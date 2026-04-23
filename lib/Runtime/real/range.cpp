@@ -15,10 +15,21 @@ static int readDeviceScalar(void *stream, const void *src, T &dst) {
   auto hip_stream = static_cast<hipStream_t>(stream);
   hipError_t err =
       hipMemcpyAsync(&dst, src, sizeof(T), hipMemcpyDeviceToHost, hip_stream);
-  if (err != hipSuccess)
+  if (err != hipSuccess) {
+    fprintf(stderr, "[REAL] readDeviceScalar: hipMemcpyAsync failed: %s\n",
+            hipGetErrorString(err));
     return -1;
+  }
+  // Synchronization is required here: we branch on host value `delta` to
+  // preserve ORT's runtime delta==0 error behavior before launching hip_range.
   err = hipStreamSynchronize(hip_stream);
-  return err == hipSuccess ? 0 : -1;
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[REAL] readDeviceScalar: hipStreamSynchronize failed: %s\n",
+            hipGetErrorString(err));
+    return -1;
+  }
+  return 0;
 }
 
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
@@ -50,11 +61,15 @@ int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
   }
   case HIP_DTYPE_FLOAT32: {
     float d = 0.0f;
+    // Keep exact zero check for ONNX/ORT parity.
+    // ORT CPU Range rejects delta only when it is exactly zero.
     deltaCheck = readDeviceScalar(stream, delta, d) || (d == 0.0f);
     break;
   }
   case HIP_DTYPE_FLOAT64: {
     double d = 0.0;
+    // Keep exact zero check for ONNX/ORT parity.
+    // ORT CPU Range rejects delta only when it is exactly zero.
     deltaCheck = readDeviceScalar(stream, delta, d) || (d == 0.0);
     break;
   }
@@ -74,5 +89,5 @@ int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
       (long long)output_num_elements, (long long)hip_dtype);
 
   return hip_range(stream, start, limit, delta, output, output_num_elements,
-                   static_cast<int>(hip_dtype));
+                   hip_dtype);
 }

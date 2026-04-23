@@ -16,6 +16,44 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// Empty-result condition for integer Range:
+/// - delta > 0 and limit <= start
+/// - delta < 0 and limit >= start
+static Value buildIntRangeEmptyCheck(PatternRewriter &rewriter, Location loc,
+                                     Value start, Value limit, Value delta,
+                                     Value zero) {
+  Value cmpPos = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
+                                       delta, zero);
+  Value cmpNeg = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
+                                       delta, zero);
+  Value cmpLimLe = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::sle, limit, start);
+  Value cmpLimGe = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::sge, limit, start);
+  Value emptyPos = arith::AndIOp::create(rewriter, loc, cmpPos, cmpLimLe);
+  Value emptyNeg = arith::AndIOp::create(rewriter, loc, cmpNeg, cmpLimGe);
+  return arith::OrIOp::create(rewriter, loc, emptyPos, emptyNeg);
+}
+
+/// Empty-result condition for float Range:
+/// - delta > 0 and limit <= start
+/// - delta < 0 and limit >= start
+static Value buildFloatRangeEmptyCheck(PatternRewriter &rewriter, Location loc,
+                                       Value start, Value limit, Value delta,
+                                       Value zero) {
+  Value cmpPos = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OGT,
+                                       delta, zero);
+  Value cmpNeg = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OLT,
+                                       delta, zero);
+  Value cmpLimLe = arith::CmpFOp::create(
+      rewriter, loc, arith::CmpFPredicate::OLE, limit, start);
+  Value cmpLimGe = arith::CmpFOp::create(
+      rewriter, loc, arith::CmpFPredicate::OGE, limit, start);
+  Value emptyPos = arith::AndIOp::create(rewriter, loc, cmpPos, cmpLimLe);
+  Value emptyNeg = arith::AndIOp::create(rewriter, loc, cmpNeg, cmpLimGe);
+  return arith::OrIOp::create(rewriter, loc, emptyPos, emptyNeg);
+}
+
 /// Dynamic length (index) for integer numpy.arange(start, limit, delta).
 static Value buildIntRangeCount(PatternRewriter &rewriter, Location loc,
                                 Value start, Value limit, Value delta,
@@ -23,20 +61,13 @@ static Value buildIntRangeCount(PatternRewriter &rewriter, Location loc,
   Value zero = arith::ConstantIntOp::create(rewriter, loc, elemTy, 0);
   Value cmpZ = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
                                      delta, zero);
+  Value empty =
+      buildIntRangeEmptyCheck(rewriter, loc, start, limit, delta, zero);
   Value cmpPos = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
                                        delta, zero);
-  Value cmpLimLe = arith::CmpIOp::create(
-      rewriter, loc, arith::CmpIPredicate::sle, limit, start);
-  Value cmpLimGe = arith::CmpIOp::create(
-      rewriter, loc, arith::CmpIPredicate::sge, limit, start);
-  Value emptyPos = arith::AndIOp::create(rewriter, loc, cmpPos, cmpLimLe);
-  Value emptyNeg = arith::AndIOp::create(
-      rewriter, loc,
-      arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt, delta,
-                            zero),
-      cmpLimGe);
-  Value empty = arith::OrIOp::create(rewriter, loc, emptyPos, emptyNeg);
-  Value bad = arith::OrIOp::create(rewriter, loc, cmpZ, empty);
+  // Guard compile-time length expression from divide-by-zero and empty ranges.
+  // Runtime still rejects delta==0 in wrap_range for ORT parity.
+  Value clampToZeroLen = arith::OrIOp::create(rewriter, loc, cmpZ, empty);
 
   Value diffPos = arith::SubIOp::create(rewriter, loc, limit, start);
   Value diffNeg = arith::SubIOp::create(rewriter, loc, start, limit);
@@ -44,7 +75,8 @@ static Value buildIntRangeCount(PatternRewriter &rewriter, Location loc,
   Value nPos = arith::CeilDivSIOp::create(rewriter, loc, diffPos, delta);
   Value nNeg = arith::CeilDivSIOp::create(rewriter, loc, diffNeg, negDelta);
   Value nInt = arith::SelectOp::create(rewriter, loc, cmpPos, nPos, nNeg);
-  Value nIntSel = arith::SelectOp::create(rewriter, loc, bad, zero, nInt);
+  Value nIntSel =
+      arith::SelectOp::create(rewriter, loc, clampToZeroLen, zero, nInt);
   return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
                                     nIntSel);
 }
@@ -77,16 +109,11 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
                                      delta, zero);
   Value cmpPos = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OGT,
                                        delta, zero);
-  Value cmpLimLe = arith::CmpFOp::create(
-      rewriter, loc, arith::CmpFPredicate::OLE, limit, start);
-  Value cmpLimGe = arith::CmpFOp::create(
-      rewriter, loc, arith::CmpFPredicate::OGE, limit, start);
-  Value emptyPos = arith::AndIOp::create(rewriter, loc, cmpPos, cmpLimLe);
-  Value cmpNegDelta = arith::CmpFOp::create(
-      rewriter, loc, arith::CmpFPredicate::OLT, delta, zero);
-  Value emptyNeg = arith::AndIOp::create(rewriter, loc, cmpNegDelta, cmpLimGe);
-  Value empty = arith::OrIOp::create(rewriter, loc, emptyPos, emptyNeg);
-  Value bad = arith::OrIOp::create(rewriter, loc, cmpZ, empty);
+  Value empty =
+      buildFloatRangeEmptyCheck(rewriter, loc, start, limit, delta, zero);
+  // Guard compile-time length expression from divide-by-zero and empty ranges.
+  // Runtime still rejects delta==0 in wrap_range for ORT parity.
+  Value clampToZeroLen = arith::OrIOp::create(rewriter, loc, cmpZ, empty);
 
   Value diffPos = arith::SubFOp::create(rewriter, loc, limit, start);
   Value diffNeg = arith::SubFOp::create(rewriter, loc, start, limit);
@@ -99,7 +126,8 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
   Value nInt =
       arith::SelectOp::create(rewriter, loc, cmpPos, ceilPosI, ceilNegI);
   Value zeroI = arith::ConstantIntOp::create(rewriter, loc, i64, 0);
-  Value nIntSel = arith::SelectOp::create(rewriter, loc, bad, zeroI, nInt);
+  Value nIntSel =
+      arith::SelectOp::create(rewriter, loc, clampToZeroLen, zeroI, nInt);
   Value nNonNeg = arith::MaxSIOp::create(rewriter, loc, nIntSel, zeroI);
   return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
                                     nNonNeg);

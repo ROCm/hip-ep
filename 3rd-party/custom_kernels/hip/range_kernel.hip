@@ -9,6 +9,36 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <type_traits>
+
+template <typename T>
+__device__ __forceinline__
+    typename std::enable_if<std::is_integral<T>::value &&
+                                (sizeof(T) < sizeof(int64_t)),
+                            T>::type
+    range_value_impl(T start_val, T delta_val, int64_t tid) {
+  // Avoid intermediate overflow for narrow integer types in tid*delta.
+  // For int64/float/double we preserve the original arithmetic behavior.
+  const int64_t v = static_cast<int64_t>(start_val) +
+                    static_cast<int64_t>(tid) * static_cast<int64_t>(delta_val);
+  return static_cast<T>(v);
+}
+
+template <typename T>
+__device__ __forceinline__
+    typename std::enable_if<!std::is_integral<T>::value ||
+                                (sizeof(T) >= sizeof(int64_t)),
+                            T>::type
+    range_value_impl(T start_val, T delta_val, int64_t tid) {
+  return start_val + static_cast<T>(tid) * delta_val;
+}
+
+template <typename T>
+__device__ __forceinline__ T range_value(T start_val, T delta_val,
+                                         int64_t tid) {
+  return range_value_impl<T>(start_val, delta_val, tid);
+}
 
 template <typename T>
 __global__ void range_kernel(const T *start, const T *delta, T *output,
@@ -16,12 +46,15 @@ __global__ void range_kernel(const T *start, const T *delta, T *output,
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= num_elements)
     return;
-  output[tid] = *start + static_cast<T>(tid) * (*delta);
+  output[tid] = range_value(*start, *delta, tid);
 }
 
 extern "C" int hip_range(void *stream, const void *start, const void *limit,
                          const void *delta, void *output,
-                         int64_t output_num_elements, int hip_dtype) {
+                         int64_t output_num_elements, int64_t hip_dtype) {
+  // `limit` is intentionally unused in the kernel launch path. The output
+  // length is precomputed by ONNX->HIP lowering and passed as
+  // output_num_elements; kernel generation only needs start/delta.
   (void)limit;
   if (!start || !delta || !output) {
     fprintf(stderr, "[custom_kernels] hip_range: null pointer argument\n");
@@ -32,13 +65,22 @@ extern "C" int hip_range(void *stream, const void *start, const void *limit,
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
-  int grid_size =
-      static_cast<int>((output_num_elements + kBlockSize - 1) / kBlockSize);
+  const uint64_t grid_size_u64 =
+      static_cast<uint64_t>((output_num_elements + kBlockSize - 1) / kBlockSize);
+  if (grid_size_u64 > std::numeric_limits<uint32_t>::max()) {
+    fprintf(stderr,
+            "[custom_kernels] hip_range: output_num_elements too large for "
+            "grid dimension (%lld)\n",
+            (long long)output_num_elements);
+    return -1;
+  }
+  const uint32_t grid_size = static_cast<uint32_t>(grid_size_u64);
 
   CUSTOM_KERNELS_DEBUG_LOG(
-      "[custom_kernels] hip_range: num_elements=%lld, hip_dtype=%d, "
-      "grid=%d, block=%d\n",
-      (long long)output_num_elements, hip_dtype, grid_size, kBlockSize);
+      "[custom_kernels] hip_range: num_elements=%lld, hip_dtype=%lld, "
+      "grid=%u, block=%d\n",
+      (long long)output_num_elements, (long long)hip_dtype, grid_size,
+      kBlockSize);
 
   switch (hip_dtype) {
   case HIP_DTYPE_INT16:
@@ -73,8 +115,8 @@ extern "C" int hip_range(void *stream, const void *start, const void *limit,
     break;
   default:
     fprintf(stderr,
-            "[custom_kernels] hip_range: unsupported hip_dtype=%d\n",
-            hip_dtype);
+            "[custom_kernels] hip_range: unsupported hip_dtype=%lld\n",
+            (long long)hip_dtype);
     return -1;
   }
 
