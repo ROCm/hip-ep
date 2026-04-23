@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-MatMulNBits (WMMA) test data generator + NumPy reference
+MatMulNBits test data generator + NumPy reference
 
 Generates random FP16 A, UINT4-packed B, scales, zeros, and computes
 the golden reference C = A @ dequant(B)^T using NumPy.
 
-Data layout matches the WMMA fast path in hip_matmul_nbits:
-  A      : FP16 col-major (M x K)
-  B      : uint4 packed (N x K/2), row-major
-  scales : FP16 (N x num_groups_k), row-major
-  zeros  : FP16 (N x num_groups_k), row-major  (optional)
-  C_ref  : FP16 col-major (M x N)
+Data layout matches the hip_matmul_nbits public API (all row-major):
+  A      : FP16 row-major [M, K]
+  B      : uint4 packed [N, K/2], row-major
+  scales : FP16 [N, num_groups_k], row-major
+  zeros  : FP16 [N, num_groups_k], row-major  (optional)
+  C_ref  : FP16 row-major [M, N]
 
 Usage:
     python3 gen_matmul_nbits_data.py [MxKxN] [--group-size GS] [--dir DIR]
@@ -74,9 +74,9 @@ def main():
     if not args.no_zeros:
         zeros = np.random.uniform(7.0, 9.0, (N, num_groups_k)).astype(np.float16)
 
-    # A stored col-major (Fortran order)
+    # A stored row-major (C order)
     file_A = os.path.join(out_dir, "matmul_nbits_A.bin")
-    A.flatten(order='F').tofile(file_A)
+    A.flatten(order='C').tofile(file_A)
 
     # B_packed stored row-major (C order)
     file_B = os.path.join(out_dir, "matmul_nbits_B_packed.bin")
@@ -103,7 +103,7 @@ def main():
             B_dq = (B_uint4.astype(np.float32) - zeros_f32[:, group_idx]) \
                  * scales_f32[:, group_idx]
         else:
-            B_dq = B_uint4.astype(np.float32) * scales_f32[:, group_idx]
+            B_dq = (B_uint4.astype(np.float32) - 8.0) * scales_f32[:, group_idx]
 
         C_ref_f32 = A.astype(np.float32) @ B_dq.T
         C_ref = C_ref_f32.astype(np.float16)
@@ -111,9 +111,9 @@ def main():
         elapsed = time.time() - t0
         gflops = (2.0 * M * N * K) / (max(elapsed, 1e-9) * 1e9)
 
-        # C_ref stored col-major (Fortran order)
+        # C_ref stored row-major (C order)
         file_C = os.path.join(out_dir, "matmul_nbits_C_ref.bin")
-        C_ref.flatten(order='F').tofile(file_C)
+        C_ref.flatten(order='C').tofile(file_C)
         print(f"done ({elapsed:.2f}s, {gflops:.1f} GFLOPS)")
     else:
         print("Skipping reference (--no-ref)")
