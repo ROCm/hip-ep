@@ -25,21 +25,6 @@ static constexpr int64_t kUpdateRuleGated = 1;
 static constexpr int64_t kUpdateRuleDelta = 2;
 static constexpr int64_t kUpdateRuleGatedDelta = 3;
 
-static const char *updateRuleName(int64_t rule) {
-  switch (rule) {
-  case kUpdateRuleLinear:
-    return "linear";
-  case kUpdateRuleGated:
-    return "gated";
-  case kUpdateRuleDelta:
-    return "delta";
-  case kUpdateRuleGatedDelta:
-    return "gated_delta";
-  default:
-    return "unknown";
-  }
-}
-
 extern "C" int wrap_linear_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_state, const void *decay, const void *beta, void *output,
@@ -50,11 +35,11 @@ extern "C" int wrap_linear_attention(
 
   RUNTIME_DEBUG_LOG("[linear_attention] enter: B=%lld seq_len=%lld "
                     "q_heads=%lld kv_heads=%lld n_k=%lld d_k=%lld d_v=%lld "
-                    "scale=%.6f chunk=%lld rule=%s type=%s(%lld)\n",
+                    "scale=%.6f chunk=%lld rule=%lld type=%s(%lld)\n",
                     (long long)B, (long long)seq_len, (long long)Hq,
                     (long long)Hkv,
                     (long long)Nk, (long long)dk, (long long)dv, (double)scale,
-                    (long long)chunk_size, updateRuleName(update_rule),
+                    (long long)chunk_size, (long long)update_rule,
                     hipdnn_ep_datatype_name(type), (long long)type);
 
   RUNTIME_DEBUG_LOG("[linear_attention] layout: decay_per_key_dim=%lld "
@@ -97,15 +82,17 @@ extern "C" int wrap_linear_attention(
   if ((update_rule == kUpdateRuleGated ||
        update_rule == kUpdateRuleGatedDelta) &&
       !decay) {
-    fprintf(stderr, "[linear_attention] ERROR: decay is required for %s mode\n",
-            updateRuleName(update_rule));
+    fprintf(stderr,
+            "[linear_attention] ERROR: decay is required for rule=%lld\n",
+            (long long)update_rule);
     return -1;
   }
   if ((update_rule == kUpdateRuleDelta ||
        update_rule == kUpdateRuleGatedDelta) &&
       !beta) {
-    fprintf(stderr, "[linear_attention] ERROR: beta is required for %s mode\n",
-            updateRuleName(update_rule));
+    fprintf(stderr,
+            "[linear_attention] ERROR: beta is required for rule=%lld\n",
+            (long long)update_rule);
     return -1;
   }
 
