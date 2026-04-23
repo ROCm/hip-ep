@@ -603,7 +603,7 @@ static int gqa_forward_hipblaslt(
     // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16) ----
     int scoreF32BatchStride = static_cast<int>(sq * total_seq);
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
-    if (sq > 1) {
+    if (sq > 1 || local_window_size > 0) {
       HIP_CHECK(hip_gqa_causal_mask_f32(
           stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(total_seq),
           static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
