@@ -45,6 +45,12 @@ template<> __device__ __forceinline__ __hip_bfloat16 from_float(float val) {
 // launch (e.g. query + t * Hq*dk*elem_size); seq_len is the original T
 // dimension and is used here only to compute the per-batch stride.
 //
+// decay and beta each support two logical layouts (selected at runtime):
+//   decay_per_key_dim = 1 -> [B, T, H_kv * d_k]
+//                       0 -> [B, T, H_kv]   (scalar per head, broadcast on d_k)
+//   beta_per_head     = 1 -> [B, T, H_kv]
+//                       0 -> [B, T, 1]      (scalar per (B,T), broadcast on H_kv)
+//
 // Phase 1 (delta/gated_delta only):
 //   Compute sk[j] = sum_i [exp(g[i]) *] S_old[i][j] * k[i]  for j in [0, dv)
 //
@@ -85,7 +91,8 @@ __global__ void linear_attention_decode_kernel(
     T* __restrict__ output,
     int seq_len,
     int Hq, int Hkv, int n_k, int dk, int dv,
-    float scale, int update_rule)
+    float scale, int update_rule,
+    int decay_per_key_dim, int beta_per_head)
 {
     const int bg = blockIdx.x;
     const int b  = bg / Hkv;
@@ -104,13 +111,18 @@ __global__ void linear_attention_decode_kernel(
 
     // Per-batch strides for the packed [B, T, H*D] tensors. The kernel reads
     // a single time step; the caller has already advanced the pointer to
-    // `t`, so we only need the batch stride here.
-    const int64_t q_batch_stride     = (int64_t)seq_len * Hq   * dk;
-    const int64_t k_batch_stride     = (int64_t)seq_len * n_k  * dk;
-    const int64_t v_batch_stride     = (int64_t)seq_len * Hkv  * dv;
-    const int64_t out_batch_stride   = (int64_t)seq_len * Hout * dv;
-    const int64_t decay_batch_stride = (int64_t)seq_len * Hkv  * dk;
-    const int64_t beta_batch_stride  = (int64_t)seq_len * Hkv;
+    // `t`, so we only need the batch stride here. decay / beta strides depend
+    // on the logical layout flags.
+    const int64_t q_batch_stride   = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_batch_stride   = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_batch_stride   = (int64_t)seq_len * Hkv  * dv;
+    const int64_t out_batch_stride = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_batch_stride = decay_per_key_dim
+        ? (int64_t)seq_len * Hkv * dk
+        : (int64_t)seq_len * Hkv;
+    const int64_t beta_batch_stride = beta_per_head
+        ? (int64_t)seq_len * Hkv
+        : (int64_t)seq_len;
 
     extern __shared__ float smem[];
     float* k_smem   = smem;
@@ -131,15 +143,30 @@ __global__ void linear_attention_decode_kernel(
         decay != nullptr;
 
     if (has_decay) {
-        const T* d_ptr = decay + b * decay_batch_stride + (int64_t)g * dk;
-        for (int i = tid; i < dk; i += nthreads)
-            aux_smem[i] = expf(to_float(d_ptr[i]));
+        if (decay_per_key_dim) {
+            // [B, T, Hkv * dk]: one log-decay per (kv_head, key_dim).
+            const T* d_ptr = decay + b * decay_batch_stride + (int64_t)g * dk;
+            for (int i = tid; i < dk; i += nthreads)
+                aux_smem[i] = expf(to_float(d_ptr[i]));
+        } else {
+            // [B, T, Hkv]: scalar log-decay per kv_head, broadcast on dk.
+            const float g_val =
+                expf(to_float(decay[b * decay_batch_stride + g]));
+            for (int i = tid; i < dk; i += nthreads)
+                aux_smem[i] = g_val;
+        }
     }
 
     float beta_val = 0.0f;
     if (beta_in &&
-        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA))
-        beta_val = to_float(beta_in[b * beta_batch_stride + g]);
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA)) {
+        // beta_per_head=1: [B, T, Hkv]  -> one value per kv_head.
+        // beta_per_head=0: [B, T, 1]    -> single value broadcast on heads.
+        const int64_t beta_idx = beta_per_head
+            ? b * beta_batch_stride + g
+            : b * beta_batch_stride;
+        beta_val = to_float(beta_in[beta_idx]);
+    }
 
     __syncthreads();
 
@@ -251,6 +278,8 @@ extern "C" int hip_linear_attention_decode(
     int64_t dv,
     float scale,
     int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
     int64_t type)
 {
     if (B <= 0 || Hkv <= 0)
@@ -304,19 +333,24 @@ extern "C" int hip_linear_attention_decode(
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
     int grid  = static_cast<int>(B * Hkv);
     int block = LA_THREADS;
-    const int dk_i      = static_cast<int>(dk);
-    const int dv_i      = static_cast<int>(dv);
-    const int seq_len_i = static_cast<int>(seq_len);
+    const int dk_i                = static_cast<int>(dk);
+    const int dv_i                = static_cast<int>(dv);
+    const int seq_len_i           = static_cast<int>(seq_len);
+    // Normalise to canonical 0/1 so the kernel can rely on the invariant.
+    const int decay_per_key_dim_i = decay_per_key_dim ? 1 : 0;
+    const int beta_per_head_i     = beta_per_head     ? 1 : 0;
 
     size_t smem_bytes = static_cast<size_t>(2 * dk_i + 2 * dv_i) * sizeof(float);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_linear_attention_decode: B=%lld seq_len=%lld "
         "Hq=%lld Hkv=%lld Nk=%lld dk=%d dv=%d scale=%.6f rule=%lld "
-        "type=%lld grid=%d block=%d smem=%zu\n",
+        "decay_per_key_dim=%d beta_per_head=%d type=%lld grid=%d block=%d "
+        "smem=%zu\n",
         (long long)B, (long long)seq_len, (long long)Hq, (long long)Hkv,
         (long long)Nk, dk_i, dv_i, (double)scale, (long long)update_rule,
-        (long long)type, grid, block, smem_bytes);
+        decay_per_key_dim_i, beta_per_head_i, (long long)type, grid, block,
+        smem_bytes);
 
     // type: HIPDNN_EP_DATATYPE_FLOAT=0, HALF=1, BFLOAT16=2
     if (type == 0) {
@@ -334,7 +368,8 @@ extern "C" int hip_linear_attention_decode(
             static_cast<int>(Hq),
             static_cast<int>(Hkv),
             static_cast<int>(Nk),
-            dk_i, dv_i, scale, static_cast<int>(update_rule));
+            dk_i, dv_i, scale, static_cast<int>(update_rule),
+            decay_per_key_dim_i, beta_per_head_i);
     } else if (type == 1) {
         hipLaunchKernelGGL(
             linear_attention_decode_kernel<__half>,
@@ -350,7 +385,8 @@ extern "C" int hip_linear_attention_decode(
             static_cast<int>(Hq),
             static_cast<int>(Hkv),
             static_cast<int>(Nk),
-            dk_i, dv_i, scale, static_cast<int>(update_rule));
+            dk_i, dv_i, scale, static_cast<int>(update_rule),
+            decay_per_key_dim_i, beta_per_head_i);
     } else if (type == 2) {
         hipLaunchKernelGGL(
             linear_attention_decode_kernel<__hip_bfloat16>,
@@ -366,7 +402,8 @@ extern "C" int hip_linear_attention_decode(
             static_cast<int>(Hq),
             static_cast<int>(Hkv),
             static_cast<int>(Nk),
-            dk_i, dv_i, scale, static_cast<int>(update_rule));
+            dk_i, dv_i, scale, static_cast<int>(update_rule),
+            decay_per_key_dim_i, beta_per_head_i);
     } else {
         fprintf(stderr,
                 "[custom_kernels] hip_linear_attention_decode: unsupported "

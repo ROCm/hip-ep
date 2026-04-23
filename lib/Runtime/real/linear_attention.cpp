@@ -109,24 +109,12 @@ extern "C" int wrap_linear_attention(
     return -1;
   }
 
-  // The current HIP decode kernel only supports the per-key-dim decay layout
-  // ([B, T, H_kv * d_k]) and the per-head beta layout ([B, T, H_kv]). Flag
-  // other combinations explicitly instead of silently mis-striding.
-  if (decay && !decay_per_key_dim) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: decay layout [B, T, H_kv] is not yet "
-            "supported (kernel expects [B, T, H_kv * d_k]); "
-            "decay_per_key_dim=%lld\n",
-            (long long)decay_per_key_dim);
-    return -1;
-  }
-  if (beta && !beta_per_head) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: beta layout [B, T, 1] is not yet "
-            "supported (kernel expects [B, T, H_kv]); beta_per_head=%lld\n",
-            (long long)beta_per_head);
-    return -1;
-  }
+  // The HIP decode kernel supports all four decay/beta layout combinations:
+  //   decay_per_key_dim=1 -> [B, T, H_kv * d_k]
+  //   decay_per_key_dim=0 -> [B, T, H_kv]        (broadcast across d_k)
+  //   beta_per_head=1     -> [B, T, H_kv]
+  //   beta_per_head=0     -> [B, T, 1]           (broadcast across H_kv)
+  // The flags are forwarded to hip_linear_attention_decode below.
 
   void *hip_stream = hipdnn_ep_state_get_stream(state);
   if (!hip_stream) {
@@ -172,8 +160,8 @@ extern "C" int wrap_linear_attention(
   //
   //   query  : Hq  * dk      key    : Nk   * dk (may be < Hkv*dk)
   //   value  : Hkv * dv      output : Hout * dv (Hout = max(Hq, Hkv))
-  //   decay_per_key_dim==1 -> Hkv * dk;   ==0 -> Hkv  (rejected above)
-  //   beta_per_head==1     -> Hkv;        ==0 -> 1    (rejected above)
+  //   decay_per_key_dim==1 -> Hkv * dk;   ==0 -> Hkv
+  //   beta_per_head==1     -> Hkv;        ==0 -> 1
   const int64_t q_token_bytes = Hq   * dk * elem_size;
   const int64_t k_token_bytes = Nk   * dk * elem_size;
   const int64_t v_token_bytes = Hkv  * dv * elem_size;
@@ -190,7 +178,8 @@ extern "C" int wrap_linear_attention(
 
   // Unified path for decode (seq_len==1) and prefill (seq_len>1):
   // advance the base pointers by t * token_bytes and let the kernel use
-  // seq_len as the per-batch stride.
+  // seq_len as the per-batch stride. decay/beta layout flags are passed
+  // through so the kernel can select the appropriate access pattern.
   for (int64_t t = 0; t < seq_len; ++t) {
     const void *q_t = (const char *)query + t * q_token_bytes;
     const void *k_t = (const char *)key   + t * k_token_bytes;
@@ -205,7 +194,8 @@ extern "C" int wrap_linear_attention(
 
     int kern_result = hip_linear_attention_decode(
         hip_stream, q_t, k_t, v_t, decay_t, beta_t, present_state, o_t,
-        B, seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule, type);
+        B, seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule,
+        decay_per_key_dim, beta_per_head, type);
     if (kern_result != 0) {
       fprintf(stderr,
               "[linear_attention] ERROR: decode kernel failed at t=%lld "
