@@ -73,7 +73,7 @@ __global__ void matmul_nbits_kernel(
     float scale_val = static_cast<float>(s_row[blk]);
     float zp_val = (zp != nullptr)
                        ? static_cast<float>(zp[n * k_blocks + blk])
-                       : 0.0f;
+                       : 8.0f;
 
     int64_t k_start = blk * block_size;
     int64_t k_end = k_start + block_size;
@@ -234,7 +234,7 @@ __global__ void matmul_nbits_gemv_kernel(
                 float zv = read_zp(n_idx[tn], grp);
                 partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
             } else {
-                partial[tn] += dot * sv[tn];
+                partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
             }
         }
     }
@@ -273,7 +273,7 @@ __global__ void matmul_nbits_gemv_kernel(
                     float zv = read_zp(n_idx[tn], grp);
                     partial[tn] += dot * sv - a_sum * zv * sv;
                 } else {
-                    partial[tn] += dot * sv;
+                    partial[tn] += dot * sv - a_sum * 8.0f * sv;
                 }
             }
         }
@@ -291,7 +291,7 @@ __global__ void matmul_nbits_gemv_kernel(
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
-                float zv = has_zp ? read_zp(n_idx[tn], grp) : 0.0f;
+                float zv = has_zp ? read_zp(n_idx[tn], grp) : 8.0f;
                 uint8_t packed = b_base_arr[tn][k / 2];
                 float   qval   = (nibble == 0)
                                    ? static_cast<float>(packed & 0xF)
@@ -550,7 +550,7 @@ __global__ void dequant_u4_to_fp16(
 
     int grp = k8 / group_size;
     _Float16 scale = scales[n * num_groups_k + grp];
-    _Float16 zp    = zeros ? zeros[n * num_groups_k + grp] : (_Float16)0;
+    _Float16 zp    = zeros ? zeros[n * num_groups_k + grp] : (_Float16)8;
 
     uint32_t four = *reinterpret_cast<const uint32_t*>(
         &B_packed[n * (K / 2) + k8 / 2]);
@@ -751,14 +751,15 @@ void GemmFp16U4Impl(
                     bv[6] = static_cast<_Float16>((pf_b4 >> 24) & 0xFu) * s16 + nzs;
                     bv[7] = static_cast<_Float16>((pf_b4 >> 28)       ) * s16 + nzs;
                 } else {
-                    bv[0] = static_cast<_Float16>((pf_b4      ) & 0xFu) * s16;
-                    bv[1] = static_cast<_Float16>((pf_b4 >>  4) & 0xFu) * s16;
-                    bv[2] = static_cast<_Float16>((pf_b4 >>  8) & 0xFu) * s16;
-                    bv[3] = static_cast<_Float16>((pf_b4 >> 12) & 0xFu) * s16;
-                    bv[4] = static_cast<_Float16>((pf_b4 >> 16) & 0xFu) * s16;
-                    bv[5] = static_cast<_Float16>((pf_b4 >> 20) & 0xFu) * s16;
-                    bv[6] = static_cast<_Float16>((pf_b4 >> 24) & 0xFu) * s16;
-                    bv[7] = static_cast<_Float16>((pf_b4 >> 28)       ) * s16;
+                    _Float16 nzs = (_Float16)(-8) * s16;
+                    bv[0] = static_cast<_Float16>((pf_b4      ) & 0xFu) * s16 + nzs;
+                    bv[1] = static_cast<_Float16>((pf_b4 >>  4) & 0xFu) * s16 + nzs;
+                    bv[2] = static_cast<_Float16>((pf_b4 >>  8) & 0xFu) * s16 + nzs;
+                    bv[3] = static_cast<_Float16>((pf_b4 >> 12) & 0xFu) * s16 + nzs;
+                    bv[4] = static_cast<_Float16>((pf_b4 >> 16) & 0xFu) * s16 + nzs;
+                    bv[5] = static_cast<_Float16>((pf_b4 >> 20) & 0xFu) * s16 + nzs;
+                    bv[6] = static_cast<_Float16>((pf_b4 >> 24) & 0xFu) * s16 + nzs;
+                    bv[7] = static_cast<_Float16>((pf_b4 >> 28)       ) * s16 + nzs;
                 }
                 *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8])     = *reinterpret_cast<uint2*>(&bv[0]);
                 *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8 + 4]) = *reinterpret_cast<uint2*>(&bv[4]);
