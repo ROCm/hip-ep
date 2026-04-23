@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 
@@ -16,6 +17,11 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       const void *g_idx, const void *bias, void *output,
                       int64_t M, int64_t N, int64_t K, int64_t batch_count,
                       int64_t bits, int64_t block_size, int64_t elem_size) {
+  PERF_TIMER(state, "MatMulNBits",
+             "M=%lld,N=%lld,K=%lld,bits=%lld,blk=%lld",
+             (long long)M, (long long)N, (long long)K,
+             (long long)bits, (long long)block_size);
+
   if (!state || !A || !B || !scales || !output) {
     fprintf(stderr, "wrap_matmul_nbits: null argument\n");
     return -1;

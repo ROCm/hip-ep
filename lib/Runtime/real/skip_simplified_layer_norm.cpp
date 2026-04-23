@@ -8,6 +8,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
@@ -168,6 +169,11 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
+  PERF_TIMER(state, "SkipLayerNorm",
+             "rows=%lld,hidden=%lld",
+             (long long)(input_num_elements / gamma_num_elements),
+             (long long)gamma_num_elements);
+
   if (!state || !input || !skip || !gamma || !output) {
     fprintf(stderr,
             "wrap_skip_simplified_layer_norm: null required argument\n");

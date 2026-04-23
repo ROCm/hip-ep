@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -11,6 +12,9 @@
 // Follows opaque RuntimeState pattern - extracts stream internally
 int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes) {
+  PERF_TIMER(state, "MemcpyD2D",
+             "bytes=%llu", (unsigned long long)size_bytes);
+
   if (!state) {
     fprintf(stderr, "wrap_hipMemcpyAsync: null state\n");
     return -1;

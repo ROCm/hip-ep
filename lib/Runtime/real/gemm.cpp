@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -203,6 +204,11 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               void *output, int64_t M, int64_t N, int64_t K, float alpha,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
               int64_t cDim0, int64_t cDim1) {
+  PERF_TIMER(state, "Gemm",
+             "M=%lld,N=%lld,K=%lld,tA=%lld,tB=%lld",
+             (long long)M, (long long)N, (long long)K,
+             (long long)transA, (long long)transB);
+
   if (!state || !A || !B || !output) {
     fprintf(stderr, "wrap_gemm: invalid arguments\n");
     return -1;

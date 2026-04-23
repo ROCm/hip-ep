@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -186,6 +187,11 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     return -1;
   }
 
+  PERF_TIMER(state, "ElementWise",
+             "out_n=%lld,out_c=%lld,out_h=%lld,out_w=%lld,op=%lld",
+             (long long)out_n, (long long)out_c,
+             (long long)out_h, (long long)out_w, (long long)tensor_op);
+
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   const char *op_name = hipdnn_ep_tensor_op_name(tensor_op);
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: op=%s, "
@@ -256,6 +262,9 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
     fprintf(stderr, "wrap_elementwise_sub: null argument\n");
     return -1;
   }
+
+  PERF_TIMER(state, "ElemSub",
+             "n=%lld", (long long)num_elements);
 
   void *stream = hipdnn_ep_state_get_stream(state);
 
