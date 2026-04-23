@@ -588,7 +588,8 @@ int wrap_qmoe(
 //   decay_per_key_dim = 1  -> decay is [B, T, H_kv * d_k] (GLA / RWKV-6)
 //                     = 0  -> decay is [B, T, H_kv]       (DeltaNet / RetNet)
 //   beta_per_head     = 1  -> beta  is [B, T, H_kv]
-//                     = 0  -> beta  is [B, T, 1]          (broadcast over heads)
+//                     = 0  -> beta  is [B, T, 1]          (broadcast over
+//                     heads)
 int wrap_linear_attention(
     RuntimeState *state,
     const void *query,      // [B, T, Hq * dk]
@@ -599,9 +600,8 @@ int wrap_linear_attention(
     const void *beta,       // [B, T, H_kv] or [B, T, 1] (nullable)
     void *output,           // [B, T, max(H_q, H_kv) * d_v]
     void *present_state,    // [B, H_kv, d_k, d_v]
-    int64_t Hq, int64_t Hkv, int64_t Nk,
-    int64_t decay_per_key_dim, int64_t beta_per_head,
-    float scale, int64_t chunk_size,
+    int64_t Hq, int64_t Hkv, int64_t Nk, int64_t decay_per_key_dim,
+    int64_t beta_per_head, float scale, int64_t chunk_size,
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
     int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
 

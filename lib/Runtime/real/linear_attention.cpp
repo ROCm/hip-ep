@@ -37,10 +37,10 @@ extern "C" int wrap_linear_attention(
                     "q_heads=%lld kv_heads=%lld n_k=%lld d_k=%lld d_v=%lld "
                     "scale=%.6f chunk=%lld rule=%lld type=%s(%lld)\n",
                     (long long)B, (long long)seq_len, (long long)Hq,
-                    (long long)Hkv,
-                    (long long)Nk, (long long)dk, (long long)dv, (double)scale,
-                    (long long)chunk_size, (long long)update_rule,
-                    hipdnn_ep_datatype_name(type), (long long)type);
+                    (long long)Hkv, (long long)Nk, (long long)dk, (long long)dv,
+                    (double)scale, (long long)chunk_size,
+                    (long long)update_rule, hipdnn_ep_datatype_name(type),
+                    (long long)type);
 
   RUNTIME_DEBUG_LOG("[linear_attention] layout: decay_per_key_dim=%lld "
                     "beta_per_head=%lld\n",
@@ -117,7 +117,8 @@ extern "C" int wrap_linear_attention(
     return -1;
   }
 
-  // Auto-compute scale if sentinel zero
+  // When 0.0 (default), derives d_k = query.shape[-1] / q_num_heads and uses
+  // 1/sqrt(d_k). Set explicitly to override.
   if (scale == 0.0f && dk > 0)
     scale = 1.0f / sqrtf((float)dk);
 
@@ -149,14 +150,13 @@ extern "C" int wrap_linear_attention(
   //   value  : Hkv * dv      output : Hout * dv (Hout = max(Hq, Hkv))
   //   decay_per_key_dim==1 -> Hkv * dk;   ==0 -> Hkv
   //   beta_per_head==1     -> Hkv;        ==0 -> 1
-  const int64_t q_token_bytes = Hq   * dk * elem_size;
-  const int64_t k_token_bytes = Nk   * dk * elem_size;
-  const int64_t v_token_bytes = Hkv  * dv * elem_size;
+  const int64_t q_token_bytes = Hq * dk * elem_size;
+  const int64_t k_token_bytes = Nk * dk * elem_size;
+  const int64_t v_token_bytes = Hkv * dv * elem_size;
   const int64_t o_token_bytes = Hout * dv * elem_size;
   const int64_t decay_token_bytes =
       (decay_per_key_dim ? Hkv * dk : Hkv) * elem_size;
-  const int64_t beta_token_bytes =
-      (beta_per_head ? Hkv : 1) * elem_size;
+  const int64_t beta_token_bytes = (beta_per_head ? Hkv : 1) * elem_size;
 
   RUNTIME_DEBUG_LOG(
       "[linear_attention] dispatching %lld token(s) via per-step decode "
@@ -169,20 +169,20 @@ extern "C" int wrap_linear_attention(
   // through so the kernel can select the appropriate access pattern.
   for (int64_t t = 0; t < seq_len; ++t) {
     const void *q_t = (const char *)query + t * q_token_bytes;
-    const void *k_t = (const char *)key   + t * k_token_bytes;
+    const void *k_t = (const char *)key + t * k_token_bytes;
     const void *v_t = (const char *)value + t * v_token_bytes;
     const void *decay_t =
         decay ? (const void *)((const char *)decay + t * decay_token_bytes)
               : nullptr;
     const void *beta_t =
-        beta  ? (const void *)((const char *)beta  + t * beta_token_bytes)
-              : nullptr;
+        beta ? (const void *)((const char *)beta + t * beta_token_bytes)
+             : nullptr;
     void *o_t = (char *)output + t * o_token_bytes;
 
     int kern_result = hip_linear_attention_decode(
-        hip_stream, q_t, k_t, v_t, decay_t, beta_t, present_state, o_t,
-        B, seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule,
-        decay_per_key_dim, beta_per_head, type);
+        hip_stream, q_t, k_t, v_t, decay_t, beta_t, present_state, o_t, B,
+        seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule, decay_per_key_dim,
+        beta_per_head, type);
     if (kern_result != 0) {
       fprintf(stderr,
               "[linear_attention] ERROR: decode kernel failed at t=%lld "
@@ -193,8 +193,8 @@ extern "C" int wrap_linear_attention(
     }
   }
 
-  RUNTIME_DEBUG_LOG(
-      "[linear_attention] completed %lld token(s)\n", (long long)seq_len);
+  RUNTIME_DEBUG_LOG("[linear_attention] completed %lld token(s)\n",
+                    (long long)seq_len);
 
 cleanup:
   RUNTIME_DEBUG_LOG("[linear_attention] exit result=%d\n", result);
