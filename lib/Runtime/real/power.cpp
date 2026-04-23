@@ -13,10 +13,9 @@
 #include <functional>
 #include <unordered_map>
 
-// Map HIPDNN_EP_DATATYPE_* to hip_dtype_t for custom HIP kernels (e.g.
-// hip_elementwise_reciprocal). Values match hip_dtype_t in
-// hip_custom_kernels.h.
-static int hipdnn_ep_to_hip_dtype_reciprocal(int64_t data_type) {
+// Map HIPDNN_EP_DATATYPE_* to hip_dtype_t for elementwise HIP kernels
+// (reciprocal, sqrt). Values match hip_dtype_t in hip_custom_kernels.h.
+static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
     return HIP_DTYPE_FLOAT32;
@@ -61,8 +60,7 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
 // power operation call.
 //
 // Uses miopenActivationPOWER mode with formula: (alpha + beta * x)^gamma
-// (Reciprocal is not executed through this cache;)
-// - Sqrt:       alpha=0, beta=1, gamma=0.5  → (0 + 1*x)^(0.5) = √x
+// Reciprocal and Sqrt are not executed through this cache (HIP elementwise).
 // - Square:     alpha=0, beta=1, gamma=2.0  → (0 + 1*x)^2 = x^2
 // - Cube:       alpha=0, beta=1, gamma=3.0  → (0 + 1*x)^3 = x^3
 // - General:    any alpha, beta, gamma      → (alpha + beta*x)^gamma
@@ -164,9 +162,9 @@ cache_done:
 // (alpha, beta, gamma). Parameters match MIOpen's POWER activation formula
 // y = (alpha + beta*x)^gamma for the MIOpen-backed cases below.
 //
-// - Reciprocal (0, 1, -1): ONNX 1/x via HIP kernel (see block at top of file).
-// - Sqrt (0, 1, 0.5): MIOpen miopenActivationPOWER / miopenActivationForward.
-// - Other (alpha, beta, gamma): same MIOpen POWER path when used.
+// - Reciprocal (0, 1, -1): ONNX 1/x via hip_elementwise_reciprocal.
+// - Sqrt (0, 1, 0.5): ONNX sqrt via hip_elementwise_sqrt (negative → NaN).
+// - Other (alpha, beta, gamma): MIOpen miopenActivationPOWER path.
 //===----------------------------------------------------------------------===//
 
 namespace {
@@ -186,8 +184,11 @@ namespace {
 // inputs can incorrectly become 0 (or otherwise not match 1/x).
 //
 // Therefore wrap_power(alpha=0, beta=1, gamma=-1) dispatches to
-// hip_elementwise_reciprocal instead of MIOpen. Sqrt and other (alpha,beta,
-// gamma) combinations still use miopenActivationPOWER below.
+// hip_elementwise_reciprocal instead of MIOpen.
+//
+// Sqrt (gamma=0.5) has the same activation-shape issue for negative inputs
+// (ONNX requires NaN). wrap_power(alpha=0, beta=1, gamma=0.5) dispatches to
+// hip_elementwise_sqrt. Other (alpha, beta, gamma) use miopenActivationPOWER.
 
 int launchReciprocalHip(RuntimeState *state, void *input, void *output,
                         int64_t num_elements, int64_t data_type) {
@@ -197,7 +198,7 @@ int launchReciprocalHip(RuntimeState *state, void *input, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  int hip_dtype = hipdnn_ep_to_hip_dtype_reciprocal(data_type);
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_power (reciprocal HIP): unsupported data_type %lld "
@@ -214,6 +215,29 @@ int launchReciprocalHip(RuntimeState *state, void *input, void *output,
                                     hip_dtype);
 }
 
+int launchSqrtHip(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type) {
+  if (!state || !input || !output) {
+    fprintf(stderr, "launchSqrtHip: null argument\n");
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr,
+            "[REAL] wrap_power (sqrt HIP): unsupported data_type %lld (%s)\n",
+            (long long)data_type, hipdnn_ep_datatype_name(data_type));
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_power (sqrt HIP): num_elements=%lld, dtype=%s\n",
+      (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+
+  return hip_elementwise_sqrt(stream, input, output, num_elements, hip_dtype);
+}
+
 } // namespace
 
 int wrap_power(RuntimeState *state, void *input, void *output,
@@ -227,6 +251,10 @@ int wrap_power(RuntimeState *state, void *input, void *output,
   // hip.reciprocal lowers to wrap_power(…, 0, 1, -1).
   if (alpha == 0.0 && beta == 1.0 && gamma == -1.0)
     return launchReciprocalHip(state, input, output, num_elements, data_type);
+
+  // hip.sqrt lowers to wrap_power(…, 0, 1, 0.5).
+  if (alpha == 0.0 && beta == 1.0 && gamma == 0.5)
+    return launchSqrtHip(state, input, output, num_elements, data_type);
 
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   RUNTIME_DEBUG_LOG("[REAL] wrap_power: num_elements=%lld, "
