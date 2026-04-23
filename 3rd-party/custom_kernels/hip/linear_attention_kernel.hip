@@ -35,10 +35,15 @@ template<> __device__ __forceinline__ __hip_bfloat16 from_float(float val) {
 }
 
 //===----------------------------------------------------------------------===//
-// Fused T=1 linear attention decode kernel
+// Single-timestep linear attention decode kernel
 //===----------------------------------------------------------------------===//
 //
 // One thread-block per (batch, kv_head) pair.
+//
+// Input tensors are views into packed [B, T, H*D] buffers. The caller is
+// expected to advance the pointers to the current time step before the
+// launch (e.g. query + t * Hq*dk*elem_size); seq_len is the original T
+// dimension and is used here only to compute the per-batch stride.
 //
 // Phase 1 (delta/gated_delta only):
 //   Compute sk[j] = sum_i [exp(g[i]) *] S_old[i][j] * k[i]  for j in [0, dv)
@@ -54,12 +59,12 @@ template<> __device__ __forceinline__ __hip_bfloat16 from_float(float val) {
 //     for hl in [0, heads_per_group):
 //       h = g * heads_per_group + hl
 //       out[h * dv .. h * dv + dv) = scale * q_h @ S
-//     Output is packed in Q-head order: [B, 1, H_q * dv].
+//     Output is packed in Q-head order: [B, T, H_q * dv] at time step t.
 //   Inverse GQA (H_q <  H_kv):
 //     h = g * H_q / H_kv   (one Q head is shared across H_kv/H_q KV heads)
 //     out[g * dv .. g * dv + dv) = scale * q_h @ S
-//     Output is packed in KV-head order: [B, 1, H_kv * dv].
-//   In both cases the caller sees output shape [B, 1, H_out * dv] with
+//     Output is packed in KV-head order: [B, T, H_kv * dv] at time step t.
+//   In both cases the caller sees output shape [B, T, H_out * dv] with
 //   H_out = max(H_q, H_kv).
 //
 // Key-head sharing: the key tensor is packed with n_k heads (n_k must divide
@@ -78,6 +83,7 @@ __global__ void linear_attention_decode_kernel(
     const T* __restrict__ beta_in,
     T* __restrict__ state,
     T* __restrict__ output,
+    int seq_len,
     int Hq, int Hkv, int n_k, int dk, int dv,
     float scale, int update_rule)
 {
@@ -96,13 +102,23 @@ __global__ void linear_attention_decode_kernel(
     // sharing the same K head produce the same index.
     const int h_k = g * n_k / Hkv;
 
+    // Per-batch strides for the packed [B, T, H*D] tensors. The kernel reads
+    // a single time step; the caller has already advanced the pointer to
+    // `t`, so we only need the batch stride here.
+    const int64_t q_batch_stride     = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_batch_stride     = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_batch_stride     = (int64_t)seq_len * Hkv  * dv;
+    const int64_t out_batch_stride   = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_batch_stride = (int64_t)seq_len * Hkv  * dk;
+    const int64_t beta_batch_stride  = (int64_t)seq_len * Hkv;
+
     extern __shared__ float smem[];
     float* k_smem   = smem;
     float* v_smem   = smem + dk;
     float* aux_smem = smem + dk + dv;
     float* sk_smem  = smem + 2 * dk + dv;
-    const T* k_ptr = key   + (int64_t)b * n_k * dk  + (int64_t)h_k * dk;    // k_ptr = &key[b, h_k, 0]
-    const T* v_ptr = value + (int64_t)b * Hkv * dv  + (int64_t)g   * dv;    // v_ptr = &value[b, g, 0]
+    const T* k_ptr = key   + b * k_batch_stride + (int64_t)h_k * dk;    // k_ptr = &key[b, t, h_k, 0]
+    const T* v_ptr = value + b * v_batch_stride + (int64_t)g   * dv;    // v_ptr = &value[b, t, g, 0]
     T* S = state + ((int64_t)b * Hkv + g) * dk * dv;
 
     for (int i = tid; i < dk; i += nthreads)
@@ -115,7 +131,7 @@ __global__ void linear_attention_decode_kernel(
         decay != nullptr;
 
     if (has_decay) {
-        const T* d_ptr = decay + (int64_t)b * Hkv * dk + (int64_t)g * dk;
+        const T* d_ptr = decay + b * decay_batch_stride + (int64_t)g * dk;
         for (int i = tid; i < dk; i += nthreads)
             aux_smem[i] = expf(to_float(d_ptr[i]));
     }
@@ -123,7 +139,7 @@ __global__ void linear_attention_decode_kernel(
     float beta_val = 0.0f;
     if (beta_in &&
         (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA))
-        beta_val = to_float(beta_in[(int64_t)b * Hkv + g]);
+        beta_val = to_float(beta_in[b * beta_batch_stride + g]);
 
     __syncthreads();
 
@@ -198,8 +214,8 @@ __global__ void linear_attention_decode_kernel(
         const int heads_per_group = Hq / Hkv;
         for (int hl = 0; hl < heads_per_group; hl++) {
             const int h = g * heads_per_group + hl;
-            const T* q_ptr = query  + (int64_t)b * Hq   * dk + (int64_t)h * dk;
-            T* out_ptr     = output + (int64_t)b * Hout * dv + (int64_t)h * dv;
+            const T* q_ptr = query  + b * q_batch_stride   + (int64_t)h * dk;
+            T* out_ptr     = output + b * out_batch_stride + (int64_t)h * dv;
             readout(q_ptr, out_ptr);
         }
     } else {
@@ -207,8 +223,8 @@ __global__ void linear_attention_decode_kernel(
         // Hkv / Hq consecutive KV heads), but each KV head writes its own
         // output slot -> Hout = Hkv output heads.
         const int h_q = g * Hq / Hkv;
-        const T* q_ptr = query  + (int64_t)b * Hq   * dk + (int64_t)h_q * dk;
-        T* out_ptr     = output + (int64_t)b * Hout * dv + (int64_t)g   * dv;
+        const T* q_ptr = query  + b * q_batch_stride   + (int64_t)h_q * dk;
+        T* out_ptr     = output + b * out_batch_stride + (int64_t)g   * dv;
         readout(q_ptr, out_ptr);
     }
 }
@@ -227,6 +243,7 @@ extern "C" int hip_linear_attention_decode(
     void* state,
     void* output,
     int64_t B,
+    int64_t seq_len,
     int64_t Hq,
     int64_t Hkv,
     int64_t Nk,
@@ -238,6 +255,17 @@ extern "C" int hip_linear_attention_decode(
 {
     if (B <= 0 || Hkv <= 0)
         return 0;
+
+    // seq_len is the T dimension of the packed [B, T, H*D] layout. It
+    // governs the per-batch stride; the kernel itself still processes
+    // exactly one time step per invocation.
+    if (seq_len <= 0) {
+        fprintf(stderr,
+                "[custom_kernels] hip_linear_attention_decode: "
+                "seq_len(%lld) must be positive\n",
+                (long long)seq_len);
+        return -1;
+    }
 
     // GQA direction: support both H_q >= H_kv (standard) and H_q < H_kv
     // (inverse, e.g. Qwen3-style n_k=16, n_kv=32).
@@ -276,18 +304,19 @@ extern "C" int hip_linear_attention_decode(
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
     int grid  = static_cast<int>(B * Hkv);
     int block = LA_THREADS;
-    const int dk_i = static_cast<int>(dk);
-    const int dv_i = static_cast<int>(dv);
+    const int dk_i      = static_cast<int>(dk);
+    const int dv_i      = static_cast<int>(dv);
+    const int seq_len_i = static_cast<int>(seq_len);
 
     size_t smem_bytes = static_cast<size_t>(2 * dk_i + 2 * dv_i) * sizeof(float);
 
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_linear_attention_decode: B=%lld Hq=%lld "
-        "Hkv=%lld Nk=%lld dk=%d dv=%d scale=%.6f rule=%lld type=%lld "
-        "grid=%d block=%d smem=%zu\n",
-        (long long)B, (long long)Hq, (long long)Hkv, (long long)Nk, dk_i,
-        dv_i, (double)scale, (long long)update_rule, (long long)type, grid,
-        block, smem_bytes);
+        "[custom_kernels] hip_linear_attention_decode: B=%lld seq_len=%lld "
+        "Hq=%lld Hkv=%lld Nk=%lld dk=%d dv=%d scale=%.6f rule=%lld "
+        "type=%lld grid=%d block=%d smem=%zu\n",
+        (long long)B, (long long)seq_len, (long long)Hq, (long long)Hkv,
+        (long long)Nk, dk_i, dv_i, (double)scale, (long long)update_rule,
+        (long long)type, grid, block, smem_bytes);
 
     // type: HIPDNN_EP_DATATYPE_FLOAT=0, HALF=1, BFLOAT16=2
     if (type == 0) {
@@ -301,6 +330,7 @@ extern "C" int hip_linear_attention_decode(
             static_cast<const float*>(beta),
             static_cast<float*>(state),
             static_cast<float*>(output),
+            seq_len_i,
             static_cast<int>(Hq),
             static_cast<int>(Hkv),
             static_cast<int>(Nk),
@@ -316,6 +346,7 @@ extern "C" int hip_linear_attention_decode(
             static_cast<const __half*>(beta),
             static_cast<__half*>(state),
             static_cast<__half*>(output),
+            seq_len_i,
             static_cast<int>(Hq),
             static_cast<int>(Hkv),
             static_cast<int>(Nk),
@@ -331,6 +362,7 @@ extern "C" int hip_linear_attention_decode(
             static_cast<const __hip_bfloat16*>(beta),
             static_cast<__hip_bfloat16*>(state),
             static_cast<__hip_bfloat16*>(output),
+            seq_len_i,
             static_cast<int>(Hq),
             static_cast<int>(Hkv),
             static_cast<int>(Nk),

@@ -156,11 +156,6 @@ extern "C" int wrap_linear_attention(
 
   int result = 0;
 
-  // Temp buffers for seq_len>1 token-by-token processing (nullptr when
-  // seq_len==1)
-  void *q_t = nullptr, *k_t = nullptr, *v_t = nullptr, *o_t = nullptr;
-  void *decay_t = nullptr, *beta_t = nullptr;
-
   // Initialize present_state from past_state (or zeros)
   if (past_state) {
     HIP_CHECK(hipMemcpyAsync(present_state, past_state, total_state_bytes,
@@ -170,120 +165,61 @@ extern "C" int wrap_linear_attention(
                              (hipStream_t)hip_stream));
   }
 
-  if (seq_len == 1) {
-    // TODO: How to do parallel decoding?
+  // Per-token stride (in bytes) for each packed [B, T, H*D] tensor. The
+  // kernel indexes into the packed layout directly using seq_len as the
+  // per-batch stride, so we only need to advance the base pointer by one
+  // token between iterations -- no intermediate gather/scatter buffers.
+  //
+  //   query  : Hq  * dk      key    : Nk   * dk (may be < Hkv*dk)
+  //   value  : Hkv * dv      output : Hout * dv (Hout = max(Hq, Hkv))
+  //   decay_per_key_dim==1 -> Hkv * dk;   ==0 -> Hkv  (rejected above)
+  //   beta_per_head==1     -> Hkv;        ==0 -> 1    (rejected above)
+  const int64_t q_token_bytes = Hq   * dk * elem_size;
+  const int64_t k_token_bytes = Nk   * dk * elem_size;
+  const int64_t v_token_bytes = Hkv  * dv * elem_size;
+  const int64_t o_token_bytes = Hout * dv * elem_size;
+  const int64_t decay_token_bytes =
+      (decay_per_key_dim ? Hkv * dk : Hkv) * elem_size;
+  const int64_t beta_token_bytes =
+      (beta_per_head ? Hkv : 1) * elem_size;
+
+  RUNTIME_DEBUG_LOG(
+      "[linear_attention] dispatching %lld token(s) via per-step decode "
+      "kernel\n",
+      (long long)seq_len);
+
+  // Unified path for decode (seq_len==1) and prefill (seq_len>1):
+  // advance the base pointers by t * token_bytes and let the kernel use
+  // seq_len as the per-batch stride.
+  for (int64_t t = 0; t < seq_len; ++t) {
+    const void *q_t = (const char *)query + t * q_token_bytes;
+    const void *k_t = (const char *)key   + t * k_token_bytes;
+    const void *v_t = (const char *)value + t * v_token_bytes;
+    const void *decay_t =
+        decay ? (const void *)((const char *)decay + t * decay_token_bytes)
+              : nullptr;
+    const void *beta_t =
+        beta  ? (const void *)((const char *)beta  + t * beta_token_bytes)
+              : nullptr;
+    void *o_t = (char *)output + t * o_token_bytes;
+
     int kern_result = hip_linear_attention_decode(
-        hip_stream, query, key, value, decay, beta, present_state, output, B,
-        Hq, Hkv, Nk, dk, dv, scale, update_rule, type);
+        hip_stream, q_t, k_t, v_t, decay_t, beta_t, present_state, o_t,
+        B, seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule, type);
     if (kern_result != 0) {
-      fprintf(stderr, "[linear_attention] ERROR: decode kernel failed (%d)\n",
-              kern_result);
+      fprintf(stderr,
+              "[linear_attention] ERROR: decode kernel failed at t=%lld "
+              "(%d)\n",
+              (long long)t, kern_result);
       result = -1;
       goto cleanup;
     }
-    RUNTIME_DEBUG_LOG(
-        "[linear_attention] seq_len==1 decode kernel dispatched\n");
-  } else {
-    // seq_len>1 prefill: loop over tokens, reusing the seq_len==1 decode kernel.
-    // Each iteration extracts one token from the packed [B,T,H*D] inputs,
-    // runs one recurrence step (updating present_state in-place), and
-    // writes the output back to the correct position. Correct but O(seq_len)
-    // kernel launches; a chunk-parallel WY kernel would be faster.
-    //
-    // Per-tensor hidden sizes:
-    //   query  : Hq  * dk      key    : Nk   * dk (may be < Hkv*dk)
-    //   value  : Hkv * dv      output : Hout * dv (Hout = max(Hq, Hkv))
-    const int64_t q_token_bytes = Hq   * dk * elem_size;
-    const int64_t k_token_bytes = Nk   * dk * elem_size;
-    const int64_t v_token_bytes = Hkv  * dv * elem_size;
-    const int64_t o_token_bytes = Hout * dv * elem_size;
-    // decay / beta stride per token depends on the logical layout:
-    //   decay_per_key_dim==1 -> [B, T, H_kv * d_k]
-    //   decay_per_key_dim==0 -> [B, T, H_kv]
-    //   beta_per_head==1     -> [B, T, H_kv]
-    //   beta_per_head==0     -> [B, T, 1]
-    const int64_t decay_token_bytes =
-        (decay_per_key_dim ? Hkv * dk : Hkv) * elem_size;
-    const int64_t beta_token_bytes =
-        (beta_per_head ? Hkv : 1) * elem_size;
-
-    HIP_CHECK(hipMalloc(&q_t, B * q_token_bytes));
-    HIP_CHECK(hipMalloc(&k_t, B * k_token_bytes));
-    HIP_CHECK(hipMalloc(&v_t, B * v_token_bytes));
-    HIP_CHECK(hipMalloc(&o_t, B * o_token_bytes));
-    if (decay)
-      HIP_CHECK(hipMalloc(&decay_t, B * decay_token_bytes));
-    if (beta)
-      HIP_CHECK(hipMalloc(&beta_t, B * beta_token_bytes));
-
-    RUNTIME_DEBUG_LOG(
-        "[linear_attention] seq_len>1 prefill: looping %lld tokens\n",
-        (long long)seq_len);
-
-    for (int64_t t = 0; t < seq_len; ++t) {
-      // Gather token t from packed [B,T,X] into contiguous [B,1,X].
-      // hipMemcpy2DAsync handles the stride between batches.
-      HIP_CHECK(hipMemcpy2DAsync(
-          q_t, q_token_bytes,
-          (const char *)query + t * q_token_bytes, seq_len * q_token_bytes,
-          q_token_bytes, B, hipMemcpyDeviceToDevice,
-          (hipStream_t)hip_stream));
-      HIP_CHECK(hipMemcpy2DAsync(
-          k_t, k_token_bytes,
-          (const char *)key + t * k_token_bytes, seq_len * k_token_bytes,
-          k_token_bytes, B, hipMemcpyDeviceToDevice,
-          (hipStream_t)hip_stream));
-      HIP_CHECK(hipMemcpy2DAsync(
-          v_t, v_token_bytes,
-          (const char *)value + t * v_token_bytes, seq_len * v_token_bytes,
-          v_token_bytes, B, hipMemcpyDeviceToDevice,
-          (hipStream_t)hip_stream));
-      if (decay) {
-        HIP_CHECK(hipMemcpy2DAsync(
-            decay_t, decay_token_bytes,
-            (const char *)decay + t * decay_token_bytes,
-            seq_len * decay_token_bytes, decay_token_bytes, B,
-            hipMemcpyDeviceToDevice, (hipStream_t)hip_stream));
-      }
-      if (beta) {
-        HIP_CHECK(hipMemcpy2DAsync(
-            beta_t, beta_token_bytes,
-            (const char *)beta + t * beta_token_bytes,
-            seq_len * beta_token_bytes, beta_token_bytes, B,
-            hipMemcpyDeviceToDevice, (hipStream_t)hip_stream));
-      }
-
-      int kern_result = hip_linear_attention_decode(
-          hip_stream, q_t, k_t, v_t, decay_t, beta_t, present_state, o_t,
-          B, Hq, Hkv, Nk, dk, dv, scale, update_rule, type);
-      if (kern_result != 0) {
-        fprintf(stderr,
-                "[linear_attention] ERROR: decode kernel failed at t=%lld "
-                "(%d)\n",
-                (long long)t, kern_result);
-        result = -1;
-        goto cleanup;
-      }
-
-      // Scatter output token back into packed [B,T,X] output buffer.
-      HIP_CHECK(hipMemcpy2DAsync(
-          (char *)output + t * o_token_bytes, seq_len * o_token_bytes, o_t,
-          o_token_bytes, o_token_bytes, B, hipMemcpyDeviceToDevice,
-          (hipStream_t)hip_stream));
-    }
-
-    RUNTIME_DEBUG_LOG(
-        "[linear_attention] seq_len>1 prefill completed (%lld tokens)\n",
-        (long long)seq_len);
   }
 
+  RUNTIME_DEBUG_LOG(
+      "[linear_attention] completed %lld token(s)\n", (long long)seq_len);
+
 cleanup:
-  hipFree(q_t);
-  hipFree(k_t);
-  hipFree(v_t);
-  hipFree(o_t);
-  hipFree(decay_t);
-  hipFree(beta_t);
   RUNTIME_DEBUG_LOG("[linear_attention] exit result=%d\n", result);
   return result;
 }
