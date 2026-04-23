@@ -4,6 +4,11 @@
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
+  // Dummy entry point required by generateModuleMetadata in convert-onnx-to-hip.
+  func.func @main_graph(%arg0: tensor<i32>) -> tensor<i32> {
+    return %arg0 : tensor<i32>
+  }
+
   // Scalar constant operands still lower through hip.range (no compile-time fold).
   func.func @test_range_i32_constants() -> tensor<4xi32> {
     %s = arith.constant dense<2> : tensor<i32>

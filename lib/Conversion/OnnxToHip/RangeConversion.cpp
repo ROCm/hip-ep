@@ -10,6 +10,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 namespace mlir {
 namespace hip {
@@ -19,7 +20,7 @@ namespace {
 static Value buildIntRangeCount(PatternRewriter &rewriter, Location loc,
                                 Value start, Value limit, Value delta,
                                 IntegerType elemTy) {
-  Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, elemTy);
+  Value zero = arith::ConstantIntOp::create(rewriter, loc, elemTy, 0);
   Value cmpZ = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
                                      delta, zero);
   Value cmpPos = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
@@ -56,11 +57,11 @@ static Value buildArithCeilNonNegFloat(PatternRewriter &rewriter, Location loc,
   Value floorF = arith::SIToFPOp::create(rewriter, loc, elemTy, floorI);
   Value frac = arith::SubFOp::create(rewriter, loc, q, floorF);
   Value c0f = arith::ConstantFloatOp::create(
-      rewriter, loc, APFloat::getZero(elemTy.getFloatSemantics()), elemTy);
+      rewriter, loc, elemTy, APFloat::getZero(elemTy.getFloatSemantics()));
   Value needBump = arith::CmpFOp::create(rewriter, loc,
                                          arith::CmpFPredicate::OGT, frac, c0f);
-  Value oneI = arith::ConstantIntOp::create(rewriter, loc, 1, i64);
-  Value zeroI = arith::ConstantIntOp::create(rewriter, loc, 0, i64);
+  Value oneI = arith::ConstantIntOp::create(rewriter, loc, i64, 1);
+  Value zeroI = arith::ConstantIntOp::create(rewriter, loc, i64, 0);
   Value bumpI = arith::SelectOp::create(rewriter, loc, needBump, oneI, zeroI);
   return arith::AddIOp::create(rewriter, loc, floorI, bumpI);
 }
@@ -71,7 +72,7 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
                                   Value start, Value limit, Value delta,
                                   FloatType elemTy) {
   Value zero = arith::ConstantFloatOp::create(
-      rewriter, loc, APFloat::getZero(elemTy.getFloatSemantics()), elemTy);
+      rewriter, loc, elemTy, APFloat::getZero(elemTy.getFloatSemantics()));
   Value cmpZ = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OEQ,
                                      delta, zero);
   Value cmpPos = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OGT,
@@ -97,7 +98,7 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
   Value ceilNegI = buildArithCeilNonNegFloat(rewriter, loc, quotNeg, elemTy);
   Value nInt =
       arith::SelectOp::create(rewriter, loc, cmpPos, ceilPosI, ceilNegI);
-  Value zeroI = arith::ConstantIntOp::create(rewriter, loc, 0, i64);
+  Value zeroI = arith::ConstantIntOp::create(rewriter, loc, i64, 0);
   Value nIntSel = arith::SelectOp::create(rewriter, loc, bad, zeroI, nInt);
   Value nNonNeg = arith::MaxSIOp::create(rewriter, loc, nIntSel, zeroI);
   return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
@@ -135,7 +136,7 @@ struct RangeToMlir : public RewritePattern {
     Value deltaE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(2),
                                              ValueRange{});
 
-    Value len = TypeSwitch<Type, Value>(elemTy)
+    Value len = llvm::TypeSwitch<Type, Value>(elemTy)
                     .Case<IntegerType>([&](IntegerType ity) {
                       return buildIntRangeCount(rewriter, loc, startE, limitE,
                                                 deltaE, ity);
@@ -165,7 +166,7 @@ struct RangeToMlir : public RewritePattern {
     auto rangeOp = mlir::hip::RangeOp::create(
         rewriter, loc, resultType, ctx, op->getOperand(0), op->getOperand(1),
         op->getOperand(2), init);
-    rewriter.replaceOp(op, rangeOp.getResult());
+    rewriter.replaceOp(op, rangeOp->getResult(0));
     return success();
   }
 };
