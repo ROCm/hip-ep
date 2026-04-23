@@ -843,6 +843,23 @@ int wrap_hipMemcpyH2D(void *dst, const void *src, int64_t size, void *stream) {
   return 0;
 }
 
+// hip.reciprocal / hip.sqrt lower to wrap_power(..., alpha, beta, gamma).
+int wrap_power(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, double alpha,
+               double beta, double gamma) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_power\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_power(num_elements=%lld, data_type=%s(%lld), "
+             "alpha=%g, beta=%g, gamma=%g)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, alpha, beta, gamma);
+
+  return 0;
+}
+
 int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyDeviceToHost,
                            static_cast<hipStream_t>(stream)));

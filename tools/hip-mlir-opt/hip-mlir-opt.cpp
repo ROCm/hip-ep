@@ -119,6 +119,10 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SigmoidOp>>(*ctx);
     mlir::hip::SoftplusOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SoftplusOp>>(*ctx);
+    mlir::hip::ReciprocalOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ReciprocalOp>>(*ctx);
+    mlir::hip::SqrtOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SqrtOp>>(*ctx);
     mlir::hip::SubOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SubOp>>(*ctx);
     mlir::hip::ReduceSumOp::attachInterface<

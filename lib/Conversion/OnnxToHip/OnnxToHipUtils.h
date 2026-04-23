@@ -117,6 +117,8 @@ void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
+void populatePowerConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateCastConversionPatterns(RewritePatternSet &patterns,

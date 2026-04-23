@@ -58,6 +58,7 @@ inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
 inline constexpr const char *kWrapMiopenOpTensor =
     "wrap_miopenOpTensor"; // hip.mul, hip.add (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
+inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -223,6 +224,8 @@ void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
+void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
