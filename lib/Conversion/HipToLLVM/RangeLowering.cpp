@@ -9,21 +9,19 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// Maps MLIR element type to hip_dtype_t in hip_custom_kernels.h.
-// Must stay in sync with that enum.
+// Maps MLIR element type to hip_dtype_t for hip_range() in range_kernel.hip.
+// ONNX Range only defines int32/int64/float/double; the kernel implements those
+// plus int16. F16/BF16 are not ONNX Range types and are not implemented in
+// hip_range — reject here so lowering fails instead of a runtime default case.
 static int64_t getHipCustomKernelDType(Type elemType) {
   if (elemType.isF32())
     return 0; // HIP_DTYPE_FLOAT32
-  if (elemType.isF16())
-    return 1; // HIP_DTYPE_FLOAT16
   if (elemType.isInteger(64))
     return 2; // HIP_DTYPE_INT64
   if (elemType.isInteger(32))
     return 3; // HIP_DTYPE_INT32
   if (elemType.isF64())
     return 4; // HIP_DTYPE_FLOAT64
-  if (elemType.isBF16())
-    return 5; // HIP_DTYPE_BFLOAT16
   if (elemType.isInteger(16))
     return 6; // HIP_DTYPE_INT16
   return -1;

@@ -105,8 +105,8 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
                                     nNonNeg);
 }
 
-struct RangeToMlir : public RewritePattern {
-  RangeToMlir(MLIRContext *ctx) : RewritePattern("onnx.Range", 1, ctx) {}
+struct RangeToHip : public RewritePattern {
+  RangeToHip(MLIRContext *ctx) : RewritePattern("onnx.Range", 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
@@ -175,7 +175,7 @@ struct RangeToMlir : public RewritePattern {
 
 void mlir::hip::populateRangeConversionPatterns(RewritePatternSet &patterns,
                                                 MLIRContext *ctx) {
-  patterns.add<RangeToMlir>(ctx);
+  patterns.add<RangeToHip>(ctx);
 }
 
 } // namespace hip
