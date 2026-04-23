@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "runtime_types.h"
 
 #include <cstdio>

@@ -5,6 +5,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
@@ -37,6 +38,11 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t rotary_dim, int64_t input_num_elements,
                           int64_t cos_cache_num_elements,
                           int64_t element_size_bytes) {
+  PERF_TIMER(state, "RoPE",
+             "n=%lld,heads=%lld,rot=%lld",
+             (long long)input_num_elements, (long long)num_heads,
+             (long long)rotary_dim);
+
   if (!state) {
     fprintf(stderr, "wrap_rotary_embedding: null state\n");
     return -1;

@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -334,6 +335,10 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
             (long long)elem_size);
     return -1;
   }
+
+  PERF_TIMER(state, "MatMul",
+             "M=%lld,N=%lld,K=%lld,batch=%lld",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count);
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
