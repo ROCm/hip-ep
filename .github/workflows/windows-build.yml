@@ -581,7 +581,7 @@ jobs:
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1 ep.context_enable|1 ep.context_embed_mode|0 ep.context_file_path|$ctxPath" `
-              -t 5 -c 1 -s `
+              -t 5 -c 1 -s -I `
               $m.FullName 2>&1 | Tee-Object -FilePath $exportFile
             if ($LASTEXITCODE -ne 0) {
               Add-Content $exportFile "[ERROR] EPContext export failed"
@@ -601,7 +601,7 @@ jobs:
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1" `
-              -t 30 -c 1 -s `
+              -t 30 -c 1 -s -I `
               $ctxPath 2>&1 | Tee-Object -FilePath $importFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
 
