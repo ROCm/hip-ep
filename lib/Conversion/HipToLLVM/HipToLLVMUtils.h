@@ -58,6 +58,7 @@ inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
 inline constexpr const char *kWrapMiopenOpTensor =
     "wrap_miopenOpTensor"; // hip.mul, hip.add (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
+inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -66,6 +67,8 @@ inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
+inline constexpr const char *kWrapCausalConvWithState =
+    "wrap_causal_conv_with_state";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -74,6 +77,13 @@ inline constexpr int64_t kAlignedPtrIdx = 1;
 inline constexpr int64_t kOffsetIdx = 2;
 inline constexpr int64_t kSizesIdx = 3;
 inline constexpr int64_t kStridesIdx = 4;
+
+// Activation mode constants.
+// Values must match HIPDNN_EP_ACTIVATION_* in lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kActivationSigmoid = 0;
+inline constexpr int64_t kActivationRelu = 1;
+inline constexpr int64_t kActivationTanh = 2;
+inline constexpr int64_t kActivationSoftplus = 3;
 
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
 // Values must match the #defines in hipdnn_ep_runtime.h.
@@ -168,8 +178,8 @@ inline Value computeNumElements(MemRefType type, Value descriptor,
 }
 
 // Extract the 4D shape (N, C, H, W) of a memref as LLVM i64 values.
-// miopenSet4dTensorDescriptor requires exactly 4 dimensions, so ranks 1-3
-// are left-padded with 1:
+// miopenSetNdTensorDescriptorWithLayout requires exactly 4 dimensions, so
+// ranks 1-3 are left-padded with 1:
 //   rank 1: [W]       -> [1, 1, 1, W]
 //   rank 2: [H, W]    -> [1, 1, H, W]
 //   rank 3: [C, H, W] -> [1, C, H, W]
@@ -215,6 +225,8 @@ void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
+void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
@@ -237,6 +249,8 @@ void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateCausalConvWithStateLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,

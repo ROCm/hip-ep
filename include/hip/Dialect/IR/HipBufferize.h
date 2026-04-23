@@ -81,11 +81,16 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
+    SoftplusOp::attachInterface<HipDstBufferizableModel<SoftplusOp>>(*ctx);
+    ReciprocalOp::attachInterface<HipDstBufferizableModel<ReciprocalOp>>(*ctx);
+    SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);
     SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
     ReduceSumOp::attachInterface<HipDstBufferizableModel<ReduceSumOp>>(*ctx);
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
+    CausalConvWithStateOp::attachInterface<
+        HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
         *ctx);
     GemmOp::attachInterface<HipDstBufferizableModel<GemmOp>>(*ctx);

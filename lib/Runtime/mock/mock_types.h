@@ -27,6 +27,10 @@ struct hipDeviceProp_t {
 #define hipMemcpyDeviceToHost 1
 #define hipHostMallocDefault 0
 
+// MIOpen tensor layout enum (subset used by the runtime)
+typedef int miopenTensorLayout_t;
+#define miopenTensorNCHW 0
+
 // Forward declarations for mock GPU functions (defined in mock_gpu.cpp)
 extern "C" hipError_t hipGetDeviceCount(int *count);
 extern "C" hipError_t hipSetDevice(int device);

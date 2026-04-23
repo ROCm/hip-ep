@@ -39,6 +39,8 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
     return miopenActivationRELU;
   case HIPDNN_EP_ACTIVATION_TANH:
     return miopenActivationTANH;
+  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
+    return miopenActivationSOFTRELU;
   default:
     fprintf(stderr, "[REAL] unsupported activation_mode %lld for MIOpen\n",
             (long long)mode);
@@ -102,10 +104,15 @@ queryOrCreateActivation(const ActivationCacheKey &key) {
 
   MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.inDesc), cache_fail);
   MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.outDesc), cache_fail);
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n),
-                    cache_fail);
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n),
-                    cache_fail);
+  {
+    int dims[] = {1, 1, 1, n};
+    MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(
+                          e.inDesc, dt, miopenTensorNCHW, dims, 4),
+                      cache_fail);
+    MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(
+                          e.outDesc, dt, miopenTensorNCHW, dims, 4),
+                      cache_fail);
+  }
   MIOPEN_CHECK_GOTO(miopenCreateActivationDescriptor(&e.actDesc), cache_fail);
   MIOPEN_CHECK_GOTO(
       miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0), cache_fail);
@@ -137,7 +144,7 @@ cache_done:
 //
 // Applies activation_mode element-wise using miopenActivationForward.
 // Tensor is represented as flat 1D [1, 1, 1, num_elements] to satisfy
-// miopenSet4dTensorDescriptor's 4D requirement.
+// MIOpen's 4D tensor descriptor requirement.
 //===----------------------------------------------------------------------===//
 
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,

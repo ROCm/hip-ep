@@ -27,6 +27,8 @@ Options:
  2 = ORT_ENABLE_EXTENDED,
  99 = ORT_ENABLE_ALL,
  -1 = default, not call this function  (default: -1)
+-p, --positive-only       Generate positive-only random inputs [0.1, 256.0]
+ for Sqrt/Reciprocal testing (flag)
 */
 //===----------------------------------------------------------------------===//
 
@@ -224,10 +226,14 @@ static uint16_t float_to_fp16_bits(float f) {
 // int/fp16). Integers: uniform over the full representable range of each type.
 // Float32/fp16: keep a modest interval (same order as the old float-only path)
 // to avoid surprising huge magnitudes in models that expect bounded inputs.
+// positive_only: if true, generate only positive values for float types (for
+// Sqrt/Reciprocal testing)
 static void fill_random_input_buffer(char *dst, size_t nbytes,
                                      ONNXTensorElementDataType et,
-                                     std::mt19937 &rng) {
-  std::uniform_real_distribution<float> fdist(-256.0f, 255.0f);
+                                     std::mt19937 &rng,
+                                     bool positive_only = false) {
+  std::uniform_real_distribution<float> fdist(positive_only ? 0.1f : -256.0f,
+                                              positive_only ? 256.0f : 255.0f);
   std::uniform_int_distribution<int> idist_i16(-32768, 32767);
   std::uniform_int_distribution<int> idist_i8(-128, 127);
   std::uniform_int_distribution<int> idist_u8(0, 255);
@@ -730,6 +736,10 @@ int main(int argc, char *argv[]) {
                 " 99 = ORT_ENABLE_ALL,  "
                 " -1 = default, not call this function ",
                 "-1");
+  mo.add_option(
+      "p", "positive-only",
+      "Generate positive-only random inputs (for Sqrt/Reciprocal testing)",
+      "false", true);
 
   try {
     mo.parse(argc, argv);
@@ -752,6 +762,7 @@ int main(int argc, char *argv[]) {
   std::string input_dir_str = trim_string(mo.get<std::string>("input-dir"));
   const bool use_input_files = !input_dir_str.empty();
   const int graph_optimization_level = mo.get<int>("graph-opt-level");
+  const bool positive_only = mo.get<bool>("positive-only");
 
   if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
       !l2norm_arg[1].empty()) {
@@ -914,7 +925,7 @@ int main(int argc, char *argv[]) {
                 << "\n";
     } else {
       fill_random_input_buffer(input_buffers[i].data(), input_buffers[i].size(),
-                               input_types[i], rng);
+                               input_types[i], rng, positive_only);
     }
 
     Ort::MemoryInfo mem =

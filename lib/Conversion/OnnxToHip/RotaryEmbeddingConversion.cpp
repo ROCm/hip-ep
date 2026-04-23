@@ -50,23 +50,18 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value cosCache = op->getOperand(2);
   mlir::Value sinCache = op->getOperand(3);
 
-  // Extract attributes
+  // All attributes are optional per the ONNX com.microsoft.RotaryEmbedding
+  // spec.  Defaults: interleaved=0, num_heads=0, rotary_embedding_dim=0.
+  // A value of 0 for num_heads / rotary_embedding_dim means "infer from
+  // tensor shapes".
   auto interleavedAttr = op->getAttrOfType<mlir::IntegerAttr>("interleaved");
-  if (!interleavedAttr)
-    return rewriter.notifyMatchFailure(op, "missing interleaved attribute");
-
   auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
-  if (!numHeadsAttr)
-    return rewriter.notifyMatchFailure(op, "missing num_heads attribute");
-
   auto rotaryDimAttr =
       op->getAttrOfType<mlir::IntegerAttr>("rotary_embedding_dim");
-  if (!rotaryDimAttr)
-    return rewriter.notifyMatchFailure(
-        op, "missing rotary_embedding_dim attribute");
 
-  int64_t numHeadsVal = numHeadsAttr.getSInt();
-  int64_t rotaryDimVal = rotaryDimAttr.getSInt();
+  int64_t interleavedVal = interleavedAttr ? interleavedAttr.getSInt() : 0;
+  int64_t numHeadsVal = numHeadsAttr ? numHeadsAttr.getSInt() : 0;
+  int64_t rotaryDimVal = rotaryDimAttr ? rotaryDimAttr.getSInt() : 0;
 
   // ONNX com.microsoft.RotaryEmbedding: 0 means "infer from tensor shapes"
   //   cos_cache: [max_seq, rotary_dim/2] -> rotary_dim = last_dim * 2
@@ -96,8 +91,7 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   }
 
   // Convert to i64 attributes (using inferred or original values)
-  auto interleavedI64Attr =
-      rewriter.getI64IntegerAttr(interleavedAttr.getSInt());
+  auto interleavedI64Attr = rewriter.getI64IntegerAttr(interleavedVal);
   auto numHeadsI64Attr = rewriter.getI64IntegerAttr(numHeadsVal);
   auto rotaryDimI64Attr = rewriter.getI64IntegerAttr(rotaryDimVal);
 
