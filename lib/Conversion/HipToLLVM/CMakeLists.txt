@@ -13,6 +13,7 @@ add_library(HipToLLVM STATIC
   ActivationLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
+  RangeLowering.cpp
   CastLowering.cpp
   ReduceSumLowering.cpp
   TransposeLowering.cpp
@@ -38,7 +39,5 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRMemRefDialect
-  MLIRMathDialect
-  MLIRMathToLLVM
   MLIRTransforms
 )

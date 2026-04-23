@@ -36,6 +36,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip
     hip/cast_kernel.hip
+    hip/range_kernel.hip
     hip/gather_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/matmul_nbits_kernel.hip

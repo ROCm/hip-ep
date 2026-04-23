@@ -30,7 +30,6 @@ target_link_libraries(hip-mlir-opt PRIVATE
   MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRMemRefDialect
-  MLIRMathDialect
   MLIRMemRefTransforms
   MLIRSCFDialect
   MLIRTensorDialect

@@ -9,7 +9,6 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
-#include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -121,9 +120,6 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
 void mlir::hip::buildHipToLLVMPipeline(
     OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
-  // Lower scf (e.g. from onnx.Range) to cf so ConvertHipToLLVM can reach LLVM.
-  pm.addPass(createSCFToControlFlowPass());
-
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.
   // populateFinalizeMemRefToLLVMConversionPatterns (used by ConvertHipToLLVM)
