@@ -10,7 +10,7 @@
 
 // RUN: not hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s 2>&1 | FileCheck %s
 
-// CHECK: error: onnx.Constant has invalid address/size
+// CHECK: error: onnx.Constant mem-addr has null address
 // CHECK-NEXT: %0 = "onnx.Constant"() {location = "*/_ORT_MEM_ADDR_/*", offset = 0 : i64, size = 32 : i64} : () -> tensor<2x4xf32>
 // CHECK-NEXT: ^
 
