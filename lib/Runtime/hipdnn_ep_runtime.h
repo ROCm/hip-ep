@@ -570,31 +570,40 @@ int wrap_qmoe(
 // All tensor inputs use packed 3D format [B, T, H*D] except past/present
 // state which is 4D [B, H_kv, d_k, d_v].
 // Head counts are three-way:
-//   - q_num_heads  (H_q) : query heads
-//   - kv_num_heads (H_kv): KV state heads
-//   - n_k_heads    (n_k) : number of key heads in the packed key tensor;
-//                          n_k divides H_kv (multiple KV heads may share a K
-//                          head when n_k < H_kv).
-// Supports both standard GQA (H_q >= H_kv, H_q % H_kv == 0) and inverse GQA
-// (H_q <  H_kv, H_kv % H_q == 0).  The output tensor's last dim is
-// max(H_q, H_kv) * d_v, packed in Q-head order for standard GQA and KV-head
-// order for inverse GQA.
+//   - Hq : query heads
+//   - Hkv: KV state heads
+//   - Nk : number of key heads in the packed key tensor (Nk divides H_kv when
+//          multiple KV heads share a K head; Nk < Hkv).
+// Supports both standard GQA (Hq >= Hkv, Hq % Hkv == 0) and inverse GQA
+// (Hq < Hkv, Hkv % Hq == 0).  The output tensor's last dim is max(Hq, Hkv)*d_v,
+// packed in Q-head order for standard GQA and KV-head order for inverse GQA.
 // Optional pointer args: pass nullptr if the corresponding input is absent.
+// Last arg `type` is HIPDNN_EP_DATATYPE_FLOAT (0), HIPDNN_EP_DATATYPE_HALF (1),
+// or HIPDNN_EP_DATATYPE_BFLOAT16 (2).
+//
+// decay_per_key_dim / beta_per_head describe the layout of the optional
+// decay / beta tensors so the runtime can pick the correct stride. Values
+// are ignored when the corresponding pointer is nullptr; compilers should
+// pass 0 in that case.
+//   decay_per_key_dim = 1  -> decay is [B, T, H_kv * d_k] (GLA / RWKV-6)
+//                     = 0  -> decay is [B, T, H_kv]       (DeltaNet / RetNet)
+//   beta_per_head     = 1  -> beta  is [B, T, H_kv]
+//                     = 0  -> beta  is [B, T, 1]          (broadcast over heads)
 int wrap_linear_attention(
     RuntimeState *state,
-    const void *query,      // [B, T, H_q * d_k]
-    const void *key,        // [B, T, n_k * d_k]
+    const void *query,      // [B, T, Hq * dk]
+    const void *key,        // [B, T, Nk * dk]
     const void *value,      // [B, T, H_kv * d_v]
     const void *past_state, // [B, H_kv, d_k, d_v] (nullable)
     const void *decay,      // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
     const void *beta,       // [B, T, H_kv] or [B, T, 1] (nullable)
     void *output,           // [B, T, max(H_q, H_kv) * d_v]
     void *present_state,    // [B, H_kv, d_k, d_v]
-    int64_t q_num_heads, int64_t kv_num_heads, int64_t n_k_heads, float scale,
-    int64_t chunk_size,
+    int64_t Hq, int64_t Hkv, int64_t Nk,
+    int64_t decay_per_key_dim, int64_t beta_per_head,
+    float scale, int64_t chunk_size,
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
-    int64_t batch_size, int64_t seq_len, int64_t head_dim_k, int64_t head_dim_v,
-    int64_t element_size_bytes);
+    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

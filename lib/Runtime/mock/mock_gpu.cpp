@@ -546,11 +546,11 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
                           const void *key, const void *value,
                           const void *past_state, const void *decay,
                           const void *beta, void *output, void *present_state,
-                          int64_t q_num_heads, int64_t kv_num_heads,
-                          int64_t n_k_heads, float scale, int64_t chunk_size,
-                          int64_t update_rule, int64_t batch_size,
-                          int64_t seq_len, int64_t head_dim_k,
-                          int64_t head_dim_v, int64_t element_size_bytes) {
+                          int64_t Hq, int64_t Hkv, int64_t Nk,
+                          int64_t decay_per_key_dim, int64_t beta_per_head,
+                          float scale, int64_t chunk_size, int64_t update_rule,
+                          int64_t B, int64_t seq_len, int64_t dk, int64_t dv,
+                          int64_t type) {
   if (!state || !query || !key || !value || !output || !present_state) {
     fprintf(stderr, "Invalid required argument in wrap_linear_attention\n");
     return -1;
@@ -576,16 +576,16 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   }
 
   MOCK_PRINT("[MOCK] wrap_linear_attention(\n");
-  MOCK_PRINT("[MOCK]   batch=%lld, seq_len=%lld, d_k=%lld, d_v=%lld,\n",
-             (long long)batch_size, (long long)seq_len, (long long)head_dim_k,
-             (long long)head_dim_v);
-  MOCK_PRINT("[MOCK]   q_num_heads=%lld, kv_num_heads=%lld, n_k_heads=%lld,\n",
-             (long long)q_num_heads, (long long)kv_num_heads,
-             (long long)n_k_heads);
+  MOCK_PRINT("[MOCK]   B=%lld, seq_len=%lld, dk=%lld, dv=%lld,\n",
+             (long long)B, (long long)seq_len, (long long)dk, (long long)dv);
+  MOCK_PRINT("[MOCK]   Hq=%lld, Hkv=%lld, Nk=%lld,\n", (long long)Hq,
+             (long long)Hkv, (long long)Nk);
+  MOCK_PRINT("[MOCK]   decay_per_key_dim=%lld, beta_per_head=%lld,\n",
+             (long long)decay_per_key_dim, (long long)beta_per_head);
   MOCK_PRINT("[MOCK]   scale=%f, chunk_size=%lld, update_rule=%s(%lld),\n",
              (double)scale, (long long)chunk_size, rule_name,
              (long long)update_rule);
-  MOCK_PRINT("[MOCK]   elem_size=%lld,\n", (long long)element_size_bytes);
+  MOCK_PRINT("[MOCK]   type=%lld,\n", (long long)type);
   MOCK_PRINT("[MOCK]   past_state=%s, decay=%s, beta=%s)\n",
              past_state ? "yes" : "null", decay ? "yes" : "null",
              beta ? "yes" : "null");

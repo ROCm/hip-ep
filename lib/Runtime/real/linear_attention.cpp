@@ -43,26 +43,46 @@ static const char *updateRuleName(int64_t rule) {
 extern "C" int wrap_linear_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_state, const void *decay, const void *beta, void *output,
-    void *present_state, int64_t q_num_heads, int64_t kv_num_heads,
-    int64_t n_k_heads, float scale, int64_t chunk_size, int64_t update_rule,
-    int64_t batch_size, int64_t seq_len, int64_t head_dim_k, int64_t head_dim_v,
-    int64_t element_size_bytes) {
+    void *present_state, int64_t Hq, int64_t Hkv, int64_t Nk,
+    int64_t decay_per_key_dim, int64_t beta_per_head, float scale,
+    int64_t chunk_size, int64_t update_rule, int64_t B, int64_t seq_len,
+    int64_t dk, int64_t dv, int64_t type) {
 
-  RUNTIME_DEBUG_LOG("[linear_attention] enter: B=%lld T=%lld "
+  RUNTIME_DEBUG_LOG("[linear_attention] enter: B=%lld seq_len=%lld "
                     "q_heads=%lld kv_heads=%lld n_k=%lld d_k=%lld d_v=%lld "
-                    "scale=%.6f chunk=%lld rule=%s elem_size=%lld\n",
-                    (long long)batch_size, (long long)seq_len,
-                    (long long)q_num_heads, (long long)kv_num_heads,
-                    (long long)n_k_heads, (long long)head_dim_k,
-                    (long long)head_dim_v, (double)scale,
+                    "scale=%.6f chunk=%lld rule=%s type=%s(%lld)\n",
+                    (long long)B, (long long)seq_len, (long long)Hq,
+                    (long long)Hkv,
+                    (long long)Nk, (long long)dk, (long long)dv, (double)scale,
                     (long long)chunk_size, updateRuleName(update_rule),
-                    (long long)element_size_bytes);
+                    hipdnn_ep_datatype_name(type), (long long)type);
+
+  RUNTIME_DEBUG_LOG("[linear_attention] layout: decay_per_key_dim=%lld "
+                    "beta_per_head=%lld\n",
+                    (long long)decay_per_key_dim, (long long)beta_per_head);
 
   RUNTIME_DEBUG_LOG("[linear_attention] ptrs: query=%p key=%p value=%p "
                     "past_state=%p decay=%p beta=%p output=%p "
                     "present_state=%p\n",
                     query, key, value, past_state, decay, beta, output,
                     present_state);
+
+  if (type != HIPDNN_EP_DATATYPE_FLOAT && type != HIPDNN_EP_DATATYPE_HALF &&
+      type != HIPDNN_EP_DATATYPE_BFLOAT16) {
+    fprintf(stderr,
+            "[linear_attention] ERROR: unsupported element type %lld "
+            "(expect HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)\n",
+            (long long)type);
+    return -1;
+  }
+
+  const int64_t elem_size = hipdnn_ep_datatype_size(type);
+  if (elem_size <= 0) {
+    fprintf(stderr,
+            "[linear_attention] ERROR: invalid elem_size from type %lld\n",
+            (long long)type);
+    return -1;
+  }
 
   // Validate required inputs
   if (!query || !key || !value || !output || !present_state) {
@@ -89,6 +109,25 @@ extern "C" int wrap_linear_attention(
     return -1;
   }
 
+  // The current HIP decode kernel only supports the per-key-dim decay layout
+  // ([B, T, H_kv * d_k]) and the per-head beta layout ([B, T, H_kv]). Flag
+  // other combinations explicitly instead of silently mis-striding.
+  if (decay && !decay_per_key_dim) {
+    fprintf(stderr,
+            "[linear_attention] ERROR: decay layout [B, T, H_kv] is not yet "
+            "supported (kernel expects [B, T, H_kv * d_k]); "
+            "decay_per_key_dim=%lld\n",
+            (long long)decay_per_key_dim);
+    return -1;
+  }
+  if (beta && !beta_per_head) {
+    fprintf(stderr,
+            "[linear_attention] ERROR: beta layout [B, T, 1] is not yet "
+            "supported (kernel expects [B, T, H_kv]); beta_per_head=%lld\n",
+            (long long)beta_per_head);
+    return -1;
+  }
+
   void *hip_stream = hipdnn_ep_state_get_stream(state);
   if (!hip_stream) {
     fprintf(stderr, "[linear_attention] ERROR: failed to get HIP stream\n");
@@ -104,27 +143,21 @@ extern "C" int wrap_linear_attention(
   }
 
   // Auto-compute scale if sentinel zero
-  if (scale == 0.0f && head_dim_k > 0)
-    scale = 1.0f / sqrtf((float)head_dim_k);
+  if (scale == 0.0f && dk > 0)
+    scale = 1.0f / sqrtf((float)dk);
 
-  // Dimension aliases
-  const int64_t B = batch_size;
-  const int64_t Hq = q_num_heads;
-  const int64_t Hkv = kv_num_heads;
-  const int64_t Nk = n_k_heads;
   // Output head count = max(Hq, Hkv).  In standard GQA (Hq >= Hkv) the output
   // is packed in Q-head order; in inverse GQA it is packed in KV-head order.
   const int64_t Hout = Hq >= Hkv ? Hq : Hkv;
-  const int64_t dk = head_dim_k;
-  const int64_t dv = head_dim_v;
 
   // State size per batch per head: dk * dv elements
-  const int64_t state_bytes = dk * dv * element_size_bytes;
+  const int64_t state_bytes = dk * dv * elem_size;
   int64_t total_state_bytes = B * Hkv * state_bytes;
 
   int result = 0;
 
-  // Temp buffers for T>1 token-by-token processing (nullptr when T=1)
+  // Temp buffers for seq_len>1 token-by-token processing (nullptr when
+  // seq_len==1)
   void *q_t = nullptr, *k_t = nullptr, *v_t = nullptr, *o_t = nullptr;
   void *decay_t = nullptr, *beta_t = nullptr;
 
@@ -138,32 +171,41 @@ extern "C" int wrap_linear_attention(
   }
 
   if (seq_len == 1) {
+    // TODO: How to do parallel decoding?
     int kern_result = hip_linear_attention_decode(
         hip_stream, query, key, value, decay, beta, present_state, output, B,
-        Hq, Hkv, Nk, dk, dv, scale, update_rule, element_size_bytes);
+        Hq, Hkv, Nk, dk, dv, scale, update_rule, type);
     if (kern_result != 0) {
       fprintf(stderr, "[linear_attention] ERROR: decode kernel failed (%d)\n",
               kern_result);
       result = -1;
       goto cleanup;
     }
-    RUNTIME_DEBUG_LOG("[linear_attention] T=1 decode kernel dispatched\n");
+    RUNTIME_DEBUG_LOG(
+        "[linear_attention] seq_len==1 decode kernel dispatched\n");
   } else {
-    // T>1 prefill: loop over tokens, reusing the T=1 decode kernel.
+    // seq_len>1 prefill: loop over tokens, reusing the seq_len==1 decode kernel.
     // Each iteration extracts one token from the packed [B,T,H*D] inputs,
     // runs one recurrence step (updating present_state in-place), and
-    // writes the output back to the correct position. Correct but O(T)
+    // writes the output back to the correct position. Correct but O(seq_len)
     // kernel launches; a chunk-parallel WY kernel would be faster.
     //
     // Per-tensor hidden sizes:
     //   query  : Hq  * dk      key    : Nk   * dk (may be < Hkv*dk)
     //   value  : Hkv * dv      output : Hout * dv (Hout = max(Hq, Hkv))
-    const int64_t q_token_bytes = Hq   * dk * element_size_bytes;
-    const int64_t k_token_bytes = Nk   * dk * element_size_bytes;
-    const int64_t v_token_bytes = Hkv  * dv * element_size_bytes;
-    const int64_t o_token_bytes = Hout * dv * element_size_bytes;
-    const int64_t decay_token_bytes = Hkv * dk * element_size_bytes;
-    const int64_t beta_token_bytes = Hkv * element_size_bytes;
+    const int64_t q_token_bytes = Hq   * dk * elem_size;
+    const int64_t k_token_bytes = Nk   * dk * elem_size;
+    const int64_t v_token_bytes = Hkv  * dv * elem_size;
+    const int64_t o_token_bytes = Hout * dv * elem_size;
+    // decay / beta stride per token depends on the logical layout:
+    //   decay_per_key_dim==1 -> [B, T, H_kv * d_k]
+    //   decay_per_key_dim==0 -> [B, T, H_kv]
+    //   beta_per_head==1     -> [B, T, H_kv]
+    //   beta_per_head==0     -> [B, T, 1]
+    const int64_t decay_token_bytes =
+        (decay_per_key_dim ? Hkv * dk : Hkv) * elem_size;
+    const int64_t beta_token_bytes =
+        (beta_per_head ? Hkv : 1) * elem_size;
 
     HIP_CHECK(hipMalloc(&q_t, B * q_token_bytes));
     HIP_CHECK(hipMalloc(&k_t, B * k_token_bytes));
@@ -175,7 +217,7 @@ extern "C" int wrap_linear_attention(
       HIP_CHECK(hipMalloc(&beta_t, B * beta_token_bytes));
 
     RUNTIME_DEBUG_LOG(
-        "[linear_attention] T>1 prefill: looping %lld tokens\n",
+        "[linear_attention] seq_len>1 prefill: looping %lld tokens\n",
         (long long)seq_len);
 
     for (int64_t t = 0; t < seq_len; ++t) {
@@ -213,8 +255,7 @@ extern "C" int wrap_linear_attention(
 
       int kern_result = hip_linear_attention_decode(
           hip_stream, q_t, k_t, v_t, decay_t, beta_t, present_state, o_t,
-          B, Hq, Hkv, Nk, dk, dv, scale, update_rule,
-          element_size_bytes);
+          B, Hq, Hkv, Nk, dk, dv, scale, update_rule, type);
       if (kern_result != 0) {
         fprintf(stderr,
                 "[linear_attention] ERROR: decode kernel failed at t=%lld "
@@ -232,7 +273,7 @@ extern "C" int wrap_linear_attention(
     }
 
     RUNTIME_DEBUG_LOG(
-        "[linear_attention] T>1 prefill completed (%lld tokens)\n",
+        "[linear_attention] seq_len>1 prefill completed (%lld tokens)\n",
         (long long)seq_len);
   }
 
