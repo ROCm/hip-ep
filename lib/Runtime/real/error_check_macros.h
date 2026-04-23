@@ -23,7 +23,8 @@
 //   int result = 0;
 //
 //   MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&desc), cleanup);
-//   MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(desc, ...), cleanup);
+//   MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(desc, ...),
+//   cleanup);
 //
 //   cleanup:
 //     if (desc) miopenDestroyTensorDescriptor(desc);

@@ -115,6 +115,7 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 #define HIPDNN_EP_ACTIVATION_SIGMOID 0
 #define HIPDNN_EP_ACTIVATION_RELU 1
 #define HIPDNN_EP_ACTIVATION_TANH 2
+#define HIPDNN_EP_ACTIVATION_SOFTPLUS 3
 
 static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   switch (activation_mode) {
@@ -124,6 +125,8 @@ static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
     return "relu";
   case HIPDNN_EP_ACTIVATION_TANH:
     return "tanh";
+  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
+    return "softplus";
   default:
     return "unknown";
   }
@@ -434,9 +437,9 @@ int wrap_group_query_attention(
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
-    // Shape values (5)
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
-    int64_t element_size_bytes);
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
 
 // Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
@@ -456,6 +459,19 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes);
+
+// Unified power entry: output = f(input; alpha, beta, gamma).
+// alpha, beta, gamma match the MIOpen POWER activation tuple where the
+// MIOpen path is used. data_type is HIPDNN_EP_DATATYPE_* (FLOAT=0, HALF=1,
+// BFLOAT16=2).
+//
+// LLVM lowering always calls this symbol. For (0, 1, -1) and (0, 1, 0.5) the
+// runtime uses HIP elementwise reciprocal and sqrt kernels (ONNX semantics).
+// Other (alpha, beta, gamma) tuples use miopenActivationPOWER /
+// miopenActivationForward.
+int wrap_power(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, double alpha,
+               double beta, double gamma);
 
 // Gather operation wrapper
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
@@ -557,6 +573,29 @@ int wrap_qmoe(
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
     float activation_alpha, float activation_beta, float swiglu_limit,
     int64_t normalize_routing_weights, int64_t elem_size);
+
+// CausalConvWithState operation wrapper (stateful causal depthwise convolution)
+// Used by Gated DeltaNet (Qwen3.5) and Mamba models.
+// Performs causal depthwise convolution with carry state for incremental
+// decode. The convolution is causal (looks only at current and past positions)
+// and depthwise (each channel convolved independently). Input layout:
+// channels-first (batch, channels, seq_len). Weight layout: (channels, 1,
+// kernel_size) for 1D depthwise.
+//   bias:       nullable - per-channel bias (channels)
+//   past_state: nullable - carry state from previous step (batch, channels,
+//   k-1) activation: 0=none, 1=silu/swish
+int wrap_causal_conv_with_state(
+    RuntimeState *state,
+    const void *input,      // (batch, channels, seq_len)
+    const void *weight,     // (channels, 1, kernel_size)
+    const void *bias,       // nullable, (channels)
+    const void *past_state, // nullable, (batch, channels, kernel_size - 1)
+    void *output,           // (batch, channels, seq_len)
+    void *present_state,    // (batch, channels, kernel_size - 1)
+    int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
+    int64_t ndim,
+    int64_t activation, // 0=none, 1=silu/swish
+    int64_t element_size_bytes);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

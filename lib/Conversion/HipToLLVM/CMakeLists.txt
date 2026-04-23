@@ -9,6 +9,7 @@ add_library(HipToLLVM STATIC
   ConvLowering.cpp
   MatmulLowering.cpp
   ElementwiseLowering.cpp
+  PowerLowering.cpp
   ActivationLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
@@ -20,6 +21,7 @@ add_library(HipToLLVM STATIC
   MatMulNBitsLowering.cpp
   QMoELowering.cpp
   GraphLowering.cpp
+  CausalConvWithStateLowering.cpp
   GemmLowering.cpp
   LinearAttentionLowering.cpp
 )

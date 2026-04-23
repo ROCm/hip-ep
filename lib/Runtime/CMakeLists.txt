@@ -215,6 +215,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
     compile_to_bitcode(real/memory.cpp runtime_memory.bc)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
+    compile_to_bitcode(real/power.cpp runtime_power.bc)
     compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
     compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
@@ -226,6 +227,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
+    compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
@@ -238,6 +240,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hipblas.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_simplified_layer_norm.bc
@@ -249,6 +252,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc

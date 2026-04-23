@@ -199,8 +199,22 @@ static miopenStatus_t miopenSet4dTensorDescriptor(miopenTensorDescriptor_t desc,
                                                   int n, int c, int h, int w) {
   (void)desc;
   (void)dataType;
-  // Print tensor shape for verification
   MOCK_PRINT("[MOCK]   Tensor descriptor set: [%d, %d, %d, %d]\n", n, c, h, w);
+  return miopenStatusSuccess;
+}
+
+static miopenStatus_t miopenSetNdTensorDescriptorWithLayout(
+    miopenTensorDescriptor_t desc, miopenDataType_t dataType,
+    miopenTensorLayout_t layout, const int *lens, int num_lens) {
+  (void)desc;
+  (void)dataType;
+  (void)layout;
+  if (num_lens == 4) {
+    MOCK_PRINT("[MOCK]   Tensor descriptor set (NCHW): [%d, %d, %d, %d]\n",
+               lens[0], lens[1], lens[2], lens[3]);
+  } else {
+    MOCK_PRINT("[MOCK]   Tensor descriptor set: %d dims\n", num_lens);
+  }
   return miopenStatusSuccess;
 }
 
@@ -430,6 +444,35 @@ int wrap_miopenConvolutionForward(
   return 0;
 }
 
+int wrap_causal_conv_with_state(
+    RuntimeState *state, const void *input, const void *weight,
+    const void *bias, const void *past_state, void *output, void *present_state,
+    int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
+    int64_t ndim, int64_t activation, int64_t element_size_bytes) {
+  if (!state || !input || !weight || !output || !present_state) {
+    fprintf(stderr,
+            "Invalid required argument in wrap_causal_conv_with_state\n");
+    return -1;
+  }
+
+  // CausalConvWithState fused activation enum: 0=none, 1=silu/swish.
+  // This is independent of hipdnn_ep_activation_name() which maps generic
+  // miopen activations (sigmoid/relu/tanh).
+  const char *act_name = (activation == 1) ? "silu" : "none";
+
+  MOCK_PRINT("[MOCK] wrap_causal_conv_with_state(\n");
+  MOCK_PRINT("[MOCK]   batch=%lld, channels=%lld, seq_len=%lld, kernel=%lld,\n",
+             (long long)batch_size, (long long)channels, (long long)seq_len,
+             (long long)kernel_size);
+  MOCK_PRINT("[MOCK]   ndim=%lld, activation=%s(%lld), elem_size=%lld,\n",
+             (long long)ndim, act_name, (long long)activation,
+             (long long)element_size_bytes);
+  MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
+             past_state ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
                        int64_t k, const void *alpha, const void *A,
                        const void *B, const void *beta, void *C) {
@@ -504,9 +547,9 @@ int wrap_group_query_attention(
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
-    // Shape values (5)
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
-    int64_t element_size_bytes) {
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -524,6 +567,7 @@ int wrap_group_query_attention(
   (void)k_quant_type;
   (void)v_quant_type;
   (void)kv_cache_bit_width;
+  (void)past_buf_seq;
   (void)present_key;
   (void)present_value;
 
@@ -535,9 +579,10 @@ int wrap_group_query_attention(
   MOCK_PRINT("[MOCK]   do_rotary=%lld, rotary_interleaved=%lld,\n",
              (long long)do_rotary, (long long)rotary_interleaved);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
-             "head_dim=%lld, elem_size=%lld)\n",
+             "past_buf_seq=%lld, head_dim=%lld, elem_size=%lld)\n",
              (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
-             (long long)head_dim, (long long)element_size_bytes);
+             (long long)past_buf_seq, (long long)head_dim,
+             (long long)element_size_bytes);
 
   return 0;
 }
@@ -846,6 +891,23 @@ int wrap_hipFree(void *ptr) {
 int wrap_hipMemcpyH2D(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyHostToDevice,
                            static_cast<hipStream_t>(stream)));
+  return 0;
+}
+
+// hip.reciprocal / hip.sqrt lower to wrap_power(..., alpha, beta, gamma).
+int wrap_power(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, double alpha,
+               double beta, double gamma) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_power\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_power(num_elements=%lld, data_type=%s(%lld), "
+             "alpha=%g, beta=%g, gamma=%g)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, alpha, beta, gamma);
+
   return 0;
 }
 

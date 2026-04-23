@@ -532,14 +532,47 @@ void SiluOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
-// SigmoidOp: ins(input), outs(output)
+// SigmoidOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange SigmoidOp::getDpsInitsMutable() {
-  return getOutputMutable();
-}
+MutableOperandRange SigmoidOp::getDpsInitsMutable() { return getYMutable(); }
 
 void SigmoidOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SoftplusOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SoftplusOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SoftplusOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+//===----------------------------------------------------------------------===//
+// ReciprocalOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReciprocalOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ReciprocalOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SqrtOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SqrtOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SqrtOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -604,6 +637,31 @@ void MatMulNBitsOp::getEffects(
 MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void QMoEOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CausalConvWithStateOp: ins(input, weight, [bias], [past_state])
+//                        outs(output, present_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CausalConvWithStateOp::getDpsInitsMutable() {
+  // DPS inits: output, present_state (always 2)
+  // Count actual inputs before the inits
+  unsigned numInputs = 1; // ctx
+  numInputs++;            // input
+  numInputs++;            // weight
+  if (getBias())
+    ++numInputs;
+  if (getPastState())
+    ++numInputs;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+}
+
+void CausalConvWithStateOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

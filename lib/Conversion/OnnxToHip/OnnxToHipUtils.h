@@ -117,6 +117,8 @@ void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
+void populatePowerConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateCastConversionPatterns(RewritePatternSet &patterns,
@@ -139,6 +141,8 @@ void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
+                                                   MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
