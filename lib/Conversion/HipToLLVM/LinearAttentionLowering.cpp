@@ -110,14 +110,13 @@ struct LinearAttentionOpLowering
     // Derive d_v from present_state shape: [B, H_kv, d_k, d_v].
     // present_state is always 4D per spec, so index 3 is safe.
     auto presentStateType = cast<MemRefType>(op.getPresentState().getType());
-    Value headDimVVal = getMemRefDimSize(presentStateType, 3,
-                                         adaptor.getPresentState(), rewriter,
-                                         loc);
+    Value headDimVVal = getMemRefDimSize(
+        presentStateType, 3, adaptor.getPresentState(), rewriter, loc);
 
     // Derive layout flags for the optional decay / beta tensors so the
     // runtime can pick the correct per-token stride:
     //   decay_per_key_dim = 1 when decay last dim == H_kv * d_k (GLA/RWKV-6)
-    //                     = 0 when decay last dim == H_kv       (DeltaNet/RetNet)
+    //                     = 0 when decay last dim == H_kv (DeltaNet/RetNet)
     //   beta_per_head     = 1 when beta  last dim == H_kv
     //                     = 0 when beta  last dim == 1          (broadcast)
     // Values are meaningless when the corresponding operand is absent, in
@@ -133,10 +132,9 @@ struct LinearAttentionOpLowering
         int64_t last = type.getDimSize(dim);
         return createI64Const(last == refConst ? 0 : 1);
       }
-      Value lastDim =
-          getMemRefDimSize(type, dim, operand, rewriter, loc);
-      Value cmp = LLVM::ICmpOp::create(
-          rewriter, loc, LLVM::ICmpPredicate::ne, lastDim, refVal);
+      Value lastDim = getMemRefDimSize(type, dim, operand, rewriter, loc);
+      Value cmp = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ne,
+                                       lastDim, refVal);
       return LLVM::ZExtOp::create(rewriter, loc, i64Type, cmp);
     };
 
@@ -151,12 +149,11 @@ struct LinearAttentionOpLowering
     if (adaptor.getBeta()) {
       auto betaType = cast<MemRefType>(op.getBeta().getType());
       Value oneConst = createI64Const(1);
-      betaPerHeadVal = deriveLayoutFlagEqualsOne(
-          adaptor.getBeta(), betaType, oneConst, /*refConst=*/1);
+      betaPerHeadVal = deriveLayoutFlagEqualsOne(adaptor.getBeta(), betaType,
+                                                 oneConst, /*refConst=*/1);
     }
 
-    int64_t elemTypeEnum =
-        getHipdnnDataType(queryType.getElementType());
+    int64_t elemTypeEnum = getHipdnnDataType(queryType.getElementType());
     if (elemTypeEnum < 0 || elemTypeEnum > 2) {
       return rewriter.notifyMatchFailure(
           op, "hip.linear_attention requires f32, f16, or bf16 element type");
@@ -201,12 +198,12 @@ struct LinearAttentionOpLowering
       return failure();
 
     SmallVector<Value, 22> args = {
-        statePtr,         queryPtr,         keyPtr,         valuePtr,
-        pastStatePtr,     decayPtr,         betaPtr,        outputPtr,
-        presentStatePtr,  qNumHeads,        kvNumHeads,     nKHeadsVal,
-        decayPerKeyDimVal, betaPerHeadVal,  scale,          chunkSize,
-        updateRule,       batchSizeVal,     seqLenVal,      headDimKVal,
-        headDimVVal,      typeVal};
+        statePtr,          queryPtr,       keyPtr,     valuePtr,
+        pastStatePtr,      decayPtr,       betaPtr,    outputPtr,
+        presentStatePtr,   qNumHeads,      kvNumHeads, nKHeadsVal,
+        decayPerKeyDimVal, betaPerHeadVal, scale,      chunkSize,
+        updateRule,        batchSizeVal,   seqLenVal,  headDimKVal,
+        headDimVVal,       typeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

@@ -107,6 +107,7 @@ __global__ void linear_attention_decode_kernel(
 
     // Key-head index for this (b, g): n_k divides Hkv, so multiple KV heads
     // sharing the same K head produce the same index.
+    // this support inverse GQA
     const int h_k = g * n_k / Hkv;
 
     // Per-batch strides for the packed [B, T, H*D] tensors. The kernel reads
@@ -123,6 +124,7 @@ __global__ void linear_attention_decode_kernel(
     const int64_t beta_batch_stride = beta_per_head
         ? (int64_t)seq_len * Hkv
         : (int64_t)seq_len;
+    const int64_t state_batch_stride = (int64_t)Hkv * dk * dv;
 
     extern __shared__ float smem[];
     float* k_smem   = smem;
@@ -131,7 +133,7 @@ __global__ void linear_attention_decode_kernel(
     float* sk_smem  = smem + 2 * dk + dv;
     const T* k_ptr = key   + b * k_batch_stride + (int64_t)h_k * dk;    // k_ptr = &key[b, t, h_k, 0]
     const T* v_ptr = value + b * v_batch_stride + (int64_t)g   * dv;    // v_ptr = &value[b, t, g, 0]
-    T* S = state + ((int64_t)b * Hkv + g) * dk * dv;
+    T* S = state + b* state_batch_stride + g * dk * dv;
 
     for (int i = tid; i < dk; i += nthreads)
         k_smem[i] = to_float(k_ptr[i]);
@@ -173,7 +175,7 @@ __global__ void linear_attention_decode_kernel(
     // === Phase 1: S^T @ k (with optional decay weighting) ===
     const bool needs_sk =
         (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
-
+//todo
     if (needs_sk) {
         for (int j = tid; j < dv; j += nthreads) {
             float sum = 0.0f;
@@ -336,7 +338,7 @@ extern "C" int hip_linear_attention_decode(
     const int dk_i                = static_cast<int>(dk);
     const int dv_i                = static_cast<int>(dv);
     const int seq_len_i           = static_cast<int>(seq_len);
-    // Normalise to canonical 0/1 so the kernel can rely on the invariant.
+    // cast from int64 to int32
     const int decay_per_key_dim_i = decay_per_key_dim ? 1 : 0;
     const int beta_per_head_i     = beta_per_head     ? 1 : 0;
 

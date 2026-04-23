@@ -576,8 +576,8 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   }
 
   MOCK_PRINT("[MOCK] wrap_linear_attention(\n");
-  MOCK_PRINT("[MOCK]   B=%lld, seq_len=%lld, dk=%lld, dv=%lld,\n",
-             (long long)B, (long long)seq_len, (long long)dk, (long long)dv);
+  MOCK_PRINT("[MOCK]   B=%lld, seq_len=%lld, dk=%lld, dv=%lld,\n", (long long)B,
+             (long long)seq_len, (long long)dk, (long long)dv);
   MOCK_PRINT("[MOCK]   Hq=%lld, Hkv=%lld, Nk=%lld,\n", (long long)Hq,
              (long long)Hkv, (long long)Nk);
   MOCK_PRINT("[MOCK]   decay_per_key_dim=%lld, beta_per_head=%lld,\n",
