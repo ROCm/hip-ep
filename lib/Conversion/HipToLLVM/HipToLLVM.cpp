@@ -5,9 +5,6 @@
 
 #include "HipToLLVMUtils.h"
 
-#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
-#include "mlir/Dialect/Math/IR/Math.h"
-
 namespace mlir {
 namespace hip {
 
@@ -221,6 +218,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateActivationLoweringPatterns(typeConverter, patterns);
   populateNormLoweringPatterns(typeConverter, patterns);
   populateGatherLoweringPatterns(typeConverter, patterns);
+  populateRangeLoweringPatterns(typeConverter, patterns);
   populateCastLoweringPatterns(typeConverter, patterns);
   populateReduceSumLoweringPatterns(typeConverter, patterns);
   populateTransposeLoweringPatterns(typeConverter, patterns);
@@ -240,12 +238,10 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
   arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
   cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
-  populateMathToLLVMConversionPatterns(typeConverter, patterns);
 
   LLVMConversionTarget target(*ctx);
   target.addLegalDialect<LLVM::LLVMDialect>();
   target.addIllegalDialect<HipDialect>();
-  target.addIllegalDialect<math::MathDialect>();
   target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
 

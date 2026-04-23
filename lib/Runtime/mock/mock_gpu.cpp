@@ -647,6 +647,18 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
+               void *output, int64_t output_num_elements, int64_t hip_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_range\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_range(output_num_elements=%lld, hip_dtype=%lld)\n",
+             (long long)output_num_elements, (long long)hip_dtype);
+  return 0;
+}
+
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t element_size_bytes,

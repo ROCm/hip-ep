@@ -4,25 +4,37 @@
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
-  // Constant-folded integer Range (numpy.arange semantics).
-  func.func @test_range_i32_fold() -> tensor<4xi32> {
+  // Scalar constant operands still lower through hip.range (no compile-time fold).
+  func.func @test_range_i32_constants() -> tensor<4xi32> {
     %s = arith.constant dense<2> : tensor<i32>
     %l = arith.constant dense<10> : tensor<i32>
     %d = arith.constant dense<2> : tensor<i32>
     %r = "onnx.Range"(%s, %l, %d) : (tensor<i32>, tensor<i32>, tensor<i32>) -> tensor<4xi32>
     return %r : tensor<4xi32>
   }
-  // CHECK-LABEL: func.func @test_range_i32_fold
+  // CHECK-LABEL: func.func @test_range_i32_constants
   // CHECK-SAME: !hip.context
-  // CHECK: arith.constant dense<[2, 4, 6, 8]> : tensor<4xi32>
-  // CHECK: return
+  // CHECK: tensor.empty
+  // CHECK: hip.range
 
-  // Dynamic operands lower to tensor.empty + scf.for.
+  // Dynamic operands lower to hip.range with DPS init tensor.
   func.func @test_range_i32_dynamic(%arg0: tensor<i32>, %arg1: tensor<i32>, %arg2: tensor<i32>) -> tensor<?xi32> {
     %r = "onnx.Range"(%arg0, %arg1, %arg2) : (tensor<i32>, tensor<i32>, tensor<i32>) -> tensor<?xi32>
     return %r : tensor<?xi32>
   }
   // CHECK-LABEL: func.func @test_range_i32_dynamic
   // CHECK: tensor.empty
-  // CHECK: scf.for
+  // CHECK: hip.range
+
+  // delta==0: always hip.range; runtime wrapper owns ORT parity.
+  func.func @test_range_delta_zero() -> tensor<?xf32> {
+    %s = arith.constant dense<0.0> : tensor<f32>
+    %l = arith.constant dense<10.0> : tensor<f32>
+    %d = arith.constant dense<0.0> : tensor<f32>
+    %r = "onnx.Range"(%s, %l, %d) : (tensor<f32>, tensor<f32>, tensor<f32>) -> tensor<?xf32>
+    return %r : tensor<?xf32>
+  }
+  // CHECK-LABEL: func.func @test_range_delta_zero
+  // CHECK-NOT: "onnx.Range"
+  // CHECK: hip.range
 }

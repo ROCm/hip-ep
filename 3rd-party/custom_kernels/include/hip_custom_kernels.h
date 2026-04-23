@@ -43,6 +43,7 @@ typedef enum {
     HIP_DTYPE_INT32    = 3,
     HIP_DTYPE_FLOAT64  = 4,
     HIP_DTYPE_BFLOAT16 = 5,
+    HIP_DTYPE_INT16    = 6,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -409,6 +410,38 @@ int hip_reduce_sum(
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
+    int hip_dtype);
+
+/* =========================================================================
+ * Range (1-D sequence generation)
+ * =========================================================================
+ *
+ * Writes output[i] = start + i * delta for i in [0, output_num_elements).
+ *
+ * start, limit, delta are scalar pointers in device memory (limit is accepted
+ * for interface symmetry and runtime validation; the kernel only needs start
+ * and delta once output_num_elements is known).
+ *
+ * Parameters:
+ *   stream              - hipStream_t cast to void*
+ *   start               - GPU pointer to scalar start
+ *   limit               - GPU pointer to scalar limit
+ *   delta               - GPU pointer to scalar delta
+ *   output              - GPU pointer to output tensor
+ *   output_num_elements - total output elements
+ *   hip_dtype           - element type (hip_dtype_t value cast to int)
+ *
+ * Supported types: HIP_DTYPE_INT16, HIP_DTYPE_INT32, HIP_DTYPE_INT64,
+ *                  HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT64
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_range(
+    void* stream,
+    const void* start,
+    const void* limit,
+    const void* delta,
+    void* output,
+    int64_t output_num_elements,
     int hip_dtype);
 
 /* =========================================================================
