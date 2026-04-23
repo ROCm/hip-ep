@@ -13,10 +13,10 @@ namespace {
 // Handles: hip.reciprocal, hip.sqrt (and future: hip.square, hip.cube, etc.)
 //
 // Ops lower to wrap_power(state, input, output, num_elements, data_type,
-// alpha, beta, gamma). Reciprocal (gamma=-1) is implemented as HIP 1/x at
-// runtime; other powers use MIOpen miopenActivationPOWER: y=(α+βx)^γ.
+// alpha, beta, gamma). Reciprocal (gamma=-1) and Sqrt (gamma=0.5) use HIP
+// elementwise kernels at runtime; other powers use MIOpen POWER: y=(α+βx)^γ.
 //   - Reciprocal: alpha=0, beta=1, gamma=-1.0 → HIP elementwise 1/x
-//   - Sqrt:       alpha=0, beta=1, gamma=0.5   → (0 + 1*x)^(0.5) = √x
+//   - Sqrt:       alpha=0, beta=1, gamma=0.5   → HIP elementwise sqrt (ONNX)
 //   - Square:     alpha=0, beta=1, gamma=2.0   → (0 + 1*x)^2 = x^2
 //   - Cube:       alpha=0, beta=1, gamma=3.0   → (0 + 1*x)^3 = x^3
 template <typename OpTy>
@@ -54,7 +54,10 @@ struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value inputPtr = extractMemRefPtr(adaptor.getX(), rewriter, loc);
     Value outputPtr = extractMemRefPtr(adaptor.getY(), rewriter, loc);
 
-    auto outputType = cast<MemRefType>(op.getY().getType());
+    auto outputType = dyn_cast<MemRefType>(op.getY().getType());
+    if (!outputType)
+      return rewriter.notifyMatchFailure(
+          op, "hip power lowering expects ranked memref outs operand");
 
     // Compute num_elements (supports dynamic shapes)
     Value numElements = createI64Const(1);
@@ -107,11 +110,10 @@ struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 void mlir::hip::populatePowerLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  // Reciprocal: (0 + 1*x)^(-1) = 1/x
-  // Same LLVM callee @wrap_power; runtime selects HIP vs MIOpen (power.cpp).
+  // Reciprocal: (0 + 1*x)^(-1) = 1/x; Sqrt: (0 + 1*x)^(0.5) = √x
+  // Same LLVM callee @wrap_power; reciprocal/sqrt use HIP kernels in power.cpp.
   patterns.insert<PowerOpLowering<ReciprocalOp>>(converter, 0.0, 1.0, -1.0,
                                                  "reciprocal");
-  // Sqrt: (0 + 1*x)^(0.5) = √x
   patterns.insert<PowerOpLowering<SqrtOp>>(converter, 0.0, 1.0, 0.5, "sqrt");
 }
 

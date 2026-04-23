@@ -23,7 +23,7 @@ struct ReciprocalToHip : public mlir::RewritePattern {
 
 /// onnx.Sqrt -> hip.sqrt
 /// ONNX element-wise sqrt; lowered to @wrap_power(0, 1, 0.5) and executed
-/// with MIOpen miopenActivationPOWER at runtime.
+/// with hip_elementwise_sqrt at runtime (not MIOpen POWER).
 struct SqrtToHip : public mlir::RewritePattern {
   SqrtToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Sqrt", /*benefit=*/1, ctx) {}
@@ -43,6 +43,12 @@ ReciprocalToHip::matchAndRewrite(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
+  if (!mlir::isa<mlir::RankedTensorType>(input.getType()))
+    return rewriter.notifyMatchFailure(
+        op, "onnx.Reciprocal lowering expects a ranked tensor input");
+  if (!mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType()))
+    return rewriter.notifyMatchFailure(
+        op, "onnx.Reciprocal lowering expects a ranked tensor result");
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
@@ -62,6 +68,12 @@ SqrtToHip::matchAndRewrite(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
+  if (!mlir::isa<mlir::RankedTensorType>(input.getType()))
+    return rewriter.notifyMatchFailure(
+        op, "onnx.Sqrt lowering expects a ranked tensor input");
+  if (!mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType()))
+    return rewriter.notifyMatchFailure(
+        op, "onnx.Sqrt lowering expects a ranked tensor result");
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);

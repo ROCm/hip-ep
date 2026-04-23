@@ -90,6 +90,25 @@ int hip_elementwise_reciprocal(
     int hip_dtype);
 
 /* =========================================================================
+ * Elementwise sqrt (ONNX Sqrt / IEEE)
+ * =========================================================================
+ *
+ * Element-wise square root via HIP (sqrtf / promote half and bf16 to float).
+ * Matches ONNX: negative inputs yield NaN; positive domain follows IEEE.
+ * hip.sqrt lowers to wrap_power(0, 1, 0.5) which dispatches here instead of
+ * MIOpen miopenActivationPOWER (see lib/Runtime/real/power.cpp).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_elementwise_sqrt(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

@@ -465,9 +465,10 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 // MIOpen path is used. data_type is HIPDNN_EP_DATATYPE_* (FLOAT=0, HALF=1,
 // BFLOAT16=2).
 //
-// LLVM lowering always calls this symbol. For (0, 1, -1) the runtime uses a
-// HIP reciprocal kernel (ONNX/IEEE 1/x); for other tuples (e.g. Sqrt
-// (0,1,0.5)) it uses miopenActivationPOWER / miopenActivationForward.
+// LLVM lowering always calls this symbol. For (0, 1, -1) and (0, 1, 0.5) the
+// runtime uses HIP elementwise reciprocal and sqrt kernels (ONNX semantics).
+// Other (alpha, beta, gamma) tuples use miopenActivationPOWER /
+// miopenActivationForward.
 int wrap_power(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha,
                double beta, double gamma);
