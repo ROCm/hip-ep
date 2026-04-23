@@ -450,11 +450,14 @@ int hip_qmoe_scatter_add(
     int64_t element_size_bytes);
 
 /* =========================================================================
- * Linear Attention Decode (T=1 Single-Token Recurrence)
+ * Linear Attention Decode (Single-Token Recurrence, Prefill-Friendly)
  * =========================================================================
  *
- * Performs one step of the linear attention recurrence for T=1 (decode).
- * Updates state in-place and writes the attention output.
+ * Performs one step of the linear attention recurrence for a single query
+ * token. Updates state in-place and writes the attention output for that
+ * token. The caller is expected to invoke this once per time step for
+ * prefill (seq_len > 1); no batching across the time dimension is
+ * performed inside the kernel.
  *
  * For each (batch, kv_head) pair, the recurrence is:
  *   linear:       S = S + k (x) v
@@ -462,6 +465,14 @@ int hip_qmoe_scatter_add(
  *   delta:        S = S + beta * k (x) (v - S^T k)
  *   gated_delta:  S = diag(exp(g)) * S + beta * k (x) (v - diag(exp(g)) * S^T k)
  *   output_h = scale * S^T q_h   (for each query head h mapped to this KV head)
+ *
+ * Input tensors are views into the packed [B, T, H*D] layout of the full
+ * sequence: query/key/value/output/decay/beta pointers must already point
+ * at the start of the current time step (i.e. the caller has pre-advanced
+ * the pointer by t * token_bytes). seq_len is the original T dimension
+ * of the packed layout and is used by the kernel to compute the per-batch
+ * stride (seq_len * H*D). Pass seq_len = 1 in the pure decode case where
+ * the tensors are already shaped [B, 1, H*D].
  *
  * Head counts are three-way and subject to the following divisibility
  * constraints:
@@ -473,25 +484,32 @@ int hip_qmoe_scatter_add(
  *
  * Parameters:
  *   stream             - hipStream_t cast to void*
- *   query              - GPU [batch, 1, q_num_heads * head_dim_k]
- *   key                - GPU [batch, 1, n_k_heads * head_dim_k]
+ *   query              - GPU [batch, T, q_num_heads * head_dim_k]
+ *                        pointing at time step t
+ *   key                - GPU [batch, T, n_k_heads * head_dim_k]
+ *                        pointing at time step t
  *                        n_k_heads may differ from kv_num_heads; it must
  *                        divide kv_num_heads.
- *   value              - GPU [batch, 1, kv_num_heads * head_dim_v]
- *   decay              - GPU [batch, 1, kv_num_heads * head_dim_k] or nullptr
- *                        Per-key-dimension decay in log-space.
- *                        Required for gated and gated_delta modes.
- *   beta               - GPU [batch, 1, kv_num_heads] or nullptr
- *                        Per-head update rate.
+ *   value              - GPU [batch, T, kv_num_heads * head_dim_v]
+ *                        pointing at time step t
+ *   decay              - GPU [batch, T, kv_num_heads * head_dim_k] or nullptr
+ *                        Per-key-dimension decay in log-space, pointing at
+ *                        time step t. Required for gated and gated_delta
+ *                        modes.
+ *   beta               - GPU [batch, T, kv_num_heads] or nullptr
+ *                        Per-head update rate, pointing at time step t.
  *                        Required for delta and gated_delta modes.
  *   state              - GPU [batch, kv_num_heads, head_dim_k, head_dim_v]
  *                        Read/write. Must be pre-initialized (from past_state
- *                        or zeros) before calling this function.
- *   output             - GPU [batch, 1, max(q_num_heads, kv_num_heads) *
- *                             head_dim_v]
+ *                        or zeros) before the first time step.
+ *   output             - GPU [batch, T, max(q_num_heads, kv_num_heads) *
+ *                             head_dim_v], pointing at time step t.
  *                        Standard GQA: heads packed in Q-head order.
  *                        Inverse GQA: heads packed in KV-head order.
  *   B                  - batch dimension
+ *   seq_len            - length of the T dimension in the packed layout;
+ *                        used to compute per-batch stride. Use 1 when the
+ *                        tensors are already shaped [B, 1, H*D].
  *   Hq                 - number of query heads
  *   Hkv                - number of key/value state heads
  *   Nk                 - number of key heads packed in the key tensor;
@@ -515,6 +533,7 @@ int hip_linear_attention_decode(
     void* state,
     void* output,
     int64_t B,
+    int64_t seq_len,
     int64_t Hq,
     int64_t Hkv,
     int64_t Nk,
