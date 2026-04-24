@@ -667,6 +667,33 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
   return 0;
 }
 
+int wrap_slice(RuntimeState *state, const void *data, const void *starts,
+               const void *ends, const void *axes, const void *steps,
+               void *output, const int64_t *input_shape,
+               const int64_t *output_shape, int64_t rank,
+               int64_t num_slice_entries, int64_t output_num_elements,
+               int64_t element_size_bytes, int64_t data_type) {
+  (void)data;
+  (void)starts;
+  (void)ends;
+  (void)output;
+  (void)input_shape;
+  (void)output_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_slice\n");
+    return -1;
+  }
+
+  MOCK_PRINT(
+      "[MOCK] wrap_slice(rank=%lld, slice_entries=%lld, output_num=%lld, "
+      "element_size=%lld, data_type=%lld, axes=%s, steps=%s)\n",
+      (long long)rank, (long long)num_slice_entries,
+      (long long)output_num_elements, (long long)element_size_bytes,
+      (long long)data_type, axes ? "yes" : "no", steps ? "yes" : "no");
+
+  return 0;
+}
+
 int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t src_data_type,
               int64_t dst_data_type) {

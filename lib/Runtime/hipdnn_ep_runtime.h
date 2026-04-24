@@ -485,6 +485,27 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t axes_num_elements, int64_t element_size_bytes,
                     int64_t keepdims, int64_t noop_with_empty_axes);
 
+// Slice operation wrapper (ONNX Slice, opset 13+)
+// Produces a slice of the input tensor along multiple axes.
+//   data:             input tensor GPU pointer
+//   starts/ends:      1-D tensors of starting/ending indices (device memory)
+//   axes:             nullable 1-D tensor selecting axes (defaults to [0..rank))
+//   steps:            nullable 1-D tensor of slice steps (defaults to all-1)
+//   output:           output tensor GPU pointer
+//   input_shape:      host array of i64, length rank, describing input dims
+//   output_shape:     host array of i64, length rank, describing output dims
+//   rank:             number of dimensions (same for input and output)
+//   num_slice_entries: number of elements in starts/ends (== axes size if axes)
+//   output_num_elements: total output elements (determines kernel launch)
+//   element_size_bytes:  bytes per element of `data` and `output`
+//   data_type:        HIPDNN_EP_DATATYPE_* enum (f32/f16/bf16/i32/i64)
+int wrap_slice(RuntimeState *state, const void *data, const void *starts,
+               const void *ends, const void *axes, const void *steps,
+               void *output, const int64_t *input_shape,
+               const int64_t *output_shape, int64_t rank,
+               int64_t num_slice_entries, int64_t output_num_elements,
+               int64_t element_size_bytes, int64_t data_type);
+
 // Cast operation wrapper (element type conversion)
 // src_data_type and dst_data_type are HIPDNN_EP_DATATYPE_* enum values.
 int wrap_cast(RuntimeState *state, void *input, void *output,
