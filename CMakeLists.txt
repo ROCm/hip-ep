@@ -54,6 +54,24 @@ endif()
 
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 
+# ==============================================================================
+# Vulkan Compute Backend (standalone, no MLIR/HIP required)
+# ==============================================================================
+# Builds a Vulkan compute-shader library implementing MatMulNBits (int4
+# dequant + matmul). Can be used independently or as a drop-in backend for
+# the ONNX EP runtime.
+#
+# Usage:
+#   cmake -B build -S . -DBUILD_VULKAN_KERNELS=ON
+#   cmake --build build --target test_matmul_nbits_vulkan
+# ==============================================================================
+option(BUILD_VULKAN_KERNELS "Build Vulkan compute-shader kernel library" OFF)
+option(BUILD_VULKAN_TESTS "Build Vulkan kernel unit tests" ON)
+
+if(BUILD_VULKAN_KERNELS)
+    add_subdirectory(3rd-party/vulkan_kernels)
+endif()
+
 if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
   # MLIR backend compiler

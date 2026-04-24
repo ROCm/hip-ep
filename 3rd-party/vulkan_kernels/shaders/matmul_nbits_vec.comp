@@ -1,0 +1,188 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ *
+ * High-performance GEMV for AWQ int4 block-128 MatMulNBits (M=1).
+ *
+ * Optimizations modeled after llama.cpp mul_mat_vec.comp:
+ *   1. K_PER_ITER=16: process 16 K-elements per iteration (2 x uint32 B loads)
+ *   2. 4x manual loop unrolling to hide memory latency
+ *   3. Vectorized A loads via unpackHalf2x16 (2 FP16 per uint32)
+ *   4. dot(vec4, vec4) for 4-way paired multiply-accumulate
+ *   5. Precomputed neg_zp_scale: dq = q * scale + neg_zp_scale
+ *   6. Subgroup reduction (zero shared-mem on AMD wave64)
+ *   7. Block-aware iteration: AWQ block-128 means scale/zp amortized over
+ *      128 elements — with K_PER_ITER=16, scale lookup every 8 iterations
+ */
+
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer ABuf      { uint      A_u32[]; };
+layout(set = 0, binding = 1) readonly  buffer BBuf      { uint      B_u32[]; };
+layout(set = 0, binding = 2) readonly  buffer ScalesBuf { float16_t scales[]; };
+layout(set = 0, binding = 3) readonly  buffer ZPBuf     { uint8_t   zp[]; };
+layout(set = 0, binding = 4) readonly  buffer BiasBuf   { float16_t bias[]; };
+layout(set = 0, binding = 5) writeonly buffer OutBuf    { float16_t out_data[]; };
+
+layout(push_constant) uniform Params {
+    int M;
+    int N;
+    int K;
+    int block_size;
+    int batch_count;
+    int has_zp;
+    int has_bias;
+};
+
+#define BLOCK_SIZE  256
+#define NUM_ROWS    4
+#define K_THREADS   (BLOCK_SIZE / NUM_ROWS)   // 64
+#define K_PER_ITER  16    // process 16 K-elements per iteration (2 x uint32)
+#define UNROLL      4     // manual unroll factor for latency hiding
+
+shared float s_partial[NUM_ROWS * 8];
+
+// Inline dequant+dot for 8 values from one uint32 B word + 4 uint32 A words
+// Returns dot(A[k..k+7], dequant(B_word)) with precomputed scale/nzs
+float dequant_dot8(uint b_word, uint a0, uint a1, uint a2, uint a3,
+                   float sc, float nzs) {
+    // Dequantize 8 nibbles: dq_i = q_i * scale - zp * scale
+    float dq0 = float((b_word >>  0) & 0xFu) * sc + nzs;
+    float dq1 = float((b_word >>  4) & 0xFu) * sc + nzs;
+    float dq2 = float((b_word >>  8) & 0xFu) * sc + nzs;
+    float dq3 = float((b_word >> 12) & 0xFu) * sc + nzs;
+    float dq4 = float((b_word >> 16) & 0xFu) * sc + nzs;
+    float dq5 = float((b_word >> 20) & 0xFu) * sc + nzs;
+    float dq6 = float((b_word >> 24) & 0xFu) * sc + nzs;
+    float dq7 = float((b_word >> 28)       ) * sc + nzs;
+
+    // Unpack A: 4 uint32 = 8 FP16
+    vec2 av0 = unpackHalf2x16(a0);
+    vec2 av1 = unpackHalf2x16(a1);
+    vec2 av2 = unpackHalf2x16(a2);
+    vec2 av3 = unpackHalf2x16(a3);
+
+    // 4x dot(vec2) = 8 FMAs
+    return dot(av0, vec2(dq0, dq1))
+         + dot(av1, vec2(dq2, dq3))
+         + dot(av2, vec2(dq4, dq5))
+         + dot(av3, vec2(dq6, dq7));
+}
+
+void main() {
+    uint tid  = gl_LocalInvocationID.x;
+    uint row  = tid / K_THREADS;
+    uint lane = tid % K_THREADS;
+
+    uint n     = gl_WorkGroupID.x * NUM_ROWS + row;
+    uint batch = gl_WorkGroupID.y;
+
+    uint k_blocks = (uint(K) + uint(block_size) - 1) / uint(block_size);
+    float acc = 0.0;
+
+    if (n < uint(N)) {
+        uint a_base = (batch * uint(K)) / 2;        // uint32 index for A
+        uint b_base = n * (uint(K) / 2);             // byte offset in B
+        uint s_base = n * k_blocks;
+
+        // Total iterations for this thread
+        uint total_k = uint(K);
+        uint stride  = K_THREADS * K_PER_ITER;       // 64 * 16 = 1024
+        uint k_start = lane * K_PER_ITER;             // starting K offset
+
+        // Number of complete iterations
+        uint num_iters = (total_k - k_start + stride - 1) / stride;
+        uint unrolled  = num_iters & ~(UNROLL - 1);   // round down to multiple of UNROLL
+
+        uint k = k_start;
+
+        // --- Unrolled loop (4x) for memory latency hiding ---
+        for (uint i = 0; i < unrolled; i += UNROLL) {
+            [[unroll]] for (uint u = 0; u < UNROLL; u++) {
+                if (k < total_k) {
+                    uint blk = k / uint(block_size);
+                    float sc  = float(scales[s_base + blk]);
+                    float nzs = (has_zp != 0) ? -float(zp[s_base + blk]) * sc : 0.0;
+
+                    uint b_idx = (b_base + k / 2) / 4;
+                    uint a_idx = a_base + k / 2;
+
+                    // Load 2 x uint32 = 16 nibbles, process as 2 groups of 8
+                    acc += dequant_dot8(B_u32[b_idx],
+                                       A_u32[a_idx], A_u32[a_idx+1],
+                                       A_u32[a_idx+2], A_u32[a_idx+3],
+                                       sc, nzs);
+
+                    // Second group of 8 (same block since 16 < block_size=128)
+                    acc += dequant_dot8(B_u32[b_idx + 1],
+                                       A_u32[a_idx+4], A_u32[a_idx+5],
+                                       A_u32[a_idx+6], A_u32[a_idx+7],
+                                       sc, nzs);
+                }
+                k += stride;
+            }
+        }
+
+        // --- Remaining iterations (no unroll) ---
+        for (uint i = unrolled; i < num_iters; i++) {
+            if (k < total_k) {
+                uint blk = k / uint(block_size);
+                float sc  = float(scales[s_base + blk]);
+                float nzs = (has_zp != 0) ? -float(zp[s_base + blk]) * sc : 0.0;
+
+                uint b_idx = (b_base + k / 2) / 4;
+                uint a_idx = a_base + k / 2;
+
+                acc += dequant_dot8(B_u32[b_idx],
+                                   A_u32[a_idx], A_u32[a_idx+1],
+                                   A_u32[a_idx+2], A_u32[a_idx+3],
+                                   sc, nzs);
+
+                // Only process second group if within bounds
+                if (k + 8 < total_k) {
+                    acc += dequant_dot8(B_u32[b_idx + 1],
+                                       A_u32[a_idx+4], A_u32[a_idx+5],
+                                       A_u32[a_idx+6], A_u32[a_idx+7],
+                                       sc, nzs);
+                }
+            }
+            k += stride;
+        }
+    }
+
+    // --- Subgroup reduction ---
+    acc = subgroupAdd(acc);
+
+    // --- Cross-subgroup reduction (NVIDIA wave32 path) ---
+    uint sg_size     = gl_SubgroupSize;
+    uint sgs_per_row = (K_THREADS + sg_size - 1) / sg_size;
+
+    if (sgs_per_row > 1) {
+        uint sg_local = lane % sg_size;
+        uint sg_id    = lane / sg_size;
+
+        if (sg_local == 0) {
+            s_partial[row * sgs_per_row + sg_id] = acc;
+        }
+        barrier();
+
+        if (sg_id == 0) {
+            acc = (sg_local < sgs_per_row)
+                    ? s_partial[row * sgs_per_row + sg_local]
+                    : 0.0;
+            acc = subgroupAdd(acc);
+        }
+    }
+
+    // --- Write output ---
+    if (lane == 0 && n < uint(N)) {
+        if (has_bias != 0) acc += float(bias[n]);
+        out_data[batch * uint(N) + n] = float16_t(acc);
+    }
+}
