@@ -1,0 +1,125 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// ============================================================================
+// TEST PURPOSE:
+// Verify ONNX Split is correctly lowered to tensor.extract_slice
+// (zero-cost standard MLIR slice ops).
+//
+// Split is a zero-cost operation that creates views into the input tensor
+// without moving data. No custom HIP dialect op or kernel is needed.
+//
+// This test validates:
+// - Equal split, static shape:   Split along last dimension
+// - Equal split, different axis:  Split along axis 0
+// - Custom split, static:         Split with explicit lengths
+// - Dynamic shape:                Split with runtime dimension
+// - Single output:                Identity operation (no-op)
+// - Multi-dimensional:            Split in middle dimension
+// - Different data types:         f32, f16, bf16
+//
+// Model: Multi-head attention head splitting
+// ============================================================================
+
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+
+module {
+  func.func @main_graph(%arg0: tensor<1x128x4096xf16>) -> tensor<1x128x4096xf16> {
+    return %arg0 : tensor<1x128x4096xf16>
+  }
+
+  // --- Equal split, static shape: split last dim into 2 outputs ---
+  func.func @test_split_equal_static(%data: tensor<1x128x4096xf16>) -> (tensor<1x128x2048xf16>, tensor<1x128x2048xf16>) {
+    %out0, %out1 = "onnx.Split"(%data) {axis = -1 : si64} : (tensor<1x128x4096xf16>) -> (tensor<1x128x2048xf16>, tensor<1x128x2048xf16>)
+    return %out0, %out1 : tensor<1x128x2048xf16>, tensor<1x128x2048xf16>
+  }
+
+  // --- Equal split, axis=0: split first dim into 3 outputs ---
+  func.func @test_split_axis0(%data: tensor<6x32x64xf32>) -> (tensor<2x32x64xf32>, tensor<2x32x64xf32>, tensor<2x32x64xf32>) {
+    %out0, %out1, %out2 = "onnx.Split"(%data) {axis = 0 : si64} : (tensor<6x32x64xf32>) -> (tensor<2x32x64xf32>, tensor<2x32x64xf32>, tensor<2x32x64xf32>)
+    return %out0, %out1, %out2 : tensor<2x32x64xf32>, tensor<2x32x64xf32>, tensor<2x32x64xf32>
+  }
+
+  // --- Custom split, static: split axis=0 with explicit lengths [3, 3, 2] ---
+  func.func @test_split_custom(%data: tensor<8x256xf16>) -> (tensor<3x256xf16>, tensor<3x256xf16>, tensor<2x256xf16>) {
+    %split_lengths = "onnx.Constant"() {value = dense<[3, 3, 2]> : tensor<3xi64>} : () -> tensor<3xi64>
+    %out0, %out1, %out2 = "onnx.Split"(%data, %split_lengths) {axis = 0 : si64} : (tensor<8x256xf16>, tensor<3xi64>) -> (tensor<3x256xf16>, tensor<3x256xf16>, tensor<2x256xf16>)
+    return %out0, %out1, %out2 : tensor<3x256xf16>, tensor<3x256xf16>, tensor<2x256xf16>
+  }
+
+  // --- Dynamic shape: split dynamic dimension into 2 outputs ---
+  func.func @test_split_dynamic(%data: tensor<?x128xf32>) -> (tensor<?x128xf32>, tensor<?x128xf32>) {
+    %out0, %out1 = "onnx.Split"(%data) {axis = 0 : si64} : (tensor<?x128xf32>) -> (tensor<?x128xf32>, tensor<?x128xf32>)
+    return %out0, %out1 : tensor<?x128xf32>, tensor<?x128xf32>
+  }
+
+  // --- Single output: identity operation (no-op) ---
+  func.func @test_split_single_output(%data: tensor<4x16xf16>) -> tensor<4x16xf16> {
+    %out = "onnx.Split"(%data) {axis = 0 : si64} : (tensor<4x16xf16>) -> tensor<4x16xf16>
+    return %out : tensor<4x16xf16>
+  }
+
+  // --- Multi-dimensional: split middle dimension ---
+  func.func @test_split_middle_dim(%data: tensor<2x4x8x16xf32>) -> (tensor<2x4x4x16xf32>, tensor<2x4x4x16xf32>) {
+    %out0, %out1 = "onnx.Split"(%data) {axis = 2 : si64} : (tensor<2x4x8x16xf32>) -> (tensor<2x4x4x16xf32>, tensor<2x4x4x16xf32>)
+    return %out0, %out1 : tensor<2x4x4x16xf32>, tensor<2x4x4x16xf32>
+  }
+
+  // --- bf16 data type ---
+  func.func @test_split_bf16(%data: tensor<1x256x512xbf16>) -> (tensor<1x256x256xbf16>, tensor<1x256x256xbf16>) {
+    %out0, %out1 = "onnx.Split"(%data) {axis = -1 : si64} : (tensor<1x256x512xbf16>) -> (tensor<1x256x256xbf16>, tensor<1x256x256xbf16>)
+    return %out0, %out1 : tensor<1x256x256xbf16>, tensor<1x256x256xbf16>
+  }
+
+  // --- f32 data type with custom split ---
+  func.func @test_split_f32_custom(%data: tensor<10x64xf32>) -> (tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>) {
+    %split_lengths = "onnx.Constant"() {value = dense<[2, 5, 3]> : tensor<3xi64>} : () -> tensor<3xi64>
+    %out0, %out1, %out2 = "onnx.Split"(%data, %split_lengths) {axis = 0 : si64} : (tensor<10x64xf32>, tensor<3xi64>) -> (tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>)
+    return %out0, %out1, %out2 : tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>
+  }
+}
+
+// CHECK-LABEL: func.func @test_split_equal_static
+// CHECK-NOT: onnx.Split
+// CHECK: tensor.extract_slice{{.*}}[0, 0, 0] [1, 128, 2048] [1, 1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [1, 128, 2048] [1, 1, 1]
+
+// CHECK-LABEL: func.func @test_split_axis0
+// CHECK-NOT: onnx.Split
+// CHECK: tensor.extract_slice{{.*}}[0, 0, 0] [2, 32, 64] [1, 1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [2, 32, 64] [1, 1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [2, 32, 64] [1, 1, 1]
+
+// CHECK-LABEL: func.func @test_split_custom
+// CHECK-NOT: onnx.Split
+// CHECK: tensor.extract_slice{{.*}}[0, 0] [3, 256] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [3, 256] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [2, 256] [1, 1]
+
+// CHECK-LABEL: func.func @test_split_dynamic
+// CHECK-NOT: onnx.Split
+// CHECK: %[[DIM:.*]] = tensor.dim
+// CHECK: %[[CHUNK:.*]] = arith.divui %[[DIM]]
+// CHECK: tensor.extract_slice{{.*}}[0, 0] [%{{.*}}, 128] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [%{{.*}}, 128] [1, 1]
+
+// CHECK-LABEL: func.func @test_split_single_output
+// CHECK-NOT: onnx.Split
+// CHECK-NOT: tensor.extract_slice
+// CHECK: return %arg{{[0-9]+}}
+
+// CHECK-LABEL: func.func @test_split_middle_dim
+// CHECK-NOT: onnx.Split
+// CHECK: tensor.extract_slice{{.*}}[0, 0, 0, 0] [2, 4, 4, 16] [1, 1, 1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [2, 4, 4, 16] [1, 1, 1, 1]
+
+// CHECK-LABEL: func.func @test_split_bf16
+// CHECK-NOT: onnx.Split
+// CHECK: tensor.extract_slice
+// CHECK: tensor.extract_slice
+
+// CHECK-LABEL: func.func @test_split_f32_custom
+// CHECK-NOT: onnx.Split
+// CHECK: tensor.extract_slice{{.*}}[0, 0] [2, 64] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [5, 64] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [3, 64] [1, 1]

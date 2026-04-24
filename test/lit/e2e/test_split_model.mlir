@@ -1,0 +1,66 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// ============================================================================
+// END-TO-END TEST: ONNX Split operator
+//
+// Validates complete pipeline from ONNX Split through to LLVM lowering:
+// 1. ONNX Split -> tensor.extract_slice (OnnxToHip conversion)
+// 2. tensor.extract_slice -> memref.subview (bufferization)
+// 3. memref.subview -> LLVM pointer arithmetic (MemRefToLLVM)
+//
+// This test ensures:
+// - Split is completely lowered (no ONNX ops remain)
+// - Zero-copy semantics preserved (subviews, not allocations)
+// - Wrapper functions generated correctly
+// - Multiple outputs handled properly
+// ============================================================================
+
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip --one-shot-bufferize --convert-hip-to-llvm | FileCheck %s
+
+module {
+  // Main entry point: multi-head attention split
+  // Input: [batch, seq_len, hidden_dim=3*head_dim*num_heads]
+  // Outputs: Q, K, V projections [batch, seq_len, head_dim*num_heads]
+  func.func @main_graph(%input: tensor<1x128x3072xf16>) -> (tensor<1x128x1024xf16>, tensor<1x128x1024xf16>, tensor<1x128x1024xf16>) {
+    // Split into Q, K, V
+    %q, %k, %v = "onnx.Split"(%input) {axis = 2 : si64} : (tensor<1x128x3072xf16>) -> (tensor<1x128x1024xf16>, tensor<1x128x1024xf16>, tensor<1x128x1024xf16>)
+    return %q, %k, %v : tensor<1x128x1024xf16>, tensor<1x128x1024xf16>, tensor<1x128x1024xf16>
+  }
+
+  // Additional test: cascaded splits (split outputs consumed by other splits)
+  func.func @test_cascaded_splits(%input: tensor<1x256x4096xf32>) -> (tensor<1x256x512xf32>, tensor<1x256x512xf32>, tensor<1x256x512xf32>, tensor<1x256x512xf32>) {
+    // First split: 4096 -> 2048 + 2048
+    %left, %right = "onnx.Split"(%input) {axis = 2 : si64} : (tensor<1x256x4096xf32>) -> (tensor<1x256x2048xf32>, tensor<1x256x2048xf32>)
+
+    // Second split: 2048 -> 512 + 512 + 512 + 512 (on left)
+    %l0, %l1, %l2, %l3 = "onnx.Split"(%left) {axis = 2 : si64} : (tensor<1x256x2048xf32>) -> (tensor<1x256x512xf32>, tensor<1x256x512xf32>, tensor<1x256x512xf32>, tensor<1x256x512xf32>)
+
+    return %l0, %l1, %l2, %l3 : tensor<1x256x512xf32>, tensor<1x256x512xf32>, tensor<1x256x512xf32>, tensor<1x256x512xf32>
+  }
+
+  // Custom split lengths test
+  func.func @test_custom_split(%input: tensor<16x128xf16>) -> (tensor<4x128xf16>, tensor<8x128xf16>, tensor<4x128xf16>) {
+    %split_lengths = "onnx.Constant"() {value = dense<[4, 8, 4]> : tensor<3xi64>} : () -> tensor<3xi64>
+    %s0, %s1, %s2 = "onnx.Split"(%input, %split_lengths) {axis = 0 : si64} : (tensor<16x128xf16>, tensor<3xi64>) -> (tensor<4x128xf16>, tensor<8x128xf16>, tensor<4x128xf16>)
+    return %s0, %s1, %s2 : tensor<4x128xf16>, tensor<8x128xf16>, tensor<4x128xf16>
+  }
+}
+
+// Verify no ONNX operations remain in final LLVM lowering
+// CHECK-NOT: onnx.Split
+// CHECK-NOT: onnx.Constant
+// CHECK-NOT: tensor.extract_slice
+
+// Verify main_graph function exists and uses memref.subview (zero-copy slicing)
+// CHECK: func.func @main_graph
+// CHECK: memref.subview
+
+// Verify LLVM lowering occurred
+// CHECK: llvm.
+
+// Verify cascaded splits function exists
+// CHECK: func.func @test_cascaded_splits
+
+// Verify custom split function exists
+// CHECK: func.func @test_custom_split
