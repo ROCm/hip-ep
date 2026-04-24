@@ -21,7 +21,15 @@ table FileRefSource {
   path:        string;  // absolute OS path to external data file
   file_offset: int64;   // byte offset within that file
 }
-union ConstantSource { SplatSource, FileRefSource }
+// Hybrid path: a constant whose source could not be re-read on demand
+// (mem-addr alias of DenseAttr / OrtValue) was packed into the small
+// per-session sidecar. The runtime fetches `size` bytes at
+// `sidecar_offset` from HipModelMetaInfo.constants_filename through
+// the EP's FileSystem and uploads via the per-entry staging buffer.
+table SidecarSource {
+  sidecar_offset: int64; // byte offset within HipModelMetaInfo.constants_filename
+}
+union ConstantSource { SplatSource, FileRefSource, SidecarSource }
 
 table ConstantInfo {
   size:   int64;

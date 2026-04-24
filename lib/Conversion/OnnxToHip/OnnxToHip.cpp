@@ -707,18 +707,25 @@ void ConvertOnnxToHipPass::runOnOperation() {
     }
   });
 
-  // Finalize externalization: emit the constants.bin sidecar or transfer
-  // file, write the JSON manifest, and stamp module attributes.
+  // Finalize externalization: emit the constants.bin sidecar or per-entry
+  // source descriptors (or both, in hybrid mode), write the JSON manifest
+  // when a full sidecar is produced, and stamp module attributes.
   //
-  // Dual-path dispatch: even if the caller asked for skipDataWrite=true
-  // (streaming mode), any mem-addr entry in constantHostPtrs forces a
-  // downgrade back to the sidecar path. Mem-addr entries alias DenseAttr
-  // raw data living in the MLIRContext; their lifetime ends when the pass
-  // returns, so they cannot survive into the customop ctor's runtime
-  // streaming. The streaming path therefore only handles file-ref + splat
-  // (lifetimes both fully owned by the EP).
+  // Three emit modes:
+  //   * skipDataWrite=false  — full sidecar (Workflow A: EPContext export
+  //     + offline hip-compiler). All ConstantInfo.source remain NONE; the
+  //     runtime bulk-loads model.constants.bin and hipMemcpy's it once.
+  //   * skipDataWrite=true, no mem-addr entries — pure streaming. Per-entry
+  //     descriptors only (Splat / FileRef); no sidecar written.
+  //   * skipDataWrite=true, has mem-addr entries — hybrid. Mem-addr bytes
+  //     are packed into a *partial* sidecar at compact 64B-aligned offsets;
+  //     the descriptor for each mem-addr entry becomes SidecarSource with
+  //     its sidecar offset. file-ref / splat entries keep their streaming
+  //     descriptors. The runtime per-entry path uploads from a single
+  //     reusable staging buffer regardless of source mix, bounding host
+  //     peak to the largest single tensor instead of total constants size.
   if (extState && extState->constantIndex > 0) {
-    // Module attributes shared across both emit modes.
+    // Module attributes shared across all emit modes.
     module->setAttr("hip.constants_file",
                     mlir::StringAttr::get(ctx, extState->binFileName));
     module->setAttr("hipdnn.constant_sizes",
@@ -727,27 +734,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         "hipdnn.constant_offsets",
         mlir::DenseI64ArrayAttr::get(ctx, extState->constantOffsets));
 
-    bool effectiveSkip = extState->skipDataWrite;
-    if (effectiveSkip) {
-      bool hasMemAddr = false;
-      size_t memAddrCount = 0;
-      for (const auto &h : extState->constantHostPtrs) {
-        if (h.filePath.empty() && h.splatElemSize == 0) {
-          hasMemAddr = true;
-          ++memAddrCount;
-        }
-      }
-      if (hasMemAddr) {
-        effectiveSkip = false;
-        llvm::errs() << "[ConvertOnnxToHipPass] downgrade to sidecar: model "
-                        "contains "
-                     << memAddrCount
-                     << " mem-addr (inline / mmap-alias) tensor(s); "
-                        "streaming path requires pure file-ref + splat\n";
-      }
-    }
-
-    if (!effectiveSkip) {
+    if (!extState->skipDataWrite) {
       // Stream constants.bin via the shared helper (preserves the 1 MB
       // tile pattern for splats so peak host memory is bounded; file-ref
       // entries stream from disk into the writer with no in-memory copy).
@@ -801,63 +788,102 @@ void ConvertOnnxToHipPass::runOnOperation() {
       jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
       jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
     } else if (!extState->constantHostPtrs.empty()) {
-      // Streaming mode: expose per-constant source descriptors as module
-      // attributes. GenerateInterface reads these and bakes them into
-      // HipModelMetaInfo.ConstantInfo.source (union of Splat / FileRef);
-      // the runtime then uploads each constant on demand from __metadata_blob.
+      // skipDataWrite=true: per-entry descriptors with optional partial
+      // sidecar for mem-addr entries (hybrid).
       //
-      // Mem-addr entries are unreachable here: the dispatch above downgrades
-      // any module containing a mem-addr alias back to the sidecar branch.
-      //
-      // Five parallel arrays, all indexed by constantIndex:
-      //   constant_source_kinds:      0=NONE, 1=Splat, 2=FileRef
-      //   constant_splat_elem_values: elem bytes left-packed into i64 (0 if not
-      //   splat) constant_splat_elem_sizes:  elem byte count (1/2/4/8; 0 if not
-      //   splat) constant_file_paths:        absolute OS path (empty string if
-      //   not file-ref) constant_file_offsets:      byte offset within file (0
-      //   if not file-ref)
+      // Six parallel arrays, all indexed by constantIndex:
+      //   constant_source_kinds:        0=NONE, 1=Splat, 2=FileRef, 3=Sidecar
+      //   constant_splat_elem_values:   elem bytes packed into i64 (0 unless splat)
+      //   constant_splat_elem_sizes:    elem byte count 1/2/4/8 (0 unless splat)
+      //   constant_file_paths:          absolute OS path (empty unless file-ref)
+      //   constant_file_offsets:        byte offset within file (0 unless file-ref)
+      //   constant_sidecar_offsets:     byte offset within partial sidecar
+      //                                 (0 unless mem-addr / Sidecar)
       int64_t count = static_cast<int64_t>(extState->constantHostPtrs.size());
-      llvm::SmallVector<int32_t> kinds;
-      kinds.reserve(count);
-      llvm::SmallVector<int64_t> splatValues;
-      splatValues.reserve(count);
-      llvm::SmallVector<int64_t> splatElemSizes;
-      splatElemSizes.reserve(count);
+      llvm::SmallVector<int32_t> kinds(count, 0);
+      llvm::SmallVector<int64_t> splatValues(count, 0);
+      llvm::SmallVector<int64_t> splatElemSizes(count, 0);
       llvm::SmallVector<mlir::Attribute> filePaths;
       filePaths.reserve(count);
-      llvm::SmallVector<int64_t> fileOffsets;
-      fileOffsets.reserve(count);
+      llvm::SmallVector<int64_t> fileOffsets(count, 0);
+      llvm::SmallVector<int64_t> sidecarOffsets(count, 0);
 
+      // Pass 1: collect mem-addr entries into a compact partial sidecar
+      // layout. Each entry is 64B-aligned within the sidecar (matches the
+      // GPU blob alignment used elsewhere, so writeConstantsBinToFileSystem
+      // emits identical zero padding logic).
+      constexpr int64_t kSidecarAlign = 64;
+      llvm::SmallVector<mlir::hip::ConstantEntry> partialEntries;
+      int64_t sidecarPos = 0;
+      int64_t memAddrCount = 0, fileRefCount = 0, splatCount = 0;
       for (int64_t i = 0; i < count; ++i) {
-        const auto &entry = extState->constantHostPtrs[i];
-        int64_t splatValue = 0;
-        int64_t splatElem = 0;
-        std::string path;
-        int64_t fileOff = 0;
-        if (!entry.filePath.empty()) {
-          kinds.push_back(2); // FileRef
-          path = entry.filePath;
-          fileOff = entry.fileOffset;
-        } else if (entry.splatElemSize > 0) {
-          kinds.push_back(1); // Splat
-          splatElem = entry.splatElemSize;
-          // Left-pack up to 8 bytes of element data into a uint64 carrier
-          // so we can ship it through a DenseI64ArrayAttr.
-          size_t n = static_cast<size_t>(std::min<int64_t>(splatElem, 8));
-          std::memcpy(&splatValue, entry.ptr, n);
+        const auto &h = extState->constantHostPtrs[i];
+        if (!h.filePath.empty()) {
+          ++fileRefCount;
+        } else if (h.splatElemSize > 0) {
+          ++splatCount;
         } else {
-          // Unreachable: mem-addr would have triggered the sidecar downgrade
-          // above. Emit error to fail fast if invariant breaks.
+          ++memAddrCount;
+          int64_t off = llvm::alignTo(sidecarPos, kSidecarAlign);
+          sidecarOffsets[i] = off;
+          mlir::hip::ConstantEntry e;
+          e.name = extState->constantNames[i];
+          e.offset = off;
+          e.size = extState->constantSizes[i];
+          e.data = h.ptr;
+          partialEntries.push_back(std::move(e));
+          sidecarPos = off + extState->constantSizes[i];
+        }
+      }
+
+      // Pass 2: write the partial sidecar (mem-addr bytes only). When
+      // there are no mem-addr entries the sidecar is omitted entirely
+      // (pure streaming model — runtime never opens constants_filename).
+      if (!partialEntries.empty()) {
+        if (!mlir::hip::writeConstantsBinToFileSystem(
+                fs, extState->binFileName,
+                std::vector<mlir::hip::ConstantEntry>(partialEntries.begin(),
+                                                      partialEntries.end()),
+                sidecarPos)) {
           module.emitError(
-              "internal: mem-addr entry leaked into streaming source "
-              "descriptor (constant index: ")
-              << i << ")";
+              "failed to write partial mem-addr sidecar via FileSystem: " +
+              extState->binFileName);
           return signalPassFailure();
         }
-        splatValues.push_back(splatValue);
-        splatElemSizes.push_back(splatElem);
+        llvm::errs() << "[ConvertOnnxToHipPass] hybrid: " << memAddrCount
+                     << " mem-addr -> partial sidecar ("
+                     << llvm::format("%.1f", sidecarPos / (1024.0 * 1024.0))
+                     << " MB), " << fileRefCount << " file-ref + "
+                     << splatCount << " splat -> streaming\n";
+      } else {
+        llvm::errs() << "[ConvertOnnxToHipPass] streaming: " << fileRefCount
+                     << " file-ref + " << splatCount
+                     << " splat -> per-entry descriptors\n";
+      }
+
+      // Pass 3: stamp per-entry source descriptors. mem-addr entries get
+      // their sidecarOffsets[i] from pass 1; the rest stay at 0 in that
+      // slot which is fine because GenerateInterface only reads it for
+      // kind==3 (Sidecar).
+      for (int64_t i = 0; i < count; ++i) {
+        const auto &entry = extState->constantHostPtrs[i];
+        std::string path;
+        if (!entry.filePath.empty()) {
+          kinds[i] = 2; // FileRef
+          path = entry.filePath;
+          fileOffsets[i] = entry.fileOffset;
+        } else if (entry.splatElemSize > 0) {
+          kinds[i] = 1; // Splat
+          splatElemSizes[i] = entry.splatElemSize;
+          // Left-pack up to 8 bytes of element data into a uint64 carrier
+          // so we can ship it through a DenseI64ArrayAttr.
+          size_t n = static_cast<size_t>(
+              std::min<int64_t>(splatElemSizes[i], 8));
+          std::memcpy(&splatValues[i], entry.ptr, n);
+        } else {
+          kinds[i] = 3; // Sidecar (mem-addr packed into partial sidecar)
+        }
         filePaths.push_back(mlir::StringAttr::get(ctx, path));
-        fileOffsets.push_back(fileOff);
       }
 
       module->setAttr("hipdnn.constant_source_kinds",
@@ -870,13 +896,16 @@ void ConvertOnnxToHipPass::runOnOperation() {
                       mlir::ArrayAttr::get(ctx, filePaths));
       module->setAttr("hipdnn.constant_file_offsets",
                       mlir::DenseI64ArrayAttr::get(ctx, fileOffsets));
+      module->setAttr("hipdnn.constant_sidecar_offsets",
+                      mlir::DenseI64ArrayAttr::get(ctx, sidecarOffsets));
     }
 
     LLVM_DEBUG(llvm::dbgs()
                << "externalized " << extState->constantIndex << " constants ("
                << extState->currentOffset << " bytes) to "
                << extState->binFileName
-               << (effectiveSkip ? " (metadata only)" : "") << "\n");
+               << (extState->skipDataWrite ? " (per-entry descriptors)" : "")
+               << "\n");
   }
   logSubpass("finalize");
 
