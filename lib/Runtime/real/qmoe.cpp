@@ -33,15 +33,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
               int64_t normalize_routing_weights, int64_t elem_size) {
-  if (!state || !input || !output) {
-    fprintf(stderr, "wrap_qmoe: null argument\n");
+  if (router_weights) {
+    fprintf(stderr, "wrap_qmoe: router_weights is not supported yet\n");
     return -1;
   }
-
-  // At least one of router_probs or router_weights must be provided
-  if (!router_probs && !router_weights) {
-    fprintf(stderr,
-            "wrap_qmoe: both router_probs and router_weights are null\n");
+  if (!state || !input || !router_probs || !output) {
+    fprintf(stderr, "wrap_qmoe: null argument\n");
     return -1;
   }
 
@@ -96,16 +93,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   HIP_CHECK(hipMalloc(&d_token_ids, num_tokens * sizeof(int32_t)));
   HIP_CHECK(hipMalloc(&d_token_wts, num_tokens * elem_size));
 
-  // Use router_weights if provided, otherwise use router_probs
-  // router_weights takes precedence per ONNX Runtime v1.25+ specification
-  const void *router_input = router_weights ? router_weights : router_probs;
-
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
-                    "k=%lld, normalize=%lld, using_router_weights=%d)\n",
+                    "k=%lld, normalize=%lld)\n",
                     (long long)num_tokens, (long long)num_experts, (long long)k,
-                    (long long)normalize_routing_weights,
-                    router_weights != nullptr);
-  HIP_CHECK(hip_qmoe_topk_routing(stream, router_input, d_expert_indices,
+                    (long long)normalize_routing_weights);
+  HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
                                   d_expert_weights, num_tokens, num_experts, k,
                                   normalize_routing_weights, elem_size));
 
