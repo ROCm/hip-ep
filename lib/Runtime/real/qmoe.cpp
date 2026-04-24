@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -33,6 +34,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
               int64_t normalize_routing_weights, int64_t elem_size) {
+  PERF_TIMER(state, "QMoE",
+             "tok=%lld,hidden=%lld,experts=%lld",
+             (long long)num_tokens, (long long)hidden_size,
+             (long long)num_experts);
+
   if (!state || !input || !router_probs || !output) {
     fprintf(stderr, "wrap_qmoe: null argument\n");
     return -1;

@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
@@ -154,6 +155,10 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
     fprintf(stderr, "wrap_miopenActivationForward: null argument\n");
     return -1;
   }
+
+  PERF_TIMER(state, "Activation",
+             "n=%lld,mode=%lld",
+             (long long)num_elements, (long long)activation_mode);
 
   const char *act_name = hipdnn_ep_activation_name(activation_mode);
   const char *type_name = hipdnn_ep_datatype_name(data_type);

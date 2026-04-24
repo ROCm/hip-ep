@@ -210,6 +210,7 @@ compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
     # Real GPU runtime implementation
+    compile_to_bitcode(profiler.cpp runtime_profiler.bc)
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
     compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
@@ -235,6 +236,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_profiler.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hipblas.bc

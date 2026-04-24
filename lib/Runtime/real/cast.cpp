@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
@@ -30,6 +31,11 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
 int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t src_data_type,
               int64_t dst_data_type) {
+  PERF_TIMER(state, "Cast",
+             "n=%lld,src=%lld,dst=%lld",
+             (long long)num_elements, (long long)src_data_type,
+             (long long)dst_data_type);
+
   if (!state || !input || !output) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_cast: null argument\n");
     return -1;

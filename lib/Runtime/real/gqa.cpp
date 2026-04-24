@@ -5,6 +5,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../profiler.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -658,6 +659,12 @@ int wrap_group_query_attention(
     // (may differ from actual past token count for pre-allocated caches)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
+
+  PERF_TIMER(state, "GQA",
+             "b=%lld,sq=%lld,skv=%lld,h=%lld,d=%lld",
+             (long long)batch_size, (long long)seq_len_q,
+             (long long)seq_len_kv, (long long)num_heads,
+             (long long)head_dim);
 
   if (!state) {
     fprintf(stderr, "wrap_group_query_attention: null state\n");
