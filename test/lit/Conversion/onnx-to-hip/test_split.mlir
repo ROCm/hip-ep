@@ -159,12 +159,11 @@ module {
 
 // CHECK-LABEL: func.func @test_split_nondivisible
 // CHECK-NOT: onnx.Split
-// CHECK: %[[DIM:.*]] = tensor.dim
-// CHECK: %[[CHUNK:.*]] = arith.divui %[[DIM]]
+// With static output types, we use static sizes directly (no tensor.dim needed)
 // CHECK: tensor.extract_slice{{.*}}[0, 0] [1, 3] [1, 1]
-// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [1, 3] [1, 1]
-// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [1, 3] [1, 1]
-// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [1, 1] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[0, {{.*}}] [1, 3] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[0, {{.*}}] [1, 3] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[0, {{.*}}] [1, 1] [1, 1]
 
 // CHECK-LABEL: func.func @test_split_nondivisible_dynamic
 // CHECK-NOT: onnx.Split
