@@ -693,6 +693,69 @@ def Hip_GatherOp : Hip_DpsOp<"gather"> {
   }];
 }
 
+def Hip_SliceOp : Hip_DpsOp<"slice", [AttrSizedOperandSegments]> {
+  let summary = "Slice tensor along multiple axes (ONNX Slice)";
+  let description = [{
+    Produces a slice of the input tensor along multiple axes. Implements the
+    ONNX Slice operator (opset 13+).
+
+    Inputs:
+    - data (required): Tensor of data to extract slices from.
+    - starts (required): 1-D tensor of starting indices per entry in axes.
+    - ends (required): 1-D tensor of ending indices (exclusive) per entry.
+    - axes (optional): 1-D tensor of axes to apply starts/ends to.
+                       Defaults to [0, ..., r-1] when absent.
+    - steps (optional): 1-D tensor of slice steps. Defaults to all-1 when
+                        absent. Negative values mean reverse stepping.
+
+    Negative indices in starts/ends are normalized against the corresponding
+    dimension size by the runtime kernel. Clamping follows the ONNX rules
+    (positive stepping clamps to [0, dim]; negative stepping clamps to
+    [-1, dim-1]).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example (basic slice):
+    ```mlir
+    hip.slice(%ctx) ins(%data, %starts, %ends :
+        memref<2x4xf32, 1>, memref<2xi64, 1>, memref<2xi64, 1>)
+        outs(%output : memref<1x2xf32, 1>)
+    ```
+
+    Example (with axes and steps):
+    ```mlir
+    hip.slice(%ctx) ins(%data, %starts, %ends, %axes, %steps :
+        memref<2x4xf32, 1>, memref<2xi64, 1>, memref<2xi64, 1>,
+        memref<2xi64, 1>, memref<2xi64, 1>)
+        outs(%output : memref<1x2xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$starts,
+    Hip_TensorOrMemRef:$ends,
+    Optional<Hip_TensorOrMemRef>:$axes,
+    Optional<Hip_TensorOrMemRef>:$steps,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $data `,` $starts `,` $ends
+        (`,` $axes^)?
+        (`,` $steps^)?
+        `:`
+        type($data) `,` type($starts) `,` type($ends)
+        (`,` type($axes)^)?
+        (`,` type($steps)^)?
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SiluOp : Hip_DpsOp<"silu"> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins

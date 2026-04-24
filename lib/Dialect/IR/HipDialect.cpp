@@ -507,6 +507,27 @@ void GatherOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SliceOp: ins(data, starts, ends, [axes], [steps]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SliceOp::getDpsInitsMutable() {
+  // Count actual operands preceding the DPS init:
+  //   ctx(1) + data(1) + starts(1) + ends(1) [+ axes(0/1)] [+ steps(0/1)]
+  unsigned numInputs = 4; // ctx + data + starts + ends
+  if (getAxes())
+    ++numInputs;
+  if (getSteps())
+    ++numInputs;
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/1);
+}
+
+void SliceOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SiluOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

@@ -523,6 +523,54 @@ int hip_qmoe_scatter_add(
 int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/* =========================================================================
+ * Slice (ONNX Slice, opset 13+)
+ * =========================================================================
+ *
+ * Produces a slice of `data` along multiple axes. Implements the ONNX Slice
+ * operator semantics, including negative indices and negative steps (reverse
+ * stepping).
+ *
+ * For each entry i in [0, num_slice_entries):
+ *   axis  = axes ? axes[i] : i  (normalized to [0, rank))
+ *   step  = steps ? steps[i] : 1
+ *   start = starts[i]            (normalized + clamped per ONNX rules)
+ * Output element at (o_0, ..., o_{rank-1}) reads
+ *   data[(o_0, ..., offsets applied along sliced axes ...)]
+ *
+ * Parameters:
+ *   stream              - hipStream_t cast to void*
+ *   data                - GPU source tensor
+ *   starts/ends         - GPU int64 tensors of length num_slice_entries
+ *   axes                - GPU int64 tensor (nullable, defaults to [0..rank))
+ *   steps               - GPU int64 tensor (nullable, defaults to all-1)
+ *   output              - GPU destination tensor
+ *   input_shape         - HOST int64 array, length `rank`, input dim sizes
+ *   output_shape        - HOST int64 array, length `rank`, output dim sizes
+ *   rank                - number of dimensions (same for input and output)
+ *   num_slice_entries   - length of starts/ends/axes/steps
+ *   output_num_elements - total output elements (kernel launch size)
+ *   element_size_bytes  - 1/2/4/8 (bool/int8/i32/f32/i64/...)
+ *
+ * Returns: 0 on success, non-zero on failure. Unsupported element sizes
+ * or ranks larger than HIP_SLICE_MAX_RANK are rejected.
+ */
+#define HIP_SLICE_MAX_RANK 8
+int hip_slice(
+    void* stream,
+    const void* data,
+    const void* starts,
+    const void* ends,
+    const void* axes,
+    const void* steps,
+    void* output,
+    const int64_t* input_shape,
+    const int64_t* output_shape,
+    int64_t rank,
+    int64_t num_slice_entries,
+    int64_t output_num_elements,
+    int element_size_bytes);
+
 #ifdef __cplusplus
 }
 #endif
