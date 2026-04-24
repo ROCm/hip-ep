@@ -71,6 +71,51 @@ int hip_elementwise_sub(
     int hip_dtype);
 
 /* =========================================================================
+ * Elementwise Where (NumPy-style multidirectional broadcasting, arbitrary rank)
+ * =========================================================================
+ *
+ * Computes output[i] = condition[idx_cond(i)] ? x[idx_x(i)] : y[idx_y(i)]
+ * for each element of the output tensor. Each operand is described by its
+ * own (shape_ptr, rank) pair; operand shapes are left-padded with 1s up to
+ * the output rank to implement ONNX multidirectional broadcasting. Dims of
+ * size 1 are broadcast against the corresponding larger output dim.
+ *
+ * No fixed layout is assumed; operands may have any rank <= HIP_WHERE_MAX_RANK.
+ *
+ * Parameters:
+ *   stream      - hipStream_t cast to void*
+ *   condition   - GPU pointer to bool tensor (1 byte per element)
+ *   x           - GPU pointer to X tensor (selected when condition is true)
+ *   y           - GPU pointer to Y tensor (selected when condition is false)
+ *   output      - GPU pointer to output tensor (broadcast shape)
+ *   cond_shape  - host pointer to condition shape array (length == cond_rank)
+ *   cond_rank   - rank of condition tensor
+ *   x_shape     - host pointer to X shape array (length == x_rank)
+ *   x_rank      - rank of X tensor
+ *   y_shape     - host pointer to Y shape array (length == y_rank)
+ *   y_rank      - rank of Y tensor
+ *   out_shape   - host pointer to output shape array (length == out_rank)
+ *   out_rank    - rank of output tensor (max of input ranks)
+ *   hip_dtype   - element type of x/y/output (hip_dtype_t value cast to int)
+ *
+ * Currently supported types for x/y/output: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32, HIP_DTYPE_INT64
+ * Returns: 0 on success (hipSuccess), non-zero on failure (including rank > max)
+ */
+#define HIP_WHERE_MAX_RANK 8
+int hip_elementwise_where(
+    void* stream,
+    const void* condition,
+    const void* x,
+    const void* y,
+    void* output,
+    const int64_t* cond_shape, int64_t cond_rank,
+    const int64_t* x_shape,    int64_t x_rank,
+    const int64_t* y_shape,    int64_t y_rank,
+    const int64_t* out_shape,  int64_t out_rank,
+    int hip_dtype);
+
+/* =========================================================================
  * Elementwise reciprocal (1 / x)
  * =========================================================================
  *
