@@ -63,8 +63,8 @@ struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
         Value dim = getMemRefDimSize(type, i, descriptor, rewriter, loc);
         Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                              rewriter.getI32IntegerAttr(i));
-        Value elemPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
-                                            arr, idx);
+        Value elemPtr =
+            LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
         LLVM::StoreOp::create(rewriter, loc, dim, elemPtr);
       }
       return arr;
@@ -106,10 +106,14 @@ struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
         extractMemRefPtr(adaptor.getX(), rewriter, loc),
         extractMemRefPtr(adaptor.getY(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
-        condShape, condRank,
-        xShape,    xRank,
-        yShape,    yRank,
-        outShape,  outRank,
+        condShape,
+        condRank,
+        xShape,
+        xRank,
+        yShape,
+        yRank,
+        outShape,
+        outRank,
         dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

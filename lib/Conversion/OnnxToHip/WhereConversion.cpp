@@ -105,8 +105,8 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
   // given output dim may be contributed by a different operand. Resolve each
   // dynamic result dim by scanning all three operands rather than relying on
   // a single "source" tensor.
-  mlir::Value init = createBroadcastEmptyTensor(rewriter, loc, resultType,
-                                                {condition, x, y});
+  mlir::Value init =
+      createBroadcastEmptyTensor(rewriter, loc, resultType, {condition, x, y});
   auto hipOp = mlir::hip::WhereOp::create(rewriter, loc, resultType, context,
                                           condition, x, y, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
