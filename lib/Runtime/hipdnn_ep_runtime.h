@@ -460,6 +460,24 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes);
 
+// Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
+// arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
+// per-operand broadcasting.
+//
+// Each operand is described by its own (shape, rank) pair: the shape array
+// holds `rank` i64 dims in row-major order. Operand shapes are left-padded
+// with 1s up to `out_rank` by the runtime, and dims of 1 are broadcast
+// against the corresponding larger output dim. No fixed layout is assumed;
+// any rank up to HIP_WHERE_MAX_RANK is supported.
+//
+//   condition: bool tensor (1 byte per element)
+//   x, y, output: same data_type (HIPDNN_EP_DATATYPE_*)
+int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
+               void *output, const int64_t *cond_shape, int64_t cond_rank,
+               const int64_t *x_shape, int64_t x_rank, const int64_t *y_shape,
+               int64_t y_rank, const int64_t *out_shape, int64_t out_rank,
+               int64_t data_type);
+
 // Unified power entry: output = f(input; alpha, beta, gamma).
 // alpha, beta, gamma match the MIOpen POWER activation tuple where the
 // MIOpen path is used. data_type is HIPDNN_EP_DATATYPE_* (FLOAT=0, HALF=1,

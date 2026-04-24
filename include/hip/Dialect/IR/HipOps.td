@@ -853,6 +853,46 @@ def Hip_SubOp : Hip_DpsOp<"sub"> {
   }];
 }
 
+def Hip_WhereOp : Hip_DpsOp<"where"> {
+  let summary = "Elementwise selection: output = condition ? x : y";
+  let description = [{
+    Implements ONNX Where: output[i] = condition[i] ? x[i] : y[i].
+
+    Supports multidirectional (NumPy-style) broadcasting between condition,
+    x and y. Each operand's shape is broadcast to the output shape; dims of
+    1 are broadcast against larger dims of the other operands.
+
+    The condition tensor must have a boolean (i1) element type. The x and y
+    tensors must share the same element type, which is also the output type.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.where(%ctx) ins(%cond, %x, %y :
+                        memref<1x4xi1, 1>,
+                        memref<2x1xf32, 1>,
+                        memref<2x4xf32, 1>)
+                    outs(%out : memref<2x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$condition,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $condition `,` $x `,` $y `:`
+        type($condition) `,` type($x) `,` type($y) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_CastOp : Hip_DpsOp<"cast"> {
   let summary = "Type conversion operation";
   let description = [{
