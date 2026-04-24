@@ -591,6 +591,18 @@ void SubOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// WhereOp: ins(condition, x, y), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange WhereOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void WhereOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CastOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
