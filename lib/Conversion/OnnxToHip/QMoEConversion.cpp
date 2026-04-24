@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -114,8 +116,12 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
       betaFloatAttr ? betaFloatAttr : rewriter.getF32FloatAttr(0.0f);
 
   auto limitFloatAttr = op->getAttrOfType<mlir::FloatAttr>("swiglu_limit");
+  // ONNX spec: "It is infinite when limit is not provided"
+  // Match ONNX Runtime: std::numeric_limits<float>::infinity()
   auto swigluLimitAttr =
-      limitFloatAttr ? limitFloatAttr : rewriter.getF32FloatAttr(0.0f);
+      limitFloatAttr
+          ? limitFloatAttr
+          : rewriter.getF32FloatAttr(std::numeric_limits<float>::infinity());
 
   auto activationTypeStrAttr =
       op->getAttrOfType<mlir::StringAttr>("activation_type");
