@@ -279,7 +279,8 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
 // Split -> standard tensor ops (zero-cost slice views)
 //===----------------------------------------------------------------------===//
 
-/// onnx.Split -> tensor.extract_slice operations (zero-cost metadata operation).
+/// onnx.Split -> tensor.extract_slice operations (zero-cost metadata
+/// operation).
 ///
 /// Split divides a tensor into multiple chunks along a specified axis.
 /// This is a zero-cost operation: it creates views into the input tensor
@@ -329,17 +330,20 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       auto splitDefOp = splitInput.getDefiningOp();
 
       // Handle onnx.NoValue: treat as equal split
-      if (splitDefOp && splitDefOp->getName().getStringRef() == "onnx.NoValue") {
+      if (splitDefOp &&
+          splitDefOp->getName().getStringRef() == "onnx.NoValue") {
         isEqualSplit = true;
       } else {
-        // Custom splits: extract split lengths from second input (must be constant)
+        // Custom splits: extract split lengths from second input (must be
+        // constant)
         if (!splitDefOp)
           return rewriter.notifyMatchFailure(
               op, "split input must be defined by a constant operation");
 
         mlir::DenseElementsAttr splitAttr;
         if (auto constOp = mlir::dyn_cast<mlir::arith::ConstantOp>(splitDefOp))
-          splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
+          splitAttr =
+              mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
         else if (splitDefOp->hasAttr("value"))
           splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(
               splitDefOp->getAttr("value"));
@@ -361,7 +365,8 @@ struct SplitToStdTensor : public mlir::RewritePattern {
           int64_t axisDimSize = inputType.getDimSize(axis);
           int64_t splitSum = 0;
           for (const auto &length : splitLengths) {
-            if (auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(length)) {
+            if (auto attr =
+                    llvm::dyn_cast_if_present<mlir::Attribute>(length)) {
               auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
               if (intAttr) {
                 splitSum += intAttr.getInt();
@@ -395,8 +400,9 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       mlir::Value chunkSize =
           rewriter.create<mlir::arith::DivUIOp>(loc, axisDim, numOutputsVal);
 
-      // For equal splits: all outputs except possibly the last have size chunkSize
-      // The last output gets the remainder: axis_size - (num_outputs-1) * chunkSize
+      // For equal splits: all outputs except possibly the last have size
+      // chunkSize The last output gets the remainder: axis_size -
+      // (num_outputs-1) * chunkSize
       for (unsigned i = 0; i < numOutputs - 1; ++i)
         splitLengths.push_back(chunkSize);
 
@@ -451,9 +457,12 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       }
 
       // Create extract_slice operation using OpBuilder
-      // This will properly decompose OpFoldResults into static attrs and dynamic operands
-      mlir::OperationState state(loc, mlir::tensor::ExtractSliceOp::getOperationName());
-      mlir::tensor::ExtractSliceOp::build(rewriter, state, outputType, input, offsets, sizes, strides);
+      // This will properly decompose OpFoldResults into static attrs and
+      // dynamic operands
+      mlir::OperationState state(
+          loc, mlir::tensor::ExtractSliceOp::getOperationName());
+      mlir::tensor::ExtractSliceOp::build(rewriter, state, outputType, input,
+                                          offsets, sizes, strides);
       auto sliceOp = rewriter.create(state);
       replacements.push_back(sliceOp->getResult(0));
 
@@ -462,8 +471,8 @@ struct SplitToStdTensor : public mlir::RewritePattern {
         // Convert OpFoldResults to Values and add them
         mlir::Value offsetVal =
             mlir::getValueOrCreateConstantIndexOp(rewriter, loc, currentOffset);
-        mlir::Value lengthVal =
-            mlir::getValueOrCreateConstantIndexOp(rewriter, loc, splitLengths[i]);
+        mlir::Value lengthVal = mlir::getValueOrCreateConstantIndexOp(
+            rewriter, loc, splitLengths[i]);
         mlir::Value newOffsetVal =
             rewriter.create<mlir::arith::AddIOp>(loc, offsetVal, lengthVal);
         currentOffset = newOffsetVal;
