@@ -554,6 +554,7 @@ int wrap_qmoe(
     RuntimeState *state,
     const void *input,           // [num_tokens, hidden_size]
     const void *router_probs,    // [num_tokens, num_experts]
+    const void *router_weights,  // (nullable) ONNX v1.25+ routing weights
     const void *fc1_weights,     // [num_experts, fusion*inter, hidden/pack]
     const void *fc1_scales,      // [num_experts, fusion*inter, hidden/bs]
     const void *fc1_bias,        // (nullable) [num_experts, fusion*inter]
