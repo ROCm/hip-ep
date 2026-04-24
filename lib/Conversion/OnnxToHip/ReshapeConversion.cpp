@@ -429,7 +429,8 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       if (!outputType)
         return rewriter.notifyMatchFailure(op, "expected ranked output type");
 
-      // Track the actual slice size used for this output (for offset calculation)
+      // Track the actual slice size used for this output (for offset
+      // calculation)
       mlir::OpFoldResult actualSliceSize;
 
       // Build offsets, sizes, strides arrays
@@ -449,11 +450,13 @@ struct SplitToStdTensor : public mlir::RewritePattern {
             // Validate consistency: static output size must match split length
             if (!isEqualSplit) {
               // For custom splits, verify the split length matches
-              if (auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(splitLengths[i])) {
+              if (auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(
+                      splitLengths[i])) {
                 if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr)) {
                   if (intAttr.getInt() != staticSize) {
                     return rewriter.notifyMatchFailure(
-                        op, "custom split length does not match static output dimension");
+                        op, "custom split length does not match static output "
+                            "dimension");
                   }
                 }
               }
@@ -488,12 +491,13 @@ struct SplitToStdTensor : public mlir::RewritePattern {
 
       // Update offset for next slice
       if (i < numOutputs - 1) {
-        // IMPORTANT: Use the actual slice size (which may differ from splitLengths[i]
-        // when output type has static dimension). This ensures correct offset calculation.
+        // IMPORTANT: Use the actual slice size (which may differ from
+        // splitLengths[i] when output type has static dimension). This ensures
+        // correct offset calculation.
         mlir::Value offsetVal =
             mlir::getValueOrCreateConstantIndexOp(rewriter, loc, currentOffset);
-        mlir::Value lengthVal =
-            mlir::getValueOrCreateConstantIndexOp(rewriter, loc, actualSliceSize);
+        mlir::Value lengthVal = mlir::getValueOrCreateConstantIndexOp(
+            rewriter, loc, actualSliceSize);
         mlir::Value newOffsetVal =
             rewriter.create<mlir::arith::AddIOp>(loc, offsetVal, lengthVal);
         currentOffset = newOffsetVal;
