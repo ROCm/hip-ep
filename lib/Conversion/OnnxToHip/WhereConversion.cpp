@@ -9,6 +9,61 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// Create a tensor.empty for a DPS init operand whose shape is the result of
+/// ONNX-style multidirectional (NumPy) broadcasting over multiple inputs.
+///
+/// Operand shapes are right-aligned with the result. For each dynamic
+/// dimension of \p resultType, the size is taken from the first operand that
+/// truly contributes to the broadcast extent at that axis -- i.e., an operand
+/// whose corresponding dim is not statically 1. Operands whose rank does not
+/// span the dimension (shorter rank, conceptually padded with 1 on the left)
+/// are skipped, as are operands whose dim is statically 1. If every operand
+/// is statically 1 at the axis (degenerate case for a dynamic result), we
+/// fall back to the first operand spanning the dim.
+mlir::Value createBroadcastEmptyTensor(mlir::OpBuilder &builder,
+                                       mlir::Location loc,
+                                       mlir::RankedTensorType resultType,
+                                       mlir::ValueRange operands) {
+  int64_t resultRank = resultType.getRank();
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+
+    mlir::Value chosen;
+    int64_t chosenDim = -1;
+    mlir::Value fallback;
+    int64_t fallbackDim = -1;
+    for (mlir::Value operand : operands) {
+      auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
+      if (!t)
+        continue;
+      int64_t offset = resultRank - t.getRank();
+      if (dimIdx < offset)
+        continue; // operand is broadcast (padded to 1) at this axis
+      int64_t operandDim = dimIdx - offset;
+      if (!fallback) {
+        fallback = operand;
+        fallbackDim = operandDim;
+      }
+      if (!t.isDynamicDim(operandDim) && t.getDimSize(operandDim) == 1)
+        continue; // statically broadcast, does not define the extent
+      chosen = operand;
+      chosenDim = operandDim;
+      break;
+    }
+    if (!chosen) {
+      chosen = fallback;
+      chosenDim = fallbackDim;
+    }
+    assert(chosen && "no ranked operand spans the dynamic result dim");
+    dynSizes.push_back(
+        mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
+  }
+  return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                       resultType.getElementType(), dynSizes);
+}
+
 /// onnx.Where -> hip.where
 /// ONNX Where: output[i] = condition[i] ? X[i] : Y[i].
 /// Supports multidirectional (NumPy-style) broadcasting between condition,
@@ -46,26 +101,12 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "onnx.Where lowering expects a ranked tensor result");
 
-  // Pick a source operand whose rank matches the result for tensor.empty
-  // dynamic-dim extraction. Falls back through condition -> x -> y to handle
-  // broadcasting from any operand having lower rank than the result.
-  auto pickSource = [&](mlir::Value v) -> mlir::Value {
-    auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
-    if (!t)
-      return nullptr;
-    return (t.getRank() == resultType.getRank()) ? v : nullptr;
-  };
-  mlir::Value source = pickSource(condition);
-  if (!source)
-    source = pickSource(x);
-  if (!source)
-    source = pickSource(y);
-  if (!source)
-    return rewriter.notifyMatchFailure(
-        op, "onnx.Where lowering expects at least one operand whose rank "
-            "matches the result");
-
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+  // ONNX Where supports multidirectional (NumPy-style) broadcasting, so any
+  // given output dim may be contributed by a different operand. Resolve each
+  // dynamic result dim by scanning all three operands rather than relying on
+  // a single "source" tensor.
+  mlir::Value init = createBroadcastEmptyTensor(rewriter, loc, resultType,
+                                                {condition, x, y});
   auto hipOp = mlir::hip::WhereOp::create(rewriter, loc, resultType, context,
                                           condition, x, y, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
