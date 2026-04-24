@@ -578,7 +578,7 @@ static int fref_fetch(FrefCache *c, int64_t file_offset, size_t size,
 struct SidecarReaderCache {
   std::unique_ptr<morphizen::FileReader,
                   morphizen::FileSystem::Deleter<morphizen::FileReader>>
-      reader;                    // default-init: null pointer, deleter unused
+      reader; // default-init: null pointer, deleter unused
   const uint8_t *mmap_base = nullptr; // non-null when reader->mmap() succeeded
   size_t total_size = 0;
   bool tried_open = false;
@@ -634,8 +634,7 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
     size_t toRead = (size_t)std::min<uint64_t>(remaining_skip, kSkipChunk);
     size_t got = c->reader->fread(skip_buf, toRead);
     if (got != toRead) {
-      fprintf(stderr,
-              "per_entry: sidecar skip short read (got %zu of %zu)\n",
+      fprintf(stderr, "per_entry: sidecar skip short read (got %zu of %zu)\n",
               got, toRead);
       return 1;
     }
@@ -643,8 +642,7 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
   }
   size_t got = c->reader->fread(staging, size);
   if (got != size) {
-    fprintf(stderr,
-            "per_entry: sidecar payload short read (got %zu of %zu)\n",
+    fprintf(stderr, "per_entry: sidecar payload short read (got %zu of %zu)\n",
             got, size);
     return 1;
   }

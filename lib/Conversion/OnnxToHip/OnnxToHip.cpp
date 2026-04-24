@@ -793,11 +793,12 @@ void ConvertOnnxToHipPass::runOnOperation() {
       //
       // Six parallel arrays, all indexed by constantIndex:
       //   constant_source_kinds:        0=NONE, 1=Splat, 2=FileRef, 3=Sidecar
-      //   constant_splat_elem_values:   elem bytes packed into i64 (0 unless splat)
-      //   constant_splat_elem_sizes:    elem byte count 1/2/4/8 (0 unless splat)
-      //   constant_file_paths:          absolute OS path (empty unless file-ref)
-      //   constant_file_offsets:        byte offset within file (0 unless file-ref)
-      //   constant_sidecar_offsets:     byte offset within partial sidecar
+      //   constant_splat_elem_values:   elem bytes packed into i64 (0 unless
+      //   splat) constant_splat_elem_sizes:    elem byte count 1/2/4/8 (0
+      //   unless splat) constant_file_paths:          absolute OS path (empty
+      //   unless file-ref) constant_file_offsets:        byte offset within
+      //   file (0 unless file-ref) constant_sidecar_offsets:     byte offset
+      //   within partial sidecar
       //                                 (0 unless mem-addr / Sidecar)
       int64_t count = static_cast<int64_t>(extState->constantHostPtrs.size());
       llvm::SmallVector<int32_t> kinds(count, 0);
@@ -853,8 +854,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
         llvm::errs() << "[ConvertOnnxToHipPass] hybrid: " << memAddrCount
                      << " mem-addr -> partial sidecar ("
                      << llvm::format("%.1f", sidecarPos / (1024.0 * 1024.0))
-                     << " MB), " << fileRefCount << " file-ref + "
-                     << splatCount << " splat -> streaming\n";
+                     << " MB), " << fileRefCount << " file-ref + " << splatCount
+                     << " splat -> streaming\n";
       } else {
         llvm::errs() << "[ConvertOnnxToHipPass] streaming: " << fileRefCount
                      << " file-ref + " << splatCount
@@ -877,8 +878,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
           splatElemSizes[i] = entry.splatElemSize;
           // Left-pack up to 8 bytes of element data into a uint64 carrier
           // so we can ship it through a DenseI64ArrayAttr.
-          size_t n = static_cast<size_t>(
-              std::min<int64_t>(splatElemSizes[i], 8));
+          size_t n =
+              static_cast<size_t>(std::min<int64_t>(splatElemSizes[i], 8));
           std::memcpy(&splatValues[i], entry.ptr, n);
         } else {
           kinds[i] = 3; // Sidecar (mem-addr packed into partial sidecar)
