@@ -90,4 +90,60 @@ module {
 
     return %output : tensor<?x?xf16>
   }
+
+  // Test 5: Signed 8-bit integer X/Y.
+  func.func @test_where_i8(%cond: tensor<2x4xi1>,
+                           %x: tensor<2x4xi8>,
+                           %y: tensor<2x4xi8>) -> tensor<2x4xi8> {
+    // CHECK-LABEL: func.func @test_where_i8
+    %output = "onnx.Where"(%cond, %x, %y) :
+        (tensor<2x4xi1>, tensor<2x4xi8>, tensor<2x4xi8>) -> tensor<2x4xi8>
+
+    // CHECK: tensor.empty() : tensor<2x4xi8>
+    // CHECK: hip.where(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<2x4xi1>, tensor<2x4xi8>, tensor<2x4xi8>) outs(%{{.*}} : tensor<2x4xi8>)
+
+    return %output : tensor<2x4xi8>
+  }
+
+  // Test 6: Unsigned 8-bit integer X/Y (verifies the ui8 path is not rejected).
+  func.func @test_where_ui8(%cond: tensor<2x4xi1>,
+                            %x: tensor<2x4xui8>,
+                            %y: tensor<2x4xui8>) -> tensor<2x4xui8> {
+    // CHECK-LABEL: func.func @test_where_ui8
+    %output = "onnx.Where"(%cond, %x, %y) :
+        (tensor<2x4xi1>, tensor<2x4xui8>, tensor<2x4xui8>) -> tensor<2x4xui8>
+
+    // CHECK: tensor.empty() : tensor<2x4xui8>
+    // CHECK: hip.where(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<2x4xi1>, tensor<2x4xui8>, tensor<2x4xui8>) outs(%{{.*}} : tensor<2x4xui8>)
+
+    return %output : tensor<2x4xui8>
+  }
+
+  // Test 7: f64 (double) X/Y.
+  func.func @test_where_f64(%cond: tensor<2x4xi1>,
+                            %x: tensor<2x4xf64>,
+                            %y: tensor<2x4xf64>) -> tensor<2x4xf64> {
+    // CHECK-LABEL: func.func @test_where_f64
+    %output = "onnx.Where"(%cond, %x, %y) :
+        (tensor<2x4xi1>, tensor<2x4xf64>, tensor<2x4xf64>) -> tensor<2x4xf64>
+
+    // CHECK: tensor.empty() : tensor<2x4xf64>
+    // CHECK: hip.where(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<2x4xi1>, tensor<2x4xf64>, tensor<2x4xf64>) outs(%{{.*}} : tensor<2x4xf64>)
+
+    return %output : tensor<2x4xf64>
+  }
+
+  // Test 8: bool (i1) X/Y -- where(cond, true_v, false_v) over bool tensors.
+  func.func @test_where_bool(%cond: tensor<2x4xi1>,
+                             %x: tensor<2x4xi1>,
+                             %y: tensor<2x4xi1>) -> tensor<2x4xi1> {
+    // CHECK-LABEL: func.func @test_where_bool
+    %output = "onnx.Where"(%cond, %x, %y) :
+        (tensor<2x4xi1>, tensor<2x4xi1>, tensor<2x4xi1>) -> tensor<2x4xi1>
+
+    // CHECK: tensor.empty() : tensor<2x4xi1>
+    // CHECK: hip.where(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<2x4xi1>, tensor<2x4xi1>, tensor<2x4xi1>) outs(%{{.*}} : tensor<2x4xi1>)
+
+    return %output : tensor<2x4xi1>
+  }
 }

@@ -102,7 +102,6 @@ int hip_elementwise_sub(
  * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32, HIP_DTYPE_INT64
  * Returns: 0 on success (hipSuccess), non-zero on failure (including rank > max)
  */
-#define HIP_WHERE_MAX_RANK 8
 int hip_elementwise_where(
     void* stream,
     const void* condition,

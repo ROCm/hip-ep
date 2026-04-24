@@ -12,7 +12,7 @@
 
 #include <cstdint>
 #include <cstdio>
-
+#define HIP_WHERE_MAX_RANK 8
 // Fixed-size shape/stride buffers passed as kernel arguments (by value).
 // Capacity is HIP_WHERE_MAX_RANK; entries past `rank` are unused.
 struct WhereDimsND {
