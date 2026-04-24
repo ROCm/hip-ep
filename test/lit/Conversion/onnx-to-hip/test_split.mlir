@@ -97,6 +97,13 @@ module {
     return %out0, %out1, %out2 : tensor<?x10xf32>, tensor<?x10xf32>, tensor<?x10xf32>
   }
 
+  // --- Custom split with i32 type (verifies APInt support for different integer widths) ---
+  func.func @test_split_i32_type(%data: tensor<10x64xf32>) -> (tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>) {
+    %split_lengths = "onnx.Constant"() {value = dense<[2, 5, 3]> : tensor<3xi32>} : () -> tensor<3xi32>
+    %out0, %out1, %out2 = "onnx.Split"(%data, %split_lengths) {axis = 0 : si64} : (tensor<10x64xf32>, tensor<3xi32>) -> (tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>)
+    return %out0, %out1, %out2 : tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>
+  }
+
   // --- Invalid: custom split lengths don't sum to axis dimension (pattern should not match) ---
   func.func @test_split_invalid_sum(%data: tensor<10x64xf32>) -> (tensor<3x64xf32>, tensor<3x64xf32>, tensor<3x64xf32>) {
     %split_lengths = "onnx.Constant"() {value = dense<[3, 3, 3]> : tensor<3xi64>} : () -> tensor<3xi64>
@@ -174,6 +181,13 @@ module {
 // CHECK: tensor.extract_slice{{.*}}[0, 0] [%[[CHUNK]], 10] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[{{.*}}] [%[[CHUNK]], 10] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[{{.*}}] [%[[LAST]], 10] [1, 1]
+
+// CHECK-LABEL: func.func @test_split_i32_type
+// CHECK-NOT: onnx.Split
+// Verify i32 split lengths work (APInt handles different integer widths)
+// CHECK: tensor.extract_slice{{.*}}[0, 0] [2, 64] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [5, 64] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [3, 64] [1, 1]
 
 // CHECK-LABEL: func.func @test_split_invalid_sum
 // Validation should prevent conversion - onnx.Split should remain
