@@ -131,9 +131,10 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
         fref->file_offset = (i < fileOffsets.size()) ? fileOffsets[i] : 0;
         ci->source.Set(std::move(*fref));
       } else if (kind == 3) {
-        // Sidecar: mem-addr entry packed into HipModelMetaInfo.constants_filename
-        // at sidecar_offset by the OnnxToHip hybrid finalize. Runtime reads
-        // size bytes from that offset through the EP FileSystem.
+        // Sidecar: mem-addr entry packed into
+        // HipModelMetaInfo.constants_filename at sidecar_offset by the
+        // OnnxToHip hybrid finalize. Runtime reads size bytes from that offset
+        // through the EP FileSystem.
         auto side = std::make_unique<mlir::hip::SidecarSourceT>();
         side->sidecar_offset =
             (i < sidecarOffsets.size()) ? sidecarOffsets[i] : 0;
