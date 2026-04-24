@@ -785,15 +785,15 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
 }
 
 int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
-              const void *fc1_weights, const void *fc1_scales,
-              const void *fc1_bias, const void *fc2_weights,
-              const void *fc2_scales, const void *fc2_bias,
-              const void *fc3_weights, const void *fc3_scales,
-              const void *fc3_bias, const void *fc1_zero_points,
-              const void *fc2_zero_points, const void *fc3_zero_points,
-              void *output, int64_t num_tokens, int64_t hidden_size,
-              int64_t inter_size, int64_t num_experts, int64_t k,
-              int64_t expert_weight_bits, int64_t block_size,
+              const void *router_weights, const void *fc1_weights,
+              const void *fc1_scales, const void *fc1_bias,
+              const void *fc2_weights, const void *fc2_scales,
+              const void *fc2_bias, const void *fc3_weights,
+              const void *fc3_scales, const void *fc3_bias,
+              const void *fc1_zero_points, const void *fc2_zero_points,
+              const void *fc3_zero_points, void *output, int64_t num_tokens,
+              int64_t hidden_size, int64_t inter_size, int64_t num_experts,
+              int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
               int64_t normalize_routing_weights, int64_t elem_size) {
@@ -819,10 +819,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
              (double)swiglu_limit, (long long)normalize_routing_weights,
              (long long)elem_size);
   MOCK_PRINT("[MOCK]   fc1_bias=%s, fc2_bias=%s, fc3_weights=%s, "
-             "fc1_zp=%s, fc2_zp=%s)\n",
+             "fc1_zp=%s, fc2_zp=%s, router_weights=%s)\n",
              fc1_bias ? "yes" : "null", fc2_bias ? "yes" : "null",
              fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
-             fc2_zero_points ? "yes" : "null");
+             fc2_zero_points ? "yes" : "null", router_weights ? "yes" : "null");
 
   return 0;
 }
