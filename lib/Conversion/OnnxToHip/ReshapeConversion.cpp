@@ -356,6 +356,32 @@ struct SplitToStdTensor : public mlir::RewritePattern {
           return rewriter.notifyMatchFailure(
               op, "split lengths count must match number of outputs");
 
+        // Validate sum of splits equals axis dimension (if axis is static)
+        if (!inputType.isDynamicDim(axis)) {
+          int64_t axisDimSize = inputType.getDimSize(axis);
+          int64_t splitSum = 0;
+          for (const auto &length : splitLengths) {
+            if (auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(length)) {
+              auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
+              if (intAttr) {
+                splitSum += intAttr.getInt();
+              } else {
+                // Non-integer attribute, can't validate
+                splitSum = -1;
+                break;
+              }
+            } else {
+              // Dynamic split length, can't validate at compile time
+              splitSum = -1;
+              break;
+            }
+          }
+          if (splitSum >= 0 && splitSum != axisDimSize) {
+            return rewriter.notifyMatchFailure(
+                op, "sum of split lengths must equal axis dimension size");
+          }
+        }
+
         isEqualSplit = false;
       }
     }
@@ -376,17 +402,14 @@ struct SplitToStdTensor : public mlir::RewritePattern {
 
       // Last chunk size = axis_size - sum(previous chunks)
       // = axis_size - (num_outputs - 1) * chunkSize
-      if (numOutputs > 1) {
-        mlir::Value numPrevChunks =
-            rewriter.create<mlir::arith::ConstantIndexOp>(loc, numOutputs - 1);
-        mlir::Value prevTotal =
-            rewriter.create<mlir::arith::MulIOp>(loc, chunkSize, numPrevChunks);
-        mlir::Value lastChunkSize =
-            rewriter.create<mlir::arith::SubIOp>(loc, axisDim, prevTotal);
-        splitLengths.push_back(lastChunkSize);
-      } else {
-        splitLengths.push_back(chunkSize);
-      }
+      // Note: numOutputs is always >= 2 here (single output case returns early)
+      mlir::Value numPrevChunks =
+          rewriter.create<mlir::arith::ConstantIndexOp>(loc, numOutputs - 1);
+      mlir::Value prevTotal =
+          rewriter.create<mlir::arith::MulIOp>(loc, chunkSize, numPrevChunks);
+      mlir::Value lastChunkSize =
+          rewriter.create<mlir::arith::SubIOp>(loc, axisDim, prevTotal);
+      splitLengths.push_back(lastChunkSize);
     }
 
     // Generate extract_slice for each output
