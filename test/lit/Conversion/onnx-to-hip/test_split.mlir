@@ -77,6 +77,25 @@ module {
     %out0, %out1, %out2 = "onnx.Split"(%data, %split_lengths) {axis = 0 : si64} : (tensor<10x64xf32>, tensor<3xi64>) -> (tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>)
     return %out0, %out1, %out2 : tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>
   }
+
+  // --- Equal split with onnx.NoValue (representing none/optional) ---
+  func.func @test_split_novalue(%data: tensor<1x128x6144xf16>) -> (tensor<1x128x2048xf16>, tensor<1x128x2048xf16>, tensor<1x128x2048xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %out0, %out1, %out2 = "onnx.Split"(%data, %none) {axis = -1 : si64} : (tensor<1x128x6144xf16>, none) -> (tensor<1x128x2048xf16>, tensor<1x128x2048xf16>, tensor<1x128x2048xf16>)
+    return %out0, %out1, %out2 : tensor<1x128x2048xf16>, tensor<1x128x2048xf16>, tensor<1x128x2048xf16>
+  }
+
+  // --- Non-divisible equal split (last chunk smaller) ---
+  func.func @test_split_nondivisible(%data: tensor<1x10xf32>) -> (tensor<1x3xf32>, tensor<1x3xf32>, tensor<1x3xf32>, tensor<1x1xf32>) {
+    %out0, %out1, %out2, %out3 = "onnx.Split"(%data) {axis = 1 : si64} : (tensor<1x10xf32>) -> (tensor<1x3xf32>, tensor<1x3xf32>, tensor<1x3xf32>, tensor<1x1xf32>)
+    return %out0, %out1, %out2, %out3 : tensor<1x3xf32>, tensor<1x3xf32>, tensor<1x3xf32>, tensor<1x1xf32>
+  }
+
+  // --- Non-divisible with dynamic output (last chunk computed via subtraction) ---
+  func.func @test_split_nondivisible_dynamic(%data: tensor<?x10xf32>) -> (tensor<?x10xf32>, tensor<?x10xf32>, tensor<?x10xf32>) {
+    %out0, %out1, %out2 = "onnx.Split"(%data) {axis = 0 : si64} : (tensor<?x10xf32>) -> (tensor<?x10xf32>, tensor<?x10xf32>, tensor<?x10xf32>)
+    return %out0, %out1, %out2 : tensor<?x10xf32>, tensor<?x10xf32>, tensor<?x10xf32>
+  }
 }
 
 // CHECK-LABEL: func.func @test_split_equal_static
@@ -123,3 +142,29 @@ module {
 // CHECK: tensor.extract_slice{{.*}}[0, 0] [2, 64] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[{{.*}}] [5, 64] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[{{.*}}] [3, 64] [1, 1]
+
+// CHECK-LABEL: func.func @test_split_novalue
+// CHECK-NOT: onnx.Split
+// CHECK-NOT: onnx.NoValue
+// CHECK: tensor.extract_slice{{.*}}[0, 0, 0] [1, 128, 2048] [1, 1, 1]
+// CHECK: tensor.extract_slice
+// CHECK: tensor.extract_slice
+
+// CHECK-LABEL: func.func @test_split_nondivisible
+// CHECK-NOT: onnx.Split
+// CHECK: %[[DIM:.*]] = tensor.dim
+// CHECK: %[[CHUNK:.*]] = arith.divui %[[DIM]]
+// CHECK: tensor.extract_slice{{.*}}[0, 0] [1, 3] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [1, 3] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [1, 3] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [1, 1] [1, 1]
+
+// CHECK-LABEL: func.func @test_split_nondivisible_dynamic
+// CHECK-NOT: onnx.Split
+// CHECK: %[[DIM:.*]] = tensor.dim
+// CHECK: %[[CHUNK:.*]] = arith.divui %[[DIM]]
+// CHECK: %[[MUL:.*]] = arith.muli %[[CHUNK]]
+// CHECK: %[[LAST:.*]] = arith.subi %[[DIM]], %[[MUL]]
+// CHECK: tensor.extract_slice{{.*}}[0, 0] [%[[CHUNK]], 10] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [%[[CHUNK]], 10] [1, 1]
+// CHECK: tensor.extract_slice{{.*}}[{{.*}}] [%[[LAST]], 10] [1, 1]

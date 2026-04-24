@@ -321,35 +321,47 @@ struct SplitToStdTensor : public mlir::RewritePattern {
 
     // Determine split mode: equal splits or custom splits
     llvm::SmallVector<mlir::OpFoldResult> splitLengths;
+    bool isEqualSplit = true;
 
     if (op->getNumOperands() == 2) {
-      // Custom splits: extract split lengths from second input (must be constant)
+      // Check if second operand is onnx.NoValue (representing none/optional)
       mlir::Value splitInput = op->getOperand(1);
       auto splitDefOp = splitInput.getDefiningOp();
-      if (!splitDefOp)
-        return rewriter.notifyMatchFailure(
-            op, "split input must be defined by a constant operation");
 
-      mlir::DenseElementsAttr splitAttr;
-      if (auto constOp = mlir::dyn_cast<mlir::arith::ConstantOp>(splitDefOp))
-        splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
-      else if (splitDefOp->hasAttr("value"))
-        splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(
-            splitDefOp->getAttr("value"));
+      // Handle onnx.NoValue: treat as equal split
+      if (splitDefOp && splitDefOp->getName().getStringRef() == "onnx.NoValue") {
+        isEqualSplit = true;
+      } else {
+        // Custom splits: extract split lengths from second input (must be constant)
+        if (!splitDefOp)
+          return rewriter.notifyMatchFailure(
+              op, "split input must be defined by a constant operation");
 
-      if (!splitAttr)
-        return rewriter.notifyMatchFailure(
-            op, "split input must be a constant dense tensor");
+        mlir::DenseElementsAttr splitAttr;
+        if (auto constOp = mlir::dyn_cast<mlir::arith::ConstantOp>(splitDefOp))
+          splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
+        else if (splitDefOp->hasAttr("value"))
+          splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(
+              splitDefOp->getAttr("value"));
 
-      // Extract split lengths as index attributes
-      for (auto val : splitAttr.getValues<int64_t>())
-        splitLengths.push_back(rewriter.getIndexAttr(val));
+        if (!splitAttr)
+          return rewriter.notifyMatchFailure(
+              op, "split input must be a constant dense tensor");
 
-      if (splitLengths.size() != numOutputs)
-        return rewriter.notifyMatchFailure(
-            op, "split lengths count must match number of outputs");
-    } else {
-      // Equal splits: compute chunk size
+        // Extract split lengths as index attributes
+        for (auto val : splitAttr.getValues<int64_t>())
+          splitLengths.push_back(rewriter.getIndexAttr(val));
+
+        if (splitLengths.size() != numOutputs)
+          return rewriter.notifyMatchFailure(
+              op, "split lengths count must match number of outputs");
+
+        isEqualSplit = false;
+      }
+    }
+
+    // Handle equal splits
+    if (isEqualSplit) {
       mlir::Value axisDim =
           rewriter.create<mlir::tensor::DimOp>(loc, input, axis);
       mlir::Value numOutputsVal =
@@ -357,8 +369,24 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       mlir::Value chunkSize =
           rewriter.create<mlir::arith::DivUIOp>(loc, axisDim, numOutputsVal);
 
-      for (unsigned i = 0; i < numOutputs; ++i)
+      // For equal splits: all outputs except possibly the last have size chunkSize
+      // The last output gets the remainder: axis_size - (num_outputs-1) * chunkSize
+      for (unsigned i = 0; i < numOutputs - 1; ++i)
         splitLengths.push_back(chunkSize);
+
+      // Last chunk size = axis_size - sum(previous chunks)
+      // = axis_size - (num_outputs - 1) * chunkSize
+      if (numOutputs > 1) {
+        mlir::Value numPrevChunks =
+            rewriter.create<mlir::arith::ConstantIndexOp>(loc, numOutputs - 1);
+        mlir::Value prevTotal =
+            rewriter.create<mlir::arith::MulIOp>(loc, chunkSize, numPrevChunks);
+        mlir::Value lastChunkSize =
+            rewriter.create<mlir::arith::SubIOp>(loc, axisDim, prevTotal);
+        splitLengths.push_back(lastChunkSize);
+      } else {
+        splitLengths.push_back(chunkSize);
+      }
     }
 
     // Generate extract_slice for each output
