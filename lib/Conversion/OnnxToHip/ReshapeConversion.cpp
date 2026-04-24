@@ -353,8 +353,9 @@ struct SplitToStdTensor : public mlir::RewritePattern {
               op, "split input must be a constant dense tensor");
 
         // Extract split lengths as index attributes
-        for (auto val : splitAttr.getValues<int64_t>())
-          splitLengths.push_back(rewriter.getIndexAttr(val));
+        // Support multiple integer widths (i32, i64, etc.) using APInt
+        for (auto val : splitAttr.getValues<mlir::APInt>())
+          splitLengths.push_back(rewriter.getIndexAttr(val.getSExtValue()));
 
         if (splitLengths.size() != numOutputs)
           return rewriter.notifyMatchFailure(
