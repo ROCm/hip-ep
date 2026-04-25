@@ -93,17 +93,25 @@ struct ClipToHip : public RewritePattern {
 
   /// Try to extract a scalar f32 from an ONNX Clip min/max operand.  Both
   /// inputs are optional; missing inputs (`onnx.NoValue`) keep the default.
+  /// Accepts both onnx.Constant and the arith.constant emitted by
+  /// lowerOnnxConstants in the same conversion pass.
   static FailureOr<float> extractScalar(Value v, float defaultVal) {
     if (!v)
       return defaultVal;
     Operation *def = v.getDefiningOp();
     if (!def)
       return failure();
-    if (def->getName().getStringRef() == "onnx.NoValue")
+    StringRef name = def->getName().getStringRef();
+    if (name == "onnx.NoValue")
       return defaultVal;
-    if (def->getName().getStringRef() != "onnx.Constant")
+    ElementsAttr valueAttr;
+    if (name == "onnx.Constant") {
+      valueAttr = def->getAttrOfType<ElementsAttr>("value");
+    } else if (auto arithConst = dyn_cast<mlir::arith::ConstantOp>(def)) {
+      valueAttr = dyn_cast<ElementsAttr>(arithConst.getValue());
+    } else {
       return failure();
-    auto valueAttr = def->getAttrOfType<ElementsAttr>("value");
+    }
     if (!valueAttr)
       return failure();
     auto dense = dyn_cast<DenseElementsAttr>(valueAttr);

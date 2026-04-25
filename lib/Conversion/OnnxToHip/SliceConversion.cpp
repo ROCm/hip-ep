@@ -16,14 +16,24 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// Pull a 1-D int64 ONNX constant into a SmallVector.
+/// Pull a 1-D int64 constant into a SmallVector.  Accepts both onnx.Constant
+/// (when running in the pre-lower pass before lowerOnnxConstants has folded
+/// constants) and arith.constant (in case the pattern fires later).
 static FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
   if (!v)
     return failure();
   Operation *def = v.getDefiningOp();
-  if (!def || def->getName().getStringRef() != "onnx.Constant")
+  if (!def)
     return failure();
-  auto valueAttr = def->getAttrOfType<ElementsAttr>("value");
+  ElementsAttr valueAttr;
+  StringRef name = def->getName().getStringRef();
+  if (name == "onnx.Constant") {
+    valueAttr = def->getAttrOfType<ElementsAttr>("value");
+  } else if (auto arithConst = dyn_cast<mlir::arith::ConstantOp>(def)) {
+    valueAttr = dyn_cast<ElementsAttr>(arithConst.getValue());
+  } else {
+    return failure();
+  }
   if (!valueAttr)
     return failure();
   auto dense = dyn_cast<DenseElementsAttr>(valueAttr);

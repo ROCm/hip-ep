@@ -393,6 +393,29 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   return mlir::success();
 }
 
+/// Patterns that need to read the original onnx.Constant values out of the IR
+/// (e.g. Slice's starts/ends/steps, Clip's min/max scalars).  Run BEFORE
+/// lowerOnnxConstants so the inputs are still onnx.Constant ops with their
+/// dense value attribute attached.  After this pass runs, lowerOnnxConstants
+/// only sees constants that flow into ops which don't need them at compile
+/// time and either inlines (small) or externalizes (large) them as usual.
+static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
+                                            mlir::MLIRContext *ctx) {
+  mlir::RewritePatternSet patterns(ctx);
+  populateSliceConversionPatterns(patterns, ctx);
+  populateUnaryElementwiseConversionPatterns(patterns, ctx);
+  // Note: only the Clip pattern in UnaryElementwise actually reads constant
+  // inputs (min/max), but populating the full set here is harmless: the
+  // simple ones (Sin/Cos/...) just match-and-rewrite as they would later.
+
+  mlir::GreedyRewriteConfig config;
+  config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+  if (mlir::failed(
+          mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
+    return mlir::failure();
+  return mlir::success();
+}
+
 //===----------------------------------------------------------------------===//
 // Module metadata generation
 //===----------------------------------------------------------------------===//
@@ -564,6 +587,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
+    // Convert ops that need original onnx.Constant inputs (Slice, Clip)
+    // BEFORE we lower constants to arith.constant or externalize them.
+    if (mlir::failed(preLowerShapeOps(funcOp, ctx)))
+      return signalPassFailure();
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
