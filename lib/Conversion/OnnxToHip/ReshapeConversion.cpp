@@ -378,6 +378,29 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
     if (inRank <= outRank)
       return rewriter.notifyMatchFailure(op, "squeeze must remove dimensions");
 
+    // tensor.collapse_shape requires at least one input dim per output
+    // group, so we can't represent "rank-N -> rank-0" with it.  Emit a
+    // tensor.extract that pulls out the single element when every input
+    // dim is statically 1 (the only case where rank-0 is well-defined);
+    // for the common Kokoro pattern `tensor<?xi64> -> tensor<i64>` we
+    // have to trust that the runtime size is 1 and emit the same
+    // tensor.extract pattern with a runtime-asserted index of 0.
+    if (outRank == 0) {
+      mlir::Location loc = op->getLoc();
+      mlir::Value zero =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, 0).getResult();
+      llvm::SmallVector<mlir::Value> indices(inRank, zero);
+      mlir::Value scalar = mlir::tensor::ExtractOp::create(
+                                rewriter, loc, data, indices)
+                                .getResult();
+      // Re-wrap into rank-0 tensor.
+      mlir::Value out = mlir::tensor::FromElementsOp::create(
+                             rewriter, loc, outputType, mlir::ValueRange{scalar})
+                             .getResult();
+      rewriter.replaceOp(op, out);
+      return mlir::success();
+    }
+
     auto axesOpt =
         inferSqueezeAxesFromShapes(inputType.getShape(), outputType.getShape());
     if (!axesOpt)

@@ -33,6 +33,18 @@ static FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
     valueAttr = dyn_cast<ElementsAttr>(arithConst.getValue());
   } else if (auto toT = dyn_cast<mlir::bufferization::ToTensorOp>(def)) {
     valueAttr = toT->getAttrOfType<ElementsAttr>("hip.inline_value");
+  } else if (auto expandShape =
+                 dyn_cast<mlir::tensor::ExpandShapeOp>(def)) {
+    // Look through expand_shape of a constant scalar/1-d tensor.  Kokoro
+    // emits this for the istft slice ends (a scalar arith.constant
+    // expanded to <1xi64>).  We just extract the underlying constant
+    // values; the expand_shape preserves them.
+    return extractI64Constant(expandShape.getSrc());
+  } else if (auto collapseShape =
+                 dyn_cast<mlir::tensor::CollapseShapeOp>(def)) {
+    return extractI64Constant(collapseShape.getSrc());
+  } else if (auto castOp = dyn_cast<mlir::tensor::CastOp>(def)) {
+    return extractI64Constant(castOp.getSource());
   } else {
     return failure();
   }

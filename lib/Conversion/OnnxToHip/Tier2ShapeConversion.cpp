@@ -49,6 +49,14 @@ static FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
   } else if (auto toT =
                  dyn_cast<mlir::bufferization::ToTensorOp>(def)) {
     valueAttr = toT->getAttrOfType<ElementsAttr>("hip.inline_value");
+  } else if (auto expandShape =
+                 dyn_cast<mlir::tensor::ExpandShapeOp>(def)) {
+    return extractI64Constant(expandShape.getSrc());
+  } else if (auto collapseShape =
+                 dyn_cast<mlir::tensor::CollapseShapeOp>(def)) {
+    return extractI64Constant(collapseShape.getSrc());
+  } else if (auto castOp = dyn_cast<mlir::tensor::CastOp>(def)) {
+    return extractI64Constant(castOp.getSource());
   } else {
     return failure();
   }
@@ -331,13 +339,16 @@ struct ShapeToConstant : public RewritePattern {
                                 PatternRewriter &rewriter) const override {
     Value input = op->getOperand(0);
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
-    if (!inputType || !inputType.hasStaticShape())
+    if (!inputType)
       return rewriter.notifyMatchFailure(
-          op, "onnx.Shape lowering requires a static-shape input");
+          op, "onnx.Shape lowering requires a ranked input");
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-    if (!resultType || !resultType.hasStaticShape())
+    if (!resultType)
       return rewriter.notifyMatchFailure(
-          op, "onnx.Shape lowering requires a static-shape output");
+          op, "onnx.Shape lowering requires a ranked output");
+    if (resultType.getElementType() != rewriter.getI64Type())
+      return rewriter.notifyMatchFailure(
+          op, "onnx.Shape lowering only supports i64 result element type");
 
     int64_t rank = inputType.getRank();
     int64_t start = 0;
@@ -353,12 +364,52 @@ struct ShapeToConstant : public RewritePattern {
     start = std::clamp<int64_t>(start, 0, rank);
     end = std::clamp<int64_t>(end, start, rank);
 
-    SmallVector<int64_t> values;
-    for (int64_t i = start; i < end; ++i)
-      values.push_back(inputType.getDimSize(i));
+    Location loc = op->getLoc();
+    Type i64Type = rewriter.getI64Type();
+    Type indexType = rewriter.getIndexType();
 
-    auto attr = DenseElementsAttr::get(resultType, ArrayRef<int64_t>(values));
-    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, resultType, attr);
+    // Build the shape vector as a tensor.from_elements where each
+    // element is either a compile-time arith.constant (for static dims)
+    // or a tensor.dim cast to i64 (for dynamic dims).  This gives us
+    // dynamic-shape support without needing a runtime kernel.
+    SmallVector<Value> elems;
+    for (int64_t i = start; i < end; ++i) {
+      if (inputType.isDynamicDim(i)) {
+        Value dim =
+            mlir::tensor::DimOp::create(rewriter, loc, input, i).getResult();
+        Value casted = mlir::arith::IndexCastOp::create(rewriter, loc, i64Type,
+                                                        dim).getResult();
+        elems.push_back(casted);
+      } else {
+        Value c = mlir::arith::ConstantOp::create(
+                       rewriter, loc, i64Type,
+                       rewriter.getI64IntegerAttr(inputType.getDimSize(i)))
+                       .getResult();
+        elems.push_back(c);
+      }
+    }
+
+    int64_t outLen = static_cast<int64_t>(elems.size());
+    auto staticOutType = RankedTensorType::get({outLen}, i64Type);
+
+    Value out;
+    if (elems.empty()) {
+      // Zero-length shape (rank-0 input).  tensor.from_elements doesn't
+      // accept zero operands; use an empty arith.constant instead.
+      auto attr = DenseElementsAttr::get(staticOutType, ArrayRef<int64_t>{});
+      out = mlir::arith::ConstantOp::create(rewriter, loc, staticOutType, attr)
+                .getResult();
+    } else {
+      out = mlir::tensor::FromElementsOp::create(rewriter, loc, staticOutType,
+                                                  elems)
+                .getResult();
+    }
+
+    if (staticOutType != resultType) {
+      out = mlir::tensor::CastOp::create(rewriter, loc, resultType, out)
+                .getResult();
+    }
+    rewriter.replaceOp(op, out);
     return success();
   }
 };

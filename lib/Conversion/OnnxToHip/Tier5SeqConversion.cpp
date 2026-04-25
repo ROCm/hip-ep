@@ -28,6 +28,14 @@ static FailureOr<int64_t> extractScalarI64(Value v) {
     valueAttr = def->getAttrOfType<ElementsAttr>("value");
   } else if (auto arithConst = dyn_cast<mlir::arith::ConstantOp>(def)) {
     valueAttr = dyn_cast<ElementsAttr>(arithConst.getValue());
+  } else if (auto toT = dyn_cast<mlir::bufferization::ToTensorOp>(def)) {
+    valueAttr = toT->getAttrOfType<ElementsAttr>("hip.inline_value");
+  } else if (auto expandShape = dyn_cast<mlir::tensor::ExpandShapeOp>(def)) {
+    return extractScalarI64(expandShape.getSrc());
+  } else if (auto collapseShape = dyn_cast<mlir::tensor::CollapseShapeOp>(def)) {
+    return extractScalarI64(collapseShape.getSrc());
+  } else if (auto castOp = dyn_cast<mlir::tensor::CastOp>(def)) {
+    return extractScalarI64(castOp.getSource());
   } else {
     return failure();
   }

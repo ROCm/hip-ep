@@ -60,15 +60,16 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
   int64_t rank = inputType.getRank();
-  if (rank != static_cast<int64_t>(permAttr.size()) ||
-      rank != resultType.getRank())
-    return rewriter.notifyMatchFailure(op, "perm size != tensor rank");
-  // Rank-0 transpose: forward the input unchanged (scalar permutation
-  // is the identity).
-  if (rank == 0) {
+  // Rank-0 transpose: forward the input unchanged regardless of the perm
+  // size.  Kokoro's iSTFTNet noise path emits a rank-0 onnx.Transpose with
+  // perm=[0,2,1,3] (dead code, but the conversion has to accept it).
+  if (rank == 0 && resultType.getRank() == 0) {
     rewriter.replaceOp(op, data);
     return mlir::success();
   }
+  if (rank != static_cast<int64_t>(permAttr.size()) ||
+      rank != resultType.getRank())
+    return rewriter.notifyMatchFailure(op, "perm size != tensor rank");
 
   // Materialize the original input dim sizes once; we pull from this when
   // building intermediate empties.

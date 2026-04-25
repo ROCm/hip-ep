@@ -460,10 +460,7 @@ void mlir::hip::populateTier6ConversionPatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx) {
   patterns.add<PadToHip>(ctx);
   patterns.add<ExpandToHip>(ctx);
-  // RangeToHip is disabled because the dynamic-length output case
-  // crashes the greedy rewriter -- still investigating; for now the
-  // 2 surviving Kokoro Range ops fall through to the bufferize gap.
-  // patterns.add<RangeToHip>(ctx);
+  patterns.add<RangeToHip>(ctx);
   patterns.add<ConvTransposeToHip>(ctx);
   patterns.add<ResizeToHip>(ctx);
 }
