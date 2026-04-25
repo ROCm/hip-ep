@@ -292,9 +292,10 @@ patterns + lowering + HIP kernels, except for the 8 listed below):**
   codegen, runtime bitcode, and HIP custom kernels are all wired up
   correctly end-to-end.
 
-**Kokoro: ConvertOnnxToHipPass now succeeds in 0.007 s.**  Of the
-1768 onnx ops in the polygraphy-static Kokoro graph, only **34
-remain after conversion** (~2%).  All blocking issues from the
+**Kokoro: ConvertOnnxToHipPass now succeeds in 0.007 s** and removes
+**1747 of the 1768 onnx ops** (98.8%).  The runtime cost of the whole
+ConvertOnnxToHipPass (constants + compute) is ~0.5 s; bufferize +
+the LLVM passes are sub-100 ms each.  All blocking issues from the
 previous snapshot have been worked around:
 
 - Dynamic-shape bridge: `morphizen` now emits `ShapedType::kDynamic`
@@ -308,41 +309,61 @@ previous snapshot have been worked around:
   (Add/Mul/Sub/Pow/Div/Where/Compare), arbitrary permutations
   decomposed into 2-swap chains (Transpose), shape-based axes
   inference (Unsqueeze/Squeeze) so they no longer need a constant
-  axes operand, and contiguous-tail relaxation (ReduceMean) for
-  dynamic input shapes.
+  axes operand, contiguous-tail relaxation (ReduceMean) for dynamic
+  input shapes, and dropping of dangling `onnx.NoValue` placeholders.
+- Tier 6 ops: `hip.pad`, `hip.expand`, `hip.conv_transpose`,
+  `hip.resize` exist in the dialect with DPS+effects, bufferize
+  registration, and conversion patterns.  `hip.range` exists too,
+  but the conversion pattern is gated off pending a fix for a greedy-
+  rewriter crash on dynamic-rank-1 outputs.
 
-| Surviving onnx ops (34 / 1768 = 1.9%) | nodes |
+| Surviving onnx ops (21 / 1768 = 1.2%) | nodes |
 |---|---|
 | LSTM | 6 |
-| Resize | 6 |
-| ConvTranspose | 6 |
-| Expand | 3 |
 | Shape (dynamic input dims) | 3 |
-| Range (dynamic limit) | 2 |
-| Pad | 2 |
-| Slice (dynamic ends operand) | 2 |
+| Range (gated-off pattern; rank-1 dynamic output) | 2 |
+| Pad (`pads` operand externalised behind to_tensor) | 2 |
+| Slice (dynamic `ends` from a runtime expand_shape) | 2 |
 | STFT | 1 |
-| Transpose (rank-0 with rank-4 perm — malformed Kokoro op) | 1 |
-| Squeeze (dynamic dim collapse to scalar) | 1 |
+| Transpose (rank-0 input with rank-4 perm — Kokoro dead code) | 1 |
+| Squeeze (rank-1 dynamic → scalar) | 1 |
 | NonZero | 1 |
 | ScatterND | 1 |
-| NoValue (LayerNorm `bias=none` placeholder) | 1 |
+| NoValue (kept because LayerNorm pattern still consumes the use) | 1 |
 
-**Next blocker: bufferization fails on those 34 surviving onnx ops**
-because there are no buffer interface models for them.  To get
-Kokoro all the way through to a model DLL the remaining work is:
+**Next blocker: bufferization fails on those 21 surviving onnx ops**
+plus the new hip ops still need their LLVM lowering and runtime
+kernels.  Concrete remaining work:
 
-1. Implement LSTM (MIOpen RNN), ConvTranspose (extend Conv with
-   transposed mode), STFT (rocFFT), Pad (custom HIP), Resize (custom
-   HIP), Expand (broadcast), NonZero (data-dependent output shape),
-   ScatterND (gather-scatter).
-2. Add a `hip.range` runtime op for the dynamic-limit Range cases.
-3. Make `onnx.Shape` emit a `tensor.from_elements` mix of static
-   constants + `tensor.dim` so it works with dynamic input dims.
-4. Decide whether the rank-0 `onnx.Transpose` with rank-4 perm
-   (dead code in Kokoro's iSTFTNet noise path) should be folded out
-   in a pre-pass or accepted by relaxing the perm-rank check.
-5. Drop `onnx.NoValue` in `lowerOnnxConstants`.
+1. **LLVM lowering + runtime kernels** for `hip.pad`, `hip.expand`,
+   `hip.conv_transpose`, `hip.resize`.  Each follows the existing
+   pattern: `wrap_*` runtime fn in `lib/Runtime/real/`, HIP kernel in
+   `3rd-party/custom_kernels/hip/`, ConvertOpToLLVMPattern in
+   `lib/Conversion/HipToLLVM/Tier6Lowering.cpp`, populated by
+   `populateTier6LoweringPatterns`.
+2. **LSTM (6 nodes)** -- `hip.lstm` op + MIOpen RNN descriptor wiring,
+   ONNX-to-MIOpen weight permutation, hidden-state and cell-state
+   handling.  Most complex piece; budget ~3-5 days.
+3. **STFT (1 node)** -- `hip.stft` op backed by rocFFT.
+4. **NonZero (1 node)** -- data-dependent output shape; needs the
+   runtime to allocate based on the kernel result count.
+5. **ScatterND (1 node)** -- gather-scatter HIP kernel.
+6. **`hip.range` final pattern** -- replace the `tensor.empty %c1`
+   placeholder with a real dynamic-shape allocation handshake so the
+   greedy rewriter doesn't crash on rank-1 dynamic outputs.
+7. **`onnx.Shape` for dynamic input dims** -- emit a
+   `tensor.from_elements` of static constants + `tensor.dim` instead
+   of folding to a single `arith.constant`.
+8. **Slice/Pad with externalised constant operands** -- either bump
+   `kDefaultExternalizeMinNumElements` to inline tiny shape
+   constants (the previous attempt at threshold=8/16/64 caused
+   downstream heap corruption -- needs proper investigation), or
+   round-trip a `hip.inline_value` attribute through to_tensor
+   without the `getFromRawBuffer` heap corruption seen in this
+   session.
+9. **Tiny edge cases:** rank-0 onnx.Transpose with rank-4 perm
+   (dead code in Kokoro's iSTFTNet noise path -- relax perm-rank
+   check or fold out in a pre-pass).
 
 Phase G (lemondate integration) is on hold until bufferization
 clears.  The shim, env vars, and abstract `--backend onnx-ep`
