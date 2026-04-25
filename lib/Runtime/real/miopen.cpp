@@ -130,7 +130,7 @@ int wrap_miopenConvolutionForward(
   int returned_algo_count = 0;
   miopenConvFwdAlgorithm_t algo;
   size_t workspace_size = 0;
-  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
+  const size_t find_workspace_size = 256 * 1024 * 1024; // 256MB
   float alpha = 1.0f;
   float beta = 0.0f;
 
