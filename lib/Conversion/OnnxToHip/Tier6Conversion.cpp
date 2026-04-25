@@ -460,7 +460,13 @@ void mlir::hip::populateTier6ConversionPatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx) {
   patterns.add<PadToHip>(ctx);
   patterns.add<ExpandToHip>(ctx);
-  patterns.add<RangeToHip>(ctx);
+  // RangeToHip currently disabled while we triage a greedy-rewriter
+  // heap-corruption that surfaces ~50 events into convertComputeOps on
+  // Kokoro.  The 2 Range ops fall through to the bufferize gap until
+  // we figure out which of (a) the dynamic-rank-1 tensor.empty
+  // placeholder, (b) the new LSTM populate, (c) something else
+  // sibling-agent-introduced is the culprit.
+  // patterns.add<RangeToHip>(ctx);
   patterns.add<ConvTransposeToHip>(ctx);
   patterns.add<ResizeToHip>(ctx);
 }
