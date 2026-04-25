@@ -41,19 +41,9 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     int rank = inMemRef.getRank();
     MemRefDescriptor inputDesc(adaptor.getInput());
 
-    // All ranks: use the generic hip_transpose_nd kernel.  (The
-    // legacy `hip_transpose` symbol has no runtime implementation
-    // anywhere in the tree, so any model exercising the previous
-    // rank-<=3 path would fail to link.  Route everything through the
-    // new kernel.)
-    //
-    // Stride computation is done inside the kernel from the input
-    // shape, so we pass an i64* of in_shape on the stack.
     int64_t dataType = getHipdnnDataType(inMemRef.getElementType());
     if (dataType < 0)
       return op.emitOpError("hip.transpose unsupported element type");
-    // Map HIPDNN_EP_DATATYPE_* to HIP_DTYPE_* (same mapping the
-    // runtime wrappers use).  See lib/Runtime/real/cumsum.cpp.
     int hipDtype = -1;
     switch (dataType) {
     case 0: hipDtype = 0; break; // FLOAT -> FLOAT32
@@ -65,6 +55,7 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
       return op.emitOpError("hip.transpose unsupported runtime element type");
     }
 
+    // Stack-allocate in_shape[rank] and fill from memref descriptor.
     auto arrayType = LLVM::LLVMArrayType::get(i64Type, rank);
     Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                             rewriter.getI64IntegerAttr(1));
@@ -72,7 +63,6 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
                                            oneI64, /*alignment=*/8);
     for (int i = 0; i < rank; ++i) {
       Value sz = inputDesc.size(rewriter, loc, i);
-      // Cast index -> i64 if needed.
       if (sz.getType() != i64Type)
         sz = LLVM::ZExtOp::create(rewriter, loc, i64Type, sz);
       SmallVector<LLVM::GEPArg, 2> idx = {0, static_cast<int32_t>(i)};
@@ -81,32 +71,39 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
       LLVM::StoreOp::create(rewriter, loc, sz, elemPtr);
     }
 
-    SmallVector<Type> paramTypesNd = {ptrType, ptrType, ptrType, i32Type,
-                                       ptrType, i32Type, i32Type, i32Type};
-    FailureOr<LLVM::LLVMFuncOp> funcOpNd = LLVM::lookupOrCreateFn(
-        rewriter, module, "hip_transpose_nd", paramTypesNd, i32Type);
-    if (failed(funcOpNd))
+    // Call wrap_transpose(state, input, output, rank, in_shape, dim0,
+    //                     dim1, hip_dtype) -- goes through runtime
+    // bitcode so the GPU kernel launches from the EP DLL context where
+    // __hipRegisterFunction has already run.
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                     ptrType, i64Type, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, "wrap_transpose", paramTypes, i32Type);
+    if (failed(funcOp))
       return failure();
-    Value rankI32 = LLVM::ConstantOp::create(rewriter, loc, i32Type,
-                                              rewriter.getI32IntegerAttr(rank));
-    // dim0 / dim1 come in as `index`; truncate to i32.
-    Value dim0I32 = LLVM::TruncOp::create(rewriter, loc, i32Type,
-                                           adaptor.getDim0());
-    Value dim1I32 = LLVM::TruncOp::create(rewriter, loc, i32Type,
-                                           adaptor.getDim1());
-    Value dtypeI32 =
-        LLVM::ConstantOp::create(rewriter, loc, i32Type,
-                                 rewriter.getI32IntegerAttr(hipDtype));
+
+    Value rankI64 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                              rewriter.getI64IntegerAttr(rank));
+    Value dim0I64 = adaptor.getDim0();
+    Value dim1I64 = adaptor.getDim1();
+    if (dim0I64.getType() != i64Type)
+      dim0I64 = LLVM::ZExtOp::create(rewriter, loc, i64Type, dim0I64);
+    if (dim1I64.getType() != i64Type)
+      dim1I64 = LLVM::ZExtOp::create(rewriter, loc, i64Type, dim1I64);
+    Value dtypeI64 =
+        LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                 rewriter.getI64IntegerAttr(hipDtype));
+
     SmallVector<Value> args = {
         adaptor.getCtx(),
         extractMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
-        rankI32,
+        rankI64,
         alloca,
-        dim0I32,
-        dim1I32,
-        dtypeI32};
-    LLVM::CallOp::create(rewriter, loc, *funcOpNd, args);
+        dim0I64,
+        dim1I64,
+        dtypeI64};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
   }

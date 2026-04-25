@@ -254,6 +254,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/expand.cpp runtime_expand.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/conv_transpose.cpp runtime_conv_transpose.bc)
+    compile_to_bitcode(real/transpose.cpp runtime_transpose.bc)
     compile_to_bitcode(real/runtime_stubs.cpp runtime_stubs.bc)
 
     set(RUNTIME_BC_MODULES
@@ -297,6 +298,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_expand.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv_transpose.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_transpose.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_stubs.bc
     )
 else()
