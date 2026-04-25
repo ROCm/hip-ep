@@ -235,6 +235,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateTier3CompareLoweringPatterns(typeConverter, patterns);
   populateTier5SeqLoweringPatterns(typeConverter, patterns);
   populateExpandLoweringPatterns(typeConverter, patterns);
+  populateResizeLoweringPatterns(typeConverter, patterns);
   populateTier6LoweringPatterns(typeConverter, patterns);
 
   // Standard dialect lowerings

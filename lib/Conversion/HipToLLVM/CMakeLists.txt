@@ -31,6 +31,7 @@ add_library(HipToLLVM STATIC
   Tier5SeqLowering.cpp
   Tier6Lowering.cpp
   ExpandLowering.cpp
+  ResizeLowering.cpp
 )
 
 add_dependencies(HipToLLVM

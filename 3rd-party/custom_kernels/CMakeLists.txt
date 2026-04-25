@@ -51,6 +51,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
     hip/expand_kernel.hip
+    hip/resize_kernel.hip
     hip/nonzero_kernel.hip
     hip/scatter_nd_kernel.hip
     INCLUDE_DIRECTORIES
