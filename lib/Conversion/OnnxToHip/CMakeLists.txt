@@ -22,6 +22,9 @@ add_library(OnnxToHip STATIC
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
+  UnaryElementwiseConversion.cpp
+  BinaryElementwiseConversion.cpp
+  SliceConversion.cpp
 )
 
 add_dependencies(OnnxToHip

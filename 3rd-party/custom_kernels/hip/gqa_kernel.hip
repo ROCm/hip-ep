@@ -799,11 +799,12 @@ extern "C" int hip_gqa_softmax_inplace(
 // WMMA types for fused kernels (RDNA 3 / 3.5, wave32)
 //===----------------------------------------------------------------------===//
 
-static constexpr int kWmmaTile = 16;  // RDNA 3 WMMA tile dimension (16x16x16)
+#include "wmma_frag.h"
 
-typedef _Float16 half16 __attribute__((ext_vector_type(16)));
-typedef float    float8 __attribute__((ext_vector_type(8)));
-#define HALF16(pointer) (reinterpret_cast<half16*>((void *)&(pointer))[0])
+static constexpr int kWmmaTile = WMMA_TILE_K;  // 16x16x16 WMMA tile
+
+typedef hip_half16 half16;  // legacy alias for the few raw <16 x fp16> uses
+typedef hip_float8 float8;
 
 //===----------------------------------------------------------------------===//
 // Fused GQA Decode Kernel (sq == 1, d in {64, 128, 256})
@@ -994,18 +995,26 @@ fused_gqa_prefill_kernel(
 
             for (int tj_off = 0; tj_off < TILES_PER_WAVE; ++tj_off) {
                 int sj = s_tile_j_base + tj_off;
-                float8 s_frag = {};
+                hip_float8 s_frag = {};
                 for (int tk = 0; tk < D / 16; tk += 2) {
-                    half16 q0 = HALF16(Q_lds[(s_tile_i * 16 + wmma_lane) * DSTR + tk * 16]);
-                    half16 k0 = HALF16(K_buf[(sj * 16 + wmma_lane) * DSTR + tk * 16]);
-                    half16 q1 = HALF16(Q_lds[(s_tile_i * 16 + wmma_lane) * DSTR + (tk + 1) * 16]);
-                    half16 k1 = HALF16(K_buf[(sj * 16 + wmma_lane) * DSTR + (tk + 1) * 16]);
-                    s_frag = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(q0, k0, s_frag);
-                    s_frag = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(q1, k1, s_frag);
+                    const _Float16* q0_ptr =
+                        &Q_lds[(s_tile_i * 16 + wmma_lane) * DSTR + tk * 16];
+                    const _Float16* k0_ptr =
+                        &K_buf[(sj * 16 + wmma_lane) * DSTR + tk * 16];
+                    const _Float16* q1_ptr =
+                        &Q_lds[(s_tile_i * 16 + wmma_lane) * DSTR + (tk + 1) * 16];
+                    const _Float16* k1_ptr =
+                        &K_buf[(sj * 16 + wmma_lane) * DSTR + (tk + 1) * 16];
+                    wmma_ab_frag_t q0 = hip_wmma_load_ab_row(q0_ptr, pair);
+                    wmma_ab_frag_t k0 = hip_wmma_load_ab_row(k0_ptr, pair);
+                    wmma_ab_frag_t q1 = hip_wmma_load_ab_row(q1_ptr, pair);
+                    wmma_ab_frag_t k1 = hip_wmma_load_ab_row(k1_ptr, pair);
+                    s_frag = hip_wmma_f32_16x16x16_f16(q0, k0, s_frag);
+                    s_frag = hip_wmma_f32_16x16x16_f16(q1, k1, s_frag);
                 }
 
                 for (int ele = 0; ele < 8; ++ele) {
-                    int r = s_tile_i * 16 + ele * 2 + pair;
+                    int r = s_tile_i * 16 + hip_wmma_cd_row(ele, pair);
                     int c = sj * 16 + wmma_lane;
                     S_lds[r * S_STR + c] = s_frag[ele] * scale;
                 }
@@ -1071,30 +1080,35 @@ fused_gqa_prefill_kernel(
 
         for (int t = 0; t < 4; ++t) {
             for (int ele = 0; ele < 8; ++ele) {
-                int r = o_tile_i * 16 + ele * 2 + pair;
+                int r = o_tile_i * 16 + hip_wmma_cd_row(ele, pair);
                 O_frag[t][ele] *= ml_lds[r * 3 + 2];
             }
         }
 
         {
+            constexpr int AB_SLOTS = hip_wmma_ab_slots();
             for (int tj_off = 0; tj_off < 4; ++tj_off) {
                 int tj = o_tile_j_base + tj_off;
 
                 for (int tk = 0; tk < BKV / 16; tk += 2) {
-                    half16 p0 = HALF16(P_lds[(o_tile_i * 16 + wmma_lane) * P_STR + tk * 16]);
-                    half16 v0;
-                    for (int e = 0; e < 16; ++e)
-                        v0[e] = V_buf[(tk * 16 + e) * DSTR + tj * 16 + wmma_lane];
+                    const _Float16* p0_ptr =
+                        &P_lds[(o_tile_i * 16 + wmma_lane) * P_STR + tk * 16];
+                    const _Float16* p1_ptr =
+                        &P_lds[(o_tile_i * 16 + wmma_lane) * P_STR + (tk + 1) * 16];
+                    wmma_ab_frag_t p0 = hip_wmma_load_ab_row(p0_ptr, pair);
+                    wmma_ab_frag_t p1 = hip_wmma_load_ab_row(p1_ptr, pair);
 
-                    half16 p1 = HALF16(P_lds[(o_tile_i * 16 + wmma_lane) * P_STR + (tk + 1) * 16]);
-                    half16 v1;
-                    for (int e = 0; e < 16; ++e)
-                        v1[e] = V_buf[((tk + 1) * 16 + e) * DSTR + tj * 16 + wmma_lane];
+                    wmma_ab_frag_t v0;
+                    wmma_ab_frag_t v1;
+#pragma unroll
+                    for (int e = 0; e < AB_SLOTS; ++e) {
+                        int kk = hip_wmma_ab_k_for_element(e, pair);
+                        v0[e] = V_buf[(tk * 16 + kk) * DSTR + tj * 16 + wmma_lane];
+                        v1[e] = V_buf[((tk + 1) * 16 + kk) * DSTR + tj * 16 + wmma_lane];
+                    }
 
-                    O_frag[tj_off] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
-                        p0, v0, O_frag[tj_off]);
-                    O_frag[tj_off] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
-                        p1, v1, O_frag[tj_off]);
+                    O_frag[tj_off] = hip_wmma_f32_16x16x16_f16(p0, v0, O_frag[tj_off]);
+                    O_frag[tj_off] = hip_wmma_f32_16x16x16_f16(p1, v1, O_frag[tj_off]);
                 }
             }
         }
@@ -1122,7 +1136,7 @@ fused_gqa_prefill_kernel(
     for (int t = 0; t < 4; ++t) {
         int tj = o_tile_j_base + t;
         for (int ele = 0; ele < 8; ++ele) {
-            int r = o_tile_i * 16 + ele * 2 + pair;
+            int r = o_tile_i * 16 + hip_wmma_cd_row(ele, pair);
             int c = tj * 16 + wmma_lane;
             int q_pos = q_start + r;
             if (q_pos < sq && c < D) {

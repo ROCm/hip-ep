@@ -59,6 +59,9 @@ inline constexpr const char *kWrapMiopenOpTensor =
     "wrap_miopenOpTensor"; // hip.mul, hip.add (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
 inline constexpr const char *kWrapPower = "wrap_power";
+inline constexpr const char *kWrapElementwiseUnary = "wrap_elementwise_unary";
+inline constexpr const char *kWrapElementwiseBinary = "wrap_elementwise_binary";
+inline constexpr const char *kWrapSlice = "wrap_slice";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -252,6 +255,12 @@ void populateCausalConvWithStateLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateUnaryElementwiseLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateBinaryElementwiseLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

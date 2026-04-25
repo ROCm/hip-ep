@@ -579,6 +579,48 @@ void SqrtOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// UnaryElementwiseOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange UnaryElementwiseOp::getDpsInitsMutable() {
+  return getYMutable();
+}
+
+void UnaryElementwiseOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// BinaryElementwiseOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange BinaryElementwiseOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void BinaryElementwiseOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SliceOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SliceOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void SliceOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SubOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 

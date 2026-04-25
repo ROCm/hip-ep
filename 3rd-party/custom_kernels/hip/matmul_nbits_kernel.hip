@@ -572,10 +572,46 @@ __global__ void dequant_u4_to_fp16(
 
 /* =======================================================================
  * Section 2b: WMMA kernel (supports both fused dequant and fp16 B)
+ *
+ * Two register / lane layouts are supported:
+ *
+ *   - RDNA3 (gfx11xx):   A,B fragments are <16 x fp16> per lane and the
+ *     lower half-wave (lanes 0-15) is replicated into the upper half-wave
+ *     (lanes 16-31).  Builtin: __builtin_amdgcn_wmma_f32_16x16x16_f16_w32.
+ *
+ *   - RDNA4 (gfx1200/gfx1201): A,B fragments are <8 x fp16> per lane.
+ *     No half-wave replication: lanes 0-15 hold K = {0,1,2,3,8,9,10,11}
+ *     and lanes 16-31 hold K = {4,5,6,7,12,13,14,15}.  Builtin:
+ *     __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12.
+ *
+ * Both layouts use a <8 x f32> accumulator per lane, but the row mapping
+ * differs:
+ *   - RDNA3: row r = e * 2 + sub,  sub = lid / 16, e in [0,8)
+ *   - RDNA4: row r = e + 8 * sub
+ *
+ * The mappings are derived from the AMD Matrix Instruction Calculator
+ * (https://github.com/ROCm/amd_matrix_instruction_calculator) for
+ * `v_wmma_f32_16x16x16_f16` on rdna3 / rdna4 with no modifiers.
  * ======================================================================= */
 
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
+typedef _Float16 half8  __attribute__((ext_vector_type(8)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
+
+// Per-arch dispatch.  The __gfx12NN__ macros are predefined by clang/HIP
+// when compiling for the corresponding offload arch, so this branch is
+// chosen separately for every --offload-arch value.
+#if defined(__gfx1200__) || defined(__gfx1201__)
+#define HIP_WMMA_GFX12 1
+#else
+#define HIP_WMMA_GFX12 0
+#endif
+
+#if HIP_WMMA_GFX12
+typedef half8 wmma_ab_frag_t;
+#else
+typedef half16 wmma_ab_frag_t;
+#endif
 
 #define WMMA_TILE 16
 
@@ -783,34 +819,67 @@ void GemmFp16U4Impl(
 #pragma unroll
         for(int ks = 0; ks < K_STEPS; ks++)
         {
-            half16 b_frag[WT_N];
+            wmma_ab_frag_t b_frag[WT_N];
 #pragma unroll
             for(int wn = 0; wn < WT_N; wn++)
             {
                 int noff              = (wcol * WT_N + wn) * WMMA_TILE;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
+#if HIP_WMMA_GFX12
+                // RDNA4 layout: lane (j + 16*sub) holds B[k][j] for
+                // k in {4*sub, 4*sub+1, 4*sub+2, 4*sub+3,
+                //       8+4*sub, 9+4*sub, 10+4*sub, 11+4*sub}.
+                // Load 4 dwords (8 fp16) from two 4-element K spans.
+                const uint32_t* src_lo = reinterpret_cast<const uint32_t*>(
+                    &smB[buf][noff + lane][ks * WMMA_TILE + 4 * sub]);
+                const uint32_t* src_hi = reinterpret_cast<const uint32_t*>(
+                    &smB[buf][noff + lane][ks * WMMA_TILE + 8 + 4 * sub]);
+                dst[0] = src_lo[0];
+                dst[1] = src_lo[1];
+                dst[2] = src_hi[0];
+                dst[3] = src_hi[1];
+#else
+                // RDNA3 layout: lane i and lane i+16 are replicated; each
+                // lane holds the full 16-element K block for column lane.
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
                     &smB[buf][noff + lane][ks * WMMA_TILE]);
 #pragma unroll
                 for(int i = 0; i < 8; i++)
                     dst[i] = src[i];
+#endif
             }
 #pragma unroll
             for(int wm = 0; wm < WT_M; wm++)
             {
                 int moff              = (wrow * WT_M + wm) * WMMA_TILE;
-                half16 a_frag;
+                wmma_ab_frag_t a_frag;
                 uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
+#if HIP_WMMA_GFX12
+                const uint32_t* src_lo = reinterpret_cast<const uint32_t*>(
+                    &smA[buf][moff + lane][ks * WMMA_TILE + 4 * sub]);
+                const uint32_t* src_hi = reinterpret_cast<const uint32_t*>(
+                    &smA[buf][moff + lane][ks * WMMA_TILE + 8 + 4 * sub]);
+                dst[0] = src_lo[0];
+                dst[1] = src_lo[1];
+                dst[2] = src_hi[0];
+                dst[3] = src_hi[1];
+#else
                 const uint32_t* src   = reinterpret_cast<const uint32_t*>(
                     &smA[buf][moff + lane][ks * WMMA_TILE]);
 #pragma unroll
                 for(int i = 0; i < 8; i++)
                     dst[i] = src[i];
+#endif
 
 #pragma unroll
                 for(int wn = 0; wn < WT_N; wn++)
+#if HIP_WMMA_GFX12
+                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                        a_frag, b_frag[wn], acc[wm][wn]);
+#else
                     acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
                         a_frag, b_frag[wn], acc[wm][wn]);
+#endif
             }
         }
     };
@@ -842,7 +911,17 @@ void GemmFp16U4Impl(
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
+#if HIP_WMMA_GFX12
+                // RDNA4 wave32 layout: each lane (j + 16*sub) holds rows
+                // [0..7] when sub=0 and rows [8..15] when sub=1, so element
+                // e of the float8 accumulator is matrix row e + 8*sub.
+                int r = e + 8 * sub;
+#else
+                // RDNA3 wave32 layout: rows are interleaved across the two
+                // half-waves; element e of the float8 accumulator is
+                // matrix row e*2 + sub.
                 int r = e * 2 + sub;
+#endif
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         __builtin_nontemporal_store((_Float16)acc[wm][wn][e],

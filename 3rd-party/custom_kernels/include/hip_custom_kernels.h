@@ -109,6 +109,118 @@ int hip_elementwise_sqrt(
     int hip_dtype);
 
 /* =========================================================================
+ * Generic Element-wise Unary
+ * =========================================================================
+ *
+ * Dispatches one of the ONNX unary ops listed below over `num_elements`
+ * elements.  All math is done in fp32 internally; half/bf16 inputs are
+ * promoted and the result is narrowed back.
+ *
+ *   HIP_UNARY_SIN, HIP_UNARY_COS, HIP_UNARY_EXP, HIP_UNARY_TANH,
+ *   HIP_UNARY_FLOOR, HIP_UNARY_ROUND (round-half-to-even),
+ *   HIP_UNARY_ATAN, HIP_UNARY_LEAKY_RELU (alpha), HIP_UNARY_CLIP (min, max)
+ *
+ * `alpha` and `beta` carry op-specific scalars and are ignored otherwise:
+ *   - LeakyRelu: alpha = negative slope, beta unused
+ *   - Clip:      alpha = min, beta = max
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+typedef enum {
+    HIP_UNARY_SIN        = 0,
+    HIP_UNARY_COS        = 1,
+    HIP_UNARY_EXP        = 2,
+    HIP_UNARY_TANH       = 3,
+    HIP_UNARY_FLOOR      = 4,
+    HIP_UNARY_ROUND      = 5,
+    HIP_UNARY_ATAN       = 6,
+    HIP_UNARY_LEAKY_RELU = 7,
+    HIP_UNARY_CLIP       = 8,
+} hip_unary_kind_t;
+
+int hip_elementwise_unary(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype,
+    int kind,
+    float alpha,
+    float beta);
+
+/* =========================================================================
+ * Generic Element-wise Binary (with broadcasting)
+ * =========================================================================
+ *
+ * Dispatches one of the ONNX binary ops listed below over `num_elements`
+ * output elements.  `out_shape`, `lhs_strides_elems`, and `rhs_strides_elems`
+ * describe the broadcast layout:
+ *   - `out_shape` has length `rank` and gives the shape of the output tensor.
+ *   - Each stride array has length `rank` and gives the lhs/rhs stride (in
+ *     elements) per output dimension.  A stride of 0 along an axis means
+ *     "broadcast that axis from a single source value".
+ *
+ * Up to HIP_BINARY_MAX_RANK (8) is supported; the host-side wrapper is
+ * expected to left-pad lower-rank operands with size-1 dims.
+ *
+ *   HIP_BINARY_DIV (a / b), HIP_BINARY_POW (powf(a, b))
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
+ * Returns: 0 on success, non-zero on failure
+ */
+typedef enum {
+    HIP_BINARY_DIV = 0,
+    HIP_BINARY_POW = 1,
+} hip_binary_kind_t;
+
+int hip_elementwise_binary(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* out,
+    int64_t num_elements,
+    int hip_dtype,
+    int kind,
+    int rank,
+    const int64_t* out_shape,
+    const int64_t* lhs_strides_elems,
+    const int64_t* rhs_strides_elems);
+
+/* =========================================================================
+ * Strided Slice
+ * =========================================================================
+ *
+ * ONNX Slice (opset 13).  Produces `num_elements` output elements by gathering
+ * from `input` at offsets:
+ *
+ *   in_off = sum_d  (starts[d] + out_idx[d] * step[d]) * in_stride[d]
+ *
+ * The host-side wrapper folds `step` into `in_strides_elems` so this kernel
+ * only sees:
+ *   - `out_shape[d]`        : output extent along axis d
+ *   - `in_strides_elems[d]` : input stride per **output** step along axis d
+ *                              (= original input stride * step)
+ *   - `starts_elems[d]`     : per-axis input offset for the first output
+ *                              element (already step-corrected)
+ *
+ * Supported element sizes: 1, 2, 4, 8 bytes (covers f16, bf16, f32, i64,
+ * etc.).  Up to 8 dimensions.
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_slice(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int element_size_bytes,
+    int rank,
+    const int64_t* out_shape,
+    const int64_t* in_strides_elems,
+    const int64_t* starts_elems);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

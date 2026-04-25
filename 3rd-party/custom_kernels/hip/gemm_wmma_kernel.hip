@@ -7,11 +7,9 @@
 #include <hip/hip_fp16.h>
 
 #include "hip_custom_kernels.h"
+#include "wmma_frag.h"
 
-typedef _Float16 half16 __attribute__((ext_vector_type(16)));
-typedef float float8 __attribute__((ext_vector_type(8)));
-
-static constexpr int kWmmaTile = 16;  // RDNA 3 WMMA tile dimension (16x16x16)
+static constexpr int kWmmaTile = WMMA_TILE_K;
 
 //===----------------------------------------------------------------------===//
 // WMMA GEMM kernel for small-M fp16 MatMuls (M <= 512)
@@ -19,23 +17,10 @@ static constexpr int kWmmaTile = 16;  // RDNA 3 WMMA tile dimension (16x16x16)
 //
 // Computes C[M,N] = A[M,K] * B[K,N]  (all row-major, fp16, fp32 accumulation)
 //
-// Uses __builtin_amdgcn_wmma_f32_16x16x16_f16_w32 for hardware-accelerated
-// 16x16x16 tile multiply-accumulate on RDNA 3+.
-//
-// Register-tiled: each wavefront computes a (KX*16) x (KY*16) output tile.
-// KX A fragments are each reused KY times; KY B fragments each reused KX times.
-// Grid: (ceil(N/(KY*16)), ceil(M/(KX*16)))
-//
-// WMMA fragment layout (wave32, per AMD GPUOpen / tinygrad / GQA kernel):
-//   a_frag (half16): a_frag[k] at lane m = A_tile[m, k]
-//                     lane = M-row, element = K-col
-//   b_frag (half16): b_frag[k] at lane n = B_tile[k, n]
-//                     element = K-row, lane = N-col
-//   c_frag (float8):  c_frag[ele] -> row (ele*2 + pair), col (lane)
-//                     where lane = threadIdx.x % 16, pair = threadIdx.x / 16
-//
-// Lanes 0-15 and 16-31 load identical data (required by RDNA 3 WMMA),
-// automatically satisfied by indexing with threadIdx.x % 16.
+// Uses the FP16 -> FP32 16x16x16 WMMA on RDNA3 (gfx11xx) and RDNA4
+// (gfx1200/gfx1201).  Register-tiled: each wavefront computes a
+// (KX*16) x (KY*16) output tile.  See wmma_frag.h for the per-arch
+// fragment layout and the C/D row mapping conventions used below.
 
 template<int KX, int KY>
 __global__ void __launch_bounds__(32)
@@ -47,40 +32,49 @@ gemm_wmma_fp16_kernel(
 {
     const int n_tile = blockIdx.x;
     const int m_tile = blockIdx.y;
-    const int lane = threadIdx.x % kWmmaTile;
-    const int pair = threadIdx.x / kWmmaTile;
+    int lane, sub;
+    hip_wmma_lane_decode(threadIdx.x, &lane, &sub);
 
     const int m_base = m_tile * KX * kWmmaTile;
     const int n_base = n_tile * KY * kWmmaTile;
 
-    half16 a_frag[KX];
-    half16 b_frag[KY];
-    float8 c_frag[KY][KX] = {};
+    constexpr int AB_SLOTS = hip_wmma_ab_slots();
+
+    wmma_ab_frag_t a_frag[KX];
+    wmma_ab_frag_t b_frag[KY];
+    hip_float8 c_frag[KY][KX] = {};
 
     for (int k = 0; k < K; k += kWmmaTile) {
-        for (int ele = 0; ele < kWmmaTile; ++ele) {
+#pragma unroll
+        for (int ele = 0; ele < AB_SLOTS; ++ele) {
+            int kk = hip_wmma_ab_k_for_element(ele, sub);
+#pragma unroll
             for (int x = 0; x < KX; ++x) {
                 int row = m_base + x * kWmmaTile + lane;
-                a_frag[x][ele] = (row < M) ? A[row * K + k + ele]
-                                            : (_Float16)0;
+                a_frag[x][ele] = (row < M) ? A[row * K + k + kk]
+                                           : (_Float16)0;
             }
+#pragma unroll
             for (int y = 0; y < KY; ++y) {
                 int col = n_base + y * kWmmaTile + lane;
-                b_frag[y][ele] = (col < N) ? B[(k + ele) * N + col]
-                                            : (_Float16)0;
+                b_frag[y][ele] = (col < N) ? B[(k + kk) * N + col]
+                                           : (_Float16)0;
             }
         }
 
+#pragma unroll
         for (int y = 0; y < KY; ++y)
+#pragma unroll
             for (int x = 0; x < KX; ++x)
-                c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                c_frag[y][x] = hip_wmma_f32_16x16x16_f16(
                                     a_frag[x], b_frag[y], c_frag[y][x]);
     }
 
     for (int y = 0; y < KY; ++y) {
         for (int x = 0; x < KX; ++x) {
+#pragma unroll
             for (int ele = 0; ele < 8; ++ele) {
-                int r = m_base + x * kWmmaTile + ele * 2 + pair;
+                int r = m_base + x * kWmmaTile + hip_wmma_cd_row(ele, sub);
                 int c = n_base + y * kWmmaTile + lane;
                 if (r < M && c < N)
                     C[r * N + c] = (_Float16)c_frag[y][x][ele];

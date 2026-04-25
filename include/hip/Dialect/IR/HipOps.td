@@ -792,6 +792,79 @@ def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal"> {
   }];
 }
 
+// ===== Generic Element-wise Unary ============================================
+// Backed by a single HIP custom kernel that dispatches by `kind`.
+// Used for ONNX Sin / Cos / Exp / Tanh / Floor / Round / Atan / LeakyRelu /
+// Clip.  alpha and beta carry op-specific scalars (LeakyRelu: alpha = slope;
+// Clip: alpha = min, beta = max; ignored for the rest).
+//
+// Kind values must match hip_unary_kind_t in
+// 3rd-party/custom_kernels/include/hip_custom_kernels.h:
+//   0=Sin, 1=Cos, 2=Exp, 3=Tanh, 4=Floor, 5=Round, 6=Atan, 7=LeakyRelu,
+//   8=Clip
+def Hip_UnaryElementwiseOp : Hip_DpsOp<"unary_elementwise"> {
+  let summary = "Generic element-wise unary op (Sin/Cos/Exp/Tanh/Floor/Round/Atan/LeakyRelu/Clip)";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y,
+    I64Attr:$kind,
+    DefaultValuedAttr<F32Attr, "0.0">:$alpha,
+    DefaultValuedAttr<F32Attr, "0.0">:$beta
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== Generic Element-wise Binary (with broadcasting) =======================
+// Used for ONNX Div and Pow.  Broadcasting is computed at lowering time
+// from lhs/rhs/output shapes.
+//
+// Kind values must match hip_binary_kind_t:
+//   0=Div, 1=Pow
+def Hip_BinaryElementwiseOp : Hip_DpsOp<"binary_elementwise"> {
+  let summary = "Generic element-wise binary op (Div/Pow) with broadcasting";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$kind
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== Strided Slice =========================================================
+// ONNX Slice (opset 13).  The `starts`, `ends`, `steps` arrays are normalised
+// at conversion time into per-axis (start_offset, step) carried as i64 array
+// attributes.  Negative ends, omitted axes, and step != 1 are all resolved
+// before reaching the runtime.
+def Hip_SliceOp : Hip_DpsOp<"slice"> {
+  let summary = "Strided slice (ONNX Slice)";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    // Per-axis input start offset (already step-corrected).  Length == output
+    // rank.
+    I64ArrayAttr:$starts,
+    // Per-axis step. Length == output rank.  step != 1 is supported.
+    I64ArrayAttr:$steps
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
   let summary = "Element-wise square root: y = sqrt(x)";
   let description = [{
