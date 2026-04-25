@@ -61,6 +61,21 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   LOG(INFO) << "Compiling MLIR bytecode using hip-compiler plugin";
   LOG(INFO) << "Bytecode size: " << mlir_bytecode.size() << " bytes";
 
+  // Optional: dump the MLIR bytecode (or text, if MORPHIZEN_SAVE_MLIR_AS_TEXT
+  // is set) to disk so it can be replayed through hip-compiler/hip-mlir-opt
+  // outside of ORT for profiling and reproducing crashes.
+  if (const char *dump_path = std::getenv("MORPHIZEN_DUMP_MLIR_PATH")) {
+    std::ofstream of(dump_path, std::ios::binary);
+    if (of) {
+      of.write(mlir_bytecode.data(), mlir_bytecode.size());
+      LOG(INFO) << "Dumped MLIR (" << mlir_bytecode.size()
+                << " bytes) to " << dump_path;
+    } else {
+      LOG(WARNING) << "Failed to open MORPHIZEN_DUMP_MLIR_PATH: "
+                   << dump_path;
+    }
+  }
+
   // Load plugin via MorphiZen Plugin API
   auto plugin = morphizen::Plugin::get("hip-compiler");
   if (!plugin) {

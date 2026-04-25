@@ -30,7 +30,10 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <chrono>
+#include <unordered_map>
+#include <vector>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -362,7 +365,8 @@ static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
 //===----------------------------------------------------------------------===//
 
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
-                                             mlir::MLIRContext *ctx) {
+                                             mlir::MLIRContext *ctx,
+                                             bool timing) {
   mlir::RewritePatternSet patterns(ctx);
   populateMatMulConversionPatterns(patterns, ctx);
   populateTransposeConversionPatterns(patterns, ctx);
@@ -390,10 +394,73 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
-  if (mlir::failed(
-          mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
-    return mlir::failure();
-  return mlir::success();
+  // Single greedy pass is enough: each onnx.* op converts to hip.*
+  // (or arith.constant for shape folds) and none of those match any of
+  // our patterns themselves.  Capping the rewriter avoids a quadratic
+  // re-walk over Kokoro's ~2000-op graph.
+  // The rewriter needs at least 2 iterations to confirm convergence (one
+  // walk to apply, a second walk to verify nothing else matches).  Cap at
+  // 4 so a runaway pattern surfaces as a clean failure rather than a hang.
+  config.setMaxIterations(4);
+  config.setMaxNumRewrites(50000);
+
+  // Heartbeat listener.  Every 50 events log the last erased + last
+  // inserted op kind so when the compiler crashes mid-rewrite we know
+  // exactly which onnx op + which downstream op the pattern produced.
+  struct Hb : public mlir::RewriterBase::Listener {
+    int n = 0;
+    std::chrono::steady_clock::time_point t0 =
+        std::chrono::steady_clock::now();
+    std::unordered_map<std::string, int> kinds;
+    std::string lastErased = "<none>";
+    std::string lastInserted = "<none>";
+    void notifyOperationInserted(mlir::Operation *op,
+                                 mlir::IRRewriter::InsertPoint) override {
+      lastInserted = op->getName().getStringRef().str();
+      kinds[lastInserted]++;
+      tick();
+    }
+    void notifyOperationErased(mlir::Operation *op) override {
+      lastErased = op->getName().getStringRef().str();
+      tick();
+    }
+    void tick() {
+      ++n;
+      if ((n % 50) == 0) {
+        double sec = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - t0)
+                         .count();
+        llvm::errs() << "[convertComputeOps]   " << n << " ev @ "
+                     << llvm::format("%.2f", sec)
+                     << "s -" << lastErased << " +" << lastInserted << "\n";
+      }
+    }
+  } hb;
+  if (timing)
+    config.setListener(&hb);
+
+  if (timing) {
+    int numOnnx = 0;
+    funcOp.walk([&](mlir::Operation *op) {
+      if (op->getName().getDialectNamespace() == "onnx")
+        numOnnx++;
+    });
+    llvm::errs() << "[convertComputeOps]   patterns ready, " << numOnnx
+                 << " onnx ops, calling applyPatternsGreedily\n";
+    auto t0 = timing_now();
+    auto rc = mlir::applyPatternsGreedily(funcOp, std::move(patterns), config);
+    llvm::errs() << "[convertComputeOps]   greedy driver: "
+                 << llvm::format("%.3f", record_elapsed(t0)) << "s, total "
+                 << hb.n << " events\n";
+    std::vector<std::pair<std::string, int>> v(hb.kinds.begin(),
+                                                hb.kinds.end());
+    std::sort(v.begin(), v.end(),
+              [](auto &a, auto &b) { return a.second > b.second; });
+    for (size_t i = 0; i < std::min<size_t>(15, v.size()); ++i)
+      llvm::errs() << "    +" << v[i].second << " " << v[i].first << "\n";
+    return rc;
+  }
+  return mlir::applyPatternsGreedily(funcOp, std::move(patterns), config);
 }
 
 /// Patterns that need to read the original onnx.Constant values out of the IR
@@ -410,13 +477,14 @@ static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
   populateUnaryElementwiseConversionPatterns(patterns, ctx);
   populateTier2ShapeConversionPatterns(patterns, ctx);
   populateTier5SeqConversionPatterns(patterns, ctx);
-  // Note: only Clip in UnaryElementwise actually reads constant inputs;
-  // ReduceMean/Range in Tier 2 do; the rest are no-ops here that re-fire
-  // safely in the main convertComputeOps pass when their patterns are
-  // included again.
+  // Unsqueeze/Squeeze infer their axes from input vs output shape, so
+  // they do not need to be run pre-constant-lowering -- the main
+  // convertComputeOps pass picks them up.
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+  config.setMaxIterations(2);
+  config.setMaxNumRewrites(50000);
   if (mlir::failed(
           mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
     return mlir::failure();
@@ -594,16 +662,29 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
+    auto subStart = timing_now();
+    auto logSub = [&](const char *name) {
+      if (!timing)
+        return;
+      llvm::errs() << "[ConvertOnnxToHipPass] " << name << ": "
+                   << llvm::format("%.3f",
+                                   record_elapsed(subStart))
+                   << "s @" << funcOp.getName().str() << "\n";
+    };
     // Convert ops that need original onnx.Constant inputs (Slice, Clip)
     // BEFORE we lower constants to arith.constant or externalize them.
     if (mlir::failed(preLowerShapeOps(funcOp, ctx)))
       return signalPassFailure();
+    logSub("preLowerShapeOps");
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
+    logSub("lowerOnnxConstants");
     lowerOnnxReturns(funcOp);
-    if (mlir::failed(convertComputeOps(funcOp, ctx)))
+    logSub("lowerOnnxReturns");
+    if (mlir::failed(convertComputeOps(funcOp, ctx, timing)))
       return signalPassFailure();
+    logSub("convertComputeOps");
   }
 
   if (timing && extState) {

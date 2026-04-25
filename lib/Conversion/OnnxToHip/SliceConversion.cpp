@@ -31,6 +31,8 @@ static FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
     valueAttr = def->getAttrOfType<ElementsAttr>("value");
   } else if (auto arithConst = dyn_cast<mlir::arith::ConstantOp>(def)) {
     valueAttr = dyn_cast<ElementsAttr>(arithConst.getValue());
+  } else if (auto toT = dyn_cast<mlir::bufferization::ToTensorOp>(def)) {
+    valueAttr = toT->getAttrOfType<ElementsAttr>("hip.inline_value");
   } else {
     return failure();
   }
@@ -71,14 +73,20 @@ struct SliceToHip : public RewritePattern {
 
     Value input = op->getOperand(0);
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
-    if (!inputType || !inputType.hasStaticShape())
+    if (!inputType)
       return rewriter.notifyMatchFailure(
-          op, "onnx.Slice lowering requires a static-shape input");
+          op, "onnx.Slice lowering requires a ranked input");
 
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-    if (!resultType || !resultType.hasStaticShape())
+    if (!resultType)
       return rewriter.notifyMatchFailure(
-          op, "onnx.Slice lowering requires a static-shape output");
+          op, "onnx.Slice lowering requires a ranked output");
+
+    // Degenerate scalar slice: rank-0 input passes through unchanged.
+    if (inputType.getRank() == 0 && resultType.getRank() == 0) {
+      rewriter.replaceOp(op, input);
+      return success();
+    }
 
     auto startsOr = extractI64Constant(op->getOperand(1));
     auto endsOr = extractI64Constant(op->getOperand(2));
@@ -125,11 +133,25 @@ struct SliceToHip : public RewritePattern {
         ax += inputRank;
       if (ax < 0 || ax >= inputRank)
         return rewriter.notifyMatchFailure(op, "onnx.Slice axis out of range");
-      int64_t dimSize = inputType.getDimSize(ax);
-      int64_t s = starts[i];
       int64_t step = steps[i];
       if (step == 0)
         return rewriter.notifyMatchFailure(op, "onnx.Slice step must be != 0");
+
+      int64_t s = starts[i];
+      if (inputType.isDynamicDim(ax)) {
+        // We don't have the dim size at compile time, so we can only
+        // accept non-negative start (no end-relative wraparound).  The
+        // runtime hip.slice kernel reads `start` literally; out-of-range
+        // values are the caller's responsibility.
+        if (s < 0)
+          return rewriter.notifyMatchFailure(
+              op, "onnx.Slice with negative start on dynamic dim is not "
+                  "supported yet");
+        normStarts[ax] = s;
+        normSteps[ax] = step;
+        continue;
+      }
+      int64_t dimSize = inputType.getDimSize(ax);
       // Per spec:  for step > 0, clamp start to [0, dim], end to [0, dim].
       // Negative indices count from the end.
       if (s < 0)
@@ -142,7 +164,19 @@ struct SliceToHip : public RewritePattern {
       normSteps[ax] = step;
     }
 
-    Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    // Build init.  resultType may have dynamic dims; for those we use the
+    // input's matching dim (slice of a dynamic dim along axis 0 with
+    // step=1 yields the same dynamic dim as input).
+    Location loc2 = loc;
+    SmallVector<Value> dynSizes;
+    for (int64_t d = 0; d < inputRank; ++d) {
+      if (resultType.isDynamicDim(d))
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc2, input, d));
+    }
+    Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc2, resultType.getShape(), resultType.getElementType(),
+        dynSizes);
     auto hipOp = SliceOp::create(rewriter, loc, resultType, context, input,
                                   init, rewriter.getI64ArrayAttr(normStarts),
                                   rewriter.getI64ArrayAttr(normSteps));

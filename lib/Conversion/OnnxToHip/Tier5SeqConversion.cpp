@@ -61,10 +61,14 @@ struct CumSumToHip : public RewritePattern {
     Value input = op->getOperand(0);
     auto inType = dyn_cast<RankedTensorType>(input.getType());
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-    if (!inType || !resultType || !inType.hasStaticShape() ||
-        !resultType.hasStaticShape())
+    if (!inType || !resultType)
       return rewriter.notifyMatchFailure(
-          op, "onnx.CumSum lowering requires static shapes");
+          op, "onnx.CumSum lowering requires ranked tensors");
+    // Rank-0 cumsum is the identity.
+    if (inType.getRank() == 0 && resultType.getRank() == 0) {
+      rewriter.replaceOp(op, input);
+      return success();
+    }
 
     auto axisOr = extractScalarI64(op->getOperand(1));
     if (failed(axisOr))

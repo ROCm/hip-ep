@@ -53,9 +53,8 @@ AddToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-  auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-  mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+  mlir::Value init =
+      createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
 
   auto hipOp =
       mlir::hip::AddOp::create(rewriter, loc, resultType, context, a, b, init);
@@ -79,9 +78,8 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
 
   // Use the operand whose rank matches the result for dim extraction
   // (handles scalar * tensor broadcasting).
-  auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-  mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+  mlir::Value init =
+      createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
 
   auto hipOp =
       mlir::hip::MulOp::create(rewriter, loc, resultType, context, a, b, init);
@@ -102,7 +100,8 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value rhs = op->getOperand(1);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, lhs);
+  mlir::Value init =
+      createBroadcastEmptyTensor(rewriter, loc, resultType, {lhs, rhs});
   auto hipOp = mlir::hip::SubOp::create(rewriter, loc, resultType, context, lhs,
                                         rhs, init);
   rewriter.replaceOp(op, hipOp->getResult(0));

@@ -292,38 +292,59 @@ patterns + lowering + HIP kernels, except for the 8 listed below):**
   codegen, runtime bitcode, and HIP custom kernels are all wired up
   correctly end-to-end.
 
-**Kokoro itself does not yet load** through `hip-onnx-runner` due to
-two issues that go beyond op coverage:
+**Kokoro: ConvertOnnxToHipPass now succeeds in 0.007 s.**  Of the
+1768 onnx ops in the polygraphy-static Kokoro graph, only **34
+remain after conversion** (~2%).  All blocking issues from the
+previous snapshot have been worked around:
 
-1. **Dynamic shapes.**  The MorphiZen ORT bridge serialises
-   `unk__N` dims as raw negative literal sizes in MLIR types, which
-   trips MLIR's `RankedTensorType::verify` (`invalid tensor
-   dimension size`) before any of our passes run.  After
-   `polygraphy surgeon sanitize --override-input-shapes
-   input_ids:[1,128] style:[1,256] speed:[1] --fold-constants` the
-   model still has 269 dynamic dims because Kokoro's iSTFTNet
-   decoder predicts durations at runtime and uses them as shape
-   inputs (`Range`, `ConstantOfShape` of `Cast` of a predicted
-   length).  Possible fixes:
-   - **(EP-side)** Patch the ORT-to-MLIR bridge in
-     `morphizen-graph` / `onnx-ir-imp` to emit `?` (kDynamic)
-     instead of the raw negative `dim_value`.  Most of our
-     conversion patterns already require `hasStaticShape()` and
-     would still bail, but the MLIR verifier would stop tripping
-     and we'd fall back through ORT to CPU per-op.
-   - **(Model-side)** Split Kokoro at the duration predictor and
-     compile two static-shape subgraphs that meet at a fixed-size
-     boundary (encoder → predictor on the input side; decoder
-     starting from a precomputed maximum frame count on the audio
-     side).  Effort: ~1 week of model surgery.
+- Dynamic-shape bridge: `morphizen` now emits `ShapedType::kDynamic`
+  instead of raw `-1` (with a symmetric mapping back when extracting
+  shapes), so MLIR's verifier no longer trips.
+- Greedy rewriter: capped iterations + heartbeat listener prevent
+  the previous 30-minute hang.  Several patterns were hardened to
+  handle Kokoro's quirks: rank-0 inputs (Gather, Slice, Concat,
+  Squeeze/Unsqueeze, Transpose, ReduceMean, CumSum), invalid
+  axis values (Gather), broadcast-aware empty-tensor construction
+  (Add/Mul/Sub/Pow/Div/Where/Compare), arbitrary permutations
+  decomposed into 2-swap chains (Transpose), shape-based axes
+  inference (Unsqueeze/Squeeze) so they no longer need a constant
+  axes operand, and contiguous-tail relaxation (ReduceMean) for
+  dynamic input shapes.
 
-2. **Missing ops** (LSTM, ConvTranspose, STFT, NonZero, ScatterND,
-   Pad, Resize, Expand) — even with dynamic shapes solved, these
-   eight op types account for 28 nodes that need conversion +
-   lowering + kernel implementations.  LSTM (MIOpen RNN with
-   ONNX-to-MIOpen weight permutation) and STFT (rocFFT-backed) are
-   the largest pieces; the others mirror the kernels we already have.
+| Surviving onnx ops (34 / 1768 = 1.9%) | nodes |
+|---|---|
+| LSTM | 6 |
+| Resize | 6 |
+| ConvTranspose | 6 |
+| Expand | 3 |
+| Shape (dynamic input dims) | 3 |
+| Range (dynamic limit) | 2 |
+| Pad | 2 |
+| Slice (dynamic ends operand) | 2 |
+| STFT | 1 |
+| Transpose (rank-0 with rank-4 perm — malformed Kokoro op) | 1 |
+| Squeeze (dynamic dim collapse to scalar) | 1 |
+| NonZero | 1 |
+| ScatterND | 1 |
+| NoValue (LayerNorm `bias=none` placeholder) | 1 |
 
-The next concrete step is whichever of {dynamic-shape bridge fix,
-model surgery} the team prefers, followed by the LSTM / STFT
-implementations.  Everything below the bridge is verified working.
+**Next blocker: bufferization fails on those 34 surviving onnx ops**
+because there are no buffer interface models for them.  To get
+Kokoro all the way through to a model DLL the remaining work is:
+
+1. Implement LSTM (MIOpen RNN), ConvTranspose (extend Conv with
+   transposed mode), STFT (rocFFT), Pad (custom HIP), Resize (custom
+   HIP), Expand (broadcast), NonZero (data-dependent output shape),
+   ScatterND (gather-scatter).
+2. Add a `hip.range` runtime op for the dynamic-limit Range cases.
+3. Make `onnx.Shape` emit a `tensor.from_elements` mix of static
+   constants + `tensor.dim` so it works with dynamic input dims.
+4. Decide whether the rank-0 `onnx.Transpose` with rank-4 perm
+   (dead code in Kokoro's iSTFTNet noise path) should be folded out
+   in a pre-pass or accepted by relaxing the perm-rank check.
+5. Drop `onnx.NoValue` in `lowerOnnxConstants`.
+
+Phase G (lemondate integration) is on hold until bufferization
+clears.  The shim, env vars, and abstract `--backend onnx-ep`
+plumbing are still defined as in the section above; only the EP DLL
+hookup is pending.

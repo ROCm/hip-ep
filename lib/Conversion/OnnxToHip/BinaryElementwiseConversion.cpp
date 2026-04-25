@@ -42,13 +42,11 @@ static LogicalResult buildBinary(Operation *op, PatternRewriter &rewriter,
         op, "hip.binary_elementwise needs a ranked tensor result");
 
   auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
-  auto lhsType = cast<RankedTensorType>(lhs.getType());
-  // Pick whichever input matches the result rank as the source for any
-  // tensor.dim queries we need to materialise the empty tensor.  If both
-  // inputs have lower rank (pure scalar broadcast on both sides) we fall
-  // back to lhs and let createEmptyTensor still handle static dims.
-  Value source = (lhsType.getRank() == resultType.getRank()) ? lhs : rhs;
-  Value init = createEmptyTensor(rewriter, loc, resultType, source);
+  // Use broadcast-aware empty-tensor builder: walks lhs/rhs, picks the
+  // first one that has a dim covering each dynamic output dim, falls
+  // back to a 1-element constant when neither side has it (scalar bcast).
+  Value init = createBroadcastEmptyTensor(rewriter, loc, resultType,
+                                          {lhs, rhs});
 
   auto hipOp = BinaryElementwiseOp::create(
       rewriter, loc, resultType, context, lhs, rhs, init,

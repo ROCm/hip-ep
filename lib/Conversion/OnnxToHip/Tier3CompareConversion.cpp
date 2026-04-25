@@ -41,9 +41,8 @@ static LogicalResult buildCompare(Operation *op, PatternRewriter &rewriter,
     return rewriter.notifyMatchFailure(
         op, "hip.compare needs ranked tensor operands");
   auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
-  auto lhsType = cast<RankedTensorType>(lhs.getType());
-  Value source = (lhsType.getRank() == resultType.getRank()) ? lhs : rhs;
-  Value init = createEmptyTensor(rewriter, loc, resultType, source);
+  Value init = createBroadcastEmptyTensor(rewriter, loc, resultType,
+                                          {lhs, rhs});
   auto hipOp = CompareOp::create(rewriter, loc, resultType, context, lhs, rhs,
                                   init, rewriter.getI64IntegerAttr(kind));
   rewriter.replaceOp(op, hipOp->getResult(0));
@@ -79,18 +78,11 @@ struct WhereToHip : public RewritePattern {
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "onnx.Where result not ranked");
 
-    // Pick whichever input matches the result rank as the source for any
-    // tensor.dim queries we need to materialise the empty tensor.
-    Value source = x;
-    if (auto t = dyn_cast<RankedTensorType>(x.getType())) {
-      if (t.getRank() != resultType.getRank()) {
-        if (auto t2 = dyn_cast<RankedTensorType>(y.getType());
-            t2 && t2.getRank() == resultType.getRank())
-          source = y;
-      }
-    }
     Location loc = op->getLoc();
-    Value init = createEmptyTensor(rewriter, loc, resultType, source);
+    // Where broadcasts cond/x/y -> result.  Walk all three inputs to
+    // resolve each dynamic output dim, in priority order x, y, cond.
+    Value init = createBroadcastEmptyTensor(rewriter, loc, resultType,
+                                            {x, y, cond});
     auto hipOp = WhereOp::create(rewriter, loc, resultType, context, cond, x,
                                   y, init);
     rewriter.replaceOp(op, hipOp->getResult(0));

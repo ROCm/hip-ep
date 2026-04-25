@@ -30,8 +30,10 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// Pull a 1-D int64 constant into a SmallVector.  Accepts onnx.Constant and
-/// arith.constant (mirrors the helper used by Slice/Clip).
+/// Pull a 1-D int64 constant into a SmallVector.  Accepts onnx.Constant,
+/// arith.constant, and bufferization.to_tensor with an attached
+/// `hip.inline_value` attribute (the path used by lowerOnnxConstants for
+/// shape-sized externalised constants).
 static FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
   if (!v)
     return failure();
@@ -44,6 +46,9 @@ static FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
     valueAttr = def->getAttrOfType<ElementsAttr>("value");
   } else if (auto arithConst = dyn_cast<mlir::arith::ConstantOp>(def)) {
     valueAttr = dyn_cast<ElementsAttr>(arithConst.getValue());
+  } else if (auto toT =
+                 dyn_cast<mlir::bufferization::ToTensorOp>(def)) {
+    valueAttr = toT->getAttrOfType<ElementsAttr>("hip.inline_value");
   } else {
     return failure();
   }
@@ -90,12 +95,17 @@ struct ReduceMeanToHip : public RewritePattern {
     Value input = op->getOperand(0);
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-    if (!inputType || !resultType || !inputType.hasStaticShape() ||
-        !resultType.hasStaticShape())
+    if (!inputType || !resultType)
       return rewriter.notifyMatchFailure(
-          op, "onnx.ReduceMean lowering requires static shapes");
+          op, "onnx.ReduceMean lowering requires ranked tensors");
 
     int64_t inRank = inputType.getRank();
+    // Degenerate case: rank-0 input.  Mean of a scalar is the scalar
+    // itself.  Forward the input (no kernel needed).
+    if (inRank == 0 && resultType.getRank() == 0) {
+      rewriter.replaceOp(op, input);
+      return success();
+    }
     SmallVector<int64_t> axes;
     if (op->getNumOperands() >= 2) {
       auto axesOr = extractI64Constant(op->getOperand(1));
@@ -150,11 +160,27 @@ struct ConcatToHip : public RewritePattern {
     Value context = *ctxOrFailure;
 
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-    if (!resultType || !resultType.hasStaticShape())
+    if (!resultType)
       return rewriter.notifyMatchFailure(
-          op, "onnx.Concat lowering requires a static-shape output");
+          op, "onnx.Concat lowering requires a ranked output");
     if (op->getNumOperands() == 0)
       return rewriter.notifyMatchFailure(op, "onnx.Concat needs >=1 input");
+
+    // Single-input concat (degenerate but seen in some Kokoro scalar
+    // paths): forward the input.
+    if (op->getNumOperands() == 1 &&
+        op->getOperand(0).getType() == resultType) {
+      rewriter.replaceOp(op, op->getOperand(0));
+      return success();
+    }
+    // Rank-0 result: ONNX requires axis to point at an existing dim, so a
+    // rank-0 Concat is malformed.  Forward the first input as a best
+    // effort -- this only fires for Kokoro's scalar-slice fallout where
+    // the original concat is dead code anyway.
+    if (resultType.getRank() == 0) {
+      rewriter.replaceOp(op, op->getOperand(0));
+      return success();
+    }
 
     // ONNX uses signed integer attributes (si64); read the raw APInt to
     // sidestep IntegerAttr::getInt's signless precondition.
@@ -171,7 +197,45 @@ struct ConcatToHip : public RewritePattern {
     Location loc = op->getLoc();
     SmallVector<Value> inputs(op->getOperands().begin(),
                               op->getOperands().end());
-    Value init = createEmptyTensor(rewriter, loc, resultType, inputs.front());
+
+    // Build the empty tensor.  For dynamic output dims we need the dim
+    // size; on the concat axis it's the sum of the contributing input
+    // dims (use arith.add when any input is dynamic on that axis), on
+    // other axes it's whatever value the first ranked input provides.
+    SmallVector<Value> dynSizes;
+    for (int64_t d = 0; d < rank; ++d) {
+      if (!resultType.isDynamicDim(d))
+        continue;
+      Value sz;
+      if (d == axis) {
+        for (Value in : inputs) {
+          auto it = dyn_cast<RankedTensorType>(in.getType());
+          if (!it || d >= it.getRank())
+            continue;
+          Value addend = mlir::tensor::DimOp::create(rewriter, loc, in, d);
+          sz = sz ? mlir::arith::AddIOp::create(rewriter, loc, sz, addend)
+                  : addend;
+        }
+      } else {
+        for (Value in : inputs) {
+          auto it = dyn_cast<RankedTensorType>(in.getType());
+          if (!it || d >= it.getRank())
+            continue;
+          if (it.isDynamicDim(d))
+            sz = mlir::tensor::DimOp::create(rewriter, loc, in, d);
+          else
+            sz = mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                      it.getDimSize(d));
+          break;
+        }
+      }
+      if (!sz)
+        sz = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+      dynSizes.push_back(sz);
+    }
+    Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, resultType.getShape(), resultType.getElementType(),
+        dynSizes);
     auto hipOp = ConcatOp::create(rewriter, loc, resultType, context, inputs,
                                    init, rewriter.getI64IntegerAttr(axis));
     rewriter.replaceOp(op, hipOp->getResult(0));

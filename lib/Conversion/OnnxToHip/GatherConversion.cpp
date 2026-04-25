@@ -39,8 +39,23 @@ struct GatherToHip : public mlir::RewritePattern {
     auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
     auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
 
-    // Normalize negative axis for dimension calculations only
-    int64_t normalizedAxis = axis < 0 ? axis + dataType.getRank() : axis;
+    // Normalize negative axis for dimension calculations only.
+    int64_t dataRank = dataType.getRank();
+    int64_t normalizedAxis = axis < 0 ? axis + dataRank : axis;
+
+    // Sanity-check axis against the data rank.  Kokoro contains quirky
+    // onnx.Gather ops with axis=3 on a rank-0 tensor<f32> that would
+    // otherwise cause `llvm::seq<int64_t>(normalizedAxis + 1, dataRank)`
+    // to wrap around and iterate ~2^63 times -- silent infinite loop in
+    // the greedy rewriter.  Treat rank-0 input as the identity (the data
+    // IS the gathered element); reject any other malformed Gather.
+    if (dataRank == 0 && resultType.getRank() == 0) {
+      rewriter.replaceOp(op, data);
+      return mlir::success();
+    }
+    if (normalizedAxis < 0 || normalizedAxis >= dataRank)
+      return rewriter.notifyMatchFailure(
+          op, "onnx.Gather axis out of range for data rank");
 
     // Create output tensor with dynamic shape support
     // Output shape: [data[0:axis], indices.shape, data[axis+1:]]
@@ -63,7 +78,7 @@ struct GatherToHip : public mlir::RewritePattern {
       outDimIdx++;
     }
     // Copy dimensions after axis from data
-    for (auto i : llvm::seq<int64_t>(normalizedAxis + 1, dataType.getRank())) {
+    for (auto i : llvm::seq<int64_t>(normalizedAxis + 1, dataRank)) {
       if (outDimIdx < resultType.getRank() &&
           resultType.isDynamicDim(outDimIdx))
         dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));

@@ -84,10 +84,63 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                      mlir::RankedTensorType resultType,
                                      mlir::Value source) {
   llvm::SmallVector<mlir::Value> dynSizes;
+  auto srcType = mlir::dyn_cast<mlir::RankedTensorType>(source.getType());
+  int64_t srcRank = srcType ? srcType.getRank() : 0;
   for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
-    if (resultType.isDynamicDim(dimIdx))
+    if (resultType.isDynamicDim(dimIdx)) {
+      // Slot must come from a tensor that actually has that dim; otherwise
+      // tensor.dim would crash on a 0-rank or lower-rank source.  Caller is
+      // expected to guarantee `source` has at least result-rank dims.  Bail
+      // by emitting `tensor.empty %c1` (1-element) as a safe placeholder.
+      if (dimIdx >= srcRank) {
+        mlir::Value one = mlir::arith::ConstantIndexOp::create(builder, loc, 1);
+        dynSizes.push_back(one);
+        continue;
+      }
       dynSizes.push_back(
           mlir::tensor::DimOp::create(builder, loc, source, dimIdx));
+    }
+  }
+  return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                       resultType.getElementType(), dynSizes);
+}
+
+/// Build a tensor.empty for the result of a broadcasted binary op where any
+/// of the candidate inputs may have lower rank (scalar broadcast).  For
+/// each dynamic output dim, we use the dim from the highest-ranked input
+/// that has that dim, or a placeholder of 1 if none does.  Caller passes
+/// the candidate inputs in priority order.
+inline mlir::Value
+createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                           mlir::RankedTensorType resultType,
+                           llvm::ArrayRef<mlir::Value> sources) {
+  int64_t resultRank = resultType.getRank();
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+    mlir::Value picked;
+    for (mlir::Value src : sources) {
+      auto srcType = mlir::dyn_cast<mlir::RankedTensorType>(src.getType());
+      if (!srcType)
+        continue;
+      int64_t srcRank = srcType.getRank();
+      // ONNX broadcast aligns from the trailing dims.
+      int64_t srcDim = dimIdx - (resultRank - srcRank);
+      if (srcDim < 0)
+        continue;
+      if (srcType.isDynamicDim(srcDim)) {
+        picked = mlir::tensor::DimOp::create(builder, loc, src, srcDim);
+        break;
+      }
+      if (srcType.getDimSize(srcDim) > 1) {
+        picked = mlir::tensor::DimOp::create(builder, loc, src, srcDim);
+        break;
+      }
+    }
+    if (!picked)
+      picked = mlir::arith::ConstantIndexOp::create(builder, loc, 1);
+    dynSizes.push_back(picked);
   }
   return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
                                        resultType.getElementType(), dynSizes);
@@ -141,6 +194,8 @@ void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateUnsqueezeSqueezeConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,

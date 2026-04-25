@@ -19,6 +19,27 @@ struct TransposeToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
+/// Build a tensor.empty for the result of a hip.transpose whose target shape
+/// is derived from the source by swapping `dim0` and `dim1`.  Dynamic dims
+/// of the result are filled in from `srcDimSizes`, which holds tensor.dim
+/// values for the original input.
+static mlir::Value buildSwapInit(mlir::PatternRewriter &rewriter,
+                                 mlir::Location loc, mlir::Value data,
+                                 mlir::RankedTensorType targetType,
+                                 llvm::ArrayRef<mlir::Value> srcDimSizes,
+                                 llvm::ArrayRef<int64_t> srcDimMap) {
+  // srcDimMap[i] == j means: target dim i comes from source dim j.
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t i = 0; i < targetType.getRank(); ++i) {
+    if (targetType.isDynamicDim(i)) {
+      mlir::Value dimVal = srcDimSizes[srcDimMap[i]];
+      dynSizes.push_back(dimVal);
+    }
+  }
+  return mlir::tensor::EmptyOp::create(rewriter, loc, targetType.getShape(),
+                                       targetType.getElementType(), dynSizes);
+}
+
 mlir::LogicalResult
 TransposeToHip::matchAndRewrite(mlir::Operation *op,
                                 mlir::PatternRewriter &rewriter) const {
@@ -32,53 +53,107 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
 
   auto permAttr = op->getAttrOfType<mlir::ArrayAttr>("perm");
   if (!permAttr)
-    return op->emitOpError("hip.transpose requires explicit perm attribute");
-
-  int64_t dim0 = -1, dim1 = -1;
-  int64_t mismatchCount = 0;
-  for (auto [permIdx, attr] : llvm::enumerate(permAttr)) {
-    int64_t p = mlir::cast<mlir::IntegerAttr>(attr).getValue().getSExtValue();
-    if (p != static_cast<int64_t>(permIdx)) {
-      ++mismatchCount;
-      if (dim0 < 0)
-        dim0 = static_cast<int64_t>(permIdx);
-      else if (dim1 < 0)
-        dim1 = static_cast<int64_t>(permIdx);
-    }
-  }
-  if (mismatchCount != 2 || dim0 < 0 || dim1 < 0)
-    return op->emitOpError("perm must swap exactly two dimensions");
-  int64_t p0 =
-      mlir::cast<mlir::IntegerAttr>(permAttr[dim0]).getValue().getSExtValue();
-  int64_t p1 =
-      mlir::cast<mlir::IntegerAttr>(permAttr[dim1]).getValue().getSExtValue();
-  if (p0 != dim1 || p1 != dim0)
-    return op->emitOpError("perm must swap exactly two dimensions");
+    return rewriter.notifyMatchFailure(
+        op, "hip.transpose requires explicit perm attribute");
 
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-
-  // Transpose: output dim i corresponds to input dim perm[i].
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (auto [outDimIdx, attr] : llvm::enumerate(permAttr)) {
-    if (resultType.isDynamicDim(outDimIdx)) {
-      const int64_t srcDim =
-          mlir::cast<mlir::IntegerAttr>(attr).getValue().getSExtValue();
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, data, srcDim));
-    }
+  auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
+  int64_t rank = inputType.getRank();
+  if (rank != static_cast<int64_t>(permAttr.size()) ||
+      rank != resultType.getRank())
+    return rewriter.notifyMatchFailure(op, "perm size != tensor rank");
+  // Rank-0 transpose: forward the input unchanged (scalar permutation
+  // is the identity).
+  if (rank == 0) {
+    rewriter.replaceOp(op, data);
+    return mlir::success();
   }
 
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
+  // Materialize the original input dim sizes once; we pull from this when
+  // building intermediate empties.
+  llvm::SmallVector<mlir::Value> srcDimSizes(rank);
+  for (int64_t i = 0; i < rank; ++i)
+    srcDimSizes[i] = mlir::tensor::DimOp::create(rewriter, loc, data, i);
 
-  mlir::Value d0 = mlir::arith::ConstantIndexOp::create(rewriter, loc, dim0);
-  mlir::Value d1 = mlir::arith::ConstantIndexOp::create(rewriter, loc, dim1);
+  // Compute final perm[].
+  llvm::SmallVector<int64_t> perm(rank);
+  for (int64_t i = 0; i < rank; ++i)
+    perm[i] = mlir::cast<mlir::IntegerAttr>(permAttr[i]).getValue().getSExtValue();
 
-  auto hipOp = mlir::hip::TransposeOp::create(rewriter, loc, resultType,
-                                              context, d0, d1, data, init);
-  rewriter.replaceOp(op, hipOp->getResult(0));
+  // Cycle-decomposition of `perm` into a sequence of 2-element swaps.
+  // Algorithm: starting from the identity, for each i find the position j
+  // that currently holds perm[i] and swap (i, j) in the running state.
+  //
+  // Each (i, j) is appended as a hip.transpose dim swap to the IR.  Final
+  // hip.transpose's result type matches resultType; intermediate result
+  // types are derived by mutating the running shape.
+  llvm::SmallVector<int64_t> state(rank);
+  for (int64_t i = 0; i < rank; ++i)
+    state[i] = i;
+
+  llvm::SmallVector<std::pair<int64_t, int64_t>> swaps;
+  for (int64_t i = 0; i < rank; ++i) {
+    if (state[i] == perm[i])
+      continue;
+    int64_t j = -1;
+    for (int64_t k = i + 1; k < rank; ++k) {
+      if (state[k] == perm[i]) {
+        j = k;
+        break;
+      }
+    }
+    if (j < 0) // perm is not a permutation -- malformed onnx.Transpose
+      return rewriter.notifyMatchFailure(op, "perm is not a valid permutation");
+    std::swap(state[i], state[j]);
+    swaps.push_back({i, j});
+  }
+
+  // No-op transpose: just forward the input.
+  if (swaps.empty()) {
+    rewriter.replaceOp(op, data);
+    return mlir::success();
+  }
+
+  // Apply each swap as one hip.transpose.  After applying all of them, the
+  // tensor lives in `resultType`.  For each intermediate step, we build a
+  // tensor.empty with the partially-permuted shape.
+  mlir::Value cur = data;
+
+  // Track the dim-index mapping: targetType dim i comes from original
+  // input dim `currentMap[i]`.  Starts as identity.
+  llvm::SmallVector<int64_t> currentMap(rank);
+  for (int64_t i = 0; i < rank; ++i)
+    currentMap[i] = i;
+
+  for (size_t step = 0; step < swaps.size(); ++step) {
+    auto [a, b] = swaps[step];
+    // After this swap: target[a] = currentMap[b], target[b] = currentMap[a].
+    llvm::SmallVector<int64_t> nextMap = currentMap;
+    std::swap(nextMap[a], nextMap[b]);
+
+    bool isLast = (step + 1 == swaps.size());
+    mlir::RankedTensorType targetType;
+    if (isLast) {
+      targetType = resultType;
+    } else {
+      llvm::SmallVector<int64_t> shape(rank);
+      for (int64_t i = 0; i < rank; ++i)
+        shape[i] = inputType.getDimSize(nextMap[i]);
+      targetType = mlir::RankedTensorType::get(shape, inputType.getElementType());
+    }
+
+    mlir::Value init =
+        buildSwapInit(rewriter, loc, data, targetType, srcDimSizes, nextMap);
+    mlir::Value d0 = mlir::arith::ConstantIndexOp::create(rewriter, loc, a);
+    mlir::Value d1 = mlir::arith::ConstantIndexOp::create(rewriter, loc, b);
+    auto hipOp = mlir::hip::TransposeOp::create(rewriter, loc, targetType,
+                                                context, d0, d1, cur, init);
+    cur = hipOp->getResult(0);
+    currentMap = nextMap;
+  }
+
+  rewriter.replaceOp(op, cur);
   return mlir::success();
 }
 

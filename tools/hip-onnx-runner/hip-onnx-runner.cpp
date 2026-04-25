@@ -52,6 +52,11 @@ Options:
 #if _WIN32
 #include <codecvt>
 #include <locale>
+#include <windows.h>
+#include <dbghelp.h>
+#include <psapi.h>
+#pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "psapi.lib")
 #endif
 
 #include "../common/minioptions.h"
@@ -710,7 +715,132 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
 // Main
 // ---------------------------------------------------------------------------
 
+#if _WIN32
+// On Windows, install a SEH handler so any access violation inside the
+// EP DLL gets logged with a stack trace AND a minidump on disk, instead
+// of silently exiting with code 0xC0000005.  Set the dump path with
+// the HIP_ONNX_RUNNER_DUMP_DIR env var (defaults to %TEMP%).
+static LONG WINAPI hip_onnx_runner_seh(EXCEPTION_POINTERS *info) {
+    const char *dump_dir = std::getenv("HIP_ONNX_RUNNER_DUMP_DIR");
+    if (!dump_dir) {
+        static char buf[MAX_PATH];
+        DWORD n = GetTempPathA(MAX_PATH, buf);
+        if (n > 0 && n < MAX_PATH) dump_dir = buf;
+    }
+    if (!dump_dir) dump_dir = ".";
+
+    char dump_path[MAX_PATH];
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(dump_path, sizeof(dump_path),
+             "%ship_onnx_runner_%04u%02u%02u_%02u%02u%02u_%lu.dmp",
+             dump_dir, st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond, GetCurrentProcessId());
+
+    HANDLE h = CreateFileA(dump_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei{};
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = info;
+        mei.ClientPointers = FALSE;
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
+                          MiniDumpNormal, &mei, NULL, NULL);
+        CloseHandle(h);
+    }
+
+    fprintf(stderr,
+            "\n[hip-onnx-runner] Crashed: ExceptionCode=0x%08lx Address=%p\n"
+            "[hip-onnx-runner] Minidump written to %s\n",
+            info->ExceptionRecord->ExceptionCode,
+            info->ExceptionRecord->ExceptionAddress, dump_path);
+
+    // Find the DLL the faulting address belongs to.
+    HMODULE mods[1024];
+    DWORD needed = 0;
+    if (EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) {
+        ULONG_PTR addr =
+            reinterpret_cast<ULONG_PTR>(info->ExceptionRecord->ExceptionAddress);
+        for (DWORD i = 0; i < needed / sizeof(HMODULE); ++i) {
+            MODULEINFO mi{};
+            if (!GetModuleInformation(GetCurrentProcess(), mods[i], &mi,
+                                      sizeof(mi)))
+                continue;
+            ULONG_PTR base = reinterpret_cast<ULONG_PTR>(mi.lpBaseOfDll);
+            if (addr >= base && addr < base + mi.SizeOfImage) {
+                char name[MAX_PATH];
+                if (GetModuleFileNameExA(GetCurrentProcess(), mods[i], name,
+                                         sizeof(name))) {
+                    fprintf(stderr,
+                            "[hip-onnx-runner] Faulting module: %s "
+                            "(base 0x%p, +0x%llx into module)\n",
+                            name, mi.lpBaseOfDll,
+                            (unsigned long long)(addr - base));
+                }
+                break;
+            }
+        }
+    }
+
+    // Walk the stack with SymFromAddr to print symbol names.
+    SymInitialize(GetCurrentProcess(), NULL, TRUE);
+    HANDLE thread = GetCurrentThread();
+    CONTEXT ctx = *info->ContextRecord;
+    STACKFRAME64 frame{};
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+    fprintf(stderr, "[hip-onnx-runner] Stack:\n");
+    for (int i = 0; i < 30; ++i) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(),
+                         thread, &frame, &ctx, NULL,
+                         SymFunctionTableAccess64, SymGetModuleBase64,
+                         NULL))
+            break;
+        if (frame.AddrPC.Offset == 0) break;
+
+        char buf[sizeof(SYMBOL_INFO) + 512];
+        SYMBOL_INFO *sym = reinterpret_cast<SYMBOL_INFO *>(buf);
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 511;
+        DWORD64 disp = 0;
+        if (SymFromAddr(GetCurrentProcess(), frame.AddrPC.Offset, &disp, sym)) {
+            HMODULE mod = (HMODULE)SymGetModuleBase64(GetCurrentProcess(),
+                                                     frame.AddrPC.Offset);
+            char modname[MAX_PATH] = "";
+            GetModuleFileNameExA(GetCurrentProcess(), mod, modname,
+                                 sizeof(modname));
+            fprintf(stderr, "  #%02d %p %s+0x%llx [%s]\n", i,
+                    (void *)frame.AddrPC.Offset, sym->Name,
+                    (unsigned long long)disp, modname);
+        } else {
+            fprintf(stderr, "  #%02d %p (no symbol)\n", i,
+                    (void *)frame.AddrPC.Offset);
+        }
+    }
+
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void install_seh() {
+    SetUnhandledExceptionFilter(hip_onnx_runner_seh);
+    // Suppress Windows Error Reporting dialog on crash so we get the
+    // stderr message + minidump cleanly.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                 SEM_NOOPENFILEERRORBOX);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+}
+#else
+static void install_seh() {}
+#endif
+
 int main(int argc, char *argv[]) {
+  install_seh();
+
   MiniOptions mo;
   mo.add_option("m", "model", "Path to .onnx model", "");
   mo.add_option("L", "l2norm",
@@ -826,6 +956,9 @@ int main(int argc, char *argv[]) {
     std::cout << "Found " << devices.size() << " EP device(s)\n";
 
     session_opts.AppendExecutionProvider_V2(env, devices, {});
+    // Hard requirement: every op runs on the GPU.  No CPU fallback.
+    // If a node fails to compile, ORT must reject the whole model so we
+    // see the failure here instead of silently degrading to CPU.
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 
