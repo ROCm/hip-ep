@@ -112,6 +112,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     find_package(hip QUIET)
     find_package(MIOpen QUIET)
     find_package(hipblaslt QUIET)
+    find_package(rocfft QUIET)
 
     if(DEFINED THEROCK_DIST)
         set(CMAKE_PREFIX_PATH "${ORIGINAL_CMAKE_PREFIX_PATH}")
@@ -127,6 +128,11 @@ if(NOT BUILD_MOCK_RUNTIME)
         message(STATUS "  HIP: ${hip_DIR}")
         message(STATUS "  MIOpen: ${MIOpen_DIR}")
         message(STATUS "  hipBLASLt: ${hipblaslt_DIR}")
+        if(rocfft_FOUND)
+            message(STATUS "  rocFFT: ${rocfft_DIR}")
+        else()
+            message(STATUS "  rocFFT: header-only (using THEROCK_DIST/include/rocfft)")
+        endif()
     endif()
 else()
     message(STATUS "Building mock runtime (BUILD_MOCK_RUNTIME explicitly set)")
@@ -241,7 +247,13 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
+    compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
+    compile_to_bitcode(real/scatter_nd.cpp runtime_scatter_nd.bc)
+    compile_to_bitcode(real/lstm.cpp runtime_lstm.bc)
+    compile_to_bitcode(real/stft.cpp runtime_stft.bc)
     compile_to_bitcode(real/expand.cpp runtime_expand.bc)
+    compile_to_bitcode(real/resize.cpp runtime_resize.bc)
+    compile_to_bitcode(real/conv_transpose.cpp runtime_conv_transpose.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -277,7 +289,13 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_nd.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_lstm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_stft.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_expand.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv_transpose.bc
     )
 else()
     # Mock runtime for testing without GPU
