@@ -56,6 +56,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/scatter_nd_kernel.hip
     hip/transpose_kernel.hip
     hip/range_kernel.hip
+    hip/stft_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

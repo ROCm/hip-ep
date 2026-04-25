@@ -27,33 +27,6 @@
 
 #include <hip/hip_runtime.h>
 
-namespace {
-
-void warn_once(const char *name) {
-  static const char *seen[32] = {nullptr};
-  for (int i = 0; i < 32; ++i) {
-    if (seen[i] == nullptr) {
-      seen[i] = name;
-      fprintf(stderr,
-              "[hipdnn_ep] WARNING: stub runtime symbol called: %s "
-              "(returns zero / pass-through)\n",
-              name);
-      return;
-    }
-    if (seen[i] == name)
-      return;
-  }
-}
-
-int zero_fill_dev(void *stream, void *ptr, size_t bytes) {
-  if (!ptr || bytes == 0)
-    return 0;
-  return static_cast<int>(hipMemsetAsync(
-      ptr, 0, bytes, static_cast<hipStream_t>(stream)));
-}
-
-} // namespace
-
 extern "C" {
 
 // MIOpen softmax (used by ActivationLowering for hip.miopen_softmax).
@@ -119,40 +92,6 @@ __declspec(dllexport) void hip_transpose(void *handle, const void *input,
   (void)s0;
   (void)s1;
   (void)s2;
-}
-
-// STFT helper kernels.  StftLowering emits two device-side helper
-// calls (frame_window and split_complex); both will be replaced when
-// the real rocFFT path is wired up.
-__declspec(dllexport) int hip_stft_frame_window(void *stream, const void *input,
-                                                 const void *window,
-                                                 void *output,
-                                                 int64_t batch,
-                                                 int64_t n_frames,
-                                                 int64_t frame_length,
-                                                 int64_t frame_step,
-                                                 int hip_dtype) {
-  (void)input;
-  (void)window;
-  (void)hip_dtype;
-  warn_once("hip_stft_frame_window");
-  size_t bytes = static_cast<size_t>(batch * n_frames * frame_length) * 4;
-  return zero_fill_dev(stream, output, bytes);
-}
-
-__declspec(dllexport) int hip_stft_split_complex(void *stream,
-                                                  const void *complex_in,
-                                                  void *real_out,
-                                                  void *imag_out,
-                                                  int64_t total_complex,
-                                                  int hip_dtype) {
-  (void)complex_in;
-  (void)hip_dtype;
-  warn_once("hip_stft_split_complex");
-  size_t bytes = static_cast<size_t>(total_complex) * 4;
-  int rc1 = zero_fill_dev(stream, real_out, bytes);
-  int rc2 = zero_fill_dev(stream, imag_out, bytes);
-  return rc1 != 0 ? rc1 : rc2;
 }
 
 } // extern "C"
