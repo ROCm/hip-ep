@@ -174,6 +174,8 @@ int hip_elementwise_unary(
 typedef enum {
     HIP_BINARY_DIV = 0,
     HIP_BINARY_POW = 1,
+    HIP_BINARY_MUL = 2,
+    HIP_BINARY_ADD = 3,
 } hip_binary_kind_t;
 
 int hip_elementwise_binary(
