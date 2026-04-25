@@ -19,6 +19,7 @@
 // correctness blocker for a model we want to ship.
 
 #include "../hipdnn_ep_runtime.h"
+#include "runtime_types.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -57,18 +58,46 @@ extern "C" {
 
 // MIOpen softmax (used by ActivationLowering for hip.miopen_softmax).
 // Signature per ActivationLowering: (handle, input, output, rows, cols).
-// Real impl would call miopenSoftmaxForward; for now we zero-fill the
-// output and warn.
-__declspec(dllexport) int hip_miopen_softmax(void *handle, const void *input,
+// Wraps miopenSoftmaxForward_V2 with MIOPEN_SOFTMAX_ACCURATE +
+// MIOPEN_SOFTMAX_MODE_INSTANCE (per-row softmax over the last
+// dimension, which is what onnx.Softmax with axis=-1 expands to).
+__declspec(dllexport) int hip_miopen_softmax(void *handle_v, const void *input,
                                               void *output, int64_t rows,
                                               int64_t cols) {
-  (void)handle;
-  (void)input;
-  warn_once("hip_miopen_softmax");
-  // Without an MIOpen-real path, we still need the output buffer in a
-  // defined state.  Assume f32 element size for the dead-code path.
-  return zero_fill_dev(/*stream=*/nullptr, output,
-                        static_cast<size_t>(rows * cols) * sizeof(float));
+  if (!handle_v || !input || !output || rows <= 0 || cols <= 0) {
+    fprintf(stderr,
+            "[hipdnn_ep] hip_miopen_softmax: bad args (handle=%p in=%p "
+            "out=%p rows=%lld cols=%lld)\n",
+            handle_v, input, output, (long long)rows, (long long)cols);
+    return -1;
+  }
+  RuntimeState *state = static_cast<RuntimeState *>(handle_v);
+  miopenHandle_t miopen_handle =
+      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
+  miopenTensorDescriptor_t inout_desc = nullptr;
+  if (miopenCreateTensorDescriptor(&inout_desc) != miopenStatusSuccess)
+    return -1;
+  // MIOpen wants 4-D NCHW.  We treat (rows, cols) as (rows, cols, 1, 1)
+  // -- equivalent for SOFTMAX_MODE_INSTANCE which reduces along
+  // C*H*W per N.
+  if (miopenSet4dTensorDescriptor(inout_desc, miopenFloat,
+                                   static_cast<int>(rows),
+                                   static_cast<int>(cols), 1, 1) !=
+      miopenStatusSuccess) {
+    miopenDestroyTensorDescriptor(inout_desc);
+    return -1;
+  }
+  float alpha = 1.0f, beta = 0.0f;
+  miopenStatus_t st = miopenSoftmaxForward_V2(
+      miopen_handle, &alpha, inout_desc, input, &beta, inout_desc, output,
+      MIOPEN_SOFTMAX_ACCURATE, MIOPEN_SOFTMAX_MODE_INSTANCE);
+  miopenDestroyTensorDescriptor(inout_desc);
+  if (st != miopenStatusSuccess) {
+    fprintf(stderr, "[hipdnn_ep] miopenSoftmaxForward_V2 returned %d\n",
+            (int)st);
+    return -1;
+  }
+  return 0;
 }
 
 // hip.transpose legacy rank<=3 kernel -- never had an implementation.
