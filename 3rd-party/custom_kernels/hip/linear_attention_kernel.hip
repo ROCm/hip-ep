@@ -77,8 +77,19 @@ template<> __device__ __forceinline__ __hip_bfloat16 from_float(float val) {
 // H_kv); this KV head reads from key head  h_k = g * n_k / H_kv.
 //
 // Shared memory layout (all float for accumulation precision):
-//   k_smem[dk] | v_smem[dv] | aux_smem[dk] | sk_smem[dv]
-//   aux_smem holds exp(g) during phases 1-2, then q during phase 3.
+//   k_smem[dk] | v_smem[dv] | aux_smem[dk] | sk_smem[dv] | q_smem[Nq * dk]
+//   aux_smem holds exp(g) for phases 1-2-3 (decay).
+//   q_smem holds all Q heads sharing this KV state (loaded once, used in
+//   the fused phase 2+3 readout).  Nq = (Hq >= Hkv) ? Hq/Hkv : 1.
+//
+// Phase 2 and Phase 3 are fused along the j (d_v) axis to avoid the fp16
+// round-trip on S that would otherwise appear between the state write and
+// the readout reload.  Each thread owns a stripe of j columns; for every j
+// it sequentially computes the fp32 column S_new[:, j], writes it back to
+// global S as fp16, and uses the *pre-rounding* fp32 value to accumulate
+// the readout sum for every Q head sharing this KV state.  The readout
+// inner product is therefore performed entirely in fp32, matching the CPU
+// kernel (which keeps S in fp32 between update and readout).
 //
 template <typename T>
 __global__ void linear_attention_decode_kernel(
@@ -94,20 +105,38 @@ __global__ void linear_attention_decode_kernel(
     float scale, int update_rule,
     int decay_per_key_dim, int beta_per_head)
 {
+    // Upper bound on Q heads sharing one KV state.  Used to size a per-thread
+    // register accumulator array.  The host launcher rejects launches that
+    // exceed this bound.
+    constexpr int MAX_Q_HEADS = 16;
+
     const int bg = blockIdx.x;
     const int b  = bg / Hkv;
     const int g  = bg % Hkv;
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
-    const int state_size = dk * dv;
 
     // Output head count: max(Hq, Hkv).  Determines stride of output and
-    // controls which branch of Phase 3 runs.
+    // controls the inverse-GQA branch of the fused readout.
     const int Hout = Hq >= Hkv ? Hq : Hkv;
+
+    // GQA direction.  Standard: Hq >= Hkv, this KV state feeds num_q_heads
+    // distinct Q heads.  Inverse: Hq < Hkv, multiple KV heads share a single
+    // Q head, but each KV head still writes its own output slot.
+    const bool inverse_gqa = (Hq < Hkv);
+    const int num_q_heads  = inverse_gqa ? 1 : (Hq / Hkv);
+
+    // Q head indices for the q_smem load:
+    //   inverse GQA: single Q head h_q = g * Hq / Hkv (shared)
+    //   standard   : consecutive heads h_q = g*num_q_heads + hl, hl in [0,Nq)
+    const int h_q_load_base = inverse_gqa ? (g * Hq / Hkv) : (g * num_q_heads);
+    // Output slot base index:
+    //   inverse GQA: write to output[g, j]                 (Hout == Hkv)
+    //   standard   : write to output[g*num_q_heads + hl, j] (Hout == Hq)
+    const int h_out_base    = inverse_gqa ? g : (g * num_q_heads);
 
     // Key-head index for this (b, g): n_k divides Hkv, so multiple KV heads
     // sharing the same K head produce the same index.
-    // this support inverse GQA
     const int h_k = g * n_k / Hkv;
 
     // Per-batch strides for the packed [B, T, H*D] tensors. The kernel reads
@@ -129,11 +158,13 @@ __global__ void linear_attention_decode_kernel(
     extern __shared__ float smem[];
     float* k_smem   = smem;
     float* v_smem   = smem + dk;
-    float* aux_smem = smem + dk + dv;
-    float* sk_smem  = smem + 2 * dk + dv;
-    const T* k_ptr = key   + b * k_batch_stride + (int64_t)h_k * dk;    // k_ptr = &key[b, t, h_k, 0]
-    const T* v_ptr = value + b * v_batch_stride + (int64_t)g   * dv;    // v_ptr = &value[b, t, g, 0]
-    T* S = state + b* state_batch_stride + g * dk * dv;
+    float* aux_smem = smem + dk + dv;          // decay (phases 1-2-3 fused)
+    float* sk_smem  = smem + 2 * dk + dv;      // per-j sk values (phase 1)
+    float* q_smem   = smem + 2 * dk + 2 * dv;  // num_q_heads * dk
+
+    const T* k_ptr = key   + b * k_batch_stride + (int64_t)h_k * dk;    // &key[b, t, h_k, 0]
+    const T* v_ptr = value + b * v_batch_stride + (int64_t)g   * dv;    // &value[b, t, g, 0]
+    T* S = state + b * state_batch_stride + (int64_t)g * dk * dv;
 
     for (int i = tid; i < dk; i += nthreads)
         k_smem[i] = to_float(k_ptr[i]);
@@ -170,12 +201,23 @@ __global__ void linear_attention_decode_kernel(
         beta_val = to_float(beta_in[beta_idx]);
     }
 
+    // Pre-load every Q head sharing this KV state into q_smem.  For inverse
+    // GQA only one head exists; for standard GQA all heads in the group are
+    // loaded so the fused inner loop can update sums for every head against
+    // the fp32 s_new before it is rounded to fp16.
+    for (int hl = 0; hl < num_q_heads; hl++) {
+        const int h_q = h_q_load_base + (inverse_gqa ? 0 : hl);
+        const T* q_ptr_h = query + b * q_batch_stride + (int64_t)h_q * dk;
+        for (int i = tid; i < dk; i += nthreads)
+            q_smem[hl * dk + i] = to_float(q_ptr_h[i]);
+    }
+
     __syncthreads();
 
     // === Phase 1: S^T @ k (with optional decay weighting) ===
     const bool needs_sk =
         (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
-//todo
+
     if (needs_sk) {
         for (int j = tid; j < dv; j += nthreads) {
             float sum = 0.0f;
@@ -189,72 +231,65 @@ __global__ void linear_attention_decode_kernel(
         __syncthreads();
     }
 
-    // === Phase 2: state update ===
-    for (int idx = tid; idx < state_size; idx += nthreads) {
-        const int i = idx / dv;
-        const int j = idx % dv;
+    // === Phase 2 + Phase 3 fused (per-j stripe) ===
+    //
+    // Each thread owns the j columns { tid, tid+nthreads, ... } < dv.
+    // For each owned j it walks i = 0..dk-1 sequentially, computing
+    //   s_new = update_rule(s_old, decay_i, k_i, v_j, beta, sk_j)   [fp32]
+    // then:
+    //   1. writes fp16 S[i*dv+j]  = from_float(s_new)
+    //   2. accumulates  sums[hl] += q_smem[hl*dk + i] * s_new      [fp32]
+    // After the i loop completes, output[h_out, j] = scale * sums[hl] is
+    // written for every Q head (cast back to T).
+    //
+    // The crucial point is that the readout sum uses the *pre-rounding* fp32
+    // s_new, so the per-step fp16 quantization noise on S no longer enters
+    // the dk-element inner product, matching CPU's fp32-internal kernel.
+    for (int j = tid; j < dv; j += nthreads) {
+        const float v_j  = v_smem[j];
+        const float sk_j = needs_sk ? sk_smem[j] : 0.0f;
 
-        float s_val = to_float(S[idx]);
-        const float k_i = k_smem[i];
-        const float v_j = v_smem[j];
+        float sums[MAX_Q_HEADS];
+        #pragma unroll
+        for (int hl = 0; hl < MAX_Q_HEADS; hl++) sums[hl] = 0.0f;
 
-        switch (update_rule) {
-        case LA_RULE_LINEAR:
-            s_val += k_i * v_j;
-            break;
-        case LA_RULE_GATED:
-            s_val = aux_smem[i] * s_val + k_i * v_j;
-            break;
-        case LA_RULE_DELTA:
-            s_val += beta_val * k_i * (v_j - sk_smem[j]);
-            break;
-        case LA_RULE_GATED_DELTA:
-            s_val = aux_smem[i] * s_val + beta_val * k_i * (v_j - sk_smem[j]);
-            break;
+        for (int i = 0; i < dk; i++) {
+            const float s_old   = to_float(S[i * dv + j]);
+            const float k_i     = k_smem[i];
+            const float decay_i = has_decay ? aux_smem[i] : 1.0f;
+
+            float s_new;
+            switch (update_rule) {
+            case LA_RULE_LINEAR:
+                s_new = s_old + k_i * v_j;
+                break;
+            case LA_RULE_GATED:
+                s_new = decay_i * s_old + k_i * v_j;
+                break;
+            case LA_RULE_DELTA:
+                s_new = s_old + beta_val * k_i * (v_j - sk_j);
+                break;
+            case LA_RULE_GATED_DELTA:
+                s_new = decay_i * s_old + beta_val * k_i * (v_j - sk_j);
+                break;
+            default:
+                s_new = s_old;
+            }
+
+            S[i * dv + j] = from_float<T>(s_new);
+
+            #pragma unroll
+            for (int hl = 0; hl < MAX_Q_HEADS; hl++) {
+                if (hl < num_q_heads)
+                    sums[hl] += q_smem[hl * dk + i] * s_new;
+            }
         }
 
-        S[idx] = from_float<T>(s_val);
-    }
-    __syncthreads();
-
-    // === Phase 3: output = scale * S^T @ q  (per query head) ===
-    // Dispatches on GQA direction:
-    //   Standard (Hq >= Hkv): loop over Hq/Hkv Q heads sharing this KV state,
-    //                          write each to output[h_q * dv] (Hout == Hq).
-    //   Inverse  (Hq <  Hkv): single Q head shared across Hkv/Hq KV heads;
-    //                          write to output[g * dv] (Hout == Hkv).
-    float* q_smem = aux_smem;
-
-    auto readout = [&](const T* q_ptr, T* out_ptr) {
-        for (int i = tid; i < dk; i += nthreads)
-            q_smem[i] = to_float(q_ptr[i]);
-        __syncthreads();
-
-        for (int j = tid; j < dv; j += nthreads) {
-            float sum = 0.0f;
-            for (int i = 0; i < dk; i++)
-                sum += q_smem[i] * to_float(S[i * dv + j]);
-            out_ptr[j] = from_float<T>(scale * sum);
+        for (int hl = 0; hl < num_q_heads; hl++) {
+            const int h_out = h_out_base + (inverse_gqa ? 0 : hl);
+            T* out_ptr = output + b * out_batch_stride + (int64_t)h_out * dv + j;
+            *out_ptr = from_float<T>(scale * sums[hl]);
         }
-        __syncthreads();
-    };
-
-    if (Hq >= Hkv) {
-        const int heads_per_group = Hq / Hkv;
-        for (int hl = 0; hl < heads_per_group; hl++) {
-            const int h = g * heads_per_group + hl;
-            const T* q_ptr = query  + b * q_batch_stride   + (int64_t)h * dk;
-            T* out_ptr     = output + b * out_batch_stride + (int64_t)h * dv;
-            readout(q_ptr, out_ptr);
-        }
-    } else {
-        // Inverse GQA: this KV head maps to a single Q head (shared across
-        // Hkv / Hq consecutive KV heads), but each KV head writes its own
-        // output slot -> Hout = Hkv output heads.
-        const int h_q = g * Hq / Hkv;
-        const T* q_ptr = query  + b * q_batch_stride   + (int64_t)h_q * dk;
-        T* out_ptr     = output + b * out_batch_stride + (int64_t)g   * dv;
-        readout(q_ptr, out_ptr);
     }
 }
 
@@ -342,7 +377,26 @@ extern "C" int hip_linear_attention_decode(
     const int decay_per_key_dim_i = decay_per_key_dim ? 1 : 0;
     const int beta_per_head_i     = beta_per_head     ? 1 : 0;
 
-    size_t smem_bytes = static_cast<size_t>(2 * dk_i + 2 * dv_i) * sizeof(float);
+    // num_q_heads = number of Q heads sharing one KV state (1 in inverse GQA).
+    // Must match the kernel's MAX_Q_HEADS bound for the per-thread register
+    // accumulator array (sums[MAX_Q_HEADS]).  Keep this in sync with the
+    // kernel-side constant.
+    constexpr int MAX_Q_HEADS = 16;
+    const int num_q_heads = (Hq >= Hkv) ? static_cast<int>(Hq / Hkv) : 1;
+    if (num_q_heads > MAX_Q_HEADS) {
+        fprintf(stderr,
+                "[custom_kernels] hip_linear_attention_decode: "
+                "num_q_heads(%d) exceeds MAX_Q_HEADS(%d); "
+                "increase the kernel-side bound to support this GQA ratio\n",
+                num_q_heads, MAX_Q_HEADS);
+        return -1;
+    }
+
+    // smem layout: k_smem[dk] | v_smem[dv] | aux_smem[dk] | sk_smem[dv] |
+    //              q_smem[num_q_heads * dk]
+    size_t smem_bytes =
+        static_cast<size_t>(2 * dk_i + 2 * dv_i + num_q_heads * dk_i) *
+        sizeof(float);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_linear_attention_decode: B=%lld seq_len=%lld "
