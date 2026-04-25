@@ -225,6 +225,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/where.cpp runtime_where.bc)
     compile_to_bitcode(real/layer_norm.cpp runtime_layer_norm.bc)
     compile_to_bitcode(real/cumsum.cpp runtime_cumsum.bc)
+    compile_to_bitcode(real/pad.cpp runtime_pad.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
     compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
@@ -259,6 +260,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_where.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cumsum.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_pad.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc

@@ -415,6 +415,46 @@ int hip_cumsum(
     int reverse);
 
 /* =========================================================================
+ * Pad (ONNX Pad opset 18)
+ * =========================================================================
+ *
+ * Pads `input` along each axis with `pads_begin[axis]` elements before and
+ * `pads_end[axis]` elements after, producing `output`.  The host computes
+ * the output strides; this kernel only needs `out_shape`, `in_shape`,
+ * `in_strides_elems`, and `pads_begin` (along with the mode and pad value).
+ *
+ * Modes (HIP_PAD_MODE_*):
+ *   0 = constant : write `value` (cast to T) for out-of-bounds reads
+ *   1 = reflect  : mirror without repeating the boundary sample
+ *   2 = edge     : replicate the boundary sample (clamp)
+ *
+ * Up to HIP_PAD_MAX_RANK (8) is supported.
+ *
+ * Supported hip_dtype: float32, float16, bfloat16
+ * Returns: 0 on success, non-zero on failure
+ */
+typedef enum {
+    HIP_PAD_MODE_CONSTANT = 0,
+    HIP_PAD_MODE_REFLECT  = 1,
+    HIP_PAD_MODE_EDGE     = 2,
+} hip_pad_mode_t;
+
+int hip_pad(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* in_shape,
+    const int64_t* in_strides_elems,
+    const int64_t* out_shape,
+    const int64_t* out_strides_elems,
+    int64_t rank,
+    const int64_t* pads_begin,
+    int64_t pads_begin_len,
+    int hip_dtype,
+    int mode,
+    float value);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

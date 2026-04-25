@@ -69,6 +69,7 @@ inline constexpr const char *kWrapCompare = "wrap_compare";
 inline constexpr const char *kWrapWhere = "wrap_where";
 inline constexpr const char *kWrapLayerNorm = "wrap_layer_norm";
 inline constexpr const char *kWrapCumSum = "wrap_cumsum";
+inline constexpr const char *kWrapPad = "wrap_pad";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -274,6 +275,8 @@ void populateTier3CompareLoweringPatterns(const LLVMTypeConverter &converter,
                                           RewritePatternSet &patterns);
 void populateTier5SeqLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
+void populateTier6LoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

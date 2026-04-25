@@ -496,6 +496,12 @@ static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
   populateUnaryElementwiseConversionPatterns(patterns, ctx);
   populateTier2ShapeConversionPatterns(patterns, ctx);
   populateTier5SeqConversionPatterns(patterns, ctx);
+  // Tier 6 (onnx.Pad / Expand) reads its `pads` / `shape` operand from a
+  // constant tensor at compile time -- run before lowerOnnxConstants so we
+  // still see the original onnx.Constant.  Once the constant has been
+  // externalized into a memref.global the pattern can no longer recover the
+  // values without a host-side runtime read.
+  populateTier6ConversionPatterns(patterns, ctx);
   // Unsqueeze/Squeeze infer their axes from input vs output shape, so
   // they do not need to be run pre-constant-lowering -- the main
   // convertComputeOps pass picks them up.
