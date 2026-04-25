@@ -10,6 +10,29 @@
 #include <cstdint>
 #include <cstdio>
 
+// Parallel sum reduction for i32.  Same shape as the i64 version but
+// stored as int32 in/out (used by Kokoro for a small constant-folded
+// shape op).  Block of 256 threads, one block per output element.
+__global__ void reduce_sum_i32_kernel(
+    const int32_t *__restrict__ data, int32_t *__restrict__ output,
+    int64_t reduce_size, int64_t num_output_elements) {
+  __shared__ int64_t sdata[256];
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+  const int32_t *slice = data + out_idx * reduce_size;
+  int tid = threadIdx.x;
+  int64_t s = 0;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x)
+    s += slice[i];
+  sdata[tid] = s;
+  __syncthreads();
+  for (unsigned int j = blockDim.x / 2; j > 0; j >>= 1) {
+    if ((unsigned)tid < j) sdata[tid] += sdata[tid + j];
+    __syncthreads();
+  }
+  if (tid == 0) output[out_idx] = static_cast<int32_t>(sdata[0]);
+}
+
 // Parallel sum reduction for i64. Each block reduces one output element
 // by summing reduce_size consecutive input elements using shared memory.
 __global__ void reduce_sum_i64_kernel(
@@ -151,6 +174,15 @@ extern "C" int hip_reduce_sum(
   int64_t reduce_size = num_input_elements / num_output_elements;
 
   switch (hip_dtype) {
+    case HIP_DTYPE_INT32: {
+      constexpr int kBlock = 256;
+      hipLaunchKernelGGL(
+          reduce_sum_i32_kernel,
+          dim3(static_cast<unsigned>(num_output_elements)), dim3(kBlock), 0,
+          hip_stream, static_cast<const int32_t *>(data),
+          static_cast<int32_t *>(output), reduce_size, num_output_elements);
+      break;
+    }
     case HIP_DTYPE_INT64: {
       int block_size = 256;
       if (reduce_size < 256) {

@@ -9,6 +9,7 @@
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <unordered_map>
@@ -212,6 +213,24 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     fprintf(stderr, "wrap_miopenOpTensor: unsupported tensor_op %lld\n",
             (long long)tensor_op);
     return -1;
+  }
+
+  // MIOpen miopenOpTensor requires `aDesc == cDesc` (the A tensor must
+  // already be at the broadcast result shape).  ONNX Add/Mul are
+  // commutative for our purposes, so when `lhs` doesn't match `output`
+  // but `rhs` does, swap them.
+  bool lhs_matches = (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h &&
+                       lhs_w == out_w);
+  bool rhs_matches = (rhs_n == out_n && rhs_c == out_c && rhs_h == out_h &&
+                       rhs_w == out_w);
+  if (!lhs_matches && rhs_matches &&
+      (miopen_op == miopenTensorOpAdd || miopen_op == miopenTensorOpMul)) {
+    std::swap(lhs, rhs);
+    std::swap(lhs_n, rhs_n);
+    std::swap(lhs_c, rhs_c);
+    std::swap(lhs_h, rhs_h);
+    std::swap(lhs_w, rhs_w);
+    lhs_matches = true;
   }
 
   OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,    rhs_h,
