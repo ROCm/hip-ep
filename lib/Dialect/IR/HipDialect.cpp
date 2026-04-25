@@ -718,6 +718,49 @@ void LayerNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+MutableOperandRange PadOp::getDpsInitsMutable() { return getOutputMutable(); }
+void PadOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange ExpandOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+void ExpandOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange RangeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+void RangeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange ConvTransposeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+void ConvTransposeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange ResizeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+void ResizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 //===----------------------------------------------------------------------===//
 // SubOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//

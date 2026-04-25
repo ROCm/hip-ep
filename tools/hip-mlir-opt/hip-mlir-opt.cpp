@@ -155,6 +155,16 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::LayerNormOp>>(*ctx);
     mlir::hip::CumSumOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::CumSumOp>>(*ctx);
+    mlir::hip::PadOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::PadOp>>(*ctx);
+    mlir::hip::ExpandOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ExpandOp>>(*ctx);
+    mlir::hip::RangeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::RangeOp>>(*ctx);
+    mlir::hip::ConvTransposeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ConvTransposeOp>>(*ctx);
+    mlir::hip::ResizeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ResizeOp>>(*ctx);
   });
 }
 

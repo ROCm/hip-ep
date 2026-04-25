@@ -944,6 +944,142 @@ def Hip_WhereOp : Hip_DpsOp<"where"> {
   }];
 }
 
+def Hip_PadOp : Hip_DpsOp<"pad"> {
+  let summary = "ONNX-style Pad (constant / reflect / edge)";
+  let description = [{
+    Pads `input` along each axis with `pads_begin[axis]` elements before
+    and `pads_end[axis]` elements after, producing `output`.  The
+    `mode` attribute selects the padding strategy:
+      - 0 = constant (pad with `value` cast to the input element type)
+      - 1 = reflect  (mirror without repeating the edge sample)
+      - 2 = edge     (replicate the edge sample)
+    `pads_begin` and `pads_end` have one entry per input rank.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$pads_begin,
+    I64ArrayAttr:$pads_end,
+    I64Attr:$mode,
+    DefaultValuedAttr<F32Attr, "0.0">:$value
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ExpandOp : Hip_DpsOp<"expand"> {
+  let summary = "ONNX Expand (broadcast to a larger shape)";
+  let description = [{
+    Broadcasts `input` to the shape of `output`.  Each input dim must
+    be either equal to the corresponding output dim or 1.  Strides on
+    broadcast dims are 0 at the kernel level.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_RangeOp : Hip_DpsOp<"range"> {
+  let summary = "ONNX Range (output[i] = start + i * delta, until limit)";
+  let description = [{
+    Fills `output` with `start, start+delta, start+2*delta, ...` until
+    the value reaches `limit`.  When the inputs are runtime tensors (not
+    foldable to compile-time constants), the kernel reads the three
+    scalar values from device memory.  Element type must be i32 or i64.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$start,
+    Hip_TensorOrMemRef:$limit,
+    Hip_TensorOrMemRef:$delta,
+    Hip_TensorOrMemRef:$output
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)`
+    `ins` `(` $start `,` $limit `,` $delta
+        `:` type($start) `,` type($limit) `,` type($delta) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
+  let summary = "ONNX ConvTranspose (transposed / fractionally-strided convolution)";
+  let description = [{
+    Backward-data convolution: scatter input pixels to a larger output
+    grid via `strides`, then convolve with `weights`.  Uses
+    MIOpen's `miopenConvolutionBackwardData` under the hood for 1-D
+    and 2-D spatial dims.  Bias is optional and added per output
+    channel.  Attributes mirror onnx.ConvTranspose semantics:
+      - `strides`         : upsampling factor per spatial dim
+      - `pads`            : implicit zero pad (begin0..., end0...)
+      - `output_padding`  : additional pad on the right/bottom
+      - `kernel_shape`    : kernel spatial dims
+      - `dilations`       : kernel dilation per spatial dim
+      - `group`           : grouped convolution
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weights,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    DefaultValuedAttr<I64ArrayAttr, "{}">:$output_padding,
+    DefaultValuedAttr<I64Attr, "1">:$group
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)`
+    `ins` `(` $input `,` $weights (`,` $bias^)?
+        `:` type($input) `,` type($weights) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ResizeOp : Hip_DpsOp<"resize"> {
+  let summary = "ONNX Resize (nearest / linear / cubic interpolation)";
+  let description = [{
+    Resizes the spatial dims of `input` to the spatial dims of
+    `output`.  The `mode` attribute selects the interpolation:
+      - 0 = nearest
+      - 1 = linear
+      - 2 = cubic
+    `coord_transform` controls how output indices map back to input
+    indices (0=half_pixel, 1=pytorch_half_pixel, 2=align_corners,
+    3=asymmetric, 4=tf_crop_and_resize).  Only NCHW and NCDHW
+    layouts are supported; the implementation tiles the spatial
+    dims and broadcasts batch/channel.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    DefaultValuedAttr<I64Attr, "0">:$coord_transform,
+    DefaultValuedAttr<F32Attr, "-0.75">:$cubic_coeff_a
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_CumSumOp : Hip_DpsOp<"cumsum"> {
   let summary = "Cumulative sum along an axis (ONNX CumSum)";
   let description = [{

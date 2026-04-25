@@ -296,6 +296,24 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                                               int64_t minNumElements,
                                               ExternalizationState *extState) {
 
+  // Drop onnx.NoValue placeholders; LayerNorm and other ops use these
+  // to mean "this optional input is absent".  The conversion patterns
+  // for those ops already check `isa<NoneType>` on the operand type, but
+  // bufferization chokes on a dangling `none`-typed op, so we erase it
+  // outright here.
+  llvm::SmallVector<mlir::Operation *> noValues;
+  funcOp.walk([&](mlir::Operation *op) {
+    if (op->getName().getStringRef() == "onnx.NoValue")
+      noValues.push_back(op);
+  });
+  for (auto *op : noValues) {
+    if (op->use_empty())
+      op->erase();
+    // Else: still in use (LayerNorm-style optional input).  Lowering
+    // patterns have to handle the `none` type or replace the use; we
+    // can't safely erase it.
+  }
+
   llvm::SmallVector<mlir::Operation *> constants;
   funcOp.walk([&](mlir::Operation *op) {
     if (op->getName().getStringRef() == "onnx.Constant")
@@ -391,6 +409,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateTier2ShapeConversionPatterns(patterns, ctx);
   populateTier3CompareConversionPatterns(patterns, ctx);
   populateTier5SeqConversionPatterns(patterns, ctx);
+  populateTier6ConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

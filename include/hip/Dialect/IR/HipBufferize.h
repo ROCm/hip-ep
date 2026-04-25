@@ -107,6 +107,12 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);
+    PadOp::attachInterface<HipDstBufferizableModel<PadOp>>(*ctx);
+    ExpandOp::attachInterface<HipDstBufferizableModel<ExpandOp>>(*ctx);
+    RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
+    ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
+        *ctx);
+    ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
   });
 }
 

@@ -196,6 +196,8 @@ void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateUnsqueezeSqueezeConversionPatterns(RewritePatternSet &patterns,
                                                 MLIRContext *ctx);
+void populateTier6ConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
