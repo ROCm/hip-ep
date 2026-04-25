@@ -292,11 +292,41 @@ patterns + lowering + HIP kernels, except for the 8 listed below):**
   codegen, runtime bitcode, and HIP custom kernels are all wired up
   correctly end-to-end.
 
-**Kokoro: ConvertOnnxToHipPass now succeeds in 0.007 s** and removes
-**1747 of the 1768 onnx ops** (98.8%).  The runtime cost of the whole
-ConvertOnnxToHipPass (constants + compute) is ~0.5 s; bufferize +
-the LLVM passes are sub-100 ms each.  All blocking issues from the
-previous snapshot have been worked around:
+**Kokoro now compiles all the way through to a model DLL that loads
+and runs.**  Pipeline timings (gfx1201, RelWithDebInfo build,
+hip-onnx-runner -m kokoro_82m_static_128_clean.onnx):
+
+| Phase | Time |
+|---|---|
+| MLIR parsing | 0.005s |
+| ConvertOnnxToHipPass | 0.526s (constants ~0.1s + compute ~0.5s) |
+| OneShotBufferizePass | 0.026s |
+| BufferDeallocationSimplification | 0.681s |
+| ConvertHipToLLVMPass | 0.046s |
+| translateToLLVMIR | 0.041s |
+| linkRuntime | 0.031s |
+| optimizeLLVMIR | 0.559s |
+| compileToObject | 1.081s |
+| linkToDLL | 0.102s |
+| **Total CompilerDriver** | **3.224s** |
+| Plugin LoadLibrary | 0.032s |
+| HIP / MIOpen / hipBLASLt init | 0.130s |
+| 538 constants @ 324MB to VRAM | 0.098s |
+
+DLL size: 3.07 MB.  6943 rewrite events fire in
+`convertComputeOps` in 0.007 s; the greedy driver then converges.
+
+**The actual `Run()` call still fails** with ORT's
+`Tensor::CalculateTensorStorageSize Tensor shape.Size() must be >= 0`
+because of the `dropUnsupportedOnnxOps` placeholders the EP inserts
+for ops it can't yet bufferize/lower (current placeholders for:
+Slice (2), Range (2), NonZero (1)).  These ops live in the iSTFTNet
+audio-synthesis tail of Kokoro and need real GPU implementations
+before the model produces correct audio; the **structural** wiring
+through the EP is in place.
+
+All blocking issues from the previous snapshot have been worked
+around or made irrelevant by `dropUnsupportedOnnxOps`:
 
 - Dynamic-shape bridge: `morphizen` now emits `ShapedType::kDynamic`
   instead of raw `-1` (with a symmetric mapping back when extracting
@@ -317,36 +347,50 @@ previous snapshot have been worked around:
   but the conversion pattern is gated off pending a fix for a greedy-
   rewriter crash on dynamic-rank-1 outputs.
 
-| Surviving onnx ops (21 / 1768 = 1.2%) | nodes |
+| Surviving onnx ops at end of `convertComputeOps` | nodes |
 |---|---|
-| LSTM | 6 |
-| Shape (dynamic input dims) | 3 |
-| Range (gated-off pattern; rank-1 dynamic output) | 2 |
-| Pad (`pads` operand externalised behind to_tensor) | 2 |
 | Slice (dynamic `ends` from a runtime expand_shape) | 2 |
-| STFT | 1 |
-| Transpose (rank-0 input with rank-4 perm — Kokoro dead code) | 1 |
-| Squeeze (rank-1 dynamic → scalar) | 1 |
-| NonZero | 1 |
-| ScatterND | 1 |
-| NoValue (kept because LayerNorm pattern still consumes the use) | 1 |
+| Range (`RangeToHip` re-disabled until `hip.range` LLVM lowering lands) | 2 |
+| NonZero (NonzeroConversion populate disabled — heap-corrupts greedy) | 1 |
 
-**Next blocker: bufferization fails on those 21 surviving onnx ops**
-plus the new hip ops still need their LLVM lowering and runtime
-kernels.  Concrete remaining work:
+These 5 surviving onnx ops are now caught by `dropUnsupportedOnnxOps`
+which replaces each with a `tensor.empty` of the result type so the
+rest of the pipeline (bufferize, HipToLLVM, LLVM codegen, link)
+succeeds.  This is intentionally INCORRECT for any inference path
+that actually depends on those ops -- in Kokoro that's the iSTFTNet
+audio-synthesis tail.
 
-1. **LLVM lowering + runtime kernels** for `hip.pad`, `hip.expand`,
-   `hip.conv_transpose`, `hip.resize`.  Each follows the existing
-   pattern: `wrap_*` runtime fn in `lib/Runtime/real/`, HIP kernel in
-   `3rd-party/custom_kernels/hip/`, ConvertOpToLLVMPattern in
-   `lib/Conversion/HipToLLVM/Tier6Lowering.cpp`, populated by
-   `populateTier6LoweringPatterns`.
-2. **LSTM (6 nodes)** -- `hip.lstm` op + MIOpen RNN descriptor wiring,
-   ONNX-to-MIOpen weight permutation, hidden-state and cell-state
-   handling.  Most complex piece; budget ~3-5 days.
-3. **STFT (1 node)** -- `hip.stft` op backed by rocFFT.
-4. **NonZero (1 node)** -- data-dependent output shape; needs the
-   runtime to allocate based on the kernel result count.
+**Concrete remaining work to get correct audio output:**
+
+1. **NonZero LLVM lowering** -- `hip.nonzero` op + DPS interface +
+   bufferize hooks already exist; the conversion populate currently
+   heap-corrupts the greedy rewriter when MERELY registered (matchAndRewrite
+   never runs because Kokoro's NonZero has dynamic K and the pattern bails
+   early).  Root cause TBD; once fixed, re-enable
+   `populateNonzeroConversionPatterns` in
+   `lib/Conversion/OnnxToHip/OnnxToHip.cpp::convertComputeOps`.
+2. **Slice with dynamic `ends`** -- the 2 surviving slices come from
+   the `decoder/decoder/generator/istft/stft/Slice*` chain where the
+   `ends` operand is the result of a `tensor.expand_shape` of a
+   constant.  `extractI64Constant` already looks through expand/
+   collapse/cast; need to also look through arith arithmetic that
+   produces the i64 from a dim size.  Alternative: emit a runtime
+   `hip.dynamic_slice` op backed by a small HIP kernel.
+3. **Range with dynamic limit** -- the 2 surviving ranges come from
+   `/encoder/Range` where `limit` comes from a runtime tensor.dim.
+   `RangeToHip` was re-disabled because there's no `hip.range` LLVM
+   lowering -- needs a tiny HIP kernel `hip_range(start, delta, n,
+   out)` and a `RangeOpLowering` that wires it up.
+4. **STFT (`hip.stft`)** -- conversion pattern + runtime stub exist
+   (`hip_stft_frame_window` / `hip_stft_split_complex` are zero-fill
+   placeholders); needs the real rocFFT path.
+5. **LSTM (`hip.lstm`)** -- conversion pattern + MIOpen RNN forward
+   inference call exist as of commit 339c500; needs a real ONNX-to-
+   MIOpen weight permutation and an end-to-end test on a small RNN
+   model before Kokoro's 6 LSTM nodes produce correct output.
+6. **`hip.miopen.softmax`** -- runtime stub
+   (`hip_miopen_softmax`, zero-fill placeholder) needs the real
+   `miopenSoftmaxForward` call (input -> output, dims rows/cols).
 5. **ScatterND (1 node)** -- gather-scatter HIP kernel.
 6. **`hip.range` final pattern** -- replace the `tensor.empty %c1`
    placeholder with a real dynamic-shape allocation handshake so the
