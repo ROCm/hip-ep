@@ -155,7 +155,7 @@ extern "C" int wrap_miopenConvolutionBackwardData(
   int returned_algo_count = 0;
   miopenConvBwdDataAlgorithm_t algo;
   size_t workspace_size = 0;
-  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
+  const size_t find_workspace_size = 64 * 1024 * 1024; // 64MB
   float alpha = 1.0f;
   float beta = 0.0f;
 
