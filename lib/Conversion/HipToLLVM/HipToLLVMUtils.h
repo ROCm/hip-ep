@@ -79,6 +79,7 @@ inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
+inline constexpr const char *kWrapExpand = "wrap_expand";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -275,6 +276,8 @@ void populateTier3CompareLoweringPatterns(const LLVMTypeConverter &converter,
                                           RewritePatternSet &patterns);
 void populateTier5SeqLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
+void populateExpandLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
 void populateTier6LoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 

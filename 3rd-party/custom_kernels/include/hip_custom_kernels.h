@@ -869,6 +869,45 @@ int hip_qmoe_scatter_add(
 int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+
+/* =========================================================================
+ * Expand (ONNX Expand opset 13 - numpy-style broadcast)
+ * =========================================================================
+ *
+ * Broadcasts `input` into the shape described by `out_shape` using
+ * right-aligned numpy broadcasting.  The host-side wrapper has already
+ * right-aligned everything to `rank` (= out_rank):
+ *
+ *   - `out_shape[d]`        : output extent along axis d (length = rank)
+ *   - `in_strides_elems[d]` : effective input element-stride along axis d.
+ *                                0 means "broadcast" (the corresponding
+ *                                right-aligned input dim is 1 or absent).
+ *   - `in_shape[d]`         : right-aligned input shape (length = rank).
+ *                                Currently informational only; the broadcast
+ *                                semantics are fully encoded in
+ *                                `in_strides_elems`.
+ *
+ * One thread per output element:
+ *   in_off = sum_d (out_coord[d] * in_strides_elems[d])
+ *   output[flat] = input[in_off]
+ *
+ * Element-type dispatch is by raw byte width (1/2/4/8), so f16/bf16/f32
+ * and i32/i64 all share the same code paths.  Up to HIP_EXPAND_MAX_RANK
+ * (8) is supported.
+ *
+ * Supported hip_dtype: float32, float16, bfloat16, int32, int64
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_expand(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* in_shape,
+    const int64_t* in_strides_elems,
+    const int64_t* out_shape,
+    int64_t rank,
+    int hip_dtype);
+
 #ifdef __cplusplus
 }
 #endif
