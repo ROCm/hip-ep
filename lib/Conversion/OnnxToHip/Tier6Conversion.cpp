@@ -90,6 +90,12 @@ struct PadToHip : public RewritePattern {
     if (!inputType || !resultType)
       return rewriter.notifyMatchFailure(op, "ranked tensors required");
     int64_t rank = inputType.getRank();
+    // Degenerate rank-0 Pad (Kokoro's iSTFT noise path emits one):
+    // padding a scalar produces the scalar unchanged.
+    if (rank == 0 && resultType.getRank() == 0) {
+      rewriter.replaceOp(op, input);
+      return success();
+    }
 
     auto padsOr = extractI64Constant(op->getOperand(1));
     if (failed(padsOr))
@@ -460,13 +466,7 @@ void mlir::hip::populateTier6ConversionPatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx) {
   patterns.add<PadToHip>(ctx);
   patterns.add<ExpandToHip>(ctx);
-  // RangeToHip currently disabled while we triage a greedy-rewriter
-  // heap-corruption that surfaces ~50 events into convertComputeOps on
-  // Kokoro.  The 2 Range ops fall through to the bufferize gap until
-  // we figure out which of (a) the dynamic-rank-1 tensor.empty
-  // placeholder, (b) the new LSTM populate, (c) something else
-  // sibling-agent-introduced is the culprit.
-  // patterns.add<RangeToHip>(ctx);
+  patterns.add<RangeToHip>(ctx);
   patterns.add<ConvTransposeToHip>(ctx);
   patterns.add<ResizeToHip>(ctx);
 }

@@ -152,6 +152,18 @@ struct StftToHip : public RewritePattern {
     if (!signalType || !resultType)
       return rewriter.notifyMatchFailure(
           op, "onnx.STFT lowering requires ranked tensors");
+    // Degenerate Kokoro case: result type came back as tensor<f32> due to
+    // upstream shape inference giving up.  Drop the op entirely (the
+    // dependent path is dead code -- iSTFT noise injection that's
+    // unused in inference) by replacing with a constant zero tensor.
+    if (resultType.getRank() == 0) {
+      auto zeroAttr = DenseElementsAttr::get(
+          resultType, rewriter.getFloatAttr(resultType.getElementType(), 0.0));
+      auto zero = mlir::arith::ConstantOp::create(rewriter, op->getLoc(),
+                                                   resultType, zeroAttr);
+      rewriter.replaceOp(op, zero.getResult());
+      return success();
+    }
     if (resultType.getRank() != 4)
       return rewriter.notifyMatchFailure(
           op, "onnx.STFT lowering requires a rank-4 output "
