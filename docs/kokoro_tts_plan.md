@@ -250,3 +250,80 @@ Concretely:
 - The plan and design notes for this work live in
   `docs/kokoro_tts_plan.md` *inside this private repo*. They are not
   mirrored to `demos/plans/`.
+
+---
+
+## Status snapshot (last build)
+
+**Build / infrastructure:**
+- Repo builds cleanly on a 9070 XT (gfx1201) against the venv
+  `_rocm_sdk_devel` SDK.  Test harness: 65 E2E + 100+ LIT, only the
+  pre-existing `test_reciprocal` (validator-Inf) and `test_reshape`
+  (harness segfault) fail; everything else passes.
+- WMMA kernels (matmul_nbits, gemm_wmma, gqa) ported from RDNA3 to
+  RDNA4 via `wmma_frag.h` (no half-wave replication on rdna4, gfx12
+  WMMA builtin, matching C/D row mapping).
+- ONNX Runtime (`rel-1.24.3`) built locally with `--use_dml`; the
+  EP DLL `onnxruntime_morphizen_ep.dll` and `hip-onnx-runner.exe` are
+  installed to `D:\jam\prebuilt-local\bin\`.
+
+**Op coverage (49/49 of Kokoro's op types implemented as conversion
+patterns + lowering + HIP kernels, except for the 8 listed below):**
+
+| Implemented this branch | Kokoro nodes |
+|---|---|
+| Slice, Div, Pow, Sin, Tanh, Exp, Cos, Floor, Round, Clip, Atan, LeakyRelu | 384 |
+| ReduceMean, Shape, Concat, ConstantOfShape, Range | 226 |
+| Equal, Greater, Less, GreaterOrEqual, And, Where, LayerNormalization | 49 |
+| CumSum | 2 |
+
+| Pre-existing in `onnx-hipdnn-ep` | Kokoro nodes |
+|---|---|
+| Add, Mul, Unsqueeze, MatMul, Sqrt, Transpose, Conv, Gemm, Sub, Reshape, Cast, Softmax, Sigmoid, ReduceSum, Squeeze, Gather | 1677 |
+
+| Still missing (28 nodes / 1.1% of Kokoro) | Kokoro nodes |
+|---|---|
+| LSTM, ConvTranspose, STFT, Pad, Resize, Expand, NonZero, ScatterND | 28 |
+
+**Verified end-to-end via `hip-onnx-runner` on gfx1201:**
+- A single-op fp16 Tanh model loads through the ORT → MorphiZen
+  bridge, compiles to a model DLL, and executes on the GPU in
+  3.2 ms.  This confirms the ORT bridge, MLIR pipeline, LLVM
+  codegen, runtime bitcode, and HIP custom kernels are all wired up
+  correctly end-to-end.
+
+**Kokoro itself does not yet load** through `hip-onnx-runner` due to
+two issues that go beyond op coverage:
+
+1. **Dynamic shapes.**  The MorphiZen ORT bridge serialises
+   `unk__N` dims as raw negative literal sizes in MLIR types, which
+   trips MLIR's `RankedTensorType::verify` (`invalid tensor
+   dimension size`) before any of our passes run.  After
+   `polygraphy surgeon sanitize --override-input-shapes
+   input_ids:[1,128] style:[1,256] speed:[1] --fold-constants` the
+   model still has 269 dynamic dims because Kokoro's iSTFTNet
+   decoder predicts durations at runtime and uses them as shape
+   inputs (`Range`, `ConstantOfShape` of `Cast` of a predicted
+   length).  Possible fixes:
+   - **(EP-side)** Patch the ORT-to-MLIR bridge in
+     `morphizen-graph` / `onnx-ir-imp` to emit `?` (kDynamic)
+     instead of the raw negative `dim_value`.  Most of our
+     conversion patterns already require `hasStaticShape()` and
+     would still bail, but the MLIR verifier would stop tripping
+     and we'd fall back through ORT to CPU per-op.
+   - **(Model-side)** Split Kokoro at the duration predictor and
+     compile two static-shape subgraphs that meet at a fixed-size
+     boundary (encoder → predictor on the input side; decoder
+     starting from a precomputed maximum frame count on the audio
+     side).  Effort: ~1 week of model surgery.
+
+2. **Missing ops** (LSTM, ConvTranspose, STFT, NonZero, ScatterND,
+   Pad, Resize, Expand) — even with dynamic shapes solved, these
+   eight op types account for 28 nodes that need conversion +
+   lowering + kernel implementations.  LSTM (MIOpen RNN with
+   ONNX-to-MIOpen weight permutation) and STFT (rocFFT-backed) are
+   the largest pieces; the others mirror the kernels we already have.
+
+The next concrete step is whichever of {dynamic-shape bridge fix,
+model surgery} the team prefers, followed by the LSTM / STFT
+implementations.  Everything below the bridge is verified working.
