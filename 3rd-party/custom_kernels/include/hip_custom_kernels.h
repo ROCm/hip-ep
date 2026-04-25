@@ -537,6 +537,20 @@ int hip_range_f32(
     int64_t n,
     void* output);
 
+/* Variant: scalar inputs live in device memory (used when MLIR can't
+ * extract them at compile time).  hip_range_dyn reads them back via
+ * hipMemcpy, computes n, then invokes the right launch internally.
+ * `output_capacity` is the max number of elements the caller has
+ * pre-allocated; the runtime n is clamped to that. */
+int hip_range_dyn(
+    void* stream,
+    const void* start_dev,
+    const void* limit_dev,
+    const void* delta_dev,
+    void* output,
+    int64_t output_capacity,
+    int hip_dtype);
+
 /* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
@@ -771,7 +785,8 @@ int hip_gather(
     int64_t data_num_elements,
     int64_t indices_num_elements,
     int64_t output_num_elements,
-    int element_size_bytes);
+    int element_size_bytes,
+    int64_t pre_axis_size);
 
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)

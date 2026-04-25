@@ -477,7 +477,7 @@ int wrap_power(RuntimeState *state, void *input, void *output,
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
-                int64_t element_size_bytes);
+                int64_t element_size_bytes, int64_t pre_axis_size);
 
 // ReduceSum operation wrapper
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,

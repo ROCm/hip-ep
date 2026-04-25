@@ -38,60 +38,53 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
     auto outMemref = cast<MemRefType>(op.getOutput().getType());
     Type elemType = outMemref.getElementType();
     bool isI64 = elemType.isInteger(64);
+    bool isI32 = elemType.isInteger(32);
     bool isF32 = elemType.isF32();
-    if (!isI64 && !isF32)
+    if (!isI64 && !isI32 && !isF32)
       return op.emitOpError(
-                 "hip.range supports only i64 and f32 element types");
+                 "hip.range supports only i32/i64/f32 element types");
+    int hipDtype = isI64 ? 2 : (isI32 ? 3 : 0);
 
-    // Pull start / limit / delta scalars (memrefs of rank-0).
-    auto extractScalar = [&](Value memref, Type wantType) -> Value {
-      Value ptr = extractMemRefPtr(memref, rewriter, loc);
-      return LLVM::LoadOp::create(rewriter, loc, wantType, ptr);
-    };
-    Type wantScalar = isI64 ? i64Type : f32Type;
-    Value startVal = extractScalar(adaptor.getStart(), wantScalar);
-    Value limitVal = extractScalar(adaptor.getLimit(), wantScalar);
-    Value deltaVal = extractScalar(adaptor.getDelta(), wantScalar);
-
-    // n = max(ceil((limit - start) / delta), 0)
-    Value n;
-    if (isI64) {
-      Value diff =
-          LLVM::SubOp::create(rewriter, loc, limitVal, startVal).getResult();
-      n = LLVM::SDivOp::create(rewriter, loc, diff, deltaVal).getResult();
-    } else {
-      Value diff =
-          LLVM::FSubOp::create(rewriter, loc, limitVal, startVal).getResult();
-      Value div =
-          LLVM::FDivOp::create(rewriter, loc, diff, deltaVal).getResult();
-      n = LLVM::FPToSIOp::create(rewriter, loc, i64Type, div).getResult();
-    }
-
-    // Clamp negative -> 0.
-    Value zeroI64 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                              rewriter.getI64IntegerAttr(0));
-    Value isPos = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::sgt,
-                                        n, zeroI64);
-    n = LLVM::SelectOp::create(rewriter, loc, isPos, n, zeroI64);
-
-    // Output device pointer.
+    // Pass start/limit/delta as device pointers; the runtime helper
+    // memcpy's them back to host before computing n.  Avoids the host
+    // CPU loading from a device pointer.
+    Value startPtr = extractMemRefPtr(adaptor.getStart(), rewriter, loc);
+    Value limitPtr = extractMemRefPtr(adaptor.getLimit(), rewriter, loc);
+    Value deltaPtr = extractMemRefPtr(adaptor.getDelta(), rewriter, loc);
     Value outPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
-    Type retType = i32Type;
-    SmallVector<Type> paramTypes;
-    if (isI64) {
-      paramTypes = {ptrType, i64Type, i64Type, i64Type, ptrType};
-    } else {
-      paramTypes = {ptrType, f32Type, f32Type, i64Type, ptrType};
+    // Compute output capacity = product of output dims (mostly 1
+    // dynamic dim for ONNX Range).
+    Value capacity = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+    {
+      MemRefDescriptor desc(adaptor.getOutput());
+      for (int64_t i = 0; i < outMemref.getRank(); ++i) {
+        Value d;
+        if (outMemref.isDynamicDim(i))
+          d = desc.size(rewriter, loc, i);
+        else
+          d = LLVM::ConstantOp::create(
+              rewriter, loc, i64Type,
+              rewriter.getI64IntegerAttr(outMemref.getDimSize(i)));
+        capacity = LLVM::MulOp::create(rewriter, loc, capacity, d);
+      }
     }
-    StringRef name = isI64 ? kHipRangeI64 : kHipRangeF32;
+    Value dtypeI32 = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type, rewriter.getI32IntegerAttr(hipDtype));
+
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                     ptrType, i64Type, i32Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, name, paramTypes, retType);
+        LLVM::lookupOrCreateFn(rewriter, module, "hip_range_dyn", paramTypes,
+                                i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {adaptor.getCtx(), startVal, deltaVal, n, outPtr};
+    SmallVector<Value> args = {adaptor.getCtx(), startPtr, limitPtr, deltaPtr,
+                                outPtr,           capacity, dtypeI32};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    (void)f32Type; (void)isF32;
     rewriter.eraseOp(op);
     return success();
   }

@@ -160,6 +160,20 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     return true;
   }
 
+  // Side-channel: HIPDNN_EP_KEEP_LL=<path> writes the .ll to <path>
+  // for post-mortem debugging.  Writes inside the temp dir if just
+  // "1".  No-op if the env var is unset.
+  if (const char *keep = std::getenv("HIPDNN_EP_KEEP_LL")) {
+    std::string keep_path =
+        (keep[0] == '1' && keep[1] == 0) ? ll_path : std::string(keep);
+    std::string keep_msg;
+    if (!emitLLVMIR(llvmModule.get(), keep_path, keep_msg))
+      llvm::errs() << "[CompilerDriver] HIPDNN_EP_KEEP_LL failed: "
+                   << keep_msg << "\n";
+    else
+      llvm::errs() << "[CompilerDriver] wrote " << keep_path << "\n";
+  }
+
   if (!compileToObject(llvmModule.get(), obj_path, error_message))
     return false;
   logPhase("compileToObject");

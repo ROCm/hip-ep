@@ -54,3 +54,58 @@ extern "C" int hip_range_f32(void *stream, float start, float delta, int64_t n,
   return launch_range<float>(static_cast<hipStream_t>(stream), start, delta, n,
                               static_cast<float *>(output));
 }
+
+// Variant that takes GPU pointers to start/limit/delta scalars.  Reads
+// them back to host via hipMemcpy, computes n = max((limit - start) /
+// delta, 0), then dispatches to the appropriate launch_range<>.  Used
+// when MLIR can't extract the scalar at compile time (e.g. start /
+// limit are runtime-computed values living in device memory).
+extern "C" int hip_range_dyn(void *stream, const void *start_dev,
+                              const void *limit_dev, const void *delta_dev,
+                              void *output, int64_t output_capacity,
+                              int hip_dtype) {
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  // Sync to ensure any prior writes to the scalar buffers complete.
+  hipError_t syn = hipStreamSynchronize(hip_stream);
+  if (syn != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_range_dyn: hipStreamSynchronize: %s\n",
+            hipGetErrorString(syn));
+    return static_cast<int>(syn);
+  }
+  if (hip_dtype == /*HIP_DTYPE_INT64*/ 2 ||
+      hip_dtype == /*HIP_DTYPE_INT32*/ 3) {
+    int64_t s = 0, l = 0, d = 1;
+    if (hip_dtype == 2) {
+      hipMemcpy(&s, start_dev, 8, hipMemcpyDeviceToHost);
+      hipMemcpy(&l, limit_dev, 8, hipMemcpyDeviceToHost);
+      hipMemcpy(&d, delta_dev, 8, hipMemcpyDeviceToHost);
+    } else {
+      int32_t s32 = 0, l32 = 0, d32 = 1;
+      hipMemcpy(&s32, start_dev, 4, hipMemcpyDeviceToHost);
+      hipMemcpy(&l32, limit_dev, 4, hipMemcpyDeviceToHost);
+      hipMemcpy(&d32, delta_dev, 4, hipMemcpyDeviceToHost);
+      s = s32; l = l32; d = d32;
+    }
+    if (d == 0) d = 1;
+    int64_t n = (l - s) / d;
+    if (n < 0) n = 0;
+    if (n > output_capacity) n = output_capacity;
+    return launch_range<int64_t>(hip_stream, s, d, n,
+                                   static_cast<int64_t *>(output));
+  }
+  if (hip_dtype == /*HIP_DTYPE_FLOAT32*/ 0) {
+    float s = 0, l = 0, d = 1;
+    hipMemcpy(&s, start_dev, 4, hipMemcpyDeviceToHost);
+    hipMemcpy(&l, limit_dev, 4, hipMemcpyDeviceToHost);
+    hipMemcpy(&d, delta_dev, 4, hipMemcpyDeviceToHost);
+    if (d == 0.f) d = 1.f;
+    int64_t n = (int64_t)((l - s) / d);
+    if (n < 0) n = 0;
+    if (n > output_capacity) n = output_capacity;
+    return launch_range<float>(hip_stream, s, d, n,
+                                 static_cast<float *>(output));
+  }
+  fprintf(stderr, "[custom_kernels] hip_range_dyn: unsupported dtype %d\n",
+          hip_dtype);
+  return -1;
+}

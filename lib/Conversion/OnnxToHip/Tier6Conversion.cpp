@@ -279,14 +279,41 @@ struct RangeToHip : public RewritePattern {
     Location loc = op->getLoc();
     SmallVector<Value> dynSizes;
     if (resultType.getRank() == 1 && resultType.isDynamicDim(0)) {
-      // We don't know the runtime length at compile time -- the kernel
-      // computes it from start/limit/delta and writes up to the
-      // allocated buffer's size.  Pre-allocate a big enough buffer; the
-      // caller is responsible for ensuring the model's downstream ops
-      // don't read beyond the actual length.  Use 1 as a placeholder so
-      // tensor.empty doesn't crash; the kernel will resize.
-      dynSizes.push_back(
-          mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
+      // Compute the runtime length n = max((limit - start) / delta, 0).
+      // start/limit/delta are rank-0 tensors; tensor.extract pulls the
+      // scalar so we can do arith on it.
+      auto elemType = resultType.getElementType();
+      Value sScalar =
+          mlir::tensor::ExtractOp::create(rewriter, loc, start, mlir::ValueRange{})
+              .getResult();
+      Value lScalar =
+          mlir::tensor::ExtractOp::create(rewriter, loc, limit, mlir::ValueRange{})
+              .getResult();
+      Value dScalar =
+          mlir::tensor::ExtractOp::create(rewriter, loc, delta, mlir::ValueRange{})
+              .getResult();
+      Value n;
+      if (elemType.isInteger()) {
+        Value diff = mlir::arith::SubIOp::create(rewriter, loc, lScalar,
+                                                  sScalar);
+        n = mlir::arith::DivSIOp::create(rewriter, loc, diff, dScalar);
+        // Cast to index.
+        n = mlir::arith::IndexCastOp::create(rewriter, loc,
+                                              rewriter.getIndexType(), n);
+      } else {
+        Value diff = mlir::arith::SubFOp::create(rewriter, loc, lScalar,
+                                                  sScalar);
+        Value div = mlir::arith::DivFOp::create(rewriter, loc, diff, dScalar);
+        Value asI64 = mlir::arith::FPToSIOp::create(
+            rewriter, loc, rewriter.getI64Type(), div);
+        n = mlir::arith::IndexCastOp::create(rewriter, loc,
+                                              rewriter.getIndexType(), asI64);
+      }
+      // clamp to >= 0
+      Value zeroIdx =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, 0);
+      n = mlir::arith::MaxSIOp::create(rewriter, loc, n, zeroIdx);
+      dynSizes.push_back(n);
     }
     Value init = mlir::tensor::EmptyOp::create(
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
