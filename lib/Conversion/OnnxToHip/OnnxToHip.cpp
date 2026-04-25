@@ -514,6 +514,9 @@ static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
   // externalized into a memref.global the pattern can no longer recover the
   // values without a host-side runtime read.
   populateTier6ConversionPatterns(patterns, ctx);
+  // STFT reads frame_step / frame_length from onnx.Constant scalars
+  // that get externalized after lowerOnnxConstants.
+  populateStftConversionPatterns(patterns, ctx);
   // Unsqueeze/Squeeze infer their axes from input vs output shape, so
   // they do not need to be run pre-constant-lowering -- the main
   // convertComputeOps pass picks them up.

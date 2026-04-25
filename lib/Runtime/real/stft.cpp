@@ -278,5 +278,23 @@ extern "C" int wrap_stft(RuntimeState *state, void *signal, void *window,
   if (rc != 0)
     return rc;
 
+  // Debug: check output values.
+  {
+    hipStreamSynchronize(static_cast<hipStream_t>(stream));
+    (void)hipGetLastError();
+    int64_t out_count = batch * n_frames * n_freqs * 2;
+    float first4[4] = {0};
+    hipMemcpy(first4, output, sizeof(first4), hipMemcpyDeviceToHost);
+    float maxv = 0;
+    std::vector<float> h(out_count);
+    hipMemcpy(h.data(), output, out_count * sizeof(float), hipMemcpyDeviceToHost);
+    for (auto v : h) if (std::abs(v) > maxv) maxv = std::abs(v);
+    fprintf(stderr,
+            "[stft_dbg] output: n=%lld first=[%.4f,%.4f,%.4f,%.4f] max=%.4f\n",
+            (long long)out_count, first4[0], first4[1], first4[2], first4[3],
+            maxv);
+    fflush(stderr);
+  }
+
   return 0;
 }

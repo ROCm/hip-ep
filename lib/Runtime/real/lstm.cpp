@@ -18,10 +18,20 @@
 //    MIOpen reports via miopenGetRNNParamsSize, then issuing one
 //    hipMemcpyAsync per (direction, gate) slab from the ONNX W/R/B tensors
 //    into the offsets MIOpen reports via miopenGetRNNLayerParamOffset /
-//    miopenGetRNNLayerBiasOffset.  Caching the permuted buffer across calls
-//    is left as a TODO -- Kokoro hits 6 LSTMs per invocation so the per-call
-//    overhead (one hipMalloc + ~64 hipMemcpyAsync + one hipFree) is on the
-//    order of tens of microseconds, dominated by the MIOpen call itself.
+//    miopenGetRNNLayerBiasOffset.
+//
+//    We intentionally bypass miopenSetRNNLayerParam: its CopyTensor path
+//    transposes each slab to column-major for non-zero offsets (via a
+//    strided GPU kernel) but does a raw memcpy for offset-zero.  MIOpen's
+//    forward GEMM reads the packed buffer as row-major, so the column-
+//    major slabs at paramID > 0 produce wrong results.  Direct memcpy at
+//    the correct byte offset keeps every slab in ONNX's native row-major
+//    order, which is exactly what the GEMM expects.
+//
+//    Caching the permuted buffer across calls is left as a TODO -- Kokoro
+//    hits 6 LSTMs per invocation so the per-call overhead (one hipMalloc +
+//    ~64 hipMemcpyAsync + one hipFree) is on the order of tens of
+//    microseconds, dominated by the MIOpen call itself.
 //
 // 2. Y output layout
 //    ONNX Y is (seq_len, num_dir, batch, hidden).  MIOpen writes
@@ -237,9 +247,15 @@ extern "C" int wrap_miopenRNNForwardInference(
   HIP_CHECK(hipMemsetAsync(w_buf, 0, param_bytes, stream));
 
   // Permute ONNX W (input GEMM), R (hidden GEMM), B (bias) into the MIOpen
-  // weight blob.  We use miopenSetRNNLayerParam / miopenSetRNNLayerBias so
-  // MIOpen handles the actual copy into its packed layout -- we only need
-  // to pick the right (layer, paramID, source) tuple per ONNX gate.
+  // weight blob.
+  //
+  // We use miopenGetRNNLayerParamOffset / miopenGetRNNLayerBiasOffset to
+  // find each gate's byte position inside the packed buffer, then
+  // hipMemcpyAsync the ONNX slab directly.  This avoids
+  // miopenSetRNNLayerParam whose internal CopyTensor path transposes the
+  // matrix for non-zero destination offsets (column-major storage) but not
+  // for offset-zero (raw memcpy), producing an inconsistent layout that
+  // the downstream GEMM (which reads row-major) cannot tolerate.
   {
     const int64_t elem = element_size(data_type);
     const int64_t w_slab_bytes = hidden_size * input_size * elem;
@@ -259,40 +275,29 @@ extern "C" int wrap_miopenRNNForwardInference(
       const int64_t slab = is_recurrent ? r_slab_bytes : w_slab_bytes;
       const char *src = static_cast<const char *>(src_dir_base) +
                         onnx_gate * slab;
-      // Populate param_desc by querying MIOpen for the parameter shape;
-      // pass nullptr as the destination so MIOpen only writes paramDesc.
-      miopenStatus_t st = miopenGetRNNLayerParam(
-          mio, rnn_desc, layer, x_descs[0], w_desc, w_buf, paramID,
-          param_desc, /*layerParam=*/nullptr);
+
+      size_t param_offset = 0;
+      miopenStatus_t st = miopenGetRNNLayerParamOffset(
+          rnn_desc, layer, x_descs[0], paramID, param_desc, &param_offset);
       if (st != miopenStatusSuccess) {
         fprintf(stderr,
-                "miopenGetRNNLayerParam(desc) failed: layer=%d paramID=%d "
+                "miopenGetRNNLayerParamOffset failed: layer=%d paramID=%d "
                 "status=%d\n",
                 layer, paramID, st);
         return -1;
       }
-      // Always-on diagnostic so we can verify the orientation MIOpen wants.
-      {
-        miopenDataType_t dt;
-        int dims_query[5] = {0};
-        int strides[5] = {0};
-        int nbDims = 0;
-        miopenGetTensorDescriptorSize(param_desc, &nbDims);
-        miopenGetTensorDescriptor(param_desc, &dt, dims_query, strides);
+      const size_t byte_offset = param_offset * static_cast<size_t>(elem);
+      fprintf(stderr,
+              "[lstm] set_gate layer=%d paramID=%d offset_elems=%zu "
+              "slab_bytes=%lld\n",
+              layer, paramID, param_offset, (long long)slab);
+      hipError_t herr = hipMemcpyAsync(
+          static_cast<char *>(w_buf) + byte_offset, src,
+          static_cast<size_t>(slab), hipMemcpyDeviceToDevice, stream);
+      if (herr != hipSuccess) {
         fprintf(stderr,
-                "[lstm] set_gate layer=%d paramID=%d nbDims=%d "
-                "dims=[%d,%d,%d] strides=[%d,%d,%d] slab_bytes=%lld\n",
-                layer, paramID, nbDims, dims_query[0], dims_query[1],
-                dims_query[2], strides[0], strides[1], strides[2],
-                (long long)slab);
-      }
-      st = miopenSetRNNLayerParam(mio, rnn_desc, layer, x_descs[0], w_desc,
-                                  w_buf, paramID, param_desc, src);
-      if (st != miopenStatusSuccess) {
-        fprintf(stderr,
-                "miopenSetRNNLayerParam failed: layer=%d paramID=%d "
-                "status=%d\n",
-                layer, paramID, st);
+                "hipMemcpyAsync(param) failed: layer=%d paramID=%d err=%s\n",
+                layer, paramID, hipGetErrorString(herr));
         return -1;
       }
       return 0;
@@ -302,27 +307,28 @@ extern "C" int wrap_miopenRNNForwardInference(
                         const void *src_dir_base) -> int {
       const int biasID =
           kOnnxToMiopenGate[onnx_gate] + (is_recurrent ? 4 : 0);
-      // ONNX B layout per direction: [Wbi Wbo Wbf Wbg | Rbi Rbo Rbf Rbg]
       int onnx_bias_slot = onnx_gate + (is_recurrent ? 4 : 0);
       const char *src = static_cast<const char *>(src_dir_base) +
                         onnx_bias_slot * b_slab_bytes;
-      miopenStatus_t st = miopenGetRNNLayerBias(
-          mio, rnn_desc, layer, x_descs[0], w_desc, w_buf, biasID,
-          param_desc, /*layerBias=*/nullptr);
+
+      size_t bias_offset = 0;
+      miopenStatus_t st = miopenGetRNNLayerBiasOffset(
+          rnn_desc, layer, x_descs[0], biasID, param_desc, &bias_offset);
       if (st != miopenStatusSuccess) {
         fprintf(stderr,
-                "miopenGetRNNLayerBias(desc) failed: layer=%d biasID=%d "
+                "miopenGetRNNLayerBiasOffset failed: layer=%d biasID=%d "
                 "status=%d\n",
                 layer, biasID, st);
         return -1;
       }
-      st = miopenSetRNNLayerBias(mio, rnn_desc, layer, x_descs[0], w_desc,
-                                 w_buf, biasID, param_desc, src);
-      if (st != miopenStatusSuccess) {
+      const size_t byte_offset = bias_offset * static_cast<size_t>(elem);
+      hipError_t herr = hipMemcpyAsync(
+          static_cast<char *>(w_buf) + byte_offset, src,
+          static_cast<size_t>(b_slab_bytes), hipMemcpyDeviceToDevice, stream);
+      if (herr != hipSuccess) {
         fprintf(stderr,
-                "miopenSetRNNLayerBias failed: layer=%d biasID=%d "
-                "status=%d\n",
-                layer, biasID, st);
+                "hipMemcpyAsync(bias) failed: layer=%d biasID=%d err=%s\n",
+                layer, biasID, hipGetErrorString(herr));
         return -1;
       }
       return 0;
@@ -379,6 +385,19 @@ extern "C" int wrap_miopenRNNForwardInference(
       mio, rnn_desc, static_cast<int>(seq_len), x_descs, x, hx_desc, hx,
       cx_desc, cx, w_desc, w_buf, y_descs, y, hy_desc, hy, cy_desc, cy,
       workspace, workspace_bytes));
+
+  // Debug: check y output values.
+  {
+    hipStreamSynchronize(stream);
+    (void)hipGetLastError();
+    int64_t y_count = seq_len * num_dir * batch * hidden_size;
+    float first4[4] = {0};
+    hipMemcpy(first4, y, sizeof(first4), hipMemcpyDeviceToHost);
+    fprintf(stderr,
+            "[lstm_dbg] y: n=%lld first=[%.4f,%.4f,%.4f,%.4f]\n",
+            (long long)y_count, first4[0], first4[1], first4[2], first4[3]);
+    fflush(stderr);
+  }
 
 cleanup: {
   hipError_t err;
