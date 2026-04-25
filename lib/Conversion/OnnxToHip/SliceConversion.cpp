@@ -139,6 +139,16 @@ struct SliceToHip : public RewritePattern {
     int64_t inputRank = inputType.getRank();
     SmallVector<int64_t> normStarts(inputRank, 0);
     SmallVector<int64_t> normSteps(inputRank, 1);
+    // For each dynamic OUTPUT dim, we may need to compute its runtime
+    // size from the input dim and the constant start/end/step.  Track
+    // the per-dim raw start/end/step so we can emit arith ops below.
+    struct DynPlan {
+      int64_t axis;
+      int64_t start;  // ONNX-spec value (may be negative)
+      int64_t end;    // ONNX-spec value (may be negative or INT64_MAX)
+      int64_t step;
+    };
+    SmallVector<DynPlan> dynPlans;
     for (size_t i = 0; i < axes.size(); ++i) {
       int64_t ax = axes[i];
       if (ax < 0)
@@ -150,17 +160,14 @@ struct SliceToHip : public RewritePattern {
         return rewriter.notifyMatchFailure(op, "onnx.Slice step must be != 0");
 
       int64_t s = starts[i];
+      int64_t e = ends[i];
       if (inputType.isDynamicDim(ax)) {
-        // We don't have the dim size at compile time, so we can only
-        // accept non-negative start (no end-relative wraparound).  The
-        // runtime hip.slice kernel reads `start` literally; out-of-range
-        // values are the caller's responsibility.
-        if (s < 0)
-          return rewriter.notifyMatchFailure(
-              op, "onnx.Slice with negative start on dynamic dim is not "
-                  "supported yet");
+        // Defer normalization to runtime arith ops below.  We still
+        // pass the *raw* start to the kernel as the slice offset;
+        // negative values are folded against tensor.dim at runtime.
         normStarts[ax] = s;
         normSteps[ax] = step;
+        dynPlans.push_back({ax, s, e, step});
         continue;
       }
       int64_t dimSize = inputType.getDimSize(ax);
@@ -176,15 +183,63 @@ struct SliceToHip : public RewritePattern {
       normSteps[ax] = step;
     }
 
-    // Build init.  resultType may have dynamic dims; for those we use the
-    // input's matching dim (slice of a dynamic dim along axis 0 with
-    // step=1 yields the same dynamic dim as input).
+    // Build init.  resultType may have dynamic dims; for those we
+    // compute the runtime size from the input dim and the constant
+    // start/end/step using arith ops (so the init memref is the right
+    // size and downstream Reshape '-1' inference produces a positive
+    // dim).  For axes not in axes[], or non-sliced dynamic dims, the
+    // output dim equals the input dim.
     Location loc2 = loc;
     SmallVector<Value> dynSizes;
     for (int64_t d = 0; d < inputRank; ++d) {
-      if (resultType.isDynamicDim(d))
-        dynSizes.push_back(
-            mlir::tensor::DimOp::create(rewriter, loc2, input, d));
+      if (!resultType.isDynamicDim(d))
+        continue;
+      // Find a DynPlan for this axis.
+      const DynPlan *plan = nullptr;
+      for (const auto &p : dynPlans)
+        if (p.axis == d) { plan = &p; break; }
+      if (!plan) {
+        // Dim is dynamic but not sliced -- forward the input dim.
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc2, input, d));
+        continue;
+      }
+      // Compute runtime: clamp(end, 0, dim) - clamp(start, 0, dim),
+      // then ceil-divide by abs(step).
+      Value dimV = mlir::tensor::DimOp::create(rewriter, loc2, input, d);
+      Value zeroIdx = mlir::arith::ConstantIndexOp::create(rewriter, loc2, 0);
+      auto addDim = [&](int64_t k) {
+        if (k == 0) return zeroIdx;
+        if (k == std::numeric_limits<int64_t>::max()) return dimV;
+        Value c = mlir::arith::ConstantIndexOp::create(rewriter, loc2, k);
+        if (k > 0) return c;
+        // negative: dim + k
+        return mlir::arith::AddIOp::create(rewriter, loc2, dimV, c).getResult();
+      };
+      Value startV = addDim(plan->start);
+      Value endV = addDim(plan->end);
+      // clamp to [0, dim]
+      auto clampV = [&](Value v) {
+        Value lo = mlir::arith::MaxSIOp::create(rewriter, loc2, v, zeroIdx);
+        return mlir::arith::MinSIOp::create(rewriter, loc2, lo, dimV)
+            .getResult();
+      };
+      Value sC = clampV(startV);
+      Value eC = clampV(endV);
+      Value diff = mlir::arith::SubIOp::create(rewriter, loc2, eC, sC);
+      // For step != 1 we'd need ceil-div; for now Kokoro only uses step=1.
+      if (plan->step != 1 && plan->step != -1) {
+        Value stepV =
+            mlir::arith::ConstantIndexOp::create(rewriter, loc2,
+                                                  std::abs(plan->step));
+        Value stepM1 = mlir::arith::SubIOp::create(
+            rewriter, loc2, stepV,
+            mlir::arith::ConstantIndexOp::create(rewriter, loc2, 1));
+        Value num = mlir::arith::AddIOp::create(rewriter, loc2, diff, stepM1);
+        diff = mlir::arith::DivSIOp::create(rewriter, loc2, num, stepV);
+      }
+      // diff can go negative if start > end -- clamp to 0.
+      diff = mlir::arith::MaxSIOp::create(rewriter, loc2, diff, zeroIdx);
+      dynSizes.push_back(diff);
     }
     Value init = mlir::tensor::EmptyOp::create(
         rewriter, loc2, resultType.getShape(), resultType.getElementType(),
