@@ -81,6 +81,13 @@ inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
 inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapResize = "wrap_resize";
+inline constexpr const char *kWrapStft = "wrap_stft";
+inline constexpr const char *kWrapNonzero = "wrap_nonzero";
+inline constexpr const char *kWrapScatterNd = "wrap_scatter_nd";
+inline constexpr const char *kWrapConvTransposeBwd =
+    "wrap_miopenConvolutionBackwardData";
+inline constexpr const char *kWrapMiopenRNNForwardInference =
+    "wrap_miopenRNNForwardInference";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -285,6 +292,14 @@ void populateTier6LoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateLstmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateStftLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateNonzeroLoweringPatterns(const LLVMTypeConverter &converter,
+                                     RewritePatternSet &patterns);
+void populateScatterNdLoweringPatterns(const LLVMTypeConverter &converter,
+                                       RewritePatternSet &patterns);
+void populateConvTransposeLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

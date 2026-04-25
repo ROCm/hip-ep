@@ -236,8 +236,12 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateTier5SeqLoweringPatterns(typeConverter, patterns);
   populateExpandLoweringPatterns(typeConverter, patterns);
   populateResizeLoweringPatterns(typeConverter, patterns);
+  populateConvTransposeLoweringPatterns(typeConverter, patterns);
   populateTier6LoweringPatterns(typeConverter, patterns);
   populateLstmLoweringPatterns(typeConverter, patterns);
+  populateStftLoweringPatterns(typeConverter, patterns);
+  populateNonzeroLoweringPatterns(typeConverter, patterns);
+  populateScatterNdLoweringPatterns(typeConverter, patterns);
 
   // Standard dialect lowerings
   // Bundle func/memref/arith/cf lowering with HIP lowering to minimize

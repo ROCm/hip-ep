@@ -30,6 +30,9 @@ add_library(OnnxToHip STATIC
   Tier5SeqConversion.cpp
   Tier6Conversion.cpp
   LstmConversion.cpp
+  StftConversion.cpp
+  NonzeroConversion.cpp
+  ScatterNdConversion.cpp
 )
 
 add_dependencies(OnnxToHip

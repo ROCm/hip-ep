@@ -216,6 +216,12 @@ void populateTier5SeqConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateLstmConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateStftConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateNonzeroConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
+void populateScatterNdConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

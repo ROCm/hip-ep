@@ -32,7 +32,11 @@ add_library(HipToLLVM STATIC
   Tier6Lowering.cpp
   ExpandLowering.cpp
   ResizeLowering.cpp
+  ConvTransposeLowering.cpp
   LstmLowering.cpp
+  StftLowering.cpp
+  NonzeroLowering.cpp
+  ScatterNdLowering.cpp
 )
 
 add_dependencies(HipToLLVM
