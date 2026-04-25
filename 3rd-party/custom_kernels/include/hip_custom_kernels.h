@@ -221,6 +221,79 @@ int hip_slice(
     const int64_t* starts_elems);
 
 /* =========================================================================
+ * ReduceMean
+ * =========================================================================
+ *
+ * Computes the mean over `num_input_elements / num_output_elements`
+ * consecutive elements per output entry.  The host-side wrapper is expected
+ * to permute the input so the reduced axes are innermost (or to compose
+ * a reshape that yields a `[outer, reduce_size]` view).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_reduce_mean(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int hip_dtype);
+
+/* =========================================================================
+ * Concat (along arbitrary axis)
+ * =========================================================================
+ *
+ * Concatenates `num_inputs` tensors along the axis the host has flattened
+ * into the (outer, inner) layout below:
+ *
+ *   - outer        = product(output.shape[:axis])  (same for every input)
+ *   - output_inner = product(output.shape[axis:])
+ *   - input_inner_sizes[i] = product(inputs[i].shape[axis:])
+ *
+ * For each input slice i, the kernel writes its `outer * input_inner_sizes[i]`
+ * elements to:
+ *
+ *   output[o * output_inner + base_inner + j] = inputs[i][o * input_inner + j]
+ *
+ * with base_inner = sum(input_inner_sizes[0..i-1]).
+ *
+ * Element-size dispatch matches the slice kernel (1, 2, 4, 8 bytes), so all
+ * float and integer dtypes that fit in 8 bytes share the same code paths.
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_concat(
+    void* stream,
+    void* output,
+    int element_size_bytes,
+    int64_t outer,
+    int64_t output_inner,
+    int num_inputs,
+    const void* const* inputs,
+    const int64_t* input_inner_sizes);
+
+/* =========================================================================
+ * ConstantOfShape (scalar fill)
+ * =========================================================================
+ *
+ * Fills `num_elements` of `output` with `scalar_bits` reinterpreted as a
+ * `element_size_bytes`-wide value.  The host packs the scalar into the low
+ * bits of `scalar_bits` (e.g. for fp16 the low 16 bits hold the raw fp16
+ * bit pattern).
+ *
+ * Element-size dispatch (1, 2, 4, 8 bytes) covers every Kokoro use case.
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_constant_of_shape(
+    void* stream,
+    void* output,
+    int64_t num_elements,
+    int element_size_bytes,
+    uint64_t scalar_bits);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

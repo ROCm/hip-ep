@@ -218,6 +218,9 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/elementwise_unary.cpp runtime_elementwise_unary.bc)
     compile_to_bitcode(real/elementwise_binary.cpp runtime_elementwise_binary.bc)
     compile_to_bitcode(real/slice.cpp runtime_slice.bc)
+    compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
+    compile_to_bitcode(real/concat.cpp runtime_concat.bc)
+    compile_to_bitcode(real/constant_of_shape.cpp runtime_constant_of_shape.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
     compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
@@ -245,6 +248,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise_unary.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise_binary.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_slice.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_concat.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_constant_of_shape.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc

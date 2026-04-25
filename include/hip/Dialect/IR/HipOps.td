@@ -865,6 +865,66 @@ def Hip_SliceOp : Hip_DpsOp<"slice"> {
   }];
 }
 
+// ===== Tier 2 shape / data movement ops ======================================
+
+def Hip_ReduceMeanOp : Hip_DpsOp<"reduce_mean"> {
+  let summary = "Mean reduction over the innermost reduce_size elements";
+  let description = [{
+    Reduces `data` to `output` by averaging contiguous slabs of
+    `num_input_elements / num_output_elements` elements.  The conversion pass
+    is responsible for ensuring the reduced axes are innermost.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$output
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `:` type($data) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ConcatOp : Hip_DpsOp<"concat"> {
+  let summary = "Concatenate variadic inputs along a single axis";
+  let description = [{
+    Concatenates `inputs` (variadic) along the integer attribute `axis`.  The
+    conversion pass already validated that every input has identical shapes
+    on every non-axis dimension and computed the output type accordingly.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$inputs,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $inputs `:` type($inputs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ConstantOfShapeOp : Hip_DpsOp<"constant_of_shape"> {
+  let summary = "Fill a buffer with a scalar (ONNX ConstantOfShape)";
+  let description = [{
+    Writes `scalar_bits` (a 64-bit blob containing the bit pattern of the
+    scalar fill value, narrowed to the output element type) into every
+    element of `output`.  The output tensor type encodes the element width.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$scalar_bits
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
   let summary = "Element-wise square root: y = sqrt(x)";
   let description = [{

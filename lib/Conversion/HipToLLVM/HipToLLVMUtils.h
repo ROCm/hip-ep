@@ -62,6 +62,9 @@ inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapElementwiseUnary = "wrap_elementwise_unary";
 inline constexpr const char *kWrapElementwiseBinary = "wrap_elementwise_binary";
 inline constexpr const char *kWrapSlice = "wrap_slice";
+inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
+inline constexpr const char *kWrapConcat = "wrap_concat";
+inline constexpr const char *kWrapConstantOfShape = "wrap_constant_of_shape";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
@@ -261,6 +264,8 @@ void populateBinaryElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateTier2ShapeLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

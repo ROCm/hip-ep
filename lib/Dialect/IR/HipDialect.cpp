@@ -621,6 +621,48 @@ void SliceOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ReduceMeanOp: ins(data), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMeanOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMeanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ConcatOp: ins(inputs...), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ConcatOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ConcatOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ConstantOfShapeOp: outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ConstantOfShapeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ConstantOfShapeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SubOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 

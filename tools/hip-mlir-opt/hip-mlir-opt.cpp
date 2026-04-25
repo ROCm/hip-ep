@@ -141,6 +141,12 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::BinaryElementwiseOp>>(*ctx);
     mlir::hip::SliceOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SliceOp>>(*ctx);
+    mlir::hip::ReduceMeanOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ReduceMeanOp>>(*ctx);
+    mlir::hip::ConcatOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ConcatOp>>(*ctx);
+    mlir::hip::ConstantOfShapeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ConstantOfShapeOp>>(*ctx);
   });
 }
 

@@ -99,6 +99,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     BinaryElementwiseOp::attachInterface<
         HipDstBufferizableModel<BinaryElementwiseOp>>(*ctx);
     SliceOp::attachInterface<HipDstBufferizableModel<SliceOp>>(*ctx);
+    ReduceMeanOp::attachInterface<HipDstBufferizableModel<ReduceMeanOp>>(*ctx);
+    ConcatOp::attachInterface<HipDstBufferizableModel<ConcatOp>>(*ctx);
+    ConstantOfShapeOp::attachInterface<
+        HipDstBufferizableModel<ConstantOfShapeOp>>(*ctx);
   });
 }
 

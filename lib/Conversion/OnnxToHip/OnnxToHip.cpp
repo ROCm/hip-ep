@@ -384,6 +384,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateUnaryElementwiseConversionPatterns(patterns, ctx);
   populateBinaryElementwiseConversionPatterns(patterns, ctx);
   populateSliceConversionPatterns(patterns, ctx);
+  populateTier2ShapeConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -394,19 +395,22 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 }
 
 /// Patterns that need to read the original onnx.Constant values out of the IR
-/// (e.g. Slice's starts/ends/steps, Clip's min/max scalars).  Run BEFORE
-/// lowerOnnxConstants so the inputs are still onnx.Constant ops with their
-/// dense value attribute attached.  After this pass runs, lowerOnnxConstants
-/// only sees constants that flow into ops which don't need them at compile
-/// time and either inlines (small) or externalizes (large) them as usual.
+/// (e.g. Slice's starts/ends/steps, Clip's min/max scalars, ReduceMean's
+/// axes, Range's start/limit/delta).  Run BEFORE lowerOnnxConstants so the
+/// inputs are still onnx.Constant ops with their dense value attribute
+/// attached.  After this pass runs, lowerOnnxConstants only sees constants
+/// that flow into ops which don't need them at compile time and either
+/// inlines (small) or externalizes (large) them as usual.
 static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
                                             mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
   populateSliceConversionPatterns(patterns, ctx);
   populateUnaryElementwiseConversionPatterns(patterns, ctx);
-  // Note: only the Clip pattern in UnaryElementwise actually reads constant
-  // inputs (min/max), but populating the full set here is harmless: the
-  // simple ones (Sin/Cos/...) just match-and-rewrite as they would later.
+  populateTier2ShapeConversionPatterns(patterns, ctx);
+  // Note: only Clip in UnaryElementwise actually reads constant inputs;
+  // ReduceMean/Range in Tier 2 do; the rest are no-ops here that re-fire
+  // safely in the main convertComputeOps pass when their patterns are
+  // included again.
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

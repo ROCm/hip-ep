@@ -151,6 +151,8 @@ void populateBinaryElementwiseConversionPatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx);
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populateTier2ShapeConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

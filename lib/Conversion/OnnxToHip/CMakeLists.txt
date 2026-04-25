@@ -25,6 +25,7 @@ add_library(OnnxToHip STATIC
   UnaryElementwiseConversion.cpp
   BinaryElementwiseConversion.cpp
   SliceConversion.cpp
+  Tier2ShapeConversion.cpp
 )
 
 add_dependencies(OnnxToHip
