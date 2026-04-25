@@ -76,10 +76,16 @@ struct CompareLowering : public ConvertOpToLLVMPattern<CompareOp> {
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
     auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
     auto rhsType = dyn_cast<MemRefType>(op.getRhs().getType());
-    if (!outType || !lhsType || !rhsType || !outType.hasStaticShape() ||
-        !lhsType.hasStaticShape() || !rhsType.hasStaticShape())
+    if (!outType || !lhsType || !rhsType)
       return rewriter.notifyMatchFailure(
-          op, "hip.compare lowering requires static shapes");
+          op, "hip.compare lowering requires ranked memrefs");
+    if (!outType.hasStaticShape() || !lhsType.hasStaticShape() ||
+        !rhsType.hasStaticShape())
+      // TODO: handle dynamic shapes by reading sizes from memref descriptors.
+      // For now drop the op so dropUnsupportedOnnxOps can replace it
+      // upstream of bufferize.
+      return rewriter.notifyMatchFailure(
+          op, "hip.compare lowering currently requires static shapes");
 
     // Use the lhs element type to derive the runtime data type.  And kind
     // ignores it (kernel always treats inputs as bool/i8) but we still need

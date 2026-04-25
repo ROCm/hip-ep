@@ -41,6 +41,13 @@ static LogicalResult buildCompare(Operation *op, PatternRewriter &rewriter,
     return rewriter.notifyMatchFailure(
         op, "hip.compare needs ranked tensor operands");
   auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+  // hip.compare LLVM lowering currently requires static shapes; emitting
+  // it for a dynamic-shape result would just blow up at HipToLLVM.  Bail
+  // early so dropUnsupportedOnnxOps can replace the surviving onnx.* op
+  // with a tensor.empty placeholder.
+  if (!resultType.hasStaticShape())
+    return rewriter.notifyMatchFailure(
+        op, "hip.compare lowering only supports static shapes");
   Value init = createBroadcastEmptyTensor(rewriter, loc, resultType,
                                           {lhs, rhs});
   auto hipOp = CompareOp::create(rewriter, loc, resultType, context, lhs, rhs,

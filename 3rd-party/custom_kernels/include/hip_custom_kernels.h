@@ -507,6 +507,20 @@ int hip_resize(
     float cubic_coeff_a);
 
 /* =========================================================================
+ * Generic N-D transpose (swap dim0 and dim1 of a row-major contiguous
+ * tensor)
+ * ========================================================================= */
+int hip_transpose_nd(
+    void* stream,
+    const void* input,
+    void* output,
+    int rank,
+    const int64_t* in_shape,
+    int dim0,
+    int dim1,
+    int hip_dtype);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

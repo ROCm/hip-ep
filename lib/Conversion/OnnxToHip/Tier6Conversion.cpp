@@ -466,7 +466,12 @@ void mlir::hip::populateTier6ConversionPatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx) {
   patterns.add<PadToHip>(ctx);
   patterns.add<ExpandToHip>(ctx);
-  patterns.add<RangeToHip>(ctx);
+  // RangeToHip disabled until hip.range gets a proper LLVM lowering /
+  // runtime kernel.  Without it `hip.range` reaches HipToLLVM and the
+  // pass aborts with "failed to legalize operation 'hip.range'".  The
+  // 2 Kokoro Range ops fall through to dropUnsupportedOnnxOps as
+  // tensor.empty placeholders for now.
+  // patterns.add<RangeToHip>(ctx);
   patterns.add<ConvTransposeToHip>(ctx);
   patterns.add<ResizeToHip>(ctx);
 }
