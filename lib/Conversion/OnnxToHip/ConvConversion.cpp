@@ -41,6 +41,13 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
   auto weightsType = mlir::cast<mlir::RankedTensorType>(weights.getType());
 
+  // Degenerate rank-0 (or rank-1) Conv lives only in Kokoro's iSTFT
+  // dead-code path -- skip conversion so dropUnsupportedOnnxOps can
+  // replace the onnx.Conv with a tensor.empty placeholder.
+  if (inputType.getRank() < 3 || resultType.getRank() < 3)
+    return rewriter.notifyMatchFailure(
+        op, "ConvToHip: input/output rank too low (degenerate)");
+
   // Extract attributes from onnx.Conv
   llvm::SmallVector<int64_t> kernelShape;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {

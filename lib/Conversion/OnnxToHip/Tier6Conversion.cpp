@@ -322,6 +322,10 @@ struct ConvTransposeToHip : public RewritePattern {
     Value bias = hasBias ? op->getOperand(2) : nullptr;
 
     auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+    auto inType = dyn_cast<RankedTensorType>(input.getType());
+    if (!inType || inType.getRank() < 3 || resultType.getRank() < 3)
+      return rewriter.notifyMatchFailure(
+          op, "ConvTransposeToHip: input/output rank too low (degenerate)");
 
     SmallVector<int64_t> kernelShape;
     if (auto attr = op->getAttrOfType<ArrayAttr>("kernel_shape")) {

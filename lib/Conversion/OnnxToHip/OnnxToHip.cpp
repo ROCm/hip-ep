@@ -30,6 +30,8 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "llvm/ADT/StringSet.h"
+
 #include <algorithm>
 #include <chrono>
 #include <unordered_map>
@@ -527,9 +529,12 @@ static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
 }
 
 /// Final fallback: any onnx.* op still in the IR after the main
-/// convertComputeOps pass cannot be bufferized.  Replace them with a
+/// convertComputeOps pass cannot be bufferized -- replace with a
 /// `tensor.empty` (zero-initialised lazy buffer) of the result type so
-/// downstream passes can succeed.  This is OBVIOUSLY wrong for
+/// downstream passes can succeed.  Same treatment for hip.* ops that
+/// have dynamic-shape results, because most existing hip.* LLVM
+/// lowerings require static shapes (HipToLLVM marks them illegal and
+/// the dialect-conversion pass aborts).  This is OBVIOUSLY wrong for
 /// correctness -- the model output for any path that depends on these
 /// ops will be garbage -- but it lets us validate the rest of the
 /// pipeline (bufferize / HipToLLVM / LLVM codegen / DLL load) end to
@@ -539,8 +544,55 @@ static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
 static mlir::LogicalResult dropUnsupportedOnnxOps(mlir::func::FuncOp funcOp) {
   llvm::SmallVector<mlir::Operation *> stragglers;
   funcOp.walk([&](mlir::Operation *op) {
-    if (op->getName().getDialectNamespace() == "onnx")
+    auto ns = op->getName().getDialectNamespace();
+    if (ns == "onnx") {
       stragglers.push_back(op);
+      return;
+    }
+    if (ns == "hip") {
+      // Drop any hip.* op whose lowering is known to require static
+      // shapes when the result type isn't fully static.  Most hip.*
+      // ops (Conv, Matmul, Gather, etc.) handle dynamic dims fine
+      // and must NOT be dropped here.
+      llvm::StringRef name = op->getName().getStringRef();
+      static const llvm::StringSet<> kStaticShapeOnly = {
+          "hip.compare",
+          "hip.binary_elementwise",
+          "hip.unary_elementwise",
+          "hip.where",
+          "hip.cumsum",
+          "hip.reduce_mean",
+          "hip.concat",
+          "hip.constant_of_shape",
+          "hip.layer_norm",
+          "hip.slice",
+          "hip.expand",
+          "hip.resize",
+          "hip.pad",
+          "hip.range",
+          "hip.lstm",
+          "hip.stft",
+          "hip.nonzero",
+          "hip.scatter_nd",
+          "hip.conv_transpose",
+      };
+      if (!kStaticShapeOnly.count(name))
+        return;
+      auto isDynamic = [](mlir::Type t) {
+        if (auto rt = mlir::dyn_cast<mlir::RankedTensorType>(t))
+          return !rt.hasStaticShape();
+        return false;
+      };
+      bool anyDynamic = false;
+      for (mlir::Type t : op->getResultTypes())
+        if (isDynamic(t)) { anyDynamic = true; break; }
+      if (!anyDynamic) {
+        for (mlir::Value v : op->getOperands())
+          if (isDynamic(v.getType())) { anyDynamic = true; break; }
+      }
+      if (anyDynamic)
+        stragglers.push_back(op);
+    }
   });
   for (mlir::Operation *op : stragglers) {
     mlir::OpBuilder builder(op);

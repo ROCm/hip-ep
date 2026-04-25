@@ -41,41 +41,14 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     int rank = inMemRef.getRank();
     MemRefDescriptor inputDesc(adaptor.getInput());
 
-    if (rank <= 3) {
-      // Legacy fast-path matching the existing hip_transpose runtime.
-      SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
-                                      indexType, indexType, indexType,
-                                      indexType, indexType, indexType};
-      FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-          rewriter, module, kHipTranspose, paramTypes, voidType);
-      if (failed(funcOp))
-        return failure();
-      Value rankVal = LLVM::ConstantOp::create(rewriter, loc, indexType,
-                                               rewriter.getIndexAttr(rank));
-      Value one = LLVM::ConstantOp::create(rewriter, loc, indexType,
-                                           rewriter.getIndexAttr(1));
-      SmallVector<Value, 3> shape;
-      for (int dimIdx : llvm::seq<int>(3))
-        shape.push_back(dimIdx < rank ? inputDesc.size(rewriter, loc, dimIdx)
-                                      : one);
-      SmallVector<Value> args = {
-          adaptor.getCtx(),
-          extractMemRefPtr(adaptor.getInput(), rewriter, loc),
-          extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
-          rankVal,
-          adaptor.getDim0(),
-          adaptor.getDim1(),
-          shape[0],
-          shape[1],
-          shape[2]};
-      LLVM::CallOp::create(rewriter, loc, *funcOp, args);
-      rewriter.eraseOp(op);
-      return success();
-    }
-
-    // Rank >= 4: use the generic hip_transpose_nd kernel.  Stride
-    // computation is done inside the kernel from the input shape, so
-    // we pass an i64* of in_shape on the stack.
+    // All ranks: use the generic hip_transpose_nd kernel.  (The
+    // legacy `hip_transpose` symbol has no runtime implementation
+    // anywhere in the tree, so any model exercising the previous
+    // rank-<=3 path would fail to link.  Route everything through the
+    // new kernel.)
+    //
+    // Stride computation is done inside the kernel from the input
+    // shape, so we pass an i64* of in_shape on the stack.
     int64_t dataType = getHipdnnDataType(inMemRef.getElementType());
     if (dataType < 0)
       return op.emitOpError("hip.transpose unsupported element type");
