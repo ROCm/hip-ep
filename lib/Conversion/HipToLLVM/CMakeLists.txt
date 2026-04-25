@@ -27,6 +27,7 @@ add_library(HipToLLVM STATIC
   BinaryElementwiseLowering.cpp
   SliceLowering.cpp
   Tier2ShapeLowering.cpp
+  Tier3CompareLowering.cpp
 )
 
 add_dependencies(HipToLLVM

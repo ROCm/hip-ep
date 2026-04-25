@@ -385,6 +385,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateBinaryElementwiseConversionPatterns(patterns, ctx);
   populateSliceConversionPatterns(patterns, ctx);
   populateTier2ShapeConversionPatterns(patterns, ctx);
+  populateTier3CompareConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

@@ -153,6 +153,8 @@ void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateTier2ShapeConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
+void populateTier3CompareConversionPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

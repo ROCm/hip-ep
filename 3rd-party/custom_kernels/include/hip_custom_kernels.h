@@ -294,6 +294,97 @@ int hip_constant_of_shape(
     uint64_t scalar_bits);
 
 /* =========================================================================
+ * Element-wise Compare / Logical (bool output)
+ * =========================================================================
+ *
+ * ONNX ops that take two tensors of any numeric type and produce a boolean
+ * tensor (1 byte per element):
+ *
+ *   HIP_COMPARE_EQ  (Equal),  HIP_COMPARE_GT  (Greater),
+ *   HIP_COMPARE_LT  (Less),   HIP_COMPARE_GE  (GreaterOrEqual),
+ *   HIP_COMPARE_AND (logical And; inputs must be bool/i8)
+ *
+ * Broadcasting follows the same convention as hip_elementwise_binary
+ * (per-axis lhs/rhs strides, 0 = broadcast).
+ *
+ * Supported hip_dtype for EQ/GT/LT/GE: float32, float16, bfloat16, int32, int64.
+ * Supported hip_dtype for AND: ignored (always treats inputs as bool/i8).
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+typedef enum {
+    HIP_COMPARE_EQ  = 0,
+    HIP_COMPARE_GT  = 1,
+    HIP_COMPARE_LT  = 2,
+    HIP_COMPARE_GE  = 3,
+    HIP_COMPARE_AND = 4,
+} hip_compare_kind_t;
+
+int hip_compare(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* out,
+    int64_t num_elements,
+    int hip_dtype,
+    int kind,
+    int rank,
+    const int64_t* out_shape,
+    const int64_t* lhs_strides_elems,
+    const int64_t* rhs_strides_elems);
+
+/* =========================================================================
+ * Where (cond ? x : y)
+ * =========================================================================
+ *
+ * `cond` is a bool tensor (1 byte per element) broadcastable to the output
+ * shape; `x` and `y` are tensors of the same element type as the output,
+ * also broadcastable.  Element-size dispatch (1/2/4/8 bytes) covers every
+ * float/int dtype that fits in a 64-bit word.
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_where(
+    void* stream,
+    const void* cond,
+    const void* x,
+    const void* y,
+    void* out,
+    int64_t num_elements,
+    int element_size_bytes,
+    int rank,
+    const int64_t* out_shape,
+    const int64_t* cond_strides_elems,
+    const int64_t* x_strides_elems,
+    const int64_t* y_strides_elems);
+
+/* =========================================================================
+ * LayerNormalization
+ * =========================================================================
+ *
+ * y = (x - mean) / sqrt(var + epsilon) * gamma + beta
+ *
+ * Mean and variance are taken over the innermost `norm_size` elements of
+ * each row.  The host flattens the input to (outer * norm_size,) so the
+ * kernel can launch one block per row.
+ *
+ * `beta` may be NULL (treated as zero).
+ *
+ * Supported hip_dtype: float32, float16, bfloat16
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_layer_norm(
+    void* stream,
+    const void* x,
+    const void* gamma,
+    const void* beta,
+    void* y,
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

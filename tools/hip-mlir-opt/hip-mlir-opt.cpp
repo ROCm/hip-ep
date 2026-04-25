@@ -147,6 +147,12 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::ConcatOp>>(*ctx);
     mlir::hip::ConstantOfShapeOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ConstantOfShapeOp>>(*ctx);
+    mlir::hip::CompareOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::CompareOp>>(*ctx);
+    mlir::hip::WhereOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::WhereOp>>(*ctx);
+    mlir::hip::LayerNormOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LayerNormOp>>(*ctx);
   });
 }
 

@@ -663,6 +663,48 @@ void ConstantOfShapeOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// CompareOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CompareOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void CompareOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// WhereOp: ins(cond, x, y), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange WhereOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void WhereOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// LayerNormOp: ins(input, gamma [, beta]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LayerNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void LayerNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SubOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 

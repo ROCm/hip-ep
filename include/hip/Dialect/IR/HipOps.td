@@ -906,6 +906,71 @@ def Hip_ConcatOp : Hip_DpsOp<"concat"> {
   }];
 }
 
+// ===== Tier 3 / 4 ops (compare / select / layernorm) =========================
+
+// Element-wise comparison / logical op producing a bool (i8) output.
+// Kind values match hip_compare_kind_t in hip_custom_kernels.h:
+//   0=Equal, 1=Greater, 2=Less, 3=GreaterOrEqual, 4=And
+def Hip_CompareOp : Hip_DpsOp<"compare"> {
+  let summary = "Element-wise compare/logical op (Equal/Greater/Less/GE/And)";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$kind
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_WhereOp : Hip_DpsOp<"where"> {
+  let summary = "Element-wise select: cond ? x : y";
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$cond,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y,
+    Hip_TensorOrMemRef:$output
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $cond `,` $x `,` $y `:`
+        type($cond) `,` type($x) `,` type($y) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_LayerNormOp : Hip_DpsOp<"layer_norm"> {
+  let summary = "ONNX LayerNormalization (with mean subtraction)";
+  let description = [{
+    Computes y = (x - mean) / sqrt(var + epsilon) * gamma + beta along the
+    innermost `norm_size` elements of each row.  beta is optional (treated
+    as zero when absent).  See SimplifiedLayerNormalization for the
+    epsilon-only/RMS variant.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$gamma,
+    Optional<Hip_TensorOrMemRef>:$beta,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$epsilon,
+    I64Attr:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $gamma (`,` $beta^)?
+        `:` type($input) `,` type($gamma) (`,` type($beta)^)?
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ConstantOfShapeOp : Hip_DpsOp<"constant_of_shape"> {
   let summary = "Fill a buffer with a scalar (ONNX ConstantOfShape)";
   let description = [{

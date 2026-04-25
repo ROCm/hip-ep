@@ -103,6 +103,9 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ConcatOp::attachInterface<HipDstBufferizableModel<ConcatOp>>(*ctx);
     ConstantOfShapeOp::attachInterface<
         HipDstBufferizableModel<ConstantOfShapeOp>>(*ctx);
+    CompareOp::attachInterface<HipDstBufferizableModel<CompareOp>>(*ctx);
+    WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
+    LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
   });
 }
 
