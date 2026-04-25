@@ -43,6 +43,8 @@ typedef enum {
     HIP_DTYPE_INT32    = 3,
     HIP_DTYPE_FLOAT64  = 4,
     HIP_DTYPE_BFLOAT16 = 5,
+    HIP_DTYPE_INT8     = 6,
+    HIP_DTYPE_UINT8    = 7,
 } hip_dtype_t;
 
 /* =========================================================================

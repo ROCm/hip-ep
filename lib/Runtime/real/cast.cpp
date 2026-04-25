@@ -22,6 +22,8 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:
     return HIP_DTYPE_INT64;
+  case 5: // HIPDNN_EP_DATATYPE_INT8
+    return HIP_DTYPE_INT8;
   default:
     return -1;
   }

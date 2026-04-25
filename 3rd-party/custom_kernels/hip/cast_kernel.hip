@@ -113,6 +113,12 @@ extern "C" int hip_cast(
   } else if (input_dtype == HIP_DTYPE_FLOAT16 &&
              output_dtype == HIP_DTYPE_FLOAT32) {
     CAST_LAUNCH(cast_f16_to_f32_kernel, __half, float);
+  } else if ((input_dtype == HIP_DTYPE_INT8 || input_dtype == HIP_DTYPE_UINT8) &&
+             output_dtype == HIP_DTYPE_FLOAT32) {
+    CAST_LAUNCH((cast_kernel_t<int8_t, float>), int8_t, float);
+  } else if (input_dtype == HIP_DTYPE_FLOAT32 &&
+             (output_dtype == HIP_DTYPE_INT8 || output_dtype == HIP_DTYPE_UINT8)) {
+    CAST_LAUNCH((cast_kernel_t<float, int8_t>), float, int8_t);
   } else if (input_dtype == output_dtype) {
     // Identity: bytewise copy.
     size_t elem_size = 0;
