@@ -455,6 +455,86 @@ int hip_pad(
     float value);
 
 /* =========================================================================
+ * Resize (ONNX Resize opset 18)
+ * =========================================================================
+ *
+ * Resizes the spatial dims (last 2) of an N-D tensor.  Batch / channel /
+ * any leading dims pass through unchanged.  Modes:
+ *   0 = nearest (round_prefer_floor per ONNX 18 default)
+ *   1 = linear  (bilinear over the last 2 dims)
+ *   2 = cubic   (bicubic with `cubic_coeff_a`, default -0.75)
+ *
+ * Coordinate-transform modes (output -> input mapping):
+ *   0 = half_pixel        (default)
+ *   1 = pytorch_half_pixel
+ *   2 = align_corners
+ *   3 = asymmetric
+ *   4 = tf_crop_and_resize (rejected at lowering time; the runtime
+ *                           kernel still falls back to half_pixel for
+ *                           safety if it ever gets here)
+ *
+ * Up to HIP_RESIZE_MAX_RANK (8) dims; rank must be >= 2.
+ *
+ * Supported hip_dtype: float32, float16, bfloat16
+ * Returns: 0 on success, non-zero on failure
+ */
+typedef enum {
+    HIP_RESIZE_MODE_NEAREST = 0,
+    HIP_RESIZE_MODE_LINEAR  = 1,
+    HIP_RESIZE_MODE_CUBIC   = 2,
+} hip_resize_mode_t;
+
+typedef enum {
+    HIP_RESIZE_COORD_HALF_PIXEL     = 0,
+    HIP_RESIZE_COORD_PT_HALF_PIXEL  = 1,
+    HIP_RESIZE_COORD_ALIGN_CORNERS  = 2,
+    HIP_RESIZE_COORD_ASYMMETRIC     = 3,
+    HIP_RESIZE_COORD_TF_CROP_RESIZE = 4,
+} hip_resize_coord_xform_t;
+
+int hip_resize(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* in_shape,
+    const int64_t* in_strides_elems,
+    const int64_t* out_shape,
+    const int64_t* out_strides_elems,
+    int64_t rank,
+    int hip_dtype,
+    int mode,
+    int coord_xform,
+    float cubic_coeff_a);
+
+/* Forward declarations for sibling-agent work-in-progress kernels.  These
+ * are added here defensively so the runtime keeps compiling while the
+ * NonZero / ScatterND owners finish wiring their signatures.  Safe to
+ * remove (or fold into a richer block) once those owners commit. */
+int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    void* k_dev_counter,
+    const int64_t* in_shape,
+    int64_t rank,
+    int64_t total_elements,
+    int64_t k_max,
+    int hip_dtype);
+
+int hip_scatter_nd(
+    void* stream,
+    void* output,
+    const void* indices,
+    const void* updates,
+    const int64_t* data_shape,
+    int64_t data_rank,
+    const int64_t* indices_shape,
+    int64_t indices_rank,
+    int data_hip_dtype,
+    int indices_hip_dtype,
+    int reduction);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *
@@ -869,7 +949,6 @@ int hip_qmoe_scatter_add(
 int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
-
 /* =========================================================================
  * Expand (ONNX Expand opset 13 - numpy-style broadcast)
  * =========================================================================
@@ -880,12 +959,12 @@ int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
  *
  *   - `out_shape[d]`        : output extent along axis d (length = rank)
  *   - `in_strides_elems[d]` : effective input element-stride along axis d.
- *                                0 means "broadcast" (the corresponding
- *                                right-aligned input dim is 1 or absent).
+ *                              0 means "broadcast" (the corresponding
+ *                              right-aligned input dim is 1 or absent).
  *   - `in_shape[d]`         : right-aligned input shape (length = rank).
- *                                Currently informational only; the broadcast
- *                                semantics are fully encoded in
- *                                `in_strides_elems`.
+ *                              Currently informational only; the broadcast
+ *                              semantics are fully encoded in
+ *                              `in_strides_elems`.
  *
  * One thread per output element:
  *   in_off = sum_d (out_coord[d] * in_strides_elems[d])
@@ -907,6 +986,174 @@ int hip_expand(
     const int64_t* out_shape,
     int64_t rank,
     int hip_dtype);
+
+/* =========================================================================
+ * NonZero (ONNX NonZero opset 13)
+ * =========================================================================
+ *
+ * Computes the row-major N-D coordinates of every nonzero element in
+ * `input` and writes them column-by-column into `output`.  The output
+ * tensor is shaped `(rank, k_max)` where `k_max` is a worst-case upper
+ * bound supplied by the host (typically equal to `total_elements` of
+ * the input).
+ *
+ * One thread per input element.  When the element is nonzero the thread
+ * grabs the next free slot in the output via an atomic counter and
+ * writes the N-D coordinate.  Slots beyond `k_max` are silently dropped
+ * (they cannot occur when `k_max >= total_elements`).
+ *
+ * On entry the kernel zero-fills the output buffer so that
+ * unused/trailing slots read back as the zero coordinate (matches the
+ * "all-zero coords" convention used by Kokoro's downstream Transpose +
+ * Gather chain).
+ *
+ * `k_dev_counter` is a device pointer to a single int64 the kernel
+ * uses for the atomic counter and writes the final K back to.  The
+ * host wrapper allocates and reads it.
+ *
+ * Supported hip_dtype: float32, float16, bfloat16, int32, int64, int8
+ * (every dtype with a clear "is zero" predicate).
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    void* k_dev_counter,
+    const int64_t* in_shape,
+    int64_t rank,
+    int64_t total_elements,
+    int64_t k_max,
+    int hip_dtype);
+
+/* =========================================================================
+ * ScatterND (ONNX ScatterND opset 13)
+ * =========================================================================
+ *
+ * Implements ONNX ScatterND.  The host has already (memcpy'd or aliased)
+ * `data` into `output`; this kernel applies the per-index updates:
+ *
+ *   for i in [0, N):
+ *     coord = indices[i, :indices_last_dim]
+ *     output[coord, ...] = updates[i, ...]   (reduction == 0)
+ *     output[coord, ...] += updates[i, ...]  (reduction == 1, atomic)
+ *
+ * `indices_shape` is the full indices shape (length = indices_rank); the
+ * leading `indices_rank - 1` dims define `N` (the number of update
+ * slices), and the innermost dim is the coordinate length used to
+ * address `output`.  The kernel computes per-update inner block size
+ * from `data_shape[indices_last_dim:]`.
+ *
+ * Supported data hip_dtype: float32, float16, bfloat16, int32, int64
+ * Supported indices hip_dtype: int32, int64
+ * Supported reduction: 0 (none/overwrite), 1 (add)
+ *
+ * Returns: 0 on success, non-zero on failure (e.g. unsupported reduction)
+ */
+int hip_scatter_nd(
+    void* stream,
+    void* output,
+    const void* indices,
+    const void* updates,
+    const int64_t* data_shape,
+    int64_t data_rank,
+    const int64_t* indices_shape,
+    int64_t indices_rank,
+    int data_hip_dtype,
+    int indices_hip_dtype,
+    int reduction);
+
+/* =========================================================================
+ * STFT helpers (Short-Time Fourier Transform, ONNX opset 17)
+ * =========================================================================
+ *
+ * The runtime wrapper (real/stft.cpp) drives rocFFT for the actual
+ * real-to-complex DFT.  These helpers prepare the framing buffer rocFFT
+ * consumes, and (optionally) repack rocFFT's interleaved output into the
+ * (..., 2) layout ONNX expects.
+ *
+ *   - hip_stft_frame_window:
+ *       For each (batch, frame, k) writes
+ *         frames[b, f, k] = signal[b, f * frame_step + k] * window[k]
+ *       (window can be NULL for a rectangular window).
+ *
+ *   - hip_stft_split_complex:
+ *       Copy `batch * n_frames * n_freqs` interleaved (re, im) f32 pairs
+ *       into the destination tensor.  For onesided=1, n_freqs =
+ *       frame_length / 2 + 1.  rocFFT's hipfftComplex layout is already
+ *       {re, im} f32 pairs in row-major order, so this is a contiguous
+ *       copy today; the kernel exists to give us a single seam where we
+ *       can later add half-precision narrowing or strided writes.
+ *
+ * Currently supported hip_dtype: HIP_DTYPE_FLOAT32
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_stft_frame_window(
+    void* stream,
+    const void* signal,
+    const void* window,
+    void* frames,
+    int64_t batch,
+    int64_t signal_len,
+    int64_t frame_len,
+    int64_t frame_step,
+    int64_t n_frames,
+    int hip_dtype);
+
+int hip_stft_split_complex(
+    void* stream,
+    const void* complex_in,
+    void* output,
+    int64_t batch,
+    int64_t n_frames,
+    int64_t n_freqs,
+    int hip_dtype);
+
+/* =========================================================================
+ * NonZero (ONNX NonZero opset 13 -- coordinates of nonzero elements)
+ * =========================================================================
+ *
+ * `output` is a pre-allocated `(rank, k_max)` int64 grid.  `k_dev_counter`
+ * is one int64 on device that the kernel atomicAdds into to assign column
+ * indices; the host should zero-fill it (and the output buffer) before
+ * the call.  Up to k_max nonzero coordinates are recorded; any extras are
+ * silently dropped.
+ */
+#define HIP_NONZERO_MAX_RANK 8
+int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    void* k_dev_counter,
+    const int64_t* in_shape,
+    int64_t rank,
+    int64_t total_elements,
+    int64_t k_max,
+    int hip_dtype);
+
+/* =========================================================================
+ * ScatterND (ONNX ScatterND opset 13 -- scatter updates by N-D indices)
+ * =========================================================================
+ *
+ * Applies output[indices[i, ...]] = updates[i, ...] for every i along
+ * the leading dim of indices/updates.  The wrapper has already copied
+ * `data` -> `output`; this kernel just applies the per-row updates.
+ *   reduction = 0  -- overwrite (none)
+ *   reduction = 1  -- atomic add (f32/f16/bf16) or non-atomic add (i32/i64)
+ */
+int hip_scatter_nd(
+    void* stream,
+    void* output,
+    const void* indices,
+    const void* updates,
+    const int64_t* data_shape,
+    int64_t data_rank,
+    const int64_t* indices_shape,
+    int64_t indices_rank,
+    int data_hip_dtype,
+    int indices_hip_dtype,
+    int reduction);
 
 #ifdef __cplusplus
 }
