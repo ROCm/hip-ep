@@ -506,34 +506,6 @@ int hip_resize(
     int coord_xform,
     float cubic_coeff_a);
 
-/* Forward declarations for sibling-agent work-in-progress kernels.  These
- * are added here defensively so the runtime keeps compiling while the
- * NonZero / ScatterND owners finish wiring their signatures.  Safe to
- * remove (or fold into a richer block) once those owners commit. */
-int hip_nonzero(
-    void* stream,
-    const void* input,
-    void* output,
-    void* k_dev_counter,
-    const int64_t* in_shape,
-    int64_t rank,
-    int64_t total_elements,
-    int64_t k_max,
-    int hip_dtype);
-
-int hip_scatter_nd(
-    void* stream,
-    void* output,
-    const void* indices,
-    const void* updates,
-    const int64_t* data_shape,
-    int64_t data_rank,
-    const int64_t* indices_shape,
-    int64_t indices_rank,
-    int data_hip_dtype,
-    int indices_hip_dtype,
-    int reduction);
-
 /* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
@@ -1109,51 +1081,6 @@ int hip_stft_split_complex(
     int64_t n_frames,
     int64_t n_freqs,
     int hip_dtype);
-
-/* =========================================================================
- * NonZero (ONNX NonZero opset 13 -- coordinates of nonzero elements)
- * =========================================================================
- *
- * `output` is a pre-allocated `(rank, k_max)` int64 grid.  `k_dev_counter`
- * is one int64 on device that the kernel atomicAdds into to assign column
- * indices; the host should zero-fill it (and the output buffer) before
- * the call.  Up to k_max nonzero coordinates are recorded; any extras are
- * silently dropped.
- */
-#define HIP_NONZERO_MAX_RANK 8
-int hip_nonzero(
-    void* stream,
-    const void* input,
-    void* output,
-    void* k_dev_counter,
-    const int64_t* in_shape,
-    int64_t rank,
-    int64_t total_elements,
-    int64_t k_max,
-    int hip_dtype);
-
-/* =========================================================================
- * ScatterND (ONNX ScatterND opset 13 -- scatter updates by N-D indices)
- * =========================================================================
- *
- * Applies output[indices[i, ...]] = updates[i, ...] for every i along
- * the leading dim of indices/updates.  The wrapper has already copied
- * `data` -> `output`; this kernel just applies the per-row updates.
- *   reduction = 0  -- overwrite (none)
- *   reduction = 1  -- atomic add (f32/f16/bf16) or non-atomic add (i32/i64)
- */
-int hip_scatter_nd(
-    void* stream,
-    void* output,
-    const void* indices,
-    const void* updates,
-    const int64_t* data_shape,
-    int64_t data_rank,
-    const int64_t* indices_shape,
-    int64_t indices_rank,
-    int data_hip_dtype,
-    int indices_hip_dtype,
-    int reduction);
 
 #ifdef __cplusplus
 }
