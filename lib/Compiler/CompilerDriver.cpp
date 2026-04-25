@@ -347,6 +347,17 @@ void CompilerDriver::discoverLibraries(
   else
     COMPILER_DEBUG_LOG("  WARNING: hipblaslt import library not found\n");
 
+  // rocfft is required by wrap_stft (ONNX STFT runtime path).  Same
+  // .lib / .dll.a layout as hipblaslt depending on the SDK toolchain.
+  std::string rocfft_lib = lib_dir + "/rocfft.lib";
+  std::string rocfft_dll_a = lib_dir + "/librocfft.dll.a";
+  if (llvm::sys::fs::exists(rocfft_lib))
+    libraries.push_back("rocfft");
+  else if (llvm::sys::fs::exists(rocfft_dll_a))
+    libraries.push_back(rocfft_dll_a);
+  else
+    COMPILER_DEBUG_LOG("  WARNING: rocfft import library not found\n");
+
   // Custom kernels library discovery (priority high → low):
   //
   //   1. HIP_CUSTOM_KERNELS_DIR env var  — runtime override for end-users
