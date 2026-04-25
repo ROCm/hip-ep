@@ -1594,6 +1594,98 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
   }];
 }
 
+def Hip_StftOp : Hip_DpsOp<"stft"> {
+  let summary = "ONNX Short-Time Fourier Transform (opset 17)";
+  let description = [{
+    Real -> complex onesided STFT.  signal is (batch, signal_length).
+    window is (frame_length,) -- optional (rectangular when absent).
+    frame_step is the hop in samples.  Output shape:
+      (batch, n_frames, n_freqs, 2)
+    where n_frames = (signal_length - frame_length) / frame_step + 1
+    and n_freqs = (frame_length / 2) + 1 when onesided=1 else frame_length.
+
+    Implemented via rocFFT's R2C plan plus a HIP framing/window kernel.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$signal,
+    Optional<Hip_TensorOrMemRef>:$window,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$frame_step,
+    I64Attr:$frame_length,
+    DefaultValuedAttr<I64Attr, "1">:$onesided
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+      $signal (`,` $window^)?
+      `:` type($signal) (`,` type($window)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== Tier 7 ops (data-dependent shape / scatter) ==========================
+
+def Hip_NonzeroOp : Hip_DpsOp<"nonzero"> {
+  let summary = "ONNX NonZero (returns coords of nonzero elements)";
+  let description = [{
+    Writes the row-major N-D coordinates of every nonzero element of `input`
+    into successive columns of `output`.  `output` has shape `(N, K)` where
+    `N == input.rank` and `K` is the worst-case nonzero count baked into the
+    output type at conversion time.
+
+    The runtime kernel atomically counts nonzeros and writes coords to
+    `output[:, 0..count-1]`; columns `count..K-1` are zero-filled.  Because
+    the actual K is data-dependent, downstream ops MUST be tolerant of
+    trailing zero coords (typical use is followed by Transpose + Gather or
+    Slice with a runtime length).  See lib/Runtime/real/nonzero.cpp for the
+    exact ABI.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ScatterNdOp : Hip_DpsOp<"scatter_nd"> {
+  let summary = "ONNX ScatterND (per-index update of a tensor)";
+  let description = [{
+    Implements ONNX ScatterND (opset 13).  The op semantically copies `data`
+    to `output`, then for every prefix index `i` along the leading
+    `(indices_rank - 1)` dims of `indices/updates` writes
+    `output[indices[i,...]] = updates[i,...]` (when `reduction == 0`) or
+    `output[indices[i,...]] += updates[i,...]` (when `reduction == 1`).
+
+    `reduction`:
+      - 0 = none (overwrite)
+      - 1 = add  (atomic add)
+
+    Other ONNX reductions (mul/min/max) are not currently implemented; the
+    conversion pattern bails on them.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$updates,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$reduction
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+      $data `,` $indices `,` $updates
+      `:` type($data) `,` type($indices) `,` type($updates) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GemmOp : Hip_DpsOp<"gemm">{
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
@@ -1634,6 +1726,92 @@ def Hip_GemmOp : Hip_DpsOp<"gemm">{
         `:` type($input_a) `,` type($input_b) (`,` type($input_c)^)?
     `)`
     `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== Recurrent Networks =====================================================
+
+def Hip_LstmOp : Hip_DpsOp<"lstm", [AttrSizedOperandSegments]> {
+  let summary = "ONNX LSTM (opset 14) backed by MIOpen RNN forward inference";
+  let description = [{
+    Single-layer LSTM matching the ONNX `LSTM` operator (opset 14) with
+    `layout = 0`, `input_forget = 0`, and the default sigmoid/tanh/tanh
+    activations.  The runtime reorders the ONNX `IOFG` weight gate
+    layout into MIOpen's `IFOG` layout, then dispatches
+    `miopenRNNForwardInference`.
+
+    Operands (DPS):
+      ctx        : `!hip.context`
+      input      : (seq_len, batch, input_size)
+      weights    : (num_directions, 4*hidden_size, input_size) ONNX `IOFG`
+      recurrence : (num_directions, 4*hidden_size, hidden_size) ONNX `IOFG`
+      bias?      : (num_directions, 8*hidden_size) ONNX `IOFG`
+                   first half = Wb, second half = Rb (omit for no bias)
+      initial_h? : (num_directions, batch, hidden_size)
+      initial_c? : (num_directions, batch, hidden_size)
+      y_out      : (seq_len, num_directions, batch, hidden_size)
+      y_h_out    : (num_directions, batch, hidden_size)
+      y_c_out    : (num_directions, batch, hidden_size)
+
+    Attributes:
+      hidden_size : i64, hidden state dim (per direction)
+      direction   : i64, 0 = forward, 1 = reverse, 2 = bidirectional
+
+    Example:
+    ```mlir
+    hip.lstm(%ctx)
+        ins(%x, %w, %r, %b, %ih, %ic
+            : memref<8x1x32xf16, 1>, memref<2x1024x32xf16, 1>,
+              memref<2x1024x256xf16, 1>, memref<2x2048xf16, 1>,
+              memref<2x1x256xf16, 1>, memref<2x1x256xf16, 1>)
+        outs(%y, %yh, %yc
+             : memref<8x2x1x256xf16, 1>, memref<2x1x256xf16, 1>,
+               memref<2x1x256xf16, 1>)
+        {hidden_size = 256 : i64, direction = 2 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    // Required ONNX inputs (1-3)
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weights,
+    Hip_TensorOrMemRef:$recurrence,
+
+    // Optional ONNX inputs 4 / 6 / 7
+    // (input 5 = sequence_lens is folded out at conversion time when constant)
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Optional<Hip_TensorOrMemRef>:$initial_h,
+    Optional<Hip_TensorOrMemRef>:$initial_c,
+
+    // DPS output buffers (always 3)
+    Hip_TensorOrMemRef:$y_out,
+    Hip_TensorOrMemRef:$y_h_out,
+    Hip_TensorOrMemRef:$y_c_out,
+
+    I64Attr:$hidden_size,
+    I64Attr:$direction
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $weights `,` $recurrence
+        ( `,` $bias^ )?
+        ( `,` $initial_h^ )?
+        ( `,` $initial_c^ )?
+        `:`
+        type($input) `,` type($weights) `,` type($recurrence)
+        ( `,` type($bias)^ )?
+        ( `,` type($initial_h)^ )?
+        ( `,` type($initial_c)^ )?
+    `)`
+    `outs` `(`
+        $y_out `,` $y_h_out `,` $y_c_out
+        `:`
+        type($y_out) `,` type($y_h_out) `,` type($y_c_out)
+    `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

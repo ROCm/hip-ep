@@ -999,6 +999,18 @@ LogicalResult GqaOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// StftOp: ins(signal [, window]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange StftOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void StftOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // HipDNNGraphOp: ins(variadic), outs(variadic)
 //===----------------------------------------------------------------------===//
 
@@ -1007,6 +1019,61 @@ MutableOperandRange HipDNNGraphOp::getDpsInitsMutable() {
 }
 
 void HipDNNGraphOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// LstmOp: ins(input, weights, recurrence, [bias, initial_h, initial_c])
+//         outs(y_out, y_h_out, y_c_out)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LstmOp::getDpsInitsMutable() {
+  // Walk the actual operand layout to find the start of the three DPS inits.
+  // ctx (1) + input (1) + weights (1) + recurrence (1) + each present optional
+  // (bias, initial_h, initial_c).  The remaining 3 entries are y_out,
+  // y_h_out, y_c_out.
+  unsigned numInputs = 1; // ctx
+  numInputs += 3;         // input, weights, recurrence
+  if (getBias())
+    ++numInputs;
+  if (getInitialH())
+    ++numInputs;
+  if (getInitialC())
+    ++numInputs;
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/3);
+}
+
+void LstmOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// NonzeroOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NonzeroOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void NonzeroOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ScatterNdOp: ins(data, indices, updates), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScatterNdOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScatterNdOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

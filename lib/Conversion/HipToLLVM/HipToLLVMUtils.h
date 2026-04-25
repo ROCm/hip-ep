@@ -283,6 +283,8 @@ void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateTier6LoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateLstmLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

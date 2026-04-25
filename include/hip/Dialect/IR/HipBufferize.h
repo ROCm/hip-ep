@@ -113,6 +113,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
+    LstmOp::attachInterface<HipDstBufferizableModel<LstmOp>>(*ctx);
+    StftOp::attachInterface<HipDstBufferizableModel<StftOp>>(*ctx);
+    NonzeroOp::attachInterface<HipDstBufferizableModel<NonzeroOp>>(*ctx);
+    ScatterNdOp::attachInterface<HipDstBufferizableModel<ScatterNdOp>>(*ctx);
   });
 }
 

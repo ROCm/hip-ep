@@ -214,6 +214,8 @@ void populateTier3CompareConversionPatterns(RewritePatternSet &patterns,
                                             MLIRContext *ctx);
 void populateTier5SeqConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
+void populateLstmConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

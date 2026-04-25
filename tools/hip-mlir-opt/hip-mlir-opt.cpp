@@ -165,6 +165,14 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::ConvTransposeOp>>(*ctx);
     mlir::hip::ResizeOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ResizeOp>>(*ctx);
+    mlir::hip::LstmOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LstmOp>>(*ctx);
+    mlir::hip::StftOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::StftOp>>(*ctx);
+    mlir::hip::NonzeroOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::NonzeroOp>>(*ctx);
+    mlir::hip::ScatterNdOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ScatterNdOp>>(*ctx);
   });
 }
 
