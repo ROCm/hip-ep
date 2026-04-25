@@ -386,6 +386,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateSliceConversionPatterns(patterns, ctx);
   populateTier2ShapeConversionPatterns(patterns, ctx);
   populateTier3CompareConversionPatterns(patterns, ctx);
+  populateTier5SeqConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -408,6 +409,7 @@ static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
   populateSliceConversionPatterns(patterns, ctx);
   populateUnaryElementwiseConversionPatterns(patterns, ctx);
   populateTier2ShapeConversionPatterns(patterns, ctx);
+  populateTier5SeqConversionPatterns(patterns, ctx);
   // Note: only Clip in UnaryElementwise actually reads constant inputs;
   // ReduceMean/Range in Tier 2 do; the rest are no-ops here that re-fire
   // safely in the main convertComputeOps pass when their patterns are

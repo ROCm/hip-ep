@@ -106,6 +106,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     CompareOp::attachInterface<HipDstBufferizableModel<CompareOp>>(*ctx);
     WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
+    CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);
   });
 }
 

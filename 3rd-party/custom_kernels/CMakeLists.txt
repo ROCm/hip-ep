@@ -43,6 +43,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/compare_kernel.hip
     hip/where_kernel.hip
     hip/layer_norm_kernel.hip
+    hip/cumsum_kernel.hip
     hip/cast_kernel.hip
     hip/gather_kernel.hip
     hip/reduce_sum_kernel.hip

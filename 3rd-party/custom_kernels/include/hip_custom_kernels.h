@@ -385,6 +385,36 @@ int hip_layer_norm(
     int hip_dtype);
 
 /* =========================================================================
+ * CumSum
+ * =========================================================================
+ *
+ * Cumulative sum along an axis.  The host flattens the input as
+ * (outer * axis_size * inner) where:
+ *   - outer     = product(input.shape[:axis])
+ *   - axis_size = input.shape[axis]
+ *   - inner     = product(input.shape[axis+1:])
+ *
+ * Per ONNX:
+ *   exclusive: 0 = inclusive (sum includes current element)
+ *              1 = exclusive (sum excludes current element)
+ *   reverse:   0 = scan from index 0 forward
+ *              1 = scan from end backward
+ *
+ * Supported hip_dtype: float32, float16, bfloat16, int32, int64
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_cumsum(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t outer,
+    int64_t axis_size,
+    int64_t inner,
+    int hip_dtype,
+    int exclusive,
+    int reverse);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

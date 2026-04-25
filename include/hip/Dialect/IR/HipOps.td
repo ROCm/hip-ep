@@ -944,6 +944,28 @@ def Hip_WhereOp : Hip_DpsOp<"where"> {
   }];
 }
 
+def Hip_CumSumOp : Hip_DpsOp<"cumsum"> {
+  let summary = "Cumulative sum along an axis (ONNX CumSum)";
+  let description = [{
+    Computes the cumulative sum of `input` along `axis`.  When `exclusive=1`,
+    the sum at position k uses elements [0, k); otherwise [0, k]. When
+    `reverse=1` the scan runs from end to start.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    DefaultValuedAttr<I64Attr, "0">:$exclusive,
+    DefaultValuedAttr<I64Attr, "0">:$reverse
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_LayerNormOp : Hip_DpsOp<"layer_norm"> {
   let summary = "ONNX LayerNormalization (with mean subtraction)";
   let description = [{

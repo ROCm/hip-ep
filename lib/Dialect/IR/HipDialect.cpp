@@ -663,6 +663,20 @@ void ConstantOfShapeOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// CumSumOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CumSumOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void CumSumOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CompareOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 

@@ -27,6 +27,7 @@ add_library(OnnxToHip STATIC
   SliceConversion.cpp
   Tier2ShapeConversion.cpp
   Tier3CompareConversion.cpp
+  Tier5SeqConversion.cpp
 )
 
 add_dependencies(OnnxToHip
