@@ -521,6 +521,23 @@ int hip_transpose_nd(
     int hip_dtype);
 
 /* =========================================================================
+ * ONNX Range: out[i] = start + i*delta for i in [0, n)
+ * ========================================================================= */
+int hip_range_i64(
+    void* stream,
+    int64_t start,
+    int64_t delta,
+    int64_t n,
+    void* output);
+
+int hip_range_f32(
+    void* stream,
+    float start,
+    float delta,
+    int64_t n,
+    void* output);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

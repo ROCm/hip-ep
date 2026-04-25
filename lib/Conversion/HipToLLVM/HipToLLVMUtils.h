@@ -300,6 +300,8 @@ void populateScatterNdLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateConvTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
+void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir
