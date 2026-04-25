@@ -497,7 +497,8 @@ void mlir::hip::populateTier6ConversionPatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx) {
   patterns.add<PadToHip>(ctx);
   patterns.add<ExpandToHip>(ctx);
-  patterns.add<RangeToHip>(ctx);
+  if (!std::getenv("HIP_OFF_RANGE"))
+    patterns.add<RangeToHip>(ctx);
   patterns.add<ConvTransposeToHip>(ctx);
   patterns.add<ResizeToHip>(ctx);
 }
