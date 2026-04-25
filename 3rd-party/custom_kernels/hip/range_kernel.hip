@@ -8,12 +8,14 @@
 // and f32 (the two element types Kokoro uses).  The host launcher
 // caps grid.x at 65535 and tiles across grid.y for very long ranges.
 
+#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -65,13 +67,15 @@ extern "C" int hip_range_dyn(void *stream, const void *start_dev,
                               void *output, int64_t output_capacity,
                               int hip_dtype) {
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-  // Sync to ensure any prior writes to the scalar buffers complete.
-  hipError_t syn = hipStreamSynchronize(hip_stream);
-  if (syn != hipSuccess) {
-    fprintf(stderr, "[custom_kernels] hip_range_dyn: hipStreamSynchronize: %s\n",
-            hipGetErrorString(syn));
-    return static_cast<int>(syn);
-  }
+
+  // Sync all device work so the scalar values are ready for D2H.
+  // Use hipDeviceSynchronize + drain errors (same pattern as
+  // wrap_transpose) to avoid bad_variant_access from morphizen bridge.
+  (void)hipGetLastError();
+  hipDeviceSynchronize();
+  (void)hipGetLastError();
+
+  // Read scalars from device memory.
   if (hip_dtype == /*HIP_DTYPE_INT64*/ 2 ||
       hip_dtype == /*HIP_DTYPE_INT32*/ 3) {
     int64_t s = 0, l = 0, d = 1;
@@ -90,6 +94,9 @@ extern "C" int hip_range_dyn(void *stream, const void *start_dev,
     int64_t n = (l - s) / d;
     if (n < 0) n = 0;
     if (n > output_capacity) n = output_capacity;
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_range_dyn: i64 s=%lld l=%lld d=%lld n=%lld\n",
+        (long long)s, (long long)l, (long long)d, (long long)n);
     return launch_range<int64_t>(hip_stream, s, d, n,
                                    static_cast<int64_t *>(output));
   }
