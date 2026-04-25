@@ -100,10 +100,11 @@ __declspec(dllexport) int hip_miopen_softmax(void *handle_v, const void *input,
   return 0;
 }
 
-// hip.transpose legacy rank<=3 kernel -- never had an implementation.
-// New TransposeOpLowering routes everything through hip_transpose_nd
-// (in transpose_kernel.hip), so this stub is only here as a link-time
-// fallback in case any not-yet-rebuilt model DLL still references it.
+// hip_transpose: legacy stub removed.  TransposeLowering now routes all
+// ranks to hip_transpose_nd.  Keeping a dllexport C function for
+// link-time compatibility in case an old model DLL references it, but
+// it's a no-op that doesn't touch any HIP stream (to avoid poisoning
+// the stream with errors).
 __declspec(dllexport) void hip_transpose(void *handle, const void *input,
                                           void *output, intptr_t rank,
                                           intptr_t dim0, intptr_t dim1,
@@ -111,15 +112,13 @@ __declspec(dllexport) void hip_transpose(void *handle, const void *input,
                                           intptr_t s2) {
   (void)handle;
   (void)input;
+  (void)output;
+  (void)rank;
   (void)dim0;
   (void)dim1;
-  warn_once("hip_transpose (legacy; rebuild the EP)");
-  size_t total = static_cast<size_t>(s0) * static_cast<size_t>(s1) *
-                  static_cast<size_t>(s2);
-  if (rank < 3)
-    total = 1;
-  // Best-effort element-size guess: 4 bytes (f32).
-  zero_fill_dev(nullptr, output, total * 4);
+  (void)s0;
+  (void)s1;
+  (void)s2;
 }
 
 // STFT helper kernels.  StftLowering emits two device-side helper
