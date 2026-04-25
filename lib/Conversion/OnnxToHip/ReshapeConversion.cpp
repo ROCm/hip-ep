@@ -219,6 +219,47 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 
     // Different rank: expand or collapse
     if (outputRank != inputRank) {
+      // Rank-0 input -> rank-N: tensor.expand_shape with empty
+      // reassociation doesn't bufferize (memref.expand_shape requires
+      // rank >= 1).  Emit tensor.extract + tensor.from_elements +
+      // optional cast like the rank-0 unsqueeze path does.  Output
+      // must collapse to a single element (all dims must be 1).
+      if (inputRank == 0 && outputRank >= 1) {
+        llvm::SmallVector<int64_t> staticShape(outputRank, 1);
+        auto staticOutType = mlir::RankedTensorType::get(
+            staticShape, outputType.getElementType());
+        mlir::Value scalar =
+            mlir::tensor::ExtractOp::create(rewriter, loc, data,
+                                             mlir::ValueRange{})
+                .getResult();
+        mlir::Value out =
+            mlir::tensor::FromElementsOp::create(rewriter, loc, staticOutType,
+                                                  mlir::ValueRange{scalar})
+                .getResult();
+        if (staticOutType != outputType)
+          out = mlir::tensor::CastOp::create(rewriter, loc, outputType, out)
+                    .getResult();
+        rewriter.replaceOp(op, out);
+        return mlir::success();
+      }
+      // Rank-N input -> rank-0: pull the single element out via
+      // tensor.extract @ [0,...,0] then re-wrap.  Same rationale as
+      // the rank-0 unsqueeze path.
+      if (inputRank >= 1 && outputRank == 0) {
+        mlir::Value zero =
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, 0).getResult();
+        llvm::SmallVector<mlir::Value> indices(inputRank, zero);
+        mlir::Value scalar =
+            mlir::tensor::ExtractOp::create(rewriter, loc, data, indices)
+                .getResult();
+        mlir::Value out = mlir::tensor::FromElementsOp::create(
+                               rewriter, loc, outputType,
+                               mlir::ValueRange{scalar})
+                               .getResult();
+        rewriter.replaceOp(op, out);
+        return mlir::success();
+      }
+
       auto reassocOpt =
           mlir::getReassociationIndicesForReshape(inputType, outputType);
       if (!reassocOpt)
@@ -307,6 +348,36 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
     }
     if (outRank <= inRank)
       return rewriter.notifyMatchFailure(op, "unsqueeze must add dimensions");
+
+    // Rank-0 input -> any rank N: tensor.expand_shape doesn't accept an
+    // empty reassociation in memref form (memref.expand_shape requires
+    // rank >= 1).  Use `tensor.extract` to pull the scalar value, then
+    // `tensor.from_elements` to build a rank-N tensor of all-1 dims.
+    // ONNX Unsqueeze of a scalar is well-defined only when every output
+    // dim is 1 (semantically the scalar wrapped in a single element).
+    if (inRank == 0) {
+      // Static-1 dims are accepted; dynamic dims are accepted ONLY if
+      // the runtime size will be 1 (which is the only case where an
+      // unsqueeze of a scalar makes sense -- ONNX would reject larger
+      // sizes).  We synthesise a tensor<1x1x...xT> of all-1 dims, then
+      // tensor.cast to whatever the output type wants.
+      llvm::SmallVector<int64_t> staticShape(outRank, 1);
+      auto staticOutType = mlir::RankedTensorType::get(
+          staticShape, outputType.getElementType());
+      mlir::Location loc = op->getLoc();
+      mlir::Value scalar =
+          mlir::tensor::ExtractOp::create(rewriter, loc, data, mlir::ValueRange{})
+              .getResult();
+      mlir::Value out =
+          mlir::tensor::FromElementsOp::create(rewriter, loc, staticOutType,
+                                                mlir::ValueRange{scalar})
+              .getResult();
+      if (staticOutType != outputType)
+        out = mlir::tensor::CastOp::create(rewriter, loc, outputType, out)
+                  .getResult();
+      rewriter.replaceOp(op, out);
+      return mlir::success();
+    }
 
     // Try axes-from-shape inference first (works without any constant-axes
     // operand, and handles dynamic dims).

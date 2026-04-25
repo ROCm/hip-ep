@@ -38,6 +38,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
 
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+  auto weightsType = mlir::cast<mlir::RankedTensorType>(weights.getType());
 
   // Extract attributes from onnx.Conv
   llvm::SmallVector<int64_t> kernelShape;
@@ -81,6 +83,61 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
     group = attr.getValue().getSExtValue();
 
+  // hip.conv lowering requires NCHW (rank-4) tensors.  ONNX Conv1D
+  // (NCW, rank-3) is reshaped here to NC1W by inserting a unit H dim
+  // at axis 2 of input, axis 2 of weights, axis 2 of result.  The
+  // per-spatial conv attrs (kernel/strides/pads/dilations) get their
+  // H entry filled in as 1/1/[0,0]/1.
+  bool was1D = inputType.getRank() == 3;
+  if (was1D) {
+    if (kernelShape.size() != 1 || strides.size() != 1 ||
+        dilations.size() != 1 || pads.size() != 2) {
+      return rewriter.notifyMatchFailure(
+          op, "1D Conv has unexpected per-spatial attribute sizes");
+    }
+    auto inserted0H = [&](mlir::RankedTensorType t) {
+      llvm::SmallVector<int64_t> shape(t.getShape().begin(),
+                                       t.getShape().end());
+      shape.insert(shape.begin() + 2, 1);
+      return mlir::RankedTensorType::get(shape, t.getElementType());
+    };
+    auto unsqueezeH = [&](mlir::Value v, mlir::RankedTensorType srcType) {
+      auto dstType = inserted0H(srcType);
+      mlir::SmallVector<mlir::ReassociationIndices> reassoc = {{0}, {1, 2}, {3}};
+      llvm::SmallVector<mlir::OpFoldResult> outShape;
+      for (int64_t i = 0; i < dstType.getRank(); ++i) {
+        if (dstType.isDynamicDim(i)) {
+          int64_t srcDim = i;
+          if (i == 2)
+            outShape.push_back(rewriter.getIndexAttr(1));
+          else {
+            // Map dst dim back to src dim: 0->0, 1->1, 2->none, 3->2.
+            int64_t s = (i < 2) ? i : i - 1;
+            outShape.push_back(
+                mlir::tensor::DimOp::create(rewriter, loc, v, s).getResult());
+          }
+        } else {
+          outShape.push_back(rewriter.getIndexAttr(dstType.getDimSize(i)));
+        }
+      }
+      return mlir::tensor::ExpandShapeOp::create(rewriter, loc, dstType, v,
+                                                  reassoc, outShape)
+          .getResult();
+    };
+    input = unsqueezeH(input, inputType);
+    weights = unsqueezeH(weights, weightsType);
+    inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+    weightsType = mlir::cast<mlir::RankedTensorType>(weights.getType());
+    kernelShape = {1, kernelShape[0]};
+    strides     = {1, strides[0]};
+    dilations   = {1, dilations[0]};
+    // ONNX pads layout for 1D: [pad_w_begin, pad_w_end].  4D wants
+    // [pad_h_begin, pad_w_begin, pad_h_end, pad_w_end].
+    pads = {0, pads[0], 0, pads[1]};
+    // Result type also gets H=1 inserted.
+    resultType = inserted0H(resultType);
+  }
+
   // Create output tensor
   llvm::SmallVector<mlir::Value> dynSizes;
   for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
@@ -117,8 +174,20 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   // Create hip.conv operation using generic builder
   auto hipOp = mlir::hip::ConvOp::create(
       rewriter, loc, mlir::TypeRange{resultType}, operands, attrs);
+  mlir::Value out = hipOp.getResult(0);
 
-  rewriter.replaceOp(op, hipOp.getResult(0));
+  // 1D Conv: collapse the inserted H=1 dim back so the result type
+  // matches the original onnx.Conv result.
+  if (was1D) {
+    auto onnxResultType = mlir::cast<mlir::RankedTensorType>(
+        op->getResult(0).getType());
+    mlir::SmallVector<mlir::ReassociationIndices> reassoc = {{0}, {1, 2}, {3}};
+    out = mlir::tensor::CollapseShapeOp::create(rewriter, loc, onnxResultType,
+                                                  out, reassoc)
+              .getResult();
+  }
+
+  rewriter.replaceOp(op, out);
   return mlir::success();
 }
 
