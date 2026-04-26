@@ -7,13 +7,15 @@
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
 
-__global__ void elementwise_sub_i64_kernel(
-    const int64_t* __restrict__ lhs,
-    const int64_t* __restrict__ rhs,
-    int64_t* __restrict__ output,
+template <typename T>
+__global__ void elementwise_sub_kernel(
+    const T* __restrict__ lhs,
+    const T* __restrict__ rhs,
+    T* __restrict__ output,
     int64_t num_elements) {
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < num_elements) {
@@ -35,19 +37,21 @@ extern "C" int hip_elementwise_sub(
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
   switch (hip_dtype) {
-    case HIP_DTYPE_INT64: {
-      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_elementwise_sub: dtype=INT64, "
-              "num_elements=%lld, grid=%d, block=%d\n",
-              (long long)num_elements, grid_size, kBlockSize);
-
-      hipLaunchKernelGGL(elementwise_sub_i64_kernel,
-                         dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                         static_cast<const int64_t*>(lhs),
-                         static_cast<const int64_t*>(rhs),
-                         static_cast<int64_t*>(output),
-                         num_elements);
+    case HIP_DTYPE_FLOAT32:
+      elementwise_sub_kernel<float><<<dim3(grid_size), dim3(kBlockSize), 0, hip_stream>>>(
+          static_cast<const float*>(lhs), static_cast<const float*>(rhs),
+          static_cast<float*>(output), num_elements);
       break;
-    }
+    case HIP_DTYPE_FLOAT16:
+      elementwise_sub_kernel<__half><<<dim3(grid_size), dim3(kBlockSize), 0, hip_stream>>>(
+          static_cast<const __half*>(lhs), static_cast<const __half*>(rhs),
+          static_cast<__half*>(output), num_elements);
+      break;
+    case HIP_DTYPE_INT64:
+      elementwise_sub_kernel<int64_t><<<dim3(grid_size), dim3(kBlockSize), 0, hip_stream>>>(
+          static_cast<const int64_t*>(lhs), static_cast<const int64_t*>(rhs),
+          static_cast<int64_t*>(output), num_elements);
+      break;
     default:
       fprintf(stderr,
               "[custom_kernels] hip_elementwise_sub: unsupported dtype=%d\n",

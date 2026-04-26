@@ -6,9 +6,12 @@
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 // Parallel sum reduction for i32.  Same shape as the i64 version but
 // stored as int32 in/out (used by Kokoro for a small constant-folded
@@ -31,6 +34,26 @@ __global__ void reduce_sum_i32_kernel(
     __syncthreads();
   }
   if (tid == 0) output[out_idx] = static_cast<int32_t>(sdata[0]);
+}
+
+__global__ void reduce_sum_f32_kernel(
+    const float *__restrict__ data, float *__restrict__ output,
+    int64_t reduce_size, int64_t num_output_elements) {
+  extern __shared__ float sdata_f32[];
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+  const float *slice = data + out_idx * reduce_size;
+  int tid = threadIdx.x;
+  float s = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x)
+    s += slice[i];
+  sdata_f32[tid] = s;
+  __syncthreads();
+  for (unsigned int j = blockDim.x / 2; j > 0; j >>= 1) {
+    if ((unsigned)tid < j) sdata_f32[tid] += sdata_f32[tid + j];
+    __syncthreads();
+  }
+  if (tid == 0) output[out_idx] = sdata_f32[0];
 }
 
 // Parallel sum reduction for i64. Each block reduces one output element
@@ -174,6 +197,23 @@ extern "C" int hip_reduce_sum(
   int64_t reduce_size = num_input_elements / num_output_elements;
 
   switch (hip_dtype) {
+    case HIP_DTYPE_FLOAT32: {
+      constexpr int kBlock = 256;
+      size_t smem = kBlock * sizeof(float);
+      hipLaunchKernelGGL(
+          reduce_sum_f32_kernel,
+          dim3(static_cast<unsigned>(num_output_elements)), dim3(kBlock),
+          smem, hip_stream, static_cast<const float *>(data),
+          static_cast<float *>(output), reduce_size, num_output_elements);
+      break;
+    }
+    case HIP_DTYPE_FLOAT16: {
+      // FP16 reduce: use f32 kernel reinterpreting pointers.
+      // For correctness we'd need a real FP16 kernel or cast, but Kokoro FP32
+      // doesn't hit this path. Just error out cleanly for now.
+      fprintf(stderr, "[custom_kernels] hip_reduce_sum: FP16 not yet supported\n");
+      return -1;
+    }
     case HIP_DTYPE_INT32: {
       constexpr int kBlock = 256;
       hipLaunchKernelGGL(

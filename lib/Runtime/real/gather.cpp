@@ -27,7 +27,9 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
       (long long)indices_num_elements, (long long)output_num_elements,
       (long long)element_size_bytes, (long long)pre_axis_size);
 
-  return hip_gather(stream, data, indices, output, axis, data_num_elements,
-                    indices_num_elements, output_num_elements,
-                    static_cast<int>(element_size_bytes), pre_axis_size);
+  int rc = hip_gather(stream, data, indices, output, axis, data_num_elements,
+                      indices_num_elements, output_num_elements,
+                      static_cast<int>(element_size_bytes), pre_axis_size);
+
+  return rc;
 }

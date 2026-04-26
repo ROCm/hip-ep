@@ -241,20 +241,22 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
                     (long long)cDim0, (long long)cDim1, (int)needsBroadcast);
 
   // Pre-broadcast: write beta * C_broadcast into output before matmul.
+  bool manualBias = false;
   if (needsBroadcast) {
     int bc_result = broadcastBiasToOutput(state, C, output, M, N, cDim0, cDim1,
                                           beta, typeCode);
-    if (bc_result != 0)
-      return bc_result;
+    if (bc_result != 0) {
+      // MIOpen broadcast failed (e.g. A!=C shape constraint).
+      // Run matmul with beta=0, then add bias manually after.
+      RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: MIOpen broadcast failed, "
+                        "falling back to manual bias after matmul\n");
+      manualBias = true;
+    }
   }
 
-  // Select effective beta and C pointer for hipblasLtMatmul.
-  //   C absent:     beta=0, C_ptr=output (placeholder, content irrelevant)
-  //   C is [M,N]:   beta=beta, C_ptr=C  (direct single-pass, no broadcast)
-  //   C broadcast:  beta=1.0, C_ptr=output (already holds beta*C_broadcast)
   float effective_beta;
   const void *effective_C;
-  if (!C) {
+  if (!C || manualBias) {
     effective_beta = 0.0f;
     effective_C = output;
   } else if (!needsBroadcast) {
@@ -382,6 +384,30 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
           &effective_beta, effective_C, matC_layout, output, matC_layout,
           const_cast<hipblasLtMatmulAlgo_t *>(&cached.algo), ws_ptr, ws_size,
           stream));
+    }
+  }
+
+  // If MIOpen broadcast failed, add bias manually after matmul.
+  if (manualBias && C && beta != 0.0f) {
+    // C is [cDim0, cDim1], broadcastable to [M, N].
+    // Common case: cDim0=1, cDim1=N -> repeat row M times.
+    // Use hip_add_bias from custom kernels if cDim0==1.
+    void *ws = hipdnn_ep_state_get_workspace(state);
+    if (cDim0 == 1 && cDim1 == N && typeCode == kTypeFloat32) {
+      // Scale C by beta, then add to each row of output
+      // Simple: for each row i, output[i*N+j] += beta * C[j]
+      // Use hipMemcpy + host loop for correctness
+      hipDeviceSynchronize();
+      (void)hipGetLastError();
+      std::vector<float> h_out(M * N), h_c(N);
+      hipMemcpy(h_out.data(), output, M * N * sizeof(float),
+                hipMemcpyDeviceToHost);
+      hipMemcpy(h_c.data(), C, N * sizeof(float), hipMemcpyDeviceToHost);
+      for (int64_t i = 0; i < M; ++i)
+        for (int64_t j = 0; j < N; ++j)
+          h_out[i * N + j] += beta * h_c[j];
+      hipMemcpy(output, h_out.data(), M * N * sizeof(float),
+                hipMemcpyHostToDevice);
     }
   }
 

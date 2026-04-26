@@ -353,14 +353,13 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 
   int hip_dtype;
   switch (element_size_bytes) {
-  case 8:
-    hip_dtype = HIP_DTYPE_INT64;
-    break;
+  case 2: hip_dtype = HIP_DTYPE_FLOAT16; break;
+  case 4: hip_dtype = HIP_DTYPE_FLOAT32; break;
+  case 8: hip_dtype = HIP_DTYPE_INT64; break;
   default:
-    RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_elementwise_sub: unsupported element_size=%lld, "
-        "only int64 (8 bytes) is currently supported via custom kernel\n",
-        (long long)element_size_bytes);
+    fprintf(stderr,
+            "[REAL] wrap_elementwise_sub: unsupported element_size=%lld\n",
+            (long long)element_size_bytes);
     return -1;
   }
 

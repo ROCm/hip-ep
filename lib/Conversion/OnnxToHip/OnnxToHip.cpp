@@ -420,7 +420,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   // by NonzeroToHip::matchAndRewrite firing -- bisected by env-var
   // gating).  Tracked for follow-up; the runtime kernel +
   // declarations stay in tree so re-enabling is a one-line change.
-  // populateNonzeroConversionPatterns(patterns, ctx);
+  populateNonzeroConversionPatterns(patterns, ctx);
   populateScatterNdConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;

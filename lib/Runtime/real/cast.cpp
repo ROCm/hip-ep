@@ -24,6 +24,8 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_INT64;
   case 5: // HIPDNN_EP_DATATYPE_INT8
     return HIP_DTYPE_INT8;
+  case 6: // HIPDNN_EP_DATATYPE_UINT8 (if defined)
+    return HIP_DTYPE_UINT8;
   default:
     return -1;
   }
@@ -56,6 +58,8 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
       (long long)src_data_type, hipdnn_ep_datatype_name(dst_data_type),
       (long long)dst_data_type);
 
-  return hip_cast(stream, input, output, num_elements, src_hip_dtype,
-                  dst_hip_dtype);
+  int rc = hip_cast(stream, input, output, num_elements, src_hip_dtype,
+                    dst_hip_dtype);
+
+  return rc;
 }
