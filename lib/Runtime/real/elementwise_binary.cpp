@@ -94,48 +94,10 @@ wrap_elementwise_binary(RuntimeState *state, void *lhs, void *rhs, void *out,
     fflush(stderr);
   }
 
-  // For Div: sanitize rhs to prevent NaN propagation from buffer corruption
-  void *safe_rhs = const_cast<void*>(static_cast<const void*>(rhs));
-  void *rhs_copy = nullptr;
-  if (kind == HIP_BINARY_DIV && rhs_actual_n > 0 && data_type == HIPDNN_EP_DATATYPE_FLOAT) {
-    hipDeviceSynchronize();
-    std::vector<float> h_rhs(rhs_actual_n);
-    hipMemcpy(h_rhs.data(), rhs, rhs_actual_n * sizeof(float),
-              hipMemcpyDeviceToHost);
-    int64_t n_nan = 0, n_inf = 0, n_zero = 0;
-    for (int64_t i = 0; i < rhs_actual_n; i++) {
-      if (std::isnan(h_rhs[i])) {
-        h_rhs[i] = 1.0f;
-        n_nan++;
-      } else if (std::isinf(h_rhs[i])) {
-        h_rhs[i] = 1.0f;
-        n_inf++;
-      } else if (h_rhs[i] == 0.0f) {
-        h_rhs[i] = 1.0f;
-        n_zero++;
-      }
-    }
-    bool any_bad = (n_nan + n_inf + n_zero) > 0;
-    if (any_bad) {
-      fprintf(stderr,
-              "[ew_binary] Div rhs: %lld/%lld bad (nan=%lld inf=%lld zero=%lld)\n",
-              (long long)(n_nan + n_inf + n_zero), (long long)rhs_actual_n,
-              (long long)n_nan, (long long)n_inf, (long long)n_zero);
-      fflush(stderr);
-      hipMalloc(&rhs_copy, rhs_actual_n * sizeof(float));
-      hipMemcpy(rhs_copy, h_rhs.data(), rhs_actual_n * sizeof(float),
-                hipMemcpyHostToDevice);
-      safe_rhs = rhs_copy;
-    }
-  }
-
-  int rc = hip_elementwise_binary(stream, lhs, safe_rhs, out, num_elements, hip_dtype,
+  int rc = hip_elementwise_binary(stream, lhs, rhs, out, num_elements, hip_dtype,
                                   static_cast<int>(kind), static_cast<int>(rank),
                                   out_shape, lhs_strides_elems,
                                   rhs_strides_elems);
-
-  if (rhs_copy)
-    hipFree(rhs_copy);
 
   nan_trace_check("ew_binary", out, num_elements);
   return rc;

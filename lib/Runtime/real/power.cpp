@@ -214,23 +214,8 @@ int launchReciprocalHip(RuntimeState *state, void *input, void *output,
       "[REAL] wrap_power (reciprocal HIP 1/x): num_elements=%lld, dtype=%s\n",
       (long long)num_elements, hipdnn_ep_datatype_name(data_type));
 
-  int rc;
-  if (data_type == HIPDNN_EP_DATATYPE_FLOAT) {
-    hipDeviceSynchronize();
-    (void)hipGetLastError();
-    std::vector<float> h_in(num_elements), h_out(num_elements);
-    hipMemcpy(h_in.data(), input, num_elements * sizeof(float),
-              hipMemcpyDeviceToHost);
-    for (int64_t i = 0; i < num_elements; i++)
-      h_out[i] = 1.0f / h_in[i];
-    hipMemcpy(output, h_out.data(), num_elements * sizeof(float),
-              hipMemcpyHostToDevice);
-    hipDeviceSynchronize();
-    rc = 0;
-  } else {
-    rc = hip_elementwise_reciprocal(stream, input, output, num_elements,
-                                    hip_dtype);
-  }
+  int rc = hip_elementwise_reciprocal(stream, input, output, num_elements,
+                                      hip_dtype);
   nan_trace_check("reciprocal", output, num_elements);
   return rc;
 }
@@ -255,31 +240,7 @@ int launchSqrtHip(RuntimeState *state, void *input, void *output,
       "[REAL] wrap_power (sqrt HIP): num_elements=%lld, dtype=%s\n",
       (long long)num_elements, hipdnn_ep_datatype_name(data_type));
 
-  int rc;
-  if (data_type == HIPDNN_EP_DATATYPE_FLOAT) {
-    hipDeviceSynchronize();
-    (void)hipGetLastError();
-    std::vector<float> h_in(num_elements), h_out(num_elements);
-    hipError_t e1 = hipMemcpy(h_in.data(), input, num_elements * sizeof(float),
-                              hipMemcpyDeviceToHost);
-    int64_t neg_count = 0;
-    for (int64_t i = 0; i < num_elements; i++) {
-      h_out[i] = std::sqrt(h_in[i]);
-      if (h_in[i] < 0) ++neg_count;
-    }
-    hipError_t e2 = hipMemcpy(output, h_out.data(), num_elements * sizeof(float),
-                              hipMemcpyHostToDevice);
-    hipDeviceSynchronize();
-    fprintf(stderr,
-            "[sqrt_host] n=%lld in_ptr=%p out_ptr=%p e1=%d e2=%d "
-            "in[0]=%.4g out[0]=%.4g neg=%lld\n",
-            (long long)num_elements, input, output,
-            (int)e1, (int)e2, h_in[0], h_out[0], (long long)neg_count);
-    fflush(stderr);
-    rc = 0;
-  } else {
-    rc = hip_elementwise_sqrt(stream, input, output, num_elements, hip_dtype);
-  }
+  int rc = hip_elementwise_sqrt(stream, input, output, num_elements, hip_dtype);
   nan_trace_check("sqrt", output, num_elements);
   return rc;
 }

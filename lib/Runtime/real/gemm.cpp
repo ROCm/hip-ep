@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "nan_check.h"
 #include "runtime_types.h"
 
@@ -388,27 +389,37 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
     }
   }
 
-  // If MIOpen broadcast failed, add bias manually after matmul.
   if (manualBias && C && beta != 0.0f && typeCode == kTypeFloat32) {
-    hipDeviceSynchronize();
-    (void)hipGetLastError();
-    std::vector<float> h_out(M * N);
-    hipMemcpy(h_out.data(), output, M * N * sizeof(float),
-              hipMemcpyDeviceToHost);
-
-    int64_t c_total = cDim0 * cDim1;
-    std::vector<float> h_c(c_total);
-    hipMemcpy(h_c.data(), C, c_total * sizeof(float), hipMemcpyDeviceToHost);
-
-    for (int64_t i = 0; i < M; ++i) {
-      int64_t ci = (cDim0 == 1) ? 0 : i;
-      for (int64_t j = 0; j < N; ++j) {
-        int64_t cj = (cDim1 == 1) ? 0 : j;
-        h_out[i * N + j] += beta * h_c[ci * cDim1 + cj];
-      }
+    // output += beta * C with broadcast, entirely on GPU.
+    // Use MIOpen opTensor with alpha scaling (supports aDesc==cDesc since
+    // output is both A and C with shape [M,N]).
+    miopenHandle_t miopen_handle =
+        static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
+    miopenTensorDescriptor_t outDesc = nullptr, biasDesc = nullptr;
+    miopenCreateTensorDescriptor(&outDesc);
+    miopenCreateTensorDescriptor(&biasDesc);
+    miopenSet4dTensorDescriptor(outDesc, miopenFloat, 1, 1, (int)M, (int)N);
+    miopenSet4dTensorDescriptor(biasDesc, miopenFloat, 1, 1, (int)cDim0,
+                                (int)cDim1);
+    float a1 = 1.0f, a2 = beta, b0 = 0.0f;
+    miopenStatus_t st = miopenOpTensor(miopen_handle, miopenTensorOpAdd, &a1,
+                                        outDesc, output, &a2, biasDesc, C,
+                                        &b0, outDesc, output);
+    miopenDestroyTensorDescriptor(outDesc);
+    miopenDestroyTensorDescriptor(biasDesc);
+    if (st != miopenStatusSuccess) {
+      // Fallback to custom kernel (beta=1 only, ignores scaling for beta!=1)
+      void *stream_v = hipdnn_ep_state_get_stream(state);
+      int64_t out_total = M * N;
+      int64_t out_shape[4] = {1, 1, M, N};
+      int64_t out_strides[4] = {out_total, out_total, N, 1};
+      int64_t c_strides[4] = {0, 0,
+                              (cDim0 == 1) ? (int64_t)0 : cDim1,
+                              (cDim1 == 1) ? (int64_t)0 : (int64_t)1};
+      hip_elementwise_binary(stream_v, output, C, output, out_total,
+                             HIP_DTYPE_FLOAT32, HIP_BINARY_ADD, 4, out_shape,
+                             out_strides, c_strides);
     }
-    hipMemcpy(output, h_out.data(), M * N * sizeof(float),
-              hipMemcpyHostToDevice);
   }
 
   nan_trace_check("gemm", output, M * N);

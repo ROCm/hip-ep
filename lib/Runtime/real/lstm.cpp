@@ -391,35 +391,7 @@ extern "C" int wrap_miopenRNNForwardInference(
 
   int64_t y_count = seq_len * num_dir * batch * hidden_size;
 
-  // MIOpen's LSTM can produce extreme but finite values that overflow when
-  // squared in downstream instance normalization. Clamp to prevent this.
-  {
-    hipStreamSynchronize(stream);
-    (void)hipGetLastError();
-
-    std::vector<float> h_y(y_count);
-    hipMemcpy(h_y.data(), y, y_count * sizeof(float), hipMemcpyDeviceToHost);
-
-    float max_abs = 0.0f;
-    int64_t clamp_count = 0;
-    const float kClampMax = 50.0f;
-    for (int64_t i = 0; i < y_count; i++) {
-      float v = h_y[i];
-      float av = std::abs(v);
-      if (av > max_abs) max_abs = av;
-      if (std::isnan(v) || std::isinf(v) || av > kClampMax) {
-        h_y[i] = (v > 0) ? kClampMax : -kClampMax;
-        ++clamp_count;
-      }
-    }
-    if (clamp_count > 0 || max_abs > 10.0f) {
-      fprintf(stderr,
-              "[lstm] output clamped: %lld of %lld values, max_abs=%.4g\n",
-              (long long)clamp_count, (long long)y_count, max_abs);
-      fflush(stderr);
-      hipMemcpy(y, h_y.data(), y_count * sizeof(float), hipMemcpyHostToDevice);
-    }
-  }
+  // No CPU-side post-processing; MIOpen's LSTM output is used as-is.
 
   nan_trace_check("lstm", y, y_count);
 

@@ -377,21 +377,7 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
     nan_trace_check_input("sub", op_id, "rhs", rhs, num_elements);
   }
 
-  if (element_size_bytes == 4) {
-    hipDeviceSynchronize();
-    (void)hipGetLastError();
-    std::vector<float> h_lhs(num_elements), h_rhs(num_elements),
-        h_out(num_elements);
-    hipMemcpy(h_lhs.data(), lhs, num_elements * sizeof(float),
-              hipMemcpyDeviceToHost);
-    hipMemcpy(h_rhs.data(), rhs, num_elements * sizeof(float),
-              hipMemcpyDeviceToHost);
-    for (int64_t i = 0; i < num_elements; i++)
-      h_out[i] = h_lhs[i] - h_rhs[i];
-    hipMemcpy(output, h_out.data(), num_elements * sizeof(float),
-              hipMemcpyHostToDevice);
-    hipDeviceSynchronize();
-  } else {
+  {
     int rc = hip_elementwise_sub(stream, lhs, rhs, output, num_elements,
                                  hip_dtype);
     if (rc != 0)

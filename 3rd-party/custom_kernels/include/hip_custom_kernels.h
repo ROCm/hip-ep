@@ -245,6 +245,15 @@ int hip_reduce_mean(
     int64_t num_output_elements,
     int hip_dtype);
 
+int hip_reduce_mean_strided(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype);
+
 /* =========================================================================
  * Concat (along arbitrary axis)
  * =========================================================================

@@ -32,7 +32,7 @@ namespace {
 template <hip_binary_kind_t Kind>
 __device__ __forceinline__ float apply(float a, float b) {
     if constexpr (Kind == HIP_BINARY_DIV)
-        return a / b;
+        return (b == 0.0f) ? 0.0f : (a / b);
     else if constexpr (Kind == HIP_BINARY_POW)
         return powf(a, b);
     else if constexpr (Kind == HIP_BINARY_MUL)
