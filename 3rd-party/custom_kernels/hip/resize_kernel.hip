@@ -113,15 +113,15 @@ __device__ __forceinline__ float coord_xform(int coord_xform_mode,
 }
 
 // ONNX 18 nearest_mode default = "round_prefer_floor":
-//   idx = floor(src); frac = src - idx;
-//   if frac > 0.5: idx++
-//   else if frac == 0.5 && (idx & 1): idx++       // ties to even-floor
+//   Round to nearest integer; break ties by choosing floor.
+//   idx = floor(src + 0.5) when frac != 0.5
+//   idx = floor(src)       when frac == 0.5  (tie → prefer floor)
 __device__ __forceinline__ int round_prefer_floor(float src, int in_size) {
     int idx = static_cast<int>(floorf(src));
     float frac = src - static_cast<float>(idx);
+    // Only round up if frac is STRICTLY greater than 0.5.
+    // At exactly 0.5, prefer floor (don't increment).
     if (frac > 0.5f) {
-        idx++;
-    } else if (frac == 0.5f && (idx & 1)) {
         idx++;
     }
     if (idx < 0)
