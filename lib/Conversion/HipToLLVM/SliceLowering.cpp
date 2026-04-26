@@ -4,9 +4,8 @@
  */
 //
 // Lowers hip.slice (already-normalised ONNX Slice) to wrap_slice in the
-// runtime bitcode.  All three i64 arrays (out_shape, in_strides_elems,
-// starts_elems) are stack-allocated since the conversion pass already
-// folded everything down to static shapes / step values.
+// runtime bitcode.  Output shapes and input strides are read from memref
+// descriptors at runtime; starts/steps remain compile-time attributes.
 
 #include "HipToLLVMUtils.h"
 
@@ -15,26 +14,6 @@
 namespace mlir {
 namespace hip {
 namespace {
-
-static Value materialiseI64Array(ArrayRef<int64_t> vals, Type i64Type,
-                                  Type ptrType,
-                                  ConversionPatternRewriter &rewriter,
-                                  Location loc) {
-  auto arrayType = LLVM::LLVMArrayType::get(i64Type, vals.size());
-  Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                       rewriter.getI64IntegerAttr(1));
-  Value alloca = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayType, one,
-                                        /*alignment=*/8);
-  for (size_t i = 0; i < vals.size(); ++i) {
-    Value v = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                       rewriter.getI64IntegerAttr(vals[i]));
-    SmallVector<LLVM::GEPArg, 2> indices = {0, static_cast<int32_t>(i)};
-    Value elemPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, arrayType,
-                                        alloca, indices);
-    LLVM::StoreOp::create(rewriter, loc, v, elemPtr);
-  }
-  return alloca;
-}
 
 struct SliceLowering : public ConvertOpToLLVMPattern<SliceOp> {
   using ConvertOpToLLVMPattern<SliceOp>::ConvertOpToLLVMPattern;
@@ -57,9 +36,6 @@ struct SliceLowering : public ConvertOpToLLVMPattern<SliceOp> {
     if (!inType || !outType)
       return rewriter.notifyMatchFailure(
           op, "hip.slice expects ranked memref operands");
-    if (!inType.hasStaticShape() || !outType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "hip.slice lowering requires static shapes");
 
     int64_t rank = inType.getRank();
     if (outType.getRank() != rank)
@@ -73,46 +49,47 @@ struct SliceLowering : public ConvertOpToLLVMPattern<SliceOp> {
       return rewriter.notifyMatchFailure(
           op, "hip.slice starts/steps lengths must match input rank");
 
-    SmallVector<int64_t> outShape(outType.getShape().begin(),
-                                  outType.getShape().end());
-
-    // Row-major contiguous strides of the input tensor in elements.
-    SmallVector<int64_t> inputStrides(rank, 0);
-    int64_t acc = 1;
-    for (int64_t d = rank - 1; d >= 0; --d) {
-      inputStrides[d] = acc;
-      acc *= inType.getDimSize(d);
-    }
-
-    SmallVector<int64_t> starts(rank, 0);
-    SmallVector<int64_t> steppedStrides(rank, 0);
-    for (int64_t d = 0; d < rank; ++d) {
-      starts[d] = cast<IntegerAttr>(startsAttr[d]).getInt();
-      int64_t step = cast<IntegerAttr>(stepsAttr[d]).getInt();
-      steppedStrides[d] = inputStrides[d] * step;
-    }
-
-    int64_t elementSize =
-        outType.getElementType().getIntOrFloatBitWidth() / 8;
-    int64_t numElements = 1;
-    for (int64_t d : outShape)
-      numElements *= d;
-
     auto i64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
 
-    Value numElems = i64Const(numElements);
+    auto outShape =
+        getMemRefShape(outType, adaptor.getOutput(), rewriter, loc);
+
+    // Row-major contiguous strides from input descriptor.
+    SmallVector<Value> inputStrides(rank);
+    Value acc = i64Const(1);
+    for (int64_t d = rank - 1; d >= 0; --d) {
+      inputStrides[d] = acc;
+      acc = LLVM::MulOp::create(
+          rewriter, loc, acc,
+          getMemRefDimSize(inType, d, adaptor.getInput(), rewriter, loc));
+    }
+
+    // starts are attributes (compile-time), steps scale the strides.
+    SmallVector<Value> starts(rank);
+    SmallVector<Value> steppedStrides(rank);
+    for (int64_t d = 0; d < rank; ++d) {
+      starts[d] = i64Const(cast<IntegerAttr>(startsAttr[d]).getInt());
+      int64_t step = cast<IntegerAttr>(stepsAttr[d]).getInt();
+      steppedStrides[d] =
+          LLVM::MulOp::create(rewriter, loc, inputStrides[d], i64Const(step));
+    }
+
+    int64_t elementSize =
+        outType.getElementType().getIntOrFloatBitWidth() / 8;
+    Value numElems = computeNumElements(outType, adaptor.getOutput(),
+                                        rewriter, loc);
     Value elemSize = i64Const(elementSize);
     Value rankConst = i64Const(rank);
 
     Value outShapePtr =
-        materialiseI64Array(outShape, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(outShape, i64Type, ptrType, rewriter, loc);
     Value strideArr =
-        materialiseI64Array(steppedStrides, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(steppedStrides, i64Type, ptrType, rewriter, loc);
     Value startArr =
-        materialiseI64Array(starts, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(starts, i64Type, ptrType, rewriter, loc);
 
     SmallVector<Type, 9> paramTypes = {ptrType, ptrType, ptrType, i64Type,
                                        i64Type, i64Type, ptrType, ptrType,

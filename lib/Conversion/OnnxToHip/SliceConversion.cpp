@@ -102,9 +102,125 @@ struct SliceToHip : public RewritePattern {
 
     auto startsOr = extractI64Constant(op->getOperand(1));
     auto endsOr = extractI64Constant(op->getOperand(2));
-    if (failed(startsOr) || failed(endsOr))
-      return rewriter.notifyMatchFailure(
-          op, "onnx.Slice starts/ends must be onnx.Constant int64 tensors");
+    if (failed(startsOr) || failed(endsOr)) {
+      // Non-constant starts/ends: lower to tensor.extract_slice directly.
+      // Extract runtime offsets and sizes from the starts/ends tensors.
+      Value startsTensor = op->getOperand(1);
+      Value endsTensor = op->getOperand(2);
+
+      SmallVector<int64_t> axes;
+      if (op->getNumOperands() >= 4) {
+        auto axesOr = extractI64Constant(op->getOperand(3));
+        if (failed(axesOr))
+          return rewriter.notifyMatchFailure(
+              op, "onnx.Slice axes must be an int64 constant for "
+                  "dynamic starts/ends fallback");
+        axes = *axesOr;
+      } else {
+        auto stType = dyn_cast<RankedTensorType>(startsTensor.getType());
+        int64_t nSlice = stType ? stType.getDimSize(0) : 0;
+        if (nSlice <= 0)
+          return rewriter.notifyMatchFailure(
+              op, "onnx.Slice cannot determine number of slice axes");
+        for (int64_t i = 0; i < nSlice; ++i)
+          axes.push_back(i);
+      }
+
+      SmallVector<int64_t> steps;
+      if (op->getNumOperands() >= 5) {
+        auto stepsOr = extractI64Constant(op->getOperand(4));
+        if (failed(stepsOr))
+          return rewriter.notifyMatchFailure(
+              op, "onnx.Slice steps must be constant for dynamic fallback");
+        steps = *stepsOr;
+      } else {
+        steps.assign(axes.size(), 1);
+      }
+
+      Location loc2 = op->getLoc();
+      int64_t inputRank = inputType.getRank();
+      Value zeroIdx = mlir::arith::ConstantIndexOp::create(rewriter, loc2, 0);
+      Value oneIdx = mlir::arith::ConstantIndexOp::create(rewriter, loc2, 1);
+
+      SmallVector<OpFoldResult> offsets(inputRank, OpFoldResult(zeroIdx));
+      SmallVector<OpFoldResult> sizes(inputRank);
+      SmallVector<OpFoldResult> strides(inputRank, OpFoldResult(oneIdx));
+
+      // Default sizes = input dims
+      for (int64_t d = 0; d < inputRank; ++d) {
+        if (inputType.isDynamicDim(d))
+          sizes[d] = OpFoldResult(
+              mlir::tensor::DimOp::create(rewriter, loc2, input, d)
+                  .getResult());
+        else
+          sizes[d] = rewriter.getIndexAttr(inputType.getDimSize(d));
+      }
+
+      for (size_t i = 0; i < axes.size(); ++i) {
+        int64_t ax = axes[i] < 0 ? axes[i] + inputRank : axes[i];
+        Value idxV = mlir::arith::ConstantIndexOp::create(rewriter, loc2, i);
+        Value startI64 = mlir::tensor::ExtractOp::create(
+            rewriter, loc2, startsTensor, ValueRange{idxV});
+        Value endI64 = mlir::tensor::ExtractOp::create(
+            rewriter, loc2, endsTensor, ValueRange{idxV});
+        Value startIdx = mlir::arith::IndexCastOp::create(
+            rewriter, loc2, rewriter.getIndexType(), startI64);
+        Value endIdx = mlir::arith::IndexCastOp::create(
+            rewriter, loc2, rewriter.getIndexType(), endI64);
+
+        Value dimV = inputType.isDynamicDim(ax)
+            ? mlir::tensor::DimOp::create(rewriter, loc2, input, ax)
+                  .getResult()
+            : mlir::arith::ConstantIndexOp::create(
+                  rewriter, loc2, inputType.getDimSize(ax))
+                  .getResult();
+
+        // Handle negative starts/ends: s = s < 0 ? s + dim : s
+        Value negCheck = mlir::arith::CmpIOp::create(
+            rewriter, loc2, mlir::arith::CmpIPredicate::slt, startIdx, zeroIdx);
+        Value sAdj = mlir::arith::AddIOp::create(rewriter, loc2, startIdx, dimV);
+        startIdx = mlir::arith::SelectOp::create(
+            rewriter, loc2, negCheck, sAdj, startIdx);
+        // Clamp start to [0, dim]
+        startIdx = mlir::arith::MaxSIOp::create(rewriter, loc2, startIdx, zeroIdx);
+        startIdx = mlir::arith::MinSIOp::create(rewriter, loc2, startIdx, dimV);
+
+        negCheck = mlir::arith::CmpIOp::create(
+            rewriter, loc2, mlir::arith::CmpIPredicate::slt, endIdx, zeroIdx);
+        Value eAdj = mlir::arith::AddIOp::create(rewriter, loc2, endIdx, dimV);
+        endIdx = mlir::arith::SelectOp::create(
+            rewriter, loc2, negCheck, eAdj, endIdx);
+        endIdx = mlir::arith::MaxSIOp::create(rewriter, loc2, endIdx, zeroIdx);
+        endIdx = mlir::arith::MinSIOp::create(rewriter, loc2, endIdx, dimV);
+
+        // size = max(0, (end - start + step - 1) / step) for positive step
+        Value diff = mlir::arith::SubIOp::create(rewriter, loc2, endIdx, startIdx);
+        int64_t step = steps[i];
+        Value stepV = mlir::arith::ConstantIndexOp::create(
+            rewriter, loc2, std::abs(step));
+        if (step != 1) {
+          Value stepM1 = mlir::arith::SubIOp::create(rewriter, loc2, stepV, oneIdx);
+          Value num = mlir::arith::AddIOp::create(rewriter, loc2, diff, stepM1);
+          diff = mlir::arith::DivSIOp::create(rewriter, loc2, num, stepV);
+        }
+        diff = mlir::arith::MaxSIOp::create(rewriter, loc2, diff, zeroIdx);
+
+        offsets[ax] = OpFoldResult(startIdx);
+        sizes[ax] = OpFoldResult(diff);
+        if (step != 1)
+          strides[ax] = OpFoldResult(stepV);
+      }
+
+      auto sliceOp = mlir::tensor::ExtractSliceOp::create(
+          rewriter, loc2, input, offsets, sizes, strides);
+      Value result = sliceOp.getResult();
+      if (result.getType() != resultType)
+        result = mlir::tensor::CastOp::create(rewriter, loc2, resultType,
+                                               result)
+                     .getResult();
+      rewriter.replaceOp(op, result);
+      return success();
+    }
     SmallVector<int64_t> starts = *startsOr;
     SmallVector<int64_t> ends = *endsOr;
 

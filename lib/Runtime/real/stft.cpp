@@ -26,6 +26,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <rocfft/rocfft.h>
@@ -237,6 +238,30 @@ extern "C" int wrap_stft(RuntimeState *state, void *signal, void *window,
       (long long)onesided, hipdnn_ep_datatype_name(data_type), total_bytes,
       frames_bytes, complex_bytes, work_bytes);
 
+  // Debug: check input signal for NaN/Inf before processing.
+  {
+    hipStreamSynchronize(static_cast<hipStream_t>(stream));
+    (void)hipGetLastError();
+    int64_t sig_count = batch * signal_len;
+    int check_len = sig_count < 16 ? (int)sig_count : 16;
+    std::vector<float> sig_head(check_len);
+    hipMemcpy(sig_head.data(), signal, check_len * sizeof(float),
+              hipMemcpyDeviceToHost);
+    int nan_count = 0;
+    float sig_max = 0;
+    for (int i = 0; i < check_len; ++i) {
+      if (std::isnan(sig_head[i])) ++nan_count;
+      if (std::abs(sig_head[i]) > sig_max) sig_max = std::abs(sig_head[i]);
+    }
+    fprintf(stderr,
+            "[stft_dbg] INPUT signal: n=%lld first=[%.4f,%.4f,%.4f,%.4f] "
+            "max=%.4f nan_in_first%d=%d\n",
+            (long long)sig_count, sig_head[0], sig_head.size() > 1 ? sig_head[1] : 0.f,
+            sig_head.size() > 2 ? sig_head[2] : 0.f,
+            sig_head.size() > 3 ? sig_head[3] : 0.f, sig_max, check_len, nan_count);
+    fflush(stderr);
+  }
+
   // Step 1: framing + window multiply.
   int rc = hip_stft_frame_window(stream, signal, window, frames, batch,
                                  signal_len, frame_length, frame_step,
@@ -278,11 +303,13 @@ extern "C" int wrap_stft(RuntimeState *state, void *signal, void *window,
   if (rc != 0)
     return rc;
 
+  int64_t out_count = batch * n_frames * n_freqs * 2;
+  nan_trace_check("stft", output, out_count);
+
   // Debug: check output values.
   {
     hipStreamSynchronize(static_cast<hipStream_t>(stream));
     (void)hipGetLastError();
-    int64_t out_count = batch * n_frames * n_freqs * 2;
     float first4[4] = {0};
     hipMemcpy(first4, output, sizeof(first4), hipMemcpyDeviceToHost);
     float maxv = 0;

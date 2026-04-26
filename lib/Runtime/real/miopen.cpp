@@ -4,9 +4,11 @@
  */
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <vector>
 
 // Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
 // label)
@@ -134,27 +136,52 @@ int wrap_miopenConvolutionForward(
   float alpha = 1.0f;
   float beta = 0.0f;
 
+  // Check inputs near the NaN-producing operation (op ~492)
+  {
+    int next_op = g_nan_trace_counter + 1;
+    if (next_op >= 485 && next_op <= 500 && !g_nan_first_found) {
+      nan_trace_check_input("conv_fwd", next_op, "data", input,
+                            input_n * input_c * input_h * input_w);
+      nan_trace_check_input("conv_fwd", next_op, "weights", weights,
+                            weights_k * input_c * kernel_h * kernel_w);
+      if (bias)
+        nan_trace_check_input("conv_fwd", next_op, "bias", bias, weights_k);
+      fprintf(stderr,
+              "[NAN_TRACE] op#%d conv_fwd shapes: in=[%lld,%lld,%lld,%lld] "
+              "w_k=%lld kern=[%lld,%lld] stride=[%lld,%lld] pad=[%lld,%lld,%lld,%lld] "
+              "dil=[%lld,%lld] group=%lld out=[_,%lld,%lld,%lld]\n",
+              next_op, (long long)input_n, (long long)input_c,
+              (long long)input_h, (long long)input_w, (long long)weights_k,
+              (long long)kernel_h, (long long)kernel_w,
+              (long long)stride_h, (long long)stride_w,
+              (long long)pad_top, (long long)pad_left,
+              (long long)pad_bottom, (long long)pad_right,
+              (long long)dilation_h, (long long)dilation_w,
+              (long long)group, (long long)weights_k,
+              (long long)output_h, (long long)output_w);
+      fflush(stderr);
+    }
+  }
+
   // Create tensor descriptors
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
 
-  // Set tensor descriptors with explicit NCHW layout (float32).
-  // miopenSet4dTensorDescriptor leaves layout as UNKNOWN which triggers
-  // warnings in MIOpen 7.12+.
+  // Use miopenSet4dTensorDescriptor for convolution I/O descriptors.
+  // miopenSetNdTensorDescriptorWithLayout can set zero strides for unit
+  // dimensions (e.g. H=1), which breaks MIOpen convolution kernels.
   {
-    int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        input_desc, miopenFloat, miopenTensorNCHW, in_dims, 4));
-
-    int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h, (int)kernel_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        weights_desc, miopenFloat, miopenTensorNCHW, w_dims, 4));
-
-    int out_dims[] = {(int)input_n, (int)weights_k, (int)output_h,
-                      (int)output_w};
-    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        output_desc, miopenFloat, miopenTensorNCHW, out_dims, 4));
+    int in_c_per_group = (group > 1) ? (int)(input_c / group) : (int)input_c;
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        input_desc, miopenFloat, (int)input_n, (int)input_c,
+        (int)input_h, (int)input_w));
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        weights_desc, miopenFloat, (int)weights_k, in_c_per_group,
+        (int)kernel_h, (int)kernel_w));
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        output_desc, miopenFloat, (int)input_n, (int)weights_k,
+        (int)output_h, (int)output_w));
   }
 
   // Create convolution descriptor
@@ -175,26 +202,62 @@ int wrap_miopenConvolutionForward(
   // MIOpen's Find API needs workspace to test algorithms
   HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
 
-  // Find best algorithm
-  // MIOpen 3.x API: returns array of performance results instead of single
-  // algorithm
-  MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
-      miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
-      output_desc, output,
-      1,                    // requestAlgoCount - ask for 1 algorithm
-      &returned_algo_count, // returnedAlgoCount - how many actually returned
-      perf_results,         // perfResults - array to receive results
-      find_workspace,       // workspace for algorithm testing
-      find_workspace_size,  // workspaceSize
-      false));
+  // Find best algorithm. Request multiple candidates and use exhaustive
+  // search to avoid problematic algorithms (Winograd for non-3x3 kernels).
+  {
+    const int kMaxAlgos = 8;
+    miopenConvAlgoPerf_t all_results[8];
+    int total_returned = 0;
+    MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
+        miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
+        output_desc, output,
+        kMaxAlgos,       // requestAlgoCount
+        &total_returned, // returnedAlgoCount
+        all_results,     // perfResults
+        find_workspace,  // workspace for algorithm testing
+        find_workspace_size,
+        true)); // exhaustiveSearch = true
 
-  // Extract algorithm from performance results
-  algo = perf_results[0].fwd_algo;
+    bool winograd_safe =
+        (kernel_h == kernel_w) && (kernel_h == 3 || kernel_h == 5) &&
+        (input_h > 1) && (input_w > 1);
 
-  // Get actual workspace size needed for this algorithm
-  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
-      miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
-      &workspace_size));
+    int best_idx = -1;
+    for (int i = 0; i < total_returned; ++i) {
+      if (!winograd_safe &&
+          all_results[i].fwd_algo == miopenConvolutionFwdAlgoWinograd)
+        continue;
+      best_idx = i;
+      break;
+    }
+
+    if (best_idx < 0 && !winograd_safe) {
+      // All returned algorithms are Winograd for a shape we previously
+      // considered unsafe.  Accept the best Winograd result rather than
+      // falling back to host-side computation (which violates the
+      // zero-CPU-fallback requirement).
+      fprintf(stderr,
+              "[conv_fwd] NOTE: using Winograd for "
+              "in=[%lld,%lld,%lld,%lld] kern=[%lld,%lld]\n",
+              (long long)input_n, (long long)input_c,
+              (long long)input_h, (long long)input_w,
+              (long long)kernel_h, (long long)kernel_w);
+      best_idx = 0; // Accept the best Winograd result
+    }
+
+    if (best_idx < 0)
+      best_idx = 0;
+
+    algo = all_results[best_idx].fwd_algo;
+    returned_algo_count = total_returned;
+    perf_results[0] = all_results[best_idx];
+  }
+
+  // Use workspace size reported by the selected algorithm.
+  // miopenConvolutionForwardGetWorkSpaceSize returns the maximum over all
+  // algorithms and can return 0 when the selected algorithm actually needs
+  // workspace, causing "0 provided, N required" errors.
+  workspace_size = perf_results[0].memory;
 
   // Reuse find_workspace if it's large enough, otherwise reallocate
   workspace = find_workspace;
@@ -207,21 +270,62 @@ int wrap_miopenConvolutionForward(
     HIP_CHECK(hipMalloc(&workspace, workspace_size));
   }
 
+  // Zero output buffer to avoid reading uninitialized memory
+  {
+    int64_t out_elems = input_n * weights_k * output_h * output_w;
+    hipMemsetAsync(output, 0, out_elems * sizeof(float), hip_stream);
+    hipStreamSynchronize(hip_stream);
+  }
+
+  // Log algorithm choice near the NaN-producing op
+  {
+    int next_op = g_nan_trace_counter + 1;
+    if (next_op >= 491 && next_op <= 493) {
+      fprintf(stderr,
+              "[NAN_TRACE] op#%d conv_fwd: algo=%d, workspace_size=%zu, "
+              "returned_algo_count=%d\n",
+              next_op, (int)algo, workspace_size, returned_algo_count);
+      fflush(stderr);
+    }
+  }
+
   // Perform convolution
   MIOPEN_CHECK(miopenConvolutionForward(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
       conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
 
+  // Check output BEFORE bias addition
+  {
+    int next_op = g_nan_trace_counter + 1;
+    if (next_op >= 491 && next_op <= 493 && !g_nan_first_found) {
+      nan_trace_check_input("conv_fwd", next_op, "PRE_BIAS_output", output,
+                            input_n * weights_k * output_h * output_w);
+    }
+  }
+
+  if (bias) {
+    miopenTensorDescriptor_t bias_desc = nullptr;
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
+    int bias_dims[] = {1, (int)weights_k, 1, 1};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        bias_desc, miopenFloat, miopenTensorNCHW, bias_dims, 4));
+    float alpha_a = 1.0f, alpha_b = 1.0f, beta_c = 0.0f;
+    MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &alpha_a,
+                                output_desc, output, &alpha_b, bias_desc, bias,
+                                &beta_c, output_desc, output));
+    miopenDestroyTensorDescriptor(bias_desc);
+  }
+
+  nan_trace_check("conv_fwd", output,
+                  input_n * weights_k * output_h * output_w);
+
 cleanup:
-  // Best-effort cleanup: free all allocated resources
-  // Continue cleanup even if individual operations fail
   if (workspace) {
     hipError_t err = hipFree(workspace);
     if (err != hipSuccess) {
       fprintf(stderr, "Warning: hipFree failed for workspace: %d\n", err);
     }
   }
-  // Free find_workspace only if it wasn't already freed during reallocation
   if (find_workspace && find_workspace != workspace) {
     hipError_t err = hipFree(find_workspace);
     if (err != hipSuccess) {

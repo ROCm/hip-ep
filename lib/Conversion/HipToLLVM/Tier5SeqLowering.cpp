@@ -32,23 +32,14 @@ struct CumSumLowering : public ConvertOpToLLVMPattern<CumSumOp> {
 
     auto inType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!inType || !outType || !inType.hasStaticShape() ||
-        !outType.hasStaticShape())
+    if (!inType || !outType)
       return rewriter.notifyMatchFailure(
-          op, "hip.cumsum lowering requires static shapes");
+          op, "hip.cumsum lowering requires ranked memrefs");
 
     int64_t rank = inType.getRank();
     int64_t axis = op.getAxis();
     if (axis < 0 || axis >= rank)
       return rewriter.notifyMatchFailure(op, "hip.cumsum axis out of range");
-
-    int64_t outer = 1;
-    for (int64_t d = 0; d < axis; ++d)
-      outer *= inType.getDimSize(d);
-    int64_t axisSize = inType.getDimSize(axis);
-    int64_t inner = 1;
-    for (int64_t d = axis + 1; d < rank; ++d)
-      inner *= inType.getDimSize(d);
 
     int64_t dataType = getHipdnnDataType(inType.getElementType());
     if (dataType < 0)
@@ -59,9 +50,19 @@ struct CumSumLowering : public ConvertOpToLLVMPattern<CumSumOp> {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
-    Value outerVal = i64Const(outer);
-    Value axisVal = i64Const(axisSize);
-    Value innerVal = i64Const(inner);
+
+    Value outerVal = i64Const(1);
+    for (int64_t d = 0; d < axis; ++d)
+      outerVal = LLVM::MulOp::create(
+          rewriter, loc, outerVal,
+          getMemRefDimSize(inType, d, adaptor.getInput(), rewriter, loc));
+    Value axisVal =
+        getMemRefDimSize(inType, axis, adaptor.getInput(), rewriter, loc);
+    Value innerVal = i64Const(1);
+    for (int64_t d = axis + 1; d < rank; ++d)
+      innerVal = LLVM::MulOp::create(
+          rewriter, loc, innerVal,
+          getMemRefDimSize(inType, d, adaptor.getInput(), rewriter, loc));
     Value dtypeVal = i64Const(dataType);
     Value exclVal = i64Const(op.getExclusive());
     Value revVal = i64Const(op.getReverse());

@@ -64,40 +64,33 @@ struct NonzeroLowering : public ConvertOpToLLVMPattern<NonzeroOp> {
 
     auto inType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!inType || !outType || !inType.hasStaticShape() ||
-        !outType.hasStaticShape())
+    if (!inType || !outType)
       return rewriter.notifyMatchFailure(
-          op, "hip.nonzero lowering requires static shapes");
+          op, "hip.nonzero lowering requires ranked memref operands");
     if (outType.getRank() != 2)
       return rewriter.notifyMatchFailure(
           op, "hip.nonzero output must be rank-2 (N, K)");
-    int64_t rank = inType.getRank();
-    if (outType.getDimSize(0) != rank)
-      return rewriter.notifyMatchFailure(
-          op, "hip.nonzero output dim 0 must equal input rank");
 
-    int64_t totalElements = 1;
-    for (int64_t d : inType.getShape())
-      totalElements *= d;
-    int64_t kMax = outType.getDimSize(1);
+    int64_t rank = inType.getRank();
 
     int64_t dataType = getHipdnnDataType(inType.getElementType());
     if (dataType < 0)
       return rewriter.notifyMatchFailure(
           op, "hip.nonzero unsupported input element type");
 
-    SmallVector<int64_t> inShape(inType.getShape().begin(),
-                                 inType.getShape().end());
+    auto inShape = getMemRefShape(inType, adaptor.getInput(), rewriter, loc);
     Value inShapePtr =
-        materialiseI64Array(inShape, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(inShape, i64Type, ptrType, rewriter, loc);
 
     auto i64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
     Value rankConst = i64Const(rank);
-    Value totalConst = i64Const(totalElements);
-    Value kMaxConst = i64Const(kMax);
+    Value totalConst = computeNumElements(inType, adaptor.getInput(),
+                                          rewriter, loc);
+    Value kMaxConst = getMemRefDimSize(outType, 1, adaptor.getOutput(),
+                                       rewriter, loc);
     Value dtypeConst = i64Const(dataType);
 
     // int wrap_nonzero(state, input, output,

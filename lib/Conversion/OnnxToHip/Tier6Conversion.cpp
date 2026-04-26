@@ -18,45 +18,6 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// Helper: pull a 1-D int64 constant tensor from a Value.  Accepts
-/// onnx.Constant, arith.constant, and bufferization.to_tensor with a
-/// `hip.inline_value` attribute.
-static FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
-  if (!v)
-    return failure();
-  Operation *def = v.getDefiningOp();
-  if (!def)
-    return failure();
-  ElementsAttr valueAttr;
-  StringRef name = def->getName().getStringRef();
-  if (name == "onnx.Constant") {
-    valueAttr = def->getAttrOfType<ElementsAttr>("value");
-  } else if (auto a = dyn_cast<mlir::arith::ConstantOp>(def)) {
-    valueAttr = dyn_cast<ElementsAttr>(a.getValue());
-  } else if (auto toT = dyn_cast<mlir::bufferization::ToTensorOp>(def)) {
-    valueAttr = toT->getAttrOfType<ElementsAttr>("hip.inline_value");
-  } else {
-    return failure();
-  }
-  if (!valueAttr)
-    return failure();
-  auto dense = dyn_cast<DenseElementsAttr>(valueAttr);
-  if (!dense)
-    return failure();
-  Type elem = dense.getElementType();
-  SmallVector<int64_t> out;
-  if (elem.isInteger(64)) {
-    for (int64_t v : dense.getValues<int64_t>())
-      out.push_back(v);
-  } else if (elem.isInteger(32)) {
-    for (int32_t v : dense.getValues<int32_t>())
-      out.push_back(static_cast<int64_t>(v));
-  } else {
-    return failure();
-  }
-  return out;
-}
-
 //===----------------------------------------------------------------------===//
 // onnx.Pad -> hip.pad
 //===----------------------------------------------------------------------===//
@@ -390,7 +351,61 @@ struct ConvTransposeToHip : public RewritePattern {
     if (auto attr = op->getAttrOfType<IntegerAttr>("group"))
       group = attr.getValue().getSExtValue();
 
-    Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    // Build the output tensor.  ConvTranspose spatial dimensions follow:
+    //   out[i] = stride[i] * (in[i] - 1) + outPad[i]
+    //            + ((kernel[i]-1)*dilation[i] + 1) - padBegin[i] - padEnd[i]
+    // Batch (dim 0) and channel (dim 1) are taken from the input.
+    int64_t rank = resultType.getRank();
+    int64_t numSpatial = rank - 2;
+
+    SmallVector<Value> dynSizes;
+    for (int64_t d = 0; d < rank; ++d) {
+      if (!resultType.isDynamicDim(d))
+        continue;
+      if (d < 2) {
+        // Batch or channel dim: take from input
+        dynSizes.push_back(tensor::DimOp::create(rewriter, loc, input, d));
+      } else {
+        // Spatial dim index within the spatial vectors
+        int64_t si = d - 2;
+        int64_t s = (si < (int64_t)strides.size()) ? strides[si] : 1;
+        int64_t k = (si < (int64_t)kernelShape.size()) ? kernelShape[si] : 1;
+        int64_t dl = (si < (int64_t)dilations.size()) ? dilations[si] : 1;
+        int64_t pb = (si < (int64_t)pads.size()) ? pads[si] : 0;
+        int64_t pe = (si + numSpatial < (int64_t)pads.size())
+                         ? pads[si + numSpatial]
+                         : 0;
+        int64_t op_ =
+            (si < (int64_t)outputPadding.size()) ? outputPadding[si] : 0;
+        // effective_kernel = (k - 1) * dl + 1
+        int64_t effK = (k - 1) * dl + 1;
+        // constant part = effK + op_ - pb - pe
+        int64_t cst = effK + op_ - pb - pe;
+        // out = s * (in - 1) + cst  =>  out = s*in - s + cst
+        Value inDim =
+            tensor::DimOp::create(rewriter, loc, input, d);
+        Value inIdx = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getI64Type(), inDim);
+        Value strideVal = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(s));
+        Value oneVal = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(1));
+        Value cstVal = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(cst));
+        // s * (in - 1) + cst
+        Value inMinus1 =
+            arith::SubIOp::create(rewriter, loc, inIdx, oneVal);
+        Value scaled =
+            arith::MulIOp::create(rewriter, loc, strideVal, inMinus1);
+        Value outDim64 =
+            arith::AddIOp::create(rewriter, loc, scaled, cstVal);
+        Value outDim = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(), outDim64);
+        dynSizes.push_back(outDim);
+      }
+    }
+    Value init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                         resultType.getElementType(), dynSizes);
 
     SmallVector<Value> operands = {context, input, weights};
     if (bias)
@@ -481,7 +496,89 @@ struct ResizeToHip : public RewritePattern {
       cubicCoeffA = static_cast<float>(a.getValueAsDouble());
 
     Location loc = op->getLoc();
-    Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+    // Build output tensor.  For dynamic spatial dims the size comes from the
+    // scales or sizes operand, not from the input tensor.
+    SmallVector<Value> dynSizes;
+    int64_t rank = resultType.getRank();
+
+    // Try to extract constant scales or sizes from ONNX operands.
+    // Resize(X, roi, scales [, sizes]): operand indices 0, 1, 2, [3]
+    SmallVector<double> scales;
+    SmallVector<int64_t> sizes;
+
+    // Skip NoneType operands when finding scales (operand 2)
+    for (int64_t opIdx = 2;
+         opIdx < (int64_t)op->getNumOperands() && scales.empty(); ++opIdx) {
+      Value operand = op->getOperand(opIdx);
+      if (isa<NoneType>(operand.getType()))
+        continue;
+      Operation *def = operand.getDefiningOp();
+      if (!def)
+        continue;
+      ElementsAttr attr;
+      if (def->getName().getStringRef() == "onnx.Constant")
+        attr = def->getAttrOfType<ElementsAttr>("value");
+      else if (auto a = dyn_cast<arith::ConstantOp>(def))
+        attr = dyn_cast<ElementsAttr>(a.getValue());
+      if (!attr)
+        continue;
+      auto dense = dyn_cast<DenseElementsAttr>(attr);
+      if (!dense)
+        continue;
+      Type elemTy = dense.getElementType();
+      if (elemTy.isF32())
+        for (float v : dense.getValues<float>())
+          scales.push_back(v);
+      else if (elemTy.isF64())
+        for (double v : dense.getValues<double>())
+          scales.push_back(v);
+      else if (elemTy.isInteger(64))
+        for (int64_t v : dense.getValues<int64_t>())
+          sizes.push_back(v);
+    }
+
+    llvm::errs() << "[ResizeToHip] rank=" << rank
+                 << " scales.size()=" << scales.size()
+                 << " sizes.size()=" << sizes.size();
+    if (!scales.empty()) {
+      llvm::errs() << " scales=[";
+      for (size_t i = 0; i < scales.size(); ++i)
+        llvm::errs() << (i ? "," : "") << scales[i];
+      llvm::errs() << "]";
+    }
+    llvm::errs() << "\n";
+
+    for (int64_t d = 0; d < rank; ++d) {
+      if (!resultType.isDynamicDim(d))
+        continue;
+      if (!sizes.empty() && d < (int64_t)sizes.size() && sizes[d] > 0) {
+        dynSizes.push_back(
+            arith::ConstantIndexOp::create(rewriter, loc, sizes[d]));
+      } else if (!scales.empty() && d < (int64_t)scales.size() &&
+                 scales[d] != 0.0) {
+        // output_dim = floor(input_dim * scale)
+        Value inDim = tensor::DimOp::create(rewriter, loc, input, d);
+        Value inI64 = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getI64Type(), inDim);
+        Value inF64 = arith::SIToFPOp::create(rewriter, loc,
+                                               rewriter.getF64Type(), inI64);
+        Value scaleVal = arith::ConstantOp::create(
+            rewriter, loc,
+            rewriter.getF64FloatAttr(scales[d]));
+        Value outF64 = arith::MulFOp::create(rewriter, loc, inF64, scaleVal);
+        Value outI64 = arith::FPToSIOp::create(rewriter, loc,
+                                                rewriter.getI64Type(), outF64);
+        dynSizes.push_back(arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(), outI64));
+      } else {
+        // Fallback: use input dimension (identity resize)
+        dynSizes.push_back(tensor::DimOp::create(rewriter, loc, input, d));
+      }
+    }
+
+    Value init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                          resultType.getElementType(), dynSizes);
     auto hipOp = ResizeOp::create(rewriter, loc, resultType, context, input,
                                    init, rewriter.getI64IntegerAttr(mode),
                                    rewriter.getI64IntegerAttr(coordXform),

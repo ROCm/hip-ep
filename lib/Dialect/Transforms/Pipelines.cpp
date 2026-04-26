@@ -18,6 +18,8 @@
 
 #include "compilation_options_generated.h"
 
+#include <cstdlib>
+
 using namespace mlir;
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
@@ -54,8 +56,16 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   pm.addPass(createCanonicalizerPass());
 
   // 6. HIP-specific buffer optimizations
-  pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
-  pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
+  //    MORPHIZEN_NO_BUFFER_OPT=1 → skip both passes
+  //    MORPHIZEN_NO_BUFFER_OPT=2 → skip OptimizeMemRefs, keep PoolAllocs
+  const char *noBuffOpt = ::getenv("MORPHIZEN_NO_BUFFER_OPT");
+  int noBuffOptVal = noBuffOpt ? std::atoi(noBuffOpt) : 0;
+  if (noBuffOptVal == 0) {
+    pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
+    pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
+  } else if (noBuffOptVal == 2) {
+    pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
+  }
 
   // 7. Lower remaining bufferization ops to memref
   pm.addPass(createConvertBufferizationToMemRefPass());

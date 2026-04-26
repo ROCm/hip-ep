@@ -10,6 +10,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -204,6 +205,8 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
   MIOPEN_CHECK(miopenT5LayerNormForward(
       handle, MIOPEN_ELEMENTWISE_AFFINE_T5, c->xDesc, input, c->weightDesc,
       scale, epsilon, c->yDesc, output, c->rstdDesc, rstd_buf));
+
+  nan_trace_check("simp_layer_norm", output, input_num_elements);
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenT5LayerNormForward: completed successfully\n");

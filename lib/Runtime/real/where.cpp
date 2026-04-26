@@ -8,6 +8,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -30,8 +31,11 @@ extern "C" int wrap_where(RuntimeState *state, void *cond, void *x, void *y,
       "[REAL] wrap_where: elem=%lld, n=%lld, rank=%lld\n",
       (long long)element_size_bytes, (long long)num_elements, (long long)rank);
 
-  return hip_where(stream, cond, x, y, out, num_elements,
-                   static_cast<int>(element_size_bytes),
-                   static_cast<int>(rank), out_shape, cond_strides_elems,
-                   x_strides_elems, y_strides_elems);
+  int rc = hip_where(stream, cond, x, y, out, num_elements,
+                     static_cast<int>(element_size_bytes),
+                     static_cast<int>(rank), out_shape, cond_strides_elems,
+                     x_strides_elems, y_strides_elems);
+  if (rc == 0)
+    nan_trace_check("where", out, num_elements);
+  return rc;
 }

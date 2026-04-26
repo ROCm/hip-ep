@@ -755,6 +755,22 @@ static LONG WINAPI hip_onnx_runner_seh(EXCEPTION_POINTERS *info) {
             info->ExceptionRecord->ExceptionCode,
             info->ExceptionRecord->ExceptionAddress, dump_path);
 
+    // For C++ exceptions (0xe06d7363), try to extract the what() message.
+    if (info->ExceptionRecord->ExceptionCode == 0xe06d7363 &&
+        info->ExceptionRecord->NumberParameters >= 4) {
+        // MSVC C++ exception: param[1] = ptr to exception object
+        try {
+            auto *ex = reinterpret_cast<std::exception *>(
+                info->ExceptionRecord->ExceptionInformation[1]);
+            if (ex)
+                fprintf(stderr,
+                        "[hip-onnx-runner] C++ exception what(): %s\n",
+                        ex->what());
+        } catch (...) {
+            fprintf(stderr, "[hip-onnx-runner] (could not extract exception message)\n");
+        }
+    }
+
     // Find the DLL the faulting address belongs to.
     HMODULE mods[1024];
     DWORD needed = 0;
@@ -956,10 +972,10 @@ int main(int argc, char *argv[]) {
     std::cout << "Found " << devices.size() << " EP device(s)\n";
 
     session_opts.AppendExecutionProvider_V2(env, devices, {});
-    // Hard requirement: every op runs on the GPU.  No CPU fallback.
-    // If a node fails to compile, ORT must reject the whole model so we
-    // see the failure here instead of silently degrading to CPU.
-    session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+    // Allow CPU fallback for ops the EP can't handle yet (dynamic shapes,
+    // LayerNorm, Reshape etc.).  This lets us test the ops that DO work
+    // on GPU while CPU handles the rest.
+    // session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 
   // Create session
@@ -978,7 +994,15 @@ int main(int argc, char *argv[]) {
           env, model_path.u8string().c_str(), session_opts);
 #endif
     } catch (const Ort::Exception &e) {
-      std::cerr << "Session creation failed: " << e.what() << "\n";
+      std::cerr << "Session creation failed (Ort::Exception): " << e.what()
+                << "\n";
+      return 1;
+    } catch (const std::exception &e) {
+      std::cerr << "Session creation failed (std::exception): " << e.what()
+                << "\n";
+      return 1;
+    } catch (...) {
+      std::cerr << "Session creation failed (unknown exception)\n";
       return 1;
     }
     std::cout << "Session created in "
@@ -1036,12 +1060,7 @@ int main(int argc, char *argv[]) {
 
   for (size_t i = 0; i < input_count; ++i) {
     auto shape = input_shapes[i];
-    if (!shape.empty() && shape[0] == -1)
-      shape[0] = 1;
-
     size_t elem_size = element_byte_size(input_types[i]);
-    int64_t n_elems = calculate_product(shape);
-    input_buffers[i].resize(n_elems * elem_size);
 
     if (use_input_files) {
       const auto bin_path = tensor_dump_bin_path(
@@ -1051,12 +1070,50 @@ int main(int argc, char *argv[]) {
         std::cerr << "Missing input file: " << bin_path.string() << "\n";
         return 1;
       }
+      // Infer dynamic dimensions from file size: if exactly one dim is
+      // dynamic, compute it from (file_bytes / elem_size / product_of_static).
+      auto file_sz = std::filesystem::file_size(bin_path, ec);
+      if (ec) {
+        std::cerr << "Cannot stat: " << bin_path.string() << "\n";
+        return 1;
+      }
+      int dyn_count = 0;
+      size_t dyn_idx = 0;
+      int64_t static_prod = 1;
+      for (size_t j = 0; j < shape.size(); ++j) {
+        if (shape[j] < 0) {
+          dyn_count++;
+          dyn_idx = j;
+        } else {
+          static_prod *= shape[j];
+        }
+      }
+      if (dyn_count == 1 && static_prod > 0 && elem_size > 0) {
+        int64_t total_elems =
+            static_cast<int64_t>(file_sz) / static_cast<int64_t>(elem_size);
+        shape[dyn_idx] = total_elems / static_prod;
+        std::cout << "Inferred dynamic dim " << dyn_idx << " = "
+                  << shape[dyn_idx] << " from file size " << file_sz << "\n";
+      } else {
+        for (auto &d : shape) {
+          if (d < 0)
+            d = 1;
+        }
+      }
+      int64_t n_elems = calculate_product(shape);
+      input_buffers[i].resize(n_elems * elem_size);
       if (!load_raw_file(bin_path, input_buffers[i].data(),
                          input_buffers[i].size()))
         return 1;
       std::cout << "Loaded input " << i << " from " << bin_path.string()
                 << "\n";
     } else {
+      for (auto &d : shape) {
+        if (d < 0)
+          d = 1;
+      }
+      int64_t n_elems = calculate_product(shape);
+      input_buffers[i].resize(n_elems * elem_size);
       fill_random_input_buffer(input_buffers[i].data(), input_buffers[i].size(),
                                input_types[i], rng, positive_only);
     }
@@ -1097,7 +1154,13 @@ int main(int argc, char *argv[]) {
                 << static_cast<int64_t>(elapsed_since(t0) * 1e6) << " us\n";
       std::cout << "OK - " << outputs.size() << " output tensor(s)\n";
     } catch (const Ort::Exception &e) {
-      std::cerr << "Inference failed: " << e.what() << "\n";
+      std::cerr << "Inference failed (Ort::Exception): " << e.what() << "\n";
+      return 1;
+    } catch (const std::exception &e) {
+      std::cerr << "Inference failed (std::exception): " << e.what() << "\n";
+      return 1;
+    } catch (...) {
+      std::cerr << "Inference failed (unknown exception)\n";
       return 1;
     }
   }

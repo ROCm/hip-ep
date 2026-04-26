@@ -217,8 +217,8 @@ struct StftToHip : public RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.STFT lowering currently supports f32 signals only");
 
-    // Build the empty output tensor.  All four output dims are normally
-    // static for Kokoro; only batch is allowed to remain dynamic.
+    // Build the empty output tensor.  Batch (d=0) inherits from the signal,
+    // n_frames (d=1) is derived from signal_length if dynamic.
     SmallVector<Value> dynSizes;
     for (int64_t d = 0; d < resultType.getRank(); ++d) {
       if (!resultType.isDynamicDim(d))
@@ -226,10 +226,31 @@ struct StftToHip : public RewritePattern {
       if (d == 0) {
         dynSizes.push_back(
             mlir::tensor::DimOp::create(rewriter, loc, signal, 0));
+      } else if (d == 1) {
+        // n_frames = (signal_length - frame_length) / frame_step + 1
+        Value sigLen = mlir::tensor::DimOp::create(rewriter, loc, signal, 1);
+        Value fl = mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                        frameLength);
+        Value fs = mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                        frameStep);
+        Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+        Value nFrames = mlir::arith::AddIOp::create(
+            rewriter, loc,
+            mlir::arith::DivSIOp::create(
+                rewriter, loc,
+                mlir::arith::SubIOp::create(rewriter, loc, sigLen, fl), fs),
+            one);
+        dynSizes.push_back(nFrames);
+      } else if (d == 2) {
+        int64_t nf = onesided ? frameLength / 2 + 1 : frameLength;
+        dynSizes.push_back(
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, nf));
+      } else if (d == 3) {
+        dynSizes.push_back(
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, 2));
       } else {
         return rewriter.notifyMatchFailure(
-            op, "onnx.STFT lowering only supports a dynamic batch dim "
-                "(other dims must be static)");
+            op, "onnx.STFT lowering: unexpected dynamic dim");
       }
     }
     Value init = mlir::tensor::EmptyOp::create(

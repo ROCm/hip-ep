@@ -67,22 +67,22 @@ struct ScatterNdLowering : public ConvertOpToLLVMPattern<ScatterNdOp> {
     auto indicesType = dyn_cast<MemRefType>(op.getIndices().getType());
     auto updatesType = dyn_cast<MemRefType>(op.getUpdates().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!dataType || !indicesType || !updatesType || !outType ||
-        !dataType.hasStaticShape() || !indicesType.hasStaticShape() ||
-        !updatesType.hasStaticShape() || !outType.hasStaticShape())
+    if (!dataType || !indicesType || !updatesType || !outType)
       return rewriter.notifyMatchFailure(
-          op, "hip.scatter_nd lowering requires static shapes");
+          op, "hip.scatter_nd lowering requires ranked memref operands");
 
     int64_t dataRank = dataType.getRank();
     int64_t indicesRank = indicesType.getRank();
     if (indicesRank < 1)
       return rewriter.notifyMatchFailure(
           op, "hip.scatter_nd indices must have rank >= 1");
-    int64_t coordLen = indicesType.getDimSize(indicesRank - 1);
-    if (coordLen <= 0 || coordLen > dataRank)
-      return rewriter.notifyMatchFailure(
-          op,
-          "hip.scatter_nd indices innermost dim must be in [1, data_rank]");
+    if (!indicesType.isDynamicDim(indicesRank - 1)) {
+      int64_t coordLen = indicesType.getDimSize(indicesRank - 1);
+      if (coordLen <= 0 || coordLen > dataRank)
+        return rewriter.notifyMatchFailure(
+            op,
+            "hip.scatter_nd indices innermost dim must be in [1, data_rank]");
+    }
 
     int64_t dataDtype = getHipdnnDataType(dataType.getElementType());
     if (dataDtype < 0)
@@ -93,14 +93,13 @@ struct ScatterNdLowering : public ConvertOpToLLVMPattern<ScatterNdOp> {
       return rewriter.notifyMatchFailure(
           op, "hip.scatter_nd unsupported indices element type");
 
-    SmallVector<int64_t> dataShape(dataType.getShape().begin(),
-                                   dataType.getShape().end());
-    SmallVector<int64_t> indicesShape(indicesType.getShape().begin(),
-                                      indicesType.getShape().end());
+    auto dataShape = getMemRefShape(dataType, adaptor.getData(), rewriter, loc);
+    auto indicesShape = getMemRefShape(indicesType, adaptor.getIndices(),
+                                       rewriter, loc);
     Value dataShapePtr =
-        materialiseI64Array(dataShape, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(dataShape, i64Type, ptrType, rewriter, loc);
     Value indicesShapePtr =
-        materialiseI64Array(indicesShape, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(indicesShape, i64Type, ptrType, rewriter, loc);
 
     auto i64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,

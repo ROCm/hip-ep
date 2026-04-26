@@ -401,9 +401,30 @@ void PoolAllocsPass::runOnOperation() {
   for (auto &info : allInfos)
     if (info.allocOp->isBeforeInBlock(firstPooledAlloc))
       firstPooledAlloc = info.allocOp.getOperation();
+
+  // Filter out dynamic allocs whose dimension operands don't dominate
+  // firstPooledAlloc.  The pool size computation and pool acquisition are
+  // inserted before firstPooledAlloc, so all operands used in byte-size
+  // computation must dominate that point.
+  SmallVector<AllocInfo> safeDynamics;
+  for (auto &info : dynamics) {
+    bool safe = true;
+    for (Value dim : info.allocOp.getDynamicSizes()) {
+      if (auto *defOp = dim.getDefiningOp()) {
+        if (!defOp->isBeforeInBlock(firstPooledAlloc) &&
+            defOp != firstPooledAlloc) {
+          safe = false;
+          break;
+        }
+      }
+    }
+    if (safe)
+      safeDynamics.push_back(info);
+  }
+
   builder.setInsertionPoint(firstPooledAlloc);
 
-  auto dynBuckets = packDynamicAllocs(dynamics, builder, loc, align);
+  auto dynBuckets = packDynamicAllocs(safeDynamics, builder, loc, align);
   NumDynBuckets += dynBuckets.size();
 
   // ----- Phase 5: emit pool + views -----------------------------------

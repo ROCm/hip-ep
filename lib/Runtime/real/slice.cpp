@@ -10,6 +10,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -35,8 +36,11 @@ extern "C" int wrap_slice(RuntimeState *state, void *input, void *output,
       "[REAL] wrap_slice: n=%lld, elem=%lld, rank=%lld\n",
       (long long)num_elements, (long long)element_size_bytes, (long long)rank);
 
-  return hip_slice(stream, input, output, num_elements,
-                   static_cast<int>(element_size_bytes),
-                   static_cast<int>(rank), out_shape, in_strides_elems,
-                   starts_elems);
+  int rc = hip_slice(stream, input, output, num_elements,
+                     static_cast<int>(element_size_bytes),
+                     static_cast<int>(rank), out_shape, in_strides_elems,
+                     starts_elems);
+  if (rc == 0)
+    nan_trace_check("slice", output, num_elements);
+  return rc;
 }

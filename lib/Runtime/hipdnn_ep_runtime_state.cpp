@@ -393,8 +393,14 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                    record_elapsed(t_prev), total_size);
       }
 
-      if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
-        fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
+      // Use hipMallocManaged so constants are accessible from both CPU and
+      // GPU.  When PoolAllocsPass is skipped, the compiled code may read
+      // constant scalars (embeddings, look-up indices) directly from CPU
+      // for control-flow decisions and index arithmetic.
+      if (hipMallocManaged(&state->gpu_constants_blob, total_size) !=
+          hipSuccess) {
+        fprintf(stderr,
+                "hipMallocManaged failed for constants blob (%zu bytes)\n",
                 total_size);
         free(cpu_buf);
         hipdnn_ep_state_cleanup(state);
@@ -402,19 +408,12 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         return 1;
       }
 
-      TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
+      TIMING_LOG("[Session] hipMallocManaged: %.3fs (%zu bytes)\n",
                  record_elapsed(t_prev), total_size);
 
-      if (hipMemcpy(state->gpu_constants_blob, src, total_size,
-                    hipMemcpyHostToDevice) != hipSuccess) {
-        fprintf(stderr, "hipMemcpy failed for constants blob\n");
-        free(cpu_buf);
-        hipdnn_ep_state_cleanup(state);
-        *out_state = nullptr;
-        return 1;
-      }
+      memcpy(state->gpu_constants_blob, src, total_size);
 
-      TIMING_LOG("[Session] hipMemcpy H2D: %.3fs (%zu bytes)\n",
+      TIMING_LOG("[Session] memcpy constants: %.3fs (%zu bytes)\n",
                  record_elapsed(t_prev), total_size);
 
       free(cpu_buf); // no-op when mmap was used
@@ -633,6 +632,28 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state) {
     return nullptr;
   }
   return state->pool_base;
+}
+
+void *hip_device_malloc(size_t size_bytes) {
+  void *ptr = nullptr;
+  // When PoolAllocsPass is skipped (MORPHIZEN_NO_BUFFER_OPT=1), the MLIR
+  // bufferization emits direct CPU loads/stores (scalar index math, Range,
+  // Gather index construction, etc.) against these buffers.  hipMalloc
+  // returns device-only memory that faults on CPU access; hipMallocManaged
+  // returns unified memory that the HIP runtime migrates on demand.
+  hipError_t err = hipMallocManaged(&ptr, size_bytes);
+  if (err != hipSuccess) {
+    fprintf(stderr, "[hip_device_malloc] hipMallocManaged(%zu) failed: %d\n",
+            size_bytes, (int)err);
+    return nullptr;
+  }
+  memset(ptr, 0, size_bytes);
+  return ptr;
+}
+
+void hip_device_free(void *ptr) {
+  if (ptr)
+    hipFree(ptr);
 }
 
 //===----------------------------------------------------------------------===//

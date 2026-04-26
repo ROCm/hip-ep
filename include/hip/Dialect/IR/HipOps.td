@@ -868,16 +868,20 @@ def Hip_SliceOp : Hip_DpsOp<"slice"> {
 // ===== Tier 2 shape / data movement ops ======================================
 
 def Hip_ReduceMeanOp : Hip_DpsOp<"reduce_mean"> {
-  let summary = "Mean reduction over the innermost reduce_size elements";
+  let summary = "Mean reduction with optional inner stride";
   let description = [{
-    Reduces `data` to `output` by averaging contiguous slabs of
-    `num_input_elements / num_output_elements` elements.  The conversion pass
-    is responsible for ensuring the reduced axes are innermost.
+    Reduces `data` to `output` by averaging groups of elements.  When
+    `inner_size` is 1 (default), the reduction is over contiguous slabs
+    of `num_input / num_output` elements.  When `inner_size` > 1, the
+    reduction strides over `inner_size`-spaced elements, supporting
+    reduction over non-tail axes.
   }];
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$data,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$inner_size,
+    DefaultValuedAttr<I64Attr, "-1">:$inner_axis
   );
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $data `:` type($data) `)`

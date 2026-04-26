@@ -145,12 +145,53 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     resultType = inserted0H(resultType);
   }
 
-  // Create output tensor
+  // Create output tensor.  For Conv, batch (dim 0) is taken from input,
+  // channels-out (dim 1) from weights (dim 0), and spatial dims follow:
+  //   out[i] = floor((in[i] + padBegin[i] + padEnd[i]
+  //                   - dilation[i]*(kernel[i]-1) - 1) / stride[i]) + 1
+  int64_t rank = resultType.getRank();
+  int64_t numSpatial = rank - 2;
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
-    if (resultType.isDynamicDim(dimIdx))
+  for (int64_t d = 0; d < rank; ++d) {
+    if (!resultType.isDynamicDim(d))
+      continue;
+    if (d == 0) {
       dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx));
+          mlir::tensor::DimOp::create(rewriter, loc, input, d));
+    } else if (d == 1) {
+      dynSizes.push_back(
+          mlir::tensor::DimOp::create(rewriter, loc, weights, (int64_t)0));
+    } else {
+      int64_t si = d - 2;
+      int64_t s = (si < (int64_t)strides.size()) ? strides[si] : 1;
+      int64_t k = (si < (int64_t)kernelShape.size()) ? kernelShape[si] : 1;
+      int64_t dl = (si < (int64_t)dilations.size()) ? dilations[si] : 1;
+      int64_t pb = (si < (int64_t)pads.size()) ? pads[si] : 0;
+      int64_t pe = (si + numSpatial < (int64_t)pads.size())
+                       ? pads[si + numSpatial]
+                       : 0;
+      // effective_kernel = dilation*(kernel-1) + 1
+      int64_t effK = dl * (k - 1) + 1;
+      // constant adjustment = pb + pe - effK + 1
+      int64_t adj = pb + pe - effK + 1;
+
+      mlir::Value inDim =
+          mlir::tensor::DimOp::create(rewriter, loc, input, d);
+      mlir::Value inIdx = mlir::arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getI64Type(), inDim);
+      mlir::Value adjVal = mlir::arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI64IntegerAttr(adj));
+      mlir::Value strideVal = mlir::arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI64IntegerAttr(s));
+      // (in + adj) / stride, using floor-div
+      mlir::Value sum =
+          mlir::arith::AddIOp::create(rewriter, loc, inIdx, adjVal);
+      mlir::Value outDim64 =
+          mlir::arith::DivSIOp::create(rewriter, loc, sum, strideVal);
+      mlir::Value outDim = mlir::arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), outDim64);
+      dynSizes.push_back(outDim);
+    }
   }
 
   mlir::Value init =

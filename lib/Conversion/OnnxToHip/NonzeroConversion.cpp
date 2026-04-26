@@ -54,18 +54,36 @@ struct NonzeroToHip : public RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.NonZero result dim 0 must equal input rank");
 
-    // K must be static.  If it's not, we can't allocate a DPS buffer.  Give
-    // up early so a higher-level pre-pass (e.g. polygraphy --override-input-
-    // shapes followed by onnxruntime shape inference) can be re-run with the
-    // correct K bound.
-    if (resultType.isDynamicDim(1))
-      return rewriter.notifyMatchFailure(
-          op, "onnx.NonZero requires static K (output dim 1)");
-
     Location loc = op->getLoc();
-    Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, resultType.getShape(), resultType.getElementType(),
-        ValueRange{});
+    Value init;
+    if (resultType.isDynamicDim(1)) {
+      // K is data-dependent.  Use total input elements as a safe upper bound
+      // (worst case every element is non-zero).  The runtime kernel writes
+      // actual count and zero-fills trailing slots.
+      SmallVector<Value> dynSizes;
+      Value kBound;
+      if (inputType.hasStaticShape()) {
+        int64_t total = 1;
+        for (int64_t d : inputType.getShape())
+          total *= d;
+        kBound = mlir::arith::ConstantIndexOp::create(rewriter, loc, total);
+      } else {
+        kBound = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+        for (int64_t d = 0; d < rank; ++d) {
+          Value dimV = mlir::tensor::DimOp::create(rewriter, loc, input, d);
+          kBound =
+              mlir::arith::MulIOp::create(rewriter, loc, kBound, dimV);
+        }
+      }
+      dynSizes.push_back(kBound);
+      init = mlir::tensor::EmptyOp::create(
+          rewriter, loc, resultType.getShape(), resultType.getElementType(),
+          dynSizes);
+    } else {
+      init = mlir::tensor::EmptyOp::create(
+          rewriter, loc, resultType.getShape(), resultType.getElementType(),
+          ValueRange{});
+    }
     auto hipOp =
         NonzeroOp::create(rewriter, loc, resultType, context, input, init);
     rewriter.replaceOp(op, hipOp->getResult(0));

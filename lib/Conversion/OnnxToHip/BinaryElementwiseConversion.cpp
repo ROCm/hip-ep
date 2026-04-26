@@ -42,15 +42,6 @@ static LogicalResult buildBinary(Operation *op, PatternRewriter &rewriter,
         op, "hip.binary_elementwise needs a ranked tensor result");
 
   auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
-  // hip.binary_elementwise LLVM lowering requires static shapes; bail
-  // on dynamic-result-type so dropUnsupportedOnnxOps replaces the op
-  // with a tensor.empty placeholder rather than blowing up at HipToLLVM.
-  if (!resultType.hasStaticShape())
-    return rewriter.notifyMatchFailure(
-        op, "hip.binary_elementwise lowering only supports static shapes");
-  // Use broadcast-aware empty-tensor builder: walks lhs/rhs, picks the
-  // first one that has a dim covering each dynamic output dim, falls
-  // back to a 1-element constant when neither side has it (scalar bcast).
   Value init = createBroadcastEmptyTensor(rewriter, loc, resultType,
                                           {lhs, rhs});
 

@@ -227,12 +227,75 @@ inline SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
   return dims;
 }
 
+// Stack-allocate an i64 array and store SSA values (dynamic-safe).
+inline Value materialiseValueArray(ArrayRef<Value> vals, Type i64Type,
+                                   Type ptrType,
+                                   ConversionPatternRewriter &rewriter,
+                                   Location loc) {
+  auto arrayType = LLVM::LLVMArrayType::get(i64Type, vals.size());
+  Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                       rewriter.getI64IntegerAttr(1));
+  Value alloca = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayType, one,
+                                        /*alignment=*/8);
+  for (size_t i = 0; i < vals.size(); ++i) {
+    SmallVector<LLVM::GEPArg, 2> indices = {0, static_cast<int32_t>(i)};
+    Value elemPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, arrayType,
+                                        alloca, indices);
+    LLVM::StoreOp::create(rewriter, loc, vals[i], elemPtr);
+  }
+  return alloca;
+}
+
+// Read all dims of a memref as SSA values (dynamic-safe).
+inline SmallVector<Value> getMemRefShape(MemRefType type, Value descriptor,
+                                         ConversionPatternRewriter &rewriter,
+                                         Location loc) {
+  SmallVector<Value> shape;
+  for (int64_t d = 0; d < type.getRank(); ++d)
+    shape.push_back(getMemRefDimSize(type, d, descriptor, rewriter, loc));
+  return shape;
+}
+
+// Compute broadcast strides as SSA values for an input shape against an output
+// shape, handling dynamic dimensions.  A stride of 0 means "broadcast".
+inline SmallVector<Value>
+computeBroadcastStridesSSA(ArrayRef<Value> inShape, ArrayRef<Value> outShape,
+                           ConversionPatternRewriter &rewriter, Location loc) {
+  Type i64Type = rewriter.getI64Type();
+  int64_t outRank = outShape.size();
+  int64_t inRank = inShape.size();
+  int64_t offset = outRank - inRank;
+
+  auto i64Const = [&](int64_t v) {
+    return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                    rewriter.getI64IntegerAttr(v));
+  };
+
+  SmallVector<Value> padded(outRank);
+  for (int64_t d = 0; d < outRank; ++d)
+    padded[d] = (d < offset) ? i64Const(1) : inShape[d - offset];
+
+  SmallVector<Value> strides(outRank);
+  Value acc = i64Const(1);
+  Value zero = i64Const(0);
+  Value one = i64Const(1);
+  for (int64_t d = outRank - 1; d >= 0; --d) {
+    Value isOne =
+        LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::eq,
+                             padded[d], one);
+    strides[d] = LLVM::SelectOp::create(rewriter, loc, isOne, zero, acc);
+    acc = LLVM::MulOp::create(rewriter, loc, acc, padded[d]);
+  }
+  return strides;
+}
+
 // Must match HIPDNN_EP_TENSOR_OP_* in lib/Runtime/hipdnn_ep_runtime.h
 enum HipdnnTensorOp : int64_t {
   kTensorOpMul = 0,
   kTensorOpAdd = 1,
   kTensorOpMin = 2,
   kTensorOpMax = 3,
+  kTensorOpSub = 4,
 };
 
 // Pattern population functions (one per operator file)

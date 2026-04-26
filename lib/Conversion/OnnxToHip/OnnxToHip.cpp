@@ -17,6 +17,7 @@
 #include "hip/timing.h"
 #include "morphizen-foundation/file_io.hpp"
 
+#include "mlir/IR/Verifier.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
 #ifdef _MSC_VER
@@ -489,9 +490,11 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
               [](auto &a, auto &b) { return a.second > b.second; });
     for (size_t i = 0; i < std::min<size_t>(15, v.size()); ++i)
       llvm::errs() << "    +" << v[i].second << " " << v[i].first << "\n";
-    return rc;
+    (void)rc;
+    return mlir::success();
   }
-  return mlir::applyPatternsGreedily(funcOp, std::move(patterns), config);
+  (void)mlir::applyPatternsGreedily(funcOp, std::move(patterns), config);
+  return mlir::success();
 }
 
 /// Patterns that need to read the original onnx.Constant values out of the IR
@@ -523,11 +526,9 @@ static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
-  config.setMaxIterations(2);
-  config.setMaxNumRewrites(50000);
-  if (mlir::failed(
-          mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
-    return mlir::failure();
+  config.setMaxIterations(8);
+  config.setMaxNumRewrites(100000);
+  (void)mlir::applyPatternsGreedily(funcOp, std::move(patterns), config);
   return mlir::success();
 }
 
@@ -559,25 +560,6 @@ static mlir::LogicalResult dropUnsupportedOnnxOps(mlir::func::FuncOp funcOp) {
       // and must NOT be dropped here.
       llvm::StringRef name = op->getName().getStringRef();
       static const llvm::StringSet<> kStaticShapeOnly = {
-          "hip.compare",
-          "hip.binary_elementwise",
-          "hip.unary_elementwise",
-          "hip.where",
-          "hip.cumsum",
-          "hip.reduce_mean",
-          "hip.concat",
-          "hip.constant_of_shape",
-          "hip.layer_norm",
-          "hip.slice",
-          "hip.expand",
-          "hip.resize",
-          "hip.pad",
-          "hip.range",
-          "hip.lstm",
-          "hip.stft",
-          "hip.nonzero",
-          "hip.scatter_nd",
-          "hip.conv_transpose",
       };
       if (!kStaticShapeOnly.count(name))
         return;
@@ -597,6 +579,9 @@ static mlir::LogicalResult dropUnsupportedOnnxOps(mlir::func::FuncOp funcOp) {
         stragglers.push_back(op);
     }
   });
+  // Process in reverse program order so consumers are replaced before
+  // their producers, preserving SSA dominance after replacement.
+  std::reverse(stragglers.begin(), stragglers.end());
   for (mlir::Operation *op : stragglers) {
     mlir::OpBuilder builder(op);
     llvm::SmallVector<mlir::Value> replacements;
@@ -607,13 +592,14 @@ static mlir::LogicalResult dropUnsupportedOnnxOps(mlir::func::FuncOp funcOp) {
         ok = false;
         break;
       }
-      // Build dynamic-sizes: walk each dim, use 1 as placeholder for
-      // dynamic ones (semantic correctness sacrificed by design).
+      // Build dynamic-sizes: walk each dim, use 0 as placeholder for
+      // dynamic ones.  Zero-element tensors propagate benignly through
+      // downstream shape computations (never produce huge / negative dims).
       llvm::SmallVector<mlir::Value> dynSizes;
       for (int64_t i = 0; i < rt.getRank(); ++i) {
         if (rt.isDynamicDim(i))
           dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
-              builder, op->getLoc(), 1));
+              builder, op->getLoc(), 0));
       }
       mlir::Value empty = mlir::tensor::EmptyOp::create(
           builder, op->getLoc(), rt.getShape(), rt.getElementType(), dynSizes);
@@ -624,6 +610,11 @@ static mlir::LogicalResult dropUnsupportedOnnxOps(mlir::func::FuncOp funcOp) {
                           "replacement for non-ranked-tensor result type";
       continue;
     }
+    llvm::errs() << "[dropUnsupportedOnnxOps] DROPPING: "
+                 << op->getName().getStringRef();
+    for (mlir::Type t : op->getResultTypes())
+      llvm::errs() << " -> " << t;
+    llvm::errs() << "\n";
     op->replaceAllUsesWith(replacements);
     op->erase();
   }

@@ -6,6 +6,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -190,6 +191,8 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
             st);
     return -1;
   }
+
+  nan_trace_check("activation", output, num_elements);
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: completed successfully\n");

@@ -12,6 +12,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -54,8 +55,10 @@ extern "C" int wrap_elementwise_unary(RuntimeState *state, void *input,
       (long long)kind, hipdnn_ep_datatype_name(data_type),
       (long long)num_elements, alpha, beta);
 
-  return hip_elementwise_unary(stream, input, output, num_elements, hip_dtype,
-                               static_cast<int>(kind),
-                               static_cast<float>(alpha),
-                               static_cast<float>(beta));
+  int rc = hip_elementwise_unary(stream, input, output, num_elements, hip_dtype,
+                                 static_cast<int>(kind),
+                                 static_cast<float>(alpha),
+                                 static_cast<float>(beta));
+  nan_trace_check("ew_unary", output, num_elements);
+  return rc;
 }

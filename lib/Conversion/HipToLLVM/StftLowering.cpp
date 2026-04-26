@@ -12,10 +12,9 @@
 //                 n_frames, n_freqs,
 //                 onesided, data_type);
 //
-// We pull batch/signal_len from the signal memref shape and compute
-// n_frames/n_freqs from the attributes, all as compile-time constants
-// (Kokoro's STFT shape is fully static).  The window pointer is null
-// when the optional operand is absent.
+// We pull batch/signal_len from the signal memref descriptor at runtime
+// and compute n_frames from signal_len, supporting dynamic signal lengths.
+// The window pointer is null when the optional operand is absent.
 
 #include "HipToLLVMUtils.h"
 
@@ -69,28 +68,11 @@ struct StftLowering : public ConvertOpToLLVMPattern<StftOp> {
         !outputType.getElementType().isF32())
       return rewriter.notifyMatchFailure(
           op, "hip.stft lowering currently supports f32 only");
-    if (!signalType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "hip.stft lowering currently requires a static-shape signal");
-    if (!outputType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "hip.stft lowering currently requires a static-shape output");
 
-    int64_t batch = signalType.getDimSize(0);
-    int64_t signalLen = signalType.getDimSize(1);
     int64_t frameStep = op.getFrameStep();
     int64_t frameLength = op.getFrameLength();
     int64_t onesided = op.getOnesided();
-    int64_t nFrames = (signalLen - frameLength) / frameStep + 1;
     int64_t nFreqs = onesided ? frameLength / 2 + 1 : frameLength;
-
-    if (outputType.getDimSize(0) != batch ||
-        outputType.getDimSize(1) != nFrames ||
-        outputType.getDimSize(2) != nFreqs ||
-        outputType.getDimSize(3) != 2)
-      return rewriter.notifyMatchFailure(
-          op, "hip.stft output shape doesn't match the (batch, n_frames, "
-              "n_freqs, 2) inferred from the signal/attrs");
 
     int64_t dataType = getHipdnnDataType(signalType.getElementType());
     if (dataType < 0)
@@ -101,11 +83,21 @@ struct StftLowering : public ConvertOpToLLVMPattern<StftOp> {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
-    Value batchVal = i64Const(batch);
-    Value signalLenVal = i64Const(signalLen);
+
+    Value batchVal = getMemRefDimSize(signalType, 0, adaptor.getSignal(),
+                                      rewriter, loc);
+    Value signalLenVal = getMemRefDimSize(signalType, 1, adaptor.getSignal(),
+                                          rewriter, loc);
     Value frameStepVal = i64Const(frameStep);
     Value frameLengthVal = i64Const(frameLength);
-    Value nFramesVal = i64Const(nFrames);
+    // nFrames = (signalLen - frameLength) / frameStep + 1
+    Value nFramesVal = LLVM::AddOp::create(
+        rewriter, loc,
+        LLVM::SDivOp::create(
+            rewriter, loc,
+            LLVM::SubOp::create(rewriter, loc, signalLenVal, frameLengthVal),
+            frameStepVal),
+        i64Const(1));
     Value nFreqsVal = i64Const(nFreqs);
     Value onesidedVal = i64Const(onesided);
     Value dtypeVal = i64Const(dataType);

@@ -13,6 +13,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdint>
@@ -125,7 +126,13 @@ extern "C" int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
       hipdnn_ep_datatype_name(data_type), hipdnn_ep_datatype_name(indices_type),
       (long long)data_rank, (long long)indices_rank, (long long)reduction);
 
-  return hip_scatter_nd(stream, output, indices, updates, data_shape, data_rank,
-                        indices_shape, indices_rank, data_dtype, indices_dtype,
-                        static_cast<int>(reduction));
+  int64_t num_out = 1;
+  for (int64_t d = 0; d < data_rank; ++d)
+    num_out *= data_shape[d];
+  int rc = hip_scatter_nd(stream, output, indices, updates, data_shape, data_rank,
+                          indices_shape, indices_rank, data_dtype, indices_dtype,
+                          static_cast<int>(reduction));
+  if (rc == 0)
+    nan_trace_check("scatter_nd", output, num_out);
+  return rc;
 }

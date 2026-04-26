@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 namespace {
 
@@ -29,10 +30,41 @@ __global__ void range_kernel(T start, T delta, int64_t n, T *__restrict__ out) {
   out[i] = start + (T)i * delta;
 }
 
+// Host-side fallback: compute the range on the CPU and upload via hipMemcpy.
+// Uses synchronous hipMemcpy only -- hipMemcpyAsync on the Morphizen bridge
+// stream triggers "bad variant access" crashes.
+//
+// When capacity > n, fills positions [n..capacity) with `sentinel` so that
+// downstream consumers (e.g. alignment comparisons) don't see stale data.
 template <typename T>
-int launch_range(hipStream_t stream, T start, T delta, int64_t n, T *out) {
+int host_range_fallback(hipStream_t /*stream*/, T start, T delta, int64_t n,
+                        T *dev_out, int64_t capacity, T sentinel) {
+  int64_t total = (capacity > n) ? capacity : n;
+  T *host_buf = static_cast<T *>(malloc(total * sizeof(T)));
+  if (!host_buf)
+    return -1;
+  for (int64_t i = 0; i < n; i++)
+    host_buf[i] = start + static_cast<T>(i) * delta;
+  for (int64_t i = n; i < total; i++)
+    host_buf[i] = sentinel;
+  (void)hipGetLastError();
+  hipError_t err =
+      hipMemcpy(dev_out, host_buf, total * sizeof(T), hipMemcpyHostToDevice);
+  free(host_buf);
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] host_range_fallback: hipMemcpy H2D failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+template <typename T>
+int launch_range(hipStream_t stream, T start, T delta, int64_t n, T *out,
+                 int64_t capacity = 0, T sentinel = T(0)) {
   if (n <= 0)
     return 0;
+  (void)hipGetLastError(); // clear stale errors
   constexpr int kBlock = 128;
   int64_t blocks = (n + kBlock - 1) / kBlock;
   int64_t grid_x = (blocks > 65535) ? 65535 : blocks;
@@ -40,7 +72,20 @@ int launch_range(hipStream_t stream, T start, T delta, int64_t n, T *out) {
   hipLaunchKernelGGL((range_kernel<T>),
                      dim3((unsigned)grid_x, (unsigned)grid_y, 1),
                      dim3(kBlock, 1, 1), 0, stream, start, delta, n, out);
-  return static_cast<int>(hipGetLastError());
+  int rc = static_cast<int>(hipGetLastError());
+  if (rc != 0) {
+    fprintf(stderr,
+            "[custom_kernels] range GPU launch failed (rc=%d), "
+            "using host fallback for n=%lld elements\n",
+            rc, (long long)n);
+    return host_range_fallback<T>(stream, start, delta, n, out, capacity,
+                                  sentinel);
+  }
+  // GPU launch OK. If capacity > n, zero-fill remaining via hipMemset.
+  if (capacity > n) {
+    (void)hipMemset(out + n, 0xFF, (capacity - n) * sizeof(T));
+  }
+  return 0;
 }
 
 } // namespace
@@ -68,12 +113,10 @@ extern "C" int hip_range_dyn(void *stream, const void *start_dev,
                               int hip_dtype) {
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-  // Sync all device work so the scalar values are ready for D2H.
-  // Use hipDeviceSynchronize + drain errors (same pattern as
-  // wrap_transpose) to avoid bad_variant_access from morphizen bridge.
-  (void)hipGetLastError();
-  hipDeviceSynchronize();
-  (void)hipGetLastError();
+  // hipMemcpy(D2H) is synchronous -- it implicitly waits for all
+  // pending work that touches these device addresses to complete.
+  // No explicit sync is needed; avoid hipDeviceSynchronize which
+  // surfaces deferred errors and can poison subsequent launches.
 
   // Read scalars from device memory.
   if (hip_dtype == /*HIP_DTYPE_INT64*/ 2 ||
@@ -94,11 +137,14 @@ extern "C" int hip_range_dyn(void *stream, const void *start_dev,
     int64_t n = (l - s) / d;
     if (n < 0) n = 0;
     if (n > output_capacity) n = output_capacity;
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_range_dyn: i64 s=%lld l=%lld d=%lld n=%lld\n",
-        (long long)s, (long long)l, (long long)d, (long long)n);
+    fprintf(stderr,
+        "[custom_kernels] hip_range_dyn: i64 s=%lld l=%lld d=%lld n=%lld cap=%lld\n",
+        (long long)s, (long long)l, (long long)d, (long long)n,
+        (long long)output_capacity);
+    // Sentinel = -1: fails all `>= 0` alignment comparisons for unused slots.
     return launch_range<int64_t>(hip_stream, s, d, n,
-                                   static_cast<int64_t *>(output));
+                                 static_cast<int64_t *>(output),
+                                 output_capacity, int64_t(-1));
   }
   if (hip_dtype == /*HIP_DTYPE_FLOAT32*/ 0) {
     float s = 0, l = 0, d = 1;
@@ -110,7 +156,8 @@ extern "C" int hip_range_dyn(void *stream, const void *start_dev,
     if (n < 0) n = 0;
     if (n > output_capacity) n = output_capacity;
     return launch_range<float>(hip_stream, s, d, n,
-                                 static_cast<float *>(output));
+                                 static_cast<float *>(output),
+                                 output_capacity, -1.0f);
   }
   fprintf(stderr, "[custom_kernels] hip_range_dyn: unsupported dtype %d\n",
           hip_dtype);

@@ -6,6 +6,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdint>
@@ -25,8 +26,14 @@ extern "C" int wrap_transpose(RuntimeState *state, void *input, void *output,
       "[REAL] wrap_transpose: rank=%lld, dim0=%lld, dim1=%lld, dtype=%lld\n",
       (long long)rank, (long long)dim0, (long long)dim1, (long long)hip_dtype);
 
-  return hip_transpose_nd(stream, input, output, static_cast<int>(rank),
-                           in_shape, static_cast<int>(dim0),
-                           static_cast<int>(dim1),
-                           static_cast<int>(hip_dtype));
+  int64_t num_elements = 1;
+  for (int64_t d = 0; d < rank; ++d)
+    num_elements *= in_shape[d];
+  int rc = hip_transpose_nd(stream, input, output, static_cast<int>(rank),
+                            in_shape, static_cast<int>(dim0),
+                            static_cast<int>(dim1),
+                            static_cast<int>(hip_dtype));
+  if (rc == 0)
+    nan_trace_check("transpose", output, num_elements);
+  return rc;
 }

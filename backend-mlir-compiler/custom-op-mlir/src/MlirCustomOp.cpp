@@ -183,6 +183,20 @@ static std::vector<int> build_output_index_map(
   return map;
 }
 
+// Check whether any dimension in the metadata shape is dynamic (< 0).
+static bool has_dynamic_dims(
+    const google::protobuf::RepeatedField<int64_t> &shape) {
+  for (auto d : shape)
+    if (d < 0)
+      return true;
+  return false;
+}
+
+// For dynamic output dims, substitute a generous upper bound so we can
+// pre-allocate the ORT tensor.  After inference_compute writes the actual
+// dimensions back into tensor_t.shape we resize the ORT tensor.
+static constexpr int64_t kDynamicDimUpperBound = 2 * 1024 * 1024; // 2M elements
+
 // Marshal output tensors from ORT context using metadata outputs.
 // output_index_map maps from metadata output index (= DLL output index) to
 // the ORT kernel context output index.
@@ -205,6 +219,12 @@ TensorData marshal_output_tensors(
     const auto &output_meta = outputs[i];
     data.shapes[i].assign(output_meta.shape().begin(),
                           output_meta.shape().end());
+
+    // Replace negative (dynamic) dims with an upper bound so ORT can allocate.
+    for (auto &d : data.shapes[i]) {
+      if (d < 0)
+        d = kDynamicDimUpperBound;
+    }
 
     int ort_idx = output_index_map[i];
     auto output_tensor = ctx.GetOutput(ort_idx, data.shapes[i]);

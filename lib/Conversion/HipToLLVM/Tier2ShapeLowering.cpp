@@ -16,26 +16,6 @@ namespace mlir {
 namespace hip {
 namespace {
 
-static Value materialiseI64Array(ArrayRef<int64_t> vals, Type i64Type,
-                                  Type ptrType,
-                                  ConversionPatternRewriter &rewriter,
-                                  Location loc) {
-  auto arrayType = LLVM::LLVMArrayType::get(i64Type, vals.size());
-  Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                       rewriter.getI64IntegerAttr(1));
-  Value alloca = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayType, one,
-                                        /*alignment=*/8);
-  for (size_t i = 0; i < vals.size(); ++i) {
-    Value v = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                       rewriter.getI64IntegerAttr(vals[i]));
-    SmallVector<LLVM::GEPArg, 2> indices = {0, static_cast<int32_t>(i)};
-    Value elemPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, arrayType,
-                                        alloca, indices);
-    LLVM::StoreOp::create(rewriter, loc, v, elemPtr);
-  }
-  return alloca;
-}
-
 /// Stack-allocate an array of `ptrType` pointers and store each value.
 static Value materialisePtrArray(ArrayRef<Value> ptrs, Type ptrType,
                                   ConversionPatternRewriter &rewriter,
@@ -96,17 +76,30 @@ struct ReduceMeanLowering : public ConvertOpToLLVMPattern<ReduceMeanOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
     Value dtype = i64Const(dataType);
+    Value innerSize;
+    int64_t innerAxisVal = op.getInnerAxis();
+    if (innerAxisVal >= 0) {
+      int64_t rank = inType.getRank();
+      innerSize = i64Const(1);
+      for (int64_t d = innerAxisVal; d < rank; ++d)
+        innerSize = LLVM::MulOp::create(
+            rewriter, loc, innerSize,
+            getMemRefDimSize(inType, d, adaptor.getData(), rewriter, loc));
+    } else {
+      innerSize = i64Const(op.getInnerSize());
+    }
 
-    // int wrap_reduce_mean(state, in, out, num_in, num_out, data_type)
-    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType, i64Type,
-                                       i64Type, i64Type};
+    // int wrap_reduce_mean(state, in, out, num_in, num_out, data_type,
+    //                      inner_size)
+    SmallVector<Type, 7> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                       i64Type, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapReduceMean, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr, inputPtr, outputPtr, numIn,
-                                  numOut,   dtype};
+    SmallVector<Value, 7> args = {statePtr, inputPtr, outputPtr, numIn,
+                                  numOut,   dtype,    innerSize};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
@@ -133,9 +126,9 @@ struct ConcatLowering : public ConvertOpToLLVMPattern<ConcatOp> {
     Value outPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!outType || !outType.hasStaticShape())
+    if (!outType)
       return rewriter.notifyMatchFailure(
-          op, "hip.concat lowering requires a static-shape output");
+          op, "hip.concat lowering requires a ranked memref output");
 
     int64_t axis = op.getAxis();
     int64_t rank = outType.getRank();
@@ -144,47 +137,53 @@ struct ConcatLowering : public ConvertOpToLLVMPattern<ConcatOp> {
     if (axis < 0 || axis >= rank)
       return rewriter.notifyMatchFailure(op, "hip.concat axis out of range");
 
-    int64_t outer = 1;
+    auto i64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    // Compute outer = product(outDims[0..axis)) from descriptor.
+    Value outerVal = i64Const(1);
     for (int64_t d = 0; d < axis; ++d)
-      outer *= outType.getDimSize(d);
-    int64_t outputInner = 1;
+      outerVal = LLVM::MulOp::create(
+          rewriter, loc, outerVal,
+          getMemRefDimSize(outType, d, adaptor.getOutput(), rewriter, loc));
+
+    // Compute outputInner = product(outDims[axis..rank)) from descriptor.
+    Value outInnerVal = i64Const(1);
     for (int64_t d = axis; d < rank; ++d)
-      outputInner *= outType.getDimSize(d);
+      outInnerVal = LLVM::MulOp::create(
+          rewriter, loc, outInnerVal,
+          getMemRefDimSize(outType, d, adaptor.getOutput(), rewriter, loc));
 
     int64_t elementSize =
         outType.getElementType().getIntOrFloatBitWidth() / 8;
 
     auto convertedInputs = adaptor.getInputs();
     SmallVector<Value> inputPtrs;
-    SmallVector<int64_t> innerSizes;
+    SmallVector<Value> innerSizeValues;
     for (auto [in, val] : llvm::zip(op.getInputs(), convertedInputs)) {
       auto inType = dyn_cast<MemRefType>(in.getType());
-      if (!inType || !inType.hasStaticShape())
+      if (!inType)
         return rewriter.notifyMatchFailure(
-            op, "hip.concat input must have a static shape");
-      int64_t inner = 1;
+            op, "hip.concat input must be a ranked memref");
+      Value inner = i64Const(1);
       for (int64_t d = axis; d < rank; ++d)
-        inner *= inType.getDimSize(d);
-      innerSizes.push_back(inner);
+        inner = LLVM::MulOp::create(
+            rewriter, loc, inner,
+            getMemRefDimSize(inType, d, val, rewriter, loc));
+      innerSizeValues.push_back(inner);
       inputPtrs.push_back(extractMemRefPtr(val, rewriter, loc));
     }
 
-    auto i64Const = [&](int64_t v) {
-      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(v));
-    };
     Value elemSize = i64Const(elementSize);
-    Value outerVal = i64Const(outer);
-    Value outInnerVal = i64Const(outputInner);
     Value numInputs = i64Const(static_cast<int64_t>(inputPtrs.size()));
 
     Value inputsArrPtr =
         materialisePtrArray(inputPtrs, ptrType, rewriter, loc);
     Value innerSizesPtr =
-        materialiseI64Array(innerSizes, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(innerSizeValues, i64Type, ptrType, rewriter, loc);
 
-    // int wrap_concat(state, out, elem_size, outer, output_inner,
-    //                 num_inputs, inputs[], input_inner_sizes[])
     SmallVector<Type, 8> paramTypes = {ptrType, ptrType, i64Type, i64Type,
                                        i64Type, i64Type, ptrType, ptrType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -222,13 +221,10 @@ struct ConstantOfShapeLowering
     Value outPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!outType || !outType.hasStaticShape())
+    if (!outType)
       return rewriter.notifyMatchFailure(
-          op, "hip.constant_of_shape requires a static-shape output");
+          op, "hip.constant_of_shape requires a ranked memref output");
 
-    int64_t numElements = 1;
-    for (int64_t d : outType.getShape())
-      numElements *= d;
     int64_t elementSize =
         outType.getElementType().getIntOrFloatBitWidth() / 8;
 
@@ -236,7 +232,8 @@ struct ConstantOfShapeLowering
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
-    Value numElems = i64Const(numElements);
+    Value numElems = computeNumElements(outType, adaptor.getOutput(),
+                                        rewriter, loc);
     Value elemSize = i64Const(elementSize);
     Value scalarBits = i64Const(static_cast<int64_t>(op.getScalarBits()));
 

@@ -72,23 +72,15 @@ struct PadLowering : public ConvertOpToLLVMPattern<PadOp> {
 
     auto inType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!inType || !outType || !inType.hasStaticShape() ||
-        !outType.hasStaticShape())
+    if (!inType || !outType)
       return rewriter.notifyMatchFailure(
-          op, "hip.pad lowering requires static shapes");
+          op, "hip.pad lowering requires ranked memref operands");
     if (inType.getRank() != outType.getRank())
       return rewriter.notifyMatchFailure(
           op, "hip.pad input/output rank mismatch");
 
     int64_t rank = inType.getRank();
-    SmallVector<int64_t> inShape(inType.getShape().begin(),
-                                 inType.getShape().end());
-    SmallVector<int64_t> outShape(outType.getShape().begin(),
-                                  outType.getShape().end());
-    SmallVector<int64_t> inStrides = computeRowMajorStrides(inShape);
-    SmallVector<int64_t> outStrides = computeRowMajorStrides(outShape);
 
-    // pads_begin / pads_end attributes have rank entries each.
     auto padsBeginAttr = op.getPadsBegin();
     auto padsEndAttr = op.getPadsEnd();
     if ((int64_t)padsBeginAttr.size() != rank ||
@@ -111,6 +103,22 @@ struct PadLowering : public ConvertOpToLLVMPattern<PadOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
 
+    auto inShape = getMemRefShape(inType, adaptor.getInput(), rewriter, loc);
+    auto outShape = getMemRefShape(outType, adaptor.getOutput(), rewriter, loc);
+
+    SmallVector<Value> inStrides(rank);
+    Value acc = i64Const(1);
+    for (int64_t d = rank - 1; d >= 0; --d) {
+      inStrides[d] = acc;
+      acc = LLVM::MulOp::create(rewriter, loc, acc, inShape[d]);
+    }
+    SmallVector<Value> outStrides(rank);
+    acc = i64Const(1);
+    for (int64_t d = rank - 1; d >= 0; --d) {
+      outStrides[d] = acc;
+      acc = LLVM::MulOp::create(rewriter, loc, acc, outShape[d]);
+    }
+
     Value rankConst = i64Const(rank);
     Value padsBeginLen = i64Const(rank);
     Value modeConst = i64Const(op.getMode());
@@ -120,13 +128,13 @@ struct PadLowering : public ConvertOpToLLVMPattern<PadOp> {
         rewriter.getF32FloatAttr(op.getValue().convertToFloat()));
 
     Value inShapePtr =
-        materialiseI64Array(inShape, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(inShape, i64Type, ptrType, rewriter, loc);
     Value inStridesPtr =
-        materialiseI64Array(inStrides, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(inStrides, i64Type, ptrType, rewriter, loc);
     Value outShapePtr =
-        materialiseI64Array(outShape, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(outShape, i64Type, ptrType, rewriter, loc);
     Value outStridesPtr =
-        materialiseI64Array(outStrides, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(outStrides, i64Type, ptrType, rewriter, loc);
     Value padsBeginPtr =
         materialiseI64Array(padsBegin, i64Type, ptrType, rewriter, loc);
 

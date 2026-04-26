@@ -16,42 +16,6 @@ namespace mlir {
 namespace hip {
 namespace {
 
-static SmallVector<int64_t> computeBroadcastStrides(ArrayRef<int64_t> inShape,
-                                                    ArrayRef<int64_t> outShape) {
-  int64_t rank = outShape.size();
-  SmallVector<int64_t> padded(rank, 1);
-  int64_t offset = rank - inShape.size();
-  for (size_t i = 0; i < inShape.size(); ++i)
-    padded[offset + i] = inShape[i];
-  SmallVector<int64_t> strides(rank, 0);
-  int64_t acc = 1;
-  for (int64_t d = rank - 1; d >= 0; --d) {
-    strides[d] = padded[d] == 1 ? 0 : acc;
-    acc *= padded[d];
-  }
-  return strides;
-}
-
-static Value materialiseI64Array(ArrayRef<int64_t> vals, Type i64Type,
-                                  Type ptrType,
-                                  ConversionPatternRewriter &rewriter,
-                                  Location loc) {
-  auto arrayType = LLVM::LLVMArrayType::get(i64Type, vals.size());
-  Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                       rewriter.getI64IntegerAttr(1));
-  Value alloca = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayType, one,
-                                        /*alignment=*/8);
-  for (size_t i = 0; i < vals.size(); ++i) {
-    Value v = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                       rewriter.getI64IntegerAttr(vals[i]));
-    SmallVector<LLVM::GEPArg, 2> indices = {0, static_cast<int32_t>(i)};
-    Value elemPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, arrayType,
-                                        alloca, indices);
-    LLVM::StoreOp::create(rewriter, loc, v, elemPtr);
-  }
-  return alloca;
-}
-
 //===----------------------------------------------------------------------===//
 // hip.compare
 //===----------------------------------------------------------------------===//
@@ -79,47 +43,38 @@ struct CompareLowering : public ConvertOpToLLVMPattern<CompareOp> {
     if (!outType || !lhsType || !rhsType)
       return rewriter.notifyMatchFailure(
           op, "hip.compare lowering requires ranked memrefs");
-    if (!outType.hasStaticShape() || !lhsType.hasStaticShape() ||
-        !rhsType.hasStaticShape())
-      // TODO: handle dynamic shapes by reading sizes from memref descriptors.
-      // For now drop the op so dropUnsupportedOnnxOps can replace it
-      // upstream of bufferize.
-      return rewriter.notifyMatchFailure(
-          op, "hip.compare lowering currently requires static shapes");
 
-    // Use the lhs element type to derive the runtime data type.  And kind
-    // ignores it (kernel always treats inputs as bool/i8) but we still need
-    // to pass *something* sensible.
     int64_t dataType = getHipdnnDataType(lhsType.getElementType());
     if (dataType < 0)
-      dataType = 0; // f32 sentinel; the And kernel doesn't read it.
+      dataType = 0;
 
     int64_t rank = outType.getRank();
-    SmallVector<int64_t> outShape(outType.getShape().begin(),
-                                  outType.getShape().end());
-    SmallVector<int64_t> lhsStrides =
-        computeBroadcastStrides(lhsType.getShape(), outShape);
-    SmallVector<int64_t> rhsStrides =
-        computeBroadcastStrides(rhsType.getShape(), outShape);
 
-    int64_t numElements = 1;
-    for (int64_t d : outShape)
-      numElements *= d;
+    auto outShape = getMemRefShape(outType, adaptor.getOutput(), rewriter, loc);
+    auto lhsShape = getMemRefShape(lhsType, adaptor.getLhs(), rewriter, loc);
+    auto rhsShape = getMemRefShape(rhsType, adaptor.getRhs(), rewriter, loc);
+
+    auto lhsStrides =
+        computeBroadcastStridesSSA(lhsShape, outShape, rewriter, loc);
+    auto rhsStrides =
+        computeBroadcastStridesSSA(rhsShape, outShape, rewriter, loc);
+
+    Value numElems = computeNumElements(outType, adaptor.getOutput(),
+                                        rewriter, loc);
 
     auto i64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
-    Value numElems = i64Const(numElements);
     Value dtype = i64Const(dataType);
     Value kind = i64Const(static_cast<int64_t>(op.getKind()));
     Value rankConst = i64Const(rank);
     Value outShapePtr =
-        materialiseI64Array(outShape, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(outShape, i64Type, ptrType, rewriter, loc);
     Value lhsStridePtr =
-        materialiseI64Array(lhsStrides, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(lhsStrides, i64Type, ptrType, rewriter, loc);
     Value rhsStridePtr =
-        materialiseI64Array(rhsStrides, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(rhsStrides, i64Type, ptrType, rewriter, loc);
 
     SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         i64Type, i64Type, i64Type, i64Type,
@@ -165,43 +120,44 @@ struct WhereLowering : public ConvertOpToLLVMPattern<WhereOp> {
     auto condType = dyn_cast<MemRefType>(op.getCond().getType());
     auto xType = dyn_cast<MemRefType>(op.getX().getType());
     auto yType = dyn_cast<MemRefType>(op.getY().getType());
-    if (!outType || !condType || !xType || !yType ||
-        !outType.hasStaticShape() || !condType.hasStaticShape() ||
-        !xType.hasStaticShape() || !yType.hasStaticShape())
+    if (!outType || !condType || !xType || !yType)
       return rewriter.notifyMatchFailure(
-          op, "hip.where lowering requires static shapes");
+          op, "hip.where lowering requires ranked memrefs");
 
     int64_t rank = outType.getRank();
-    SmallVector<int64_t> outShape(outType.getShape().begin(),
-                                  outType.getShape().end());
-    SmallVector<int64_t> condStrides =
-        computeBroadcastStrides(condType.getShape(), outShape);
-    SmallVector<int64_t> xStrides =
-        computeBroadcastStrides(xType.getShape(), outShape);
-    SmallVector<int64_t> yStrides =
-        computeBroadcastStrides(yType.getShape(), outShape);
-
-    int64_t numElements = 1;
-    for (int64_t d : outShape)
-      numElements *= d;
     int64_t elementSize =
         outType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    auto outShape = getMemRefShape(outType, adaptor.getOutput(), rewriter, loc);
+    auto condShape =
+        getMemRefShape(condType, adaptor.getCond(), rewriter, loc);
+    auto xShape = getMemRefShape(xType, adaptor.getX(), rewriter, loc);
+    auto yShape = getMemRefShape(yType, adaptor.getY(), rewriter, loc);
+
+    auto condStrides =
+        computeBroadcastStridesSSA(condShape, outShape, rewriter, loc);
+    auto xStrides =
+        computeBroadcastStridesSSA(xShape, outShape, rewriter, loc);
+    auto yStrides =
+        computeBroadcastStridesSSA(yShape, outShape, rewriter, loc);
+
+    Value numElems = computeNumElements(outType, adaptor.getOutput(),
+                                        rewriter, loc);
 
     auto i64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
-    Value numElems = i64Const(numElements);
     Value elemSize = i64Const(elementSize);
     Value rankConst = i64Const(rank);
     Value outShapePtr =
-        materialiseI64Array(outShape, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(outShape, i64Type, ptrType, rewriter, loc);
     Value condStridePtr =
-        materialiseI64Array(condStrides, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(condStrides, i64Type, ptrType, rewriter, loc);
     Value xStridePtr =
-        materialiseI64Array(xStrides, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(xStrides, i64Type, ptrType, rewriter, loc);
     Value yStridePtr =
-        materialiseI64Array(yStrides, i64Type, ptrType, rewriter, loc);
+        materialiseValueArray(yStrides, i64Type, ptrType, rewriter, loc);
 
     SmallVector<Type, 12> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         ptrType, i64Type, i64Type, i64Type,
@@ -247,10 +203,9 @@ struct LayerNormLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
 
     auto inType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outType = dyn_cast<MemRefType>(op.getOutput().getType());
-    if (!inType || !outType || !inType.hasStaticShape() ||
-        !outType.hasStaticShape())
+    if (!inType || !outType)
       return rewriter.notifyMatchFailure(
-          op, "hip.layer_norm lowering requires static shapes");
+          op, "hip.layer_norm lowering requires ranked memrefs");
 
     int64_t rank = inType.getRank();
     int64_t axis = op.getAxis();
@@ -258,13 +213,6 @@ struct LayerNormLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
       axis += rank;
     if (axis < 0 || axis >= rank)
       return rewriter.notifyMatchFailure(op, "hip.layer_norm axis out of range");
-
-    int64_t outer = 1;
-    for (int64_t d = 0; d < axis; ++d)
-      outer *= inType.getDimSize(d);
-    int64_t normSize = 1;
-    for (int64_t d = axis; d < rank; ++d)
-      normSize *= inType.getDimSize(d);
 
     int64_t dataType = getHipdnnDataType(outType.getElementType());
     if (dataType < 0)
@@ -280,8 +228,18 @@ struct LayerNormLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
                                       rewriter.getF64FloatAttr(v));
     };
 
-    Value outerVal = i64Const(outer);
-    Value normVal = i64Const(normSize);
+    // Compute outer = product of dims [0, axis) and normSize = product of
+    // dims [axis, rank).  Uses runtime dim queries for dynamic dimensions.
+    Value outerVal = i64Const(1);
+    for (int64_t d = 0; d < axis; ++d)
+      outerVal = LLVM::MulOp::create(
+          rewriter, loc, outerVal,
+          getMemRefDimSize(inType, d, adaptor.getInput(), rewriter, loc));
+    Value normVal = i64Const(1);
+    for (int64_t d = axis; d < rank; ++d)
+      normVal = LLVM::MulOp::create(
+          rewriter, loc, normVal,
+          getMemRefDimSize(inType, d, adaptor.getInput(), rewriter, loc));
     Value epsVal = f64Const(op.getEpsilon().convertToDouble());
     Value dtypeVal = i64Const(dataType);
 

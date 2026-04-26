@@ -133,20 +133,31 @@ struct ReduceMeanToHip : public RewritePattern {
       if (ax < 0)
         ax += inRank;
 
-    // Verify axes form a contiguous tail.
-    llvm::SmallSet<int64_t, 8> axesSet(axes.begin(), axes.end());
-    int64_t firstReduced = inRank - static_cast<int64_t>(axes.size());
-    for (int64_t i = firstReduced; i < inRank; ++i) {
-      if (!axesSet.count(i))
+    llvm::sort(axes);
+    for (size_t i = 1; i < axes.size(); ++i) {
+      if (axes[i] != axes[i - 1] + 1)
         return rewriter.notifyMatchFailure(
-            op, "onnx.ReduceMean lowering requires axes to form the "
-                "innermost tail of the input shape");
+            op, "onnx.ReduceMean lowering requires axes to form a "
+                "contiguous range");
+    }
+
+    int64_t lastReduced = axes.back();
+    int64_t innerAxis = lastReduced + 1;
+    bool trailingDynamic = false;
+    int64_t innerSize = 1;
+    for (int64_t i = innerAxis; i < inRank; ++i) {
+      if (inputType.isDynamicDim(i))
+        trailingDynamic = true;
+      else
+        innerSize *= inputType.getDimSize(i);
     }
 
     Location loc = op->getLoc();
     Value init = createEmptyTensor(rewriter, loc, resultType, input);
-    auto hipOp = ReduceMeanOp::create(rewriter, loc, resultType, context,
-                                       input, init);
+    auto hipOp = ReduceMeanOp::create(
+        rewriter, loc, resultType, context, input, init,
+        rewriter.getI64IntegerAttr(trailingDynamic ? 1 : innerSize),
+        rewriter.getI64IntegerAttr(trailingDynamic ? innerAxis : -1));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return success();
   }
@@ -303,16 +314,30 @@ struct ConstantOfShapeToHip : public RewritePattern {
     Value context = *ctxOrFailure;
 
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-    if (!resultType || !resultType.hasStaticShape())
+    if (!resultType)
       return rewriter.notifyMatchFailure(
-          op, "onnx.ConstantOfShape requires a static-shape output");
+          op, "onnx.ConstantOfShape requires a ranked tensor output");
 
     uint64_t bits = packScalarBits(resultType.getElementType(),
                                    op->getAttr("value"));
 
     Location loc = op->getLoc();
-    Value init =
-        createEmptyTensor(rewriter, loc, resultType, op->getOperand(0));
+    Value shapeInput = op->getOperand(0);
+    SmallVector<Value> dynSizes;
+    for (int64_t d = 0; d < resultType.getRank(); ++d) {
+      if (resultType.isDynamicDim(d)) {
+        Value idx = mlir::arith::ConstantIndexOp::create(rewriter, loc, d);
+        Value dimI64 =
+            mlir::tensor::ExtractOp::create(rewriter, loc, shapeInput,
+                                            ValueRange{idx});
+        Value dimIdx = mlir::arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(), dimI64);
+        dynSizes.push_back(dimIdx);
+      }
+    }
+    Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, resultType.getShape(), resultType.getElementType(),
+        dynSizes);
     auto hipOp = ConstantOfShapeOp::create(
         rewriter, loc, resultType, context, init,
         rewriter.getI64IntegerAttr(static_cast<int64_t>(bits)));

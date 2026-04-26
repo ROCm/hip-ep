@@ -48,6 +48,7 @@ extern "C" {
 #define HIPDNN_EP_TENSOR_OP_ADD 1 // element-wise add
 #define HIPDNN_EP_TENSOR_OP_MIN 2 // element-wise min
 #define HIPDNN_EP_TENSOR_OP_MAX 3 // element-wise max
+#define HIPDNN_EP_TENSOR_OP_SUB 4 // element-wise subtract
 
 static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   switch (op) {
@@ -59,6 +60,8 @@ static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
     return "min";
   case HIPDNN_EP_TENSOR_OP_MAX:
     return "max";
+  case HIPDNN_EP_TENSOR_OP_SUB:
+    return "sub";
   default:
     return "unknown";
   }
@@ -192,6 +195,9 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // Returns: GPU base pointer of pool (NULL if pool not initialized)
 // Used by hip.get_pool lowering in generated compute kernels
 void *hipdnn_ep_get_pool_base(RuntimeState *state);
+
+void *hip_device_malloc(size_t size_bytes);
+void hip_device_free(void *ptr);
 
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);

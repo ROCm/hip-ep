@@ -8,6 +8,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -48,6 +49,8 @@ extern "C" int wrap_layer_norm(RuntimeState *state, void *x, void *gamma,
       hipdnn_ep_datatype_name(data_type), (long long)outer,
       (long long)norm_size, epsilon);
 
-  return hip_layer_norm(stream, x, gamma, beta, y, outer, norm_size,
-                        static_cast<float>(epsilon), hip_dtype);
+  int rc = hip_layer_norm(stream, x, gamma, beta, y, outer, norm_size,
+                          static_cast<float>(epsilon), hip_dtype);
+  nan_trace_check("layer_norm", y, outer * norm_size);
+  return rc;
 }

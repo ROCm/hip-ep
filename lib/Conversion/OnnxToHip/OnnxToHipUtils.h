@@ -42,6 +42,44 @@ namespace hip {
 // Helpers
 //===----------------------------------------------------------------------===//
 
+/// Pull a 1-D int64 constant tensor from a Value.  Accepts onnx.Constant,
+/// arith.constant, and bufferization.to_tensor with hip.inline_value.
+inline FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
+  if (!v)
+    return failure();
+  Operation *def = v.getDefiningOp();
+  if (!def)
+    return failure();
+  ElementsAttr valueAttr;
+  StringRef name = def->getName().getStringRef();
+  if (name == "onnx.Constant") {
+    valueAttr = def->getAttrOfType<ElementsAttr>("value");
+  } else if (auto a = dyn_cast<arith::ConstantOp>(def)) {
+    valueAttr = dyn_cast<ElementsAttr>(a.getValue());
+  } else if (auto toT = dyn_cast<bufferization::ToTensorOp>(def)) {
+    valueAttr = toT->getAttrOfType<ElementsAttr>("hip.inline_value");
+  } else {
+    return failure();
+  }
+  if (!valueAttr)
+    return failure();
+  auto dense = dyn_cast<DenseElementsAttr>(valueAttr);
+  if (!dense)
+    return failure();
+  Type elem = dense.getElementType();
+  SmallVector<int64_t> out;
+  if (elem.isInteger(64)) {
+    for (int64_t val : dense.getValues<int64_t>())
+      out.push_back(val);
+  } else if (elem.isInteger(32)) {
+    for (int32_t val : dense.getValues<int32_t>())
+      out.push_back(static_cast<int64_t>(val));
+  } else {
+    return failure();
+  }
+  return out;
+}
+
 /// Sanitize an arbitrary string (typically an ONNX node name) into a valid
 /// MLIR bare identifier fragment.  Non-alphanumeric characters are replaced
 /// with '_', consecutive underscores are collapsed, and leading/trailing

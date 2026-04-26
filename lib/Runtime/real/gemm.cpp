@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -388,28 +389,29 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
   }
 
   // If MIOpen broadcast failed, add bias manually after matmul.
-  if (manualBias && C && beta != 0.0f) {
-    // C is [cDim0, cDim1], broadcastable to [M, N].
-    // Common case: cDim0=1, cDim1=N -> repeat row M times.
-    // Use hip_add_bias from custom kernels if cDim0==1.
-    void *ws = hipdnn_ep_state_get_workspace(state);
-    if (cDim0 == 1 && cDim1 == N && typeCode == kTypeFloat32) {
-      // Scale C by beta, then add to each row of output
-      // Simple: for each row i, output[i*N+j] += beta * C[j]
-      // Use hipMemcpy + host loop for correctness
-      hipDeviceSynchronize();
-      (void)hipGetLastError();
-      std::vector<float> h_out(M * N), h_c(N);
-      hipMemcpy(h_out.data(), output, M * N * sizeof(float),
-                hipMemcpyDeviceToHost);
-      hipMemcpy(h_c.data(), C, N * sizeof(float), hipMemcpyDeviceToHost);
-      for (int64_t i = 0; i < M; ++i)
-        for (int64_t j = 0; j < N; ++j)
-          h_out[i * N + j] += beta * h_c[j];
-      hipMemcpy(output, h_out.data(), M * N * sizeof(float),
-                hipMemcpyHostToDevice);
+  if (manualBias && C && beta != 0.0f && typeCode == kTypeFloat32) {
+    hipDeviceSynchronize();
+    (void)hipGetLastError();
+    std::vector<float> h_out(M * N);
+    hipMemcpy(h_out.data(), output, M * N * sizeof(float),
+              hipMemcpyDeviceToHost);
+
+    int64_t c_total = cDim0 * cDim1;
+    std::vector<float> h_c(c_total);
+    hipMemcpy(h_c.data(), C, c_total * sizeof(float), hipMemcpyDeviceToHost);
+
+    for (int64_t i = 0; i < M; ++i) {
+      int64_t ci = (cDim0 == 1) ? 0 : i;
+      for (int64_t j = 0; j < N; ++j) {
+        int64_t cj = (cDim1 == 1) ? 0 : j;
+        h_out[i * N + j] += beta * h_c[ci * cDim1 + cj];
+      }
     }
+    hipMemcpy(output, h_out.data(), M * N * sizeof(float),
+              hipMemcpyHostToDevice);
   }
+
+  nan_trace_check("gemm", output, M * N);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: completed successfully\n");
 

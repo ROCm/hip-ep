@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -42,6 +43,7 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
         (long long)total_bytes);
     HIP_CHECK(hipMemcpyAsync(output, data, total_bytes, hipMemcpyDeviceToDevice,
                              static_cast<hipStream_t>(stream)));
+    nan_trace_check("reduce_sum", output, output_num_elements);
     return 0;
   }
 
@@ -66,6 +68,9 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
       (long long)axes_num_elements, (long long)element_size_bytes,
       (long long)keepdims, (long long)noop_with_empty_axes, hip_dtype);
 
-  return hip_reduce_sum(stream, data, output, data_num_elements,
-                        output_num_elements, hip_dtype);
+  int rc = hip_reduce_sum(stream, data, output, data_num_elements,
+                          output_num_elements, hip_dtype);
+  if (rc == 0)
+    nan_trace_check("reduce_sum", output, output_num_elements);
+  return rc;
 }

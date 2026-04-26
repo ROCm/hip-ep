@@ -39,6 +39,8 @@ __device__ __forceinline__ float apply(float a, float b) {
         return a * b;
     else if constexpr (Kind == HIP_BINARY_ADD)
         return a + b;
+    else if constexpr (Kind == HIP_BINARY_SUB)
+        return a - b;
     else
         return a;
 }
@@ -191,6 +193,10 @@ extern "C" int hip_elementwise_binary(void *stream, const void *lhs,
         break;
     case HIP_BINARY_ADD:
         rc = launch_binary<HIP_BINARY_ADD>(hip_stream, lhs, rhs, out,
+                                           num_elements, hip_dtype, desc);
+        break;
+    case HIP_BINARY_SUB:
+        rc = launch_binary<HIP_BINARY_SUB>(hip_stream, lhs, rhs, out,
                                            num_elements, hip_dtype, desc);
         break;
     default:

@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
+#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -222,8 +223,9 @@ extern "C" int wrap_miopenConvolutionBackwardData(
   }
   algo = perf_results[0].bwd_data_algo;
 
-  MIOPEN_CHECK(miopenConvolutionBackwardDataGetWorkSpaceSize(
-      miopen_handle, dy_desc, w_desc, conv_desc, dx_desc, &workspace_size));
+  // Use workspace size from the selected algorithm rather than the API
+  // query, which can return 0 when the algorithm actually needs workspace.
+  workspace_size = perf_results[0].memory;
 
   workspace = find_workspace;
   if (workspace_size > find_workspace_size) {
@@ -248,6 +250,8 @@ extern "C" int wrap_miopenConvolutionBackwardData(
                                 dx_desc, output, &alpha_b, bias_desc, bias,
                                 &beta_c, dx_desc, output));
   }
+
+  nan_trace_check("conv_transpose", output, input_n * output_c * output_h * output_w);
 
 cleanup:
   if (workspace && workspace != find_workspace)

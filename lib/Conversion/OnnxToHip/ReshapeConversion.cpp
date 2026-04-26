@@ -262,60 +262,218 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 
       auto reassocOpt =
           mlir::getReassociationIndicesForReshape(inputType, outputType);
-      if (!reassocOpt)
-        return rewriter.notifyMatchFailure(
-            op, "cannot compute reshape reassociation");
-
-      if (outputRank > inputRank) {
-        // Expand: use shared helper to build output shape
-        auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
-                                                       outputType, *reassocOpt);
-        auto expandOp = mlir::tensor::ExpandShapeOp::create(
-            rewriter, loc, outputType, data, *reassocOpt, outputShape);
-        rewriter.replaceOp(op, expandOp.getResult());
+      if (!reassocOpt) {
+        // Fall through to tensor.reshape fallback below.
       } else {
-        // Collapse: no dynamic shape computation needed
-        auto collapseOp = mlir::tensor::CollapseShapeOp::create(
-            rewriter, loc, outputType, data, *reassocOpt);
-        rewriter.replaceOp(op, collapseOp.getResult());
+        if (outputRank > inputRank) {
+          auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
+                                                         outputType, *reassocOpt);
+          auto expandOp = mlir::tensor::ExpandShapeOp::create(
+              rewriter, loc, outputType, data, *reassocOpt, outputShape);
+          rewriter.replaceOp(op, expandOp.getResult());
+        } else {
+          auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+              rewriter, loc, outputType, data, *reassocOpt);
+          rewriter.replaceOp(op, collapseOp.getResult());
+        }
+        return mlir::success();
       }
-      return mlir::success();
     }
 
     // Same rank, different shape: collapse to 1-D then expand.
-    if (!inputType.hasStaticShape() || !outputType.hasStaticShape())
+    if (outputRank == inputRank &&
+        (!inputType.hasStaticShape() || !outputType.hasStaticShape())) {
+      // Dynamic same-rank reshape: fall through to tensor.reshape below.
+    } else if (outputRank == inputRank) {
+      int64_t numElems = inputType.getNumElements();
+      if (numElems != outputType.getNumElements())
+        return rewriter.notifyMatchFailure(op, "element count mismatch");
+
+      auto flatType =
+          mlir::RankedTensorType::get({numElems}, inputType.getElementType());
+
+      mlir::ReassociationIndices allInputDims;
+      for (int64_t i : llvm::seq<int64_t>(inputRank))
+        allInputDims.push_back(i);
+      llvm::SmallVector<mlir::ReassociationIndices> collapseReassoc = {
+          allInputDims};
+      auto collapsed = mlir::tensor::CollapseShapeOp::create(
+          rewriter, loc, flatType, data, collapseReassoc);
+
+      mlir::ReassociationIndices allOutputDims;
+      for (int64_t i : llvm::seq<int64_t>(outputRank))
+        allOutputDims.push_back(i);
+      llvm::SmallVector<mlir::ReassociationIndices> expandReassoc = {
+          allOutputDims};
+      llvm::SmallVector<mlir::OpFoldResult> flatOutputShape;
+      for (int64_t i : llvm::seq<int64_t>(outputRank))
+        flatOutputShape.push_back(
+            rewriter.getIndexAttr(outputType.getDimSize(i)));
+      auto expanded = mlir::tensor::ExpandShapeOp::create(
+          rewriter, loc, outputType, collapsed.getResult(), expandReassoc,
+          flatOutputShape);
+
+      rewriter.replaceOp(op, expanded.getResult());
+      return mlir::success();
+    }
+
+    // Fallback: use tensor.reshape with the ONNX shape operand (operand 1).
+    // This handles dynamic same-rank reshapes and rank-changing reshapes
+    // where getReassociationIndicesForReshape cannot determine the mapping.
+    if (op->getNumOperands() < 2)
+      return rewriter.notifyMatchFailure(op, "Reshape missing shape operand");
+    mlir::Value shapeOp = op->getOperand(1);
+    auto shapeTy = mlir::dyn_cast<mlir::RankedTensorType>(shapeOp.getType());
+    if (!shapeTy || shapeTy.getRank() != 1)
+      return rewriter.notifyMatchFailure(op, "shape operand is not a 1-D tensor");
+
+    // tensor.reshape requires the shape tensor to have a static size
+    // equal to the output rank.
+    if (shapeTy.isDynamicDim(0) || shapeTy.getDimSize(0) != outputRank) {
       return rewriter.notifyMatchFailure(
-          op, "same-rank dynamic reshape not supported");
+          op, "shape tensor size doesn't match output rank");
+    }
 
-    int64_t numElems = inputType.getNumElements();
-    if (numElems != outputType.getNumElements())
-      return rewriter.notifyMatchFailure(op, "element count mismatch");
+    // ONNX Reshape uses -1 to mean "infer this dim from total element count".
+    // tensor.reshape does NOT support -1; resolve it here.
+    // If the shape is a constant, resolve -1 at compile time; otherwise build
+    // runtime arithmetic to compute the inferred dimension.
+    // Resolve ONNX's -1 ("infer") and 0 ("copy from input") semantics.
+    // tensor.reshape does NOT support -1; we must resolve it before lowering.
+    mlir::Type i64Ty = rewriter.getI64Type();
 
-    auto flatType =
-        mlir::RankedTensorType::get({numElems}, inputType.getElementType());
+    auto shapeConst = extractI64Constant(shapeOp);
+    if (succeeded(shapeConst)) {
+      // Compile-time constant shape: resolve -1 and 0 statically where
+      // possible (more efficient than the fully-dynamic path).
+      auto &shapeVals = *shapeConst;
+      int64_t negOneIdx = -1;
+      bool hasZero = false;
+      for (int64_t i = 0; i < (int64_t)shapeVals.size(); ++i) {
+        if (shapeVals[i] == -1)
+          negOneIdx = i;
+        if (shapeVals[i] == 0)
+          hasZero = true;
+      }
+      if (negOneIdx >= 0 || hasZero) {
+        mlir::Value total = mlir::arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(1));
+        for (int64_t d = 0; d < inputRank; ++d) {
+          mlir::Value dim =
+              mlir::tensor::DimOp::create(rewriter, loc, data, d);
+          mlir::Value dimI64 =
+              mlir::arith::IndexCastOp::create(rewriter, loc, i64Ty, dim);
+          total = mlir::arith::MulIOp::create(rewriter, loc, total, dimI64);
+        }
 
-    mlir::ReassociationIndices allInputDims;
-    for (int64_t i : llvm::seq<int64_t>(inputRank))
-      allInputDims.push_back(i);
-    llvm::SmallVector<mlir::ReassociationIndices> collapseReassoc = {
-        allInputDims};
-    auto collapsed = mlir::tensor::CollapseShapeOp::create(
-        rewriter, loc, flatType, data, collapseReassoc);
+        int64_t knownProduct = 1;
+        for (int64_t i = 0; i < (int64_t)shapeVals.size(); ++i) {
+          if (shapeVals[i] > 0)
+            knownProduct *= shapeVals[i];
+        }
+        mlir::Value knownVal = mlir::arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(knownProduct));
+        mlir::Value inferred =
+            mlir::arith::DivSIOp::create(rewriter, loc, total, knownVal);
 
-    mlir::ReassociationIndices allOutputDims;
-    for (int64_t i : llvm::seq<int64_t>(outputRank))
-      allOutputDims.push_back(i);
-    llvm::SmallVector<mlir::ReassociationIndices> expandReassoc = {
-        allOutputDims};
-    llvm::SmallVector<mlir::OpFoldResult> flatOutputShape;
-    for (int64_t i : llvm::seq<int64_t>(outputRank))
-      flatOutputShape.push_back(
-          rewriter.getIndexAttr(outputType.getDimSize(i)));
-    auto expanded = mlir::tensor::ExpandShapeOp::create(
-        rewriter, loc, outputType, collapsed.getResult(), expandReassoc,
-        flatOutputShape);
+        llvm::SmallVector<mlir::Value> dimVals;
+        for (int64_t i = 0; i < (int64_t)shapeVals.size(); ++i) {
+          if (shapeVals[i] == -1) {
+            dimVals.push_back(inferred);
+          } else if (shapeVals[i] == 0 && i < inputRank) {
+            mlir::Value dim =
+                mlir::tensor::DimOp::create(rewriter, loc, data, i);
+            dimVals.push_back(
+                mlir::arith::IndexCastOp::create(rewriter, loc, i64Ty, dim));
+          } else {
+            dimVals.push_back(mlir::arith::ConstantOp::create(
+                rewriter, loc, rewriter.getI64IntegerAttr(shapeVals[i])));
+          }
+        }
 
-    rewriter.replaceOp(op, expanded.getResult());
+        auto newShapeTy = mlir::RankedTensorType::get({outputRank}, i64Ty);
+        shapeOp = mlir::tensor::FromElementsOp::create(
+                       rewriter, loc, newShapeTy, dimVals)
+                       .getResult();
+      }
+    } else {
+      // Dynamic shape (e.g. from Concat, Gather, etc.).  Resolve -1 and 0
+      // at runtime using select ops.  The output rank is known at compile
+      // time so we can fully unroll.
+      mlir::Value negOneConst = mlir::arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI64IntegerAttr(-1));
+      mlir::Value oneConst = mlir::arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI64IntegerAttr(1));
+      mlir::Value zeroConst = mlir::arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI64IntegerAttr(0));
+
+      // total = product of all input dims
+      mlir::Value total = oneConst;
+      for (int64_t d = 0; d < inputRank; ++d) {
+        mlir::Value dim =
+            mlir::tensor::DimOp::create(rewriter, loc, data, d);
+        mlir::Value dimI64 =
+            mlir::arith::IndexCastOp::create(rewriter, loc, i64Ty, dim);
+        total = mlir::arith::MulIOp::create(rewriter, loc, total, dimI64);
+      }
+
+      // Extract each element, resolve 0 → input dim
+      llvm::SmallVector<mlir::Value> rawVals, resolvedVals;
+      for (int64_t i = 0; i < outputRank; ++i) {
+        mlir::Value idx =
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
+        mlir::Value val = mlir::tensor::ExtractOp::create(
+            rewriter, loc, shapeOp, mlir::ValueRange{idx});
+        rawVals.push_back(val);
+
+        if (i < inputRank) {
+          mlir::Value isZero = mlir::arith::CmpIOp::create(
+              rewriter, loc, mlir::arith::CmpIPredicate::eq, val, zeroConst);
+          mlir::Value inputDim =
+              mlir::tensor::DimOp::create(rewriter, loc, data, i);
+          mlir::Value inputDimI64 = mlir::arith::IndexCastOp::create(
+              rewriter, loc, i64Ty, inputDim);
+          val = mlir::arith::SelectOp::create(rewriter, loc, isZero,
+                                              inputDimI64, val);
+        }
+        resolvedVals.push_back(val);
+      }
+
+      // known_product = product of all non-(-1) dims (treat -1 as 1)
+      mlir::Value knownProduct = oneConst;
+      for (int64_t i = 0; i < outputRank; ++i) {
+        mlir::Value isNeg = mlir::arith::CmpIOp::create(
+            rewriter, loc, mlir::arith::CmpIPredicate::eq, rawVals[i],
+            negOneConst);
+        mlir::Value dimOrOne = mlir::arith::SelectOp::create(
+            rewriter, loc, isNeg, oneConst, resolvedVals[i]);
+        knownProduct =
+            mlir::arith::MulIOp::create(rewriter, loc, knownProduct, dimOrOne);
+      }
+
+      // inferred = total / known_product
+      mlir::Value inferred =
+          mlir::arith::DivSIOp::create(rewriter, loc, total, knownProduct);
+
+      // Build final shape: replace -1 with inferred
+      llvm::SmallVector<mlir::Value> finalVals;
+      for (int64_t i = 0; i < outputRank; ++i) {
+        mlir::Value isNeg = mlir::arith::CmpIOp::create(
+            rewriter, loc, mlir::arith::CmpIPredicate::eq, rawVals[i],
+            negOneConst);
+        finalVals.push_back(mlir::arith::SelectOp::create(
+            rewriter, loc, isNeg, inferred, resolvedVals[i]));
+      }
+
+      auto newShapeTy = mlir::RankedTensorType::get({outputRank}, i64Ty);
+      shapeOp = mlir::tensor::FromElementsOp::create(
+                     rewriter, loc, newShapeTy, finalVals)
+                     .getResult();
+    }
+
+    auto reshapeOp = mlir::tensor::ReshapeOp::create(
+        rewriter, loc, outputType, data, shapeOp);
+    rewriter.replaceOp(op, reshapeOp.getResult());
     return mlir::success();
   }
 };
