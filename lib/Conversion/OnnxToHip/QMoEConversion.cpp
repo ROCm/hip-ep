@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -75,6 +77,8 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value fc1ZeroPoints = getOptionalInput(11);
   mlir::Value fc2ZeroPoints = getOptionalInput(12);
   mlir::Value fc3ZeroPoints = getOptionalInput(13);
+  mlir::Value routerWeights =
+      getOptionalInput(14); // ONNX v1.25+ router_weights
 
   auto expertWeightBitsIntAttr =
       op->getAttrOfType<mlir::IntegerAttr>("expert_weight_bits");
@@ -104,15 +108,20 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
 
   auto alphaFloatAttr = op->getAttrOfType<mlir::FloatAttr>("activation_alpha");
   auto activationAlphaAttr =
-      alphaFloatAttr ? alphaFloatAttr : rewriter.getF32FloatAttr(0.0f);
+      alphaFloatAttr ? alphaFloatAttr
+                     : rewriter.getF32FloatAttr(1.0f); // ONNX spec default: 1.0
 
   auto betaFloatAttr = op->getAttrOfType<mlir::FloatAttr>("activation_beta");
   auto activationBetaAttr =
       betaFloatAttr ? betaFloatAttr : rewriter.getF32FloatAttr(0.0f);
 
   auto limitFloatAttr = op->getAttrOfType<mlir::FloatAttr>("swiglu_limit");
+  // ONNX spec: "It is infinite when limit is not provided"
+  // Match ONNX Runtime: std::numeric_limits<float>::infinity()
   auto swigluLimitAttr =
-      limitFloatAttr ? limitFloatAttr : rewriter.getF32FloatAttr(0.0f);
+      limitFloatAttr
+          ? limitFloatAttr
+          : rewriter.getF32FloatAttr(std::numeric_limits<float>::infinity());
 
   auto activationTypeStrAttr =
       op->getAttrOfType<mlir::StringAttr>("activation_type");
@@ -127,9 +136,10 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
       rewriter, loc, mlir::TypeRange{rt}, context, input, routerProbs,
       fc1Weights, fc1Scales, fc2Weights, fc2Scales, fc1Bias, fc2Bias,
       fc3Weights, fc3Scales, fc3Bias, fc1ZeroPoints, fc2ZeroPoints,
-      fc3ZeroPoints, init, expertWeightBitsAttr, kAttr, blockSizeAttr,
-      normalizeAttr, swigluFusionAttr, useSparseAttr, activationAlphaAttr,
-      activationBetaAttr, swigluLimitAttr, activationTypeAttr);
+      fc3ZeroPoints, routerWeights, init, expertWeightBitsAttr, kAttr,
+      blockSizeAttr, normalizeAttr, swigluFusionAttr, useSparseAttr,
+      activationAlphaAttr, activationBetaAttr, swigluLimitAttr,
+      activationTypeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
