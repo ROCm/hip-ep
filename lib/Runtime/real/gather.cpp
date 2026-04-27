@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -17,6 +18,7 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
     RUNTIME_DEBUG_LOG("[REAL] wrap_gather: null argument\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   void *stream = hipdnn_ep_state_get_stream(state);
 

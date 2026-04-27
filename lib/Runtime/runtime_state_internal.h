@@ -61,6 +61,20 @@ struct RuntimeState {
   // cleaned up here)
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
+
+  // Per-inference I/O cache for `past_present_share_buffer` optimization.
+  // Opaque `IoCache*` (defined in hipdnn_ep_runtime_tensor.cpp). When the same
+  // host pointer is passed as both an input (e.g. past_key) and an output
+  // (e.g. present_key) of the same inference, the EP skips the H2D/D2H round
+  // trip and keeps the tensor resident on GPU across calls. Saves several
+  // GiB per decode step on large-context models with `past_present_share_buffer=true`.
+  void *io_cache;
 };
+
+// Internal helper: destroy the io_cache attached to `state` (releases any
+// persistent GPU buffers it owns, back to the shared GPU buffer pool). Safe
+// to call when `state->io_cache` is null.
+// Defined in hipdnn_ep_runtime_tensor.cpp.
+void hipdnn_ep_io_cache_destroy(RuntimeState *state);
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

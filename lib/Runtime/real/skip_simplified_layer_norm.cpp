@@ -8,6 +8,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
@@ -173,6 +174,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
             "wrap_skip_simplified_layer_norm: null required argument\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));

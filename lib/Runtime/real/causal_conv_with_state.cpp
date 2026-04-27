@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "runtime_types.h"
 
 #include <cassert>
@@ -45,6 +46,7 @@ int wrap_causal_conv_with_state(
     fprintf(stderr, "wrap_causal_conv_with_state: null required argument\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_causal_conv_with_state: batch=%lld, "
                     "channels=%lld, seq_len=%lld, kernel=%lld, ndim=%lld, "

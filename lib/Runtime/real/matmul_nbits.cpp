@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 
@@ -20,6 +21,7 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
     fprintf(stderr, "wrap_matmul_nbits: null argument\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_matmul_nbits(M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, bits=%lld, block_size=%lld, elem_size=%lld, "

@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -318,6 +319,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   hipblasLtHandle_t handle =
       static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
