@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # ONNX Model Splitter
 
 A set of tools for splitting ONNX models into submodels for performance testing
