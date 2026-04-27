@@ -9,8 +9,6 @@
 
 #include <cassert>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -31,11 +29,6 @@ static int64_t getNumElements(const DynamicMemRefType<char> &m) {
   for (int64_t d = 0; d < m.rank; ++d)
     elems *= m.sizes[d];
   return elems;
-}
-
-static bool memrefCopyTraceEnabled() {
-  const char *v = std::getenv("HIPDNN_MEMREFCOPY_TRACE");
-  return v && v[0] != '\0' && v[0] != '0';
 }
 
 static bool copyBytes(void *dst, const void *src, size_t bytes) {
@@ -97,12 +90,7 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefType<char> *srcArg,
                            UnrankedMemRefType<char> *dstArg) {
   DynamicMemRefType<char> src(*srcArg);
   DynamicMemRefType<char> dst(*dstArg);
-  uint64_t copyCalls = 0;
-  uint64_t hipMemcpyCalls = 0;
-  uint64_t memcpyFallbackCalls = 0;
-  size_t copiedBytes = 0;
   uint64_t pendingAsyncCopies = 0;
-  uint64_t submittedAsyncCopies = 0;
 
   auto flushAsyncCopies = [&]() {
     if (pendingAsyncCopies == 0)
@@ -112,38 +100,24 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefType<char> *srcArg,
   };
 
   auto countedCopy = [&](char *dstPtr, const char *srcPtr, size_t bytes) {
-    ++copyCalls;
-    copiedBytes += bytes;
     if (copyBytesAsync(dstPtr, srcPtr, bytes)) {
-      ++hipMemcpyCalls;
       ++pendingAsyncCopies;
-      ++submittedAsyncCopies;
       return;
     }
     (void)hipGetLastError();
-    if (copyBytes(dstPtr, srcPtr, bytes))
-      ++hipMemcpyCalls;
-    else
-      ++memcpyFallbackCalls;
+    (void)copyBytes(dstPtr, srcPtr, bytes);
   };
   auto countedCopy2D = [&](char *dstPtr, size_t dstPitchBytes,
                            const char *srcPtr, size_t srcPitchBytes,
                            size_t widthBytes, size_t height) {
-    ++copyCalls;
-    copiedBytes += widthBytes * height;
     if (copyBytes2DAsync(dstPtr, dstPitchBytes, srcPtr, srcPitchBytes,
                          widthBytes, height)) {
-      ++hipMemcpyCalls;
       ++pendingAsyncCopies;
-      ++submittedAsyncCopies;
       return;
     }
     (void)hipGetLastError();
-    if (copyBytes2D(dstPtr, dstPitchBytes, srcPtr, srcPitchBytes, widthBytes,
-                    height))
-      ++hipMemcpyCalls;
-    else
-      ++memcpyFallbackCalls;
+    (void)copyBytes2D(dstPtr, dstPitchBytes, srcPtr, srcPitchBytes, widthBytes,
+                      height);
   };
 
   assert(src.rank == dst.rank && "rank mismatch in memrefCopy");
@@ -161,15 +135,6 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefType<char> *srcArg,
                 src.data + src.offset * elemSize,
                 static_cast<size_t>(elemSize));
     flushAsyncCopies();
-    if (memrefCopyTraceEnabled())
-      std::fprintf(stderr,
-                   "[memrefCopy] calls=%llu hip=%llu memcpy=%llu bytes=%zu "
-                   "mode=rank0 async=%llu\n",
-                   static_cast<unsigned long long>(copyCalls),
-                   static_cast<unsigned long long>(hipMemcpyCalls),
-                   static_cast<unsigned long long>(memcpyFallbackCalls),
-                   copiedBytes,
-                   static_cast<unsigned long long>(submittedAsyncCopies));
     return;
   }
 
@@ -182,15 +147,6 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefType<char> *srcArg,
                 src.data + src.offset * elemSize,
                 static_cast<size_t>(totalElems * elemSize));
     flushAsyncCopies();
-    if (memrefCopyTraceEnabled())
-      std::fprintf(stderr,
-                   "[memrefCopy] calls=%llu hip=%llu memcpy=%llu bytes=%zu "
-                   "mode=fully-contiguous async=%llu\n",
-                   static_cast<unsigned long long>(copyCalls),
-                   static_cast<unsigned long long>(hipMemcpyCalls),
-                   static_cast<unsigned long long>(memcpyFallbackCalls),
-                   copiedBytes,
-                   static_cast<unsigned long long>(submittedAsyncCopies));
     return;
   }
 
@@ -235,16 +191,6 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefType<char> *srcArg,
         break;
     }
     flushAsyncCopies();
-
-    if (memrefCopyTraceEnabled())
-      std::fprintf(stderr,
-                   "[memrefCopy] calls=%llu hip=%llu memcpy=%llu bytes=%zu "
-                   "mode=strided-2d width=%zu height=%zu async=%llu\n",
-                   static_cast<unsigned long long>(copyCalls),
-                   static_cast<unsigned long long>(hipMemcpyCalls),
-                   static_cast<unsigned long long>(memcpyFallbackCalls),
-                   copiedBytes, widthBytes, height,
-                   static_cast<unsigned long long>(submittedAsyncCopies));
     return;
   }
 
@@ -293,14 +239,4 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefType<char> *srcArg,
       break;
   }
   flushAsyncCopies();
-
-  if (memrefCopyTraceEnabled())
-    std::fprintf(stderr,
-                 "[memrefCopy] calls=%llu hip=%llu memcpy=%llu bytes=%zu "
-                 "mode=strided block_elems=%lld async=%llu\n",
-                 static_cast<unsigned long long>(copyCalls),
-                 static_cast<unsigned long long>(hipMemcpyCalls),
-                 static_cast<unsigned long long>(memcpyFallbackCalls),
-                 copiedBytes, static_cast<long long>(suffixElems),
-                 static_cast<unsigned long long>(submittedAsyncCopies));
 }
