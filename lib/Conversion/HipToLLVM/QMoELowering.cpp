@@ -62,6 +62,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         extractOptionalMemRefPtr(adaptor.getFc2ZeroPoints(), rewriter, loc);
     Value fc3ZpPtr =
         extractOptionalMemRefPtr(adaptor.getFc3ZeroPoints(), rewriter, loc);
+    Value routerWeightsPtr =
+        extractOptionalMemRefPtr(adaptor.getRouterWeights(), rewriter, loc);
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
@@ -120,10 +122,11 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     Value normalizeVal = createI64Const(op.getNormalizeRoutingWeights());
     Value elemSizeVal = createI64Const(elemSize);
 
-    SmallVector<Type, 30> paramTypes = {
+    SmallVector<Type, 31> paramTypes = {
         ptrType, // state
         ptrType, // input
         ptrType, // router_probs
+        ptrType, // router_weights (nullable)
         ptrType, // fc1_weights
         ptrType, // fc1_scales
         ptrType, // fc1_bias (nullable)
@@ -159,9 +162,10 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
       return failure();
     }
 
-    SmallVector<Value, 30> args = {statePtr,
+    SmallVector<Value, 31> args = {statePtr,
                                    inputPtr,
                                    routerPtr,
+                                   routerWeightsPtr,
                                    fc1WeightsPtr,
                                    fc1ScalesPtr,
                                    fc1BiasPtr,
