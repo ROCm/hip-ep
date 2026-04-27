@@ -48,6 +48,7 @@ from onnx import helper, TensorProto, numpy_helper
 
 try:
     import onnxoptimizer
+
     _HAS_OPTIMIZER = True
 except ImportError:
     _HAS_OPTIMIZER = False
@@ -96,12 +97,23 @@ FOLD_TOTAL_SEQ_NODE_NAME = "fold/total_seq_len"
 TOTAL_SEQ_LEN_CONSTANT_OUT = "total_seq_len_constant"
 
 PERF_SIGNIFICANT_OPS = {
-    "Gemm", "MatMul", "MatMulNBits", "Conv", "ConvTranspose",
-    "GroupQueryAttention", "LinearAttention", "QMoE",
-    "CausalConvWithState", "RotaryEmbedding",
-    "LayerNormalization", "SimplifiedLayerNormalization",
-    "SkipSimplifiedLayerNormalization", "BatchNormalization",
-    "LSTM", "GRU", "Loop",
+    "Gemm",
+    "MatMul",
+    "MatMulNBits",
+    "Conv",
+    "ConvTranspose",
+    "GroupQueryAttention",
+    "LinearAttention",
+    "QMoE",
+    "CausalConvWithState",
+    "RotaryEmbedding",
+    "LayerNormalization",
+    "SimplifiedLayerNormalization",
+    "SkipSimplifiedLayerNormalization",
+    "BatchNormalization",
+    "LSTM",
+    "GRU",
+    "Loop",
 }
 
 
@@ -203,17 +215,21 @@ class GraphAnalyzer:
         typical_count = Counter(layer_counts.values()).most_common(1)[0][0]
         threshold = max(typical_count * 0.4, 5)
         real_layers = sorted(
-            idx for idx, cnt in layer_counts.items() if cnt >= threshold)
+            idx for idx, cnt in layer_counts.items() if cnt >= threshold
+        )
         self.num_layers = len(real_layers)
         self.layer_indices = set(real_layers)
 
         layer_groups = defaultdict(list)
         for idx in real_layers:
             layer_groups[layer_counts[idx]].append(idx)
-        desc = ", ".join(f"{len(idxs)}x{cnt}-node" for cnt, idxs
-                         in sorted(layer_groups.items()))
-        print(f"  Layers: {self.num_layers} total "
-              f"(index {real_layers[0]}..{real_layers[-1]}, {desc})")
+        desc = ", ".join(
+            f"{len(idxs)}x{cnt}-node" for cnt, idxs in sorted(layer_groups.items())
+        )
+        print(
+            f"  Layers: {self.num_layers} total "
+            f"(index {real_layers[0]}..{real_layers[-1]}, {desc})"
+        )
 
     # ── Op type detection ──
 
@@ -225,7 +241,10 @@ class GraphAnalyzer:
             self.shape_diff_ops.add("MatMulNBits")
         else:
             for node in self.graph.node:
-                if node.op_type == "MatMul" and self.get_layer_index(node.name) is not None:
+                if (
+                    node.op_type == "MatMul"
+                    and self.get_layer_index(node.name) is not None
+                ):
                     if any(inp in self.init_names for inp in node.input):
                         self.shape_diff_ops.add("MatMul")
                         break
@@ -242,8 +261,11 @@ class GraphAnalyzer:
         chain = []
         current_tensor = start_tensor
         for op in expected_ops:
-            consumers = [n for n in self.input_to_nodes.get(current_tensor, [])
-                         if n.op_type == op]
+            consumers = [
+                n
+                for n in self.input_to_nodes.get(current_tensor, [])
+                if n.op_type == op
+            ]
             if len(consumers) != 1:
                 break
             node = consumers[0]
@@ -257,8 +279,11 @@ class GraphAnalyzer:
         """attention_mask -> Shape -> Gather -> Cast"""
         if "attention_mask" not in self.graph_input_names:
             return
-        shape_nodes = [n for n in self.input_to_nodes.get("attention_mask", [])
-                       if n.op_type == "Shape"]
+        shape_nodes = [
+            n
+            for n in self.input_to_nodes.get("attention_mask", [])
+            if n.op_type == "Shape"
+        ]
         for sn in shape_nodes:
             out = sn.output[0] if sn.output else None
             if not out:
@@ -276,14 +301,14 @@ class GraphAnalyzer:
         """input_ids -> Shape -> Gather -> Unsqueeze -> Concat -> Reshape"""
         if "input_ids" not in self.graph_input_names:
             return
-        shape_nodes = [n for n in self.input_to_nodes.get("input_ids", [])
-                       if n.op_type == "Shape"]
+        shape_nodes = [
+            n for n in self.input_to_nodes.get("input_ids", []) if n.op_type == "Shape"
+        ]
         for sn in shape_nodes:
             out = sn.output[0] if sn.output else None
             if not out:
                 continue
-            tail = self._follow_chain(
-                out, ["Gather", "Unsqueeze", "Concat", "Reshape"])
+            tail = self._follow_chain(out, ["Gather", "Unsqueeze", "Concat", "Reshape"])
             if len(tail) == 4:
                 chain = [sn] + tail
                 self.reshape_chain_output = chain[-1].output[0]
@@ -307,8 +332,7 @@ class GraphAnalyzer:
             if name in self.graph_input_names:
                 continue
             consumers = self.input_to_nodes.get(name, [])
-            non_deleted = [n for n in consumers
-                           if n.name not in self.nodes_to_delete]
+            non_deleted = [n for n in consumers if n.name not in self.nodes_to_delete]
             if not non_deleted and name in self.output_to_node:
                 producer = self.output_to_node[name]
                 if producer.op_type == "Constant":
@@ -342,8 +366,10 @@ class GraphAnalyzer:
     def _discover_lm_head(self):
         if "logits" in self.output_to_node:
             self.lm_head_node = self.output_to_node["logits"]
-            print(f"  LM head:         {self.lm_head_node.name} "
-                  f"({self.lm_head_node.op_type})")
+            print(
+                f"  LM head:         {self.lm_head_node.name} "
+                f"({self.lm_head_node.op_type})"
+            )
             return
         for node in reversed(list(self.graph.node)):
             if node.op_type in ("MatMul", "MatMulNBits"):
@@ -357,8 +383,11 @@ class GraphAnalyzer:
         """Trace backward from lm_head to find the final normalization."""
         if self.lm_head_node is None:
             return
-        norm_ops = {"SkipSimplifiedLayerNormalization",
-                    "SimplifiedLayerNormalization", "LayerNormalization"}
+        norm_ops = {
+            "SkipSimplifiedLayerNormalization",
+            "SimplifiedLayerNormalization",
+            "LayerNormalization",
+        }
         for inp in self.lm_head_node.input:
             if inp in self.init_names:
                 continue
@@ -418,8 +447,7 @@ class GraphAnalyzer:
                 if inp:
                     queue.append(inp)
 
-        self.pre_layer_nodes = [
-            n for n in self.graph.node if n.name in found_names]
+        self.pre_layer_nodes = [n for n in self.graph.node if n.name in found_names]
         print(f"  Pre-layer nodes: {len(self.pre_layer_nodes)}")
         for n in self.pre_layer_nodes:
             print(f"    {n.op_type:35s} {n.name}")
@@ -475,8 +503,12 @@ class GraphAnalyzer:
                 if inp in rewire:
                     continue
                 m = re.search(r"(layers?[./])(\d+)([/.])", inp)
-                if m and int(m.group(2)) not in (0,) and int(m.group(2)) in self.layer_indices:
-                    new_name = inp[:m.start(2)] + "0" + inp[m.end(2):]
+                if (
+                    m
+                    and int(m.group(2)) not in (0,)
+                    and int(m.group(2)) in self.layer_indices
+                ):
+                    new_name = inp[: m.start(2)] + "0" + inp[m.end(2) :]
                     rewire[inp] = new_name
         if rewire:
             print(f"  Final-norm rewire: {len(rewire)} tensor(s)")
@@ -495,7 +527,7 @@ class GraphAnalyzer:
         return int(m.group(1)) if m else None
 
     def _print_summary(self):
-        print(f"\n  === Discovery Summary ===")
+        print("\n  === Discovery Summary ===")
         print(f"  Layers:         {self.num_layers}")
         print(f"  Nodes to delete:{len(self.nodes_to_delete):>3d}")
         print(f"  Rewire map:     {self.rewire_map}")
@@ -525,8 +557,10 @@ def get_tensor_shape(vi_map, name):
     if name in vi_map:
         vi = vi_map[name]
         if vi.type.tensor_type.shape:
-            return [d.dim_param if d.dim_param else d.dim_value
-                    for d in vi.type.tensor_type.shape.dim]
+            return [
+                d.dim_param if d.dim_param else d.dim_value
+                for d in vi.type.tensor_type.shape.dim
+            ]
     return None
 
 
@@ -600,7 +634,10 @@ def total_seq_len_scalar_from_dim_map(dim_map) -> Optional[int]:
 
 
 def upsert_total_seq_len_const_initializer(
-    graph: onnx.GraphProto, value: int, *, name: str = TOTAL_SEQ_LEN_CONST_NAME,
+    graph: onnx.GraphProto,
+    value: int,
+    *,
+    name: str = TOTAL_SEQ_LEN_CONST_NAME,
 ) -> None:
     """Replace or append int32 scalar initializer ``total_seq_len_const`` = ``value``."""
     new_init = numpy_helper.from_array(
@@ -655,11 +692,17 @@ def make_tensor_vi(name, elem_type, shape):
     return vi
 
 
-def build_single_op_model(node, inputs, outputs, initializers,
-                          opsets, ir_version=7, value_infos=None):
+def build_single_op_model(
+    node, inputs, outputs, initializers, opsets, ir_version=7, value_infos=None
+):
     graph = helper.make_graph(
-        [node], "single_op_graph", inputs, outputs,
-        initializer=initializers, value_info=value_infos or [])
+        [node],
+        "single_op_graph",
+        inputs,
+        outputs,
+        initializer=initializers,
+        value_info=value_infos or [],
+    )
     model = helper.make_model(graph)
     model.ir_version = ir_version
     del model.opset_import[:]
@@ -670,11 +713,17 @@ def build_single_op_model(node, inputs, outputs, initializers,
     return model
 
 
-def build_multi_node_model(nodes, inputs, outputs, initializers,
-                           opsets, ir_version=7, value_infos=None):
+def build_multi_node_model(
+    nodes, inputs, outputs, initializers, opsets, ir_version=7, value_infos=None
+):
     graph = helper.make_graph(
-        nodes, "subgraph", inputs, outputs,
-        initializer=initializers, value_info=value_infos or [])
+        nodes,
+        "subgraph",
+        inputs,
+        outputs,
+        initializer=initializers,
+        value_info=value_infos or [],
+    )
     model = helper.make_model(graph)
     model.ir_version = ir_version
     del model.opset_import[:]
@@ -688,10 +737,18 @@ def build_multi_node_model(nodes, inputs, outputs, initializers,
 PROTOBUF_LIMIT = 1_800_000_000  # ~1.8 GB, safely below protobuf 2GB cap
 
 DTYPE_BYTE_SIZE = {
-    TensorProto.FLOAT: 4, TensorProto.UINT8: 1, TensorProto.INT8: 1,
-    TensorProto.UINT16: 2, TensorProto.INT16: 2, TensorProto.INT32: 4,
-    TensorProto.INT64: 8, TensorProto.BOOL: 1, TensorProto.FLOAT16: 2,
-    TensorProto.DOUBLE: 8, TensorProto.UINT32: 4, TensorProto.UINT64: 8,
+    TensorProto.FLOAT: 4,
+    TensorProto.UINT8: 1,
+    TensorProto.INT8: 1,
+    TensorProto.UINT16: 2,
+    TensorProto.INT16: 2,
+    TensorProto.INT32: 4,
+    TensorProto.INT64: 8,
+    TensorProto.BOOL: 1,
+    TensorProto.FLOAT16: 2,
+    TensorProto.DOUBLE: 8,
+    TensorProto.UINT32: 4,
+    TensorProto.UINT64: 8,
     TensorProto.BFLOAT16: 2,
 }
 
@@ -715,8 +772,7 @@ def save_model(model, path):
 
 
 def get_weight_signature(node, init_map):
-    return tuple(
-        tuple(init_map[inp].dims) for inp in node.input if inp in init_map)
+    return tuple(tuple(init_map[inp].dims) for inp in node.input if inp in init_map)
 
 
 def get_input_shape_signature(node, vi_map):
@@ -733,7 +789,6 @@ def get_input_shape_signature(node, vi_map):
 
 
 class SingleOpExtractor:
-
     def __init__(self, model_path, output_dir=None):
         self.model_path = model_path
         self.base_dir = output_dir or os.path.dirname(model_path)
@@ -747,8 +802,7 @@ class SingleOpExtractor:
 
         print("Running shape inference...")
         try:
-            self.graph_model = onnx.shape_inference.infer_shapes(
-                self.graph_model)
+            self.graph_model = onnx.shape_inference.infer_shapes(self.graph_model)
             print("Shape inference succeeded.")
         except Exception as e:
             print(f"Shape inference warning: {e}")
@@ -763,8 +817,7 @@ class SingleOpExtractor:
         for node in self.graph.node:
             if node.op_type == "Constant":
                 for attr in node.attribute:
-                    if attr.name == "value" \
-                            and attr.type == onnx.AttributeProto.TENSOR:
+                    if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
                         for out in node.output:
                             if out:
                                 self.constant_outputs[out] = attr.t
@@ -789,9 +842,11 @@ class SingleOpExtractor:
                     consumed_tensors.add(inp)
 
         init_names = {init.name for init in self.graph.initializer}
-        orphan_inputs = [inp for inp in self.graph.input
-                         if inp.name not in consumed_tensors
-                         and inp.name not in init_names]
+        orphan_inputs = [
+            inp
+            for inp in self.graph.input
+            if inp.name not in consumed_tensors and inp.name not in init_names
+        ]
         if orphan_inputs:
             names = [inp.name for inp in orphan_inputs]
             print(f"Removing orphan inputs: {names}")
@@ -810,9 +865,11 @@ class SingleOpExtractor:
                         all_consumed.add(inp)
             all_consumed |= output_names
 
-            dead = [n for n in self.graph.node
-                    if all(o not in all_consumed
-                           for o in n.output if o)]
+            dead = [
+                n
+                for n in self.graph.node
+                if all(o not in all_consumed for o in n.output if o)
+            ]
             if dead:
                 for n in dead:
                     self.graph.node.remove(n)
@@ -838,16 +895,18 @@ class SingleOpExtractor:
     def _detect_model_type(self):
         input_names = {inp.name for inp in self.graph.input}
         if "pixel_values" in input_names:
-            print(f"Model type: vision")
+            print("Model type: vision")
             return "vision"
         if "image_features" in input_names and "input_ids" in input_names:
-            print(f"Model type: embedding")
+            print("Model type: embedding")
             return "embedding"
         return "llm"
 
     _CONFIG_DIM_KEYS = [
-        "num_attention_heads", "num_key_value_heads",
-        "head_size", "hidden_size",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "head_size",
+        "hidden_size",
     ]
 
     def _load_config_dims(self):
@@ -888,11 +947,9 @@ class SingleOpExtractor:
         model_dir = os.path.dirname(self.model_path)
         total = os.path.getsize(self.model_path)
         for f in os.listdir(model_dir):
-            if f.endswith((".data", ".bin")) and f != os.path.basename(
-                    self.model_path):
+            if f.endswith((".data", ".bin")) and f != os.path.basename(self.model_path):
                 total += os.path.getsize(os.path.join(model_dir, f))
-        print(f"Loading full model with weights "
-              f"(~{total / (1024 ** 3):.1f} GB)...")
+        print(f"Loading full model with weights (~{total / (1024**3):.1f} GB)...")
         self.full_model = onnx.load(self.model_path)
         print("Full model loaded.")
         saved_graph = self.graph
@@ -973,8 +1030,7 @@ class SingleOpExtractor:
             else:
                 non_layer_nodes.append(node)
 
-        unique = {k: self._pick_fp16_representative(vs)
-                  for k, vs in layer_ops.items()}
+        unique = {k: self._pick_fp16_representative(vs) for k, vs in layer_ops.items()}
 
         mode_label = "Unique ops (flat)" if flat_mode else "Unique layer ops"
         print(f"\n{mode_label}: {len(unique)}")
@@ -989,8 +1045,9 @@ class SingleOpExtractor:
     def _get_name_prefix(self, node, key=None):
         """Generate semantic name for the op folder."""
         op_type = node.op_type
-        need_suffix = (op_type in self.analyzer.shape_diff_ops
-                       or not self.analyzer.has_layers)
+        need_suffix = (
+            op_type in self.analyzer.shape_diff_ops or not self.analyzer.has_layers
+        )
         if not need_suffix:
             return op_type
         if not node.name:
@@ -1071,11 +1128,11 @@ class SingleOpExtractor:
                 shape, elem_type = self._resolve_input_info(inp)
                 if shape is None:
                     shape, elem_type = self._resolve_input_info(
-                        node.input[list(clean_node.input).index(inp)])
+                        node.input[list(clean_node.input).index(inp)]
+                    )
                 if shape is None:
                     shape = [1]
-                adj = shape_to_dynamic_fixed(shape, dim_map,
-                                             extra=self.config_dims)
+                adj = shape_to_dynamic_fixed(shape, dim_map, extra=self.config_dims)
                 model_inputs.append(make_tensor_vi(inp, elem_type, adj))
 
             model_outputs = []
@@ -1088,12 +1145,17 @@ class SingleOpExtractor:
 
             if is_gqa:
                 initializers.extend(
-                    self._make_gqa_constant_inputs(actual_node, dim_map))
+                    self._make_gqa_constant_inputs(actual_node, dim_map)
+                )
 
             model = build_single_op_model(
-                actual_node, model_inputs, model_outputs,
-                initializers, self.opset_imports,
-                ir_version=self.ir_version)
+                actual_node,
+                model_inputs,
+                model_outputs,
+                initializers,
+                self.opset_imports,
+                ir_version=self.ir_version,
+            )
 
             try:
                 model = onnx.shape_inference.infer_shapes(model)
@@ -1104,8 +1166,9 @@ class SingleOpExtractor:
                 if not out_vi.type.tensor_type.shape.dim:
                     shape, etype = self._resolve_input_info(out_vi.name)
                     if shape:
-                        adj = shape_to_dynamic_fixed(shape, dim_map,
-                                                     extra=self.config_dims)
+                        adj = shape_to_dynamic_fixed(
+                            shape, dim_map, extra=self.config_dims
+                        )
                         for d in adj:
                             dp = out_vi.type.tensor_type.shape.dim.add()
                             if isinstance(d, str):
@@ -1118,8 +1181,7 @@ class SingleOpExtractor:
             os.makedirs(op_dir, exist_ok=True)
 
             if large_init_names:
-                self._save_with_external_weights(
-                    model, fpath, large_init_names)
+                self._save_with_external_weights(model, fpath, large_init_names)
             else:
                 save_model(model, fpath)
 
@@ -1145,9 +1207,11 @@ class SingleOpExtractor:
                 ext_init.data_type = tensor.data_type
                 ext_init.dims.extend(tensor.dims)
                 ext_init.data_location = TensorProto.EXTERNAL
-                for k, v in [("location", data_file),
-                             ("offset", str(offset)),
-                             ("length", str(length))]:
+                for k, v in [
+                    ("location", data_file),
+                    ("offset", str(offset)),
+                    ("length", str(length)),
+                ]:
                     kv = ext_init.external_data.add()
                     kv.key = k
                     kv.value = v
@@ -1171,12 +1235,18 @@ class SingleOpExtractor:
 
         if len(inputs) > 5 and inputs[5]:
             node.input[5] = "seqlens_k"
-            inits.append(numpy_helper.from_array(
-                np.array([eff - 1], dtype=np.int32), name="seqlens_k"))
+            inits.append(
+                numpy_helper.from_array(
+                    np.array([eff - 1], dtype=np.int32), name="seqlens_k"
+                )
+            )
         if len(inputs) > 6 and inputs[6]:
             node.input[6] = "total_seq_len"
-            inits.append(numpy_helper.from_array(
-                np.array(eff, dtype=np.int32), name="total_seq_len"))
+            inits.append(
+                numpy_helper.from_array(
+                    np.array(eff, dtype=np.int32), name="total_seq_len"
+                )
+            )
         return inits
 
     def _unique_prefix(self, base, used):
@@ -1202,15 +1272,17 @@ class SingleOpExtractor:
             else:
                 key = (node.op_type,)
             groups[key].append(node)
-        return [self._pick_fp16_representative(vs)
-                for vs in groups.values()]
+        return [self._pick_fp16_representative(vs) for vs in groups.values()]
 
     def extract_all_single_ops(self):
         unique, non_layer = self._identify_unique_ops()
 
         print("\n" + "=" * 60)
-        label = "Extracting ops..." if not self.analyzer.has_layers \
+        label = (
+            "Extracting ops..."
+            if not self.analyzer.has_layers
             else "Extracting layer ops..."
+        )
         print(label)
         print("=" * 60)
         used = set()
@@ -1225,8 +1297,10 @@ class SingleOpExtractor:
         if non_layer:
             deduped = self._dedup_non_layer(non_layer)
             print("\n" + "=" * 60)
-            print(f"Extracting non-layer ops "
-                  f"({len(non_layer)} -> {len(deduped)} after dedup)...")
+            print(
+                f"Extracting non-layer ops "
+                f"({len(non_layer)} -> {len(deduped)} after dedup)..."
+            )
             print("=" * 60)
             for node in deduped:
                 prefix = self._get_name_prefix(node)
@@ -1251,16 +1325,17 @@ class SingleOpExtractor:
 
         a = self.analyzer
 
-        layer0_nodes = [n for n in self.graph.node
-                        if a.get_layer_index(n.name) == 0]
+        layer0_nodes = [n for n in self.graph.node if a.get_layer_index(n.name) == 0]
 
         post_nodes = list(a.post_layer_nodes)
 
         all_nodes = list(a.pre_layer_nodes) + layer0_nodes + post_nodes
-        print(f"Total nodes: {len(all_nodes)} "
-              f"(pre={len(a.pre_layer_nodes)}, "
-              f"layer0={len(layer0_nodes)}, "
-              f"post={len(post_nodes)})")
+        print(
+            f"Total nodes: {len(all_nodes)} "
+            f"(pre={len(a.pre_layer_nodes)}, "
+            f"layer0={len(layer0_nodes)}, "
+            f"post={len(post_nodes)})"
+        )
 
         input_rewire = dict(a.rewire_map)
         fnr = a.compute_final_norm_rewire()
@@ -1291,8 +1366,7 @@ class SingleOpExtractor:
             elif inp not in graph_input_names:
                 graph_input_names.append(inp)
 
-        graph_output_names = self._detect_single_layer_outputs(
-            all_nodes, all_outputs)
+        graph_output_names = self._detect_single_layer_outputs(all_nodes, all_outputs)
 
         print(f"Inputs:  {graph_input_names}")
         print(f"Outputs: {graph_output_names}")
@@ -1322,8 +1396,11 @@ class SingleOpExtractor:
             it.name = cname
             small_inits.append(it)
 
-        small_inits.append(numpy_helper.from_array(
-            np.array(128, dtype=np.int32), name=TOTAL_SEQ_LEN_CONST_NAME))
+        small_inits.append(
+            numpy_helper.from_array(
+                np.array(128, dtype=np.int32), name=TOTAL_SEQ_LEN_CONST_NAME
+            )
+        )
 
         model_inputs = []
         for inp in graph_input_names:
@@ -1331,9 +1408,12 @@ class SingleOpExtractor:
             if shape is None:
                 shape = [1]
             model_inputs.append(
-                make_tensor_vi(inp, elem_type,
-                               shape_to_dynamic_fixed(
-                                   shape, None, extra=self.config_dims)))
+                make_tensor_vi(
+                    inp,
+                    elem_type,
+                    shape_to_dynamic_fixed(shape, None, extra=self.config_dims),
+                )
+            )
 
         model_outputs = []
         for out in graph_output_names:
@@ -1341,9 +1421,12 @@ class SingleOpExtractor:
             if shape is None:
                 shape = [1]
             model_outputs.append(
-                make_tensor_vi(out, elem_type,
-                               shape_to_dynamic_fixed(
-                                   shape, None, extra=self.config_dims)))
+                make_tensor_vi(
+                    out,
+                    elem_type,
+                    shape_to_dynamic_fixed(shape, None, extra=self.config_dims),
+                )
+            )
 
         out_set = set(graph_output_names)
         in_set = set(graph_input_names)
@@ -1355,19 +1438,28 @@ class SingleOpExtractor:
                 shape, elem_type = self._resolve_input_info(o)
                 if shape:
                     value_infos.append(
-                        make_tensor_vi(o, elem_type,
-                                       shape_to_dynamic_fixed(
-                                           shape, None,
-                                           extra=self.config_dims)))
+                        make_tensor_vi(
+                            o,
+                            elem_type,
+                            shape_to_dynamic_fixed(shape, None, extra=self.config_dims),
+                        )
+                    )
 
         model = build_multi_node_model(
-            nodes_copy, model_inputs, model_outputs,
-            small_inits, self.opset_imports,
-            ir_version=self.ir_version, value_infos=value_infos)
+            nodes_copy,
+            model_inputs,
+            model_outputs,
+            small_inits,
+            self.opset_imports,
+            ir_version=self.ir_version,
+            value_infos=value_infos,
+        )
 
         if large_inits:
-            print(f"  {len(large_inits)} oversized initializer(s), "
-                  f"adding via direct assignment")
+            print(
+                f"  {len(large_inits)} oversized initializer(s), "
+                f"adding via direct assignment"
+            )
             for init in large_inits:
                 new_init = model.graph.initializer.add()
                 new_init.name = init.name
@@ -1392,8 +1484,7 @@ class SingleOpExtractor:
                     if out and out in graph_out_names and out not in outputs:
                         outputs.append(out)
         if not outputs:
-            fallback = [o.name for o in self.graph.output
-                        if o.name in all_outputs]
+            fallback = [o.name for o in self.graph.output if o.name in all_outputs]
             outputs = fallback[:5]
         return outputs
 
@@ -1405,11 +1496,13 @@ class SingleOpExtractor:
         nodes = self.graph.node
         block_ends = []
         for i in range(len(nodes) - 4):
-            if (nodes[i].op_type == "LayerNormalization"
-                    and nodes[i + 1].op_type == "Gemm"
-                    and nodes[i + 2].op_type == "Gelu"
-                    and nodes[i + 3].op_type == "Gemm"
-                    and nodes[i + 4].op_type == "Add"):
+            if (
+                nodes[i].op_type == "LayerNormalization"
+                and nodes[i + 1].op_type == "Gemm"
+                and nodes[i + 2].op_type == "Gelu"
+                and nodes[i + 3].op_type == "Gemm"
+                and nodes[i + 4].op_type == "Add"
+            ):
                 block_ends.append(i + 4)
         if len(block_ends) < 2:
             return None
@@ -1451,8 +1544,12 @@ class SingleOpExtractor:
             idx = queue.pop(0)
             n = nodes[idx]
             for inp in n.input:
-                if not inp or inp in init_names \
-                        or inp in graph_in or inp in const_names:
+                if (
+                    not inp
+                    or inp in init_names
+                    or inp in graph_in
+                    or inp in const_names
+                ):
                     continue
                 src = output_to_idx.get(inp)
                 if src is not None and src not in required:
@@ -1477,8 +1574,10 @@ class SingleOpExtractor:
         n_blocks = len(blocks)
         b0_start, b0_end = blocks[0]
         last_end = blocks[-1][1]
-        print(f"Extracting vision single block ({n_blocks} blocks detected, "
-              f"block 0: nodes [{b0_start}..{b0_end}])...")
+        print(
+            f"Extracting vision single block ({n_blocks} blocks detected, "
+            f"block 0: nodes [{b0_start}..{b0_end}])..."
+        )
         print("=" * 60)
 
         nodes = self.graph.node
@@ -1486,8 +1585,9 @@ class SingleOpExtractor:
         pre_block = list(range(0, b0_start))
         block0_indices = list(range(b0_start, b0_end + 1))
 
-        post_block = [i for i in range(last_end + 1, len(nodes))
-                      if nodes[i].op_type != "Cast"]
+        post_block = [
+            i for i in range(last_end + 1, len(nodes)) if nodes[i].op_type != "Cast"
+        ]
 
         middle_outputs = set()
         for k in range(1, n_blocks - 1):
@@ -1497,8 +1597,7 @@ class SingleOpExtractor:
                         middle_outputs.add(o)
 
         core = pre_block + block0_indices + post_block
-        all_indices = self._collect_cast_deps(core,
-                                              forbidden_inputs=middle_outputs)
+        all_indices = self._collect_cast_deps(core, forbidden_inputs=middle_outputs)
 
         block0_output_names = set()
         for i in block0_indices:
@@ -1522,17 +1621,18 @@ class SingleOpExtractor:
         for idx in all_indices:
             n = nodes[idx]
             for inp_name in n.input:
-                if inp_name and inp_name in last_block_outputs \
-                        and inp_name not in block0_output_names:
+                if (
+                    inp_name
+                    and inp_name in last_block_outputs
+                    and inp_name not in block0_output_names
+                ):
                     input_rewire[inp_name] = b0_main_out
 
         self._load_full_model()
         fm_nodes = list(self.full_model.graph.node)
-        fm_init_map = {init.name: init
-                       for init in self.full_model.graph.initializer}
+        fm_init_map = {init.name: init for init in self.full_model.graph.initializer}
 
-        all_nodes_list = [fm_nodes[i] for i in all_indices
-                          if i < len(fm_nodes)]
+        all_nodes_list = [fm_nodes[i] for i in all_indices if i < len(fm_nodes)]
 
         all_outputs_set = set()
         for n in all_nodes_list:
@@ -1540,7 +1640,6 @@ class SingleOpExtractor:
                 if o:
                     all_outputs_set.add(o)
 
-        orig_graph_in = {inp.name for inp in self.graph.input}
         init_names = set()
         const_names = set()
         graph_input_names = []
@@ -1558,10 +1657,13 @@ class SingleOpExtractor:
 
         graph_output_names = [o.name for o in self.graph.output]
 
-        n_cast = len(all_indices) - len(pre_block) \
-            - len(block0_indices) - len(post_block)
-        print(f"  Pre-block: {len(pre_block)}, block 0: {len(block0_indices)}, "
-              f"post-block: {len(post_block)}, Cast deps: {n_cast}")
+        n_cast = (
+            len(all_indices) - len(pre_block) - len(block0_indices) - len(post_block)
+        )
+        print(
+            f"  Pre-block: {len(pre_block)}, block 0: {len(block0_indices)}, "
+            f"post-block: {len(post_block)}, Cast deps: {n_cast}"
+        )
         print(f"  Inputs:  {graph_input_names}")
         print(f"  Outputs: {graph_output_names}")
 
@@ -1579,8 +1681,7 @@ class SingleOpExtractor:
             shape, elem_type = self._resolve_input_info(inp_name)
             if shape is None:
                 shape = [1]
-            adj = shape_to_dynamic_fixed(shape, None,
-                                         extra=self.config_dims)
+            adj = shape_to_dynamic_fixed(shape, None, extra=self.config_dims)
             model_inputs.append(make_tensor_vi(inp_name, elem_type, adj))
 
         model_outputs = []
@@ -1588,8 +1689,7 @@ class SingleOpExtractor:
             shape, elem_type = self._resolve_input_info(out_name)
             if shape is None:
                 shape = [1]
-            adj = shape_to_dynamic_fixed(shape, None,
-                                         extra=self.config_dims)
+            adj = shape_to_dynamic_fixed(shape, None, extra=self.config_dims)
             model_outputs.append(make_tensor_vi(out_name, elem_type, adj))
 
         small_inits = []
@@ -1620,15 +1720,22 @@ class SingleOpExtractor:
                 shape, elem_type = self._resolve_input_info(o)
                 if shape:
                     value_infos.append(
-                        make_tensor_vi(o, elem_type,
-                                       shape_to_dynamic_fixed(
-                                           shape, None,
-                                           extra=self.config_dims)))
+                        make_tensor_vi(
+                            o,
+                            elem_type,
+                            shape_to_dynamic_fixed(shape, None, extra=self.config_dims),
+                        )
+                    )
 
         model = build_multi_node_model(
-            nodes_copy, model_inputs, model_outputs,
-            small_inits, self.opset_imports,
-            ir_version=self.ir_version, value_infos=value_infos)
+            nodes_copy,
+            model_inputs,
+            model_outputs,
+            small_inits,
+            self.opset_imports,
+            ir_version=self.ir_version,
+            value_infos=value_infos,
+        )
 
         if large_inits:
             print(f"  {len(large_inits)} oversized initializer(s)")
@@ -1649,8 +1756,7 @@ class SingleOpExtractor:
             print("Extracting fixed-shape variants (flat model)...")
             print("=" * 60)
             self._load_full_model()
-            self._save_variants(
-                self.full_model, self.full_model_dir, "full_model")
+            self._save_variants(self.full_model, self.full_model_dir, "full_model")
             return
         print("Extracting full model...")
         print("=" * 60)
@@ -1669,8 +1775,7 @@ class SingleOpExtractor:
                     if o:
                         deleted_tensors.add(o)
 
-        keep = [n for n in model.graph.node
-                if n.name not in a.nodes_to_delete]
+        keep = [n for n in model.graph.node if n.name not in a.nodes_to_delete]
         del model.graph.node[:]
         model.graph.node.extend(keep)
 
@@ -1679,8 +1784,7 @@ class SingleOpExtractor:
                 if inp in a.rewire_map:
                     node.input[i] = a.rewire_map[inp]
 
-        vis = [vi for vi in model.graph.value_info
-               if vi.name not in deleted_tensors]
+        vis = [vi for vi in model.graph.value_info if vi.name not in deleted_tensors]
         del model.graph.value_info[:]
         model.graph.value_info.extend(vis)
 
@@ -1689,8 +1793,11 @@ class SingleOpExtractor:
             for inp in node.input:
                 if inp:
                     used_inputs.add(inp)
-        orphaned_idx = [i for i, init in enumerate(model.graph.initializer)
-                        if init.name not in used_inputs]
+        orphaned_idx = [
+            i
+            for i, init in enumerate(model.graph.initializer)
+            if init.name not in used_inputs
+        ]
         if orphaned_idx:
             print(f"  Removing {len(orphaned_idx)} orphaned initializer(s)")
             for idx in reversed(orphaned_idx):
@@ -1728,8 +1835,10 @@ class SingleOpExtractor:
         dst_data = os.path.join(out_dir, data_name)
         if os.path.isfile(src_data):
             if os.path.abspath(src_data) != os.path.abspath(dst_data):
-                print(f"  Copying external data: {data_name} "
-                      f"({os.path.getsize(src_data) / (1024**3):.2f} GB)")
+                print(
+                    f"  Copying external data: {data_name} "
+                    f"({os.path.getsize(src_data) / (1024**3):.2f} GB)"
+                )
                 shutil.copy2(src_data, dst_data)
             else:
                 print(f"  External data already in place: {data_name}")
@@ -1737,20 +1846,23 @@ class SingleOpExtractor:
             print(f"  WARNING: external data file not found: {src_data}")
 
         orig_in = {i.name: self._save_vi_shape(i) for i in model.graph.input}
-        orig_out = {o.name: self._save_vi_shape(o)
-                    for o in model.graph.output}
-        orig_vi = {v.name: self._save_vi_shape(v)
-                   for v in model.graph.value_info}
+        orig_out = {o.name: self._save_vi_shape(o) for o in model.graph.output}
+        orig_vi = {v.name: self._save_vi_shape(v) for v in model.graph.value_info}
 
-        has_tsl = any(
-            inp == TOTAL_SEQ_LEN_CONST_NAME
-            for node in model.graph.node for inp in node.input
-        ) and self.model_type == "llm"
+        has_tsl = (
+            any(
+                inp == TOTAL_SEQ_LEN_CONST_NAME
+                for node in model.graph.node
+                for inp in node.input
+            )
+            and self.model_type == "llm"
+        )
 
         for idx, (vname, dim_map) in enumerate(self.variants):
             llm_total = (
                 total_seq_len_scalar_from_dim_map(dim_map)
-                if self.model_type == "llm" else None
+                if self.model_type == "llm"
+                else None
             )
 
             if has_tsl:
@@ -1760,15 +1872,19 @@ class SingleOpExtractor:
                             if inp == TOTAL_SEQ_LEN_CONST_NAME:
                                 node.input[j] = "total_sequence_length"
                     tsl_vi = make_tensor_vi(
-                        "total_sequence_length", TensorProto.INT32, [1])
+                        "total_sequence_length", TensorProto.INT32, [1]
+                    )
                     model.graph.input.append(tsl_vi)
                 else:
                     for node in model.graph.node:
                         for j, inp in enumerate(node.input):
                             if inp == "total_sequence_length":
                                 node.input[j] = TOTAL_SEQ_LEN_CONST_NAME
-                    to_rm = [i for i, vi in enumerate(model.graph.input)
-                             if vi.name == "total_sequence_length"]
+                    to_rm = [
+                        i
+                        for i, vi in enumerate(model.graph.input)
+                        if vi.name == "total_sequence_length"
+                    ]
                     for i in reversed(to_rm):
                         del model.graph.input[i]
 
@@ -1776,8 +1892,11 @@ class SingleOpExtractor:
                 patch_fold_total_seq_len_constant_value(model, llm_total)
                 upsert_total_seq_len_const_initializer(model.graph, llm_total)
 
-            for vi in list(model.graph.input) + list(model.graph.output) \
-                    + list(model.graph.value_info):
+            for vi in (
+                list(model.graph.input)
+                + list(model.graph.output)
+                + list(model.graph.value_info)
+            ):
                 self._set_vi_shape(vi, dim_map, extra=self.config_dims)
 
             path = os.path.join(out_dir, self._full_model_variant_onnx_basename(vname))
@@ -1801,10 +1920,8 @@ class SingleOpExtractor:
             os.remove(stale)
 
         orig_in = {i.name: self._save_vi_shape(i) for i in model.graph.input}
-        orig_out = {o.name: self._save_vi_shape(o)
-                    for o in model.graph.output}
-        orig_vi = {v.name: self._save_vi_shape(v)
-                   for v in model.graph.value_info}
+        orig_out = {o.name: self._save_vi_shape(o) for o in model.graph.output}
+        orig_vi = {v.name: self._save_vi_shape(v) for v in model.graph.value_info}
 
         for idx, (vname, dim_map) in enumerate(self.variants):
             if self.model_type == "llm":
@@ -1813,8 +1930,11 @@ class SingleOpExtractor:
                     patch_fold_total_seq_len_constant_value(model, llm_total)
                     upsert_total_seq_len_const_initializer(model.graph, llm_total)
 
-            for vi in list(model.graph.input) + list(model.graph.output) \
-                    + list(model.graph.value_info):
+            for vi in (
+                list(model.graph.input)
+                + list(model.graph.output)
+                + list(model.graph.value_info)
+            ):
                 self._set_vi_shape(vi, dim_map, extra=self.config_dims)
 
             save_model = model
@@ -1823,11 +1943,14 @@ class SingleOpExtractor:
 
             path = os.path.join(out_dir, f"{prefix}_{vname}.onnx")
             if idx == 0:
-                onnx.save(save_model, path,
-                          save_as_external_data=True,
-                          all_tensors_to_one_file=True,
-                          location=data_name,
-                          size_threshold=1024)
+                onnx.save(
+                    save_model,
+                    path,
+                    save_as_external_data=True,
+                    all_tensors_to_one_file=True,
+                    location=data_name,
+                    size_threshold=1024,
+                )
             else:
                 with open(path, "wb") as f:
                     f.write(save_model.SerializeToString())
@@ -1865,8 +1988,7 @@ class SingleOpExtractor:
             opt = onnxoptimizer.optimize(m, cls._OPT_PASSES)
             after = len(opt.graph.node)
             if after < before:
-                print(f"    shape-fold: {before} -> {after} nodes "
-                      f"(-{before - after})")
+                print(f"    shape-fold: {before} -> {after} nodes (-{before - after})")
             return opt
         except Exception as e:
             print(f"    shape-fold skipped: {e}")
@@ -1876,11 +1998,12 @@ class SingleOpExtractor:
 
     @staticmethod
     def _save_vi_shape(vi):
-        if not vi.type.tensor_type.shape \
-                or len(vi.type.tensor_type.shape.dim) == 0:
+        if not vi.type.tensor_type.shape or len(vi.type.tensor_type.shape.dim) == 0:
             return None
-        return [("param", d.dim_param) if d.dim_param else ("value", d.dim_value)
-                for d in vi.type.tensor_type.shape.dim]
+        return [
+            ("param", d.dim_param) if d.dim_param else ("value", d.dim_value)
+            for d in vi.type.tensor_type.shape.dim
+        ]
 
     @staticmethod
     def _restore_vi_shape(vi, saved):
@@ -1922,14 +2045,17 @@ class SingleOpExtractor:
 def main():
     parser = argparse.ArgumentParser(
         description="Universal ONNX submodel extractor for LLMs "
-                    "(auto-discovers graph topology)")
-    parser.add_argument("--model", required=True,
-                        help="Path to model.onnx")
-    parser.add_argument("--output", default=None,
-                        help="Output directory (default: same as model)")
-    parser.add_argument("--only",
-                        choices=["single_op", "single_layer", "full_model"],
-                        help="Run only a specific extraction step")
+        "(auto-discovers graph topology)"
+    )
+    parser.add_argument("--model", required=True, help="Path to model.onnx")
+    parser.add_argument(
+        "--output", default=None, help="Output directory (default: same as model)"
+    )
+    parser.add_argument(
+        "--only",
+        choices=["single_op", "single_layer", "full_model"],
+        help="Run only a specific extraction step",
+    )
     args = parser.parse_args()
 
     extractor = SingleOpExtractor(args.model, output_dir=args.output)

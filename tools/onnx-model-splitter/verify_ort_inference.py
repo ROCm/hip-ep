@@ -19,21 +19,20 @@ Examples:
 
 import os
 import sys
-import json
 import argparse
 import subprocess
 
 
 def _run_in_subprocess(fpath, verbose=False, timeout=300):
     """Run ORT inference for a single model in an isolated subprocess."""
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "_verify_one_model.py")
+    script = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "_verify_one_model.py"
+    )
     cmd = [sys.executable, script, fpath]
     if verbose:
         cmd.append("--verbose")
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "TIMEOUT (exceeded {}s)".format(timeout)
 
@@ -97,18 +96,24 @@ def verify_dir(d, collector, verbose=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Verify extracted ONNX models via ORT inference")
+        description="Verify extracted ONNX models via ORT inference"
+    )
     parser.add_argument(
-        "output_dir", type=str,
+        "output_dir",
+        type=str,
         help="Base output directory containing single_op/, single_layer/, full_model/",
     )
     parser.add_argument(
-        "--mode", type=str, default=None,
+        "--mode",
+        type=str,
+        default=None,
         choices=["single_op", "single_layer", "full_model"],
         help="Only verify a specific mode (default: all)",
     )
     parser.add_argument(
-        "--verbose", "-v", action="store_true",
+        "--verbose",
+        "-v",
+        action="store_true",
         help="Print detailed input/output info for each model",
     )
     args = parser.parse_args()
@@ -126,8 +131,11 @@ def main():
         print(mode)
         print("=" * 70)
         d = os.path.join(base, mode)
-        collector = _collect_onnx_files_single_op if mode == "single_op" \
+        collector = (
+            _collect_onnx_files_single_op
+            if mode == "single_op"
             else _collect_onnx_files_flat
+        )
         ok = verify_dir(d, collector, verbose=args.verbose)
         if not ok:
             overall_ok = False

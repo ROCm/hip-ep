@@ -3,6 +3,7 @@
 # Licensed under the MIT License.
 #
 """Subprocess worker: load one ONNX model, run ORT inference, print result."""
+
 import sys
 import numpy as np
 import onnxruntime as ort
@@ -24,8 +25,7 @@ def make_dummy_input(inp):
     dtype_str = inp.type
 
     if "attention_mask" in name_lower:
-        return np.ones(shape, dtype=np.int64 if "int64" in dtype_str
-                       else np.int32)
+        return np.ones(shape, dtype=np.int64 if "int64" in dtype_str else np.int32)
 
     if "float16" in dtype_str:
         return np.zeros(shape, dtype=np.float16)
@@ -61,9 +61,12 @@ def main():
     for inp in sess.get_inputs():
         feeds[inp.name] = make_dummy_input(inp)
         if verbose:
-            print(f"  input: {inp.name:50s} "
-                  f"shape={feeds[inp.name].shape} "
-                  f"dtype={feeds[inp.name].dtype}", file=sys.stderr)
+            print(
+                f"  input: {inp.name:50s} "
+                f"shape={feeds[inp.name].shape} "
+                f"dtype={feeds[inp.name].dtype}",
+                file=sys.stderr,
+            )
 
     try:
         outputs = sess.run(None, feeds)
@@ -74,11 +77,16 @@ def main():
     if verbose:
         for i, out_meta in enumerate(sess.get_outputs()):
             arr = outputs[i]
-            has_nan = (bool(np.isnan(arr).any())
-                       if np.issubdtype(arr.dtype, np.floating) else False)
-            print(f"  output: {out_meta.name:50s} "
-                  f"shape={arr.shape} dtype={arr.dtype} nan={has_nan}",
-                  file=sys.stderr)
+            has_nan = (
+                bool(np.isnan(arr).any())
+                if np.issubdtype(arr.dtype, np.floating)
+                else False
+            )
+            print(
+                f"  output: {out_meta.name:50s} "
+                f"shape={arr.shape} dtype={arr.dtype} nan={has_nan}",
+                file=sys.stderr,
+            )
 
     print(f"{len(outputs)} outputs")
 

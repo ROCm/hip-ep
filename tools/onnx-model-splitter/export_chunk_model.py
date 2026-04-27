@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib.util
 import json
 import os
 import re
@@ -82,27 +83,36 @@ from typing import Any
 from collections import defaultdict
 from dataclasses import dataclass
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPT_DIR)
-
 import numpy as np
 import onnx
 from onnx import numpy_helper
 from onnx import TensorProto
 from onnx.external_data_helper import set_external_data
 
-from extract_submodels import (
-    BATCH_SIZE,
-    FOLD_TOTAL_SEQ_NODE_NAME,
-    TOTAL_SEQ_LEN_CONST_NAME,
-    TOTAL_SEQ_LEN_CONSTANT_OUT,
-    SingleOpExtractor,
-    _build_dim_subs,
-    patch_fold_total_seq_len_constant_value,
-    total_seq_len_scalar_from_dim_map,
-    upsert_total_seq_len_const_initializer,
-)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_extract_submodels():
+    """Load sibling ``extract_submodels.py`` without modifying ``sys.path``."""
+    path = os.path.join(_SCRIPT_DIR, "extract_submodels.py")
+    spec = importlib.util.spec_from_file_location("extract_submodels", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load extract_submodels from {path!r}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["extract_submodels"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_es = _load_extract_submodels()
+BATCH_SIZE = _es.BATCH_SIZE
+FOLD_TOTAL_SEQ_NODE_NAME = _es.FOLD_TOTAL_SEQ_NODE_NAME
+TOTAL_SEQ_LEN_CONSTANT_OUT = _es.TOTAL_SEQ_LEN_CONSTANT_OUT
+SingleOpExtractor = _es.SingleOpExtractor
+_build_dim_subs = _es._build_dim_subs
+patch_fold_total_seq_len_constant_value = _es.patch_fold_total_seq_len_constant_value
+total_seq_len_scalar_from_dim_map = _es.total_seq_len_scalar_from_dim_map
+upsert_total_seq_len_const_initializer = _es.upsert_total_seq_len_const_initializer
 
 
 DEFAULT_SEQ_LENS = (128, 256, 512, 1024, 2048, 3072, 4096, 12200)
@@ -161,9 +171,7 @@ def scan_external_data_layout(model_path: str) -> ExternalDataLayout | None:
             ordered.append(loc)
     file_index = {loc: i for i, loc in enumerate(ordered)}
     init_to_location = {name: loc for name, loc, _ in rows}
-    init_pack_order = {
-        name: (file_index[loc], off) for name, loc, off in rows
-    }
+    init_pack_order = {name: (file_index[loc], off) for name, loc, off in rows}
     return ExternalDataLayout(
         ordered_locations=tuple(ordered),
         init_to_location=init_to_location,
@@ -231,9 +239,7 @@ def _save_onnx_external_aligned(
 
     if layout is None or len(layout.ordered_locations) == 1:
         loc = (
-            layout.ordered_locations[0]
-            if layout
-            else DEFAULT_EXTERNAL_WEIGHTS_FILENAME
+            layout.ordered_locations[0] if layout else DEFAULT_EXTERNAL_WEIGHTS_FILENAME
         )
         ext_path = os.path.join(out_dir, loc)
         if os.path.isfile(ext_path):
@@ -365,7 +371,9 @@ def expand_export_variant_specs(
 QMoe_OP_TYPES: frozenset[str] = frozenset({"QMoE"})
 
 
-def _graph_contains_any_op_type(graph: onnx.GraphProto, op_types: frozenset[str]) -> bool:
+def _graph_contains_any_op_type(
+    graph: onnx.GraphProto, op_types: frozenset[str]
+) -> bool:
     return any(node.op_type in op_types for node in graph.node)
 
 
@@ -423,8 +431,7 @@ def write_genai_config_jsons(
         prefill_onnx_path=prefill_onnx_path,
         decode_onnx_path=decode_onnx_path,
     )
-    specs = expand_export_variant_specs(
-        seq_lens, max_length, decode_mode=False)
+    specs = expand_export_variant_specs(seq_lens, max_length, decode_mode=False)
     for tag, _dm, genai_chunk, fixed_prompt_len in specs:
         cfg = copy.deepcopy(template)
         model = cfg.setdefault("model", {})
@@ -608,8 +615,11 @@ def _backup_gqa_nodes(model: onnx.ModelProto):
     Must use **names**, not node list indices: after ``_remove_orphan_fold_total_seq_len``
     deletes ``fold/total_seq_len``, all following indices shift; restoring by stale
     index would overwrite the wrong node (e.g. o_proj MatMul gets GQA's 9 inputs)."""
-    return [(n.name, list(n.input)) for n in model.graph.node
-            if n.op_type == "GroupQueryAttention"]
+    return [
+        (n.name, list(n.input))
+        for n in model.graph.node
+        if n.op_type == "GroupQueryAttention"
+    ]
 
 
 def _restore_gqa_nodes(model: onnx.ModelProto, backup):
@@ -861,8 +871,7 @@ def _remove_orphan_fold_total_seq_len(model: onnx.ModelProto) -> bool:
     model.graph.node.extend(kept)
     # Drop stale value_info for the removed edge
     vi_keep = [
-        v for v in model.graph.value_info
-        if v.name != TOTAL_SEQ_LEN_CONSTANT_OUT
+        v for v in model.graph.value_info if v.name != TOTAL_SEQ_LEN_CONSTANT_OUT
     ]
     if len(vi_keep) != len(model.graph.value_info):
         del model.graph.value_info[:]
@@ -899,7 +908,8 @@ class FixedCtxExtractor(SingleOpExtractor):
     def _get_variants(self):
         ml = self._max_length
         specs = expand_export_variant_specs(
-            self._seq_lens, ml, decode_mode=self._decode_mode)
+            self._seq_lens, ml, decode_mode=self._decode_mode
+        )
         return [(tag, dm) for tag, dm, _gc, _fp in specs]
 
     def _save_variants(self, model, out_dir, _prefix):
@@ -915,8 +925,10 @@ class FixedCtxExtractor(SingleOpExtractor):
             ex0 = self._ext_layout.ordered_locations[0]
             print(f"  External data: {nloc} file(s) (from source), e.g. {ex0!r}")
         else:
-            print(f"  External data: single file {DEFAULT_EXTERNAL_WEIGHTS_FILENAME!r} "
-                  f"(source has no external initializers)")
+            print(
+                f"  External data: single file {DEFAULT_EXTERNAL_WEIGHTS_FILENAME!r} "
+                f"(source has no external initializers)"
+            )
 
         orig_in = {i.name: self._save_vi_shape(i) for i in model.graph.input}
         orig_out = {o.name: self._save_vi_shape(o) for o in model.graph.output}
@@ -927,7 +939,9 @@ class FixedCtxExtractor(SingleOpExtractor):
             1 for n in model.graph.node if n.op_type == "GroupQueryAttention"
         )
         if gqa_node_count:
-            print(f"  GQA nodes: {gqa_node_count} (will patch seqlens/total per variant)")
+            print(
+                f"  GQA nodes: {gqa_node_count} (will patch seqlens/total per variant)"
+            )
 
         fold_total_template = _snapshot_fold_total_seq_len_node(model)
         _printed_reuse_hint = False
@@ -935,7 +949,8 @@ class FixedCtxExtractor(SingleOpExtractor):
         for idx, (vname, dim_map) in enumerate(self.variants):
             eff_total_llm = (
                 total_seq_len_scalar_from_dim_map(dim_map)
-                if self.model_type == "llm" else None
+                if self.model_type == "llm"
+                else None
             )
             _ensure_fold_total_seq_len_node(model, fold_total_template)
             if eff_total_llm is not None:
@@ -944,19 +959,23 @@ class FixedCtxExtractor(SingleOpExtractor):
             _restore_gqa_nodes(model, gqa_backup)
 
             if eff_total_llm is not None:
-                upsert_total_seq_len_const_initializer(
-                    model.graph, eff_total_llm)
+                upsert_total_seq_len_const_initializer(model.graph, eff_total_llm)
 
             n_gqa_inits = _patch_gqa_scalars(model, dim_map, GQA_INIT_PREFIX)
             if n_gqa_inits and idx == 0:
                 print(f"  Patched GQA initializer tensor(s): {n_gqa_inits}")
 
             if _remove_orphan_fold_total_seq_len(model) and idx == 0:
-                print(f"  Removed orphan {FOLD_TOTAL_SEQ_NODE_NAME!r} "
-                      f"(output {TOTAL_SEQ_LEN_CONSTANT_OUT!r} unused after GQA total patch)")
+                print(
+                    f"  Removed orphan {FOLD_TOTAL_SEQ_NODE_NAME!r} "
+                    f"(output {TOTAL_SEQ_LEN_CONSTANT_OUT!r} unused after GQA total patch)"
+                )
 
-            for vi in list(model.graph.input) + list(model.graph.output) \
-                    + list(model.graph.value_info):
+            for vi in (
+                list(model.graph.input)
+                + list(model.graph.output)
+                + list(model.graph.value_info)
+            ):
                 _set_vi_shape_ctx(vi, dim_map)
 
             ids_seq = 1 if self._decode_mode else int(dim_map["sequence_length"])
@@ -966,21 +985,26 @@ class FixedCtxExtractor(SingleOpExtractor):
                 attention_second=self._max_length,
             )
 
-            n_pk = _force_past_key_values_past_seq_dim(
-                model.graph, self._max_length)
+            n_pk = _force_past_key_values_past_seq_dim(model.graph, self._max_length)
             if n_pk and idx == 0:
-                print(f"  past_key_values inputs with past_sequence_length="
-                      f"{self._max_length} (max_length): {n_pk}")
+                print(
+                    f"  past_key_values inputs with past_sequence_length="
+                    f"{self._max_length} (max_length): {n_pk}"
+                )
 
             n_pr = _force_present_kv_seq_dim(model.graph, self._max_length)
             if n_pr and idx == 0:
-                print(f"  present.* outputs/value_info dim[2]="
-                      f"{self._max_length} (max_length): {n_pr} tensor(s)")
+                print(
+                    f"  present.* outputs/value_info dim[2]="
+                    f"{self._max_length} (max_length): {n_pr} tensor(s)"
+                )
 
             n_nodes, n_vi, n_in, n_init = _post_export_prune_unreachable(model)
             if idx == 0 and (n_nodes or n_vi or n_in or n_init):
-                print(f"  Pruned unreachable: {n_nodes} node(s), {n_vi} value_info, "
-                      f"{n_in} unused input(s), {n_init} unused initializer(s)")
+                print(
+                    f"  Pruned unreachable: {n_nodes} node(s), {n_vi} value_info, "
+                    f"{n_in} unused input(s), {n_init} unused initializer(s)"
+                )
 
             fname = f"{self._export_prefix}_{vname}.onnx"
             path = os.path.join(out_dir, fname)
@@ -989,10 +1013,13 @@ class FixedCtxExtractor(SingleOpExtractor):
             # graphs on idx>=1 (e.g. MatMul with 9 inputs / ORT schema errors) while
             # idx==0 loaded fine.
             graph_only = _save_onnx_external_aligned(
-                model, path, self._ext_layout, size_threshold=1024)
+                model, path, self._ext_layout, size_threshold=1024
+            )
             if graph_only and not _printed_reuse_hint:
-                print("  Reusing shared external weight file(s); later variants write "
-                      ".onnx only (no re-read / no blob rewrite).")
+                print(
+                    "  Reusing shared external weight file(s); later variants write "
+                    ".onnx only (no re-read / no blob rewrite)."
+                )
                 _printed_reuse_hint = True
             print(f"  Saved: {path}")
 
@@ -1037,7 +1064,7 @@ def parse_seq_lens(s: str | None) -> tuple[int, ...]:
 def main():
     p = argparse.ArgumentParser(
         description="Export Llama prefill/decode ONNX with fixed max_length "
-                    f"(default {16384}) and per-variant sequence lengths."
+        f"(default {16384}) and per-variant sequence lengths."
     )
     p.add_argument(
         "--model",
@@ -1074,7 +1101,7 @@ def main():
         dest="max_length",
         metavar="N",
         help="max_length (e.g. 16384): past/total sequence dims, GQA total, attention_mask "
-             "second dim. --cache-len is an alias.",
+        "second dim. --cache-len is an alias.",
     )
     p.add_argument(
         "--seq-lens",
@@ -1100,9 +1127,7 @@ def main():
             p.error(f"GenAI config template file does not exist: {cfg_tpl}")
     else:
         cfg_tpl = (
-            os.path.abspath(args.config_template)
-            if args.config_template
-            else None
+            os.path.abspath(args.config_template) if args.config_template else None
         )
 
     seq_lens = parse_seq_lens(args.seq_lens)
@@ -1114,13 +1139,19 @@ def main():
 
     print(f"=== Prefill (out={out}, prefill_*m{args.max_length}.onnx, etc.) ===")
     run_export(
-        model_abs, out, args.max_length, seq_lens,
+        model_abs,
+        out,
+        args.max_length,
+        seq_lens,
         decode_mode=False,
         export_prefix="prefill",
     )
     print(f"=== Decode (out={out}, decode_*m{args.max_length}.onnx, etc.) ===")
     run_export(
-        model_abs, out, args.max_length, seq_lens,
+        model_abs,
+        out,
+        args.max_length,
+        seq_lens,
         decode_mode=True,
         export_prefix="decode",
     )

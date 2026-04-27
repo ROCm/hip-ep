@@ -16,20 +16,19 @@ Usage:
   python inspect_onnx.py <model.onnx> --find-chains         # find common preprocessing chains
 """
 
-import os
-import sys
 import argparse
 from collections import Counter
 
 import onnx
-from onnx import numpy_helper
 
 
 def load_model(path):
     print(f"Loading {path} ...")
     m = onnx.load(path, load_external_data=False)
     print(f"  IR version:  {m.ir_version}")
-    print(f"  Opset:       {[(o.domain or 'ai.onnx', o.version) for o in m.opset_import]}")
+    print(
+        f"  Opset:       {[(o.domain or 'ai.onnx', o.version) for o in m.opset_import]}"
+    )
     return m
 
 
@@ -74,6 +73,7 @@ def show_io(m):
 def detect_layers(g):
     """Detect transformer layers by scanning node names for layer index patterns."""
     import re
+
     pattern = re.compile(r"/layers?[./](\d+)[/.]")
 
     layer_node_counts = Counter()
@@ -112,18 +112,22 @@ def detect_layers(g):
     outlier_layers = [i for i in all_indices if layer_node_counts[i] != majority_count]
 
     num_normal = len(normal_layers)
-    print(f"Layers:       {num_normal}  (index {normal_layers[0]}..{normal_layers[-1]}, "
-          f"{majority_count} nodes per layer"
-          f"{'' if contiguous and not outlier_layers else ', see below'})")
+    print(
+        f"Layers:       {num_normal}  (index {normal_layers[0]}..{normal_layers[-1]}, "
+        f"{majority_count} nodes per layer"
+        f"{'' if contiguous and not outlier_layers else ', see below'})"
+    )
 
     if outlier_layers:
-        print(f"              + {len(outlier_layers)} outlier(s) with different node count:")
+        print(
+            f"              + {len(outlier_layers)} outlier(s) with different node count:"
+        )
         for idx in outlier_layers:
             cnt = layer_node_counts[idx]
             nodes = layer_sample_nodes[idx]
             node_desc = ", ".join(f"{op}" for op, _ in nodes[:3])
             if len(nodes) > 3:
-                node_desc += f" ... (+{len(nodes)-3} more)"
+                node_desc += f" ... (+{len(nodes) - 3} more)"
             print(f"                layer {idx}: {cnt} node(s) - {node_desc}")
     elif not contiguous:
         missing = [i for i in range(min_l, max_l + 1) if i not in layer_node_counts]
@@ -136,21 +140,24 @@ def show_nodes(m, layer_filter=None, type_name=None):
     matched = []
     for i, n in enumerate(g.node):
         if layer_filter is not None:
-            if f"/layers.{layer_filter}/" not in n.name and f"/layer.{layer_filter}/" not in n.name:
+            if (
+                f"/layers.{layer_filter}/" not in n.name
+                and f"/layer.{layer_filter}/" not in n.name
+            ):
                 continue
         if type_lower is not None and n.op_type.lower() != type_lower:
             continue
         matched.append((i, n))
 
-    label = f"Nodes (showing {len(matched)}/{len(g.node)})" if (layer_filter is not None or type_name) \
+    label = (
+        f"Nodes (showing {len(matched)}/{len(g.node)})"
+        if (layer_filter is not None or type_name)
         else f"Nodes ({len(g.node)})"
+    )
     print(f"\n{label}:")
     for i, n in matched:
         domain = f"[{n.domain}]" if n.domain else ""
-        print(
-            f"  {i:>5d}  {n.op_type:40s} {domain:25s} "
-            f"name={n.name}"
-        )
+        print(f"  {i:>5d}  {n.op_type:40s} {domain:25s} name={n.name}")
         for j, inp_name in enumerate(n.input):
             print(f"         in[{j}]: {inp_name}")
         for j, out_name in enumerate(n.output):
@@ -205,8 +212,6 @@ def find_chains(m):
         for o in n.output:
             out_to_node[o] = n
 
-    input_names = {inp.name for inp in g.input}
-
     print("\n--- Chains starting from graph inputs ---")
     for inp in g.input:
         consumers = [n for n in g.node if inp.name in n.input]
@@ -217,9 +222,20 @@ def find_chains(m):
                 for _ in range(10):
                     chain.append(f"{current.op_type}({current.name})")
                     next_consumers = [
-                        n2 for n2 in g.node
+                        n2
+                        for n2 in g.node
                         if any(o in n2.input for o in current.output)
-                        and n2.op_type in ("Shape", "Gather", "Cast", "Unsqueeze", "Concat", "Reshape", "Sub", "Add")
+                        and n2.op_type
+                        in (
+                            "Shape",
+                            "Gather",
+                            "Cast",
+                            "Unsqueeze",
+                            "Concat",
+                            "Reshape",
+                            "Sub",
+                            "Add",
+                        )
                     ]
                     if len(next_consumers) == 1:
                         chain.append(" -> ")
@@ -233,12 +249,26 @@ def main():
     parser = argparse.ArgumentParser(description="Inspect ONNX model structure")
     parser.add_argument("model", type=str, help="Path to .onnx file")
     parser.add_argument("--nodes", action="store_true", help="List all nodes")
-    parser.add_argument("--layer", type=int, default=None, help="Filter nodes by layer index")
-    parser.add_argument("--node-name", type=str, default=None, help="Show detail for a specific node")
-    parser.add_argument("--type-name", type=str, default=None,
-                        help="Filter --nodes by op_type (case-insensitive), e.g. --type-name Add")
-    parser.add_argument("--op-types", action="store_true", help="Count nodes by op type")
-    parser.add_argument("--find-chains", action="store_true", help="Find preprocessing chains from inputs")
+    parser.add_argument(
+        "--layer", type=int, default=None, help="Filter nodes by layer index"
+    )
+    parser.add_argument(
+        "--node-name", type=str, default=None, help="Show detail for a specific node"
+    )
+    parser.add_argument(
+        "--type-name",
+        type=str,
+        default=None,
+        help="Filter --nodes by op_type (case-insensitive), e.g. --type-name Add",
+    )
+    parser.add_argument(
+        "--op-types", action="store_true", help="Count nodes by op type"
+    )
+    parser.add_argument(
+        "--find-chains",
+        action="store_true",
+        help="Find preprocessing chains from inputs",
+    )
     args = parser.parse_args()
 
     m = load_model(args.model)
@@ -256,7 +286,9 @@ def main():
         find_chains(m)
 
     if not (args.nodes or args.node_name or args.op_types or args.find_chains):
-        print("\nTip: use --nodes, --op-types, --node-name, or --find-chains for more details")
+        print(
+            "\nTip: use --nodes, --op-types, --node-name, or --find-chains for more details"
+        )
 
 
 if __name__ == "__main__":
