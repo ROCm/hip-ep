@@ -16,7 +16,7 @@
 // - Multiple outputs handled properly
 // ============================================================================
 
-// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip --one-shot-bufferize --convert-hip-to-llvm | FileCheck %s
+// RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
 module {
   // Main entry point: multi-head attention split
@@ -47,20 +47,29 @@ module {
   }
 }
 
-// Verify no ONNX operations remain in final LLVM lowering
+// Verify no high-level ops remain after full pipeline lowering.
 // CHECK-NOT: onnx.Split
 // CHECK-NOT: onnx.Constant
 // CHECK-NOT: tensor.extract_slice
+// CHECK-NOT: func.func
 
-// Verify main_graph function exists and uses memref.subview (zero-copy slicing)
-// CHECK: func.func @main_graph
-// CHECK: memref.subview
+// Verify split lowering reaches LLVM and materializes outputs through memrefCopy.
+// CHECK: llvm.func @memrefCopy(i64, !llvm.ptr, !llvm.ptr)
+// CHECK: llvm.func private @main_graph
+// CHECK: llvm.func private @main_graph_internal
+// CHECK: llvm.call @memrefCopy
 
-// Verify LLVM lowering occurred
-// CHECK: llvm.
+// Verify additional split test functions survive to LLVM lowering.
+// CHECK: llvm.func @test_cascaded_splits
+// CHECK: llvm.func @test_custom_split
 
-// Verify cascaded splits function exists
-// CHECK: func.func @test_cascaded_splits
-
-// Verify custom split function exists
-// CHECK: func.func @test_custom_split
+// Verify generated C interface wrappers are present.
+// CHECK-LABEL: llvm.func @inference_init
+// CHECK: llvm.call @hipdnn_ep_state_init_with_fs
+// CHECK-LABEL: llvm.func @inference_compute
+// CHECK: llvm.call @hipdnn_ep_tensor_prepare_input
+// CHECK: llvm.call @hipdnn_ep_tensor_prepare_output
+// CHECK: llvm.call @hipdnn_ep_tensor_finalize_output
+// CHECK-LABEL: llvm.func @inference_cleanup
+// CHECK: llvm.call @hipdnn_ep_state_cleanup
+// CHECK-LABEL: llvm.func @inference_get_metadata_json
