@@ -16,5 +16,6 @@
 #include "mm_config.h"
 #include "mm_hal.h"
 #include "mm_api.h"
+#include "mm_pool.h"
 
 #endif /* MM_H */

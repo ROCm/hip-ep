@@ -13,6 +13,7 @@ option(MM_USE_MOCK_HAL "Build UMM with mock HAL (no GPU required)" ON)
 set(MM_SOURCES
     mm_core.cpp
     mm_error.cpp
+    mm_pool.cpp
     handle_table.cpp
 )
 

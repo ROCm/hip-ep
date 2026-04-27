@@ -11,6 +11,8 @@
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
+#include "mm/mm.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -100,6 +102,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->workspace_size = 0;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
+  state->mm_pool_opaque = nullptr;
+  state->mm_constants_handle = 0;
+  state->mm_workspace_handle = 0;
 
   // Explicitly initialize HIP device before any other operations
   // This ensures device 0 is active and context is properly initialized
@@ -171,6 +176,21 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   }
 
   TIMING_LOG("[Session] HIP device init: %.3fs\n", record_elapsed(t_prev));
+
+  // Initialize UMM (Unified Memory Manager)
+  {
+    mm_config_t mm_cfg = mm_config_default();
+    mm_cfg.device_id = 0;
+    mm_status_t mm_st = mm_init(&mm_cfg);
+    if (mm_st != MM_OK && mm_st != MM_ERR_ALREADY_INIT) {
+      fprintf(stderr, "Failed to initialize UMM: %s\n",
+              mm_status_string(mm_st));
+      free(state);
+      return 5;
+    }
+  }
+
+  TIMING_LOG("[Session] UMM init: %.3fs\n", record_elapsed(t_prev));
 
   // Create HIP stream
   if (hipStreamCreate(&state->stream) != hipSuccess) {
@@ -393,16 +413,27 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                    record_elapsed(t_prev), total_size);
       }
 
-      if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
-        fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
-                total_size);
-        free(cpu_buf);
-        hipdnn_ep_state_cleanup(state);
-        *out_state = nullptr;
-        return 1;
+      {
+        mm_alloc_hints_t mm_hints;
+        mm_hints.mem_class = MM_CLASS_WEIGHT;
+        mm_hints.lifetime  = MM_LIFETIME_STATIC;
+        mm_hints.alignment = 0;
+        state->mm_constants_handle =
+            (uint64_t)mm_alloc(total_size, &mm_hints, nullptr);
+        if (state->mm_constants_handle == 0) {
+          fprintf(stderr,
+                  "mm_alloc failed for constants blob (%zu bytes)\n",
+                  total_size);
+          free(cpu_buf);
+          hipdnn_ep_state_cleanup(state);
+          *out_state = nullptr;
+          return 1;
+        }
+        state->gpu_constants_blob =
+            mm_get_ptr((mm_handle_t)state->mm_constants_handle);
       }
 
-      TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
+      TIMING_LOG("[Session] mm_alloc VRAM: %.3fs (%zu bytes)\n",
                  record_elapsed(t_prev), total_size);
 
       if (hipMemcpy(state->gpu_constants_blob, src, total_size,
@@ -478,17 +509,26 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipStreamSynchronize(state->stream));
   }
 
-  // Free shared workspace (if allocated)
-  if (state->workspace) {
+  // Free shared workspace via UMM (if allocated)
+  if (state->mm_workspace_handle) {
+    mm_free((mm_handle_t)state->mm_workspace_handle, nullptr);
+    state->workspace = nullptr;
+    state->workspace_size = 0;
+  } else if (state->workspace) {
     HIP_CLEANUP(hipFree(state->workspace));
   }
 
-  // Free memory pool (if allocated)
-  if (state->pool_base) {
-    HIP_CLEANUP(hipFree(state->pool_base));
-  }
-  if (state->buffer_offsets) {
-    free(state->buffer_offsets);
+  // Free memory pool via UMM (if allocated)
+  if (state->mm_pool_opaque) {
+    mm_pool_destroy((mm_pool_t)state->mm_pool_opaque);
+    state->pool_base = nullptr;
+  } else {
+    if (state->pool_base) {
+      HIP_CLEANUP(hipFree(state->pool_base));
+    }
+    if (state->buffer_offsets) {
+      free(state->buffer_offsets);
+    }
   }
 
   // Free the single constants blob and the pointer array.
@@ -502,6 +542,8 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
       if (remaining <= 0) {
         if (state->constants_blob_is_host)
           HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
+        else if (state->mm_constants_handle)
+          mm_free((mm_handle_t)state->mm_constants_handle, nullptr);
         else
           HIP_CLEANUP(hipFree(state->gpu_constants_blob));
       }
@@ -513,6 +555,8 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     {
       if (state->constants_blob_is_host)
         HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
+      else if (state->mm_constants_handle)
+        mm_free((mm_handle_t)state->mm_constants_handle, nullptr);
       else
         HIP_CLEANUP(hipFree(state->gpu_constants_blob));
     }
@@ -534,6 +578,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->stream) {
     HIP_CLEANUP(hipStreamDestroy(state->stream));
   }
+
+  // Shut down UMM
+  mm_shutdown();
 
   // Free the context struct itself
   free(state);
@@ -575,63 +622,59 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
     return 1;
   }
 
-  // Allocate the memory pool
-  if (pool_size > 0) {
-    if (hipMalloc(&state->pool_base, pool_size) != hipSuccess) {
-      fprintf(stderr, "Failed to allocate memory pool of size %zu bytes\n",
-              pool_size);
-      return 2; // Pool allocation failed
-    }
-  } else {
+  if (pool_size == 0) {
     state->pool_base = nullptr;
+    state->pool_size = 0;
+    state->num_buffers = 0;
+    state->buffer_offsets = nullptr;
+    state->mm_pool_opaque = nullptr;
+    return 0;
   }
 
-  // Store pool metadata
+  // Use UMM static pool: single allocation + offset table
+  mm_static_plan_t plan;
+  plan.total_size  = pool_size;
+  plan.offsets     = buffer_offsets;
+  plan.num_entries = (uint32_t)num_buffers;
+
+  mm_pool_t pool = mm_pool_create(&plan);
+  if (!pool) {
+    fprintf(stderr, "mm_pool_create failed for pool of size %zu bytes\n",
+            pool_size);
+    return 2;
+  }
+
+  state->mm_pool_opaque = pool;
+  state->pool_base = mm_pool_get_base(pool);
   state->pool_size = pool_size;
   state->num_buffers = num_buffers;
+  state->buffer_offsets = nullptr;
 
-  // Copy buffer offsets array
-  if (num_buffers > 0 && buffer_offsets) {
-    state->buffer_offsets = (size_t *)malloc(sizeof(size_t) * num_buffers);
-    if (!state->buffer_offsets) {
-      fprintf(stderr, "Failed to allocate buffer offsets array\n");
-      if (state->pool_base) {
-        HIP_CLEANUP(hipFree(state->pool_base));
-        state->pool_base = nullptr;
-      }
-      return 1; // Allocation failed
-    }
-    memcpy(state->buffer_offsets, buffer_offsets, sizeof(size_t) * num_buffers);
-  } else {
-    state->buffer_offsets = nullptr;
-  }
-
-  return 0; // Success
+  return 0;
 }
 
 void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
-  if (!state || !state->pool_base) {
+  if (!state) {
     fprintf(stderr, "Invalid state or pool not initialized\n");
     return nullptr;
   }
 
-  if (index >= state->num_buffers) {
-    fprintf(stderr, "Buffer index %zu out of range (num_buffers = %zu)\n",
-            index, state->num_buffers);
-    return nullptr;
-  }
+  if (state->mm_pool_opaque)
+    return mm_pool_get_ptr((mm_pool_t)state->mm_pool_opaque, (uint32_t)index);
 
-  // Return pointer at pool_base + offset
-  char *pool_ptr = static_cast<char *>(state->pool_base);
-  size_t offset = state->buffer_offsets[index];
-  return pool_ptr + offset;
+  // Legacy fallback (should not be reached after UMM integration)
+  if (!state->pool_base || index >= state->num_buffers)
+    return nullptr;
+  return static_cast<char *>(state->pool_base) + state->buffer_offsets[index];
 }
 
 void *hipdnn_ep_get_pool_base(RuntimeState *state) {
-  if (!state) {
-    fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
+  if (!state)
     return nullptr;
-  }
+
+  if (state->mm_pool_opaque)
+    return mm_pool_get_base((mm_pool_t)state->mm_pool_opaque);
+
   return state->pool_base;
 }
 
@@ -658,23 +701,36 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   // Grow: free old, allocate new.
   // Sync the stream first to ensure no in-flight kernel is still using the
   // old workspace buffer (prevents use-after-free on async GPU execution).
-  if (state->workspace) {
-    if (state->stream) {
+  if (state->mm_workspace_handle) {
+    if (state->stream)
       hipStreamSynchronize(state->stream);
-    }
+    mm_free((mm_handle_t)state->mm_workspace_handle, nullptr);
+    state->mm_workspace_handle = 0;
+    state->workspace = nullptr;
+    state->workspace_size = 0;
+  } else if (state->workspace) {
+    if (state->stream)
+      hipStreamSynchronize(state->stream);
     HIP_CLEANUP(hipFree(state->workspace));
     state->workspace = nullptr;
     state->workspace_size = 0;
   }
 
-  if (hipMalloc(&state->workspace, needed_size) != hipSuccess) {
-    fprintf(
-        stderr,
-        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
-        needed_size);
+  mm_alloc_hints_t hints;
+  hints.mem_class = MM_CLASS_SCRATCH;
+  hints.lifetime  = MM_LIFETIME_REQUEST;
+  hints.alignment = 0;
+
+  mm_handle_t h = mm_alloc(needed_size, &hints, nullptr);
+  if (h == MM_HANDLE_INVALID) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_workspace: mm_alloc failed for %zu bytes\n",
+            needed_size);
     return -1;
   }
 
+  state->mm_workspace_handle = (uint64_t)h;
+  state->workspace = mm_get_ptr(h);
   state->workspace_size = needed_size;
   RUNTIME_DEBUG_LOG("[workspace] Allocated shared workspace: %zu bytes\n",
                     needed_size);

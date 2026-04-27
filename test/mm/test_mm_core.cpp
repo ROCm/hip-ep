@@ -9,16 +9,19 @@
 #include <cassert>
 #include <cstdio>
 
+#define ASSERT_OK(expr) do { mm_status_t s_ = (expr); assert(s_ == MM_OK); (void)s_; } while(0)
+#define ASSERT_ERR(expr, code) do { mm_status_t s_ = (expr); assert(s_ == (code)); (void)s_; } while(0)
+
 static void test_lifecycle() {
     /* Not initialized yet */
     assert(mm_is_initialized() == 0);
 
     /* Init with defaults */
-    assert(mm_init(NULL) == MM_OK);
+    ASSERT_OK(mm_init(NULL));
     assert(mm_is_initialized() == 1);
 
     /* Double init is an error */
-    assert(mm_init(NULL) == MM_ERR_ALREADY_INIT);
+    ASSERT_ERR(mm_init(NULL), MM_ERR_ALREADY_INIT);
 
     /* Shutdown */
     mm_shutdown();
@@ -27,14 +30,14 @@ static void test_lifecycle() {
     /* Re-init after shutdown */
     mm_config_t cfg = mm_config_default();
     cfg.enable_debug_log = 1;
-    assert(mm_init(&cfg) == MM_OK);
+    ASSERT_OK(mm_init(&cfg));
     mm_shutdown();
 
     printf("  lifecycle: ok\n");
 }
 
 static void test_alloc_free() {
-    assert(mm_init(NULL) == MM_OK);
+    ASSERT_OK(mm_init(NULL));
 
     /* Basic alloc */
     mm_handle_t h = mm_alloc(1024, NULL, NULL);
@@ -46,7 +49,7 @@ static void test_alloc_free() {
 
     /* query */
     mm_alloc_info_t info;
-    assert(mm_query(h, &info) == MM_OK);
+    ASSERT_OK(mm_query(h, &info));
     assert(info.handle == h);
     assert(info.ptr == ptr);
     assert(info.size >= 1024);
@@ -55,23 +58,23 @@ static void test_alloc_free() {
     assert(info.device == 0);
 
     /* free */
-    assert(mm_free(h, NULL) == MM_OK);
+    ASSERT_OK(mm_free(h, NULL));
 
     /* double free */
-    assert(mm_free(h, NULL) == MM_ERR_INVALID_HANDLE);
+    ASSERT_ERR(mm_free(h, NULL), MM_ERR_INVALID_HANDLE);
 
     /* get_ptr after free */
     assert(mm_get_ptr(h) == NULL);
 
     /* query after free */
-    assert(mm_query(h, &info) == MM_ERR_INVALID_HANDLE);
+    ASSERT_ERR(mm_query(h, &info), MM_ERR_INVALID_HANDLE);
 
     mm_shutdown();
     printf("  alloc_free: ok\n");
 }
 
 static void test_alloc_with_hints() {
-    assert(mm_init(NULL) == MM_OK);
+    ASSERT_OK(mm_init(NULL));
 
     mm_alloc_hints_t hints;
     hints.mem_class = MM_CLASS_WEIGHT;
@@ -82,20 +85,20 @@ static void test_alloc_with_hints() {
     assert(h != MM_HANDLE_INVALID);
 
     mm_alloc_info_t info;
-    assert(mm_query(h, &info) == MM_OK);
+    ASSERT_OK(mm_query(h, &info));
     assert(info.mem_class == MM_CLASS_WEIGHT);
     assert(info.lifetime == MM_LIFETIME_STATIC);
     assert(info.size >= 100);
     /* size should be aligned to 512 */
     assert(info.size % 512 == 0);
 
-    assert(mm_free(h, NULL) == MM_OK);
+    ASSERT_OK(mm_free(h, NULL));
     mm_shutdown();
     printf("  alloc_with_hints: ok\n");
 }
 
 static void test_zero_size_alloc() {
-    assert(mm_init(NULL) == MM_OK);
+    ASSERT_OK(mm_init(NULL));
 
     mm_handle_t h = mm_alloc(0, NULL, NULL);
     assert(h == MM_HANDLE_INVALID);
@@ -107,17 +110,17 @@ static void test_zero_size_alloc() {
 static void test_not_initialized() {
     /* All ops should fail gracefully when not initialized */
     assert(mm_alloc(1024, NULL, NULL) == MM_HANDLE_INVALID);
-    assert(mm_free(1, NULL) == MM_ERR_NOT_INITIALIZED);
+    ASSERT_ERR(mm_free(1, NULL), MM_ERR_NOT_INITIALIZED);
     assert(mm_get_ptr(1) == NULL);
 
     mm_alloc_info_t info;
-    assert(mm_query(1, &info) == MM_ERR_NOT_INITIALIZED);
+    ASSERT_ERR(mm_query(1, &info), MM_ERR_NOT_INITIALIZED);
 
     printf("  not_initialized: ok\n");
 }
 
 static void test_metrics() {
-    assert(mm_init(NULL) == MM_OK);
+    ASSERT_OK(mm_init(NULL));
 
     mm_metrics_snapshot_t snap = mm_metrics_snapshot();
     assert(snap.alloc_count == 0);
@@ -138,7 +141,7 @@ static void test_metrics() {
 
     size_t peak_before = snap.peak_allocated_bytes;
 
-    assert(mm_free(h2, NULL) == MM_OK);
+    ASSERT_OK(mm_free(h2, NULL));
     snap = mm_metrics_snapshot();
     assert(snap.alloc_count == 3);
     assert(snap.free_count == 1);
@@ -152,14 +155,14 @@ static void test_metrics() {
     assert(snap.alloc_count == 0);
     assert(snap.free_count == 0);
 
-    assert(mm_free(h1, NULL) == MM_OK);
-    assert(mm_free(h3, NULL) == MM_OK);
+    ASSERT_OK(mm_free(h1, NULL));
+    ASSERT_OK(mm_free(h3, NULL));
     mm_shutdown();
     printf("  metrics: ok\n");
 }
 
 static void test_dump_state() {
-    assert(mm_init(NULL) == MM_OK);
+    ASSERT_OK(mm_init(NULL));
 
     mm_handle_t h1 = mm_alloc(256, NULL, NULL);
     mm_alloc_hints_t hints = {MM_CLASS_WEIGHT, MM_LIFETIME_STATIC, 0};
@@ -168,8 +171,8 @@ static void test_dump_state() {
     /* Just verify it doesn't crash */
     mm_dump_state(stderr);
 
-    assert(mm_free(h1, NULL) == MM_OK);
-    assert(mm_free(h2, NULL) == MM_OK);
+    ASSERT_OK(mm_free(h1, NULL));
+    ASSERT_OK(mm_free(h2, NULL));
     mm_shutdown();
     printf("  dump_state: ok\n");
 }
@@ -177,7 +180,7 @@ static void test_dump_state() {
 static void test_leak_detection() {
     mm_config_t cfg = mm_config_default();
     cfg.enable_debug_log = 1;
-    assert(mm_init(&cfg) == MM_OK);
+    ASSERT_OK(mm_init(&cfg));
 
     /* Allocate but don't free — shutdown should warn and clean up */
     mm_alloc(512, NULL, NULL);
