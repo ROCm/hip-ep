@@ -39,6 +39,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Cast | Custom HIP Kernel |
 | ReduceSum | Custom HIP Kernel |
 | Gather | Custom HIP Kernel |
+| Slice | Custom HIP Kernel |
 | SimplifiedLayerNormalization | MIOpen |
 | SkipSimplifiedLayerNormalization (com.microsoft) | MIOpen |
 | RotaryEmbedding (com.microsoft) | Custom HIP Kernel |
