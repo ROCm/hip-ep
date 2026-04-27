@@ -329,7 +329,11 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: oga-dml-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # Reuse PREBUILT_CACHE_VERSION as the OGA cache version too: when
+          # the OGA build outputs change shape (e.g. wheel added), bumping
+          # PREBUILT_CACHE_VERSION invalidates both ORT and OGA caches in
+          # one step instead of needing two separate version knobs.
+          key: oga-dml-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
