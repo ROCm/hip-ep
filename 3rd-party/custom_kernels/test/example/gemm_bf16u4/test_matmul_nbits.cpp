@@ -89,9 +89,12 @@ static bool readBin(const std::string& path, std::vector<T>& data, size_t count)
 // ============================================================
 // Benchmark helpers
 // ============================================================
+static bool g_cold_cache = false;
+
 static int calibrateIters(double warmup_ms, int warmup_count,
                           double target_ms = 2000.0, int lo = 5, int hi = 200)
 {
+    if(g_cold_cache) { lo = 3; hi = 20; target_ms = 500.0; }
     double per_iter = warmup_ms / warmup_count;
     if(per_iter <= 0) return lo;
     return std::max(lo, std::min(hi, static_cast<int>(target_ms / per_iter)));
@@ -105,6 +108,20 @@ struct MeasureResult {
     double max_ms;
 };
 
+static void* g_l2_polluter = nullptr;
+constexpr size_t L2_POLLUTER_BYTES = 8 * 1024 * 1024;
+
+static void ensureL2Polluter()
+{
+    if(!g_l2_polluter)
+        hipMalloc(&g_l2_polluter, L2_POLLUTER_BYTES);
+}
+
+static void flushL2(hipStream_t stream)
+{
+    hipMemsetAsync(g_l2_polluter, 0x42, L2_POLLUTER_BYTES, stream);
+}
+
 static MeasureResult measureMedian(hipStream_t stream, int niters,
                                    const std::function<void()>& launch)
 {
@@ -112,14 +129,41 @@ static MeasureResult measureMedian(hipStream_t stream, int niters,
     hipEventCreate(&ev0);
     hipEventCreate(&ev1);
     std::vector<float> round_ms(NROUNDS);
+
+    if(g_cold_cache)
+        ensureL2Polluter();
+
     for(int r = 0; r < NROUNDS; r++)
     {
-        hipEventRecord(ev0, stream);
-        for(int i = 0; i < niters; i++)
-            launch();
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-        hipEventElapsedTime(&round_ms[r], ev0, ev1);
+        if(g_cold_cache)
+        {
+            float total_ms = 0.0f;
+            for(int i = 0; i < niters; i++)
+            {
+                flushL2(stream);
+                hip_matmul_nbits_release_buffers();
+                hipStreamSynchronize(stream);
+
+                hipEventRecord(ev0, stream);
+                launch();
+                hipEventRecord(ev1, stream);
+                hipEventSynchronize(ev1);
+
+                float iter_ms = 0.0f;
+                hipEventElapsedTime(&iter_ms, ev0, ev1);
+                total_ms += iter_ms;
+            }
+            round_ms[r] = total_ms;
+        }
+        else
+        {
+            hipEventRecord(ev0, stream);
+            for(int i = 0; i < niters; i++)
+                launch();
+            hipEventRecord(ev1, stream);
+            hipEventSynchronize(ev1);
+            hipEventElapsedTime(&round_ms[r], ev0, ev1);
+        }
     }
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
@@ -424,7 +468,7 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
             2);        // element_size_bytes (fp16)
     };
 
-    constexpr int PRE_WARMUP = 2000;
+    int PRE_WARMUP = g_cold_cache ? 10 : 2000;
     std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
     auto pw0 = std::chrono::steady_clock::now();
     for(int w = 0; w < PRE_WARMUP; w++)
@@ -571,6 +615,7 @@ struct ShapeResult {
     bool   pass;
     int    errors;
     int    checked;
+    std::string tune_info;
 };
 
 static int runModelSweep(const std::string& json_path, int group_size,
@@ -636,7 +681,7 @@ static int runModelSweep(const std::string& json_path, int group_size,
             {
                 std::cerr << "  ERROR: cannot read data from " << shape_dir << "/" << std::endl;
                 std::cerr << "  Run: make gendata_model  to generate all data first" << std::endl;
-                results.push_back({M, K, N, 0, 0, 0, false, -1, 0});
+                results.push_back({M, K, N, 0, 0, 0, false, -1, 0, "N/A"});
                 continue;
             }
             std::cout << "  Loaded data from " << shape_dir << "/" << std::endl;
@@ -670,7 +715,7 @@ static int runModelSweep(const std::string& json_path, int group_size,
             // Pre-warmup (once, on first successfully loaded shape)
             if(!warmup_done)
             {
-                constexpr int PRE_WARMUP = 200;
+                int PRE_WARMUP = g_cold_cache ? 10 : 200;
                 std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
                 auto t0 = std::chrono::steady_clock::now();
                 for(int w = 0; w < PRE_WARMUP; w++)
@@ -703,7 +748,7 @@ static int runModelSweep(const std::string& json_path, int group_size,
             if(status != 0)
             {
                 std::cout << " FAILED (status=" << status << ")" << std::endl;
-                results.push_back({M, K, N, 0, 0, 0, false, -1, 0});
+                results.push_back({M, K, N, 0, 0, 0, false, -1, 0, "N/A"});
                 hipFree(dA); hipFree(dB); hipFree(dS);
                 if(dZ) hipFree(dZ); hipFree(dC);
                 continue;
@@ -768,8 +813,9 @@ static int runModelSweep(const std::string& json_path, int group_size,
                 std::cout << "  Verify: SKIPPED (no reference)" << std::endl;
             }
 
+            std::string tune = hip_matmul_nbits_last_tune_info();
             results.push_back({M, K, N, avg_ms, gflops, bw_gbs,
-                               pass, errors, total});
+                               pass, errors, total, tune});
 
             hipFree(dA); hipFree(dB); hipFree(dS);
             if(dZ) hipFree(dZ); hipFree(dC);
@@ -792,8 +838,9 @@ static int runModelSweep(const std::string& json_path, int group_size,
               << std::setw(11) << "Median(ms)"  << " | "
               << std::setw(9)  << "GFLOPS"  << " | "
               << std::setw(8)  << "GB/s"    << " | "
-              << "Status" << std::endl;
-    std::cout << "-----+-------+-------+---------+-------------+-----------+----------+--------"
+              << std::setw(6) << "Status" << " | "
+              << "Autotune" << std::endl;
+    std::cout << "-----+-------+-------+---------+-------------+-----------+----------+--------+---------------------------"
               << std::endl;
 
     int pass_count = 0, fail_count = 0;
@@ -808,7 +855,8 @@ static int runModelSweep(const std::string& json_path, int group_size,
                   << std::setw(11) << std::fixed << std::setprecision(6) << r.median_ms << " | "
                   << std::setw(9)  << std::setprecision(2) << r.gflops << " | "
                   << std::setw(8)  << std::setprecision(2) << r.bw_gbs << " | "
-                  << (r.pass ? "PASS" : "FAIL") << std::endl;
+                  << std::setw(6) << (r.pass ? "PASS" : "FAIL") << " | "
+                  << r.tune_info << std::endl;
     }
 
     std::cout << "=========================================================================="
@@ -836,6 +884,15 @@ int main(int argc, char* argv[])
         std::cerr << "WARNING: WMMA fast path requires RDNA3+ (gfx11xx/gfx12xx). "
                   << "Current arch: " << arch << std::endl;
     }
+
+    for(int i = 1; i < argc; i++)
+    {
+        if(std::string(argv[i]) == "--cold-cache")
+            g_cold_cache = true;
+    }
+    if(g_cold_cache)
+        std::cout << "*** COLD-CACHE mode: L2 flush + buffer release between each kernel call ***"
+                  << std::endl;
 
     // --- Check for --true-data mode ---
     std::string true_data_folder;
