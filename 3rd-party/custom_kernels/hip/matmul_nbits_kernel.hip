@@ -1238,6 +1238,14 @@ static int tuneWmmaConfig(
         auto& cfg = kWmmaConfigs[cid];
         if (cfg.bn < 64 && N > 2 * cfg.bn) continue;
 
+        // BK_T = bm / (wt_m * wt_n).  When BK_T > group_size the fused
+        // dequant applies a single scale to K-positions that span multiple
+        // quant groups, producing wrong results.  Skip such configs.
+        if (cfg.fused) {
+            int bk_t = cfg.bm / (cfg.wt_m * cfg.wt_n);
+            if (bk_t > gs) continue;
+        }
+
         for (int w = 0; w < WARMUP; w++)
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
