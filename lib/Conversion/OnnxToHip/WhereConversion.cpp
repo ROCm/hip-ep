@@ -20,10 +20,17 @@ namespace {
 /// are skipped, as are operands whose dim is statically 1. If every operand
 /// is statically 1 at the axis (degenerate case for a dynamic result), we
 /// fall back to the first operand spanning the dim.
-mlir::Value createBroadcastEmptyTensor(mlir::OpBuilder &builder,
-                                       mlir::Location loc,
-                                       mlir::RankedTensorType resultType,
-                                       mlir::ValueRange operands) {
+///
+/// Returns failure if no ranked operand spans a dynamic result dim (e.g.
+/// every operand is unranked while the result is ranked-and-dynamic). We
+/// surface this through `FailureOr` rather than `assert` so that the check
+/// remains active in Release builds (assertions are stripped under NDEBUG)
+/// and the pattern fails cleanly via `notifyMatchFailure` instead of
+/// dereferencing a null Value at the next builder call.
+mlir::FailureOr<mlir::Value>
+createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                           mlir::RankedTensorType resultType,
+                           mlir::ValueRange operands) {
   int64_t resultRank = resultType.getRank();
   llvm::SmallVector<mlir::Value> dynSizes;
   for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
@@ -56,12 +63,14 @@ mlir::Value createBroadcastEmptyTensor(mlir::OpBuilder &builder,
       chosen = fallback;
       chosenDim = fallbackDim;
     }
-    assert(chosen && "no ranked operand spans the dynamic result dim");
+    if (!chosen)
+      return mlir::failure();
     dynSizes.push_back(
         mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
   }
-  return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
-                                       resultType.getElementType(), dynSizes);
+  return mlir::Value(mlir::tensor::EmptyOp::create(
+      builder, loc, resultType.getShape(), resultType.getElementType(),
+      dynSizes));
 }
 
 /// onnx.Where -> hip.where
@@ -105,10 +114,13 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
   // given output dim may be contributed by a different operand. Resolve each
   // dynamic result dim by scanning all three operands rather than relying on
   // a single "source" tensor.
-  mlir::Value init =
+  mlir::FailureOr<mlir::Value> initOrFailure =
       createBroadcastEmptyTensor(rewriter, loc, resultType, {condition, x, y});
+  if (mlir::failed(initOrFailure))
+    return rewriter.notifyMatchFailure(
+        op, "onnx.Where: no ranked operand spans dynamic result dim");
   auto hipOp = mlir::hip::WhereOp::create(rewriter, loc, resultType, context,
-                                          condition, x, y, init);
+                                          condition, x, y, *initOrFailure);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

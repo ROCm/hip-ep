@@ -124,4 +124,97 @@ module {
 
     return
   }
+
+  // Test 6: Rank-0 (scalar) operands. Verifies the lowering still emits a
+  // valid alloca for shape arrays via std::max(rank, 1) and passes rank=0
+  // alongside each shape pointer. The runtime treats rank-0 specially (loop
+  // degeneracy yields all-zero strides and a single-element kernel launch),
+  // see `hip_elementwise_where` in
+  // 3rd-party/custom_kernels/hip/elementwise_where_kernel.hip.
+  // CHECK-LABEL: llvm.func @where_scalar_test
+  func.func @where_scalar_test(
+      %ctx: !hip.context,
+      %cond: memref<i1, 1>,
+      %x: memref<f32, 1>,
+      %y: memref<f32, 1>,
+      %out: memref<f32, 1>) {
+    hip.where(%ctx) ins(%cond, %x, %y :
+                        memref<i1, 1>, memref<f32, 1>, memref<f32, 1>)
+                    outs(%out : memref<f32, 1>)
+
+    // Rank-0 still produces a valid 1-element allocation (max(rank, 1) = 1)
+    // so the LLVM pointer is well-defined, even though the runtime ignores
+    // the buffer when rank == 0.
+    // CHECK: llvm.alloca {{.*}} x !llvm.array<1 x i64>
+    // CHECK: llvm.call @wrap_where({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
+
+    return
+  }
+
+  // Test 7: Mixed rank-0 + rank-2 (scalar broadcast against a tensor).
+  // cond rank-0, x rank-0, y rank-2; out is rank-2 -- exercises the
+  // alloca-sizing path on heterogeneous ranks.
+  // CHECK-LABEL: llvm.func @where_scalar_broadcast_test
+  func.func @where_scalar_broadcast_test(
+      %ctx: !hip.context,
+      %cond: memref<i1, 1>,
+      %x: memref<f32, 1>,
+      %y: memref<2x4xf32, 1>,
+      %out: memref<2x4xf32, 1>) {
+    hip.where(%ctx) ins(%cond, %x, %y :
+                        memref<i1, 1>, memref<f32, 1>, memref<2x4xf32, 1>)
+                    outs(%out : memref<2x4xf32, 1>)
+
+    // The rank-0 operands should still produce a valid 1-element allocation,
+    // and the rank-2 ones a 2-element one.
+    // CHECK-DAG: llvm.alloca {{.*}} x !llvm.array<1 x i64>
+    // CHECK-DAG: llvm.alloca {{.*}} x !llvm.array<2 x i64>
+    // CHECK: llvm.call @wrap_where({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
+
+    return
+  }
+
+  // Test 8: ui8 condition (1 byte / element). The ORT/morphizen ONNX -> MLIR
+  // frontend encodes ONNX `tensor(bool)` as a 1-byte integer (mirroring the
+  // on-disk TensorProto BOOL layout) rather than MLIR-native `i1`. The
+  // lowering accepts both because they share the same in-memory layout
+  // (1 byte / element, matching C/C++ `bool` ABI). This test guards against
+  // a regression where the lowering rejects ui8 conditions and `hip.where`
+  // can no longer be legalized at runtime.
+  // CHECK-LABEL: llvm.func @where_ui8_cond_test
+  func.func @where_ui8_cond_test(
+      %ctx: !hip.context,
+      %cond: memref<2x3x4x5xui8, 1>,
+      %x: memref<2x3x4x5xf16, 1>,
+      %y: memref<2x3x4x5xf16, 1>,
+      %out: memref<2x3x4x5xf16, 1>) {
+    hip.where(%ctx) ins(%cond, %x, %y :
+                        memref<2x3x4x5xui8, 1>,
+                        memref<2x3x4x5xf16, 1>,
+                        memref<2x3x4x5xf16, 1>)
+                    outs(%out : memref<2x3x4x5xf16, 1>)
+
+    // CHECK: llvm.call @wrap_where({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
+
+    return
+  }
+
+  // Test 9: signless i8 condition (1 byte / element). Same rationale as
+  // Test 8 -- some IR producers emit signless `i8` instead of `ui8` for a
+  // bool tensor and the lowering must accept either.
+  // CHECK-LABEL: llvm.func @where_i8_cond_test
+  func.func @where_i8_cond_test(
+      %ctx: !hip.context,
+      %cond: memref<2x4xi8, 1>,
+      %x: memref<2x4xf32, 1>,
+      %y: memref<2x4xf32, 1>,
+      %out: memref<2x4xf32, 1>) {
+    hip.where(%ctx) ins(%cond, %x, %y :
+                        memref<2x4xi8, 1>, memref<2x4xf32, 1>, memref<2x4xf32, 1>)
+                    outs(%out : memref<2x4xf32, 1>)
+
+    // CHECK: llvm.call @wrap_where({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
+
+    return
+  }
 }

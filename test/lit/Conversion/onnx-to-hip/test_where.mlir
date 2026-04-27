@@ -169,4 +169,50 @@ module {
 
     return %output : tensor<2x4xi1>
   }
+
+  // --------------------------------------------------------------------------
+  // Tests 9-10: rank-0 (scalar) coverage.
+  //
+  // ONNX Where permits rank-0 tensors under NumPy-style multidirectional
+  // broadcasting. The runtime kernel handles scalars through natural loop
+  // degeneracy (see `hip_elementwise_where` in
+  // 3rd-party/custom_kernels/hip/elementwise_where_kernel.hip), and the
+  // lowering uses `std::max(rank, 1)` for the alloca size so rank-0 stack
+  // arrays remain valid. These cases exercise the conversion side: an empty
+  // tensor.empty() plus a hip.where on rank-0 operands.
+  // --------------------------------------------------------------------------
+
+  // Test 9: All-scalar Where -- cond / x / y / out are all rank-0 f32.
+  func.func @test_where_scalar(%cond: tensor<i1>,
+                               %x: tensor<f32>,
+                               %y: tensor<f32>) -> tensor<f32> {
+    // CHECK-LABEL: func.func @test_where_scalar
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[COND:.*]]: tensor<i1>, %[[X:.*]]: tensor<f32>, %[[Y:.*]]: tensor<f32>) -> tensor<f32>
+
+    %output = "onnx.Where"(%cond, %x, %y) :
+        (tensor<i1>, tensor<f32>, tensor<f32>) -> tensor<f32>
+
+    // CHECK: tensor.empty() : tensor<f32>
+    // CHECK: hip.where(%[[CTX]]) ins(%[[COND]], %[[X]], %[[Y]] : tensor<i1>, tensor<f32>, tensor<f32>) outs({{.*}} : tensor<f32>)
+
+    return %output : tensor<f32>
+  }
+
+  // Test 10: Scalar broadcast against a rank-2 tensor.
+  // cond: i1, x: f32 (scalar), y: 2x4xf32 -> 2x4xf32. Verifies scalar
+  // broadcast path on the conversion side.
+  func.func @test_where_scalar_broadcast(%cond: tensor<i1>,
+                                         %x: tensor<f32>,
+                                         %y: tensor<2x4xf32>) -> tensor<2x4xf32> {
+    // CHECK-LABEL: func.func @test_where_scalar_broadcast
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[COND:.*]]: tensor<i1>, %[[X:.*]]: tensor<f32>, %[[Y:.*]]: tensor<2x4xf32>) -> tensor<2x4xf32>
+
+    %output = "onnx.Where"(%cond, %x, %y) :
+        (tensor<i1>, tensor<f32>, tensor<2x4xf32>) -> tensor<2x4xf32>
+
+    // CHECK: tensor.empty() : tensor<2x4xf32>
+    // CHECK: hip.where(%[[CTX]]) ins(%[[COND]], %[[X]], %[[Y]] : tensor<i1>, tensor<f32>, tensor<2x4xf32>) outs({{.*}} : tensor<2x4xf32>)
+
+    return %output : tensor<2x4xf32>
+  }
 }
