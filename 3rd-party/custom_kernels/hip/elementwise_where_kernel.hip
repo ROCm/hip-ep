@@ -131,6 +131,22 @@ extern "C" int hip_elementwise_where(
     const int64_t *y_shape,    int64_t y_rank,
     const int64_t *out_shape,  int64_t out_rank,
     int hip_dtype) {
+  // Rank validation. Note that `rank == 0` (a scalar tensor) is intentionally
+  // accepted for every operand, matching the ONNX Where spec which permits
+  // rank-0 tensors under NumPy-style multidirectional broadcasting (a scalar
+  // broadcasts to any shape). Scalars are handled correctly by the rest of
+  // this function through natural loop degeneracy:
+  //   * When `out_rank == 0`, the element-count loop below leaves `total` at
+  //     its initial value of 1, which is the correct element count for a
+  //     rank-0 output tensor.
+  //   * `make_broadcast_layout` with `src_rank == 0` skips both the padding
+  //     and stride loops and returns trivially (all-zero strides), which
+  //     mirrors the "broadcast scalar" semantics.
+  //   * `where_nd_kernel` launches a single thread whose coordinate
+  //     decomposition loop also doesn't execute, so all operand indices stay
+  //     at 0 and the kernel produces `output[0] = condition[0] ? x[0] : y[0]`.
+  // The shape pointers may legitimately be null when the corresponding rank
+  // is 0; the upstream wrapper (`wrap_where`) already guarantees this.
   if (out_rank < 0 || out_rank > HIP_WHERE_MAX_RANK || cond_rank < 0 ||
       cond_rank > out_rank || x_rank < 0 || x_rank > out_rank || y_rank < 0 ||
       y_rank > out_rank) {
@@ -142,6 +158,8 @@ extern "C" int hip_elementwise_where(
     return -1;
   }
 
+  // Initial value of 1 is also the correct element count for the scalar
+  // (out_rank == 0) case, where the loop body does not execute.
   int64_t total = 1;
   for (int i = 0; i < out_rank; ++i)
     total *= out_shape[i];
