@@ -310,7 +310,7 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits", [AttrSizedOperandSegments]> {
 def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
   let summary = "Quantized Mixture-of-Experts (com.microsoft QMoE)";
   let description = [{
-    Implements the com.microsoft QMoE operator (inputs 7-14): quantized
+    Implements the com.microsoft QMoE operator (ONNX v1.25+ compatible): quantized
     Mixture-of-Experts with top-k expert routing and optional SwiGLU activation.
 
     Routes each token to its top-k experts, performs quantized linear
@@ -330,6 +330,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
       fc1_experts_bias, fc2_experts_bias: bias vectors (optional)
       fc3_*: unfused SwiGLU second GEMM weights/scales/bias (optional)
       fc1/fc2/fc3_zero_points: per-block zero points (optional)
+      router_weights: alternative aggregation weights (optional, ONNX v1.25+, takes precedence over router_probs)
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -363,6 +364,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
     Optional<Hip_TensorOrMemRef>:$fc1_zero_points,        // fc1 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
+    Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -393,6 +395,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
     (`fc1_zero_points` `(` $fc1_zero_points^ `:` type($fc1_zero_points) `)`)?
     (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
     (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
+    (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
