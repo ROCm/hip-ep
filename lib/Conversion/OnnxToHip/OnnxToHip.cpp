@@ -388,6 +388,24 @@ resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
   return mlir::success();
 }
 
+/// Split lowering reads split lengths from a dense constant on the defining
+/// op (arith.constant or onnx.Constant with \p value). If we externalize that
+/// tensor first, it becomes bufferization.to_tensor(memref.get_global) with
+/// no dense \p value in IR, and onnx.Split is left unconverted — then
+/// one-shot-bufferize fails with "op was not bufferized". Keep such tensors
+/// inlined so convert-onnx-to-hip can still pattern-match Split.
+static bool constantFeedsOnnxSplitSizes(mlir::Operation *constOp) {
+  mlir::Value v = constOp->getResult(0);
+  for (mlir::OpOperand &use : v.getUses()) {
+    mlir::Operation *user = use.getOwner();
+    if (user->getName().getStringRef() != "onnx.Split")
+      continue;
+    if (user->getNumOperands() >= 2 && use.getOperandNumber() == 1)
+      return true;
+  }
+  return false;
+}
+
 /// Lower onnx.Constant ops to either externalized constants (constants.bin)
 /// or inline arith.constant ops.
 static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
@@ -419,7 +437,8 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
     }
 
     if (extState && minNumElements > 0 &&
-        valueAttr.getNumElements() >= minNumElements) {
+        valueAttr.getNumElements() >= minNumElements &&
+        !constantFeedsOnnxSplitSizes(constOp)) {
       auto tensorType = mlir::cast<mlir::RankedTensorType>(valueAttr.getType());
       int64_t elemBits = tensorType.getElementTypeBitWidth();
       int64_t byteSize = valueAttr.getNumElements() * ((elemBits + 7) / 8);
