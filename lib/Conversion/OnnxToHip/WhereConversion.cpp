@@ -68,9 +68,9 @@ createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
     dynSizes.push_back(
         mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
   }
-  return mlir::Value(mlir::tensor::EmptyOp::create(
-      builder, loc, resultType.getShape(), resultType.getElementType(),
-      dynSizes));
+  return mlir::Value(
+      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynSizes));
 }
 
 /// onnx.Where -> hip.where
