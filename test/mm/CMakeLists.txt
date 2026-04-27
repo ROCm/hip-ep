@@ -3,19 +3,27 @@
 # ** Licensed under the MIT License.
 ##
 
-# UMM unit tests — uses mock HAL, no GPU required.
+# UMM unit tests.
 
 cmake_minimum_required(VERSION 3.20)
 
 enable_testing()
 
+# When LLVM is loaded it forces CMAKE_MSVC_RUNTIME_LIBRARY to MultiThreaded
+# (/MT). The MemoryManager static lib inherits that, so tests must match.
+if(MSVC AND CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY ${CMAKE_MSVC_RUNTIME_LIBRARY})
+endif()
+
 add_executable(test_mm_types test_mm_types.cpp)
 target_link_libraries(test_mm_types PRIVATE MemoryManager)
 add_test(NAME UMM_TypesCompile COMMAND test_mm_types)
 
-add_executable(test_hal_mock test_hal_mock.cpp)
-target_link_libraries(test_hal_mock PRIVATE MemoryManager)
-add_test(NAME UMM_HalMock COMMAND test_hal_mock)
+if(MM_USE_MOCK_HAL)
+    add_executable(test_hal_mock test_hal_mock.cpp)
+    target_link_libraries(test_hal_mock PRIVATE MemoryManager)
+    add_test(NAME UMM_HalMock COMMAND test_hal_mock)
+endif()
 
 add_executable(test_handle_table test_handle_table.cpp)
 target_link_libraries(test_handle_table PRIVATE MemoryManager)
