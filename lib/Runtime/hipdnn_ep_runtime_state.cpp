@@ -416,13 +416,12 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       {
         mm_alloc_hints_t mm_hints;
         mm_hints.mem_class = MM_CLASS_WEIGHT;
-        mm_hints.lifetime  = MM_LIFETIME_STATIC;
+        mm_hints.lifetime = MM_LIFETIME_STATIC;
         mm_hints.alignment = 0;
         state->mm_constants_handle =
             (uint64_t)mm_alloc(total_size, &mm_hints, nullptr);
         if (state->mm_constants_handle == 0) {
-          fprintf(stderr,
-                  "mm_alloc failed for constants blob (%zu bytes)\n",
+          fprintf(stderr, "mm_alloc failed for constants blob (%zu bytes)\n",
                   total_size);
           free(cpu_buf);
           hipdnn_ep_state_cleanup(state);
@@ -633,8 +632,8 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 
   // Use UMM static pool: single allocation + offset table
   mm_static_plan_t plan;
-  plan.total_size  = pool_size;
-  plan.offsets     = buffer_offsets;
+  plan.total_size = pool_size;
+  plan.offsets = buffer_offsets;
   plan.num_entries = (uint32_t)num_buffers;
 
   mm_pool_t pool = mm_pool_create(&plan);
@@ -718,7 +717,7 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
 
   mm_alloc_hints_t hints;
   hints.mem_class = MM_CLASS_SCRATCH;
-  hints.lifetime  = MM_LIFETIME_REQUEST;
+  hints.lifetime = MM_LIFETIME_REQUEST;
   hints.alignment = 0;
 
   mm_handle_t h = mm_alloc(needed_size, &hints, nullptr);
