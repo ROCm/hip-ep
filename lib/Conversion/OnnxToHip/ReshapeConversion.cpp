@@ -334,57 +334,77 @@ struct SplitToStdTensor : public mlir::RewritePattern {
           splitDefOp->getName().getStringRef() == "onnx.NoValue") {
         isEqualSplit = true;
       } else {
-        // Custom splits: extract split lengths from second input (must be
-        // constant)
-        if (!splitDefOp)
-          return rewriter.notifyMatchFailure(
-              op, "split input must be defined by a constant operation");
-
+        // Custom splits: prefer compile-time constants when available, but
+        // also support runtime split-length tensors (e.g. externalized
+        // constants loaded via globals).
         mlir::DenseElementsAttr splitAttr;
-        if (auto constOp = mlir::dyn_cast<mlir::arith::ConstantOp>(splitDefOp))
-          splitAttr =
-              mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
-        else if (splitDefOp->hasAttr("value"))
+        if (splitDefOp && mlir::isa<mlir::arith::ConstantOp>(splitDefOp))
+          if (auto constOp =
+                  mlir::dyn_cast<mlir::arith::ConstantOp>(splitDefOp))
+            splitAttr =
+                mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
+        if (!splitAttr && splitDefOp && splitDefOp->hasAttr("value"))
           splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(
               splitDefOp->getAttr("value"));
 
-        if (!splitAttr)
-          return rewriter.notifyMatchFailure(
-              op, "split input must be a constant dense tensor");
+        if (splitAttr) {
+          // Extract split lengths as index attributes
+          for (auto val : splitAttr.getValues<mlir::APInt>())
+            splitLengths.push_back(rewriter.getIndexAttr(val.getSExtValue()));
 
-        // Extract split lengths as index attributes
-        // Support multiple integer widths (i32, i64, etc.) using APInt
-        for (auto val : splitAttr.getValues<mlir::APInt>())
-          splitLengths.push_back(rewriter.getIndexAttr(val.getSExtValue()));
+          if (splitLengths.size() != numOutputs)
+            return rewriter.notifyMatchFailure(
+                op, "split lengths count must match number of outputs");
 
-        if (splitLengths.size() != numOutputs)
-          return rewriter.notifyMatchFailure(
-              op, "split lengths count must match number of outputs");
-
-        // Validate sum of splits equals axis dimension (if axis is static)
-        if (!inputType.isDynamicDim(axis)) {
-          int64_t axisDimSize = inputType.getDimSize(axis);
-          int64_t splitSum = 0;
-          for (const auto &length : splitLengths) {
-            if (auto attr =
-                    llvm::dyn_cast_if_present<mlir::Attribute>(length)) {
-              auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
-              if (intAttr) {
-                splitSum += intAttr.getInt();
+          // Validate sum of splits equals axis dimension (if axis is static)
+          if (!inputType.isDynamicDim(axis)) {
+            int64_t axisDimSize = inputType.getDimSize(axis);
+            int64_t splitSum = 0;
+            for (const auto &length : splitLengths) {
+              if (auto attr =
+                      llvm::dyn_cast_if_present<mlir::Attribute>(length)) {
+                auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
+                if (intAttr) {
+                  splitSum += intAttr.getInt();
+                } else {
+                  splitSum = -1;
+                  break;
+                }
               } else {
-                // Non-integer attribute, can't validate
                 splitSum = -1;
                 break;
               }
-            } else {
-              // Dynamic split length, can't validate at compile time
-              splitSum = -1;
-              break;
+            }
+            if (splitSum >= 0 && splitSum != axisDimSize) {
+              return rewriter.notifyMatchFailure(
+                  op, "sum of split lengths must equal axis dimension size");
             }
           }
-          if (splitSum >= 0 && splitSum != axisDimSize) {
+        } else {
+          // Runtime path: read split lengths element-by-element.
+          auto splitType =
+              mlir::dyn_cast<mlir::RankedTensorType>(splitInput.getType());
+          if (!splitType || splitType.getRank() != 1)
             return rewriter.notifyMatchFailure(
-                op, "sum of split lengths must equal axis dimension size");
+                op, "split input must be a rank-1 tensor");
+          if (!splitType.getElementType().isIntOrIndex())
+            return rewriter.notifyMatchFailure(
+                op, "split input element type must be integer or index");
+          if (!splitType.isDynamicDim(0) &&
+              splitType.getDimSize(0) != static_cast<int64_t>(numOutputs))
+            return rewriter.notifyMatchFailure(
+                op, "split lengths count must match number of outputs");
+
+          auto indexType = rewriter.getIndexType();
+          for (unsigned i = 0; i < numOutputs; ++i) {
+            mlir::Value idx =
+                rewriter.create<mlir::arith::ConstantIndexOp>(loc, i);
+            mlir::Value len = rewriter.create<mlir::tensor::ExtractOp>(
+                loc, splitInput, mlir::ValueRange{idx});
+            if (len.getType() != indexType)
+              len = rewriter.create<mlir::arith::IndexCastOp>(loc, indexType,
+                                                              len);
+            splitLengths.push_back(len);
           }
         }
 
