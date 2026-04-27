@@ -91,6 +91,10 @@ extern "C" int hip_gather(
           (long long)slice_size, (long long)data_axis_size,
           grid_size, kBlockSize);
 
+  // Drain any stale async error left by NAN_TRACE's hipMemcpy(D2H) so
+  // hipGetLastError() below only reports errors from *this* launch.
+  (void)hipGetLastError();
+
   switch (element_size_bytes) {
     case 2:
       hipLaunchKernelGGL(
