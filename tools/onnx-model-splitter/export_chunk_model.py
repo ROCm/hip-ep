@@ -19,6 +19,10 @@ Export fixed-shape Llama prefill/decode ONNX variants.
   ``12200``.
   ``128`` and ``2048`` still keep their sliding-window variants ``prefill_pSm...``;
   ``12200`` is fixed-only (no ``p12200m...`` variant).
+  **Control fixed-prompt** (chunk=0 only, when ``128`` / ``2048`` appear in ``--seq-lens``):
+  ``prefill_128_m256.onnx`` / ``genai_config_128_m256.json`` (``context_length``/KV = 256,
+  ``fixed_prompt_length`` 128) and ``prefill_2k_m3072.onnx`` /
+  ``genai_config_2k_m3072.json`` (3072 / 2048; stem ``2k`` like other fixed 2048 files).
 - Prefill: default ``--seq-lens`` expands to 10 variants (two for ``128`` and ``2048`` plus
   the rest); Decode maps one-to-one with these variants.
 - input_ids: [1, S] (prefill) or [1, 1] (decode); attention_mask: [1, max_length];
@@ -316,21 +320,25 @@ def expand_export_variant_specs(
     max_length: int,
     *,
     decode_mode: bool,
-) -> list[tuple[str, dict[str, int], int, int | None]]:
+) -> list[tuple[str, dict[str, int], int, int | None, int | None]]:
     """Expand ``--seq-lens`` into the ONNX/genai variant list.
 
-    Each item is ``(file_stem, dim_map, genai_window_chunk, fixed_prompt_len)``:
+    Each item is
+    ``(file_stem, dim_map, genai_window_chunk, fixed_prompt_len, genai_context_length)``:
 
     - ``genai_window_chunk==0``: fixed-prompt JSON variant (writes ``fixed_prompt_length``);
       ``fixed_prompt_len`` is the corresponding sequence length.
     - ``genai_window_chunk>0``: sliding-window variant, ``window_size`` uses this value;
       ``fixed_prompt_len`` is ``None``.
+    - ``genai_context_length``: if not ``None``, JSON ``context_length`` /
+      ``search.max_length`` use this value (ONNX KV / mask dims follow ``dim_map``); if
+      ``None``, use CLI ``--max-length``.
     - ``12200`` only generates a fixed variant, no ``p12200m...`` sliding variant.
     - For fixed variants where ``S==2048``, stem is ``2k`` (e.g. ``prefill_2k.onnx``),
       while dimensions still use 2048.
     """
     ml = int(max_length)
-    out: list[tuple[str, dict[str, int], int, int | None]] = []
+    out: list[tuple[str, dict[str, int], int, int | None, int | None]] = []
     for s_raw in seq_lens:
         s = int(s_raw)
         if s != 12200:
@@ -347,7 +355,7 @@ def expand_export_variant_specs(
                     "past_sequence_length": ml,
                     "total_sequence_length": ml,
                 }
-            out.append((tag_sl, dm_sl, s, None))
+            out.append((tag_sl, dm_sl, s, None, None))
         if s in FIXED_PROMPT_SEQUENCE_LENS:
             tag_fx = fixed_prompt_filename_stem(s)
             if decode_mode:
@@ -362,7 +370,39 @@ def expand_export_variant_specs(
                     "past_sequence_length": ml,
                     "total_sequence_length": ml,
                 }
-            out.append((tag_fx, dm_fx, 0, s))
+            out.append((tag_fx, dm_fx, 0, s, None))
+            if s == 128:
+                ctrl_ml = 256
+                tag_ctrl = "128_m256"
+                if decode_mode:
+                    dm_ctrl = {
+                        "sequence_length": 1,
+                        "past_sequence_length": ctrl_ml,
+                        "total_sequence_length": ctrl_ml,
+                    }
+                else:
+                    dm_ctrl = {
+                        "sequence_length": 128,
+                        "past_sequence_length": ctrl_ml,
+                        "total_sequence_length": ctrl_ml,
+                    }
+                out.append((tag_ctrl, dm_ctrl, 0, 128, ctrl_ml))
+            if s == 2048:
+                ctrl_ml = 3072
+                tag_ctrl = "2k_m3072"
+                if decode_mode:
+                    dm_ctrl = {
+                        "sequence_length": 1,
+                        "past_sequence_length": ctrl_ml,
+                        "total_sequence_length": ctrl_ml,
+                    }
+                else:
+                    dm_ctrl = {
+                        "sequence_length": 2048,
+                        "past_sequence_length": ctrl_ml,
+                        "total_sequence_length": ctrl_ml,
+                    }
+                out.append((tag_ctrl, dm_ctrl, 0, 2048, ctrl_ml))
     return out
 
 
@@ -432,10 +472,11 @@ def write_genai_config_jsons(
         decode_onnx_path=decode_onnx_path,
     )
     specs = expand_export_variant_specs(seq_lens, max_length, decode_mode=False)
-    for tag, _dm, genai_chunk, fixed_prompt_len in specs:
+    for tag, _dm, genai_chunk, fixed_prompt_len, genai_ctx in specs:
+        ctx_len = genai_ctx if genai_ctx is not None else max_length
         cfg = copy.deepcopy(template)
         model = cfg.setdefault("model", {})
-        model["context_length"] = max_length
+        model["context_length"] = ctx_len
         dec = model.setdefault("decoder", {})
 
         if genai_chunk == 0:
@@ -447,7 +488,7 @@ def write_genai_config_jsons(
 
         dec["pipeline"]["prefill"]["filename"] = f"prefill_{tag}.onnx"
         dec["pipeline"]["decode"]["filename"] = f"decode_{tag}.onnx"
-        cfg["search"]["max_length"] = max_length
+        cfg["search"]["max_length"] = ctx_len
 
         # Fixed-prompt variant: ORT GenAI requires ``decoder.fixed_prompt_length``.
         # The template may not contain this key, so write it last to avoid losing it
@@ -910,7 +951,7 @@ class FixedCtxExtractor(SingleOpExtractor):
         specs = expand_export_variant_specs(
             self._seq_lens, ml, decode_mode=self._decode_mode
         )
-        return [(tag, dm) for tag, dm, _gc, _fp in specs]
+        return [(tag, dm) for tag, dm, _, _, _ in specs]
 
     def _save_variants(self, model, out_dir, _prefix):
         """``_prefix`` from parent (``full_model``) ignored; files use ``_export_prefix``."""
@@ -947,6 +988,10 @@ class FixedCtxExtractor(SingleOpExtractor):
         _printed_reuse_hint = False
 
         for idx, (vname, dim_map) in enumerate(self.variants):
+            if isinstance(dim_map, dict):
+                cache_len = int(dim_map["total_sequence_length"])
+            else:
+                cache_len = self._max_length
             eff_total_llm = (
                 total_seq_len_scalar_from_dim_map(dim_map)
                 if self.model_type == "llm"
@@ -982,21 +1027,21 @@ class FixedCtxExtractor(SingleOpExtractor):
             _apply_input_ids_mask_shapes(
                 model.graph,
                 input_ids_seq=ids_seq,
-                attention_second=self._max_length,
+                attention_second=cache_len,
             )
 
-            n_pk = _force_past_key_values_past_seq_dim(model.graph, self._max_length)
+            n_pk = _force_past_key_values_past_seq_dim(model.graph, cache_len)
             if n_pk and idx == 0:
                 print(
                     f"  past_key_values inputs with past_sequence_length="
-                    f"{self._max_length} (max_length): {n_pk}"
+                    f"{cache_len} (variant cache): {n_pk}"
                 )
 
-            n_pr = _force_present_kv_seq_dim(model.graph, self._max_length)
+            n_pr = _force_present_kv_seq_dim(model.graph, cache_len)
             if n_pr and idx == 0:
                 print(
                     f"  present.* outputs/value_info dim[2]="
-                    f"{self._max_length} (max_length): {n_pr} tensor(s)"
+                    f"{cache_len} (variant cache): {n_pr} tensor(s)"
                 )
 
             n_nodes, n_vi, n_in, n_init = _post_export_prune_unreachable(model)
