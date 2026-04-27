@@ -12,7 +12,33 @@
 
 #include <cstdint>
 #include <cstdio>
+
 #define HIP_WHERE_MAX_RANK 8
+
+// =============================================================================
+// CONDITION BUFFER LAYOUT ASSUMPTION (1 byte / element)
+// =============================================================================
+// The `condition` buffer is read here as `const bool *`, i.e. one byte per
+// element. This relies on an *implicit* contract with the upstream MLIR
+// pipeline: the ONNX `tensor(bool)` reaches us either as `memref<...xi1, 1>`
+// (hand-written IR / lit tests) or as a 1-byte integer memref
+// `memref<...xi8, 1>` / `memref<...xui8, 1>` (the ORT/morphizen ONNX -> MLIR
+// frontend mirrors the on-disk `TensorProto` BOOL layout, which is 1 byte
+// per element). Under the default LLVM/MLIR memref-to-LLVM lowering all
+// three encodings produce a 1-byte-per-element device buffer that matches
+// the C/C++ `bool` ABI, so we can safely reinterpret the device pointer as
+// `const bool *` regardless of which encoding the IR carried.
+//
+// IMPORTANT: this is *not* enforced by a verifier or by a type cast in the
+// IR -- the lowering pipeline never converts the condition element type
+// explicitly. If a future LLVM/MLIR version switches to bit-packed `i1`
+// memrefs (multiple bools per byte) without our pipeline being updated,
+// this kernel will silently read garbage offsets without any compile-time
+// error. Any change to the condition -> bytes lowering must be mirrored
+// here (and in the matching host-side launcher in
+// `lib/Conversion/HipToLLVM/WhereLowering.cpp`).
+// =============================================================================
+
 // Fixed-size shape/stride buffers passed as kernel arguments (by value).
 // Capacity is HIP_WHERE_MAX_RANK; entries past `rank` are unused.
 struct WhereDimsND {

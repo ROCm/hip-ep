@@ -26,6 +26,29 @@ namespace {
 //
 // data_type identifies the X/Y/output element type (HIPDNN_EP_DATATYPE_*);
 // the condition is always 1-byte bool.
+//
+// CONDITION BUFFER LAYOUT ASSUMPTION (1 byte / element):
+// The condition memref carries an ONNX `tensor(bool)`. Two element-type
+// encodings reach this lowering in practice:
+//   * MLIR-native `i1`     -- emitted by hand-written IR (e.g. lit tests).
+//   * 8-bit integer (`i8`/
+//     `ui8`/`si8`)         -- emitted by the ORT/morphizen ONNX -> MLIR
+//                              frontend, which mirrors the on-disk
+//                              `TensorProto` BOOL layout (1 byte / element).
+//
+// Both encodings occupy exactly 1 byte per element under the default
+// LLVM/MLIR memref-to-LLVM lowering and are ABI-compatible with C/C++
+// `bool`, so we can safely reinterpret the device pointer as
+// `const bool *` in the runtime kernel. This lowering therefore passes
+// the raw `alignedPtr` of the condition memref straight to `wrap_where`,
+// which forwards it to the HIP kernel as `const bool *`. We do *not*
+// re-cast the buffer (e.g. to i8) in IR -- the contract is implicit.
+//
+// If a future MLIR upgrade switches to bit-packed `i1` memrefs (multiple
+// bools per byte), both this lowering and
+// `3rd-party/custom_kernels/hip/elementwise_where_kernel.hip` must be
+// updated together; otherwise the kernel will read wrong offsets
+// silently. See the matching comment block at the top of that .hip file.
 struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -43,7 +66,57 @@ struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
     auto yType = cast<MemRefType>(op.getY().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    int64_t dataType = getHipdnnDataType(outputType.getElementType());
+    // Defensive check on the implicit 1-byte-per-element layout contract
+    // (see header comment). ONNX requires condition to be bool, but the
+    // ORT/morphizen frontend encodes that as a 1-byte integer (`ui8` /
+    // `i8`), while hand-written IR (lit tests) typically uses MLIR-native
+    // `i1`. Both encodings are 1 byte/element under the default memref-
+    // to-LLVM lowering and ABI-compatible with C/C++ `bool`, so the kernel
+    // can read either as `const bool *`. We accept i1 *or* any 8-bit
+    // integer here and reject anything wider, so violations of the contract
+    // (e.g. i32 condition from a buggy upstream pass) fail the pattern
+    // explicitly instead of silently miscomputing.
+    Type condElemTy = condType.getElementType();
+    if (!condElemTy.isInteger(1) && !condElemTy.isInteger(8))
+      return rewriter.notifyMatchFailure(
+          op, "hip.where: condition must be a 1-byte integer "
+              "(i1 / i8 / ui8 / si8) per the implicit "
+              "1-byte-per-element layout contract");
+
+    // X / Y / output must share the same element type per the ONNX `Where`
+    // type constraint T. Without this guard, mismatched operands (e.g. due
+    // to a shape-inference bug or hand-written IR) would be reinterpreted
+    // by the kernel using the *output* dtype's element size against the
+    // operand buffers, silently producing wrong results.
+    Type xElemTy = xType.getElementType();
+    Type yElemTy = yType.getElementType();
+    Type outElemTy = outputType.getElementType();
+    if (xElemTy != yElemTy || xElemTy != outElemTy)
+      return rewriter.notifyMatchFailure(
+          op, "hip.where: x/y/output element types must match");
+
+    // Restrict to the dtypes actually dispatched by `wrap_where` /
+    // `hip_elementwise_where`. We deliberately do *not* fall back to the
+    // full `getHipdnnDataType` set here: types like i8 / ui8 / f64 would
+    // map to a HIPDNN_EP_DATATYPE_* value that the runtime's
+    // `hipdnn_to_hip_dtype_where` rejects, surfacing the failure only at
+    // execution time. By gating in the lowering, an unsupported Where node
+    // fails the conversion pattern and the EP can fall back to CPU.
+    //
+    // Keep this list in sync with `hipdnn_to_hip_dtype_where` in
+    // lib/Runtime/real/where.cpp and the dtype switch in
+    // 3rd-party/custom_kernels/hip/elementwise_where_kernel.hip. We do NOT
+    // extend the runtime/kernel dtype set as part of this lowering; if a
+    // new dtype is needed, add it in all three places together.
+    bool dtypeSupported = outElemTy.isF32() || outElemTy.isF16() ||
+                          outElemTy.isBF16() || outElemTy.isInteger(32) ||
+                          outElemTy.isInteger(64);
+    if (!dtypeSupported)
+      return rewriter.notifyMatchFailure(
+          op, "hip.where: x/y/output dtype not supported by runtime kernel "
+              "(allowed: f32, f16, bf16, i32, i64)");
+
+    int64_t dataType = getHipdnnDataType(outElemTy);
     if (dataType < 0)
       return rewriter.notifyMatchFailure(
           op, "hip.where: unsupported output element type");
