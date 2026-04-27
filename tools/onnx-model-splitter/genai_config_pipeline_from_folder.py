@@ -119,7 +119,12 @@ def _merge_decoder_io_templates(
         return dict(_DEFAULT_DECODER_INPUTS), merged_out, INPUT_LAYOUT_FULL_IDS
 
     if merged_in.get("inputs_embeds"):
-        for k in ("attention_mask", "position_ids", "past_key_names", "past_value_names"):
+        for k in (
+            "attention_mask",
+            "position_ids",
+            "past_key_names",
+            "past_value_names",
+        ):
             if k not in merged_in:
                 merged_in[k] = _DEFAULT_DECODER_INPUTS[k]
         return merged_in, merged_out, INPUT_LAYOUT_EMBEDS
@@ -163,7 +168,8 @@ def _pipeline_io_lists(num_hidden_layers: int) -> tuple[list[str], list[str]]:
     """Prefill/decode I/O name lists matching existing Llama pipeline configs."""
     return (
         _pipeline_inputs_from_decoder_templates(
-            dict(_DEFAULT_DECODER_INPUTS), num_hidden_layers),
+            dict(_DEFAULT_DECODER_INPUTS), num_hidden_layers
+        ),
         _pipeline_outputs_from_layer_count(num_hidden_layers),
     )
 
@@ -191,7 +197,10 @@ def _pipeline_inputs_from_decoder_templates(
         if v:
             pin.append(v)
     pk = inputs_tmpl.get("past_key_names") or _DEFAULT_DECODER_INPUTS["past_key_names"]
-    pv = inputs_tmpl.get("past_value_names") or _DEFAULT_DECODER_INPUTS["past_value_names"]
+    pv = (
+        inputs_tmpl.get("past_value_names")
+        or _DEFAULT_DECODER_INPUTS["past_value_names"]
+    )
     for i in range(num_hidden_layers):
         pin.append(pk % i)
         pin.append(pv % i)

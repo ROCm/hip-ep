@@ -120,7 +120,8 @@ def _collect_fixed_variant_shape_issues(model):
         if len(bad_nodes) > 24:
             head += f", ... (+{len(bad_nodes) - 24} more)"
         lines.append(
-            f"      nodes consuming unfixed tensors ({len(bad_nodes)}): {head}")
+            f"      nodes consuming unfixed tensors ({len(bad_nodes)}): {head}"
+        )
 
     return lines
 
@@ -172,8 +173,7 @@ def _phase2_shape_normality_issues(model):
 
     residual = _collect_fixed_variant_shape_issues(inferred)
     if residual:
-        lines.append(
-            "      [phase-2] after inference, still unfixed or invalid dims:")
+        lines.append("      [phase-2] after inference, still unfixed or invalid dims:")
         lines.extend(residual)
     return lines
 
@@ -213,13 +213,13 @@ def verify_single_op(d, check_fixed_shapes=True, check_shape_inference=True):
             try:
                 m = onnx.load(fpath, load_external_data=False)
                 n_nodes = len(m.graph.node)
-                n_inits = len(m.graph.initializer)
                 if n_nodes == 0:
                     print(f"    WARNING: {folder}/{f} has 0 nodes!")
                     all_ok = False
                 if check_fixed_shapes and not _is_dynamic_variant_filename(f):
                     ok_shape, entries = _run_two_phase_shape_checks(
-                        m, run_phase2=check_shape_inference)
+                        m, run_phase2=check_shape_inference
+                    )
                     if not ok_shape:
                         print(f"    SHAPE (fixed variant): {folder}/{f}")
                         for _, line in entries:
@@ -232,8 +232,9 @@ def verify_single_op(d, check_fixed_shapes=True, check_shape_inference=True):
     return all_ok
 
 
-def verify_external_data_dir(d, label, check_fixed_shapes=True,
-                             check_shape_inference=True):
+def verify_external_data_dir(
+    d, label, check_fixed_shapes=True, check_shape_inference=True
+):
     """Verify a directory with external weights (single_layer or full_model)."""
     if not os.path.exists(d):
         print("  [NOT FOUND]")
@@ -245,11 +246,11 @@ def verify_external_data_dir(d, label, check_fixed_shapes=True,
         onnx_files = sorted([f for f in os.listdir(d) if f.endswith(".onnx")])
         for f in onnx_files:
             sz = os.path.getsize(os.path.join(d, f))
-            print(f"    {f:45s} {sz / (1024*1024):.1f} MB")
+            print(f"    {f:45s} {sz / (1024 * 1024):.1f} MB")
         return True
 
     weights_size = os.path.getsize(weights_path)
-    if weights_size > 1024 ** 3:
+    if weights_size > 1024**3:
         print(f"  weights.data: {weights_size / (1024**3):.2f} GB")
     else:
         print(f"  weights.data: {weights_size / (1024**2):.1f} MB")
@@ -304,7 +305,8 @@ def verify_external_data_dir(d, label, check_fixed_shapes=True,
 
         if check_fixed_shapes and not _is_dynamic_variant_filename(f):
             ok_shape, entries = _run_two_phase_shape_checks(
-                m, run_phase2=check_shape_inference)
+                m, run_phase2=check_shape_inference
+            )
             if not ok_shape:
                 all_ok = False
                 print(f"    SHAPE (fixed variant): {f}")
@@ -312,7 +314,9 @@ def verify_external_data_dir(d, label, check_fixed_shapes=True,
                     print(line)
 
     if all_ok:
-        print(f"  >> ALL OFFSETS VALID (max_end = weights.data size: {max_end == weights_size})")
+        print(
+            f"  >> ALL OFFSETS VALID (max_end = weights.data size: {max_end == weights_size})"
+        )
     else:
         print("  >> ERRORS FOUND!")
 
@@ -321,17 +325,21 @@ def verify_external_data_dir(d, label, check_fixed_shapes=True,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Verify extracted ONNX models (single_op, single_layer, full_model)")
+        description="Verify extracted ONNX models (single_op, single_layer, full_model)"
+    )
     parser.add_argument(
-        "output_dir", type=str,
+        "output_dir",
+        type=str,
         help="Base output directory containing single_op/, single_layer/, full_model/",
     )
     parser.add_argument(
-        "--skip-fixed-shape-check", action="store_true",
+        "--skip-fixed-shape-check",
+        action="store_true",
         help="Do not verify that non-_dynamic.onnx files have fully fixed tensor shapes",
     )
     parser.add_argument(
-        "--skip-shape-inference-check", action="store_true",
+        "--skip-shape-inference-check",
+        action="store_true",
         help="After phase-1 passes, skip ONNX shape_inference + check_model (phase-2)",
     )
     args = parser.parse_args()
@@ -361,7 +369,8 @@ def main():
     print("single_layer")
     print("=" * 70)
     ok = verify_external_data_dir(
-        os.path.join(base, "single_layer"), "single_layer",
+        os.path.join(base, "single_layer"),
+        "single_layer",
         check_fixed_shapes=check_shapes,
         check_shape_inference=check_infer if check_shapes else False,
     )
@@ -373,7 +382,8 @@ def main():
     print("full_model")
     print("=" * 70)
     ok = verify_external_data_dir(
-        os.path.join(base, "full_model"), "full_model",
+        os.path.join(base, "full_model"),
+        "full_model",
         check_fixed_shapes=check_shapes,
         check_shape_inference=check_infer if check_shapes else False,
     )
