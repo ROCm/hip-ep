@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 #
 """
-Verify extracted ONNX models: check file sizes, weights.data offsets,
+Verify extracted ONNX models: check file sizes, external data offsets,
 graph structure (nodes, inputs, outputs), initializer integrity, and for
 non-dynamic variants (filenames not ending with _dynamic.onnx):
   (1) phase-1 static scan: no symbolic / invalid dims on declared types;
@@ -144,6 +144,16 @@ def _graph_initializers_use_external_data(graph):
     return any(bool(init.external_data) for init in graph.initializer)
 
 
+def _detect_ext_data_name_from_graph(graph):
+    """Read the external data filename from the first external initializer."""
+    for init in graph.initializer:
+        if init.external_data:
+            for entry in init.external_data:
+                if entry.key == "location":
+                    return entry.value
+    return None
+
+
 def _check_model_failure_is_extended_op_only(exc):
     """onnx.checker only knows built-in ops; MS ORT ops fail with 'No Op registered'."""
     msg = str(exc).lower()
@@ -240,24 +250,38 @@ def verify_external_data_dir(
         print("  [NOT FOUND]")
         return True
 
-    weights_path = os.path.join(d, "weights.data")
-    if not os.path.exists(weights_path):
-        print("  [No weights.data file]")
-        onnx_files = sorted([f for f in os.listdir(d) if f.endswith(".onnx")])
+    onnx_files = sorted([f for f in os.listdir(d) if f.endswith(".onnx")])
+
+    weights_name = None
+    for f in onnx_files:
+        try:
+            m = onnx.load(os.path.join(d, f), load_external_data=False)
+            weights_name = _detect_ext_data_name_from_graph(m.graph)
+            if weights_name:
+                break
+        except Exception:
+            continue
+
+    if not weights_name:
+        print("  [No external data referenced by any .onnx file]")
         for f in onnx_files:
             sz = os.path.getsize(os.path.join(d, f))
             print(f"    {f:45s} {sz / (1024 * 1024):.1f} MB")
         return True
 
+    weights_path = os.path.join(d, weights_name)
+    if not os.path.exists(weights_path):
+        print(f"  ERROR: external data file {weights_name!r} not found!")
+        return False
+
     weights_size = os.path.getsize(weights_path)
     if weights_size > 1024**3:
-        print(f"  weights.data: {weights_size / (1024**3):.2f} GB")
+        print(f"  {weights_name}: {weights_size / (1024**3):.2f} GB")
     else:
-        print(f"  weights.data: {weights_size / (1024**2):.1f} MB")
+        print(f"  {weights_name}: {weights_size / (1024**2):.1f} MB")
 
     all_ok = True
-    onnx_files = sorted([f for f in os.listdir(d) if f.endswith(".onnx")])
-    max_end = 0
+    global_max_end = 0
 
     for f in onnx_files:
         fpath = os.path.join(d, f)
@@ -302,6 +326,8 @@ def verify_external_data_dir(
             f"out={n_outputs:>3d}  ext={ext_count}  emb={emb_count}  "
             f"max_end={max_end:>15d}  {status}"
         )
+        if max_end > global_max_end:
+            global_max_end = max_end
 
         if check_fixed_shapes and not _is_dynamic_variant_filename(f):
             ok_shape, entries = _run_two_phase_shape_checks(
@@ -315,7 +341,7 @@ def verify_external_data_dir(
 
     if all_ok:
         print(
-            f"  >> ALL OFFSETS VALID (max_end = weights.data size: {max_end == weights_size})"
+            f"  >> ALL OFFSETS VALID (max_end = {weights_name} size: {global_max_end == weights_size})"
         )
     else:
         print("  >> ERRORS FOUND!")
