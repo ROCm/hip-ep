@@ -91,6 +91,25 @@ endif()
 # ==============================================================================
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
 
+# ==============================================================================
+# Unified Memory Manager (standalone, no MLIR/HIP required for mock build)
+# ==============================================================================
+# When BUILD_HIP_TOOLS is ON, MemoryManager is built as part of lib/.
+# When only BUILD_UMM_TESTS is ON, we build it standalone for testing.
+option(BUILD_UMM_TESTS "Build UMM unit tests" ON)
+set(UMM_STANDALONE OFF)
+if(BUILD_UMM_TESTS AND NOT BUILD_HIP_TOOLS)
+  set(UMM_STANDALONE ON)
+  enable_testing()
+  add_subdirectory(lib/MemoryManager)
+endif()
+if(BUILD_UMM_TESTS)
+  if(NOT UMM_STANDALONE)
+    enable_testing()
+  endif()
+  add_subdirectory(test/mm)
+endif()
+
 if(BUILD_HIP_TOOLS)
   find_package(LLVM REQUIRED CONFIG)
   find_package(MLIR REQUIRED CONFIG)
