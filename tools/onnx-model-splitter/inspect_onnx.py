@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Inspect ONNX model structure: list graph inputs, outputs, nodes,
 initializers, and optionally dump node details.

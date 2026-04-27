@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Subprocess worker: load one ONNX model, run ORT inference, print result."""
 import sys
 import numpy as np

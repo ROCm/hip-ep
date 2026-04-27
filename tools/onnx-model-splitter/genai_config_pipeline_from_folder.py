@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Read structural metadata from `genai_config.json` (or another JSON) in a model folder,
 then generate a `decoder-pipeline` style `genai_config.json` for ORT GenAI.

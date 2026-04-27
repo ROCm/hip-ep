@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 r"""
 Verify extracted ONNX models by running ORT inference with dummy inputs.
 Checks that models load successfully and produce valid outputs.

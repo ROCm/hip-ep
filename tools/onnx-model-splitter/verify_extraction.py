@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Verify extracted ONNX models: check file sizes, weights.data offsets,
 graph structure (nodes, inputs, outputs), initializer integrity, and for
