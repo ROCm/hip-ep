@@ -1,19 +1,13 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * mm_types.h — Core type definitions for the Unified Memory Manager (UMM).
- *
- * This header defines the vocabulary types shared across all UMM components:
- * handles, memory classification, lifetime hints, allocation metadata, and
- * metrics. It has no dependencies beyond C99 stdint/stddef.
  */
 
 #ifndef MM_TYPES_H
 #define MM_TYPES_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,7 +23,8 @@ extern "C" {
  *
  * Handles are monotonically increasing and never reused, which makes double-
  * free detection trivial (remove returns false if handle not found).
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef uint64_t mm_handle_t;
 
 /** Sentinel value indicating an invalid or failed allocation. */
@@ -40,15 +35,17 @@ typedef uint64_t mm_handle_t;
  *
  * Wraps the backend-specific stream type (e.g., hipStream_t on ROCm).
  * Pass NULL for synchronous operations or when the stream is not relevant.
- * --------------------------------------------------------------------------- */
-typedef void* mm_stream_t;
+ * ---------------------------------------------------------------------------
+ */
+typedef void *mm_stream_t;
 
 /* ---------------------------------------------------------------------------
  * mm_device_t — Device identifier
  *
  * Non-negative values identify GPU ordinals (0, 1, ...).
  * MM_DEVICE_HOST (-1) identifies host (CPU) memory.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef int32_t mm_device_t;
 #define MM_DEVICE_GPU0 0
 #define MM_DEVICE_HOST (-1)
@@ -65,13 +62,14 @@ typedef int32_t mm_device_t;
  *   ACTIVATION — Intermediate tensors. Short-lived, arena-allocated.
  *   KV_CACHE   — Attention key-value cache. Request-scoped, paged blocks.
  *   SCRATCH    — Kernel workspace. Per-stream, reusable ring buffer.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef enum {
-    MM_CLASS_GENERIC    = 0,
-    MM_CLASS_WEIGHT     = 1,
-    MM_CLASS_ACTIVATION = 2,
-    MM_CLASS_KV_CACHE   = 3,
-    MM_CLASS_SCRATCH    = 4
+  MM_CLASS_GENERIC = 0,
+  MM_CLASS_WEIGHT = 1,
+  MM_CLASS_ACTIVATION = 2,
+  MM_CLASS_KV_CACHE = 3,
+  MM_CLASS_SCRATCH = 4
 } mm_class_t;
 
 /* ---------------------------------------------------------------------------
@@ -84,12 +82,13 @@ typedef enum {
  *   REQUEST   — Lives for one inference request (seconds to minutes).
  *   STEP      — Lives for one decode step (freed after each generated token).
  *   TRANSIENT — Lives for a single kernel or fused operator group.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef enum {
-    MM_LIFETIME_STATIC    = 0,
-    MM_LIFETIME_REQUEST   = 1,
-    MM_LIFETIME_STEP      = 2,
-    MM_LIFETIME_TRANSIENT = 3
+  MM_LIFETIME_STATIC = 0,
+  MM_LIFETIME_REQUEST = 1,
+  MM_LIFETIME_STEP = 2,
+  MM_LIFETIME_TRANSIENT = 3
 } mm_lifetime_t;
 
 /* ---------------------------------------------------------------------------
@@ -103,11 +102,12 @@ typedef enum {
  *   lifetime   — Expected lifetime (default: MM_LIFETIME_TRANSIENT).
  *   alignment  — Required byte alignment. 0 means use the config default
  *                (typically 256 bytes, matching GPU cache line size).
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef struct {
-    mm_class_t    mem_class;
-    mm_lifetime_t lifetime;
-    size_t        alignment;
+  mm_class_t mem_class;
+  mm_lifetime_t lifetime;
+  size_t alignment;
 } mm_alloc_hints_t;
 
 /* ---------------------------------------------------------------------------
@@ -124,14 +124,15 @@ typedef struct {
  *   mem_class — The memory class specified at allocation time.
  *   lifetime  — The lifetime hint specified at allocation time.
  *   device    — The device on which memory was allocated.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef struct {
-    mm_handle_t   handle;
-    void*         ptr;
-    size_t        size;
-    mm_class_t    mem_class;
-    mm_lifetime_t lifetime;
-    mm_device_t   device;
+  mm_handle_t handle;
+  void *ptr;
+  size_t size;
+  mm_class_t mem_class;
+  mm_lifetime_t lifetime;
+  mm_device_t device;
 } mm_alloc_info_t;
 
 /* ---------------------------------------------------------------------------
@@ -147,13 +148,14 @@ typedef struct {
  *   free_count            — Total number of mm_free() calls since init/reset.
  *   active_count          — Number of currently live allocations
  *                           (alloc_count - free_count).
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef struct {
-    size_t   total_allocated_bytes;
-    size_t   peak_allocated_bytes;
-    uint64_t alloc_count;
-    uint64_t free_count;
-    uint64_t active_count;
+  size_t total_allocated_bytes;
+  size_t peak_allocated_bytes;
+  uint64_t alloc_count;
+  uint64_t free_count;
+  uint64_t active_count;
 } mm_metrics_snapshot_t;
 
 #ifdef __cplusplus

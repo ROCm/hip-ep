@@ -1,26 +1,13 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * mm_hal.h — Hardware Abstraction Layer for the Unified Memory Manager.
- *
- * The HAL is a function-pointer vtable that isolates all GPU-specific calls
- * behind a single indirection point. Two backends are provided:
- *
- *   mm_hal_rocm() — Real ROCm/HIP backend (hipMalloc, hipFree, etc.).
- *   mm_hal_mock() — Host-only mock backend (malloc/free). No GPU required.
- *                   Follows the existing lib/Runtime/mock/ pattern.
- *
- * The active HAL is selected at mm_init() time (build-time flag MM_USE_MOCK_HAL
- * controls the default). The function-pointer cost is negligible — one indirect
- * call per hipMalloc, not per kernel launch.
  */
 
 #ifndef MM_HAL_H
 #define MM_HAL_H
 
-#include "mm_types.h"
 #include "mm_error.h"
+#include "mm_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,23 +34,23 @@ extern "C" {
  * Device queries:
  *   get_free_mem — Query available and total device memory (in bytes).
  *   set_device   — Set the active GPU device for the calling thread.
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 typedef struct {
-    mm_status_t (*malloc)(void** ptr, size_t size);
-    mm_status_t (*free)(void* ptr);
-    mm_status_t (*memcpy_h2d)(void* dst, const void* src, size_t size,
-                              mm_stream_t stream);
-    mm_status_t (*memcpy_d2h)(void* dst, const void* src, size_t size,
-                              mm_stream_t stream);
-    mm_status_t (*memset)(void* ptr, int value, size_t size,
-                          mm_stream_t stream);
+  mm_status_t (*malloc)(void **ptr, size_t size);
+  mm_status_t (*free)(void *ptr);
+  mm_status_t (*memcpy_h2d)(void *dst, const void *src, size_t size,
+                            mm_stream_t stream);
+  mm_status_t (*memcpy_d2h)(void *dst, const void *src, size_t size,
+                            mm_stream_t stream);
+  mm_status_t (*memset)(void *ptr, int value, size_t size, mm_stream_t stream);
 
-    mm_status_t (*stream_create)(mm_stream_t* stream);
-    mm_status_t (*stream_destroy)(mm_stream_t stream);
-    mm_status_t (*stream_sync)(mm_stream_t stream);
+  mm_status_t (*stream_create)(mm_stream_t *stream);
+  mm_status_t (*stream_destroy)(mm_stream_t stream);
+  mm_status_t (*stream_sync)(mm_stream_t stream);
 
-    mm_status_t (*get_free_mem)(size_t* free_bytes, size_t* total_bytes);
-    mm_status_t (*set_device)(mm_device_t device);
+  mm_status_t (*get_free_mem)(size_t *free_bytes, size_t *total_bytes);
+  mm_status_t (*set_device)(mm_device_t device);
 } mm_hal_t;
 
 /**
@@ -75,7 +62,7 @@ typedef struct {
  *
  * Only available when MM_USE_MOCK_HAL is NOT defined at build time.
  */
-const mm_hal_t* mm_hal_rocm(void);
+const mm_hal_t *mm_hal_rocm(void);
 
 /**
  * Returns the mock HAL vtable.
@@ -84,7 +71,7 @@ const mm_hal_t* mm_hal_rocm(void);
  * Streams are dummy pointers (create allocates a byte, destroy frees it).
  * Useful for unit testing the memory manager on machines without a GPU.
  */
-const mm_hal_t* mm_hal_mock(void);
+const mm_hal_t *mm_hal_mock(void);
 
 #ifdef __cplusplus
 }
