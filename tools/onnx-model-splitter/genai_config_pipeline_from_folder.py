@@ -21,13 +21,14 @@ Default output: ``<model_dir>/genai_config_pipeline.json`` (override with ``-o``
 and `provider_options` is forced to ``[{"MorphiZenEP": {}}]``.
 Optional `--session-options-json` only merges other keys and never overrides those two.
 
-Standard text-only LLM (`input_ids`): missing keys are filled with common defaults,
-and ``pipeline.inputs`` is generated in
-``input_ids → attention_mask → position_ids → past_*`` order.
-Embedded-input models (Qwen3.5 / Gemma3, etc.): `decoder.inputs` uses
-``inputs_embeds``, ``attention_mask``, ``position_ids``, ``past_*`` without `input_ids`;
-the script generates pipeline lists in
-``inputs_embeds → attention_mask → position_ids → past_*`` order.
+For ``decoder.inputs`` / ``decoder.outputs``: **keys absent in the source are not
+back-filled** from Llama-style defaults (e.g. gptoss without ``position_ids`` stays
+without it; partial ``outputs`` stays partial). ``pipeline.inputs`` order follows only
+bindings present: ``input_ids`` or ``inputs_embeds``, then optional ``attention_mask`` /
+``position_ids``, then ``past_*`` (``past_key_names`` / ``past_value_names`` are still
+required when auto-building lists). If ``decoder.inputs`` or ``decoder.outputs`` is
+missing or empty (e.g. bare HF ``config.json``), the full default maps are used for that
+side so the tool still produces a usable template.
 Fully custom main-input names with neither pattern above must provide an ONNX input name
 string array in ``model.decoder.pipeline.prefill.inputs``.
 
@@ -91,6 +92,10 @@ def _merge_decoder_io_templates(
 ) -> tuple[dict[str, str], dict[str, str], str]:
     """Merge ``decoder.inputs`` / ``outputs`` templates.
 
+    Source ``inputs`` / ``outputs`` dicts: keys are **not** back-filled from defaults.
+    If ``inputs`` (or ``outputs``) is missing, non-dict, or has no non-empty values after
+    filtering, the full default map is used for that side only.
+
     Returns:
         ``(merged_inputs, merged_outputs, input_layout_kind)``, where
         ``input_layout_kind`` is ``full_ids`` | ``embeds`` | ``custom``.
@@ -100,9 +105,8 @@ def _merge_decoder_io_templates(
         for k, v in outputs.items():
             if v is not None and str(v).strip() != "":
                 merged_out[str(k)] = str(v)
-    for k, v in _DEFAULT_DECODER_OUTPUTS.items():
-        if k not in merged_out:
-            merged_out[k] = v
+    if not merged_out:
+        merged_out = dict(_DEFAULT_DECODER_OUTPUTS)
 
     if inputs is None:
         return dict(_DEFAULT_DECODER_INPUTS), merged_out, INPUT_LAYOUT_FULL_IDS
@@ -119,25 +123,11 @@ def _merge_decoder_io_templates(
         return dict(_DEFAULT_DECODER_INPUTS), merged_out, INPUT_LAYOUT_FULL_IDS
 
     if merged_in.get("inputs_embeds"):
-        for k in (
-            "attention_mask",
-            "position_ids",
-            "past_key_names",
-            "past_value_names",
-        ):
-            if k not in merged_in:
-                merged_in[k] = _DEFAULT_DECODER_INPUTS[k]
         return merged_in, merged_out, INPUT_LAYOUT_EMBEDS
 
     if merged_in.get("input_ids"):
-        for k, v in _DEFAULT_DECODER_INPUTS.items():
-            if k not in merged_in:
-                merged_in[k] = v
         return merged_in, merged_out, INPUT_LAYOUT_FULL_IDS
 
-    for k in ("past_key_names", "past_value_names"):
-        if k not in merged_in:
-            merged_in[k] = _DEFAULT_DECODER_INPUTS[k]
     return merged_in, merged_out, INPUT_LAYOUT_CUSTOM
 
 
@@ -348,16 +338,11 @@ def build_pipeline_config(
         if not inputs_tmpl.get(key):
             raise ValueError(f"decoder.inputs incomplete, missing: {key}")
     if layout == INPUT_LAYOUT_FULL_IDS:
-        for key in ("input_ids", "attention_mask", "position_ids"):
-            if not inputs_tmpl.get(key):
-                raise ValueError(f"decoder.inputs incomplete, missing: {key}")
+        if not inputs_tmpl.get("input_ids"):
+            raise ValueError("decoder.inputs incomplete, missing: input_ids")
     elif layout == INPUT_LAYOUT_EMBEDS:
-        for key in ("inputs_embeds", "attention_mask", "position_ids"):
-            if not inputs_tmpl.get(key):
-                raise ValueError(f"decoder.inputs incomplete, missing: {key}")
-    for key in ("logits", "present_key_names", "present_value_names"):
-        if not outputs_tmpl.get(key):
-            raise ValueError(f"decoder.outputs incomplete, missing: {key}")
+        if not inputs_tmpl.get("inputs_embeds"):
+            raise ValueError("decoder.inputs incomplete, missing: inputs_embeds")
 
     session_opts = _canonical_morphizen_session_options()
     if session_options_override:
