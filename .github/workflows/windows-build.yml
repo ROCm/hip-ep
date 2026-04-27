@@ -458,24 +458,29 @@ jobs:
           cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
 
+          # ---------------------------------------------------------------
+          # Python wheels (ORT + OGA cp314) — bundled into the same artifact
+          # under staging/wheels/ so downstream consumers download a single
+          # zip. Both wheels are cached inside prebuilt-local / oga-artifacts
+          # respectively, so cache hits restore them without re-running ORT
+          # or OGA from source.
+          # ---------------------------------------------------------------
+          mkdir -p staging/wheels
+          ORT_WHEEL=$(find "${{ runner.workspace }}/prebuilt-local/wheels" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: cp314 wheel(s) missing from cache"
+            echo "  ORT: $ORT_WHEEL"
+            echo "  OGA: $OGA_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" staging/wheels/
+          cp "$OGA_WHEEL" staging/wheels/
+
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
-
-      # -----------------------------------------------------------------------
-      # Upload Python wheels (ORT + OGA cp314) as a separate artifact so they
-      # can be downloaded independently from gpu-test-package. Both wheels are
-      # cached inside prebuilt-local / oga-artifacts respectively, so cache
-      # hits restore them without re-running ORT / OGA from-source builds.
-      # -----------------------------------------------------------------------
-      - name: Upload Python wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-wheels
-          path: |
-            ${{ runner.workspace }}/prebuilt-local/wheels/*.whl
-            ${{ runner.workspace }}/oga-artifacts/*.whl
-          retention-days: ${{ github.ref == 'refs/heads/main' && 14 || 3 }}
-          if-no-files-found: error
 
       - name: Upload GPU test package
         uses: actions/upload-artifact@v4
