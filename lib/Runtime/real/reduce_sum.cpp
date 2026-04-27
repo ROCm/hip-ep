@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -29,6 +30,7 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
     RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: null argument\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   // Handle noop_with_empty_axes: if axes is empty and noop_with_empty_axes is
   // 1, copy input to output without reduction

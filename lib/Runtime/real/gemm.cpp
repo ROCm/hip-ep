@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -207,6 +208,7 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
     fprintf(stderr, "wrap_gemm: invalid arguments\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   hipblasLtHandle_t handle =
       static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));

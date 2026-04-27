@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
@@ -34,6 +35,7 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
     RUNTIME_DEBUG_LOG("[REAL] wrap_cast: null argument\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   void *stream = hipdnn_ep_state_get_stream(state);
 

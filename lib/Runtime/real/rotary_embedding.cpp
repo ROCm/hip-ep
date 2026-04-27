@@ -5,6 +5,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
@@ -41,6 +42,7 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
     fprintf(stderr, "wrap_rotary_embedding: null state\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {

@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -110,6 +111,7 @@ int wrap_miopenConvolutionForward(
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   // Extract handle and stream from opaque RuntimeState via accessor functions
   // (Maintains abstraction barrier - no direct field access)

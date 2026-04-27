@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -22,6 +23,9 @@ int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
   if (size_bytes == 0) {
     return 0; // No-op for zero-sized copy
   }
+  // Use the I/O profile scope so this D2D shows up in the I/O table with
+  // bandwidth, separate from the compute-op table.
+  HIPDNN_EP_IO_PROFILE_SCOPE(state, __func__, size_bytes);
 
   // Extract stream from opaque RuntimeState using accessor function
   // (Maintains abstraction barrier - no direct field access)

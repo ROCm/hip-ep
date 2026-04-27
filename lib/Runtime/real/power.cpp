@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -247,6 +248,7 @@ int wrap_power(RuntimeState *state, void *input, void *output,
     fprintf(stderr, "wrap_power: null argument\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   // hip.reciprocal lowers to wrap_power(…, 0, 1, -1).
   if (alpha == 0.0 && beta == 1.0 && gamma == -1.0)

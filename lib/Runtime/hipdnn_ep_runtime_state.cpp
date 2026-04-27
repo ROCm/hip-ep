@@ -6,6 +6,7 @@
 #include "hip/timing.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
+#include "operator_profile.h"
 #include "runtime_state_internal.h"
 
 #include "model_metadata_generated.h"
@@ -100,6 +101,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->workspace_size = 0;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
+  state->io_cache = nullptr;
 
   // Explicitly initialize HIP device before any other operations
   // This ensures device 0 is active and context is properly initialized
@@ -476,6 +478,22 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Synchronize stream to ensure all GPU operations complete
   if (state->stream) {
     HIP_CLEANUP(hipStreamSynchronize(state->stream));
+  }
+
+  // Drain any remaining per-operator profiling events and emit the lifetime
+  // summary. Must happen after stream sync so the events have completed.
+  hipdnn_ep::op_profile_print_summary_and_reset();
+
+  // Roll up the last open inference (if any) and dump the [PERF] aggregate.
+  // Mirrors op_profile: the generated inference_compute does not call
+  // hipdnn_ep_stream_sync today, so this is the deterministic flush point
+  // for the wall-clock + GPU breakdown reference.
+  hipdnn_ep_perf_flush_and_print(state);
+
+  // Destroy the I/O cache (frees any persistent GPU buffers it owns). Must
+  // happen after stream sync so no in-flight kernel references these buffers.
+  if (state->io_cache) {
+    hipdnn_ep_io_cache_destroy(state);
   }
 
   // Free shared workspace (if allocated)

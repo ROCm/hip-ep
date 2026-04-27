@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../operator_profile.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -37,6 +38,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     fprintf(stderr, "wrap_qmoe: null argument\n");
     return -1;
   }
+  HIPDNN_EP_OP_PROFILE_SCOPE(state);
 
   if (swiglu_fusion != 1) {
     fprintf(stderr, "wrap_qmoe: only swiglu_fusion=1 supported, got %lld\n",
