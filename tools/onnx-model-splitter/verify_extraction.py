@@ -1,20 +1,193 @@
 """
 Verify extracted ONNX models: check file sizes, weights.data offsets,
-graph structure (nodes, inputs, outputs), and initializer integrity.
+graph structure (nodes, inputs, outputs), initializer integrity, and for
+non-dynamic variants (filenames not ending with _dynamic.onnx):
+  (1) phase-1 static scan: no symbolic / invalid dims on declared types;
+  (2) only if phase-1 passes: phase-2 ONNX shape_inference (strict when
+      supported), onnx.checker when applicable, then a second fixed-dim scan.
+      check_model is skipped (not failed) for extended ops onnx does not
+      register (e.g. SimplifiedLayerNormalization); ORT may still run them.
 
 Usage:
   python verify_extraction.py <output_dir>
-  python verify_extraction.py D:\liuc\0-modelzoo\llm\Qwen2.5-14B-Instruct-fp16\Qwen2.5-14B-Instruct\space
+  python verify_extraction.py D:/liuc/0-modelzoo/llm/.../space
+  python verify_extraction.py <output_dir> --skip-fixed-shape-check
+  python verify_extraction.py <output_dir> --skip-shape-inference-check
 """
 
 import os
 import sys
 import argparse
+from collections import defaultdict
 
 import onnx
 
 
-def verify_single_op(d):
+def _is_dynamic_variant_filename(filename):
+    """extract_submodels names variants as <stem>_<variant>.onnx; dynamic is *_dynamic.onnx."""
+    return filename.endswith("_dynamic.onnx")
+
+
+def _tensor_shape_dim_issues(shape):
+    """Return human-readable issues for one TensorShapeProto (tensor dims)."""
+    if not shape.dim:
+        return []
+    out = []
+    for i, d in enumerate(shape.dim):
+        if d.dim_param:
+            out.append(f"dim[{i}] symbolic={d.dim_param!r}")
+        elif d.dim_value < 0:
+            out.append(f"dim[{i}] dim_value={d.dim_value}")
+        elif d.dim_value == 0:
+            out.append(f"dim[{i}] dim_value=0 (unspecified)")
+    return out
+
+
+def _vi_tensor_shape_issues(vi):
+    if not vi.type.HasField("tensor_type"):
+        return []
+    tt = vi.type.tensor_type
+    if not tt.HasField("shape"):
+        return ["missing tensor_type.shape"]
+    return _tensor_shape_dim_issues(tt.shape)
+
+
+def _build_vi_map(graph):
+    """Same merge order as extract_submodels.get_value_info_map."""
+    vi = {}
+    for v in graph.value_info:
+        vi[v.name] = v
+    for v in graph.input:
+        vi[v.name] = v
+    for v in graph.output:
+        vi[v.name] = v
+    return vi
+
+
+def _collect_fixed_variant_shape_issues(model):
+    """For fixed-shape ONNX files: list tensors / nodes that still have unfixed dims."""
+    g = model.graph
+    tensor_issues = defaultdict(list)
+    init_by_name = {init.name: init for init in g.initializer}
+    vi_map = _build_vi_map(g)
+
+    def _add(name, issues):
+        if not issues or not name:
+            return
+        for x in issues:
+            if x not in tensor_issues[name]:
+                tensor_issues[name].append(x)
+
+    for vi in g.input:
+        _add(vi.name, _vi_tensor_shape_issues(vi))
+    for vi in g.output:
+        _add(vi.name, _vi_tensor_shape_issues(vi))
+    for vi in g.value_info:
+        _add(vi.name, _vi_tensor_shape_issues(vi))
+
+    for name, init in init_by_name.items():
+        idims = []
+        for i, d in enumerate(init.dims):
+            if d <= 0:
+                idims.append(f"dims[{i}]={d}")
+        _add(name, idims)
+
+    for node in g.node:
+        for inp in node.input:
+            if not inp or inp in init_by_name:
+                continue
+            vi = vi_map.get(inp)
+            if vi is None:
+                continue
+            _add(inp, _vi_tensor_shape_issues(vi))
+
+    lines = []
+    for name in sorted(tensor_issues):
+        issues = tensor_issues[name]
+        if issues:
+            lines.append(f"      tensor {name!r}: {', '.join(issues)}")
+
+    bad_nodes = []
+    for node in g.node:
+        if any(inp and inp in tensor_issues for inp in node.input):
+            bad_nodes.append(f"{node.name}({node.op_type})")
+    if bad_nodes:
+        head = ", ".join(bad_nodes[:24])
+        if len(bad_nodes) > 24:
+            head += f", ... (+{len(bad_nodes) - 24} more)"
+        lines.append(
+            f"      nodes consuming unfixed tensors ({len(bad_nodes)}): {head}")
+
+    return lines
+
+
+def _infer_shapes_for_check(model):
+    """Return inferred model; ONNX uses check_type (not check_types)."""
+    infer = onnx.shape_inference.infer_shapes
+    try:
+        return infer(model, check_type=True, strict_mode=True)
+    except TypeError:
+        pass
+    try:
+        return infer(model, check_type=True)
+    except TypeError:
+        pass
+    return infer(model)
+
+
+def _graph_initializers_use_external_data(graph):
+    return any(bool(init.external_data) for init in graph.initializer)
+
+
+def _check_model_failure_is_extended_op_only(exc):
+    """onnx.checker only knows built-in ops; MS ORT ops fail with 'No Op registered'."""
+    msg = str(exc).lower()
+    return (
+        "no op registered" in msg
+        or "no schema registered" in msg
+        or "is not a registered function" in msg
+    )
+
+
+def _phase2_shape_normality_issues(model):
+    """After phase-1 passed: ONNX shape inference + checker + residual unfixed dims."""
+    lines = []
+    try:
+        inferred = _infer_shapes_for_check(model)
+    except Exception as e:
+        lines.append(f"      [phase-2] shape_inference failed: {e}")
+        return lines
+
+    if not _graph_initializers_use_external_data(inferred.graph):
+        try:
+            onnx.checker.check_model(inferred, full_check=False)
+        except Exception as e:
+            if not _check_model_failure_is_extended_op_only(e):
+                lines.append(f"      [phase-2] check_model failed: {e}")
+                return lines
+
+    residual = _collect_fixed_variant_shape_issues(inferred)
+    if residual:
+        lines.append(
+            "      [phase-2] after inference, still unfixed or invalid dims:")
+        lines.extend(residual)
+    return lines
+
+
+def _run_two_phase_shape_checks(model, run_phase2=True):
+    """Phase 1: fixed dims on disk graph. Phase 2: only if phase 1 is clean."""
+    phase1 = _collect_fixed_variant_shape_issues(model)
+    if phase1:
+        return False, [("phase-1", x) for x in phase1]
+    if not run_phase2:
+        return True, []
+    phase2 = _phase2_shape_normality_issues(model)
+    if phase2:
+        return False, [("phase-2", x) for x in phase2]
+    return True, []
+
+
+def verify_single_op(d, check_fixed_shapes=True, check_shape_inference=True):
     """Verify single_op directory structure."""
     if not os.path.exists(d):
         print("  [NOT FOUND]")
@@ -40,6 +213,14 @@ def verify_single_op(d):
                 if n_nodes == 0:
                     print(f"    WARNING: {folder}/{f} has 0 nodes!")
                     all_ok = False
+                if check_fixed_shapes and not _is_dynamic_variant_filename(f):
+                    ok_shape, entries = _run_two_phase_shape_checks(
+                        m, run_phase2=check_shape_inference)
+                    if not ok_shape:
+                        print(f"    SHAPE (fixed variant): {folder}/{f}")
+                        for _, line in entries:
+                            print(line)
+                        all_ok = False
             except Exception as e:
                 print(f"    ERROR loading {folder}/{f}: {e}")
                 all_ok = False
@@ -47,7 +228,8 @@ def verify_single_op(d):
     return all_ok
 
 
-def verify_external_data_dir(d, label):
+def verify_external_data_dir(d, label, check_fixed_shapes=True,
+                             check_shape_inference=True):
     """Verify a directory with external weights (single_layer or full_model)."""
     if not os.path.exists(d):
         print("  [NOT FOUND]")
@@ -70,6 +252,7 @@ def verify_external_data_dir(d, label):
 
     all_ok = True
     onnx_files = sorted([f for f in os.listdir(d) if f.endswith(".onnx")])
+    max_end = 0
 
     for f in onnx_files:
         fpath = os.path.join(d, f)
@@ -115,6 +298,15 @@ def verify_external_data_dir(d, label):
             f"max_end={max_end:>15d}  {status}"
         )
 
+        if check_fixed_shapes and not _is_dynamic_variant_filename(f):
+            ok_shape, entries = _run_two_phase_shape_checks(
+                m, run_phase2=check_shape_inference)
+            if not ok_shape:
+                all_ok = False
+                print(f"    SHAPE (fixed variant): {f}")
+                for _, line in entries:
+                    print(line)
+
     if all_ok:
         print(f"  >> ALL OFFSETS VALID (max_end = weights.data size: {max_end == weights_size})")
     else:
@@ -130,7 +322,17 @@ def main():
         "output_dir", type=str,
         help="Base output directory containing single_op/, single_layer/, full_model/",
     )
+    parser.add_argument(
+        "--skip-fixed-shape-check", action="store_true",
+        help="Do not verify that non-_dynamic.onnx files have fully fixed tensor shapes",
+    )
+    parser.add_argument(
+        "--skip-shape-inference-check", action="store_true",
+        help="After phase-1 passes, skip ONNX shape_inference + check_model (phase-2)",
+    )
     args = parser.parse_args()
+    check_shapes = not args.skip_fixed_shape_check
+    check_infer = not args.skip_shape_inference_check
 
     base = args.output_dir
     if not os.path.isdir(base):
@@ -142,7 +344,11 @@ def main():
     print("=" * 70)
     print("single_op")
     print("=" * 70)
-    ok = verify_single_op(os.path.join(base, "single_op"))
+    ok = verify_single_op(
+        os.path.join(base, "single_op"),
+        check_fixed_shapes=check_shapes,
+        check_shape_inference=check_infer if check_shapes else False,
+    )
     if not ok:
         overall_ok = False
     print()
@@ -150,7 +356,11 @@ def main():
     print("=" * 70)
     print("single_layer")
     print("=" * 70)
-    ok = verify_external_data_dir(os.path.join(base, "single_layer"), "single_layer")
+    ok = verify_external_data_dir(
+        os.path.join(base, "single_layer"), "single_layer",
+        check_fixed_shapes=check_shapes,
+        check_shape_inference=check_infer if check_shapes else False,
+    )
     if not ok:
         overall_ok = False
     print()
@@ -158,7 +368,11 @@ def main():
     print("=" * 70)
     print("full_model")
     print("=" * 70)
-    ok = verify_external_data_dir(os.path.join(base, "full_model"), "full_model")
+    ok = verify_external_data_dir(
+        os.path.join(base, "full_model"), "full_model",
+        check_fixed_shapes=check_shapes,
+        check_shape_inference=check_infer if check_shapes else False,
+    )
     if not ok:
         overall_ok = False
     print()

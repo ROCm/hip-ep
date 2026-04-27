@@ -16,7 +16,13 @@ def make_dummy_input(inp):
             except (ValueError, TypeError):
                 shape.append(1)
 
+    name_lower = inp.name.lower()
     dtype_str = inp.type
+
+    if "attention_mask" in name_lower:
+        return np.ones(shape, dtype=np.int64 if "int64" in dtype_str
+                       else np.int32)
+
     if "float16" in dtype_str:
         return np.zeros(shape, dtype=np.float16)
     elif "float" in dtype_str:
