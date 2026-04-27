@@ -10,18 +10,29 @@
 
 #include "mm/mm_hal.h"
 #include <hip/hip_runtime.h>
+#include <atomic>
+
+static std::atomic<bool> g_is_igpu{false};
 
 static mm_status_t rocm_malloc(void** ptr, size_t size) {
     if (!ptr || size == 0)
         return MM_ERR_INVALID_ARGUMENT;
-    hipError_t err = hipMalloc(ptr, size);
+    hipError_t err;
+    if (g_is_igpu.load(std::memory_order_relaxed))
+        err = hipHostMalloc(ptr, size, hipHostMallocDefault);
+    else
+        err = hipMalloc(ptr, size);
     if (err == hipErrorOutOfMemory)
         return MM_ERR_OUT_OF_MEMORY;
     return (err == hipSuccess) ? MM_OK : MM_ERR_HAL_FAILURE;
 }
 
 static mm_status_t rocm_free(void* ptr) {
-    hipError_t err = hipFree(ptr);
+    hipError_t err;
+    if (g_is_igpu.load(std::memory_order_relaxed))
+        err = hipHostFree(ptr);
+    else
+        err = hipFree(ptr);
     return (err == hipSuccess) ? MM_OK : MM_ERR_HAL_FAILURE;
 }
 
@@ -82,7 +93,12 @@ static mm_status_t rocm_get_free_mem(size_t* free_bytes, size_t* total_bytes) {
 
 static mm_status_t rocm_set_device(mm_device_t device) {
     hipError_t err = hipSetDevice(device);
-    return (err == hipSuccess) ? MM_OK : MM_ERR_HAL_FAILURE;
+    if (err != hipSuccess)
+        return MM_ERR_HAL_FAILURE;
+    hipDeviceProp_t prop;
+    if (hipGetDeviceProperties(&prop, device) == hipSuccess)
+        g_is_igpu.store(prop.integrated == 1, std::memory_order_relaxed);
+    return MM_OK;
 }
 
 const mm_hal_t* mm_hal_rocm(void) {

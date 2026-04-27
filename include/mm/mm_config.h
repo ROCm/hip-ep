@@ -13,6 +13,12 @@
 
 #include "mm_types.h"
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)  /* getenv deprecation */
+#endif
+#include <stdlib.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -37,17 +43,23 @@ typedef struct {
 /**
  * Returns an mm_config_t initialized with sensible defaults:
  *   device_id = 0, default_alignment = 256, enable_debug_log = 0.
+ * Set environment variable MM_DEBUG_LOG=1 to enable debug logging.
  */
 static inline mm_config_t mm_config_default(void) {
     mm_config_t c;
     c.device_id = 0;
     c.default_alignment = 256;
-    c.enable_debug_log = 0;
+    const char* dbg = getenv("MM_DEBUG_LOG");
+    c.enable_debug_log = (dbg && dbg[0] != '0' && dbg[0] != '\0') ? 1 : 0;
     return c;
 }
 
 #ifdef __cplusplus
 }
+#endif
+
+#ifdef _MSC_VER
+#pragma warning(pop)
 #endif
 
 #endif /* MM_CONFIG_H */
