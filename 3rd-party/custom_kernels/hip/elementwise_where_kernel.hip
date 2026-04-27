@@ -51,8 +51,20 @@ __global__ void where_nd_kernel(const bool *__restrict__ condition,
 }
 
 // Left-pad `src_shape` (length `src_rank`) to `out_rank` with 1s into
-// `padded_shape`, then compute row-major strides over the padded shape with
-// stride 0 along axes where padded dim is 1 (NumPy-style broadcast).
+// `padded_shape`, then compute row-major strides over the padded shape and
+// validate NumPy-style broadcast compatibility against `out_shape`.
+//
+// For each axis k, the padded operand dim must satisfy one of:
+//   1. dim == 1            -> broadcast along this axis (stride = 0)
+//   2. dim == out_shape[k] -> exact match (stride = running row-major stride)
+//   3. otherwise           -> not broadcast-compatible, return false
+//
+// This mirrors the per-axis rule used by ORT's CUDA EP `ComputeOutputShape`
+// in onnxruntime/core/providers/cuda/tensor/where.cc, where each input dim
+// is rejected unless it equals the output dim or 1. We additionally enforce
+// the rule here at runtime as defense-in-depth: even if the upstream ONNX
+// shape inference and MLIR conversion produced a consistent `out_shape`,
+// any mismatch surfaces a clear error instead of an out-of-bounds access.
 static bool make_broadcast_layout(const int64_t *src_shape, int src_rank,
                                   int out_rank, const int64_t *out_shape,
                                   WhereDimsND *padded_shape,
@@ -67,10 +79,18 @@ static bool make_broadcast_layout(const int64_t *src_shape, int src_rank,
   for (int k = out_rank - 1; k >= 0; --k) {
     int64_t dim = padded_shape->v[k];
     if (dim == 1) {
+      // NumPy rule (1): dim of 1 broadcasts to any out dim, including
+      // out_shape[k] != 1. Stride 0 makes every output index along this
+      // axis read the same source element.
       stride->v[k] = 0;
     } else if (dim == out_shape[k]) {
+      // NumPy rule (2): non-1 dim must match the out dim exactly; use the
+      // accumulated row-major stride.
       stride->v[k] = running;
     } else {
+      // NumPy rule (3): dim is neither 1 nor equal to out_shape[k] -> the
+      // operand cannot broadcast to the output along this axis. Reject
+      // explicitly rather than silently producing wrong indices.
       fprintf(stderr,
               "[custom_kernels] hip_elementwise_where: %s dim %d = %lld is "
               "not broadcast-compatible with out dim %lld\n",
