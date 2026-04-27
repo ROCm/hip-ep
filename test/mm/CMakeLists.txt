@@ -27,3 +27,7 @@ add_test(NAME UMM_HandleTable COMMAND test_handle_table)
 add_executable(test_mm_core test_mm_core.cpp)
 target_link_libraries(test_mm_core PRIVATE MemoryManager)
 add_test(NAME UMM_Core COMMAND test_mm_core)
+
+add_executable(test_mm_pool test_mm_pool.cpp)
+target_link_libraries(test_mm_pool PRIVATE MemoryManager)
+add_test(NAME UMM_Pool COMMAND test_mm_pool)
