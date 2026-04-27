@@ -14,16 +14,15 @@
  * Internally auto-dispatched to one of three execution paths:
  *
  *   1. RDNA3 WMMA fast path (batch==1, K%32==0, M>=16):
- *      Transposes A/C to col-major internally, then uses WMMA intrinsics
- *      with double-buffered shared memory, grid swizzling, and inline-asm
- *      batched dequant. Requires gfx11xx/gfx12xx.
+ *      Row-major A/C, WMMA intrinsics with double-buffered shared memory,
+ *      grid swizzling, and inline-asm batched dequant.
+ *      Requires gfx11xx/gfx12xx.
  *
- *   2. GEMV col-major path (batch==1, K%32==0, M<16):
- *      Transposes A/C internally (skipped for M=1). K-parallel reduction
- *      GEMV with COL_MAJOR=true, autotuned (BLOCK_SIZE, TILE_N).
+ *   2. GEMV row-major path (batch==1, K%32==0, M<16):
+ *      Row-major GEMV, autotuned (BLOCK_SIZE, TILE_N).
  *
  *   3. Naive fallback (arbitrary alignment, batched):
- *      Row-major kernels, uint8 zero points.
+ *      Row-major kernels.
  *
  * When zero_points is NULL, dequantization uses the ONNX MatMulNBits
  * default zp = 2^(bits-1) (= 8 for bits=4) to match the CPU EP (MLAS).
@@ -64,6 +63,8 @@ __global__ void matmul_nbits_kernel(
   int64_t k_blocks = (K + block_size - 1) / block_size;
   int64_t blob_size = block_size / 2;
 
+  const __half* zp_fp16 = reinterpret_cast<const __half*>(zp);
+
   float acc = 0.0f;
   const __half* a_row = A + batch * M * K + m * K;
   const uint8_t* b_row = B + n * (K / 2);
@@ -72,7 +73,7 @@ __global__ void matmul_nbits_kernel(
   for (int64_t blk = 0; blk < k_blocks; blk++) {
     float scale_val = static_cast<float>(s_row[blk]);
     float zp_val = (zp != nullptr)
-                       ? static_cast<float>(zp[n * k_blocks + blk])
+                       ? static_cast<float>(zp_fp16[n * k_blocks + blk])
                        : 8.0f;
 
     int64_t k_start = blk * block_size;
@@ -126,7 +127,7 @@ __global__ void matmul_nbits_kernel(
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
 
-template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false>
+template <int BLOCK_SIZE, int TILE_N>
 __global__ void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
@@ -139,7 +140,7 @@ __global__ void matmul_nbits_gemv_kernel(
 {
     const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
     const int64_t m      = blockIdx.y;
-    const int64_t batch  = COL_MAJOR ? 0 : blockIdx.z;
+    const int64_t batch  = blockIdx.z;
     const int tid        = threadIdx.x;
 
     if (m >= M) return;
@@ -148,18 +149,9 @@ __global__ void matmul_nbits_gemv_kernel(
     const int     bs_shift = __builtin_ctzll(
                                  static_cast<unsigned long long>(block_size));
 
-    const __half* a_base;
-    int64_t       a_stride;
-    if constexpr (COL_MAJOR) {
-        a_base   = A + m;
-        a_stride = M;
-    } else {
-        a_base   = A + batch * M * K + m * K;
-        a_stride = 1;
-    }
+    const __half* a_base = A + batch * M * K + m * K;
 
-    [[maybe_unused]] const __half* zp_fp16 =
-        COL_MAJOR ? reinterpret_cast<const __half*>(zp) : nullptr;
+    const __half* zp_fp16 = reinterpret_cast<const __half*>(zp);
 
     const uint8_t* b_base_arr[TILE_N];
     const __half*  s_rows[TILE_N];
@@ -180,17 +172,12 @@ __global__ void matmul_nbits_gemv_kernel(
 
     const bool has_zp = (zp != nullptr);
 
-    // Helper: read zero-point for (n_idx, grp) — FP16 when COL_MAJOR
     auto read_zp = [&](int64_t nidx, int64_t grp) __attribute__((always_inline)) -> float {
-        if constexpr (COL_MAJOR)
-            return static_cast<float>(zp_fp16[nidx * k_blocks + grp]);
-        else
-            return static_cast<float>(zp[nidx * k_blocks + grp]);
+        return static_cast<float>(zp_fp16[nidx * k_blocks + grp]);
     };
 
-    // Helper: read A element at K-offset
     auto read_a = [&](int64_t k_off) __attribute__((always_inline)) -> float {
-        return static_cast<float>(a_base[k_off * a_stride]);
+        return static_cast<float>(a_base[k_off]);
     };
 
     // ---- Phase 1: 16-nibble (64-bit) vectorized main loop ----
@@ -336,11 +323,8 @@ __global__ void matmul_nbits_gemv_kernel(
                 if (n < N) {
                     if (bias)
                         val += static_cast<float>(bias[n]);
-                    if constexpr (COL_MAJOR)
-                        output[n * M + m] = static_cast<__half>(val);
-                    else
-                        output[batch * M * N + m * N + n] =
-                            static_cast<__half>(val);
+                    output[batch * M * N + m * N + n] =
+                        static_cast<__half>(val);
                 }
             }
         }
@@ -373,25 +357,19 @@ static void launchGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs,
-    bool col_major = false)
+    int64_t batch, int64_t bs)
 {
     auto& c = kGemvConfigs[config_id];
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
               static_cast<unsigned>(M),
-              static_cast<unsigned>(col_major ? 1 : batch));
+              static_cast<unsigned>(batch));
     dim3 block(c.threads);
 
 #define GEMV_CASE(ID, BS, TN) \
     case ID: \
-        if (col_major) \
-            hipLaunchKernelGGL( \
-                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true>), \
-                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
-        else \
-            hipLaunchKernelGGL( \
-                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false>), \
-                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+        hipLaunchKernelGGL( \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN>), \
+            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
         break
 
     switch (config_id) {
@@ -423,8 +401,7 @@ static int tuneGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs,
-    bool col_major = false)
+    int64_t batch, int64_t bs)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -441,12 +418,12 @@ static int tuneGemvConfig(
 
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
+                             M, N, K, batch, bs);
 
         hipEventRecord(ev0, stream);
         for (int i = 0; i < ITERS; i++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
+                             M, N, K, batch, bs);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
@@ -468,9 +445,9 @@ static int tuneGemvConfig(
     hipEventDestroy(ev1);
 
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] GEMV autotune: M=%lld N=%lld K=%lld bs=%lld col_major=%d -> "
+        "[custom_kernels] GEMV autotune: M=%lld N=%lld K=%lld bs=%lld -> "
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
-        (long long)M, (long long)N, (long long)K, (long long)bs, col_major,
+        (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvConfigs[best_id].threads,
         kGemvConfigs[best_id].tile_n, best_ms / ITERS);
 
@@ -480,11 +457,9 @@ static int tuneGemvConfig(
 static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 
-static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
-                                bool col_major = false) {
+static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs) {
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (col_major ? "1" : "0");
+           std::to_string(K) + "_" + std::to_string(bs);
 }
 
 static int getOrTuneGemvConfig(
@@ -493,10 +468,9 @@ static int getOrTuneGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs,
-    bool col_major = false)
+    int64_t batch, int64_t bs)
 {
-    std::string key = gemvCacheKey(M, N, K, bs, col_major);
+    std::string key = gemvCacheKey(M, N, K, bs);
 
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
@@ -505,7 +479,7 @@ static int getOrTuneGemvConfig(
         return it->second;
 
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs, col_major);
+                               M, N, K, batch, bs);
     gemv_cache[key] = best;
 
     CUSTOM_KERNELS_DEBUG_LOG(
@@ -960,6 +934,9 @@ static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- WT_M=2, WT_N=1 fused (BN=32 — optimized for small N) ---
     { 64,  32,  4, true, 2, 1}, { 64,  32,  8, true, 2, 1},
     {128,  32,  4, true, 2, 1}, {128,  32,  8, true, 2, 1},
+    // --- WT_M=1, WT_N=2 fused (BM=32 — tall-N tile, maximizes A reuse) ---
+    { 32,  64,  2, true, 1, 2}, { 32,  64,  4, true, 1, 2},
+    { 32,  64,  8, true, 1, 2}, { 32,  64, 16, true, 1, 2},
     // --- separate dequant + fp16 GEMM ---
     { 64,  64,  2, false}, { 64,  64,  4, false}, { 64,  64,  8, false}, { 64,  64, 16, false},
     { 64, 128,  2, false}, { 64, 128,  4, false}, { 64, 128,  8, false}, { 64, 128, 16, false},
@@ -974,6 +951,9 @@ static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- WT_M=2, WT_N=1 separate dequant (BN=32 — for small N) ---
     { 64,  32,  4, false, 2, 1}, { 64,  32,  8, false, 2, 1},
     {128,  32,  4, false, 2, 1}, {128,  32,  8, false, 2, 1},
+    // --- WT_M=1, WT_N=2 separate dequant (BM=32 — tall-N tile) ---
+    { 32,  64,  2, false, 1, 2}, { 32,  64,  4, false, 1, 2},
+    { 32,  64,  8, false, 1, 2}, { 32,  64, 16, false, 1, 2},
 };
 static constexpr int kNumWmmaConfigs =
     static_cast<int>(sizeof(kWmmaConfigs) / sizeof(kWmmaConfigs[0]));
@@ -1059,18 +1039,39 @@ static void launchWmmaConfig(
     if (need_bc) FP16_GEMM_LAUNCH_WT21(BM_V, BN_V, true); \
     else         FP16_GEMM_LAUNCH_WT21(BM_V, BN_V, false)
 
+#define FP16_GEMM_LAUNCH_WT12(BM_V, BN_V, BC_V) do { \
+    constexpr int WM_ = BM_V / (1 * 16); \
+    constexpr int WN_ = BN_V / (2 * 16); \
+    constexpr int THR_ = WM_ * WN_ * 32; \
+    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
+               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
+    dim3 block_(THR_); \
+    hipLaunchKernelGGL( \
+        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 1, 2, 8, BC_V>), \
+        grid_, block_, 0, stream, \
+        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+} while(0)
+
+#define FP16_TILE_CASE_WT12(BM_V, BN_V) \
+    if (need_bc) FP16_GEMM_LAUNCH_WT12(BM_V, BN_V, true); \
+    else         FP16_GEMM_LAUNCH_WT12(BM_V, BN_V, false)
+
         if      (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
                                                   FP16_TILE_CASE_WT4(256, 128);
         else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
                                                   FP16_TILE_CASE_WT21(128, 32);
         else if (c.wt_n == 1 && c.bm ==  64 && c.bn == 32)
                                                   FP16_TILE_CASE_WT21( 64, 32);
+        else if (c.wt_m == 1 && c.bm ==  32 && c.bn == 64)
+                                                  FP16_TILE_CASE_WT12( 32, 64);
         else if (c.bm ==  64 && c.bn ==  64) FP16_TILE_CASE( 64,  64);
         else if (c.bm ==  64 && c.bn == 128) FP16_TILE_CASE( 64, 128);
         else if (c.bm == 128 && c.bn ==  64) FP16_TILE_CASE(128,  64);
         else if (c.bm == 128 && c.bn == 256) FP16_TILE_CASE(128, 256);
         else                                  FP16_TILE_CASE(128, 128);
 
+#undef FP16_TILE_CASE_WT12
+#undef FP16_GEMM_LAUNCH_WT12
 #undef FP16_TILE_CASE_WT21
 #undef FP16_GEMM_LAUNCH_WT21
 #undef FP16_TILE_CASE_WT4
@@ -1152,18 +1153,46 @@ static void launchWmmaConfig(
     if (need_bc) WMMA_LAUNCH_WT21(BM_V, BN_V, true); \
     else         WMMA_LAUNCH_WT21(BM_V, BN_V, false)
 
+#define WMMA_LAUNCH_WT12(BM_V, BN_V, BC_V) do { \
+    constexpr int WM_ = BM_V / (1 * 16); \
+    constexpr int WN_ = BN_V / (2 * 16); \
+    constexpr int THR_ = WM_ * WN_ * 32; \
+    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
+               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
+    dim3 block_(THR_); \
+    if (has_zp) { \
+        hipLaunchKernelGGL( \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 1, 2, 8, BC_V>), \
+            grid_, block_, 0, stream, \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+    } else { \
+        hipLaunchKernelGGL( \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 1, 2, 8, BC_V>), \
+            grid_, block_, 0, stream, \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+    } \
+} while(0)
+
+#define WMMA_TILE_CASE_WT12(BM_V, BN_V) \
+    if (need_bc) WMMA_LAUNCH_WT12(BM_V, BN_V, true); \
+    else         WMMA_LAUNCH_WT12(BM_V, BN_V, false)
+
     if      (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
                                               WMMA_TILE_CASE_WT4(256, 128);
     else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
                                               WMMA_TILE_CASE_WT21(128, 32);
     else if (c.wt_n == 1 && c.bm ==  64 && c.bn == 32)
                                               WMMA_TILE_CASE_WT21( 64, 32);
+    else if (c.wt_m == 1 && c.bm ==  32 && c.bn == 64)
+                                              WMMA_TILE_CASE_WT12( 32, 64);
     else if (c.bm ==  64 && c.bn ==  64) WMMA_TILE_CASE( 64,  64);
     else if (c.bm ==  64 && c.bn == 128) WMMA_TILE_CASE( 64, 128);
     else if (c.bm == 128 && c.bn ==  64) WMMA_TILE_CASE(128,  64);
     else if (c.bm == 128 && c.bn == 256) WMMA_TILE_CASE(128, 256);
     else                                  WMMA_TILE_CASE(128, 128);
 
+#undef WMMA_TILE_CASE_WT12
+#undef WMMA_LAUNCH_WT12
 #undef WMMA_TILE_CASE_WT21
 #undef WMMA_LAUNCH_WT21
 #undef WMMA_TILE_CASE_WT4
@@ -1183,82 +1212,6 @@ static _Float16* ensureDqBuffer(int N, int K) {
     hipMalloc(&g_dq_buf, need * sizeof(_Float16));
     g_dq_buf_elems = need;
     return g_dq_buf;
-}
-
-/* -----------------------------------------------------------------------
- * GPU 2-D FP16 transpose + scratch buffer helpers
- *
- * transpose2d_fp16_kernel: transposes a [rows x cols] row-major matrix
- * into a [cols x rows] row-major matrix (equivalent to col-major view).
- * Used to convert row-major ONNX tensors to the col-major layout that
- * WMMA / GEMV kernels expect, and to convert results back.
- * ----------------------------------------------------------------------- */
-
-__global__ void transpose2d_fp16_kernel(
-    const _Float16* __restrict__ src,
-    _Float16* __restrict__ dst,
-    int rows, int cols)
-{
-    constexpr int TILE = 32;
-    __shared__ _Float16 tile[TILE][TILE + 1];
-
-    int bx = blockIdx.x * TILE;
-    int by = blockIdx.y * TILE;
-
-    int x = bx + threadIdx.x;
-    int y = by + threadIdx.y;
-
-    for (int j = 0; j < TILE; j += blockDim.y) {
-        int yy = y + j;
-        if (x < cols && yy < rows)
-            tile[threadIdx.y + j][threadIdx.x] = src[yy * cols + x];
-    }
-    __syncthreads();
-
-    x = by + threadIdx.x;
-    y = bx + threadIdx.y;
-    for (int j = 0; j < TILE; j += blockDim.y) {
-        int yy = y + j;
-        if (x < rows && yy < cols)
-            dst[yy * rows + x] = tile[threadIdx.x][threadIdx.y + j];
-    }
-}
-
-static void launchTranspose2DFp16(hipStream_t stream,
-                                  const void* src, void* dst,
-                                  int rows, int cols)
-{
-    constexpr int TILE = 32;
-    dim3 block(TILE, 8);
-    dim3 grid((cols + TILE - 1) / TILE, (rows + TILE - 1) / TILE);
-    hipLaunchKernelGGL(transpose2d_fp16_kernel, grid, block, 0, stream,
-                       static_cast<const _Float16*>(src),
-                       static_cast<_Float16*>(dst),
-                       rows, cols);
-}
-
-static _Float16* g_a_col_buf = nullptr;
-static size_t    g_a_col_buf_elems = 0;
-
-static _Float16* ensureAColBuffer(int M, int K) {
-    size_t need = static_cast<size_t>(M) * K;
-    if (g_a_col_buf && g_a_col_buf_elems >= need) return g_a_col_buf;
-    if (g_a_col_buf) hipFree(g_a_col_buf);
-    hipMalloc(&g_a_col_buf, need * sizeof(_Float16));
-    g_a_col_buf_elems = need;
-    return g_a_col_buf;
-}
-
-static _Float16* g_out_col_buf = nullptr;
-static size_t    g_out_col_buf_elems = 0;
-
-static _Float16* ensureOutColBuffer(int M, int N) {
-    size_t need = static_cast<size_t>(M) * N;
-    if (g_out_col_buf && g_out_col_buf_elems >= need) return g_out_col_buf;
-    if (g_out_col_buf) hipFree(g_out_col_buf);
-    hipMalloc(&g_out_col_buf, need * sizeof(_Float16));
-    g_out_col_buf_elems = need;
-    return g_out_col_buf;
 }
 
 static int tuneWmmaConfig(
@@ -1444,6 +1397,12 @@ static const _Float16* convertZpToFp16(
     return zp_fp16;
 }
 
+static char g_last_tune_info[128] = "none";
+
+extern "C" const char* hip_matmul_nbits_last_tune_info() {
+    return g_last_tune_info;
+}
+
 extern "C" int hip_matmul_nbits(
     void* stream,
     const void* A,
@@ -1498,7 +1457,7 @@ extern "C" int hip_matmul_nbits(
    * zero_points (if not NULL) must be FP16 [N, num_groups_k].
    *
    * When M >= kBlockDim (16): WMMA intrinsics (RDNA3 fast path)
-   * When M <  kBlockDim:      GEMV kernel with COL_MAJOR=true
+   * When M <  kBlockDim:      GEMV kernel (row-major, autotuned)
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
 
@@ -1529,6 +1488,14 @@ extern "C" int hip_matmul_nbits(
     int wmma_cfg = getOrTuneWmmaConfig(
         hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
         s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp);
+
+    {
+        auto& cc = kWmmaConfigs[wmma_cfg];
+        snprintf(g_last_tune_info, sizeof(g_last_tune_info),
+                 "%s bm=%d bn=%d wt=%d,%d sw=%d",
+                 cc.fused ? "fused" : "dq+gem",
+                 cc.bm, cc.bn, cc.wt_m, cc.wt_n, cc.swizzle_n);
+    }
 
     _Float16* dq_buf = kWmmaConfigs[wmma_cfg].fused
                            ? nullptr : ensureDqBuffer(iN, iK);
@@ -1566,74 +1533,39 @@ extern "C" int hip_matmul_nbits(
   }
 
   /* -------------------------------------------------------------------
-   * GEMV path with col-major data — small M, WMMA data format
+   * GEMV path — small M, WMMA data format
    *
-   * When batch==1, K%32==0, but M < kBlockDim: internally transpose
-   * A row->col and output col->row so the caller sees row-major I/O.
-   * GEMV kernel runs with COL_MAJOR=true for K-parallel reduction.
+   * When batch==1, K%32==0, but M < kBlockDim: row-major GEMV with
+   * autotuned (BLOCK_SIZE, TILE_N). Zero points are FP16 (same as API).
    * ------------------------------------------------------------------- */
   if (wmma_data_format && M < kBlockDim) {
+    snprintf(g_last_tune_info, sizeof(g_last_tune_info), "gemv-row");
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
-        "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
-        (long long)M, (long long)N, (long long)K,
-        (long long)block_size,
-        zero_points ? "yes" : "null", bias ? "yes" : "null");
+        "[custom_kernels] hip_matmul_nbits: GEMV row-major M=%lld "
+        "N=%lld K=%lld bs=%lld zp=%s\n",
+        (long long)M, (long long)N, (long long)K, (long long)block_size,
+        zero_points ? "yes" : "null");
 
-    int iM = static_cast<int>(M);
-    int iN = static_cast<int>(N);
-    int iK = static_cast<int>(K);
-
-    // Row-major A [M, K] -> col-major (skip if M==1: row/col identical)
-    const __half* a_col;
-    if (M > 1) {
-      _Float16* a_buf = ensureAColBuffer(iM, iK);
-      launchTranspose2DFp16(hip_stream, A, a_buf, iM, iK);
-      a_col = reinterpret_cast<const __half*>(a_buf);
-    } else {
-      a_col = static_cast<const __half*>(A);
-    }
-
-    // GEMV output to col-major scratch (skip if M==1)
-    __half* o_col;
-    if (M > 1) {
-      o_col = reinterpret_cast<__half*>(ensureOutColBuffer(iM, iN));
-    } else {
-      o_col = static_cast<__half*>(output);
-    }
-
+    const auto* a_h = static_cast<const __half*>(A);
     const auto* b_u = static_cast<const uint8_t*>(B);
     const auto* s_h = static_cast<const __half*>(scales);
     const auto* z_u = static_cast<const uint8_t*>(zp_for_fp16_paths);
     const auto* b_h = static_cast<const __half*>(bias);
+    auto*       o_h = static_cast<__half*>(output);
 
     int config_id = getOrTuneGemvConfig(
-        hip_stream, a_col, b_u, s_h, z_u, b_h, o_col,
-        M, N, K, 1, block_size, /*col_major=*/true);
+        hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
+        M, N, K, 1, block_size);
 
     launchGemvConfig(config_id, hip_stream,
-                     a_col, b_u, s_h, z_u, b_h, o_col,
-                     M, N, K, 1, block_size, /*col_major=*/true);
+                     a_h, b_u, s_h, z_u, b_h, o_h,
+                     M, N, K, 1, block_size);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
       fprintf(stderr,
-              "[custom_kernels] hip_matmul_nbits GEMV col-major launch "
-              "failed: %s\n",
+              "[custom_kernels] hip_matmul_nbits GEMV launch failed: %s\n",
               hipGetErrorString(err));
-      return static_cast<int>(err);
-    }
-
-    // Col-major output -> row-major (skip if M==1)
-    if (M > 1) {
-      launchTranspose2DFp16(hip_stream, o_col, output, iN, iM);
-      err = hipGetLastError();
-      if (err != hipSuccess) {
-        fprintf(stderr,
-                "[custom_kernels] hip_matmul_nbits GEMV out-transpose "
-                "failed: %s\n",
-                hipGetErrorString(err));
-      }
     }
     return static_cast<int>(err);
   }
@@ -1641,11 +1573,12 @@ extern "C" int hip_matmul_nbits(
   /* -------------------------------------------------------------------
    * GEMV path — small M, row-major data (non-WMMA format)
    *
-   * For small M (≤ kBlockDim) with row-major A and uint8 zero points.
+   * For small M (≤ kBlockDim) with row-major A and FP16 zero points.
    * On the first call for each (M,N,K,block_size) shape, all configs
    * are benchmarked and the fastest is cached for subsequent calls.
    * ------------------------------------------------------------------- */
   if (M <= kBlockDim) {
+    snprintf(g_last_tune_info, sizeof(g_last_tune_info), "gemv-row");
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV path M=%lld N=%lld K=%lld "
         "batch=%lld bs=%lld zp=%s bias=%s\n",
@@ -1680,6 +1613,7 @@ extern "C" int hip_matmul_nbits(
   /* -------------------------------------------------------------------
    * Naive fallback (row-major, batched, uint8 zero points)
    * ------------------------------------------------------------------- */
+  snprintf(g_last_tune_info, sizeof(g_last_tune_info), "naive");
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_matmul_nbits: naive fallback M=%lld N=%lld K=%lld "
       "batch=%lld bits=%lld bs=%lld elem=%lld zp=%s bias=%s\n",
@@ -1707,4 +1641,8 @@ extern "C" int hip_matmul_nbits(
             hipGetErrorString(err));
   }
   return static_cast<int>(err);
+}
+
+extern "C" void hip_matmul_nbits_release_buffers() {
+  if (g_dq_buf) { hipFree(g_dq_buf); g_dq_buf = nullptr; g_dq_buf_elems = 0; }
 }
