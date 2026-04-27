@@ -12,16 +12,19 @@ on:
   push:
     branches: [main]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 permissions:
   contents: read
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    # Cancel the build job when a newer commit lands on the same PR ref to
+    # save runner minutes. gpu-test deliberately does NOT inherit this rule
+    # (see its own concurrency block below) so an in-progress GPU run keeps
+    # going to completion even if a newer build supersedes it.
+    concurrency:
+      group: build-windows-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
       PREBUILT_CACHE_VERSION: "3"  # bump to invalidate prebuilt cache (added cp314 wheels)
@@ -488,6 +491,13 @@ jobs:
   gpu-test:
     needs: build-windows
     runs-on: StrixHalo
+    # Never cancel an in-progress GPU run: queue newer runs of the same ref
+    # behind it instead of killing the long-running perf / OGA / L2 suites.
+    # The self-hosted StrixHalo runner already serializes physically, so
+    # this group only adds explicit logical queueing for clarity.
+    concurrency:
+      group: gpu-test-${{ github.ref }}
+      cancel-in-progress: false
 
     permissions:
       contents: read
