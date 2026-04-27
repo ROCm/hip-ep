@@ -6,6 +6,16 @@
 // Verify ONNX Where (elementwise selection) is correctly lowered
 // to hip.where operation in tensor-first mode.
 //
+// SCOPE: this is a static IR-rewrite test driven by `hip-mlir-opt | FileCheck`.
+// It runs the `--convert-onnx-to-hip` pass and inspects the textual IR ONLY.
+// No HIP kernel is compiled or launched, and no runtime code path is exercised
+// by these checks. Therefore the set of element types covered here intentionally
+// matches the ONNX `Where` type constraint (NumPy-style typing) rather than the
+// narrower set currently dispatched by the runtime kernel. The conversion is
+// designed to be type-agnostic so it remains correct as the kernel grows
+// support for more element types; runtime-level type coverage is gated
+// independently by the EP capability check and the kernel's dtype switch.
+//
 // This test validates:
 // - Ternary elementwise lowering (onnx.Where -> hip.where)
 // - Three-input operand handling (condition, x, y)
@@ -13,6 +23,7 @@
 // - Same-rank operands and multidirectional broadcasting (NumPy-style)
 // - Proper !hip.context threading through operations
 // - Tensor-first DPS: tensor.empty() used as output init
+// - Type-agnostic lowering across the full ONNX `Where` T constraint
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
@@ -90,6 +101,18 @@ module {
 
     return %output : tensor<?x?xf16>
   }
+
+  // --------------------------------------------------------------------------
+  // Tests 5-8: type-agnostic conversion coverage.
+  //
+  // These cases confirm the OnnxToHip rewrite preserves the operand/result
+  // element type for the full ONNX `Where` T constraint (uint8, int8, double,
+  // bool, ...) -- not just the subset the runtime kernel currently dispatches.
+  // They are pure FileCheck assertions on the rewritten IR; nothing here gets
+  // lowered to LLVM or executed. Whether a given element type is actually
+  // supported end-to-end is decided later by the EP capability check and the
+  // kernel's dtype switch, which are exercised by other test layers.
+  // --------------------------------------------------------------------------
 
   // Test 5: Signed 8-bit integer X/Y.
   func.func @test_where_i8(%cond: tensor<2x4xi1>,
