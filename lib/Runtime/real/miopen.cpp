@@ -270,11 +270,12 @@ int wrap_miopenConvolutionForward(
     HIP_CHECK(hipMalloc(&workspace, workspace_size));
   }
 
-  // Zero output buffer to avoid reading uninitialized memory
+  // Zero output buffer before convolution (belt-and-suspenders; MIOpen with
+  // beta=0 overwrites output fully, but zeroing prevents stale data from
+  // masking errors during NAN_TRACE debugging).
   {
     int64_t out_elems = input_n * weights_k * output_h * output_w;
     hipMemsetAsync(output, 0, out_elems * sizeof(float), hip_stream);
-    hipStreamSynchronize(hip_stream);
   }
 
   // Log algorithm choice near the NaN-producing op

@@ -538,17 +538,6 @@ struct ResizeToHip : public RewritePattern {
           sizes.push_back(v);
     }
 
-    llvm::errs() << "[ResizeToHip] rank=" << rank
-                 << " scales.size()=" << scales.size()
-                 << " sizes.size()=" << sizes.size();
-    if (!scales.empty()) {
-      llvm::errs() << " scales=[";
-      for (size_t i = 0; i < scales.size(); ++i)
-        llvm::errs() << (i ? "," : "") << scales[i];
-      llvm::errs() << "]";
-    }
-    llvm::errs() << "\n";
-
     for (int64_t d = 0; d < rank; ++d) {
       if (!resultType.isDynamicDim(d))
         continue;
