@@ -12,19 +12,22 @@ on:
   push:
     branches: [main]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 permissions:
   contents: read
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    # Cancel the build job when a newer commit lands on the same PR ref to
+    # save runner minutes. gpu-test deliberately does NOT inherit this rule
+    # (see its own concurrency block below) so an in-progress GPU run keeps
+    # going to completion even if a newer build supersedes it.
+    concurrency:
+      group: build-windows-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
-      PREBUILT_CACHE_VERSION: "2"  # bump to invalidate prebuilt cache
+      PREBUILT_CACHE_VERSION: "3"  # bump to invalidate prebuilt cache (added cp314 wheels)
       LLVM_TAG: llvm-22.1.0-release
       FLATBUFFERS_TAG: flatbuffers-25.12.19-release
       PROTO_TAG: protobuf-34.0-release
@@ -116,10 +119,10 @@ jobs:
       # llvm-lit.py (from prebuilt) requires the lit pip package at runtime.
       # Pin Python to avoid mismatch with find_package(Python3) in CMake.
       # -----------------------------------------------------------------------
-      - name: Setup Python 3.12
+      - name: Setup Python 3.14
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install pip dependencies
         run: pip install lit requests
@@ -165,7 +168,8 @@ jobs:
             --skip_tests ^
             --disable_memleak_checker ^
             --use_dml ^
-            --cmake_generator Ninja
+            --cmake_generator Ninja ^
+            --build_wheel
 
       - name: Install ORT into prebuilt-local
         if: steps.cache-prebuilt.outputs.cache-hit != 'true'
@@ -190,6 +194,18 @@ jobs:
             exit 1
           fi
           cp "$DML_DLL" "${{ runner.workspace }}/prebuilt-local/bin/"
+          # Cache the cp314 ORT Python wheel inside prebuilt-local so it
+          # rides the same cache key as the rest of the ORT artifacts.
+          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.24.3-cp314-cp314-win_amd64.whl
+          ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ]; then
+            echo "ERROR: onnxruntime_directml wheel not found in build tree"
+            exit 1
+          fi
+          mkdir -p "${{ runner.workspace }}/prebuilt-local/wheels"
+          cp "$ORT_WHEEL" "${{ runner.workspace }}/prebuilt-local/wheels/"
+          echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
       # -----------------------------------------------------------------------
       # Download LLVM prebuilt (from wcy123/llvm-mlir-prebuilt releases)
@@ -313,7 +329,11 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: oga-dml-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # Reuse PREBUILT_CACHE_VERSION as the OGA cache version too: when
+          # the OGA build outputs change shape (e.g. wheel added), bumping
+          # PREBUILT_CACHE_VERSION invalidates both ORT and OGA caches in
+          # one step instead of needing two separate version knobs.
+          key: oga-dml-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -348,7 +368,7 @@ jobs:
             --cmake_generator Ninja \
             --use_dml \
             --ort_home "$ORT_HOME" \
-            --skip_wheel --skip_tests --skip_examples \
+            --skip_tests --skip_examples \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
@@ -359,6 +379,16 @@ jobs:
           OGA_OUT="${{ runner.workspace }}/build-oga/Release"
           cp "$OGA_OUT/benchmark/c/model_benchmark.exe" "${{ runner.workspace }}/oga-artifacts/"
           cp "$OGA_OUT/onnxruntime-genai.dll" "${{ runner.workspace }}/oga-artifacts/"
+          # Cache the cp314 OGA Python wheel alongside the other OGA artifacts.
+          # Output path: build-oga/Release/wheel/onnxruntime_genai_directml-0.13.0.dev0-cp314-cp314-win_amd64.whl
+          OGA_WHEEL=$(find "${{ runner.workspace }}/build-oga" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          if [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: onnxruntime_genai_directml wheel not found in build tree"
+            exit 1
+          fi
+          cp "$OGA_WHEEL" "${{ runner.workspace }}/oga-artifacts/"
+          echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -432,6 +462,27 @@ jobs:
           cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
 
+          # ---------------------------------------------------------------
+          # Python wheels (ORT + OGA cp314) — bundled into the same artifact
+          # under staging/wheels/ so downstream consumers download a single
+          # zip. Both wheels are cached inside prebuilt-local / oga-artifacts
+          # respectively, so cache hits restore them without re-running ORT
+          # or OGA from source.
+          # ---------------------------------------------------------------
+          mkdir -p staging/wheels
+          ORT_WHEEL=$(find "${{ runner.workspace }}/prebuilt-local/wheels" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: cp314 wheel(s) missing from cache"
+            echo "  ORT: $ORT_WHEEL"
+            echo "  OGA: $OGA_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" staging/wheels/
+          cp "$OGA_WHEEL" staging/wheels/
+
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
@@ -449,6 +500,13 @@ jobs:
   gpu-test:
     needs: build-windows
     runs-on: StrixHalo
+    # Never cancel an in-progress GPU run: queue newer runs of the same ref
+    # behind it instead of killing the long-running perf / OGA / L2 suites.
+    # The self-hosted StrixHalo runner already serializes physically, so
+    # this group only adds explicit logical queueing for clarity.
+    concurrency:
+      group: gpu-test-${{ github.ref }}
+      cancel-in-progress: false
 
     permissions:
       contents: read
