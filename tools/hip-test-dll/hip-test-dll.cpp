@@ -23,6 +23,7 @@
 #endif
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -56,6 +57,25 @@ typedef struct {
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
   int memory_type;     // TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 } tensor_t;
+
+// Compile-time guard against silent layout drift between the three places
+// that duplicate this struct (this file,
+// backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp, and
+// lib/Runtime/hipdnn_ep_runtime.h). The same three asserts live in all
+// three files; if you reorder/add/remove a field in one place you have to
+// touch all three or one of these will fire at build time.
+//
+// We assert per-field offsets, not raw sizeof(tensor_t), because trailing
+// padding after `memory_type` is compiler-defined and not part of what the
+// MLIR-emitted model.dll actually reads.
+static_assert(offsetof(tensor_t, data) == 0,
+              "tensor_t.data must remain the first field");
+static_assert(offsetof(tensor_t, shape) == sizeof(void *),
+              "tensor_t.shape moved -- update all three tensor_t copies");
+static_assert(offsetof(tensor_t, memory_type) ==
+                  offsetof(tensor_t, element_size) + sizeof(size_t),
+              "tensor_t.memory_type moved -- update all three tensor_t "
+              "copies");
 
 typedef struct {
   tensor_t *data; // Array of tensors
