@@ -120,9 +120,16 @@ GeluToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
-  // Extract approximate attribute from ONNX op (default to "none")
+  // Extract and validate approximate attribute from ONNX op (default to "none")
   mlir::StringAttr approximateAttr = rewriter.getStringAttr("none");
   if (auto attr = op->getAttrOfType<mlir::StringAttr>("approximate")) {
+    llvm::StringRef approxValue = attr.getValue();
+    // Only "none" and "tanh" are valid per ONNX Gelu spec
+    if (approxValue != "none" && approxValue != "tanh") {
+      return rewriter.notifyMatchFailure(op, "invalid approximate attribute '" +
+                                                 approxValue.str() +
+                                                 "', must be 'none' or 'tanh'");
+    }
     approximateAttr = attr;
   }
 
