@@ -7,9 +7,11 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 namespace mlir {
@@ -66,7 +68,8 @@ static Value buildIntRangeCount(PatternRewriter &rewriter, Location loc,
   Value cmpPos = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
                                        delta, zero);
   // Guard compile-time length expression from divide-by-zero and empty ranges.
-  // Runtime still rejects delta==0 in wrap_range for ORT parity.
+  // Non-empty `hip_range` launches validate delta in `range_kernel`. Constant
+  // delta==0 is rejected in `verifyConstantDeltaNonZero`.
   Value clampToZeroLen = arith::OrIOp::create(rewriter, loc, cmpZ, empty);
 
   Value diffPos = arith::SubIOp::create(rewriter, loc, limit, start);
@@ -112,7 +115,8 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
   Value empty =
       buildFloatRangeEmptyCheck(rewriter, loc, start, limit, delta, zero);
   // Guard compile-time length expression from divide-by-zero and empty ranges.
-  // Runtime still rejects delta==0 in wrap_range for ORT parity.
+  // Non-empty `hip_range` launches validate delta in `range_kernel`. Constant
+  // delta==0 is rejected in `verifyConstantDeltaNonZero`.
   Value clampToZeroLen = arith::OrIOp::create(rewriter, loc, cmpZ, empty);
 
   Value diffPos = arith::SubFOp::create(rewriter, loc, limit, start);
@@ -131,6 +135,40 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
   Value nNonNeg = arith::MaxSIOp::create(rewriter, loc, nIntSel, zeroI);
   return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
                                     nNonNeg);
+}
+
+/// Fail conversion when delta is a compile-time constant equal to zero (ORT
+/// INVALID_ARGUMENT parity).
+static LogicalResult verifyConstantDeltaNonZero(Operation *op, Value deltaTensor,
+                                                Type elemTy) {
+  auto cst = deltaTensor.getDefiningOp<arith::ConstantOp>();
+  if (!cst)
+    return success();
+
+  auto dense = dyn_cast<DenseElementsAttr>(cst.getValue());
+  if (!dense)
+    return success();
+
+  bool isZero = false;
+  if (isa<IntegerType>(elemTy)) {
+    for (APInt v : dense.getValues<APInt>()) {
+      isZero = v.isZero();
+      break;
+    }
+  } else if (isa<FloatType>(elemTy)) {
+    for (APFloat v : dense.getValues<APFloat>()) {
+      isZero = v.isZero();
+      break;
+    }
+  } else {
+    return success();
+  }
+
+  if (!isZero)
+    return success();
+
+  op->emitOpError("delta in Range operator can not be zero!");
+  return failure();
 }
 
 struct RangeToHip : public RewritePattern {
@@ -157,6 +195,10 @@ struct RangeToHip : public RewritePattern {
     }
 
     Location loc = op->getLoc();
+
+    if (failed(verifyConstantDeltaNonZero(op, op->getOperand(2), elemTy)))
+      return failure();
+
     Value startE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(0),
                                              ValueRange{});
     Value limitE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(1),

@@ -41,8 +41,21 @@ __device__ __forceinline__ T range_value(T start_val, T delta_val,
 }
 
 template <typename T>
+__device__ __forceinline__ bool range_delta_is_zero(T d) {
+  // ORT treats +0 and -0 as zero for float/double (exact equality).
+  return d == T(0);
+}
+
+template <typename T>
 __global__ void range_kernel(const T *start, const T *delta, T *output,
                              int64_t num_elements) {
+  __shared__ T s_delta;
+  if (threadIdx.x == 0)
+    s_delta = *delta;
+  __syncthreads();
+  if (range_delta_is_zero(s_delta))
+    return;
+
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= num_elements)
     return;
@@ -60,8 +73,13 @@ extern "C" int hip_range(void *stream, const void *start, const void *limit,
     fprintf(stderr, "[custom_kernels] hip_range: null pointer argument\n");
     return -1;
   }
-  if (output_num_elements <= 0)
+  if (output_num_elements <= 0) {
+    // No kernel for empty output. If runtime delta were 0, shape folding may
+    // have produced 0 length without launching range_kernel; use compile-time
+    // rejection (see RangeConversion) for constant delta==0, or a future
+    // side-channel error flag for full dynamic ORT parity without per-empty sync.
     return 0;
+  }
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
