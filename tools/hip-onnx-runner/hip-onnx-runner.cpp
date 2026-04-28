@@ -142,6 +142,10 @@ static bool type_tag_to_onnx(const std::string &tag,
     out = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
   else if (tag == "fp16")
     out = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+  else if (tag == "fp64")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
+  else if (tag == "bf16")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
   else if (tag == "i64")
     out = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
   else if (tag == "i32")
@@ -738,7 +742,7 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
       std::cerr
           << fn
           << ": missing or unknown type tag; expected name ending with _fp32, "
-             "_fp16, _i64, _i32, _i16, _i8, _u8, or _u16 before .bin\n";
+             "_fp16, _fp64, _bf16, _i64, _i32, _i16, _i8, _u8, or _u16 before .bin\n";
       return 1;
     }
     // Bitwise-equal buffers => L2 is 0 (fast path).
