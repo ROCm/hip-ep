@@ -234,7 +234,8 @@ static uint16_t float_to_fp16_bits(float f) {
   return static_cast<uint16_t>((sign >> 16) | nonsign);
 }
 
-// BFloat16 -> float32 (simple: copy sign bit + upper 7 bits of exponent/mantissa to f32).
+// BFloat16 -> float32 (simple: copy sign bit + upper 7 bits of
+// exponent/mantissa to f32).
 static float bf16_bits_to_float(uint16_t bf16) {
   uint32_t bits = static_cast<uint32_t>(bf16) << 16;
   float result;
@@ -742,7 +743,8 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
       std::cerr
           << fn
           << ": missing or unknown type tag; expected name ending with _fp32, "
-             "_fp16, _fp64, _bf16, _i64, _i32, _i16, _i8, _u8, or _u16 before .bin\n";
+             "_fp16, _fp64, _bf16, _i64, _i32, _i16, _i8, _u8, or _u16 before "
+             ".bin\n";
       return 1;
     }
     // Bitwise-equal buffers => L2 is 0 (fast path).
