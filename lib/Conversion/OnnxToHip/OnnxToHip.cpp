@@ -194,6 +194,22 @@ static void replaceWithArithConstant(mlir::Operation *constOp,
   constOp->erase();
 }
 
+/// Returns true when this onnx.Constant feeds the second operand (`split`)
+/// of at least one onnx.Split op. These constants must remain inline so
+/// Split lowering can read exact split lengths at compile time.
+static bool isSplitLengthsConstant(mlir::Operation *constOp) {
+  if (constOp->getNumResults() != 1)
+    return false;
+  mlir::Value result = constOp->getResult(0);
+  for (mlir::Operation *user : result.getUsers()) {
+    if (user->getName().getStringRef() != "onnx.Split")
+      continue;
+    if (user->getNumOperands() > 1 && user->getOperand(1) == result)
+      return true;
+  }
+  return false;
+}
+
 /// Externalize a splat constant: expand the single element via chunked
 /// writes to avoid allocating the full tensor in memory.
 static void externalizeSplatConstant(mlir::ModuleOp module,
@@ -316,6 +332,13 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
           "or location attribute)");
     }
 
+    // Keep Split length tensors inline even when global externalization is
+    // enabled, otherwise Split lowering loses compile-time lengths.
+    if (isSplitLengthsConstant(constOp)) {
+      replaceWithArithConstant(constOp, valueAttr);
+      continue;
+    }
+
     if (extState && minNumElements > 0 &&
         valueAttr.getNumElements() >= minNumElements) {
       auto tensorType = mlir::cast<mlir::RankedTensorType>(valueAttr.getType());
@@ -372,6 +395,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateCastConversionPatterns(patterns, ctx);
   populateReduceSumConversionPatterns(patterns, ctx);
   populateGatherConversionPatterns(patterns, ctx);
+  populateSplitConversionPatterns(patterns, ctx);
   populateConvConversionPatterns(patterns, ctx);
   populateNormConversionPatterns(patterns, ctx);
   populateRotaryEmbeddingConversionPatterns(patterns, ctx);

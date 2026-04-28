@@ -507,6 +507,18 @@ void GatherOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SplitOp: ins(data), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SplitOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SplitOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SiluOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

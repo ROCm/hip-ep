@@ -479,6 +479,12 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t indices_num_elements, int64_t output_num_elements,
                 int64_t element_size_bytes);
 
+// Split operation wrapper: copy one split chunk from data to output.
+int wrap_split(RuntimeState *state, void *data, void *output, int64_t axis,
+               int64_t offset, int64_t input_axis_dim, int64_t output_axis_dim,
+               int64_t inner_size, int64_t output_num_elements,
+               int64_t element_size_bytes);
+
 // ReduceSum operation wrapper
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,

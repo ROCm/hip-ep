@@ -13,6 +13,7 @@ add_library(HipToLLVM STATIC
   ActivationLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
+  SplitLowering.cpp
   CastLowering.cpp
   ReduceSumLowering.cpp
   TransposeLowering.cpp

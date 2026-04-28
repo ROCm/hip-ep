@@ -345,6 +345,30 @@ int hip_gather(
     int element_size_bytes);
 
 /* =========================================================================
+ * Split (Chunk Copy Along Axis)
+ * =========================================================================
+ *
+ * Copies one output chunk for ONNX Split.
+ * The runtime precomputes:
+ *   - input_axis_dim: full input size along split axis
+ *   - inner_size: product of dimensions after split axis
+ *   - output_num_elements: total output element count
+ *
+ * `offset` is the starting index on the split axis for this chunk.
+ */
+int hip_split(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t axis,
+    int64_t offset,
+    int64_t input_axis_dim,
+    int64_t output_axis_dim,
+    int64_t inner_size,
+    int64_t output_num_elements,
+    int64_t element_size_bytes);
+
+/* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
  * =========================================================================
  *

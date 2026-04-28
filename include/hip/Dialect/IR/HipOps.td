@@ -696,6 +696,36 @@ def Hip_GatherOp : Hip_DpsOp<"gather"> {
   }];
 }
 
+def Hip_SplitOp : Hip_DpsOp<"split"> {
+  let summary = "Split a tensor into chunks along an axis (kernel-backed copy)";
+  let description = [{
+    Copies one split chunk from `data` into `output`.
+    ONNX Split with N outputs lowers to N `hip.split` ops, each with its own
+    `offset` along the split `axis`.
+
+    Example:
+    ```mlir
+    %q = hip.split(%ctx) ins(%x : memref<1x128x3072xf16, 1>)
+                      outs(%q_out : memref<1x128x1024xf16, 1>)
+                      {axis = 2 : i64, offset = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<I64Attr, "0">:$offset
+  );
+  // result_tensors inherited from Hip_DpsOp
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `:` type($data) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SiluOp : Hip_DpsOp<"silu"> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins
