@@ -174,12 +174,9 @@ __global__ void matmul_nbits_gemv_kernel(
     }
 
     float partial[TILE_N];
-    float zp_corr[TILE_N];
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++) {
+    for (int tn = 0; tn < TILE_N; tn++)
         partial[tn] = 0.0f;
-        zp_corr[tn] = 0.0f;
-    }
 
     const bool has_zp = (zp != nullptr);
 
@@ -233,9 +230,12 @@ __global__ void matmul_nbits_gemv_kernel(
                 dot += a_vals[8 + i] *
                        static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
 
-            partial[tn] += dot * sv[tn];
-            float zv = has_zp ? read_zp(n_idx[tn], grp) : 8.0f;
-            zp_corr[tn] += a_sum * zv * sv[tn];
+            if (has_zp) {
+                float zv = read_zp(n_idx[tn], grp);
+                partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
+            } else {
+                partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
+            }
         }
     }
 
@@ -269,9 +269,12 @@ __global__ void matmul_nbits_gemv_kernel(
                     dot += a_vals[i] *
                            static_cast<float>((packed >> (i * 4)) & 0xF);
 
-                partial[tn] += dot * sv;
-                float zv = has_zp ? read_zp(n_idx[tn], grp) : 8.0f;
-                zp_corr[tn] += a_sum * zv * sv;
+                if (has_zp) {
+                    float zv = read_zp(n_idx[tn], grp);
+                    partial[tn] += dot * sv - a_sum * zv * sv;
+                } else {
+                    partial[tn] += dot * sv - a_sum * 8.0f * sv;
+                }
             }
         }
     }
@@ -293,15 +296,10 @@ __global__ void matmul_nbits_gemv_kernel(
                 float   qval   = (nibble == 0)
                                    ? static_cast<float>(packed & 0xF)
                                    : static_cast<float>(packed >> 4);
-                partial[tn] += a_val * qval * sv;
-                zp_corr[tn] += a_val * zv * sv;
+                partial[tn] += a_val * (qval - zv) * sv;
             }
         }
     }
-
-#pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++)
-        partial[tn] -= zp_corr[tn];
 
     // --- Reduction: warp shuffle then shared memory ---
     const int wave_size = __builtin_amdgcn_wavefrontsize();
@@ -602,7 +600,7 @@ void GemmFp16U4Impl(
     constexpr int PAD_K   = 2;
     constexpr int K_STR   = BK_T + PAD_K;
     constexpr int A_VL    = (BM_T * BK_T) / (THR_L * 4);
-    constexpr int A_GRP_2 = BM_T / 2;
+    constexpr int A_GRP_K = BK_T / 2;
     constexpr int K_STEPS = BK_T / WMMA_TILE;
 
     static_assert(A_VL >= 1, "A_VL must be >= 1");
@@ -688,27 +686,24 @@ void GemmFp16U4Impl(
         for(int ld = 0; ld < A_VL; ld++)
         {
             int vid    = tid + ld * THR_L;
-            pf_am[ld]  = (vid % A_GRP_2) * 2;
-            pf_ak[ld]  = (vid / A_GRP_2) * 2;
+            pf_ak[ld]  = (vid % A_GRP_K) * 2;
+            pf_am[ld]  = (vid / A_GRP_K) * 2;
             if constexpr (!BOUNDS_CHECK) {
                 pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                  &A[(t + pf_ak[ld]) * lda + row0 + pf_am[ld]]);
+                                  &A[(row0 + pf_am[ld]) * lda + t + pf_ak[ld]]);
                 pf_a2[ld] = *reinterpret_cast<const uint32_t*>(
-                                  &A[(t + pf_ak[ld] + 1) * lda + row0 + pf_am[ld]]);
+                                  &A[(row0 + pf_am[ld] + 1) * lda + t + pf_ak[ld]]);
             } else {
                 int row_a = row0 + pf_am[ld];
                 if (row_a + 1 < M) {
                     pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[(t + pf_ak[ld]) * lda + row_a]);
+                                      &A[row_a * lda + t + pf_ak[ld]]);
                     pf_a2[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[(t + pf_ak[ld] + 1) * lda + row_a]);
+                                      &A[(row_a + 1) * lda + t + pf_ak[ld]]);
                 } else if (row_a < M) {
-                    uint16_t lo1 = *reinterpret_cast<const uint16_t*>(
-                                      &A[(t + pf_ak[ld]) * lda + row_a]);
-                    uint16_t lo2 = *reinterpret_cast<const uint16_t*>(
-                                      &A[(t + pf_ak[ld] + 1) * lda + row_a]);
-                    pf_a1[ld] = static_cast<uint32_t>(lo1);
-                    pf_a2[ld] = static_cast<uint32_t>(lo2);
+                    pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
+                                      &A[row_a * lda + t + pf_ak[ld]]);
+                    pf_a2[ld] = 0;
                 } else {
                     pf_a1[ld] = 0;
                     pf_a2[ld] = 0;
@@ -778,11 +773,8 @@ void GemmFp16U4Impl(
 #pragma unroll
         for(int ld = 0; ld < A_VL; ld++)
         {
-            uint32_t g1 = pf_a1[ld], g2 = pf_a2[ld];
-            uint32_t pack_even = (g1 & 0xFFFF) | ((g2 & 0xFFFF) << 16);
-            uint32_t pack_odd  = (g1 >> 16)     | (g2 & 0xFFFF0000);
-            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]  ][pf_ak[ld]]) = pack_even;
-            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]+1][pf_ak[ld]]) = pack_odd;
+            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]  ][pf_ak[ld]]) = pf_a1[ld];
+            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]+1][pf_ak[ld]]) = pf_a2[ld];
         }
     };
 
@@ -854,10 +846,10 @@ void GemmFp16U4Impl(
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         __builtin_nontemporal_store((_Float16)acc[wm][wn][e],
-                                                    &C[(nbase + lane) * ldc + mbase + r]);
+                                                    &C[(mbase + r) * ldc + nbase + lane]);
                 } else {
                     __builtin_nontemporal_store((_Float16)acc[wm][wn][e],
-                                                &C[(nbase + lane) * ldc + mbase + r]);
+                                                &C[(mbase + r) * ldc + nbase + lane]);
                 }
             }
         }
@@ -1296,21 +1288,22 @@ static int getOrTuneWmmaConfig(
 }
 
 /* =======================================================================
- * Section 3: Post-WMMA bias addition (col-major output)
+ * Section 3: Post-WMMA bias addition (row-major output)
  *
- * C is col-major [M x N] with ldc = M.
- * bias is [N]. Adds bias[n] to every row of column n.
+ * C is row-major [M x N] with ldc = N.
+ * bias is [N]. Adds bias[n] to every element in column n.
+ * Threads sweep N (coalesced along row), blocks sweep M.
  * ======================================================================= */
 
-__global__ void matmul_nbits_add_bias_colmajor(
+__global__ void matmul_nbits_add_bias_rowmajor(
     _Float16* __restrict__ C,
     const _Float16* __restrict__ bias,
     int M, int N, int ldc)
 {
-    int m = static_cast<int>(blockIdx.y) * 256 + threadIdx.x;
-    int n = static_cast<int>(blockIdx.x);
+    int n = static_cast<int>(blockIdx.x) * 256 + threadIdx.x;
+    int m = static_cast<int>(blockIdx.y);
     if (m < M && n < N)
-        C[n * ldc + m] += bias[n];
+        C[m * ldc + n] += bias[n];
 }
 
 /* =======================================================================
@@ -1375,25 +1368,26 @@ extern "C" int hip_matmul_nbits(
     int iK  = static_cast<int>(K);
     int gs  = static_cast<int>(block_size);
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
-    int lda = iM;
-    int ldc = iM;
+    int lda = iK;
+    int ldc = iN;
 
     const auto* a_ptr = static_cast<const _Float16*>(A);
     const auto* b_ptr = static_cast<const unsigned char*>(B);
     const auto* s_ptr = static_cast<const _Float16*>(scales);
     const auto* z_ptr = static_cast<const _Float16*>(zero_points);
-    auto*       c_ptr = static_cast<_Float16*>(output);
+
+    auto* out_ptr = static_cast<_Float16*>(output);
 
     bool has_zp = (z_ptr != nullptr);
     int wmma_cfg = getOrTuneWmmaConfig(
         hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-        s_ptr, z_ptr, gs, ngk, c_ptr, ldc, has_zp);
+        s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp);
 
     _Float16* dq_buf = kWmmaConfigs[wmma_cfg].fused
                            ? nullptr : ensureDqBuffer(iN, iK);
     launchWmmaConfig(wmma_cfg, hip_stream,
                      iM, iN, iK, a_ptr, lda, b_ptr,
-                     s_ptr, z_ptr, gs, ngk, c_ptr, ldc, has_zp, dq_buf);
+                     s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -1404,23 +1398,24 @@ extern "C" int hip_matmul_nbits(
     }
 
     if (bias) {
-      dim3 bias_grid(static_cast<unsigned>(iN),
-                     static_cast<unsigned>((iM + 255) / 256));
+      dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
+                     static_cast<unsigned>(iM));
       dim3 bias_block(256);
       hipLaunchKernelGGL(
-          matmul_nbits_add_bias_colmajor, bias_grid, bias_block,
+          matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
           0, hip_stream,
-          c_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
+          out_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
 
       err = hipGetLastError();
       if (err != hipSuccess) {
         fprintf(stderr,
                 "[custom_kernels] hip_matmul_nbits bias launch failed: %s\n",
                 hipGetErrorString(err));
+        return static_cast<int>(err);
       }
     }
 
-    return static_cast<int>(err);
+    return static_cast<int>(hipGetLastError());
   }
 
   /* -------------------------------------------------------------------
