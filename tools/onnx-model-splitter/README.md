@@ -13,6 +13,7 @@ and analysis. Supports LLM (text), Vision, and Embedding models.
 |--------|-------------|
 | `extract_submodels.py` | Main extraction tool — splits an ONNX model into `single_op`, `single_layer`, and `full_model` submodels with multiple dimension variants |
 | `export_chunk_model.py` | Export fixed-shape Llama prefill/decode ONNX variants with genai_config generation |
+| `compare_chunk_export_outputs.py` | Validate an `export_chunk_model.py` output directory: structural match of each prefill/decode ONNX pair plus `genai_config_*.json` filenames and pipeline I/O lists vs graphs |
 | `genai_config_pipeline_from_folder.py` | Generate `decoder-pipeline` style `genai_config.json` for ORT GenAI from an existing model folder |
 | `inspect_onnx.py` | Inspect ONNX model structure (inputs, outputs, nodes, op types, preprocessing chains) |
 | `verify_ort_inference.py` | Verify extracted models by running ORT inference with dummy inputs (subprocess-isolated) |
@@ -59,6 +60,18 @@ python export_chunk_model.py --model path/to/model.onnx --output /output/dir
 
 # Specify max context length
 python export_chunk_model.py --model path/to/model.onnx --output /output/dir --max-length 4096
+```
+
+### Compare chunk export outputs
+
+After `export_chunk_model.py`, run this on the **same output directory** to check that each `prefill_TAG.onnx` has a matching `decode_TAG.onnx` and `genai_config_TAG.json` (non-`*_dml`): same graph topology (node names, op types, edges), compatible dtypes (intermediate shapes may differ by design), aligned graph I/O except known prefill vs decode sequence axes, and consistent `past_*` / `present_*` shapes. Optional `--compare-intermediate-shapes` enforces identical tensor shapes on every edge.
+
+```bash
+python compare_chunk_export_outputs.py /path/to/export_chunk_model_output
+
+python compare_chunk_export_outputs.py /path/to/out --quiet
+
+python compare_chunk_export_outputs.py /path/to/out --compare-intermediate-shapes
 ```
 
 ### Generate genai_config
@@ -111,7 +124,9 @@ python verify_extraction.py /output/dir --skip-fixed-shape-check
 Assume the original model is at
 `C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml`.
 
-### Step 1 — Extract submodels (single_op / single_layer / full_model)
+### Step 1 — Extract submodels into `space`
+
+#### 1a. Run extraction (single_op / single_layer / full_model)
 
 ```bash
 python extract_submodels.py ^
@@ -128,6 +143,20 @@ space/
 └── full_model/          # full model with dimension variants
 ```
 
+#### 1b. Verify `space` (structure + ORT smoke)
+
+Run from the directory that contains the scripts (or use full paths to `verify_extraction.py` / `verify_ort_inference.py`). Both commands should exit with code **0**.
+
+```bash
+python verify_extraction.py ^
+    C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\space
+
+python verify_ort_inference.py ^
+    C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\space
+```
+
+`verify_extraction.py` checks extracted `.onnx` layout, external data offsets, graph sanity, and (for fixed-shape filenames) shape consistency. `verify_ort_inference.py` loads each extracted model in a **subprocess** and runs ORT with dummy inputs. To skip fixed-shape dimension checks on the first script, add `--skip-fixed-shape-check` to the `verify_extraction.py` line.
+
 ### Step 2 — Export OGA prefill / decode variants
 
 #### 2a. Generate genai_config
@@ -140,7 +169,11 @@ python genai_config_pipeline_from_folder.py ^
 ```
 
 This produces `genai_config_pipeline.json` in the model folder, which is
-required by the next step.
+required by the next step. When prefill/decode ONNX files are discoverable under
+the model directory (or common subdirs such as `chunk/`), pipeline **input/output
+name lists** are taken from the graphs so bindings match the export (e.g. sparse KV
+or extra state tensors). Use `--no-onnx-io` to force template-only lists; `--onnx-subdir`
+prepends extra search paths relative to `model_dir`.
 
 #### 2b. Export prefill / decode ONNX
 
@@ -166,6 +199,13 @@ space/chunk/
 ├── genai_config_12200.json
 ├── ...
 └── model.onnx.data          # shared external weights
+```
+
+#### 2c. (Optional) Compare prefill / decode / genai artifacts
+
+```bash
+python compare_chunk_export_outputs.py ^
+    C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\space\chunk
 ```
 
 ## Supported Model Types

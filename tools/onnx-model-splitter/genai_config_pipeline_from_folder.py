@@ -32,6 +32,14 @@ side so the tool still produces a usable template.
 Fully custom main-input names with neither pattern above must provide an ONNX input name
 string array in ``model.decoder.pipeline.prefill.inputs``.
 
+When ``model_dir`` is passed to the builder (CLI default), if ``prefill_*.onnx`` and
+``decode_*.onnx`` are found (search: ``model_dir``, then ``chunk/``, ``full_model/``,
+``export_fixed_ctx/full_model/``, plus any ``--onnx-subdir`` prefixes), **I/O name lists
+are read from the ONNX graphs** so sparse KV / extra state tensors / binding order match
+the exported model (e.g. Qwen3.5). If ONNX is missing or ``onnx`` is not installed, the
+script falls back to template lists derived from ``decoder.inputs``. Use ``--no-onnx-io``
+to force templates only.
+
 The output is a **template**: ``decoder`` always includes both
 ``fixed_prompt_length`` and ``sliding_window``
 (``window_size`` equals ``fixed_prompt_length`` and contains ``alignment: "left"``),
@@ -49,6 +57,57 @@ from typing import Any
 
 # Keep chunk==0 naming consistent with export_llama_fixed_ctx.py variants.
 CHUNK_ZERO_STEM = "12200"
+
+# Relative to model_dir when resolving prefill/decode ONNX paths (first existing file wins).
+_DEFAULT_ONNX_SEARCH_SUBDIRS: tuple[str, ...] = (
+    ".",
+    "chunk",
+    "full_model",
+    os.path.join("export_fixed_ctx", "full_model"),
+)
+
+
+def _find_onnx_path(
+    model_dir: str,
+    onnx_basename: str,
+    search_subdirs: tuple[str, ...],
+) -> str | None:
+    """Return absolute path to ``onnx_basename`` under ``model_dir`` / subdirs, or None."""
+    root = os.path.abspath(model_dir)
+    raw = str(onnx_basename).strip()
+    base = os.path.basename(raw)
+    if not base:
+        return None
+    if os.path.isabs(raw) and os.path.isfile(raw):
+        return raw
+    if base != os.path.basename(os.path.normpath(raw)):
+        return None
+    for sub in search_subdirs:
+        sub_path = os.path.normpath(os.path.join(root, sub))
+        try:
+            if os.path.commonpath([root, sub_path]) != root:
+                continue
+        except ValueError:
+            continue
+        cand = os.path.join(sub_path, base)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _onnx_graph_io_lists(onnx_path: str) -> tuple[list[str], list[str]]:
+    """Graph input and output tensor names in ONNX order (``load_external_data=False``)."""
+    try:
+        import onnx
+    except ImportError as e:
+        raise ImportError(
+            "The 'onnx' package is required to read I/O names from ONNX files "
+            "(pip install onnx), or pass --no-onnx-io to use template lists only."
+        ) from e
+
+    model = onnx.load(onnx_path, load_external_data=False)
+    g = model.graph
+    return [vi.name for vi in g.input], [vi.name for vi in g.output]
 
 
 def _default_stem(fixed_prompt: int, max_length: int) -> str:
@@ -308,7 +367,10 @@ def build_pipeline_config(
     prefill_filename: str,
     decode_filename: str,
     session_options_override: dict[str, Any] | None,
-) -> dict[str, Any]:
+    model_dir: str | None = None,
+    read_onnx_io: bool = True,
+    onnx_io_search_subdirs: tuple[str, ...] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     extracted = _extract_decoder_fields(src_flat)
     tok = extracted["model_partial"]
     dec = extracted["decoder_partial"]
@@ -351,8 +413,19 @@ def build_pipeline_config(
                 continue
             session_opts[k] = copy.deepcopy(v)
 
+    meta: dict[str, Any] = {
+        "pipeline_io_source": "template",
+        "onnx_prefill_path": None,
+        "onnx_decode_path": None,
+    }
+    pin: list[str] | None = None
+    pout: list[str] | None = None
+    pin_decode: list[str] | None = None
+    pout_decode: list[str] | None = None
+
     if isinstance(pin_src, list) and pin_src:
         pin = list(pin_src)
+        meta["pipeline_io_source"] = "source_config"
         if isinstance(por_src, list) and por_src:
             pout = list(por_src)
         else:
@@ -365,18 +438,35 @@ def build_pipeline_config(
             pout_decode = list(dor_src)
         else:
             pout_decode = list(pout)
-    elif layout in (INPUT_LAYOUT_FULL_IDS, INPUT_LAYOUT_EMBEDS):
-        pin = _pipeline_inputs_from_decoder_templates(inputs_tmpl, int(n_layers))
-        pout = _pipeline_outputs_from_layer_count(int(n_layers))
-        pin_decode = list(pin)
-        pout_decode = list(pout)
     else:
-        raise ValueError(
-            "Cannot infer main model inputs from decoder.inputs (neither input_ids nor "
-            "inputs_embeds found): provide an ONNX input-name list (string array) in "
-            "model.decoder.pipeline.prefill.inputs; optional decode.inputs / "
-            "prefill.outputs / decode.outputs are also supported."
-        )
+        subdirs = onnx_io_search_subdirs or _DEFAULT_ONNX_SEARCH_SUBDIRS
+        if read_onnx_io and model_dir:
+            pp = _find_onnx_path(model_dir, prefill_filename, subdirs)
+            dp = _find_onnx_path(model_dir, decode_filename, subdirs)
+            if pp and dp:
+                try:
+                    pin, pout = _onnx_graph_io_lists(pp)
+                    pin_decode, pout_decode = _onnx_graph_io_lists(dp)
+                    meta["pipeline_io_source"] = "onnx"
+                    meta["onnx_prefill_path"] = pp
+                    meta["onnx_decode_path"] = dp
+                except Exception as exc:  # noqa: BLE001
+                    meta["onnx_read_error"] = str(exc)
+                    pin = pout = pin_decode = pout_decode = None
+
+        if pin is None and layout in (INPUT_LAYOUT_FULL_IDS, INPUT_LAYOUT_EMBEDS):
+            pin = _pipeline_inputs_from_decoder_templates(inputs_tmpl, int(n_layers))
+            pout = _pipeline_outputs_from_layer_count(int(n_layers))
+            pin_decode = list(pin)
+            pout_decode = list(pout)
+            if meta.get("pipeline_io_source") != "source_config":
+                meta["pipeline_io_source"] = "template"
+        elif pin is None:
+            raise ValueError(
+                "Cannot infer pipeline I/O: no decoder.pipeline.prefill.inputs in source; "
+                "ONNX files for prefill/decode were not found or could not be read; and "
+                "decoder.inputs has neither input_ids nor inputs_embeds for template lists."
+            )
 
     # Keep key order aligned with Llama decoder-pipeline configs in this repo for cleaner diffs.
     decoder: dict[str, Any] = {
@@ -446,7 +536,7 @@ def build_pipeline_config(
                 search[k] = v
         search["max_length"] = int(max_length)
 
-    return {"model": model_out, "search": search}
+    return {"model": model_out, "search": search}, meta
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -505,6 +595,19 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="JSON object: merge additional keys after fixed session_options (same as genai_config_12200)",
     )
+    p.add_argument(
+        "--no-onnx-io",
+        action="store_true",
+        help="Do not read pipeline prefill/decode I/O from ONNX; use template lists only.",
+    )
+    p.add_argument(
+        "--onnx-subdir",
+        action="append",
+        default=None,
+        dest="onnx_subdirs_append",
+        metavar="RELDIR",
+        help="Prepend RELDIR to ONNX search dirs (relative to model_dir). Repeatable.",
+    )
     args = p.parse_args(argv)
 
     model_dir = os.path.abspath(args.model_dir)
@@ -540,13 +643,23 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(session_override, dict):
             raise ValueError("session-options-json root must be an object")
 
-    out_cfg = build_pipeline_config(
+    onnx_sd: tuple[str, ...] | None = None
+    if args.onnx_subdirs_append:
+        onnx_sd = tuple(
+            str(x).strip() for x in args.onnx_subdirs_append if str(x).strip()
+        )
+        onnx_sd = onnx_sd + _DEFAULT_ONNX_SEARCH_SUBDIRS
+
+    out_cfg, io_meta = build_pipeline_config(
         src_root,
         fixed_prompt_length=fixed_p,
         max_length=max_len,
         prefill_filename=prefill_fn,
         decode_filename=decode_fn,
         session_options_override=session_override,
+        model_dir=model_dir,
+        read_onnx_io=not args.no_onnx_io,
+        onnx_io_search_subdirs=onnx_sd,
     )
 
     out_path = args.output or os.path.join(model_dir, "genai_config_pipeline.json")
@@ -558,6 +671,13 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"wrote: {out_path}")
     print(f"  stem={stem} prefill={prefill_fn} decode={decode_fn} max_length={max_len}")
+    src = io_meta.get("pipeline_io_source", "?")
+    print(f"  pipeline_io_source={src}")
+    if src == "onnx":
+        print(f"  onnx_prefill={io_meta.get('onnx_prefill_path')}")
+        print(f"  onnx_decode={io_meta.get('onnx_decode_path')}")
+    elif io_meta.get("onnx_read_error"):
+        print(f"  onnx_read_error={io_meta.get('onnx_read_error')}")
     return 0
 
 
