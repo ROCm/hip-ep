@@ -198,7 +198,8 @@ struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
     Value approximateModeVal = createI64Const(approximateMode);
 
     // int wrap_gelu(RuntimeState* state, void* input, void* output,
-    //               int64_t num_elements, int64_t data_type, int64_t approximate)
+    //               int64_t num_elements, int64_t data_type, int64_t
+    //               approximate)
     SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
                                        i64Type, i64Type, i64Type};
 
@@ -207,8 +208,8 @@ struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr, inputPtr, outputPtr, numElements,
-                                  dataTypeVal, approximateModeVal};
+    SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
+                                  numElements, dataTypeVal, approximateModeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
