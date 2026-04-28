@@ -73,6 +73,10 @@ static size_t element_byte_size(ONNXTensorElementDataType t) {
     return 4;
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
     return 2;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+    return 8;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+    return 2;
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
     return 8;
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
@@ -110,6 +114,10 @@ static const char *onnx_elem_type_tag(ONNXTensorElementDataType t) {
     return "fp32";
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
     return "fp16";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+    return "fp64";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+    return "bf16";
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
     return "i64";
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
@@ -222,6 +230,25 @@ static uint16_t float_to_fp16_bits(float f) {
   return static_cast<uint16_t>((sign >> 16) | nonsign);
 }
 
+// BFloat16 -> float32 (simple: copy sign bit + upper 7 bits of exponent/mantissa to f32).
+static float bf16_bits_to_float(uint16_t bf16) {
+  uint32_t bits = static_cast<uint32_t>(bf16) << 16;
+  float result;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+// float32 -> BFloat16 bits (round-to-nearest-even truncation).
+static uint16_t float_to_bf16_bits(float f) {
+  uint32_t bits;
+  std::memcpy(&bits, &f, sizeof(bits));
+  // Round to nearest even: check if we need to round up
+  uint32_t lsb = (bits >> 16) & 1;
+  uint32_t rounding_bias = 0x7fff + lsb;
+  bits += rounding_bias;
+  return static_cast<uint16_t>(bits >> 16);
+}
+
 // Random fill matching element type (do not reinterpret float bits as
 // int/fp16). Integers: uniform over the full representable range of each type.
 // Float32/fp16: keep a modest interval (same order as the old float-only path)
@@ -254,6 +281,20 @@ static void fill_random_input_buffer(char *dst, size_t nbytes,
     const size_t n = nbytes / sizeof(uint16_t);
     for (size_t i = 0; i < n; ++i)
       p[i] = float_to_fp16_bits(fdist(rng));
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: {
+    auto *p = reinterpret_cast<double *>(dst);
+    const size_t n = nbytes / sizeof(double);
+    for (size_t i = 0; i < n; ++i)
+      p[i] = static_cast<double>(fdist(rng));
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: {
+    auto *p = reinterpret_cast<uint16_t *>(dst);
+    const size_t n = nbytes / sizeof(uint16_t);
+    for (size_t i = 0; i < n; ++i)
+      p[i] = float_to_bf16_bits(fdist(rng));
     return;
   }
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
@@ -518,6 +559,37 @@ static bool squared_l2_diff_elementwise(
     for (size_t i = 0; i < n; ++i) {
       const float fa = fp16_bits_to_float(pa[i]);
       const float fb = fp16_bits_to_float(pb[i]);
+      if (!std::isfinite(static_cast<double>(fa)) ||
+          !std::isfinite(static_cast<double>(fb))) {
+        skipped_nonfinite++;
+        continue;
+      }
+      const double d = static_cast<double>(fa) - static_cast<double>(fb);
+      s += d * d;
+      used_elems++;
+    }
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: {
+    const auto *pa = reinterpret_cast<const double *>(a.data());
+    const auto *pb = reinterpret_cast<const double *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      if (!std::isfinite(pa[i]) || !std::isfinite(pb[i])) {
+        skipped_nonfinite++;
+        continue;
+      }
+      const double d = pa[i] - pb[i];
+      s += d * d;
+      used_elems++;
+    }
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: {
+    const auto *pa = reinterpret_cast<const uint16_t *>(a.data());
+    const auto *pb = reinterpret_cast<const uint16_t *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const float fa = bf16_bits_to_float(pa[i]);
+      const float fb = bf16_bits_to_float(pb[i]);
       if (!std::isfinite(static_cast<double>(fa)) ||
           !std::isfinite(static_cast<double>(fb))) {
         skipped_nonfinite++;
