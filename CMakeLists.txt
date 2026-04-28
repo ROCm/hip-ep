@@ -54,6 +54,24 @@ endif()
 
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 
+# ==============================================================================
+# Vulkan Compute Backend (standalone, no MLIR/HIP required)
+# ==============================================================================
+# Builds a Vulkan compute-shader library implementing MatMulNBits (int4
+# dequant + matmul). Can be used independently or as a drop-in backend for
+# the ONNX EP runtime.
+#
+# Usage:
+#   cmake -B build -S . -DBUILD_VULKAN_KERNELS=ON
+#   cmake --build build --target test_matmul_nbits_vulkan
+# ==============================================================================
+option(BUILD_VULKAN_KERNELS "Build Vulkan compute-shader kernel library" OFF)
+option(BUILD_VULKAN_TESTS "Build Vulkan kernel unit tests" ON)
+
+if(BUILD_VULKAN_KERNELS)
+    add_subdirectory(3rd-party/vulkan_kernels)
+endif()
+
 if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
   # MLIR backend compiler
@@ -72,6 +90,22 @@ endif()
 #     [-DONNX_MLIR_SRC=/path/to/onnx-mlir -DONNX_MLIR_BUILD=/path/to/build]
 # ==============================================================================
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
+
+# ==============================================================================
+# Unified Memory Manager (standalone, no MLIR/HIP required for mock build)
+# ==============================================================================
+# When BUILD_HIP_TOOLS is ON, MemoryManager is built as part of lib/.
+# When only BUILD_UMM_TESTS is ON, we build it standalone for testing.
+option(BUILD_UMM_TESTS "Build UMM unit tests" ON)
+set(UMM_STANDALONE OFF)
+if(BUILD_UMM_TESTS AND NOT BUILD_HIP_TOOLS)
+  set(UMM_STANDALONE ON)
+  enable_testing()
+  add_subdirectory(lib/MemoryManager)
+  add_subdirectory(test/mm)
+endif()
+# When BUILD_HIP_TOOLS is ON, test/mm is added later (after find_package(LLVM))
+# so that the CRT setting from LLVMConfig.cmake is inherited by the test targets.
 
 if(BUILD_HIP_TOOLS)
   find_package(LLVM REQUIRED CONFIG)
@@ -153,5 +187,13 @@ if(BUILD_HIP_TOOLS)
 
     # E2E integration tests (compile MLIR → DLL → execute)
     add_subdirectory(test/e2e)
+  endif()
+
+  # UMM tests (added here so LLVM's CRT setting is inherited)
+  if(BUILD_UMM_TESTS)
+    if(NOT BUILD_HIP_UNIT_TESTS)
+      enable_testing()
+    endif()
+    add_subdirectory(test/mm)
   endif()
 endif()

@@ -18,6 +18,7 @@
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
 #include "runtime_types.h"
+#include <stdint.h>
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
@@ -61,6 +62,14 @@ struct RuntimeState {
   // cleaned up here)
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
+
+  // UMM (Unified Memory Manager) integration.
+  // These fields use plain C types (uint64_t/void*) instead of mm_handle_t/
+  // mm_pool_t to avoid including UMM headers in bitcode-compiled code.
+  // The values are numerically identical to the UMM types.
+  void *mm_pool_opaque;         // mm_pool_t for the activation buffer pool
+  uint64_t mm_constants_handle; // mm_handle_t for constants blob (VRAM path)
+  uint64_t mm_workspace_handle; // mm_handle_t for workspace
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

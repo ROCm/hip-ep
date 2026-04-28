@@ -1,0 +1,92 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ *
+ * MatMulNBits Vulkan compute shader — int4 dequantization + matrix multiply.
+ *
+ * Computes:  output[batch, m, n] = sum_k( A[batch,m,k] * dequant(B[n,k]) )
+ * where dequant unpacks 4-bit values from uint8 and applies per-block
+ * scale/zero_point:  dequant(q) = (q - zero_point) * scale
+ *
+ * This is a correctness-first naive implementation matching the HIP fallback
+ * kernel (matmul_nbits_kernel.hip lines 49-101).  One thread per output
+ * element, float32 accumulation for numerical stability.
+ *
+ * Weight packing (same as ONNX MatMulNBits / AWQ):
+ *   B is uint8 [N, K/2] — each byte holds 2 values:
+ *     lower nibble (bits 0-3) = first value
+ *     upper nibble (bits 4-7) = second value
+ *   scales: float16 [N, k_blocks]  (k_blocks = ceil(K / block_size))
+ *   zp:     uint8   [N, k_blocks]  (default zero_point = 0 when absent)
+ */
+
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Buffer bindings — all GPU-resident
+layout(set = 0, binding = 0) readonly  buffer ABuf      { float16_t A[]; };
+layout(set = 0, binding = 1) readonly  buffer BBuf      { uint8_t   B[]; };
+layout(set = 0, binding = 2) readonly  buffer ScalesBuf { float16_t scales[]; };
+layout(set = 0, binding = 3) readonly  buffer ZPBuf     { uint8_t   zp[]; };
+layout(set = 0, binding = 4) readonly  buffer BiasBuf   { float16_t bias[]; };
+layout(set = 0, binding = 5) writeonly buffer OutBuf    { float16_t out_data[]; };
+
+layout(push_constant) uniform Params {
+    int M;
+    int N;
+    int K;
+    int block_size;
+    int batch_count;
+    int has_zp;      // 0 = no zero_points buffer, 1 = present
+    int has_bias;    // 0 = no bias buffer,         1 = present
+};
+
+void main() {
+    int n     = int(gl_GlobalInvocationID.x);
+    int m     = int(gl_GlobalInvocationID.y);
+    int batch = int(gl_GlobalInvocationID.z);
+
+    if (m >= M || n >= N || batch >= batch_count) return;
+
+    int k_blocks  = (K + block_size - 1) / block_size;
+    int blob_size = block_size / 2;   // bytes per block in B
+
+    float acc = 0.0;
+
+    // Pointers into the row-major layouts
+    int a_base = batch * M * K + m * K;
+    int b_base = n * (K / 2);
+    int s_base = n * k_blocks;
+
+    for (int blk = 0; blk < k_blocks; blk++) {
+        float scale_val = float(scales[s_base + blk]);
+        float zp_val    = (has_zp != 0)
+                            ? float(zp[s_base + blk])
+                            : 0.0;
+
+        int k_start = blk * block_size;
+        int k_end   = min(k_start + block_size, K);
+        int b_blk   = b_base + blk * blob_size;
+
+        for (int k = k_start; k < k_end; k++) {
+            int in_blk   = k - k_start;
+            int byte_off = in_blk >> 1;            // in_blk / 2
+            int nibble   = in_blk & 1;             // low or high nibble
+
+            uint packed = uint(B[b_blk + byte_off]);
+            float qval  = (nibble == 0) ? float(packed & 0xFu)
+                                        : float(packed >> 4);
+
+            acc += float(A[a_base + k]) * (qval - zp_val) * scale_val;
+        }
+    }
+
+    if (has_bias != 0) {
+        acc += float(bias[n]);
+    }
+
+    out_data[batch * M * N + m * N + n] = float16_t(acc);
+}

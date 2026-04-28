@@ -149,6 +149,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # Shared project headers (timing.h, etc.)
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/include")
 
+    # UMM internal headers (handle_table.h etc.)
+    list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/lib/MemoryManager")
+
     # Add morphizen-foundation headers
     list(APPEND COMPILE_FLAGS "-I" "${MORPHIZEN_FOUNDATION_INCLUDE_DIR}")
 
@@ -178,6 +181,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         endif()
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
+        list(APPEND COMPILE_FLAGS "-DMM_USE_MOCK_HAL")
     endif()
 
     add_custom_command(
@@ -207,8 +211,17 @@ endmacro()
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 
-# Compile implementation-specific files
+# UMM (Unified Memory Manager) — compiled to bitcode for runtime integration
+compile_to_bitcode(../MemoryManager/mm_core.cpp umm_core.bc)
+compile_to_bitcode(../MemoryManager/mm_error.cpp umm_error.bc)
+compile_to_bitcode(../MemoryManager/mm_pool.cpp umm_pool.bc)
+compile_to_bitcode(../MemoryManager/handle_table.cpp umm_handle_table.bc)
+
+# Compile implementation-specific files (including UMM HAL backend)
 if(NOT BUILD_MOCK_RUNTIME)
+    # UMM ROCm HAL backend
+    compile_to_bitcode(../MemoryManager/hal_rocm.cpp umm_hal.bc)
+
     # Real GPU runtime implementation
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
     compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
@@ -254,8 +267,16 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_core.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_error.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_pool.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_handle_table.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_hal.bc
     )
 else()
+    # UMM mock HAL backend
+    compile_to_bitcode(../MemoryManager/hal_mock.cpp umm_hal.bc)
+
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)
     compile_to_bitcode(mock/memory.cpp runtime_memory.bc)
@@ -267,6 +288,11 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_core.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_error.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_pool.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_handle_table.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/umm_hal.bc
     )
 endif()
 
