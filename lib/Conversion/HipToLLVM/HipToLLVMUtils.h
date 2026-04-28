@@ -252,6 +252,8 @@ void populateCausalConvWithStateLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateDumpTensorLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

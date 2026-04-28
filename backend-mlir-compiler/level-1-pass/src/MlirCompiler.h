@@ -22,6 +22,8 @@ enum class ArtifactFormat { Native, LlvmIr };
 struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
+  bool dumpTensors = false;
+  std::string dumpDir;
 };
 
 // Compiled artifact (bytes + metadata)

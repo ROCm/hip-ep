@@ -179,4 +179,27 @@ def ResolveExternConstantsPass
   ];
 }
 
+def InsertTensorDumpPass
+    : Pass<"hip-insert-tensor-dump", "mlir::ModuleOp"> {
+  let summary = "Insert hip.dump_tensor after every HIP compute op";
+  let description = [{
+    Walks every hip.* compute operation and inserts a hip.dump_tensor op
+    after it for each memref-typed result.  Skipped for infrastructure ops
+    (alloc, free, get_constant, get_pool, yield, dump_tensor).
+
+    The op name is derived from the MLIR Location metadata when available,
+    falling back to {hip_op_type}_{index}.
+
+    This pass is conditionally added by the compiler driver when the
+    dump_tensors compilation option is enabled.
+  }];
+  let options = [
+    Option<"dumpTensorsDir", "dump-tensors-dir", "std::string", /*default=*/"\"\"",
+           "Directory where .npy files will be written at inference time">
+  ];
+  let dependentDialects = [
+    "mlir::hip::HipDialect"
+  ];
+}
+
 #endif // HIP_PASSES

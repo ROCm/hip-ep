@@ -13,6 +13,8 @@ table CompilationOptions {
   output_mode: OutputMode = DLL;
   verbose: bool = false;
   constants_file: string = "constants.bin";
+  dump_tensors: bool = false;
+  dump_tensors_dir: string;
 }
 
 root_type CompilationOptions;

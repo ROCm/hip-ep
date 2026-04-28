@@ -627,6 +627,19 @@ int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream);
 // HIP stream synchronization wrapper
 int wrap_hipStreamSynchronize(void *stream);
 
+//===----------------------------------------------------------------------===//
+// Debug Tensor Dump
+//===----------------------------------------------------------------------===//
+
+// Dump a GPU tensor to disk as a NumPy .npy file.
+// Performs a D2H copy, then writes {dump_tensors_dir}/{name}.npy.
+// Called by generated code when dump_tensors compilation option is enabled.
+//   data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
+void hipdnn_ep_dump_tensor(RuntimeState *state, void *gpu_ptr,
+                           const int64_t *shape, int64_t rank,
+                           int64_t data_type, const char *name,
+                           const char *dump_tensors_dir);
+
 #ifdef __cplusplus
 }
 #endif
