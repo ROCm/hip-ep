@@ -191,19 +191,29 @@ __global__ void matmul_nbits_gemv_kernel(
         return static_cast<float>(a_base[k_off * a_stride]);
     };
 
-    // ---- Phase 1: 16-nibble (64-bit) vectorized main loop ----
+    // ---- Pass 1: main GEMV (identical to old code's fast path) ----
+    // For HAS_ZP=false: also store per-iteration a_sum to LDS for pass 2.
+
     const int64_t num_u64 = K / 16;
+    const int64_t num_u32_mid = (K - num_u64 * 16) / 8;
+    const int64_t total_iters = num_u64 + num_u32_mid;
+
+    extern __shared__ float dyn_smem[];
+    float* a_sum_lds = dyn_smem;
+
     for (int64_t idx = static_cast<int64_t>(tid); idx < num_u64;
          idx += static_cast<int64_t>(BLOCK_SIZE)) {
         const int64_t k16 = idx * 16;
 
         float a_vals[16];
-        [[maybe_unused]] float a_sum = 0.0f;
+        float a_sum = 0.0f;
 #pragma unroll
         for (int i = 0; i < 16; i++) {
             a_vals[i] = read_a(k16 + i);
-            if constexpr (HAS_ZP) a_sum += a_vals[i];
+            a_sum += a_vals[i];
         }
+
+        if constexpr (!HAS_ZP) a_sum_lds[idx] = a_sum;
 
         const int64_t grp = k16 >> bs_shift;
 
@@ -237,21 +247,22 @@ __global__ void matmul_nbits_gemv_kernel(
         }
     }
 
-    // ---- Phase 2: 8-nibble (32-bit) middle (K%16 remainder) ----
+    // ---- Phase 2 (8-nibble): identical logic, store a_sum to LDS ----
     {
-        const int64_t k8_base   = num_u64 * 16;
-        const int64_t num_u32_m = (K - k8_base) / 8;
-        for (int64_t idx2 = static_cast<int64_t>(tid); idx2 < num_u32_m;
+        const int64_t k8_base = num_u64 * 16;
+        for (int64_t idx2 = static_cast<int64_t>(tid); idx2 < num_u32_mid;
              idx2 += static_cast<int64_t>(BLOCK_SIZE)) {
             const int64_t k8 = k8_base + idx2 * 8;
 
             float a_vals[8];
-            [[maybe_unused]] float a_sum = 0.0f;
+            float a_sum = 0.0f;
 #pragma unroll
             for (int i = 0; i < 8; i++) {
                 a_vals[i] = read_a(k8 + i);
-                if constexpr (HAS_ZP) a_sum += a_vals[i];
+                a_sum += a_vals[i];
             }
+
+            if constexpr (!HAS_ZP) a_sum_lds[num_u64 + idx2] = a_sum;
 
             const int64_t grp = k8 >> bs_shift;
 
@@ -289,12 +300,39 @@ __global__ void matmul_nbits_gemv_kernel(
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
-                float zv = HAS_ZP ? read_zp(n_idx[tn], grp) : 0.0f;
+                float zv = HAS_ZP ? read_zp(n_idx[tn], grp) : 8.0f;
                 uint8_t packed = b_base_arr[tn][k / 2];
                 float   qval   = (nibble == 0)
                                    ? static_cast<float>(packed & 0xF)
                                    : static_cast<float>(packed >> 4);
                 partial[tn] += a_val * (qval - zv) * sv;
+            }
+        }
+    }
+
+    // ---- Pass 2 (HAS_ZP=false only): apply zp=8 correction from LDS ----
+    if constexpr (!HAS_ZP) {
+        __syncthreads();
+
+        for (int64_t idx = static_cast<int64_t>(tid); idx < num_u64;
+             idx += static_cast<int64_t>(BLOCK_SIZE)) {
+            const float  as = a_sum_lds[idx];
+            const int64_t grp = (idx * 16) >> bs_shift;
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                float sv = static_cast<float>(s_rows[tn][grp]);
+                partial[tn] -= 8.0f * as * sv;
+            }
+        }
+
+        for (int64_t idx2 = static_cast<int64_t>(tid); idx2 < num_u32_mid;
+             idx2 += static_cast<int64_t>(BLOCK_SIZE)) {
+            const float  as = a_sum_lds[num_u64 + idx2];
+            const int64_t grp = ((num_u64 * 16) + idx2 * 8) >> bs_shift;
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                float sv = static_cast<float>(s_rows[tn][grp]);
+                partial[tn] -= 8.0f * as * sv;
             }
         }
     }
@@ -346,98 +384,6 @@ __global__ void matmul_nbits_gemv_kernel(
 }
 
 /* -----------------------------------------------------------------------
- * ZP=8 correction kernel (launched AFTER the main GEMV when zp is NULL)
- *
- * Main GEMV computes: Y[n] = sum_g( dot_g * scale[n,g] )
- * Correct result:     Y[n] = sum_g( (dot_g - 8*a_sum_g) * scale[n,g] )
- * Correction:         Y[n] -= 8 * sum_g( a_sum_g * scale[n,g] )
- *
- * Step 1: threads cooperatively compute per-group A sums into shared mem.
- * Step 2: each thread computes its N-column correction via dot(a_sums, scales).
- * ----------------------------------------------------------------------- */
-
-template <bool COL_MAJOR>
-__global__ void gemv_zp8_correction(
-    const __half* __restrict__ A,
-    const __half* __restrict__ scales,
-    __half* __restrict__ output,
-    int64_t M, int64_t N, int64_t K,
-    int64_t block_size)
-{
-    const int64_t m = blockIdx.y;
-    const int64_t batch = COL_MAJOR ? 0 : blockIdx.z;
-    if (m >= M) return;
-
-    const int64_t num_groups = (K + block_size - 1) / block_size;
-
-    const __half* a_base;
-    int64_t a_stride;
-    if constexpr (COL_MAJOR) {
-        a_base   = A + m;
-        a_stride = M;
-    } else {
-        a_base   = A + batch * M * K + m * K;
-        a_stride = 1;
-    }
-
-    extern __shared__ float lds_a_sums[];
-
-    for (int64_t g = static_cast<int64_t>(threadIdx.x);
-         g < num_groups; g += static_cast<int64_t>(blockDim.x)) {
-        int64_t k_start = g * block_size;
-        int64_t k_end   = k_start + block_size;
-        if (k_end > K) k_end = K;
-        float s = 0.0f;
-        for (int64_t k = k_start; k < k_end; k++)
-            s += static_cast<float>(a_base[k * a_stride]);
-        lds_a_sums[g] = s;
-    }
-    __syncthreads();
-
-    const int64_t n = static_cast<int64_t>(blockIdx.x) * blockDim.x
-                    + threadIdx.x;
-    if (n >= N) return;
-
-    const __half* s_row = scales + n * num_groups;
-    float correction = 0.0f;
-    for (int64_t g = 0; g < num_groups; g++)
-        correction += lds_a_sums[g] * static_cast<float>(s_row[g]);
-
-    int64_t out_idx = COL_MAJOR ? (n * M + m)
-                                : (batch * M * N + m * N + n);
-    output[out_idx] = static_cast<__half>(
-        static_cast<float>(output[out_idx]) - 8.0f * correction);
-}
-
-static void launchZp8Correction(
-    hipStream_t stream,
-    const __half* A, const __half* scales, __half* output,
-    int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t block_size,
-    bool col_major)
-{
-    constexpr int kCorrBlock = 256;
-    int64_t num_groups = (K + block_size - 1) / block_size;
-    dim3 grid(static_cast<unsigned>((N + kCorrBlock - 1) / kCorrBlock),
-              static_cast<unsigned>(M),
-              static_cast<unsigned>(col_major ? 1 : batch));
-    dim3 block(kCorrBlock);
-    size_t smem = static_cast<size_t>(num_groups) * sizeof(float);
-
-    if (col_major) {
-        hipLaunchKernelGGL(
-            gemv_zp8_correction<true>,
-            grid, block, smem, stream,
-            A, scales, output, M, N, K, block_size);
-    } else {
-        hipLaunchKernelGGL(
-            gemv_zp8_correction<false>,
-            grid, block, smem, stream,
-            A, scales, output, M, N, K, block_size);
-    }
-}
-
-/* -----------------------------------------------------------------------
  * GEMV Autotune: config table, dispatch, benchmark, cache
  * ----------------------------------------------------------------------- */
 
@@ -473,6 +419,13 @@ static void launchGemvConfig(
               static_cast<unsigned>(col_major ? 1 : batch));
     dim3 block(c.threads);
 
+    size_t smem = 0;
+    if (!has_zp) {
+        int64_t num_u64   = K / 16;
+        int64_t num_u32_m = (K - num_u64 * 16) / 8;
+        smem = static_cast<size_t>(num_u64 + num_u32_m) * sizeof(float);
+    }
+
 #define GEMV_CASE(ID, BS, TN) \
     case ID: \
         if (col_major && has_zp) \
@@ -482,7 +435,7 @@ static void launchGemvConfig(
         else if (col_major && !has_zp) \
             hipLaunchKernelGGL( \
                 HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true, false>), \
-                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+                grid, block, smem, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
         else if (!col_major && has_zp) \
             hipLaunchKernelGGL( \
                 HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false, true>), \
@@ -490,7 +443,7 @@ static void launchGemvConfig(
         else \
             hipLaunchKernelGGL( \
                 HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false, false>), \
-                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+                grid, block, smem, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
         break
 
     switch (config_id) {
@@ -1561,18 +1514,6 @@ extern "C" int hip_matmul_nbits(
               "[custom_kernels] hip_matmul_nbits GEMV col-major launch "
               "failed: %s\n",
               hipGetErrorString(err));
-      return static_cast<int>(err);
-    }
-
-    if (!gemv_has_zp) {
-      launchZp8Correction(hip_stream, a_h, s_h, o_h,
-                          M, N, K, 1, block_size, /*col_major=*/true);
-      err = hipGetLastError();
-      if (err != hipSuccess) {
-        fprintf(stderr,
-                "[custom_kernels] zp8 correction col-major failed: %s\n",
-                hipGetErrorString(err));
-      }
     }
     return static_cast<int>(err);
   }
@@ -1616,19 +1557,6 @@ extern "C" int hip_matmul_nbits(
       fprintf(stderr,
               "[custom_kernels] hip_matmul_nbits GEMV launch failed: %s\n",
               hipGetErrorString(err));
-      return static_cast<int>(err);
-    }
-
-    if (!gemv_has_zp) {
-      launchZp8Correction(hip_stream, a_h, s_h, o_h,
-                          M, N, K, batch_count, block_size,
-                          /*col_major=*/false);
-      err = hipGetLastError();
-      if (err != hipSuccess) {
-        fprintf(stderr,
-                "[custom_kernels] zp8 correction row-major failed: %s\n",
-                hipGetErrorString(err));
-      }
     }
     return static_cast<int>(err);
   }
