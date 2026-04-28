@@ -150,104 +150,97 @@ void format_bytes(char *out, size_t out_size, size_t bytes) {
     std::snprintf(out, out_size, "%.2f %s", v, units[u]);
 }
 
-// Print one bucket's compute + I/O tables. Used by print_summary() to emit
-// the warmup section and the steady-state section back-to-back.
+// Print one bucket as a single unified table mixing compute operators and
+// I/O (memcpy) entries. Sorted by total_ms descending regardless of kind,
+// so the hot rows float to the top regardless of whether they're kernels
+// or transfers. Compute rows leave the I/O-specific columns blank; I/O
+// rows populate all columns.
+//
+// %total is computed over the combined (compute + I/O) grand total so
+// percentages sum to 100 across the whole table and directly indicate
+// where the inference is spending its time. The TOTAL footer also
+// reports an aggregate I/O-bandwidth column computed from the I/O subset
+// only (bandwidth averaged across compute+I/O time would be meaningless).
 void print_one_bucket(FILE *out,
                       const std::unordered_map<std::string, OpStats> &m) {
   if (m.empty())
     return;
 
-  // Partition into compute operators and I/O entries so each can be reported
-  // with the columns most useful to it (I/O gets a bandwidth column).
-  std::vector<std::pair<std::string, OpStats>> ops, ios;
-  ops.reserve(m.size());
-  ios.reserve(m.size());
-  for (const auto &kv : m) {
-    if (kv.second.is_io)
-      ios.push_back(kv);
-    else
-      ops.push_back(kv);
-  }
+  std::vector<std::pair<std::string, OpStats>> rows;
+  rows.reserve(m.size());
+  for (const auto &kv : m)
+    rows.push_back(kv);
+  std::sort(rows.begin(), rows.end(),
+            [](const std::pair<std::string, OpStats> &a,
+               const std::pair<std::string, OpStats> &b) {
+              return a.second.total_ms > b.second.total_ms;
+            });
 
-  auto sort_by_total = [](std::vector<std::pair<std::string, OpStats>> &v) {
-    std::sort(v.begin(), v.end(),
-              [](const std::pair<std::string, OpStats> &a,
-                 const std::pair<std::string, OpStats> &b) {
-                return a.second.total_ms > b.second.total_ms;
-              });
-  };
-  sort_by_total(ops);
-  sort_by_total(ios);
-
-  // ---- Operator (compute) table ----
-  if (!ops.empty()) {
-    double grand_total_ms = 0.0;
-    size_t grand_count = 0;
-    for (const auto &kv : ops) {
-      grand_total_ms += kv.second.total_ms;
-      grand_count += kv.second.count;
-    }
-    fprintf(out, "  %-32s %8s %10s %10s %10s %10s %7s\n", "operator", "count",
-            "total_ms", "avg_ms", "min_ms", "max_ms", "%total");
-    for (const auto &kv : ops) {
-      const auto &s = kv.second;
-      double avg_ms =
-          s.count ? (s.total_ms / static_cast<double>(s.count)) : 0.0;
-      double pct = grand_total_ms > 0.0
-                       ? (s.total_ms / grand_total_ms * 100.0)
-                       : 0.0;
-      fprintf(out, "  %-32s %8zu %10.3f %10.3f %10.3f %10.3f %6.1f%%\n",
-              kv.first.c_str(), s.count, s.total_ms, avg_ms, s.min_ms, s.max_ms,
-              pct);
-    }
-    fprintf(out, "  %-32s %8zu %10.3f\n", "TOTAL", grand_count, grand_total_ms);
-  }
-
-  // ---- I/O (memcpy) table ----
-  if (!ios.empty()) {
-    double io_total_ms = 0.0;
-    size_t io_total_count = 0;
-    size_t io_total_bytes = 0;
-    for (const auto &kv : ios) {
+  double grand_total_ms = 0.0;
+  size_t grand_count = 0;
+  double io_total_ms = 0.0;
+  size_t io_total_bytes = 0;
+  for (const auto &kv : rows) {
+    grand_total_ms += kv.second.total_ms;
+    grand_count += kv.second.count;
+    if (kv.second.is_io) {
       io_total_ms += kv.second.total_ms;
-      io_total_count += kv.second.count;
       io_total_bytes += kv.second.total_bytes;
     }
-    fprintf(out, "  --- I/O (memcpy) ---\n");
-    fprintf(out, "  %-32s %8s %10s %10s %14s %10s %7s\n", "io_path", "count",
-            "total_ms", "avg_ms", "total_bytes", "GB/s", "%total");
-    for (const auto &kv : ios) {
-      const auto &s = kv.second;
-      double avg_ms =
-          s.count ? (s.total_ms / static_cast<double>(s.count)) : 0.0;
-      // Bandwidth: total_bytes / total_seconds, expressed in GB/s (1e9).
+  }
+
+  fprintf(out,
+          "  %-32s %8s %10s %10s %10s %10s %14s %10s %7s\n", "name", "count",
+          "total_ms", "avg_ms", "min_ms", "max_ms", "bytes", "GB/s",
+          "%total");
+  for (const auto &kv : rows) {
+    const auto &s = kv.second;
+    double avg_ms = s.count ? (s.total_ms / static_cast<double>(s.count)) : 0.0;
+    double pct =
+        grand_total_ms > 0.0 ? (s.total_ms / grand_total_ms * 100.0) : 0.0;
+    if (s.is_io) {
+      char bytes_str[24];
+      format_bytes(bytes_str, sizeof(bytes_str), s.total_bytes);
+      // Per-row bandwidth: total_bytes / total_seconds, in GB/s (1e9).
       double gbs = (s.total_ms > 0.0)
                        ? (static_cast<double>(s.total_bytes) /
                           (s.total_ms * 1.0e6))
                        : 0.0;
-      double pct =
-          io_total_ms > 0.0 ? (s.total_ms / io_total_ms * 100.0) : 0.0;
-      char bytes_str[24];
-      format_bytes(bytes_str, sizeof(bytes_str), s.total_bytes);
-      fprintf(out, "  %-32s %8zu %10.3f %10.3f %14s %10.2f %6.1f%%\n",
-              kv.first.c_str(), s.count, s.total_ms, avg_ms, bytes_str, gbs,
-              pct);
+      fprintf(out,
+              "  %-32s %8zu %10.3f %10.3f %10.3f %10.3f %14s %10.2f "
+              "%6.1f%%\n",
+              kv.first.c_str(), s.count, s.total_ms, avg_ms, s.min_ms, s.max_ms,
+              bytes_str, gbs, pct);
+    } else {
+      fprintf(out,
+              "  %-32s %8zu %10.3f %10.3f %10.3f %10.3f %14s %10s %6.1f%%\n",
+              kv.first.c_str(), s.count, s.total_ms, avg_ms, s.min_ms, s.max_ms,
+              "-", "-", pct);
     }
+  }
+
+  // Footer: combined TOTAL across compute + I/O. The GB/s column is
+  // computed only over I/O rows -- averaging bandwidth across kernel time
+  // would be meaningless -- and left blank when no I/O was recorded.
+  if (io_total_bytes > 0) {
     char bytes_str[24];
     format_bytes(bytes_str, sizeof(bytes_str), io_total_bytes);
-    double total_gbs =
+    double io_gbs =
         io_total_ms > 0.0
             ? (static_cast<double>(io_total_bytes) / (io_total_ms * 1.0e6))
             : 0.0;
-    fprintf(out, "  %-32s %8zu %10.3f %10s %14s %10.2f\n", "TOTAL",
-            io_total_count, io_total_ms, "", bytes_str, total_gbs);
+    fprintf(out, "  %-32s %8zu %10.3f %10s %10s %10s %14s %10.2f\n", "TOTAL",
+            grand_count, grand_total_ms, "", "", "", bytes_str, io_gbs);
+  } else {
+    fprintf(out, "  %-32s %8zu %10.3f\n", "TOTAL", grand_count, grand_total_ms);
   }
 }
 
 // Print the full session aggregate -- a warmup block followed by a steady-
-// state block, each with its own compute + I/O tables. The session label
-// ("session #N") matches the [PERF] session label so warmup / steady
-// counts line up across the two reports for the same model.
+// state block, each a single unified table mixing compute and I/O rows.
+// The session label ("session #N") matches the [PERF] session label so
+// warmup / steady counts line up across the two reports for the same
+// model.
 void print_summary(FILE *out, unsigned session_index,
                    const OpAggregate &agg) {
   if (agg.empty())

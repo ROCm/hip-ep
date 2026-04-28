@@ -24,10 +24,13 @@
 //
 // At session_cleanup the WARMUP and STEADY-STATE buckets are emitted as
 // separate "[OP_PROFILE] session #N WARMUP" / "STEADY-STATE" tables. Each
-// bucket additionally splits compute operators from I/O (memcpy) entries so
-// I/O can be reported with a bandwidth column. Splitting warmup off keeps
-// hipBLASLt heuristic search, MIOpen kernel-finder cache fills, hipRTC JIT
-// and the first hipMalloc growth from inflating the steady-state averages.
+// table mixes compute operators and I/O (memcpy) entries sorted together
+// by total_ms descending, with I/O-specific columns (bytes, GB/s) blank
+// for compute rows. This lets the user spot hot rows regardless of kind
+// and see what fraction of inference time is I/O vs compute at a glance.
+// Splitting warmup off keeps hipBLASLt heuristic search, MIOpen
+// kernel-finder cache fills, hipRTC JIT, and the first hipMalloc growth
+// from inflating the steady-state averages.
 //
 //===----------------------------------------------------------------------===//
 
@@ -55,9 +58,11 @@ void *op_profile_scope_begin(RuntimeState *state, const char *name);
 void op_profile_scope_end(RuntimeState *state, const char *name, void *token);
 
 // I/O variant: like op_profile_scope_begin/end, but also records the byte
-// count moved by the operation. The reporter prints a separate "I/O" table
-// with bandwidth (GB/s = total_bytes / total_ms / 1e6) so memcpy-style ops
-// get their own throughput column instead of polluting the operator table.
+// count moved by the operation. In the unified report these entries
+// share the same table as compute operators, with extra bytes and GB/s
+// columns populated (GB/s = total_bytes / total_ms / 1e6). Sorting is by
+// total_ms so memcpy hotspots float to the top right alongside kernel
+// hotspots.
 //
 // Use for wrap_<op>() functions whose primary work is a memory transfer
 // (H2D/D2H/D2D), and for the framework's per-input/per-output transfers.
