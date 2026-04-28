@@ -330,6 +330,24 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // timing breakdown (one line, easy to grep) and open a new window. We
   // piggy-back on prepare_input(0) instead of using a dedicated sync hook
   // because main_graph IR doesn't emit one.
+  //
+  // PERF mode trade-off (intentional, not a bug): the hipStreamSynchronize
+  // below is *required* to make hipEventElapsedTime return valid per-phase
+  // numbers (the H2D / Compute / D2H events are async-recorded on the GPU
+  // stream and only become measurable once the stream has drained). The
+  // cost is that each inference's stream is forced to fully serialise
+  // before the next inference can submit work, which kills the natural
+  // pipeline overlap between consecutive inferences and *artificially
+  // lowers the measured TPS* compared to a normal run. So:
+  //
+  //   * HIPDNN_EP_PERF=1 -- accurate per-phase breakdown, sub-real TPS.
+  //     Use when you need the H2D / Compute / D2H split.
+  //   * HIPDNN_EP_DEBUG=1 -- log-only, no sync, real-throughput TPS.
+  //     Use when you want traces but care about wall-clock perf.
+  //
+  // PERF intentionally no longer inherits from DEBUG (see
+  // hipdnn_ep_perf_enabled() in debug_log.h) so adding debug printfs
+  // doesn't silently re-impose the sync penalty.
   if (hipdnn_ep_perf_enabled() && index == 0) {
     perf_ensure_events();
     // Flush the previous inference's window (if any). inference_num > 0
