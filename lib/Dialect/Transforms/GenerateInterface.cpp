@@ -104,6 +104,10 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
                           ? outputCountAttr.getInt()
                           : (int64_t)(outputShapes ? outputShapes.size() : 0);
 
+  if (auto md5Attr =
+          module->getAttrOfType<StringAttr>("hipdnn.constants_md5"))
+    meta.constants_md5 = md5Attr.getValue().str();
+
   return meta;
 }
 

@@ -21,6 +21,7 @@ table HipModelMetaInfo {
   output_count: int64;
   inputs: [TensorInfo];
   outputs: [TensorInfo];
+  constants_md5: string;
 }
 
 root_type HipModelMetaInfo;

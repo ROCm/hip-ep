@@ -270,18 +270,29 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
              record_elapsed(t_prev), (long long)count, total_size);
 
   // --- Shared Constants Cache ---
-  // In OGA pipeline mode, prefill and decode models share the same
-  // constants.bin. The second model skips the expensive allocation+load
-  // by reusing the first model's blob via process-wide named shared memory.
+  // In OGA pipeline mode, prefill and decode models may share the same
+  // constants.bin when their content is identical.  Two criteria must both
+  // match: (1) the constants-map MD5 hash (computed at compile time from
+  // the offset+size layout and stored in FlatBuffers metadata) selects the
+  // shared memory segment, and (2) total_size is verified against the
+  // published blob to guard against hash collisions or stale mappings.
+  // If the MD5 field is absent (legacy build), sharing is disabled.
   bool constants_shared = false;
 
-#ifdef _WIN32
-  char shm_name[128];
-  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
-           (unsigned long)GetCurrentProcessId(), total_size);
+  const char *constants_md5 = nullptr;
+  if (meta->constants_md5())
+    constants_md5 = meta->constants_md5()->c_str();
 
-  {
-    void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
+#ifdef _WIN32
+  if (constants_md5 && constants_md5[0] != '\0') {
+    fprintf(stderr, "[SHARED_CONSTANTS] constants_md5=%s\n", constants_md5);
+
+    char shm_name[256];
+    snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%s",
+             (unsigned long)GetCurrentProcessId(), constants_md5);
+
+    void *existing_map =
+        OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
     if (existing_map) {
       auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
           existing_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
@@ -295,8 +306,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         state->shared_constants_view = smeta;
         fprintf(stderr,
                 "[SHARED_CONSTANTS] Reusing existing blob "
-                "(%zu bytes, ref_count=%ld)\n",
-                total_size, new_ref);
+                "(%zu bytes, ref_count=%ld, md5=%s)\n",
+                total_size, new_ref, constants_md5);
         constants_shared = true;
       } else {
         if (smeta)
@@ -304,6 +315,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         CloseHandle(existing_map);
       }
     }
+  } else {
+    fprintf(stderr, "[SHARED_CONSTANTS] No constants_md5 in metadata, "
+                    "sharing disabled\n");
   }
 #endif
 
@@ -423,8 +437,14 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
 #ifdef _WIN32
     // Publish the newly loaded blob to the shared constants cache so that
-    // subsequent models in this process can skip the allocation+load.
-    {
+    // subsequent models with the same MD5 can skip allocation+load.
+    // Only publish when MD5 is available; without it we can't guarantee
+    // content identity.
+    if (constants_md5 && constants_md5[0] != '\0') {
+      char shm_name[256];
+      snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%s",
+               (unsigned long)GetCurrentProcessId(), constants_md5);
+
       void *new_map = CreateFileMappingA(
           (void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
           (unsigned long)sizeof(SharedConstantsMeta), shm_name);
@@ -439,8 +459,10 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
           smeta->ref_count = 1;
           state->shared_constants_mapping = new_map;
           state->shared_constants_view = smeta;
-          fprintf(stderr, "[SHARED_CONSTANTS] Published new blob (%zu bytes)\n",
-                  total_size);
+          fprintf(stderr,
+                  "[SHARED_CONSTANTS] Published new blob "
+                  "(%zu bytes, md5=%s)\n",
+                  total_size, constants_md5);
         } else {
           CloseHandle(new_map);
         }
