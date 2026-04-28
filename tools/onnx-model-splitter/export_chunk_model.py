@@ -942,7 +942,9 @@ class FixedCtxExtractor(SingleOpExtractor):
         export_prefix: str = "prefill",
     ):
         self._max_length = max_length
-        self._seq_lens = seq_lens if seq_lens is not None else DEFAULT_QUICK_EXPORT_SEQ_LENS
+        self._seq_lens = (
+            seq_lens if seq_lens is not None else DEFAULT_QUICK_EXPORT_SEQ_LENS
+        )
         self._decode_mode = decode_mode
         self._export_prefix = export_prefix
         super().__init__(model_path, output_dir=output_dir)
