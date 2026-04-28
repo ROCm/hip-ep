@@ -544,7 +544,8 @@ int wrap_matmul_nbits(
     int64_t batch_count,     // number of batches
     int64_t bits,            // quantization bits (e.g. 4)
     int64_t block_size,      // quantization block size
-    int64_t elem_size);      // element size in bytes
+    int64_t elem_size,       // element size in bytes
+    int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,

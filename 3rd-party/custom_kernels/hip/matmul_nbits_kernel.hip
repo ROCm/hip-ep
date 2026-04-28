@@ -1386,6 +1386,64 @@ __global__ void matmul_nbits_add_bias_rowmajor(
  * Section 4: Host-side launcher (extern "C")
  * ======================================================================= */
 
+/* =======================================================================
+ * Section 4a: uint8 packed nibble zero_points -> FP16 conversion
+ *
+ * ONNX MatMulNBits uint8 packed format:  [N, ceil(groups_k/2)]
+ *   Each byte holds two 4-bit zero_points:  low nibble = zp[2*i],
+ *                                           high nibble = zp[2*i+1]
+ * Output FP16 format: [N, groups_k]
+ * ======================================================================= */
+
+__global__ void unpack_zp_u8_to_fp16_kernel(
+    const unsigned char* __restrict__ zp_packed,
+    _Float16* __restrict__ zp_fp16,
+    int N, int groups_k, int packed_cols)
+{
+    int n  = static_cast<int>(blockIdx.y);
+    int g2 = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (n >= N || g2 >= packed_cols) return;
+
+    unsigned char packed = zp_packed[n * packed_cols + g2];
+    int g_lo = g2 * 2;
+    int g_hi = g_lo + 1;
+
+    zp_fp16[n * groups_k + g_lo] = static_cast<_Float16>(packed & 0xF);
+    if (g_hi < groups_k)
+        zp_fp16[n * groups_k + g_hi] = static_cast<_Float16>(packed >> 4);
+}
+
+static _Float16* g_zp_fp16_buf = nullptr;
+static size_t    g_zp_fp16_buf_elems = 0;
+
+static _Float16* ensureZpFp16Buffer(size_t need) {
+    if (g_zp_fp16_buf && g_zp_fp16_buf_elems >= need) return g_zp_fp16_buf;
+    if (g_zp_fp16_buf) hipFree(g_zp_fp16_buf);
+    hipMalloc(&g_zp_fp16_buf, need * sizeof(_Float16));
+    g_zp_fp16_buf_elems = need;
+    return g_zp_fp16_buf;
+}
+
+static const _Float16* convertZpToFp16(
+    hipStream_t stream,
+    const void* zp_packed_ptr,
+    int N, int groups_k)
+{
+    int packed_cols = (groups_k + 1) / 2;
+    size_t fp16_elems = static_cast<size_t>(N) * groups_k;
+    _Float16* zp_fp16 = ensureZpFp16Buffer(fp16_elems);
+
+    constexpr int THR = 256;
+    dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
+              static_cast<unsigned>(N));
+    dim3 block(THR);
+    hipLaunchKernelGGL(unpack_zp_u8_to_fp16_kernel,
+                       grid, block, 0, stream,
+                       static_cast<const unsigned char*>(zp_packed_ptr),
+                       zp_fp16, N, groups_k, packed_cols);
+    return zp_fp16;
+}
+
 extern "C" int hip_matmul_nbits(
     void* stream,
     const void* A,
@@ -1398,7 +1456,8 @@ extern "C" int hip_matmul_nbits(
     int64_t batch_count,
     int64_t bits,
     int64_t block_size,
-    int64_t element_size_bytes) {
+    int64_t element_size_bytes,
+    int64_t zp_elem_size) {
   if (bits != 4) {
     fprintf(stderr,
             "[custom_kernels] hip_matmul_nbits: only bits=4 supported, "
@@ -1418,6 +1477,17 @@ extern "C" int hip_matmul_nbits(
   }
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+  // Convert uint8 packed nibble zero_points to FP16 for WMMA/GEMV-col-major
+  // paths which require FP16 zero_points. Row-major GEMV and naive fallback
+  // read uint8 directly and don't need this conversion.
+  const void* zp_for_fp16_paths = zero_points;
+  bool wmma_data_format_pre = (batch_count == 1) && (K % 32 == 0);
+  if (zero_points && zp_elem_size == 1 && wmma_data_format_pre) {
+    int ngk = static_cast<int>((K + block_size - 1) / block_size);
+    zp_for_fp16_paths = convertZpToFp16(
+        hip_stream, zero_points, static_cast<int>(N), ngk);
+  }
 
   /* -------------------------------------------------------------------
    * WMMA data format: batch==1 && K%32==0
@@ -1450,7 +1520,7 @@ extern "C" int hip_matmul_nbits(
     const auto* a_ptr = static_cast<const _Float16*>(A);
     const auto* b_ptr = static_cast<const unsigned char*>(B);
     const auto* s_ptr = static_cast<const _Float16*>(scales);
-    const auto* z_ptr = static_cast<const _Float16*>(zero_points);
+    const auto* z_ptr = static_cast<const _Float16*>(zp_for_fp16_paths);
 
     // WMMA writes row-major C directly to caller's output buffer (ldc = N)
     auto* out_ptr = static_cast<_Float16*>(output);
@@ -1534,7 +1604,7 @@ extern "C" int hip_matmul_nbits(
 
     const auto* b_u = static_cast<const uint8_t*>(B);
     const auto* s_h = static_cast<const __half*>(scales);
-    const auto* z_u = static_cast<const uint8_t*>(zero_points);
+    const auto* z_u = static_cast<const uint8_t*>(zp_for_fp16_paths);
     const auto* b_h = static_cast<const __half*>(bias);
 
     int config_id = getOrTuneGemvConfig(
