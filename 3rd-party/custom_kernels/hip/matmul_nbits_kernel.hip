@@ -127,7 +127,7 @@ __global__ void matmul_nbits_kernel(
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
 
-template <int BLOCK_SIZE, int TILE_N>
+template <int BLOCK_SIZE, int TILE_N, bool HAS_ZP = true>
 __global__ void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
@@ -170,8 +170,6 @@ __global__ void matmul_nbits_gemv_kernel(
     for (int tn = 0; tn < TILE_N; tn++)
         partial[tn] = 0.0f;
 
-    const bool has_zp = (zp != nullptr);
-
     auto read_zp = [&](int64_t nidx, int64_t grp) __attribute__((always_inline)) -> float {
         return static_cast<float>(zp_fp16[nidx * k_blocks + grp]);
     };
@@ -187,11 +185,11 @@ __global__ void matmul_nbits_gemv_kernel(
         const int64_t k16 = idx * 16;
 
         float a_vals[16];
-        float a_sum = 0.0f;
+        [[maybe_unused]] float a_sum = 0.0f;
 #pragma unroll
         for (int i = 0; i < 16; i++) {
             a_vals[i] = read_a(k16 + i);
-            a_sum += a_vals[i];
+            if constexpr (HAS_ZP) a_sum += a_vals[i];
         }
 
         const int64_t grp = k16 >> bs_shift;
@@ -217,9 +215,9 @@ __global__ void matmul_nbits_gemv_kernel(
                 dot += a_vals[8 + i] *
                        static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
 
-            if (has_zp) {
+            if constexpr (HAS_ZP) {
                 float zv = read_zp(n_idx[tn], grp);
-                partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
+                partial[tn] += (dot - a_sum * zv) * sv[tn];
             } else {
                 partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
             }
@@ -235,11 +233,11 @@ __global__ void matmul_nbits_gemv_kernel(
             const int64_t k8 = k8_base + idx2 * 8;
 
             float a_vals[8];
-            float a_sum = 0.0f;
+            [[maybe_unused]] float a_sum = 0.0f;
 #pragma unroll
             for (int i = 0; i < 8; i++) {
                 a_vals[i] = read_a(k8 + i);
-                a_sum += a_vals[i];
+                if constexpr (HAS_ZP) a_sum += a_vals[i];
             }
 
             const int64_t grp = k8 >> bs_shift;
@@ -256,9 +254,9 @@ __global__ void matmul_nbits_gemv_kernel(
                     dot += a_vals[i] *
                            static_cast<float>((packed >> (i * 4)) & 0xF);
 
-                if (has_zp) {
+                if constexpr (HAS_ZP) {
                     float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += dot * sv - a_sum * zv * sv;
+                    partial[tn] += (dot - a_sum * zv) * sv;
                 } else {
                     partial[tn] += dot * sv - a_sum * 8.0f * sv;
                 }
@@ -278,7 +276,7 @@ __global__ void matmul_nbits_gemv_kernel(
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
-                float zv = has_zp ? read_zp(n_idx[tn], grp) : 8.0f;
+                float zv = HAS_ZP ? read_zp(n_idx[tn], grp) : 8.0f;
                 uint8_t packed = b_base_arr[tn][k / 2];
                 float   qval   = (nibble == 0)
                                    ? static_cast<float>(packed & 0xF)
@@ -357,7 +355,8 @@ static void launchGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs,
+    bool has_zp = true)
 {
     auto& c = kGemvConfigs[config_id];
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
@@ -367,9 +366,14 @@ static void launchGemvConfig(
 
 #define GEMV_CASE(ID, BS, TN) \
     case ID: \
-        hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN>), \
-            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+        if (has_zp) \
+            hipLaunchKernelGGL( \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true>), \
+                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+        else \
+            hipLaunchKernelGGL( \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false>), \
+                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
         break
 
     switch (config_id) {
@@ -401,7 +405,8 @@ static int tuneGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs,
+    bool has_zp = true)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -418,12 +423,12 @@ static int tuneGemvConfig(
 
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs);
+                             M, N, K, batch, bs, has_zp);
 
         hipEventRecord(ev0, stream);
         for (int i = 0; i < ITERS; i++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs);
+                             M, N, K, batch, bs, has_zp);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
@@ -457,9 +462,11 @@ static int tuneGemvConfig(
 static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 
-static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs) {
+static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
+                                bool has_zp = true) {
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(bs);
+           std::to_string(K) + "_" + std::to_string(bs) + "_" +
+           (has_zp ? "1" : "0");
 }
 
 static int getOrTuneGemvConfig(
@@ -468,9 +475,10 @@ static int getOrTuneGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs,
+    bool has_zp = true)
 {
-    std::string key = gemvCacheKey(M, N, K, bs);
+    std::string key = gemvCacheKey(M, N, K, bs, has_zp);
 
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
@@ -479,7 +487,7 @@ static int getOrTuneGemvConfig(
         return it->second;
 
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
+                               M, N, K, batch, bs, has_zp);
     gemv_cache[key] = best;
 
     CUSTOM_KERNELS_DEBUG_LOG(
@@ -1561,13 +1569,15 @@ extern "C" int hip_matmul_nbits(
     const auto* b_h = static_cast<const __half*>(bias);
     auto*       o_h = static_cast<__half*>(output);
 
+    bool gemv_has_zp = (z_u != nullptr);
+
     int config_id = getOrTuneGemvConfig(
         hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
-        M, N, K, 1, block_size);
+        M, N, K, 1, block_size, gemv_has_zp);
 
     launchGemvConfig(config_id, hip_stream,
                      a_h, b_u, s_h, z_u, b_h, o_h,
-                     M, N, K, 1, block_size);
+                     M, N, K, 1, block_size, gemv_has_zp);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -1601,13 +1611,15 @@ extern "C" int hip_matmul_nbits(
     const auto* b_h = static_cast<const __half*>(bias);
     auto*       o_h = static_cast<__half*>(output);
 
+    bool gemv_has_zp = (z_u != nullptr);
+
     int config_id = getOrTuneGemvConfig(
         hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
-        M, N, K, batch_count, block_size);
+        M, N, K, batch_count, block_size, gemv_has_zp);
 
     launchGemvConfig(config_id, hip_stream,
                      a_h, b_u, s_h, z_u, b_h, o_h,
-                     M, N, K, batch_count, block_size);
+                     M, N, K, batch_count, block_size, gemv_has_zp);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
