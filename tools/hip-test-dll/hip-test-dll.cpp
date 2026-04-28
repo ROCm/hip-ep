@@ -39,12 +39,22 @@ typedef int (*InferenceComputeFunc)(void *state, void *inputs, void *outputs);
 typedef int (*InferenceCleanupFunc)(void *state);
 typedef const char *(*InferenceGetMetadataJsonFunc)(void);
 
-// Tensor structures matching hipdnn_ep_runtime.h
+// Tensor structures matching hipdnn_ep_runtime.h. Keep in sync with the
+// definitions there (and with custom_op_mlir.hpp); the layout is the
+// on-the-wire ABI between marshalling and the MLIR-compiled model.dll.
+enum {
+  TENSOR_MEMORY_CPU = 0,  // == OrtMemoryInfoDeviceType_CPU
+  TENSOR_MEMORY_GPU = 1,  // == OrtMemoryInfoDeviceType_GPU
+  TENSOR_MEMORY_FPGA = 2, // == OrtMemoryInfoDeviceType_FPGA
+  TENSOR_MEMORY_NPU = 3,  // == OrtMemoryInfoDeviceType_NPU
+};
+
 typedef struct {
-  void *data;          // Host data pointer
+  void *data;          // Data pointer (host or GPU-accessible per memory_type)
   int64_t *shape;      // Array of dimension sizes
   size_t rank;         // Number of dimensions
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
+  int memory_type;     // TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 } tensor_t;
 
 typedef struct {
@@ -417,6 +427,7 @@ int main(int argc, char **argv) {
     tensor.shape = input_shape_storage.back().data();
     tensor.rank = input_shape_storage.back().size();
     tensor.element_size = input_elem_sizes[i];
+    tensor.memory_type = TENSOR_MEMORY_CPU; // host buffers, runtime does H2D
     input_tensors.push_back(tensor);
   }
 
@@ -440,6 +451,7 @@ int main(int argc, char **argv) {
     tensor.shape = output_shape_storage.back().data();
     tensor.rank = output_shape_storage.back().size();
     tensor.element_size = output_elem_sizes[i];
+    tensor.memory_type = TENSOR_MEMORY_CPU; // host buffers, runtime does D2H
     output_tensors.push_back(tensor);
   }
 

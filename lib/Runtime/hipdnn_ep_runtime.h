@@ -213,12 +213,44 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 // Inference API Types (for generated interface)
 //===----------------------------------------------------------------------===//
 
-// Represents a tensor with host data and shape information
+// Memory placement of a tensor's `data` pointer. Values are 1:1 with ORT's
+// OrtMemoryInfoDeviceType (onnxruntime_c_api.h) so MlirCustomOp can write
+// the ORT value straight into tensor_t.memory_type with no remapping.
+//
+// Today the runtime only special-cases TENSOR_MEMORY_GPU (alias path,
+// avoids the per-inference H2D / D2H copy on AMD APU iGPU mapped-pinned
+// memory). CPU / FPGA / NPU all fall through to the legacy host H2D / D2H
+// path, preserving existing behaviour for hip-test-dll, hip-onnx-runner,
+// and any other host-input caller.
+//
+// Must match the matching enum in
+// `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp`.
+enum {
+  TENSOR_MEMORY_CPU = 0, // == OrtMemoryInfoDeviceType_CPU
+  TENSOR_MEMORY_GPU = 1, // == OrtMemoryInfoDeviceType_GPU  (alias path; only
+                         // mode optimized today)
+  TENSOR_MEMORY_FPGA =
+      2, // == OrtMemoryInfoDeviceType_FPGA (treated as host today)
+  TENSOR_MEMORY_NPU =
+      3, // == OrtMemoryInfoDeviceType_NPU  (treated as host today)
+};
+
+// Represents a tensor with data pointer and shape information.
+//
+// Memory ownership: caller-owned. `memory_type` selects the data pointer's
+// placement (see the enum above) and tells prepare_input/finalize_output
+// whether to copy H2D/D2H or alias the caller's GPU-accessible buffer.
+//
+// IMPORTANT: this layout is duplicated as `tensor_t` in
+// `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (C++ version
+// consumed by MlirCustomOp marshalling). Keep the two definitions
+// byte-for-byte identical.
 typedef struct {
-  void *data;          // Host data pointer
+  void *data;          // Data pointer (host or GPU-accessible per memory_type)
   int64_t *shape;      // Array of dimension sizes
   size_t rank;         // Number of dimensions
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
+  int memory_type;     // One of TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 } tensor_t;
 
 // Represents a span of tensors (inputs or outputs)
@@ -230,12 +262,17 @@ typedef struct {
 // Represents a prepared tensor with GPU buffer and metadata
 // Used internally by tensor preparation helpers
 typedef struct {
-  void *gpu_ptr;      // GPU memory (allocated or from pool)
+  void *gpu_ptr;      // GPU memory (allocated, from pool, or aliased)
   void *host_ptr;     // Host memory (from tensor_t.data)
   int64_t *shape_ptr; // Shape array (from tensor_t.shape) for memref building
   size_t rank;        // Tensor rank (for validation)
   size_t size_bytes;  // Buffer size
   bool is_pooled;     // Internal: true if from pool, false if allocated
+  // Internal: true if gpu_ptr aliases caller's GPU-accessible memory
+  // (tensor_t.memory_type == TENSOR_MEMORY_GPU). When set, finalize_output
+  // skips the D2H copy and free_input skips pool_release/hipFree because
+  // the memory is owned by the caller, not by us.
+  bool is_aliased;
 } TensorBuffer;
 
 //===----------------------------------------------------------------------===//
