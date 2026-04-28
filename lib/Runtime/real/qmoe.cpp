@@ -182,7 +182,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       HIP_CHECK(hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e,
                                  fc1_zp_e, fc1_b_e, d_fc1_buf, count,
                                  fusion_inter, hidden_size, 1,
-                                 expert_weight_bits, block_size, elem_size));
+                                 expert_weight_bits, block_size, elem_size,
+                                 /*zp_elem_size=*/1));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
@@ -211,7 +212,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       HIP_CHECK(hip_matmul_nbits(stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e,
                                  fc2_b_e, d_fc2_buf, count, hidden_size,
                                  inter_size, 1, expert_weight_bits, block_size,
-                                 elem_size));
+                                 elem_size, /*zp_elem_size=*/1));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
