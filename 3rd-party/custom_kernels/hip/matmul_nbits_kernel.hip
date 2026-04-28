@@ -112,9 +112,10 @@ __global__ void matmul_nbits_kernel(
  * threads cooperating on the K reduction via warp shuffle + shared mem.
  *
  * Key optimizations:
- *   - 16-nibble main loop: uint2 (64-bit) B load → 16 nibbles per txn
+ *   - 32-nibble main loop: uint4 (128-bit) B load → 32 nibbles per txn
  *   - Load-compute separation: all B loads issued before FMA compute
- *   - Factored dequant:  dot*scale - a_sum*zp*scale  (saves ~40% FLOPs)
+ *   - Explicit __fmaf_rn intrinsics for dot product accumulation
+ *   - Factored dequant:  (dot - a_sum*zp) * scale  (saves ~40% FLOPs)
  *   - Bit-shift group index (block_size is always power-of-2)
  *   - TILE_N up to 16 for large-N shapes (e.g. N=200k)
  *
@@ -209,6 +210,7 @@ __global__ void matmul_nbits_gemv_kernel(
         }
 
         const int grp = k32 >> bs_shift;
+        const float a_sum_x_default_zp = a_sum * 8.0f;
 
         uint4   b_pk[TILE_N];
         float   sv[TILE_N];
@@ -224,26 +226,26 @@ __global__ void matmul_nbits_gemv_kernel(
             float dot = 0.0f;
 #pragma unroll
             for (int i = 0; i < 8; i++)
-                dot += a_vals[i] *
-                       static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF);
+                dot = __fmaf_rn(a_vals[i],
+                       static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF), dot);
 #pragma unroll
             for (int i = 0; i < 8; i++)
-                dot += a_vals[8 + i] *
-                       static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
+                dot = __fmaf_rn(a_vals[8 + i],
+                       static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF), dot);
 #pragma unroll
             for (int i = 0; i < 8; i++)
-                dot += a_vals[16 + i] *
-                       static_cast<float>((b_pk[tn].z >> (i * 4)) & 0xF);
+                dot = __fmaf_rn(a_vals[16 + i],
+                       static_cast<float>((b_pk[tn].z >> (i * 4)) & 0xF), dot);
 #pragma unroll
             for (int i = 0; i < 8; i++)
-                dot += a_vals[24 + i] *
-                       static_cast<float>((b_pk[tn].w >> (i * 4)) & 0xF);
+                dot = __fmaf_rn(a_vals[24 + i],
+                       static_cast<float>((b_pk[tn].w >> (i * 4)) & 0xF), dot);
 
             if (has_zp) {
                 float zv = read_zp(n_idx[tn], grp);
-                partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
+                partial[tn] += (dot - a_sum * zv) * sv[tn];
             } else {
-                partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
+                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
             }
         }
     }
@@ -264,6 +266,7 @@ __global__ void matmul_nbits_gemv_kernel(
             }
 
             const int grp = k16 >> bs_shift;
+            const float a_sum_x_default_zp = a_sum * 8.0f;
 
             uint2   b_pk[TILE_N];
             float   sv[TILE_N];
@@ -279,18 +282,18 @@ __global__ void matmul_nbits_gemv_kernel(
                 float dot = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 8; i++)
-                    dot += a_vals[i] *
-                           static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF);
+                    dot = __fmaf_rn(a_vals[i],
+                           static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF), dot);
 #pragma unroll
                 for (int i = 0; i < 8; i++)
-                    dot += a_vals[8 + i] *
-                           static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
+                    dot = __fmaf_rn(a_vals[8 + i],
+                           static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF), dot);
 
                 if (has_zp) {
                     float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
+                    partial[tn] += (dot - a_sum * zv) * sv[tn];
                 } else {
-                    partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
+                    partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
                 }
             }
         }
@@ -312,6 +315,7 @@ __global__ void matmul_nbits_gemv_kernel(
             }
 
             const int grp = k8 >> bs_shift;
+            const float a_sum_x_default_zp = a_sum * 8.0f;
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
@@ -322,14 +326,14 @@ __global__ void matmul_nbits_gemv_kernel(
                 float dot = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 8; i++)
-                    dot += a_vals[i] *
-                           static_cast<float>((packed >> (i * 4)) & 0xF);
+                    dot = __fmaf_rn(a_vals[i],
+                           static_cast<float>((packed >> (i * 4)) & 0xF), dot);
 
                 if (has_zp) {
                     float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += dot * sv - a_sum * zv * sv;
+                    partial[tn] += (dot - a_sum * zv) * sv;
                 } else {
-                    partial[tn] += dot * sv - a_sum * 8.0f * sv;
+                    partial[tn] += (dot - a_sum_x_default_zp) * sv;
                 }
             }
         }
@@ -419,6 +423,7 @@ static constexpr GemvConfig kGemvConfigs[] = {
     {512, 1}, {512, 2}, {512, 4}, {512, 8}, {512, 16},
     {1024, 1}, {1024, 2}, {1024, 4}, {1024, 8}, {1024, 16},
     { 64, 32}, {128, 32}, {256, 32},
+    { 64, 64}, {128, 64}, {256, 64},
 };
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
@@ -468,6 +473,8 @@ static void launchGemvConfig(
         GEMV_CASE(24, 1024, 16);
         GEMV_CASE(25,  64, 32);  GEMV_CASE(26, 128, 32);
         GEMV_CASE(27, 256, 32);
+        GEMV_CASE(28,  64, 64);  GEMV_CASE(29, 128, 64);
+        GEMV_CASE(30, 256, 64);
         default: break;
     }
 #undef GEMV_CASE
@@ -493,7 +500,8 @@ static int tuneGemvConfig(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 32 && N < 1024) continue;
+        if (cfg.tile_n >= 64 && N < 2048) continue;
+        if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
 
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
@@ -552,7 +560,10 @@ static int getOrTuneGemvConfig(
     int64_t batch, int64_t bs,
     bool col_major = false)
 {
-    std::string key = gemvCacheKey(M, N, K, bs, col_major);
+    // M=1: col_major and row_major layouts are identical (single row) —
+    // reuse the row_major autotune result to avoid a redundant tuning pass.
+    bool effective_col_major = (M == 1) ? false : col_major;
+    std::string key = gemvCacheKey(M, N, K, bs, effective_col_major);
 
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
