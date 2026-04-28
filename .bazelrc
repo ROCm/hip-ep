@@ -45,7 +45,6 @@ build --experimental_output_directory_naming_scheme=diff_against_baseline
 # Windows common flags (all modes, all architectures)
 # WIN32/_WINDOWS are not defined: _WIN32/_WIN64 are auto-defined by the compiler for Windows
 # targets and are the correct macros to use. WIN32/_WINDOWS are legacy VS project conventions.
-build:windows --@bazel_cpp_toolchain//toolchain/settings:windows_target_version=win10
 build:windows --cxxopt=/std:c++17 --host_cxxopt=/std:c++17
 build:windows --copt=/EHsc          # C++ exception handling
 build:windows --copt=/W3            # Warning level 3

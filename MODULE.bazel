@@ -39,7 +39,7 @@ use_repo(llvm_repos, "llvm-project")
 git_override(
     module_name = "bazel_cpp_toolchain",
     remote = "https://github.com/ROCm/bazel-cpp-toolchain",
-    commit = "dff7273e5b21e0b7c7b845de361762d8aad1f3ab",
+    commit = "bbfb5248c0e310a55859497e7ea9eb5dfc718d00",  # Fixes /VERBOSE flag issue
 )
 
 # Local override for MorphiZen module
