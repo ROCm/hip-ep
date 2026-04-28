@@ -59,8 +59,7 @@ static CompilationConfig load_config(PassContext *ctx) {
     config.optLevel = std::stoi(opt_level_str);
 
     // Parse tensor dump options
-    config.dumpTensors =
-        ctx->get_provider_option("dump_tensors", "0") == "1";
+    config.dumpTensors = ctx->get_provider_option("dump_tensors", "0") == "1";
     config.dumpDir = ctx->get_provider_option("dump_tensors_dir", "");
 
   } catch (const std::exception &ex) {
