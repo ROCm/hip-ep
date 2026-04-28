@@ -4,29 +4,29 @@
  *
  * MatMulNBits — Fused Dequant + MatMul for int4 packed weights (FP16)
  *
- * Public API (hip_matmul_nbits) — all tensors are ROW-MAJOR per ONNX convention:
- *        A      : FP16 row-major [batch, M, K]
- *        B      : uint4 packed [N, K/2]
- *        scales : FP16 [N, num_groups_k]
- *        zeros  : FP16 [N, num_groups_k]  (or NULL, default zp=8)
- *        output : FP16 row-major [batch, M, N]
- *
- * Internally auto-dispatched to one of three execution paths:
+ * Three execution paths (auto-dispatched by M, batch, K alignment):
  *
  *   1. RDNA3 WMMA fast path (batch==1, K%32==0, M>=16):
- *      Transposes A/C to col-major internally, then uses WMMA intrinsics
- *      with double-buffered shared memory, grid swizzling, and inline-asm
- *      batched dequant. Requires gfx11xx/gfx12xx.
+ *      Uses WMMA intrinsics with double-buffered shared memory, grid swizzling,
+ *      and inline-asm batched dequant. Requires gfx11xx/gfx12xx.
  *
  *   2. GEMV col-major path (batch==1, K%32==0, M<16):
- *      Transposes A/C internally (skipped for M=1). K-parallel reduction
- *      GEMV with COL_MAJOR=true, autotuned (BLOCK_SIZE, TILE_N).
+ *      K-parallel reduction GEMV with COL_MAJOR=true, same data layout as WMMA.
+ *      Autotuned (BLOCK_SIZE, TILE_N) for best performance.
  *
- *   3. Naive fallback (arbitrary alignment, batched):
- *      Row-major kernels, uint8 zero points.
+ *      Data layout for paths 1 & 2 (WMMA data format):
+ *        A      : FP16 col-major (M x K), stride lda = M
+ *        B      : uint4 packed (N x K/2), row-major per column
+ *        scales : FP16 (N x num_groups_k), row-major
+ *        zeros  : FP16 (N x num_groups_k), row-major  (or NULL)
+ *        output : FP16 col-major (M x N), stride ldc = M
  *
- * When zero_points is NULL, dequantization uses the ONNX MatMulNBits
- * default zp = 2^(bits-1) (= 8 for bits=4) to match the CPU EP (MLAS).
+ *   3. Naive fallback (arbitrary alignment, batched, row-major):
+ *        A      : FP16 row-major [batch, M, K]
+ *        B      : uint4 packed [N, k_blocks, blob_size]
+ *        scales : FP16 [N, k_blocks]
+ *        zeros  : uint8 [N, k_blocks]  (or NULL, default zp=8)
+ *        output : FP16 row-major [batch, M, N]
  */
 
 #include "hip_custom_kernels.h"
@@ -174,9 +174,12 @@ __global__ void matmul_nbits_gemv_kernel(
     }
 
     float partial[TILE_N];
+    float zp_corr[TILE_N];
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++)
+    for (int tn = 0; tn < TILE_N; tn++) {
         partial[tn] = 0.0f;
+        zp_corr[tn] = 0.0f;
+    }
 
     const bool has_zp = (zp != nullptr);
 
@@ -230,12 +233,9 @@ __global__ void matmul_nbits_gemv_kernel(
                 dot += a_vals[8 + i] *
                        static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
 
-            if (has_zp) {
-                float zv = read_zp(n_idx[tn], grp);
-                partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
-            } else {
-                partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
-            }
+            partial[tn] += dot * sv[tn];
+            float zv = has_zp ? read_zp(n_idx[tn], grp) : 8.0f;
+            zp_corr[tn] += a_sum * zv * sv[tn];
         }
     }
 
@@ -269,12 +269,9 @@ __global__ void matmul_nbits_gemv_kernel(
                     dot += a_vals[i] *
                            static_cast<float>((packed >> (i * 4)) & 0xF);
 
-                if (has_zp) {
-                    float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += dot * sv - a_sum * zv * sv;
-                } else {
-                    partial[tn] += dot * sv - a_sum * 8.0f * sv;
-                }
+                partial[tn] += dot * sv;
+                float zv = has_zp ? read_zp(n_idx[tn], grp) : 8.0f;
+                zp_corr[tn] += a_sum * zv * sv;
             }
         }
     }
@@ -296,10 +293,15 @@ __global__ void matmul_nbits_gemv_kernel(
                 float   qval   = (nibble == 0)
                                    ? static_cast<float>(packed & 0xF)
                                    : static_cast<float>(packed >> 4);
-                partial[tn] += a_val * (qval - zv) * sv;
+                partial[tn] += a_val * qval * sv;
+                zp_corr[tn] += a_val * zv * sv;
             }
         }
     }
+
+#pragma unroll
+    for (int tn = 0; tn < TILE_N; tn++)
+        partial[tn] -= zp_corr[tn];
 
     // --- Reduction: warp shuffle then shared memory ---
     const int wave_size = __builtin_amdgcn_wavefrontsize();
@@ -520,11 +522,11 @@ static int getOrTuneGemvConfig(
  * Section 2: RDNA3 WMMA Fused GEMM + Dequantization Kernel
  *
  * Computes C = A x dequant(B_packed)^T  where:
- *   A        : FP16 row-major (M x K), stride lda = K
+ *   A        : FP16 col-major (M x K), stride lda
  *   B_packed : uint4 packed into bytes (N x K/2), row-major per column
  *   scales   : FP16 (N x num_groups_k), per-column per-group scale
  *   zeros    : FP16 (N x num_groups_k), per-column per-group zero point
- *   C        : FP16 row-major (M x N), stride ldc = N
+ *   C        : FP16 col-major (M x N), stride ldc
  *
  * Requires RDNA3+ (gfx11xx/gfx12xx) for WMMA intrinsics.
  * K must be multiple of 32. M and N can be any positive value (boundary-safe).
@@ -600,7 +602,7 @@ void GemmFp16U4Impl(
     constexpr int PAD_K   = 2;
     constexpr int K_STR   = BK_T + PAD_K;
     constexpr int A_VL    = (BM_T * BK_T) / (THR_L * 4);
-    constexpr int A_GRP_K = BK_T / 2;
+    constexpr int A_GRP_2 = BM_T / 2;
     constexpr int K_STEPS = BK_T / WMMA_TILE;
 
     static_assert(A_VL >= 1, "A_VL must be >= 1");
@@ -669,7 +671,7 @@ void GemmFp16U4Impl(
     /* --- Register-prefetch pipeline: split load from dequant+store ---
      *
      * issueLoads(t): fire off global memory reads into registers (non-blocking).
-     * storeToShared(buf): dequant B in registers, write A & B to smem.
+     * storeToShared(buf): dequant B in registers, repack A, write to smem.
      *
      * The K-loop interleaves: issueLoads → computeWMMA → storeToShared → sync
      * so that global loads overlap with Matrix Core WMMA execution.
@@ -686,24 +688,27 @@ void GemmFp16U4Impl(
         for(int ld = 0; ld < A_VL; ld++)
         {
             int vid    = tid + ld * THR_L;
-            pf_ak[ld]  = (vid % A_GRP_K) * 2;
-            pf_am[ld]  = (vid / A_GRP_K) * 2;
+            pf_am[ld]  = (vid % A_GRP_2) * 2;
+            pf_ak[ld]  = (vid / A_GRP_2) * 2;
             if constexpr (!BOUNDS_CHECK) {
                 pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                  &A[(row0 + pf_am[ld]) * lda + t + pf_ak[ld]]);
+                                  &A[(t + pf_ak[ld]) * lda + row0 + pf_am[ld]]);
                 pf_a2[ld] = *reinterpret_cast<const uint32_t*>(
-                                  &A[(row0 + pf_am[ld] + 1) * lda + t + pf_ak[ld]]);
+                                  &A[(t + pf_ak[ld] + 1) * lda + row0 + pf_am[ld]]);
             } else {
                 int row_a = row0 + pf_am[ld];
                 if (row_a + 1 < M) {
                     pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[row_a * lda + t + pf_ak[ld]]);
+                                      &A[(t + pf_ak[ld]) * lda + row_a]);
                     pf_a2[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[(row_a + 1) * lda + t + pf_ak[ld]]);
+                                      &A[(t + pf_ak[ld] + 1) * lda + row_a]);
                 } else if (row_a < M) {
-                    pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[row_a * lda + t + pf_ak[ld]]);
-                    pf_a2[ld] = 0;
+                    uint16_t lo1 = *reinterpret_cast<const uint16_t*>(
+                                      &A[(t + pf_ak[ld]) * lda + row_a]);
+                    uint16_t lo2 = *reinterpret_cast<const uint16_t*>(
+                                      &A[(t + pf_ak[ld] + 1) * lda + row_a]);
+                    pf_a1[ld] = static_cast<uint32_t>(lo1);
+                    pf_a2[ld] = static_cast<uint32_t>(lo2);
                 } else {
                     pf_a1[ld] = 0;
                     pf_a2[ld] = 0;
@@ -773,8 +778,11 @@ void GemmFp16U4Impl(
 #pragma unroll
         for(int ld = 0; ld < A_VL; ld++)
         {
-            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]  ][pf_ak[ld]]) = pf_a1[ld];
-            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]+1][pf_ak[ld]]) = pf_a2[ld];
+            uint32_t g1 = pf_a1[ld], g2 = pf_a2[ld];
+            uint32_t pack_even = (g1 & 0xFFFF) | ((g2 & 0xFFFF) << 16);
+            uint32_t pack_odd  = (g1 >> 16)     | (g2 & 0xFFFF0000);
+            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]  ][pf_ak[ld]]) = pack_even;
+            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]+1][pf_ak[ld]]) = pack_odd;
         }
     };
 
@@ -846,10 +854,10 @@ void GemmFp16U4Impl(
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         __builtin_nontemporal_store((_Float16)acc[wm][wn][e],
-                                                    &C[(mbase + r) * ldc + nbase + lane]);
+                                                    &C[(nbase + lane) * ldc + mbase + r]);
                 } else {
                     __builtin_nontemporal_store((_Float16)acc[wm][wn][e],
-                                                &C[(mbase + r) * ldc + nbase + lane]);
+                                                &C[(nbase + lane) * ldc + mbase + r]);
                 }
             }
         }
@@ -1185,82 +1193,6 @@ static _Float16* ensureDqBuffer(int N, int K) {
     return g_dq_buf;
 }
 
-/* -----------------------------------------------------------------------
- * GPU 2-D FP16 transpose + scratch buffer helpers
- *
- * transpose2d_fp16_kernel: transposes a [rows x cols] row-major matrix
- * into a [cols x rows] row-major matrix (equivalent to col-major view).
- * Used to convert row-major ONNX tensors to the col-major layout that
- * WMMA / GEMV kernels expect, and to convert results back.
- * ----------------------------------------------------------------------- */
-
-__global__ void transpose2d_fp16_kernel(
-    const _Float16* __restrict__ src,
-    _Float16* __restrict__ dst,
-    int rows, int cols)
-{
-    constexpr int TILE = 32;
-    __shared__ _Float16 tile[TILE][TILE + 1];
-
-    int bx = blockIdx.x * TILE;
-    int by = blockIdx.y * TILE;
-
-    int x = bx + threadIdx.x;
-    int y = by + threadIdx.y;
-
-    for (int j = 0; j < TILE; j += blockDim.y) {
-        int yy = y + j;
-        if (x < cols && yy < rows)
-            tile[threadIdx.y + j][threadIdx.x] = src[yy * cols + x];
-    }
-    __syncthreads();
-
-    x = by + threadIdx.x;
-    y = bx + threadIdx.y;
-    for (int j = 0; j < TILE; j += blockDim.y) {
-        int yy = y + j;
-        if (x < rows && yy < cols)
-            dst[yy * rows + x] = tile[threadIdx.x][threadIdx.y + j];
-    }
-}
-
-static void launchTranspose2DFp16(hipStream_t stream,
-                                  const void* src, void* dst,
-                                  int rows, int cols)
-{
-    constexpr int TILE = 32;
-    dim3 block(TILE, 8);
-    dim3 grid((cols + TILE - 1) / TILE, (rows + TILE - 1) / TILE);
-    hipLaunchKernelGGL(transpose2d_fp16_kernel, grid, block, 0, stream,
-                       static_cast<const _Float16*>(src),
-                       static_cast<_Float16*>(dst),
-                       rows, cols);
-}
-
-static _Float16* g_a_col_buf = nullptr;
-static size_t    g_a_col_buf_elems = 0;
-
-static _Float16* ensureAColBuffer(int M, int K) {
-    size_t need = static_cast<size_t>(M) * K;
-    if (g_a_col_buf && g_a_col_buf_elems >= need) return g_a_col_buf;
-    if (g_a_col_buf) hipFree(g_a_col_buf);
-    hipMalloc(&g_a_col_buf, need * sizeof(_Float16));
-    g_a_col_buf_elems = need;
-    return g_a_col_buf;
-}
-
-static _Float16* g_out_col_buf = nullptr;
-static size_t    g_out_col_buf_elems = 0;
-
-static _Float16* ensureOutColBuffer(int M, int N) {
-    size_t need = static_cast<size_t>(M) * N;
-    if (g_out_col_buf && g_out_col_buf_elems >= need) return g_out_col_buf;
-    if (g_out_col_buf) hipFree(g_out_col_buf);
-    hipMalloc(&g_out_col_buf, need * sizeof(_Float16));
-    g_out_col_buf_elems = need;
-    return g_out_col_buf;
-}
-
 static int tuneWmmaConfig(
     hipStream_t stream,
     int M, int N, int K,
@@ -1364,22 +1296,21 @@ static int getOrTuneWmmaConfig(
 }
 
 /* =======================================================================
- * Section 3: Post-WMMA bias addition (row-major output)
+ * Section 3: Post-WMMA bias addition (col-major output)
  *
- * C is row-major [M x N] with ldc = N.
- * bias is [N]. Adds bias[n] to every element in column n.
- * Threads sweep N (coalesced along row), blocks sweep M.
+ * C is col-major [M x N] with ldc = M.
+ * bias is [N]. Adds bias[n] to every row of column n.
  * ======================================================================= */
 
-__global__ void matmul_nbits_add_bias_rowmajor(
+__global__ void matmul_nbits_add_bias_colmajor(
     _Float16* __restrict__ C,
     const _Float16* __restrict__ bias,
     int M, int N, int ldc)
 {
-    int n = static_cast<int>(blockIdx.x) * 256 + threadIdx.x;
-    int m = static_cast<int>(blockIdx.y);
+    int m = static_cast<int>(blockIdx.y) * 256 + threadIdx.x;
+    int n = static_cast<int>(blockIdx.x);
     if (m < M && n < N)
-        C[m * ldc + n] += bias[n];
+        C[n * ldc + m] += bias[n];
 }
 
 /* =======================================================================
@@ -1422,13 +1353,13 @@ extern "C" int hip_matmul_nbits(
   /* -------------------------------------------------------------------
    * WMMA data format: batch==1 && K%32==0
    *
-   * Caller passes row-major A [M, K] and receives row-major C [M, N].
-   * WMMA kernel loads A row-major directly (K-first thread mapping for
-   * coalesced reads) and writes C row-major (no transposes needed).
-   * zero_points (if not NULL) must be FP16 [N, num_groups_k].
+   * Data layout requirements (different from the naive fallback):
+   *   - A and output are col-major with leading dimension = M
+   *   - zero_points (if not NULL) must be FP16 [N, num_groups_k]
    *
-   * When M >= kBlockDim (16): WMMA intrinsics (RDNA3 fast path)
-   * When M <  kBlockDim:      GEMV kernel with COL_MAJOR=true
+   * When M >= kBlockDim (16): use WMMA intrinsics (RDNA3 fast path)
+   * When M <  kBlockDim:      use GEMV kernel with COL_MAJOR=true
+   *                           (same col-major data format, autotuned)
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
 
@@ -1444,27 +1375,25 @@ extern "C" int hip_matmul_nbits(
     int iK  = static_cast<int>(K);
     int gs  = static_cast<int>(block_size);
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
-    int lda = iK;
-    int ldc = iN;
+    int lda = iM;
+    int ldc = iM;
 
     const auto* a_ptr = static_cast<const _Float16*>(A);
     const auto* b_ptr = static_cast<const unsigned char*>(B);
     const auto* s_ptr = static_cast<const _Float16*>(scales);
     const auto* z_ptr = static_cast<const _Float16*>(zero_points);
-
-    // WMMA writes row-major C directly to caller's output buffer (ldc = N)
-    auto* out_ptr = static_cast<_Float16*>(output);
+    auto*       c_ptr = static_cast<_Float16*>(output);
 
     bool has_zp = (z_ptr != nullptr);
     int wmma_cfg = getOrTuneWmmaConfig(
         hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-        s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp);
+        s_ptr, z_ptr, gs, ngk, c_ptr, ldc, has_zp);
 
     _Float16* dq_buf = kWmmaConfigs[wmma_cfg].fused
                            ? nullptr : ensureDqBuffer(iN, iK);
     launchWmmaConfig(wmma_cfg, hip_stream,
                      iM, iN, iK, a_ptr, lda, b_ptr,
-                     s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf);
+                     s_ptr, z_ptr, gs, ngk, c_ptr, ldc, has_zp, dq_buf);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -1475,32 +1404,32 @@ extern "C" int hip_matmul_nbits(
     }
 
     if (bias) {
-      dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
-                     static_cast<unsigned>(iM));
+      dim3 bias_grid(static_cast<unsigned>(iN),
+                     static_cast<unsigned>((iM + 255) / 256));
       dim3 bias_block(256);
       hipLaunchKernelGGL(
-          matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
+          matmul_nbits_add_bias_colmajor, bias_grid, bias_block,
           0, hip_stream,
-          out_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
+          c_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
 
       err = hipGetLastError();
       if (err != hipSuccess) {
         fprintf(stderr,
                 "[custom_kernels] hip_matmul_nbits bias launch failed: %s\n",
                 hipGetErrorString(err));
-        return static_cast<int>(err);
       }
     }
 
-    return static_cast<int>(hipGetLastError());
+    return static_cast<int>(err);
   }
 
   /* -------------------------------------------------------------------
    * GEMV path with col-major data — small M, WMMA data format
    *
-   * When batch==1, K%32==0, but M < kBlockDim: internally transpose
-   * A row->col and output col->row so the caller sees row-major I/O.
-   * GEMV kernel runs with COL_MAJOR=true for K-parallel reduction.
+   * When batch==1, K%32==0, but M < kBlockDim: the caller provides
+   * WMMA-format data (col-major A, FP16 zeros, col-major output).
+   * We use the GEMV kernel with COL_MAJOR=true to handle this layout
+   * while keeping the K-parallel reduction performance advantage.
    * ------------------------------------------------------------------- */
   if (wmma_data_format && M < kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
@@ -1510,39 +1439,19 @@ extern "C" int hip_matmul_nbits(
         (long long)block_size,
         zero_points ? "yes" : "null", bias ? "yes" : "null");
 
-    int iM = static_cast<int>(M);
-    int iN = static_cast<int>(N);
-    int iK = static_cast<int>(K);
-
-    // Row-major A [M, K] -> col-major (skip if M==1: row/col identical)
-    const __half* a_col;
-    if (M > 1) {
-      _Float16* a_buf = ensureAColBuffer(iM, iK);
-      launchTranspose2DFp16(hip_stream, A, a_buf, iM, iK);
-      a_col = reinterpret_cast<const __half*>(a_buf);
-    } else {
-      a_col = static_cast<const __half*>(A);
-    }
-
-    // GEMV output to col-major scratch (skip if M==1)
-    __half* o_col;
-    if (M > 1) {
-      o_col = reinterpret_cast<__half*>(ensureOutColBuffer(iM, iN));
-    } else {
-      o_col = static_cast<__half*>(output);
-    }
-
+    const auto* a_h = static_cast<const __half*>(A);
     const auto* b_u = static_cast<const uint8_t*>(B);
     const auto* s_h = static_cast<const __half*>(scales);
     const auto* z_u = static_cast<const uint8_t*>(zero_points);
     const auto* b_h = static_cast<const __half*>(bias);
+    auto*       o_h = static_cast<__half*>(output);
 
     int config_id = getOrTuneGemvConfig(
-        hip_stream, a_col, b_u, s_h, z_u, b_h, o_col,
+        hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
         M, N, K, 1, block_size, /*col_major=*/true);
 
     launchGemvConfig(config_id, hip_stream,
-                     a_col, b_u, s_h, z_u, b_h, o_col,
+                     a_h, b_u, s_h, z_u, b_h, o_h,
                      M, N, K, 1, block_size, /*col_major=*/true);
 
     hipError_t err = hipGetLastError();
@@ -1551,19 +1460,6 @@ extern "C" int hip_matmul_nbits(
               "[custom_kernels] hip_matmul_nbits GEMV col-major launch "
               "failed: %s\n",
               hipGetErrorString(err));
-      return static_cast<int>(err);
-    }
-
-    // Col-major output -> row-major (skip if M==1)
-    if (M > 1) {
-      launchTranspose2DFp16(hip_stream, o_col, output, iN, iM);
-      err = hipGetLastError();
-      if (err != hipSuccess) {
-        fprintf(stderr,
-                "[custom_kernels] hip_matmul_nbits GEMV out-transpose "
-                "failed: %s\n",
-                hipGetErrorString(err));
-      }
     }
     return static_cast<int>(err);
   }
