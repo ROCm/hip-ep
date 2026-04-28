@@ -52,7 +52,8 @@ inline constexpr const char *kHipTranspose = "hip_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kHipSilu = "hip_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
-    "wrap_miopenActivationForward"; // hip.sigmoid
+    "wrap_miopenActivationForward";                   // hip.sigmoid
+inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
 inline constexpr const char *kWrapMiopenOpTensor =
@@ -100,6 +101,8 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return 4; // HIPDNN_EP_DATATYPE_INT64
   if (elemType.isInteger(8))
     return 5; // HIPDNN_EP_DATATYPE_INT8
+  if (elemType.isF64())
+    return 6; // HIPDNN_EP_DATATYPE_DOUBLE
   return -1;
 }
 

@@ -109,6 +109,45 @@ int hip_elementwise_sqrt(
     int hip_dtype);
 
 /* =========================================================================
+ * Elementwise GELU (Gaussian Error Linear Unit)
+ * =========================================================================
+ *
+ * Element-wise GELU activation via HIP with support for exact and approximate modes.
+ *
+ * Approximate mode (approximate=1, tanh):
+ *   Formula: GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+ *   Standard approximation used in PyTorch, TensorFlow, and ONNX.
+ *
+ * Exact mode (approximate=0, erf, default):
+ *   Formula: GELU(x) = x * 0.5 * (1.0 + erf(x / sqrt(2.0)))
+ *   Matches ONNX Gelu operator spec exactly.
+ *
+ * Parameters:
+ *   stream       - hipStream_t cast to void*
+ *   input        - GPU pointer to input
+ *   output       - GPU pointer to output
+ *   num_elements - number of elements
+ *   hip_dtype    - data type (HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ *                  HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64)
+ *   approximate  - 0 for exact (erf), 1 for tanh approximation
+ *
+ * Supported data types (per ONNX spec):
+ *   - HIP_DTYPE_FLOAT32 (float32)
+ *   - HIP_DTYPE_FLOAT16 (float16)
+ *   - HIP_DTYPE_BFLOAT16 (bfloat16)
+ *   - HIP_DTYPE_FLOAT64 (double/float64)
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_elementwise_gelu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype,
+    int64_t approximate);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *

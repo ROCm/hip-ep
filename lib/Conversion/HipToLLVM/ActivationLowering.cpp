@@ -132,6 +132,90 @@ struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
   }
 };
 
+// hip.gelu(ctx, input, output)
+//   -> wrap_gelu(state, input, output, num_elements, data_type, approximate)
+// Uses custom HIP kernel (hip_elementwise_gelu) instead of MIOpen.
+// Supports static and dynamic shapes (computes num_elements at runtime).
+// Supports data types: f32, f16, bf16, f64 (per ONNX Gelu spec).
+// Supports approximate modes: "none" (erf) and "tanh".
+struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GeluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    // Helper to create i64 constants
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    // Extract pointers
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+
+    // Compute num_elements (supports dynamic shapes)
+    Value numElements = createI64Const(1);
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
+      Value dimSize;
+      if (outputType.isDynamicDim(dimIdx)) {
+        dimSize = outputDesc.size(rewriter, loc, dimIdx);
+      } else {
+        dimSize = createI64Const(outputType.getDimSize(dimIdx));
+      }
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
+    }
+
+    // Get data type enum (f32=0, f16=1, bf16=2, i32=3, i64=4, i8=5, f64=6)
+    Type elemType = outputType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+
+    // Validate: only f32, f16, bf16, f64 are supported (per ONNX Gelu spec)
+    if (dataType < 0 || (dataType > 2 && dataType != 6)) {
+      std::string errorMsg;
+      llvm::raw_string_ostream os(errorMsg);
+      os << "unsupported element type '" << elemType
+         << "' for GELU. Only f32, f16, bf16, and f64 are supported";
+      return rewriter.notifyMatchFailure(op, os.str());
+    }
+
+    Value dataTypeVal = createI64Const(dataType);
+
+    // Get approximate mode: "none" -> 0, "tanh" -> 1
+    std::string approximateStr = op.getApproximate().str();
+    int64_t approximateMode = (approximateStr == "tanh") ? 1 : 0;
+    Value approximateModeVal = createI64Const(approximateMode);
+
+    // int wrap_gelu(RuntimeState* state, void* input, void* output,
+    //               int64_t num_elements, int64_t data_type, int64_t approximate)
+    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, i64Type};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapGelu, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 6> args = {statePtr, inputPtr, outputPtr, numElements,
+                                  dataTypeVal, approximateModeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.silu(handle, input, output)
 struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -207,8 +291,8 @@ struct MiopenSoftmaxOpLowering
 
 void mlir::hip::populateActivationLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.add<SigmoidOpLowering, SoftplusOpLowering, SiluOpLowering,
-               MiopenSoftmaxOpLowering>(converter);
+  patterns.add<SigmoidOpLowering, SoftplusOpLowering, GeluOpLowering,
+               SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip

@@ -765,6 +765,42 @@ def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
   }];
 }
 
+def Hip_GeluOp : Hip_DpsOp<"gelu"> {
+  let summary = "GELU activation (Gaussian Error Linear Unit)";
+  let description = [{
+    Applies the GELU activation function element-wise.
+    Implements the ONNX Gelu operator with support for both exact and approximate modes.
+
+    Approximate mode (approximate="tanh"):
+      Y ≈ 0.5 * X * (1 + tanh(sqrt(2/π) * (X + 0.044715 * X³)))
+
+    Exact mode (approximate="none", default):
+      Y = X * 0.5 * (1.0 + erf(X / sqrt(2.0)))
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.gelu(%ctx) ins(%x : memref<1x128x768xf16, 1>)
+                   outs(%y : memref<1x128x768xf16, 1>)
+                   {approximate = "tanh"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$approximate
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal"> {
   let summary = "Element-wise reciprocal: y = 1/x";
   let description = [{
