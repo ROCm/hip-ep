@@ -139,8 +139,8 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
 
 /// Fail conversion when delta is a compile-time constant equal to zero (ORT
 /// INVALID_ARGUMENT parity).
-static LogicalResult verifyConstantDeltaNonZero(Operation *op, Value deltaTensor,
-                                                Type elemTy) {
+static LogicalResult
+verifyConstantDeltaNonZero(Operation *op, Value deltaTensor, Type elemTy) {
   auto cst = deltaTensor.getDefiningOp<arith::ConstantOp>();
   if (!cst)
     return success();
