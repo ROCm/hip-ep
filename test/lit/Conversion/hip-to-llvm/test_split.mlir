@@ -15,4 +15,3 @@ module {
     return %out : memref<1x2xf32, 1>
   }
 }
-

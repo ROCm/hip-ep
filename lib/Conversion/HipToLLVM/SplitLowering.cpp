@@ -34,12 +34,11 @@ struct SplitOpLowering : public ConvertOpToLLVMPattern<SplitOp> {
     Value dataPtr = extractMemRefPtr(adaptor.getData(), rewriter, loc);
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
-    Value inputAxisDim =
-        getMemRefDimSize(dataType, static_cast<unsigned>(axis), adaptor.getData(),
-                         rewriter, loc);
-    Value outputAxisDim = getMemRefDimSize(
-        outputType, static_cast<unsigned>(axis), adaptor.getOutput(), rewriter,
-        loc);
+    Value inputAxisDim = getMemRefDimSize(dataType, static_cast<unsigned>(axis),
+                                          adaptor.getData(), rewriter, loc);
+    Value outputAxisDim =
+        getMemRefDimSize(outputType, static_cast<unsigned>(axis),
+                         adaptor.getOutput(), rewriter, loc);
 
     auto createI64 = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
@@ -48,10 +47,10 @@ struct SplitOpLowering : public ConvertOpToLLVMPattern<SplitOp> {
 
     Value innerSize = createI64(1);
     for (int64_t d = axis + 1; d < rank; ++d) {
-      innerSize =
-          LLVM::MulOp::create(rewriter, loc, innerSize,
-                              getMemRefDimSize(dataType, static_cast<unsigned>(d),
-                                               adaptor.getData(), rewriter, loc));
+      innerSize = LLVM::MulOp::create(
+          rewriter, loc, innerSize,
+          getMemRefDimSize(dataType, static_cast<unsigned>(d),
+                           adaptor.getData(), rewriter, loc));
     }
 
     Value outputNumElements =
@@ -77,10 +76,9 @@ struct SplitOpLowering : public ConvertOpToLLVMPattern<SplitOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 10> args = {statePtr,       dataPtr, outputPtr, axisVal,
-                                   offsetVal,      inputAxisDim, outputAxisDim,
-                                   innerSize,      outputNumElements,
-                                   elemSizeVal};
+    SmallVector<Value, 10> args = {
+        statePtr,     dataPtr,       outputPtr, axisVal,           offsetVal,
+        inputAxisDim, outputAxisDim, innerSize, outputNumElements, elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -90,11 +88,10 @@ struct SplitOpLowering : public ConvertOpToLLVMPattern<SplitOp> {
 
 } // namespace
 
-void mlir::hip::populateSplitLoweringPatterns(const LLVMTypeConverter &converter,
-                                              RewritePatternSet &patterns) {
+void mlir::hip::populateSplitLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<SplitOpLowering>(converter);
 }
 
 } // namespace hip
 } // namespace mlir
-

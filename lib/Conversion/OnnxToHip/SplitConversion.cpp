@@ -9,8 +9,8 @@ namespace mlir {
 namespace hip {
 namespace {
 
-static LogicalResult
-extractConstI64Vector(Value splitOperand, SmallVectorImpl<int64_t> &values) {
+static LogicalResult extractConstI64Vector(Value splitOperand,
+                                           SmallVectorImpl<int64_t> &values) {
   if (!splitOperand)
     return failure();
 
@@ -41,7 +41,8 @@ static Value createSplitInitTensor(PatternRewriter &rewriter, Location loc,
     if (!outputType.isDynamicDim(i))
       continue;
     if (i == axis) {
-      dynSizes.push_back(arith::ConstantIndexOp::create(rewriter, loc, splitSize));
+      dynSizes.push_back(
+          arith::ConstantIndexOp::create(rewriter, loc, splitSize));
     } else {
       dynSizes.push_back(tensor::DimOp::create(rewriter, loc, data, i));
     }
@@ -93,7 +94,8 @@ struct SplitToHip : public RewritePattern {
       }
     }
 
-    if (hasSplitOperand && static_cast<int64_t>(splitSizes.size()) != numOutputs)
+    if (hasSplitOperand &&
+        static_cast<int64_t>(splitSizes.size()) != numOutputs)
       return rewriter.notifyMatchFailure(
           op, "split lengths count must equal number of outputs");
 
@@ -128,7 +130,8 @@ struct SplitToHip : public RewritePattern {
     for (int64_t i = 0; i < numOutputs; ++i) {
       int64_t splitSize = splitSizes[i];
       if (splitSize < 0)
-        return rewriter.notifyMatchFailure(op, "split size must be non-negative");
+        return rewriter.notifyMatchFailure(op,
+                                           "split size must be non-negative");
 
       auto resultType = dyn_cast<RankedTensorType>(op->getResult(i).getType());
       if (!resultType)
@@ -140,12 +143,12 @@ struct SplitToHip : public RewritePattern {
             op, "result axis dimension mismatch with split size");
       }
 
-      Value init =
-          createSplitInitTensor(rewriter, loc, data, resultType, axis, splitSize);
-      auto splitOp = hip::SplitOp::create(
-          rewriter, loc, resultType, context, data, init,
-          rewriter.getI64IntegerAttr(axis),
-          rewriter.getI64IntegerAttr(currentOffset));
+      Value init = createSplitInitTensor(rewriter, loc, data, resultType, axis,
+                                         splitSize);
+      auto splitOp =
+          hip::SplitOp::create(rewriter, loc, resultType, context, data, init,
+                               rewriter.getI64IntegerAttr(axis),
+                               rewriter.getI64IntegerAttr(currentOffset));
       newResults.push_back(splitOp->getResult(0));
       currentOffset += splitSize;
     }
@@ -164,4 +167,3 @@ void mlir::hip::populateSplitConversionPatterns(RewritePatternSet &patterns,
 
 } // namespace hip
 } // namespace mlir
-

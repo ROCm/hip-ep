@@ -29,11 +29,9 @@ int wrap_split(RuntimeState *state, void *data, void *output, int64_t axis,
       "-> calling hip_split\n",
       (long long)axis, (long long)offset, (long long)input_axis_dim,
       (long long)output_axis_dim, (long long)inner_size,
-      (long long)output_num_elements,
-      (long long)element_size_bytes);
+      (long long)output_num_elements, (long long)element_size_bytes);
 
   return hip_split(stream, data, output, axis, offset, input_axis_dim,
                    output_axis_dim, inner_size, output_num_elements,
                    element_size_bytes);
 }
-

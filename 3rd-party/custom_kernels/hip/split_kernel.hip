@@ -112,4 +112,3 @@ extern "C" int hip_split(void *stream, const void *data, void *output,
   }
   return static_cast<int>(err);
 }
-
