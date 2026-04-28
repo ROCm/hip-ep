@@ -339,9 +339,8 @@ static void perf_aggregate_one(unsigned idx, const PerfPending &p,
     fprintf(stderr,
             "[PERF] inference #%u%s:  Wall %.3f ms  (GPU %.3f ms = "
             "H2D %.3f + Compute %.3f + D2H %.3f, %s %.3f)\n",
-            idx + 1,
-            idx < hipdnn_ep_perf_warmup_count() ? " [warmup]" : "", wall_ms,
-            gpu_ms, (double)h2d_ms, (double)compute_ms, (double)d2h_ms,
+            idx + 1, idx < hipdnn_ep_perf_warmup_count() ? " [warmup]" : "",
+            wall_ms, gpu_ms, (double)h2d_ms, (double)compute_ms, (double)d2h_ms,
             delta_ms >= 0.0 ? "Other" : "Overlap",
             delta_ms >= 0.0 ? delta_ms : -delta_ms);
   }
@@ -362,9 +361,9 @@ static void perf_drain_and_aggregate() {
 
   for (size_t i = 0; i < g_perf_queue.size(); ++i) {
     auto &p = g_perf_queue[i];
-    double wall_ms = std::chrono::duration<double, std::milli>(p.host_end -
-                                                                p.host_start)
-                          .count();
+    double wall_ms =
+        std::chrono::duration<double, std::milli>(p.host_end - p.host_start)
+            .count();
     if (wall_ms < 0.0)
       wall_ms = 0.0;
 
@@ -382,8 +381,8 @@ static void perf_drain_and_aggregate() {
     if (d2h_ms < 0.0f)
       d2h_ms = 0.0f;
 
-    perf_aggregate_one(static_cast<unsigned>(i), p, wall_ms, h2d_ms,
-                       compute_ms, d2h_ms);
+    perf_aggregate_one(static_cast<unsigned>(i), p, wall_ms, h2d_ms, compute_ms,
+                       d2h_ms);
 
     // Recycle events back to the pool for reuse.
     perf_release_event(p.h2d_start);
@@ -395,7 +394,8 @@ static void perf_drain_and_aggregate() {
 }
 
 // Print one aggregate block. Internal helper used by perf_print_aggregate().
-static void perf_print_one_aggregate(const char *label, const PerfAggregate &a) {
+static void perf_print_one_aggregate(const char *label,
+                                     const PerfAggregate &a) {
   if (a.count == 0)
     return;
   double n = static_cast<double>(a.count);
@@ -460,8 +460,7 @@ static void perf_print_aggregate() {
                 g_perf_session_index);
   perf_print_one_aggregate(header, g_perf_warmup_agg);
   std::snprintf(header, sizeof(header),
-                "session #%u STEADY-STATE (post-warmup)",
-                g_perf_session_index);
+                "session #%u STEADY-STATE (post-warmup)", g_perf_session_index);
   perf_print_one_aggregate(header, g_perf_steady_agg);
 
   g_perf_warmup_agg = PerfAggregate{};
@@ -520,54 +519,145 @@ static void pool_release(void *ptr, size_t size_bytes) {
 }
 
 //===----------------------------------------------------------------------===//
-// I/O Cache: skip H2D + D2H for `past_present_share_buffer` tensors (PERF)
+// I/O Cache: skip H2D + (steady-decode) D2H for rank-4 KV tensors
 //===----------------------------------------------------------------------===//
-// PERF-VERIFICATION MODE: skips both H2D and D2H on cache_claim. This is
-// faster than the correct PIN+D2H variant but produces incorrect outputs
-// in OGA's chunked decoder pipeline because each compiled MLIR DLL has
-// its own copy of the file-scope statics below -- prefill's installs are
-// invisible to decode and vice versa. Use only to put a number on the
-// upper bound of what an I/O cache could buy.
+// CORRECT VARIANT (PIN+selective-D2H, rank-4 only, per-state).
 //
-// Architecture: process-global cache (one shared map keyed by host_ptr),
-// with per-state refcount tracking so persistent buffers are reclaimed
-// when the last referencing state is destroyed.
+// OGA with past_present_share_buffer=true passes the same host OrtValue
+// as both the "past_key_N" input and the "present_key_N" output. Without
+// a cache the runtime copies that buffer H2D at every prepare_input step.
+// For Mistral-7B at ctx=16384 that is ~2 GiB of redundant PCIe traffic
+// per token.
 //
-// Gate: HIPDNN_EP_IO_CACHE (default=ON, set to "0" to disable).
+// Design constraints for this variant:
+//   1. Cache only rank-4 tensors. OGA's KV cache tensors are shaped
+//      [batch, num_kv_heads, seq_len, head_size] (rank 4); all other
+//      inputs (input_ids, attention_mask, position_ids) are rank <=2 and
+//      intentionally not cached -- they change every step and their host
+//      contents must be read every time.
+//   2. Per-state. Each RuntimeState owns its own map; prefill's cache
+//      and decode's cache do not share. In OGA's chunked decoder
+//      pipeline prefill and decode load distinct MLIR DLLs so the caches
+//      would already be separate via file-scope statics, but keeping the
+//      cache inside the state makes that intent explicit (and still
+//      works correctly if multiple states share a DLL).
+//   3. First use reads from host (CPU source of truth). The cache
+//      installs a GPU buffer only on cache_claim (input/output alias);
+//      a session that has not yet seen the host_ptr MISSes, pool_allocs,
+//      and H2Ds.
+//
+// Correctness invariant: D2H runs whenever the host buffer is the
+// downstream source of truth, and H2D runs whenever the host buffer may
+// have been mutated between calls. Concretely:
+//   * Prefill calls ALWAYS do both H2D and D2H on rank-4 cache_claim
+//     outputs (cache serves only as an allocation reuse mechanism --
+//     no bandwidth savings). Rationale: in chat mode the prompt is
+//     split into multiple prefill chunks that may span many turns, and
+//     OGA can freely mutate the KV host buffers between chunks (KV
+//     trimming, sliding-window rotation, new-turn prompt ingestion).
+//     Skipping either direction would desync host and GPU.
+//   * Decode calls skip H2D on rank-4 cache HITs (GPU is authoritative
+//     in steady state) and skip D2H when every rank-4 input was a HIT
+//     (the session hands KV off to itself via the cache, no external
+//     observer reads the host buffer). The first decode call of each
+//     generator is all-MISS (gen-boundary GC cleared the previous
+//     generator's entries), so H2D runs to pull prefill's output into
+//     the cache and D2H runs to preserve the invariant cheaply.
+//
+// The net effect: prefill -> decode handoff, chunked-prefill correctness,
+// and multi-turn chat all stay correct; logits are identical to the no-
+// cache path; steady-state decode still avoids ~2 GiB of H2D+D2H
+// traffic per token.
+//
+// Prefill vs decode detection: at prepare_input(idx==0) we pick the
+// smallest last-dim across rank>=2 non-KV inputs. Decode always has a
+// rank>=2 input with last_dim == 1 (input_ids / position_ids carry one
+// new token); prefill's corresponding inputs carry the chunk so their
+// last_dim is chunk_size > 1. This is model-agnostic for GenAI-style
+// decoder pipelines; ambiguous cases default to prefill (the safe
+// choice -- just turns off the skip, no correctness risk).
+//
+// Operations:
+//   - prepare_input(idx==0):
+//       * Build the alive set (current_inputs) from ALL of this call's
+//         rank-4 inputs. Non-rank-4 inputs are not tracked since they
+//         are never cached.
+//       * Generation-boundary GC: any cache entry whose host_ptr is NOT
+//         in current_inputs is stale (the previous OgaGenerator's KV
+//         buffers were freed). hipStreamSynchronize and hipFree them so
+//         VRAM actually returns to the OS before this call allocates.
+//       * Mode detection: is_prefill := min rank>=2 non-KV last_dim > 1.
+//       * Steady-decode detection: skip_rank4_d2h := !is_prefill AND
+//         every rank-4 input is already in the cache (all HITs).
+//         Consumed by finalize_output.
+//   - prepare_input (per-tensor):
+//       * If tensor->rank != 4: skip the cache, pool_alloc + H2D as
+//         before.
+//       * If tensor->rank == 4: look up host_ptr in this state's cache.
+//           HIT in decode : reuse gpu_ptr, skip H2D.
+//           HIT in prefill: reuse gpu_ptr, RUN H2D (host may have
+//                           changed between chunks / turns).
+//           MISS          : pool_alloc + H2D.
+//   - finalize_output:
+//       * cache_claim = (rank == 4) && (host_ptr in current_inputs).
+//       * Skip D2H when cache_claim && skip_rank4_d2h (decode steady
+//         state only); otherwise run it. Prefill forces D2H via
+//         skip_rank4_d2h=false.
+//       * On cache_claim install (host_ptr -> gpu_ptr) in this state's
+//         cache. Otherwise pool_release.
+//   - free_input:
+//       * If this state's cache now holds (host_ptr, gpu_ptr), leave it
+//         alone. Otherwise pool_release.
+//   - state_cleanup:
+//       * hipFree every entry's GPU buffer (stream was already synced by
+//         hipdnn_ep_state_cleanup).
+//
+// Gate: HIPDNN_EP_IO_CACHE (default=ON, set to "0" to disable for A/B
+// comparisons against the no-cache path).
 
 struct IoCacheEntry {
   void *gpu_ptr;
   size_t size_bytes;
 };
 
-// Process-global cache: keyed by host_ptr. Owns the pinned GPU buffers.
-// "Process-global" is aspirational -- because the runtime is statically
-// linked into each MLIR-compiled DLL, each DLL gets its own copy of these
-// statics. That's why this mode produces wrong output in chunked
-// pipelines; see header comment.
-static std::unordered_map<const void *, IoCacheEntry> g_io_cache_persistent;
-
-// Refcount keyed by host_ptr. One reference per RuntimeState that has
-// observed the host_ptr as an input. Decremented on state_cleanup; the
-// persistent entry is freed when count hits zero.
-static std::unordered_map<const void *, int> g_io_cache_refcount;
-
-// Per-state tracker: history of host_ptrs we've refcount-bumped (so we
-// can decrement on cleanup) and the alive set for the current call (so
-// finalize_output can detect input/output aliasing).
+// Per-state cache. Keyed by host_ptr; one map per RuntimeState.
 struct IoCache {
-  std::unordered_set<const void *> tracked_keys;
+  std::unordered_map<const void *, IoCacheEntry> entries;
+  // Alive set of rank-4 input host pointers for the in-flight call.
+  // Refreshed at prepare_input(idx==0) and consumed by finalize_output to
+  // detect input/output aliasing (cache_claim).
   std::unordered_set<const void *> current_inputs;
+  // True when this call looks like prefill (multi-token input chunk).
+  // Determined at prepare_input(idx==0) from input shapes: decode always
+  // has at least one rank>=2 non-KV input with last_dim == 1 (the single
+  // new token), while prefill carries the chunk so min last_dim > 1.
+  // Prefill forces both H2D (host may have been mutated since last
+  // call) and D2H (hand off correct KV to the next prefill chunk /
+  // decode / turn) on rank-4 cache_claim outputs. Default is prefill
+  // (safe: just turns off the skip, no correctness risk).
+  bool is_prefill = true;
+  // True when EVERY rank-4 input of this call was already in the cache
+  // (all HITs, post gen-boundary GC) AND this call is decode. That only
+  // happens once this state has been running its own decode loop --
+  // every prefill call, the first call of every new generator, and any
+  // call with a fresh rank-4 input leave this false. When true,
+  // finalize_output can skip D2H for rank-4 cache_claim outputs: the
+  // decode session hands off to itself via the cache, and no external
+  // observer reads the host KV buffer in that steady state, so keeping
+  // the host buffer in sync is pure bandwidth waste. Computed at
+  // prepare_input(idx==0).
+  bool skip_rank4_d2h = false;
 };
 
 static bool io_cache_enabled() {
-  // Read once at process startup, log the resolved state to stderr so it is
-  // visible in benchmark logs alongside other runtime toggles.
+  // Read once at process startup, log the resolved state to stderr so it
+  // is visible in benchmark logs alongside other runtime toggles.
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_IO_CACHE");
     bool on = !v || v[0] != '0';
     fprintf(stderr,
-            "[Runtime] HIPDNN_EP_IO_CACHE=%s (I/O cache %s, mode=global)\n",
+            "[Runtime] HIPDNN_EP_IO_CACHE=%s (I/O cache %s, "
+            "mode=pin+d2h, rank-4 only, per-state)\n",
             v ? v : "<unset>", on ? "ENABLED" : "DISABLED");
     return on;
   }();
@@ -582,84 +672,67 @@ static IoCache *io_cache_get(RuntimeState *state) {
   return static_cast<IoCache *>(state->io_cache);
 }
 
-// Bump the global refcount for host_ptr the first time this state sees it.
-// Idempotent on repeat calls within the same state.
-static void io_cache_track(IoCache *cache, const void *host_ptr) {
-  if (!cache || !host_ptr)
-    return;
-  if (cache->tracked_keys.insert(host_ptr).second) {
-    g_io_cache_refcount[host_ptr]++;
-  }
-}
-
-// Look up a host_ptr in the global cache. Returns the entry on HIT; on
-// size mismatch, evicts the stale entry (returning its GPU buffer to the
-// pool) and returns nullptr (caller will alloc + H2D).
-static const IoCacheEntry *io_cache_lookup(const void *host_ptr,
+// Look up a host_ptr in this state's cache. Returns the entry on HIT; on
+// size mismatch, evicts the stale entry (hipFree) and returns nullptr
+// (the caller will pool_alloc + H2D).
+static const IoCacheEntry *io_cache_lookup(IoCache *cache, const void *host_ptr,
                                            size_t size_bytes) {
-  if (!host_ptr)
+  if (!cache || !host_ptr)
     return nullptr;
-  auto it = g_io_cache_persistent.find(host_ptr);
-  if (it == g_io_cache_persistent.end())
+  auto it = cache->entries.find(host_ptr);
+  if (it == cache->entries.end())
     return nullptr;
   if (it->second.size_bytes != size_bytes) {
     RUNTIME_DEBUG_LOG(
         "[Runtime DEBUG] io_cache EVICT (size change) host=%p gpu=%p "
         "old_size=%zu new_size=%zu\n",
         host_ptr, it->second.gpu_ptr, it->second.size_bytes, size_bytes);
-    pool_release(it->second.gpu_ptr, it->second.size_bytes);
-    g_io_cache_persistent.erase(it);
+    hipFree(it->second.gpu_ptr);
+    cache->entries.erase(it);
     return nullptr;
   }
   return &it->second;
 }
 
-// Install/overwrite a global cache entry. The OLD gpu_ptr (if any) is NOT
-// pool_released here: it is still referenced by THIS call's input
-// TensorBuffer at install time, and free_input will release it (its
-// gpu_ptr no longer matches the cache).
-static void io_cache_install(const void *host_ptr, void *gpu_ptr,
-                             size_t size_bytes) {
-  g_io_cache_persistent[host_ptr] = IoCacheEntry{gpu_ptr, size_bytes};
+// Install/overwrite a cache entry in this state's cache. The OLD gpu_ptr
+// (if any) is NOT released here: it is still referenced by THIS call's
+// input TensorBuffer at install time, and free_input releases it (its
+// gpu_ptr no longer matches the cache's new entry).
+static void io_cache_install(IoCache *cache, const void *host_ptr,
+                             void *gpu_ptr, size_t size_bytes) {
+  if (!cache)
+    return;
+  cache->entries[host_ptr] = IoCacheEntry{gpu_ptr, size_bytes};
 }
 
-// True iff the global cache currently holds gpu_ptr under host_ptr. Used
-// by free_input to decide whether the cache still owns the buffer.
-static bool io_cache_owns(const void *host_ptr, const void *gpu_ptr) {
-  if (!host_ptr || !gpu_ptr)
+// True iff this state's cache currently holds gpu_ptr under host_ptr.
+// Used by free_input to decide whether the cache still owns the buffer
+// (skip release) or has moved on (pool_release).
+static bool io_cache_owns(IoCache *cache, const void *host_ptr,
+                          const void *gpu_ptr) {
+  if (!cache || !host_ptr || !gpu_ptr)
     return false;
-  auto it = g_io_cache_persistent.find(host_ptr);
-  return it != g_io_cache_persistent.end() && it->second.gpu_ptr == gpu_ptr;
+  auto it = cache->entries.find(host_ptr);
+  return it != cache->entries.end() && it->second.gpu_ptr == gpu_ptr;
 }
 
 // Invoked from hipdnn_ep_state_cleanup via runtime_state_internal.h.
-// Decrements the global refcount for every host_ptr this state tracked.
-// When the last reference is dropped, the persistent GPU entry (if any)
-// is pool_released.
+// Releases every cached GPU buffer. hipFree (not pool_release) because
+// at state teardown there is no later consumer within this DLL; we want
+// VRAM to return to the OS, not sit in an orphaned pool.
 //
-// Caller MUST have synchronized this state's stream first so no in-flight
-// kernel still references the buffers we are about to release. (See
+// Caller MUST have synchronized this state's stream first so no
+// in-flight kernel still references the buffers. (See
 // hipdnn_ep_state_cleanup which calls hipStreamSynchronize before us.)
 void hipdnn_ep_io_cache_destroy(RuntimeState *state) {
   if (!state || !state->io_cache)
     return;
   auto *cache = static_cast<IoCache *>(state->io_cache);
-  for (const void *host_ptr : cache->tracked_keys) {
-    auto rc_it = g_io_cache_refcount.find(host_ptr);
-    if (rc_it == g_io_cache_refcount.end())
-      continue;
-    if (--rc_it->second <= 0) {
-      auto p_it = g_io_cache_persistent.find(host_ptr);
-      if (p_it != g_io_cache_persistent.end()) {
-        RUNTIME_DEBUG_LOG(
-            "[Runtime DEBUG] io_cache GC host=%p gpu=%p size=%zu "
-            "(last referencing state destroyed)\n",
-            host_ptr, p_it->second.gpu_ptr, p_it->second.size_bytes);
-        pool_release(p_it->second.gpu_ptr, p_it->second.size_bytes);
-        g_io_cache_persistent.erase(p_it);
-      }
-      g_io_cache_refcount.erase(rc_it);
-    }
+  for (const auto &kv : cache->entries) {
+    RUNTIME_DEBUG_LOG("[Runtime DEBUG] io_cache GC host=%p gpu=%p size=%zu "
+                      "(state destroyed)\n",
+                      kv.first, kv.second.gpu_ptr, kv.second.size_bytes);
+    hipFree(kv.second.gpu_ptr);
   }
   delete cache;
   state->io_cache = nullptr;
@@ -876,37 +949,38 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     hipdnn_ep::op_profile_flush_inference();
   }
 
-  // I/O cache lookup (past_present_share_buffer fast-path). On the first
-  // input of a call, refresh the alive set of host pointers so
-  // finalize_output can detect input/output aliasing, and refcount-track
-  // each host_ptr in the global cache for GC on state cleanup.
+  // I/O cache plumbing (past_present_share_buffer fast-path, rank-4 only).
+  // On the first input of a call, refresh the alive set from THIS call's
+  // rank-4 inputs so finalize_output can detect cache_claim (input/output
+  // aliasing) and so the generation-boundary sweep below knows which
+  // host_ptrs are still live.
   IoCache *io_cache = io_cache_enabled() ? io_cache_get(state) : nullptr;
   if (io_cache && index == 0) {
     io_cache->current_inputs.clear();
     io_cache->current_inputs.reserve(inputs->count);
     for (size_t i = 0; i < inputs->count; ++i) {
-      if (inputs->data[i].data) {
-        io_cache->current_inputs.insert(inputs->data[i].data);
-        io_cache_track(io_cache, inputs->data[i].data);
+      const tensor_t &t = inputs->data[i];
+      if (t.data && t.rank == 4) {
+        io_cache->current_inputs.insert(t.data);
       }
     }
 
     // Generation-boundary GC: when OGA recreates a generator the KV host
     // buffers from the previous generator are freed and a fresh set is
-    // passed in. The persistent cache still holds 64 entries keyed by the
-    // now-freed host pointers, each pinning a 32 MiB GPU buffer. Without
-    // this sweep those entries accumulate every iteration (2 GiB per DLL
-    // per iteration) and OOM by iter 1.
+    // passed in. The cache still holds 32 entries (per rank-4 input)
+    // keyed by the now-freed host pointers, each pinning a 32 MiB GPU
+    // buffer. Without this sweep those entries accumulate every
+    // iteration (~1 GiB per session per iteration) and OOM a few iters
+    // in.
     //
-    // Any persistent entry whose host_ptr is NOT in this call's alive set
-    // is stale: hipFree the GPU buffer (return it to the OS, not the pool
-    // -- the pool is per-size-class and would just hold the buffer
-    // indefinitely) and erase the bookkeeping. We must sync the stream
-    // first because the previous call's main_graph may still be writing
-    // to the cached output buffer (cache_claim path skips D2H, so there
-    // is no implicit sync from a finalize_output hipMemcpyAsync either).
+    // Any cache entry whose host_ptr is NOT in this call's rank-4 alive
+    // set is stale: hipFree the GPU buffer (return VRAM to the OS; the
+    // per-size-class pool would just hold it indefinitely) and erase
+    // the bookkeeping. We must hipStreamSynchronize first because the
+    // previous call's main_graph may still be writing to the cached
+    // output buffer when we enter this new call.
     std::vector<const void *> stale_keys;
-    for (const auto &kv : g_io_cache_persistent) {
+    for (const auto &kv : io_cache->entries) {
       if (io_cache->current_inputs.count(kv.first) == 0) {
         stale_keys.push_back(kv.first);
       }
@@ -916,35 +990,86 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
         hipStreamSynchronize(static_cast<hipStream_t>(state->stream));
       }
       for (const void *key : stale_keys) {
-        auto it = g_io_cache_persistent.find(key);
-        if (it != g_io_cache_persistent.end()) {
+        auto it = io_cache->entries.find(key);
+        if (it != io_cache->entries.end()) {
           RUNTIME_DEBUG_LOG(
               "[Runtime DEBUG] io_cache GC (gen boundary) host=%p gpu=%p "
               "size=%zu\n",
               key, it->second.gpu_ptr, it->second.size_bytes);
           hipFree(it->second.gpu_ptr);
-          g_io_cache_persistent.erase(it);
+          io_cache->entries.erase(it);
         }
-        g_io_cache_refcount.erase(key);
-        io_cache->tracked_keys.erase(key);
       }
     }
+
+    // Prefill vs decode detection: decode always has at least one
+    // rank>=2 non-KV input with last_dim == 1 (input_ids / position_ids
+    // carry a single new token), while prefill's corresponding inputs
+    // carry a chunk so min last_dim > 1. Skip rank-0 / rank-1 inputs
+    // (scalars / step-length) since they do not distinguish, and skip
+    // rank-4 inputs (KV slabs are shaped to max_seq in both modes).
+    // Default to prefill on ambiguity -- prefill semantics are strictly
+    // safer (no skip), just slower.
+    int64_t min_last_dim = -1;
+    for (size_t i = 0; i < inputs->count; ++i) {
+      const tensor_t &t = inputs->data[i];
+      if (!t.data || !t.shape || t.rank < 2 || t.rank == 4)
+        continue;
+      int64_t last = t.shape[t.rank - 1];
+      if (min_last_dim < 0 || last < min_last_dim)
+        min_last_dim = last;
+    }
+    io_cache->is_prefill = (min_last_dim != 1);
+
+    // Steady-decode detection: true iff this call is decode AND every
+    // rank-4 input of this call is already in the cache (post-GC). In
+    // that state the session is running its own decode loop and
+    // finalize_output may skip D2H for rank-4 cache_claim outputs.
+    // False on any MISS, on prefill (every call, across all turns and
+    // chunks), and on the first decode call of each new generator.
+    bool all_hit = !io_cache->current_inputs.empty();
+    for (const void *host_ptr : io_cache->current_inputs) {
+      if (io_cache->entries.find(host_ptr) == io_cache->entries.end()) {
+        all_hit = false;
+        break;
+      }
+    }
+    io_cache->skip_rank4_d2h = all_hit && !io_cache->is_prefill;
   }
 
+  // Only rank-4 tensors (KV slabs) are cached. Everything else takes the
+  // MISS path below unconditionally: input_ids / attention_mask /
+  // position_ids change every step, and a stale cache HIT would break
+  // correctness.
+  //
+  // Two independent decisions on a rank-4 HIT:
+  //   gpu_from_cache: reuse the cached GPU buffer instead of pool_alloc
+  //                   (always true on HIT -- saves ~32 MiB / slab on
+  //                   every call and avoids alloc churn).
+  //   skip_h2d      : skip the host->device copy (only safe when this
+  //                   state owns the GPU data authoritatively, i.e.
+  //                   decode steady state). Prefill always re-copies
+  //                   because the host buffer may have been mutated
+  //                   since the last call (chat-turn rotation, chunk
+  //                   handoff, OGA-side KV trimming).
   void *gpu_ptr = nullptr;
-  bool cache_hit = false;
-  if (io_cache) {
-    if (const auto *entry = io_cache_lookup(tensor->data, size_bytes)) {
+  bool gpu_from_cache = false;
+  bool skip_h2d = false;
+  if (io_cache && tensor->rank == 4) {
+    if (const auto *entry =
+            io_cache_lookup(io_cache, tensor->data, size_bytes)) {
       gpu_ptr = entry->gpu_ptr;
-      cache_hit = true;
+      gpu_from_cache = true;
+      skip_h2d = !io_cache->is_prefill;
       RUNTIME_DEBUG_LOG(
           "[Runtime DEBUG] prepare_input[%zu]: io_cache HIT host=%p gpu=%p "
-          "size=%zu (skipping H2D)\n",
-          index, tensor->data, gpu_ptr, size_bytes);
+          "size=%zu (rank=4, H2D %s)\n",
+          index, tensor->data, gpu_ptr, size_bytes,
+          skip_h2d ? "skipped (decode)" : "forced (prefill)");
     }
   }
 
-  if (!cache_hit) {
+  if (!gpu_from_cache) {
     gpu_ptr = pool_alloc(size_bytes);
     if (!gpu_ptr) {
       fprintf(stderr,
@@ -952,22 +1077,22 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
               size_bytes);
       return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
     }
+  }
 
+  if (!skip_h2d) {
     // H2D transfer (instrumented; `io_h2d_input` shows up in the I/O table
     // when HIPDNN_EP_OP_PROFILE=1 along with bytes moved and bandwidth).
-    {
-      HIPDNN_EP_IO_PROFILE_SCOPE(state, "io_h2d_input", size_bytes);
-      if (hipMemcpyAsync(gpu_ptr, tensor->data, size_bytes,
-                         hipMemcpyHostToDevice,
-                         static_cast<hipStream_t>(state->stream)) !=
-          hipSuccess) {
-        fprintf(stderr,
-                "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
+    HIPDNN_EP_IO_PROFILE_SCOPE(state, "io_h2d_input", size_bytes);
+    if (hipMemcpyAsync(gpu_ptr, tensor->data, size_bytes, hipMemcpyHostToDevice,
+                       static_cast<hipStream_t>(state->stream)) != hipSuccess) {
+      fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
+      if (!gpu_from_cache) {
+        // Only free pool-allocated buffers on error; the cache still
+        // owns cached GPU buffers regardless of the H2D outcome.
         HIP_CLEANUP(hipFree(gpu_ptr));
-        return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
       }
+      return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
     }
-
     perf_count_h2d(size_bytes);
   }
 
@@ -1098,64 +1223,79 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
   int result = HIPDNN_EP_SUCCESS;
 
-  // I/O cache decision: if this output shares its host buffer with an
-  // input of the same call (past_present_share_buffer), PIN the GPU
-  // buffer in the global cache and SKIP D2H entirely. Wrong output for
-  // chunked pipelines (multi-DLL load splits the global) but fastest --
-  // intended for perf-bound verification only.
+  // I/O cache decision:
+  //   cache_claim: install in the state's cache iff caching is enabled,
+  //                this output is rank 4 (KV slab), AND its host_ptr
+  //                aliases an input of the same call
+  //                (past_present_share_buffer).
+  //   D2H skip  : additionally skip D2H iff cache_claim AND the state
+  //                is in steady-decode mode (decode call AND every
+  //                rank-4 input of this call was a cache HIT post
+  //                gen-boundary GC, see skip_rank4_d2h).
+  //                Rationale: in steady-decode, the session hands KV
+  //                off to itself on the next call via the cache, and
+  //                no other session reads the host buffer -- so D2H is
+  //                pure waste. Prefill ALWAYS runs D2H (is_prefill
+  //                forces skip_rank4_d2h=false) because the next prefill
+  //                chunk, the next chat turn, or the decode handoff all
+  //                read KV from the host buffer. The first decode call
+  //                of each new generator is all-MISS too, which forces
+  //                D2H there and keeps the invariant cheaply.
   IoCache *io_cache = io_cache_enabled() ? io_cache_get(state) : nullptr;
-  bool cache_claim =
-      io_cache && io_cache->current_inputs.count(buffer->host_ptr) > 0;
-
-  if (cache_claim) {
-    // PERF: still close out the inference cleanly. There's no real D2H,
-    // so re-record d2h markers on this very call so post-finalize
-    // host_end / aggregate Wall stay coherent for sparse-call models
-    // (e.g. the prompt model). d2h_ms will aggregate ~0 for claimed
-    // buffers, which is the intended behavior.
-    perf_record_d2h_start(state->stream);
-    perf_record_d2h_end(state->stream);
-    perf_touch_host_end();
-
-    io_cache_install(buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes);
-    RUNTIME_DEBUG_LOG(
-        "[Runtime DEBUG] finalize_output: io_cache PIN host=%p gpu=%p "
-        "size=%zu (D2H SKIPPED, global cache owns it)\n",
-        buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes);
-    buffer->gpu_ptr = nullptr; // cache now owns this GPU buffer
-    return result;
-  }
+  bool cache_claim = io_cache && buffer->rank == 4 &&
+                     io_cache->current_inputs.count(buffer->host_ptr) > 0;
+  bool skip_d2h = cache_claim && io_cache->skip_rank4_d2h;
 
   // PERF: D2H-start / Compute-end marker. Idempotent -- only the first
   // finalize of this inference actually queues the event.
   perf_record_d2h_start(state->stream);
 
-  // D2H transfer (async -- sync happens once after all outputs).
-  // Instrumented: shows up as `io_d2h_output` in the profiler I/O table.
-  {
+  if (!skip_d2h) {
+    // D2H transfer (async -- sync happens once after all outputs).
+    // Instrumented: shows up as `io_d2h_output` in the profiler I/O
+    // table.
     HIPDNN_EP_IO_PROFILE_SCOPE(state, "io_d2h_output", buffer->size_bytes);
     if (hipMemcpyAsync(buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes,
                        hipMemcpyDeviceToHost,
-                       static_cast<hipStream_t>(state->stream)) !=
-        hipSuccess) {
+                       static_cast<hipStream_t>(state->stream)) != hipSuccess) {
       fprintf(stderr,
               "hipdnn_ep_tensor_finalize_output: D2H transfer failed\n");
       result = HIPDNN_EP_ERR_D2H_TRANSFER_FAILED;
       // Continue to cleanup even on error (best-effort)
     }
+    perf_count_d2h(buffer->size_bytes);
   }
 
-  perf_count_d2h(buffer->size_bytes);
-  // Re-record d2h_end on the stream right after queueing the real D2H, and
-  // sample host_end. Both are last-write-wins, so after the LAST finalize
-  // of this inference d2h_end fires immediately after the final D2H copy
+  // Re-record d2h_end on the stream right after queueing the real D2H
+  // (or right here on the skip path), and sample host_end. Both are
+  // last-write-wins, so after the LAST finalize of this inference
+  // d2h_end fires immediately after the final D2H copy (or skip-marker)
   // and host_end pins to "right after the EP's last bookkeeping return".
   // This is what makes Wall and d2h_ms accurate for sparse-call models
   // (e.g. the prompt model in OGA's chunked decoder pipeline).
   perf_record_d2h_end(state->stream);
   perf_touch_host_end();
 
-  // Return buffer to pool (non-claimed outputs).
+  if (cache_claim) {
+    // Hand ownership of the GPU buffer to the cache. The PREVIOUS entry
+    // under this host_ptr (if any) was consumed as an input earlier in
+    // this call; free_input will pool_release it because its gpu_ptr
+    // no longer matches the cache's new entry.
+    io_cache_install(io_cache, buffer->host_ptr, buffer->gpu_ptr,
+                     buffer->size_bytes);
+    RUNTIME_DEBUG_LOG(
+        "[Runtime DEBUG] finalize_output: io_cache PIN host=%p gpu=%p "
+        "size=%zu (rank=4, D2H %s, cache owns it)\n",
+        buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes,
+        skip_d2h ? "SKIPPED (steady decode)"
+                 : (io_cache->is_prefill ? "ran (prefill)"
+                                         : "ran (decode first call)"));
+    buffer->gpu_ptr = nullptr; // cache now owns this GPU buffer
+    return result;
+  }
+
+  // Non-cached output (rank != 4 or host_ptr not in alive set): return
+  // the buffer to the pool.
   pool_release(buffer->gpu_ptr, buffer->size_bytes);
   buffer->gpu_ptr = nullptr;
 
@@ -1189,17 +1329,21 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
     return;
   }
 
-  // If the global I/O cache currently owns this exact GPU buffer under
-  // this host pointer, leave it alone -- it will serve as a future
-  // prepare_input HIT (in this session, or any session that happens to
-  // share the same statics). The cache owns the buffer's lifetime; it is
-  // released either when a later finalize_output overwrites the entry
-  // (the displaced gpu_ptr is pool_released here on the *next*
-  // free_input, since by then it no longer matches the cache) or when
-  // the last referencing state is destroyed (handled in
-  // hipdnn_ep_io_cache_destroy via refcount).
-  if (state && io_cache_enabled() && buffer->host_ptr && buffer->gpu_ptr) {
-    if (io_cache_owns(buffer->host_ptr, buffer->gpu_ptr)) {
+  // If THIS state's I/O cache currently owns this (host_ptr, gpu_ptr)
+  // pair, leave it alone -- it will serve as a future prepare_input HIT
+  // within this same state. The cache, not the per-call TensorBuffer,
+  // owns the buffer's lifetime; it is released either when a later
+  // finalize_output overwrites the entry (the displaced gpu_ptr is
+  // pool_released here on the *next* free_input, since by then it no
+  // longer matches the cache) or when the state is destroyed (handled
+  // in hipdnn_ep_io_cache_destroy).
+  //
+  // Only rank-4 buffers can be cached, so this check is skipped for
+  // scalar/rank-2/rank-3 inputs to avoid a pointless hashmap lookup.
+  if (state && state->io_cache && io_cache_enabled() && buffer->rank == 4 &&
+      buffer->host_ptr && buffer->gpu_ptr) {
+    auto *io_cache = static_cast<IoCache *>(state->io_cache);
+    if (io_cache_owns(io_cache, buffer->host_ptr, buffer->gpu_ptr)) {
       buffer->gpu_ptr = nullptr;
       return;
     }
