@@ -96,11 +96,47 @@ SoftplusToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Gelu -> hip.gelu
+struct GeluToHip : public mlir::RewritePattern {
+  GeluToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Gelu", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+GeluToHip::matchAndRewrite(mlir::Operation *op,
+                           mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Extract approximate attribute from ONNX op (default to "none")
+  mlir::StringAttr approximateAttr = rewriter.getStringAttr("none");
+  if (auto attr = op->getAttrOfType<mlir::StringAttr>("approximate")) {
+    approximateAttr = attr;
+  }
+
+  auto hipOp = mlir::hip::GeluOp::create(rewriter, loc, resultType, context,
+                                         input, init, approximateAttr);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 } // namespace
 
 void mlir::hip::populateActivationConversionPatterns(
     RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.add<SoftmaxToHip, SigmoidToHip, SoftplusToHip>(ctx);
+  patterns.add<SoftmaxToHip, SigmoidToHip, SoftplusToHip, GeluToHip>(ctx);
 }
 
 } // namespace hip

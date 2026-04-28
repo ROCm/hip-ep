@@ -35,6 +35,8 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
 #define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
 #define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
+#define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
+#define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
 
 //===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
@@ -76,6 +78,10 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 4;
   case HIPDNN_EP_DATATYPE_INT64:
     return 8;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return 1;
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return 8;
   default:
     return -1;
   }
@@ -93,6 +99,10 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "i32";
   case HIPDNN_EP_DATATYPE_INT64:
     return "i64";
+  case HIPDNN_EP_DATATYPE_INT8:
+    return "i8";
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return "f64";
   default:
     return "unknown";
   }
@@ -497,6 +507,13 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode);
+
+// GELU activation wrapper (uses custom HIP kernel)
+// Applies GELU element-wise with support for exact or approximate mode
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
+// approximate: 0 = exact (erf), 1 = tanh approximation
+int wrap_gelu(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type, int64_t approximate);
 
 // Rotary embedding operation wrapper
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
