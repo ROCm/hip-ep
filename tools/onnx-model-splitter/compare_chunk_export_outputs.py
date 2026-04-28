@@ -54,10 +54,6 @@ import numpy as np
 import onnx
 from onnx import TensorProto, numpy_helper
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
-
 PAST_KV_IO_RE = re.compile(r"^past_key_values\.\d+\.(?:key|value)$")
 PRESENT_IO_RE = re.compile(r"^present\.\d+\.(?:key|value)$")
 
@@ -181,9 +177,16 @@ def gqa_total_input_compare(
     ga: onnx.GraphProto,
     gb: onnx.GraphProto,
 ) -> list[str]:
-    """Compare GroupQueryAttention total slot (``export_chunk_model`` uses 0-based index 6)."""
+    """Compare GroupQueryAttention wiring for the **total sequence length** input slot.
+
+    This is **not** a generic GQA port detector: it follows the wiring contract produced by
+    ``export_chunk_model`` / chunk export in this repo. There, ``GroupQueryAttention`` exposes the
+    total-sequence tensor at **0-based input index 6** when the node has more than six inputs;
+    otherwise the same role is taken to be index **5**. If a graph uses a different op signature
+    (same input count but different semantics), this check may compare the wrong slot.
+    """
     errs: list[str] = []
-    # Total sequence length is wired to input index 6 when the graph has that slot.
+    # export_chunk_model chunk graphs: total-seq at index 6 when len(inputs) > 6, else 5.
     idx = 6 if len(na.input) > 6 and len(nb.input) > 6 else 5
     if len(na.input) <= idx or len(nb.input) <= idx:
         return [
