@@ -126,7 +126,7 @@ __global__ void matmul_nbits_kernel(
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
 
-template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false>
+template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, bool HAS_ZP = true>
 __global__ void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
@@ -178,10 +178,8 @@ __global__ void matmul_nbits_gemv_kernel(
     for (int tn = 0; tn < TILE_N; tn++)
         partial[tn] = 0.0f;
 
-    const bool has_zp = (zp != nullptr);
-
     // Helper: read zero-point for (n_idx, grp) — FP16 when COL_MAJOR
-    auto read_zp = [&](int64_t nidx, int64_t grp) __attribute__((always_inline)) -> float {
+    [[maybe_unused]] auto read_zp = [&](int64_t nidx, int64_t grp) __attribute__((always_inline)) -> float {
         if constexpr (COL_MAJOR)
             return static_cast<float>(zp_fp16[nidx * k_blocks + grp]);
         else
@@ -200,11 +198,11 @@ __global__ void matmul_nbits_gemv_kernel(
         const int64_t k16 = idx * 16;
 
         float a_vals[16];
-        float a_sum = 0.0f;
+        [[maybe_unused]] float a_sum = 0.0f;
 #pragma unroll
         for (int i = 0; i < 16; i++) {
             a_vals[i] = read_a(k16 + i);
-            a_sum += a_vals[i];
+            if constexpr (HAS_ZP) a_sum += a_vals[i];
         }
 
         const int64_t grp = k16 >> bs_shift;
@@ -230,11 +228,11 @@ __global__ void matmul_nbits_gemv_kernel(
                 dot += a_vals[8 + i] *
                        static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
 
-            if (has_zp) {
+            if constexpr (HAS_ZP) {
                 float zv = read_zp(n_idx[tn], grp);
-                partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
+                partial[tn] += (dot - a_sum * zv) * sv[tn];
             } else {
-                partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
+                partial[tn] += dot * sv[tn];
             }
         }
     }
@@ -248,11 +246,11 @@ __global__ void matmul_nbits_gemv_kernel(
             const int64_t k8 = k8_base + idx2 * 8;
 
             float a_vals[8];
-            float a_sum = 0.0f;
+            [[maybe_unused]] float a_sum = 0.0f;
 #pragma unroll
             for (int i = 0; i < 8; i++) {
                 a_vals[i] = read_a(k8 + i);
-                a_sum += a_vals[i];
+                if constexpr (HAS_ZP) a_sum += a_vals[i];
             }
 
             const int64_t grp = k8 >> bs_shift;
@@ -269,11 +267,11 @@ __global__ void matmul_nbits_gemv_kernel(
                     dot += a_vals[i] *
                            static_cast<float>((packed >> (i * 4)) & 0xF);
 
-                if (has_zp) {
+                if constexpr (HAS_ZP) {
                     float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += dot * sv - a_sum * zv * sv;
+                    partial[tn] += (dot - a_sum * zv) * sv;
                 } else {
-                    partial[tn] += dot * sv - a_sum * 8.0f * sv;
+                    partial[tn] += dot * sv;
                 }
             }
         }
@@ -291,7 +289,7 @@ __global__ void matmul_nbits_gemv_kernel(
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
-                float zv = has_zp ? read_zp(n_idx[tn], grp) : 8.0f;
+                float zv = HAS_ZP ? read_zp(n_idx[tn], grp) : 0.0f;
                 uint8_t packed = b_base_arr[tn][k / 2];
                 float   qval   = (nibble == 0)
                                    ? static_cast<float>(packed & 0xF)
@@ -374,7 +372,8 @@ static void launchGemvConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs,
-    bool col_major = false)
+    bool col_major = false,
+    bool has_zp = true)
 {
     auto& c = kGemvConfigs[config_id];
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
@@ -384,13 +383,21 @@ static void launchGemvConfig(
 
 #define GEMV_CASE(ID, BS, TN) \
     case ID: \
-        if (col_major) \
+        if (col_major && has_zp) \
             hipLaunchKernelGGL( \
-                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true>), \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true, true>), \
+                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+        else if (col_major && !has_zp) \
+            hipLaunchKernelGGL( \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true, false>), \
+                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+        else if (!col_major && has_zp) \
+            hipLaunchKernelGGL( \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false, true>), \
                 grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
         else \
             hipLaunchKernelGGL( \
-                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false>), \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false, false>), \
                 grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
         break
 
@@ -424,7 +431,8 @@ static int tuneGemvConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs,
-    bool col_major = false)
+    bool col_major = false,
+    bool has_zp = true)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -441,12 +449,12 @@ static int tuneGemvConfig(
 
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
+                             M, N, K, batch, bs, col_major, has_zp);
 
         hipEventRecord(ev0, stream);
         for (int i = 0; i < ITERS; i++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
+                             M, N, K, batch, bs, col_major, has_zp);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
@@ -481,10 +489,10 @@ static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 
 static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
-                                bool col_major = false) {
+                                bool col_major = false, bool has_zp = true) {
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (col_major ? "1" : "0");
+           (col_major ? "1" : "0") + "_" + (has_zp ? "1" : "0");
 }
 
 static int getOrTuneGemvConfig(
@@ -494,9 +502,10 @@ static int getOrTuneGemvConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs,
-    bool col_major = false)
+    bool col_major = false,
+    bool has_zp = true)
 {
-    std::string key = gemvCacheKey(M, N, K, bs, col_major);
+    std::string key = gemvCacheKey(M, N, K, bs, col_major, has_zp);
 
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
@@ -505,7 +514,7 @@ static int getOrTuneGemvConfig(
         return it->second;
 
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs, col_major);
+                               M, N, K, batch, bs, col_major, has_zp);
     gemv_cache[key] = best;
 
     CUSTOM_KERNELS_DEBUG_LOG(
@@ -600,7 +609,7 @@ void GemmFp16U4Impl(
     constexpr int PAD_K   = 2;
     constexpr int K_STR   = BK_T + PAD_K;
     constexpr int A_VL    = (BM_T * BK_T) / (THR_L * 4);
-    constexpr int A_GRP_K = BK_T / 2;
+    constexpr int A_GRP_2 = BM_T / 2;
     constexpr int K_STEPS = BK_T / WMMA_TILE;
 
     static_assert(A_VL >= 1, "A_VL must be >= 1");
@@ -686,24 +695,27 @@ void GemmFp16U4Impl(
         for(int ld = 0; ld < A_VL; ld++)
         {
             int vid    = tid + ld * THR_L;
-            pf_ak[ld]  = (vid % A_GRP_K) * 2;
-            pf_am[ld]  = (vid / A_GRP_K) * 2;
+            pf_am[ld]  = (vid % A_GRP_2) * 2;
+            pf_ak[ld]  = (vid / A_GRP_2) * 2;
             if constexpr (!BOUNDS_CHECK) {
                 pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                  &A[(row0 + pf_am[ld]) * lda + t + pf_ak[ld]]);
+                                  &A[(t + pf_ak[ld]) * lda + row0 + pf_am[ld]]);
                 pf_a2[ld] = *reinterpret_cast<const uint32_t*>(
-                                  &A[(row0 + pf_am[ld] + 1) * lda + t + pf_ak[ld]]);
+                                  &A[(t + pf_ak[ld] + 1) * lda + row0 + pf_am[ld]]);
             } else {
                 int row_a = row0 + pf_am[ld];
                 if (row_a + 1 < M) {
                     pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[row_a * lda + t + pf_ak[ld]]);
+                                      &A[(t + pf_ak[ld]) * lda + row_a]);
                     pf_a2[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[(row_a + 1) * lda + t + pf_ak[ld]]);
+                                      &A[(t + pf_ak[ld] + 1) * lda + row_a]);
                 } else if (row_a < M) {
-                    pf_a1[ld] = *reinterpret_cast<const uint32_t*>(
-                                      &A[row_a * lda + t + pf_ak[ld]]);
-                    pf_a2[ld] = 0;
+                    uint16_t lo1 = *reinterpret_cast<const uint16_t*>(
+                                      &A[(t + pf_ak[ld]) * lda + row_a]);
+                    uint16_t lo2 = *reinterpret_cast<const uint16_t*>(
+                                      &A[(t + pf_ak[ld] + 1) * lda + row_a]);
+                    pf_a1[ld] = static_cast<uint32_t>(lo1);
+                    pf_a2[ld] = static_cast<uint32_t>(lo2);
                 } else {
                     pf_a1[ld] = 0;
                     pf_a2[ld] = 0;
@@ -773,8 +785,11 @@ void GemmFp16U4Impl(
 #pragma unroll
         for(int ld = 0; ld < A_VL; ld++)
         {
-            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]  ][pf_ak[ld]]) = pf_a1[ld];
-            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]+1][pf_ak[ld]]) = pf_a2[ld];
+            uint32_t g1 = pf_a1[ld], g2 = pf_a2[ld];
+            uint32_t pack_even = (g1 & 0xFFFF) | ((g2 & 0xFFFF) << 16);
+            uint32_t pack_odd  = (g1 >> 16)     | (g2 & 0xFFFF0000);
+            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]  ][pf_ak[ld]]) = pack_even;
+            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]+1][pf_ak[ld]]) = pack_odd;
         }
     };
 
@@ -846,10 +861,10 @@ void GemmFp16U4Impl(
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         __builtin_nontemporal_store((_Float16)acc[wm][wn][e],
-                                                    &C[(mbase + r) * ldc + nbase + lane]);
+                                                    &C[(nbase + lane) * ldc + mbase + r]);
                 } else {
                     __builtin_nontemporal_store((_Float16)acc[wm][wn][e],
-                                                &C[(mbase + r) * ldc + nbase + lane]);
+                                                &C[(nbase + lane) * ldc + mbase + r]);
                 }
             }
         }
@@ -1288,22 +1303,21 @@ static int getOrTuneWmmaConfig(
 }
 
 /* =======================================================================
- * Section 3: Post-WMMA bias addition (row-major output)
+ * Section 3: Post-WMMA bias addition (col-major output)
  *
- * C is row-major [M x N] with ldc = N.
- * bias is [N]. Adds bias[n] to every element in column n.
- * Threads sweep N (coalesced along row), blocks sweep M.
+ * C is col-major [M x N] with ldc = M.
+ * bias is [N]. Adds bias[n] to every row of column n.
  * ======================================================================= */
 
-__global__ void matmul_nbits_add_bias_rowmajor(
+__global__ void matmul_nbits_add_bias_colmajor(
     _Float16* __restrict__ C,
     const _Float16* __restrict__ bias,
     int M, int N, int ldc)
 {
-    int n = static_cast<int>(blockIdx.x) * 256 + threadIdx.x;
-    int m = static_cast<int>(blockIdx.y);
+    int m = static_cast<int>(blockIdx.y) * 256 + threadIdx.x;
+    int n = static_cast<int>(blockIdx.x);
     if (m < M && n < N)
-        C[m * ldc + n] += bias[n];
+        C[n * ldc + m] += bias[n];
 }
 
 /* =======================================================================
@@ -1368,26 +1382,25 @@ extern "C" int hip_matmul_nbits(
     int iK  = static_cast<int>(K);
     int gs  = static_cast<int>(block_size);
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
-    int lda = iK;
-    int ldc = iN;
+    int lda = iM;
+    int ldc = iM;
 
     const auto* a_ptr = static_cast<const _Float16*>(A);
     const auto* b_ptr = static_cast<const unsigned char*>(B);
     const auto* s_ptr = static_cast<const _Float16*>(scales);
     const auto* z_ptr = static_cast<const _Float16*>(zero_points);
-
-    auto* out_ptr = static_cast<_Float16*>(output);
+    auto*       c_ptr = static_cast<_Float16*>(output);
 
     bool has_zp = (z_ptr != nullptr);
     int wmma_cfg = getOrTuneWmmaConfig(
         hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-        s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp);
+        s_ptr, z_ptr, gs, ngk, c_ptr, ldc, has_zp);
 
     _Float16* dq_buf = kWmmaConfigs[wmma_cfg].fused
                            ? nullptr : ensureDqBuffer(iN, iK);
     launchWmmaConfig(wmma_cfg, hip_stream,
                      iM, iN, iK, a_ptr, lda, b_ptr,
-                     s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf);
+                     s_ptr, z_ptr, gs, ngk, c_ptr, ldc, has_zp, dq_buf);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -1398,24 +1411,23 @@ extern "C" int hip_matmul_nbits(
     }
 
     if (bias) {
-      dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
-                     static_cast<unsigned>(iM));
+      dim3 bias_grid(static_cast<unsigned>(iN),
+                     static_cast<unsigned>((iM + 255) / 256));
       dim3 bias_block(256);
       hipLaunchKernelGGL(
-          matmul_nbits_add_bias_rowmajor, bias_grid, bias_block,
+          matmul_nbits_add_bias_colmajor, bias_grid, bias_block,
           0, hip_stream,
-          out_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
+          c_ptr, static_cast<const _Float16*>(bias), iM, iN, ldc);
 
       err = hipGetLastError();
       if (err != hipSuccess) {
         fprintf(stderr,
                 "[custom_kernels] hip_matmul_nbits bias launch failed: %s\n",
                 hipGetErrorString(err));
-        return static_cast<int>(err);
       }
     }
 
-    return static_cast<int>(hipGetLastError());
+    return static_cast<int>(err);
   }
 
   /* -------------------------------------------------------------------
@@ -1441,13 +1453,15 @@ extern "C" int hip_matmul_nbits(
     const auto* b_h = static_cast<const __half*>(bias);
     auto*       o_h = static_cast<__half*>(output);
 
+    bool gemv_has_zp = (z_u != nullptr);
+
     int config_id = getOrTuneGemvConfig(
         hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
-        M, N, K, 1, block_size, /*col_major=*/true);
+        M, N, K, 1, block_size, /*col_major=*/true, gemv_has_zp);
 
     launchGemvConfig(config_id, hip_stream,
                      a_h, b_u, s_h, z_u, b_h, o_h,
-                     M, N, K, 1, block_size, /*col_major=*/true);
+                     M, N, K, 1, block_size, /*col_major=*/true, gemv_has_zp);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -1481,13 +1495,17 @@ extern "C" int hip_matmul_nbits(
     const auto* b_h = static_cast<const __half*>(bias);
     auto*       o_h = static_cast<__half*>(output);
 
+    bool gemv_has_zp = (z_u != nullptr);
+
     int config_id = getOrTuneGemvConfig(
         hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
-        M, N, K, batch_count, block_size);
+        M, N, K, batch_count, block_size,
+        /*col_major=*/false, gemv_has_zp);
 
     launchGemvConfig(config_id, hip_stream,
                      a_h, b_u, s_h, z_u, b_h, o_h,
-                     M, N, K, batch_count, block_size);
+                     M, N, K, batch_count, block_size,
+                     /*col_major=*/false, gemv_has_zp);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
