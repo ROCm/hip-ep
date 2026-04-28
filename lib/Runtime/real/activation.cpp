@@ -6,8 +6,8 @@
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
-#include "runtime_types.h"
 #include "hip_custom_kernels.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 #include <functional>
@@ -204,7 +204,8 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 // Applies GELU activation using custom HIP kernel (hip_elementwise_gelu).
 // Supports two modes (per ONNX Gelu spec):
 //   - Exact (erf):  GELU(x) = x * 0.5 * (1.0 + erf(x / sqrt(2.0)))
-//   - Tanh approx:  GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+//   - Tanh approx:  GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 *
+//   x³)))
 // Supports data types: f32, f16, bf16, f64.
 // MIOpen does not support GELU activation, so we use a custom kernel.
 //===----------------------------------------------------------------------===//
