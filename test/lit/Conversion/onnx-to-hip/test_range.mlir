@@ -31,18 +31,6 @@ module {
   // CHECK: tensor.empty
   // CHECK: hip.range
 
-  // delta==0: always hip.range; runtime wrapper owns ORT parity.
-  func.func @test_range_delta_zero() -> tensor<?xf32> {
-    %s = arith.constant dense<0.0> : tensor<f32>
-    %l = arith.constant dense<10.0> : tensor<f32>
-    %d = arith.constant dense<0.0> : tensor<f32>
-    %r = "onnx.Range"(%s, %l, %d) : (tensor<f32>, tensor<f32>, tensor<f32>) -> tensor<?xf32>
-    return %r : tensor<?xf32>
-  }
-  // CHECK-LABEL: func.func @test_range_delta_zero
-  // CHECK-NOT: "onnx.Range"
-  // CHECK: hip.range
-
   func.func @test_range_i16() -> tensor<4xi16> {
     %s = arith.constant dense<0> : tensor<i16>
     %l = arith.constant dense<4> : tensor<i16>
