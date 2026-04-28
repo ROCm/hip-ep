@@ -1,0 +1,123 @@
+# =============================================================================
+# Bazel Configuration for ONNX HIPDnn EP
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Core Setup
+# -----------------------------------------------------------------------------
+
+# Enable Bzlmod (modern module system)
+common --enable_bzlmod
+
+# -----------------------------------------------------------------------------
+# Module Registry
+# -----------------------------------------------------------------------------
+# Local registry overrides for registry development and testing (gitignored).
+# Must be imported HERE — before the remote registries — so that any
+# local file:// registry is checked first and takes precedence.
+#
+# Workflow: create .bazelrc.registries with one line per local registry, e.g.:
+#   common --registry=file:///path/to/local/registry
+try-import %workspace%/.bazelrc.registries
+
+# ROCm Bazel registry for AMD/ROCm modules (openssl, llvm-project-overlay,
+# onnxruntime, toolchain-probe). Falls back to BCR for public modules.
+common --registry=https://raw.githubusercontent.com/ROCm/bazel-registry/main
+common --registry=https://bcr.bazel.build
+
+# Workspace status stamping — inject git hash into stamped build targets.
+# Only active when --stamp is passed (e.g. release builds).
+build --workspace_status_command="python workspace_status.py"
+
+# Enable platform-specific config sections (auto-applies build:windows or build:linux)
+common --enable_platform_specific_config
+
+# Modern C++ toolchain resolution
+build --incompatible_enable_cc_toolchain_resolution
+
+# Better output directory naming
+build --experimental_output_directory_naming_scheme=diff_against_baseline
+
+# -----------------------------------------------------------------------------
+# Platform-Specific Defaults (Auto-Applied)
+# -----------------------------------------------------------------------------
+
+# Windows common flags (all modes, all architectures)
+# WIN32/_WINDOWS are not defined: _WIN32/_WIN64 are auto-defined by the compiler for Windows
+# targets and are the correct macros to use. WIN32/_WINDOWS are legacy VS project conventions.
+build:windows --@bazel_cpp_toolchain//toolchain/settings:windows_target_version=win10
+build:windows --cxxopt=/std:c++17 --host_cxxopt=/std:c++17
+build:windows --copt=/EHsc          # C++ exception handling
+build:windows --copt=/W3            # Warning level 3
+build:windows --platforms=@bazel_cpp_toolchain//toolchain/platforms:windows_x64
+build:windows --extra_execution_platforms=@bazel_cpp_toolchain//toolchain/platforms:windows_x64
+
+# Linux common flags (all modes, all architectures)
+build:linux --copt=-DLINUX
+build:linux --copt=-fPIC
+build:linux --copt=-Wall
+build:linux --copt=-Wextra
+build:linux --linkopt=-lpthread
+build:linux --linkopt=-ldl
+
+# -----------------------------------------------------------------------------
+# Convenience Shortcuts (Workflow Configs)
+# -----------------------------------------------------------------------------
+
+# Development: Debug build on local platform
+build:dev --compilation_mode=dbg
+build:dev --strip=never
+
+# Production: Optimized with debug symbols
+build:prod --compilation_mode=opt
+build:prod --strip=never
+
+# -----------------------------------------------------------------------------
+# Remote Execution and Caching
+# -----------------------------------------------------------------------------
+
+# Remote execution (strict - fails if unavailable)
+build:remote --remote_executor=grpc://172.20.158.244:50051
+build:remote --remote_cache=grpc://172.20.158.244:50051
+build:remote --remote_upload_local_results=true
+build:remote --remote_download_outputs=toplevel
+build:remote --remote_timeout=600
+build:remote --jobs=1000
+build:remote --spawn_strategy=remote
+
+# Default: Windows x64
+build:remote --platforms=@bazel_cpp_toolchain//toolchain/platforms:windows_x64
+build:remote --extra_execution_platforms=@bazel_cpp_toolchain//toolchain/platforms:windows_x64
+
+# Hermetic toolchain only
+build:remote --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+# Disable strict header checking for cross-compilation
+build:remote --noincompatible_validate_top_level_header_inclusions
+
+# Same as :remote — remote execution only. Fails if cachion is down;
+# no fallback to local execution.
+build:remote-dev --config=remote
+
+# Remote without cache upload (workaround for cache upload issues)
+build:remote-nocache --config=remote
+build:remote-nocache --noremote_upload_local_results
+build:remote-nocache --noremote_accept_cached
+
+# -----------------------------------------------------------------------------
+# Remote Execution with PDB Downloads (for debugging)
+# -----------------------------------------------------------------------------
+# Use this when you need to debug remotely-built binaries locally.
+# Downloads only .exe and .pdb files (not intermediate .obj files).
+
+build:remote-debug --config=remote
+build:remote-debug --output_groups=+pdb_file
+build:remote-debug --compilation_mode=dbg
+
+# -----------------------------------------------------------------------------
+# Local Overrides
+# -----------------------------------------------------------------------------
+# Machine-specific settings (gitignored). Create .bazelrc.user with e.g.:
+#   common --repository_cache=/path/to/bazel-cache
+#   startup --output_user_root=/path/to/bazel-user-root
+try-import %workspace%/.bazelrc.user

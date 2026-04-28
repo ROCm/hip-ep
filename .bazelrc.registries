@@ -1,0 +1,3 @@
+# Local registry overrides (gitignored)
+# Use local clone of ROCm bazel-registry for faster, offline access
+common --registry=file:///C:/Develop/m/source/bazel-registry-1
