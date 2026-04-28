@@ -376,6 +376,12 @@ static bool ort_tensor_raw_bytes(const Ort::Value &v, const void *&out_ptr,
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
     out_ptr = v.GetTensorData<Ort::Float16_t>();
     return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+    out_ptr = v.GetTensorData<double>();
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+    out_ptr = v.GetTensorData<Ort::BFloat16_t>();
+    return true;
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
     out_ptr = v.GetTensorData<int64_t>();
     return true;
