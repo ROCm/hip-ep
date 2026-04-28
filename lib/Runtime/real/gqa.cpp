@@ -15,7 +15,6 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <unordered_map>
@@ -23,33 +22,6 @@
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
-
-//===----------------------------------------------------------------------===//
-// Fused-decode dispatch toggle
-//===----------------------------------------------------------------------===//
-// HIPDNN_EP_GQA_FUSED (default 1):
-//   1 / unset -> use the fused decode kernel (hip_gqa_fused_decode) when
-//                eligible (sq == 1, d in {64, 128, 256}, no sliding window /
-//                head sink / smooth softmax). This is the fast path.
-//   0         -> force ALL GQA calls -- decode included -- through the
-//                decomposed hipBLASLt pipeline. Useful for bit-for-bit
-//                comparison against the pre-fused-kernel baseline (e.g.
-//                output-quality regression triage) and for isolating any
-//                accuracy difference introduced by the fused kernel.
-//
-// Read once at process startup so the dispatch decision is uniform across
-// every call and the resolved state is visible in the runtime banner.
-static bool gqa_fused_enabled() {
-  static const bool enabled = [] {
-    const char *v = std::getenv("HIPDNN_EP_GQA_FUSED");
-    bool on = !v || v[0] != '0';
-    fprintf(stderr,
-            "[Runtime] HIPDNN_EP_GQA_FUSED=%s (fused decode %s)\n",
-            v ? v : "<unset>", on ? "ENABLED" : "DISABLED");
-    return on;
-  }();
-  return enabled;
-}
 
 //===----------------------------------------------------------------------===//
 // hipBLASLt layout helper
@@ -302,15 +274,10 @@ static int gqa_forward_hipblaslt(
   // All prefill (sq > 1) goes through the decomposed hipBLASLt path where
   // auto-tuned GEMMs outperform fixed WMMA tiling and all ORT GQA features
   // (sliding window, smooth softmax, head sink) are supported.
-  //
-  // Set HIPDNN_EP_GQA_FUSED=0 to force decode through the decomposed path
-  // as well, e.g. for output-quality bisection against the pre-fused-kernel
-  // baseline.
   //===--------------------------------------------------------------------===//
   bool fused_d = (d == 64 || d == 128 || d == 256);
-  if (gqa_fused_enabled() && fused_d && sq == 1 && key && value &&
-      present_key && present_value && local_window_size == 0 && !head_sink &&
-      !use_smooth_softmax) {
+  if (fused_d && sq == 1 && key && value && present_key && present_value &&
+      local_window_size == 0 && !head_sink && !use_smooth_softmax) {
     const void *qSrc = query;
     const void *kSrc = key;
 
