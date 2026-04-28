@@ -3,6 +3,25 @@
  * Licensed under the MIT License.
  */
 
+//===----------------------------------------------------------------------===//
+// Custom GELU Kernel Implementation
+//===----------------------------------------------------------------------===//
+//
+// This file implements GELU (Gaussian Error Linear Unit) activation using
+// a custom HIP kernel rather than MIOpen library calls.
+//
+// Rationale for custom kernel:
+//   MIOpen does not provide native GELU activation support as of ROCm 6.x.
+//   The available miopenActivationForward() supports SIGMOID, RELU, TANH,
+//   CLIPPED_RELU, ELU, and IDENTITY, but not GELU.
+//
+// Future considerations:
+//   If future MIOpen versions add GELU support (miopenActivationMode_t_GELU),
+//   consider migrating to the library implementation for potential hardware-
+//   specific optimizations and reduced maintenance burden.
+//
+//===----------------------------------------------------------------------===//
+
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
