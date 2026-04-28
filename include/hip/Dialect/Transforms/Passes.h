@@ -30,7 +30,8 @@ createGenerateInterfacePass(const CompilationOptionsT &options);
 /// Creates a pass that inserts hip.dump_tensor ops after every HIP compute op.
 /// Each dump op copies the output tensor from GPU to host and saves it as a
 /// NumPy .npy file under \p dumpTensorsDir.
-std::unique_ptr<mlir::Pass> createInsertTensorDumpPass(llvm::StringRef dumpTensorsDir);
+std::unique_ptr<mlir::Pass>
+createInsertTensorDumpPass(llvm::StringRef dumpTensorsDir);
 
 } // namespace hip
 } // namespace mlir

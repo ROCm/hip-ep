@@ -144,7 +144,8 @@ extern "C" void hipdnn_ep_dump_tensor(RuntimeState *state, void *gpu_ptr,
     return;
   }
 
-  RUNTIME_DEBUG_LOG("[DUMP] Saved tensor '%s' -> %s (%lld elements, dtype=%s)\n",
-                    name, path.c_str(), (long long)num_elements,
-                    hipdnn_ep_datatype_name(data_type));
+  RUNTIME_DEBUG_LOG(
+      "[DUMP] Saved tensor '%s' -> %s (%lld elements, dtype=%s)\n", name,
+      path.c_str(), (long long)num_elements,
+      hipdnn_ep_datatype_name(data_type));
 }

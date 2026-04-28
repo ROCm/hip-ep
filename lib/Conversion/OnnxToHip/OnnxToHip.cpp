@@ -80,8 +80,8 @@ static void promoteFirstOutputNameToLoc(mlir::ModuleOp module) {
     if (chosen.empty())
       return;
 
-    op->setLoc(mlir::NameLoc::get(
-        mlir::StringAttr::get(op->getContext(), chosen)));
+    op->setLoc(
+        mlir::NameLoc::get(mlir::StringAttr::get(op->getContext(), chosen)));
   });
 }
 

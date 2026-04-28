@@ -28,13 +28,11 @@ static Value getOrCreateGlobalString(ConversionPatternRewriter &rewriter,
                            rewriter.getStringAttr(value.str() + '\0'));
   }
 
-  Value globalAddr =
-      LLVM::AddressOfOp::create(rewriter, loc, ptrType, symName);
+  Value globalAddr = LLVM::AddressOfOp::create(rewriter, loc, ptrType, symName);
   return globalAddr;
 }
 
-struct DumpTensorOpLowering
-    : public ConvertOpToLLVMPattern<hip::DumpTensorOp> {
+struct DumpTensorOpLowering : public ConvertOpToLLVMPattern<hip::DumpTensorOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -81,22 +79,21 @@ struct DumpTensorOpLowering
     std::replace(nameSym.begin(), nameSym.end(), '.', '_');
     std::string dirSym = "__dump_tensors_dir";
 
-    Value namePtr = getOrCreateGlobalString(rewriter, loc, module, nameSym,
-                                            nameStr);
+    Value namePtr =
+        getOrCreateGlobalString(rewriter, loc, module, nameSym, nameStr);
     Value dirPtr =
         getOrCreateGlobalString(rewriter, loc, module, dirSym, dirStr);
 
     // Declare and call hipdnn_ep_dump_tensor.
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
-                                    i64Type, i64Type, ptrType, ptrType};
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                    i64Type, ptrType, ptrType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kHipDumpTensor, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,    gpuPtr,      shapeArray,
-                               rankVal,     dataTypeVal, namePtr,
-                               dirPtr};
+    SmallVector<Value> args = {statePtr,    gpuPtr,  shapeArray, rankVal,
+                               dataTypeVal, namePtr, dirPtr};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     rewriter.eraseOp(op);
