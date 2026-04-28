@@ -12,114 +12,34 @@ and analysis. Supports LLM (text), Vision, and Embedding models.
 | Script | Description |
 |--------|-------------|
 | `extract_submodels.py` | Main extraction tool — splits an ONNX model into `single_op`, `single_layer`, and `full_model` submodels with multiple dimension variants |
-| `export_chunk_model.py` | Export fixed-shape Llama prefill/decode ONNX variants with genai_config generation |
+| `export_chunk_model.py` | Export fixed-shape Llama prefill/decode ONNX variants with genai_config generation. **Default:** one sliding `p512…` prefill/decode pair only; pass **`--all`** for the full sequence-length matrix (`DEFAULT_SEQ_LENS` in code) and derived fixed-prompt / control stems |
 | `compare_chunk_export_outputs.py` | Validate an `export_chunk_model.py` output directory: structural match of each prefill/decode ONNX pair plus `genai_config_*.json` filenames and pipeline I/O lists vs graphs |
 | `genai_config_pipeline_from_folder.py` | Generate `decoder-pipeline` style `genai_config.json` for ORT GenAI from an existing model folder |
 | `inspect_onnx.py` | Inspect ONNX model structure (inputs, outputs, nodes, op types, preprocessing chains) |
 | `verify_ort_inference.py` | Verify extracted models by running ORT inference with dummy inputs (subprocess-isolated) |
-| `verify_extraction.py` | Verify extracted model files: sizes, graph structure, initializer integrity, fixed-shape validation |
+| `verify_extraction.py` | Verify extracted model files: sizes, graph structure, initializer integrity; fixed-shape **phase-1** scan and optional **phase-2** `shape_inference` + `check_model` (unless `--skip-shape-inference-check`). Use `--skip-fixed-shape-check` to skip fixed-shape checks entirely |
 | `_verify_one_model.py` | Subprocess worker for `verify_ort_inference.py` — loads one model and runs inference |
 
 ## Installation
 
+**Recommended:** use an isolated **Conda** environment so `onnx` / `onnxruntime` versions stay consistent with other projects on the same machine.
+
 ```bash
-pip install onnx onnxruntime numpy
-pip install onnxoptimizer  # optional but recommended
+conda create -n onnx-splitter python=3.11 -y
+conda activate onnx-splitter
 ```
 
-> **Note:** `onnxoptimizer` is optional but recommended. When installed, fixed-shape
-> variants automatically run Shape/Gather constant folding to eliminate redundant
-> shape-computation nodes.
+Then install dependencies (same packages if you use `venv` + `pip` instead):
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Quick Start
 
-### Extract submodels
+End-to-end flow on one machine: **extract** submodels into `space`, **verify** them, build **decoder-pipeline** `genai_config`, **export** prefill/decode ONNX into `space\chunk` (the walkthrough uses **`--all`** so `chunk/` lists every variant; omit it for the default single `p512…` sliding pair only), then optionally **compare** exports. Uses a concrete **Llama-3.1-8B** Windows tree (`^` line continuation for `cmd`); adapt paths to your layout.
 
-```bash
-# Extract all (single_op + single_layer + full_model)
-python extract_submodels.py --model path/to/model.onnx
-
-# Extract to a custom output directory
-python extract_submodels.py --model path/to/model.onnx --output /output/dir
-
-# Extract only single_op
-python extract_submodels.py --model path/to/model.onnx --only single_op
-
-# Extract only single_layer
-python extract_submodels.py --model path/to/model.onnx --only single_layer
-
-# Extract only full_model
-python extract_submodels.py --model path/to/model.onnx --only full_model
-```
-
-### Export prefill/decode variants
-
-```bash
-# Export prefill + decode ONNX with genai configs
-python export_chunk_model.py --model path/to/model.onnx --output /output/dir
-
-# Specify max context length
-python export_chunk_model.py --model path/to/model.onnx --output /output/dir --max-length 4096
-```
-
-### Compare chunk export outputs
-
-After `export_chunk_model.py`, run this on the **same output directory** to check that each `prefill_TAG.onnx` has a matching `decode_TAG.onnx` and `genai_config_TAG.json` (non-`*_dml`): same graph topology (node names, op types, edges), compatible dtypes (intermediate shapes may differ by design), aligned graph I/O except known prefill vs decode sequence axes, and consistent `past_*` / `present_*` shapes. Optional `--compare-intermediate-shapes` enforces identical tensor shapes on every edge.
-
-```bash
-python compare_chunk_export_outputs.py /path/to/export_chunk_model_output
-
-python compare_chunk_export_outputs.py /path/to/out --quiet
-
-python compare_chunk_export_outputs.py /path/to/out --compare-intermediate-shapes
-```
-
-### Generate genai_config
-
-```bash
-python genai_config_pipeline_from_folder.py path/to/model_folder \
-    --fixed-prompt-length 128 --max-length 4096
-```
-
-### Inspect a model
-
-```bash
-# Basic info (inputs, outputs, summary)
-python inspect_onnx.py model.onnx
-
-# List all nodes
-python inspect_onnx.py model.onnx --nodes
-
-# Filter by op type
-python inspect_onnx.py model.onnx --nodes --type-name MatMul
-
-# Filter by layer index
-python inspect_onnx.py model.onnx --nodes --layer 0
-
-# Show op type statistics
-python inspect_onnx.py model.onnx --op-types
-
-# Find preprocessing chains (attention_mask, position_ids)
-python inspect_onnx.py model.onnx --find-chains
-```
-
-### Verify extracted models
-
-```bash
-# Verify all extracted models via ORT inference
-python verify_ort_inference.py /output/dir
-
-# Verify only single_op models
-python verify_ort_inference.py /output/dir --mode single_op
-
-# Verify model file structure and fixed-shape correctness
-python verify_extraction.py /output/dir
-
-# Skip fixed-shape dimension checks
-python verify_extraction.py /output/dir --skip-fixed-shape-check
-```
-
-## End-to-End Example: Llama-3.1-8B
+### Walkthrough: Llama-3.1-8B (Windows)
 
 Assume the original model is at
 `C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml`.
@@ -143,7 +63,7 @@ space/
 └── full_model/          # full model with dimension variants
 ```
 
-#### 1b. Verify `space` (structure + ORT smoke)
+#### 1b. (Optional) Verify `space` (structure + ORT smoke)
 
 Run from the directory that contains the scripts (or use full paths to `verify_extraction.py` / `verify_ort_inference.py`). Both commands should exit with code **0**.
 
@@ -155,7 +75,7 @@ python verify_ort_inference.py ^
     C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\space
 ```
 
-`verify_extraction.py` checks extracted `.onnx` layout, external data offsets, graph sanity, and (for fixed-shape filenames) shape consistency. `verify_ort_inference.py` loads each extracted model in a **subprocess** and runs ORT with dummy inputs. To skip fixed-shape dimension checks on the first script, add `--skip-fixed-shape-check` to the `verify_extraction.py` line.
+`verify_extraction.py` checks extracted `.onnx` layout, external data offsets, graph sanity, and (for fixed-shape filenames) a two-phase shape check: static dims first, then optional ONNX `shape_inference` / `check_model` when phase-1 passes. `verify_ort_inference.py` loads each extracted model in a **subprocess** and runs ORT with dummy inputs. Add `--skip-fixed-shape-check` to skip fixed-shape checks, or `--skip-shape-inference-check` to keep phase-1 but skip phase-2.
 
 ### Step 2 — Export OGA prefill / decode variants
 
@@ -181,10 +101,13 @@ prepends extra search paths relative to `model_dir`.
 python export_chunk_model.py ^
     --model  C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\model.onnx ^
     --output C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\space\chunk ^
-    -T C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\genai_config_pipeline.json
+    -T C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\genai_config_pipeline.json ^
+    --all
 ```
 
-Output:
+`--all` exports the **full** variant matrix (multiple `prefill_*` / `decode_*` / `genai_config_*` files). Omit `--all` for a **quick** export: a single default `p512…` prefill/decode pair and matching `genai_config` (plus shared weights).
+
+Output (with `--all`):
 
 ```
 space/chunk/
@@ -206,6 +129,101 @@ space/chunk/
 ```bash
 python compare_chunk_export_outputs.py ^
     C:\modelzoo\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml\space\chunk
+```
+
+## Script CLI reference
+
+Copy-paste examples for **each** Python entry point using generic paths. For a full pipeline in order, see **Quick Start** above.
+
+### `extract_submodels.py`
+
+```bash
+# Extract all (single_op + single_layer + full_model)
+python extract_submodels.py --model path/to/model.onnx
+
+# Extract to a custom output directory
+python extract_submodels.py --model path/to/model.onnx --output /output/dir
+
+# Extract only single_op
+python extract_submodels.py --model path/to/model.onnx --only single_op
+
+# Extract only single_layer
+python extract_submodels.py --model path/to/model.onnx --only single_layer
+
+# Extract only full_model
+python extract_submodels.py --model path/to/model.onnx --only full_model
+```
+
+### `export_chunk_model.py`
+
+Required: `--model`, `-o` / `--output`. With genai JSON (default), also pass **`-T` / `--config-template`** unless `--no-genai-config`.
+
+```bash
+# Quick export: single default sliding pair + genai_config (needs -T)
+python export_chunk_model.py --model path/to/model.onnx -o /output/dir -T path/to/genai_template.json
+
+# Full variant matrix (same stems as a “full” split export)
+python export_chunk_model.py --model path/to/model.onnx -o /output/dir -T path/to/genai_template.json --all
+```
+
+### `compare_chunk_export_outputs.py`
+
+After `export_chunk_model.py`, run on the **same output directory** to check that each `prefill_TAG.onnx` has a matching `decode_TAG.onnx` and `genai_config_TAG.json` (non-`*_dml`): same graph topology (node names, op types, edges), compatible dtypes (intermediate shapes may differ by design), aligned graph I/O except known prefill vs decode sequence axes, and consistent `past_*` / `present_*` shapes. Optional `--compare-intermediate-shapes` enforces identical tensor shapes on every edge.
+
+```bash
+python compare_chunk_export_outputs.py /path/to/export_chunk_model_output
+
+python compare_chunk_export_outputs.py /path/to/out --quiet
+
+python compare_chunk_export_outputs.py /path/to/out --compare-intermediate-shapes
+```
+
+### `genai_config_pipeline_from_folder.py`
+
+```bash
+python genai_config_pipeline_from_folder.py path/to/model_folder \
+    --fixed-prompt-length 128 --max-length 4096
+```
+
+### `inspect_onnx.py`
+
+```bash
+# Basic info (inputs, outputs, summary)
+python inspect_onnx.py model.onnx
+
+# List all nodes
+python inspect_onnx.py model.onnx --nodes
+
+# Filter by op type
+python inspect_onnx.py model.onnx --nodes --type-name MatMul
+
+# Filter by layer index
+python inspect_onnx.py model.onnx --nodes --layer 0
+
+# Show op type statistics
+python inspect_onnx.py model.onnx --op-types
+
+# Find preprocessing chains (attention_mask, position_ids)
+python inspect_onnx.py model.onnx --find-chains
+```
+
+### `verify_ort_inference.py` / `verify_extraction.py`
+
+```bash
+# Verify all extracted models via ORT inference
+python verify_ort_inference.py /output/dir
+
+# Verify only single_op models
+python verify_ort_inference.py /output/dir --mode single_op
+
+# Verify model file structure and fixed-shape correctness
+python verify_extraction.py /output/dir
+
+# Skip fixed-shape dimension checks (phase-1 + phase-2 off for shapes)
+python verify_extraction.py /output/dir --skip-fixed-shape-check
+
+# Keep phase-1 fixed-shape scan; skip ONNX shape_inference / check_model (phase-2)
+python verify_extraction.py /output/dir --skip-shape-inference-check
 ```
 
 ## Supported Model Types
