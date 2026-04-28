@@ -296,41 +296,85 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
 
   RUNTIME_DEBUG_LOG(
       "[Runtime DEBUG] prepare_input[%zu]: rank=%zu element_size=%zu "
-      "size_bytes=%zu\n",
-      index, tensor->rank, element_size, size_bytes);
+      "size_bytes=%zu memory_type=%d\n",
+      index, tensor->rank, element_size, size_bytes, tensor->memory_type);
 
-  // Allocate GPU buffer (pool reuses across inferences)
-  void *gpu_ptr = pool_alloc(size_bytes);
-  if (!gpu_ptr) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_input: failed to allocate %zu bytes\n",
-            size_bytes);
-    return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
+  // Fast path: caller already placed `data` in GPU-accessible memory
+  // (TENSOR_MEMORY_GPU), so we alias the buffer instead of pool_alloc + H2D.
+  // This is the path that eliminates the per-decode 2 GB KV-cache H2D copy
+  // when OGA's MorphiZenEP device interface allocated KV cache via our
+  // hipHostMalloc(Mapped|Coherent) allocator (path A). The caller still owns
+  // the buffer; finalize_output / free_input must skip pool_release in
+  // this case (gated by TensorBuffer.is_aliased).
+  //
+  // Other memory_type values (CPU / FPGA / NPU) fall through to the legacy
+  // host H2D path below — preserves behaviour for hip-test-dll,
+  // hip-onnx-runner, and the OGA path-B-only configuration where KV cache
+  // still lives in host RAM.
+  const bool alias_caller_buffer = (tensor->memory_type == TENSOR_MEMORY_GPU);
+  void *gpu_ptr = nullptr;
+  if (alias_caller_buffer) {
+    gpu_ptr = tensor->data;
+  } else {
+    // Allocate GPU buffer (pool reuses across inferences)
+    gpu_ptr = pool_alloc(size_bytes);
+    if (!gpu_ptr) {
+      fprintf(stderr,
+              "hipdnn_ep_tensor_prepare_input: failed to allocate %zu bytes\n",
+              size_bytes);
+      return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
+    }
   }
 
-  // PERF: record H2D start on first input
+  // PERF: at the start of each new inference, flush the previous inference's
+  // timing breakdown (one line, easy to grep) and open a new window. We
+  // piggy-back on prepare_input(0) instead of using a dedicated sync hook
+  // because main_graph IR doesn't emit one.
   if (hipdnn_ep_perf_enabled() && index == 0) {
     perf_ensure_events();
+    // Flush the previous inference's window (if any). inference_num > 0
+    // means we've already record(h2d_start)'d at least once, so the events
+    // are valid to query. Using inference_num instead of "h2d_count > 0"
+    // keeps this working under Option A, where every input may take the
+    // alias fast path and accumulate zero H2D bytes.
+    if (g_perf.initialized && g_perf.inference_num > 0) {
+      (void)hipStreamSynchronize(static_cast<hipStream_t>(state->stream));
+      float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;
+      (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
+      (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
+      (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
+      const float total_ms = h2d_ms + compute_ms + d2h_ms;
+      RUNTIME_PERF_LOG("[PERF] #%u: H2D %zut/%.1fMB/%.2fms | Compute %.2fms | "
+                       "D2H %zut/%.1fMB/%.2fms | Total %.2fms\n",
+                       g_perf.inference_num, g_perf.h2d_count,
+                       g_perf.h2d_bytes / 1048576.0, h2d_ms, compute_ms,
+                       g_perf.d2h_count, g_perf.d2h_bytes / 1048576.0, d2h_ms,
+                       total_ms);
+    }
     g_perf.h2d_bytes = 0;
     g_perf.h2d_count = 0;
     g_perf.d2h_bytes = 0;
     g_perf.d2h_count = 0;
     (void)hipEventRecord(g_perf.h2d_start,
                          static_cast<hipStream_t>(state->stream));
+    g_perf.inference_num++; // marks "window opened"; flush above guards on this
   }
 
-  // H2D transfer
-  if (hipMemcpyAsync(gpu_ptr, tensor->data, size_bytes, hipMemcpyHostToDevice,
-                     static_cast<hipStream_t>(state->stream)) != hipSuccess) {
-    fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
-    HIP_CLEANUP(hipFree(gpu_ptr));
-    return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
-  }
+  // H2D transfer (skipped on the alias fast path — caller's buffer is
+  // already GPU-accessible, no copy needed).
+  if (!alias_caller_buffer) {
+    if (hipMemcpyAsync(gpu_ptr, tensor->data, size_bytes, hipMemcpyHostToDevice,
+                       static_cast<hipStream_t>(state->stream)) != hipSuccess) {
+      fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
+      HIP_CLEANUP(hipFree(gpu_ptr));
+      return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
+    }
 
-  // PERF: accumulate H2D bytes
-  if (hipdnn_ep_perf_enabled()) {
-    g_perf.h2d_bytes += size_bytes;
-    g_perf.h2d_count++;
+    // PERF: accumulate H2D bytes (only the actual copy, not aliased buffers)
+    if (hipdnn_ep_perf_enabled()) {
+      g_perf.h2d_bytes += size_bytes;
+      g_perf.h2d_count++;
+    }
   }
 
   // Populate output buffer
@@ -340,6 +384,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   out_buffer->rank = tensor->rank;
   out_buffer->size_bytes = size_bytes;
   out_buffer->is_pooled = false;
+  out_buffer->is_aliased = alias_caller_buffer;
 
   check_gcnarch("AFTER prepare_input");
   return HIPDNN_EP_SUCCESS;
@@ -417,8 +462,8 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
 
   RUNTIME_DEBUG_LOG(
       "[Runtime DEBUG] prepare_output[%zu]: rank=%zu element_size=%zu "
-      "size_bytes=%zu\n",
-      index, tensor->rank, element_size, size_bytes);
+      "size_bytes=%zu memory_type=%d\n",
+      index, tensor->rank, element_size, size_bytes, tensor->memory_type);
 
   // PERF: record H2D end on first output alloc (after all H2D copies queued)
   if (hipdnn_ep_perf_enabled() && index == 0 && g_perf.initialized) {
@@ -426,13 +471,24 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
                          static_cast<hipStream_t>(state->stream));
   }
 
-  // Allocate GPU buffer (pool reuses across inferences)
-  void *gpu_ptr = pool_alloc(size_bytes);
-  if (!gpu_ptr) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: failed to allocate %zu bytes\n",
-            size_bytes);
-    return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
+  // Fast path: caller's output OrtValue is in GPU-accessible memory, alias
+  // it so the kernel writes directly into the caller's buffer and we can
+  // skip both the pool_alloc here and the D2H copy in finalize_output. For
+  // OGA path A this hits on present_key/present_value tensors that share
+  // buffers with past_key/past_value (past_present_share_buffer=true).
+  const bool alias_caller_buffer = (tensor->memory_type == TENSOR_MEMORY_GPU);
+  void *gpu_ptr = nullptr;
+  if (alias_caller_buffer) {
+    gpu_ptr = tensor->data;
+  } else {
+    // Allocate GPU buffer (pool reuses across inferences)
+    gpu_ptr = pool_alloc(size_bytes);
+    if (!gpu_ptr) {
+      fprintf(stderr,
+              "hipdnn_ep_tensor_prepare_output: failed to allocate %zu bytes\n",
+              size_bytes);
+      return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
+    }
   }
 
   // Populate output buffer
@@ -442,6 +498,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   out_buffer->rank = tensor->rank;
   out_buffer->size_bytes = size_bytes;
   out_buffer->is_pooled = false;
+  out_buffer->is_aliased = alias_caller_buffer;
 
   return HIPDNN_EP_SUCCESS;
 }
@@ -460,30 +517,53 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
   int result = HIPDNN_EP_SUCCESS;
 
-  // PERF: record D2H start on first output finalize (after all compute)
+  // PERF: record D2H start on first output finalize (after all compute).
+  // We always record, even on the alias fast path, so the [PERF] D2H window
+  // is well-defined; aliased outputs just don't add bytes to the accumulator.
   if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 && g_perf.initialized) {
     (void)hipEventRecord(g_perf.d2h_start,
                          static_cast<hipStream_t>(state->stream));
   }
 
-  // D2H transfer (async -- sync happens once after all outputs)
-  if (hipMemcpyAsync(buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes,
-                     hipMemcpyDeviceToHost,
-                     static_cast<hipStream_t>(state->stream)) != hipSuccess) {
-    fprintf(stderr, "hipdnn_ep_tensor_finalize_output: D2H transfer failed\n");
-    result = HIPDNN_EP_ERR_D2H_TRANSFER_FAILED;
-    // Continue to cleanup even on error (best-effort)
+  // D2H transfer (async -- sync happens once after all outputs).
+  // Skipped on the alias fast path: gpu_ptr already points into the caller's
+  // GPU-accessible host_ptr (same physical pages on AMD APU mapped pinned
+  // memory), so the kernel has already written the result; no copy needed.
+  if (!buffer->is_aliased) {
+    if (hipMemcpyAsync(buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes,
+                       hipMemcpyDeviceToHost,
+                       static_cast<hipStream_t>(state->stream)) != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_tensor_finalize_output: D2H transfer failed\n");
+      result = HIPDNN_EP_ERR_D2H_TRANSFER_FAILED;
+      // Continue to cleanup even on error (best-effort)
+    }
+
+    // PERF: accumulate D2H bytes (only the actual copies, not aliased)
+    if (hipdnn_ep_perf_enabled()) {
+      g_perf.d2h_bytes += buffer->size_bytes;
+      g_perf.d2h_count++;
+    }
   }
 
-  // PERF: accumulate D2H bytes
-  if (hipdnn_ep_perf_enabled()) {
-    g_perf.d2h_bytes += buffer->size_bytes;
-    g_perf.d2h_count++;
+  // PERF: re-record d2h_end after every finalize_output (aliased or not).
+  // The "real" last call wins; in-between records are cheap and let us avoid
+  // having to know which finalize_output is the last one (the MLIR-emitted
+  // main_graph does not signal end-of-inference back to us, see
+  // prepare_input flush logic).
+  if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
+    (void)hipEventRecord(g_perf.d2h_end,
+                         static_cast<hipStream_t>(state->stream));
   }
 
-  // Return buffer to pool
-  pool_release(buffer->gpu_ptr, buffer->size_bytes);
+  // Return buffer to pool only if we own it. Aliased buffers are owned by
+  // the caller (e.g. OGA's KV cache OrtValue under path A); freeing them
+  // would corrupt the caller's allocation.
+  if (!buffer->is_aliased) {
+    pool_release(buffer->gpu_ptr, buffer->size_bytes);
+  }
   buffer->gpu_ptr = nullptr;
+  buffer->is_aliased = false;
 
   return result;
 }
@@ -536,14 +616,20 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
 
 // Release input tensor buffer (no D2H transfer needed)
 void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
+  (void)state;
   if (!buffer) {
     fprintf(stderr, "hipdnn_ep_tensor_free_input: null buffer\n");
     return;
   }
 
-  // Return buffer to pool
-  pool_release(buffer->gpu_ptr, buffer->size_bytes);
+  // Return buffer to pool only if we own it. Aliased buffers are owned by
+  // the caller (e.g. OGA's KV cache OrtValue under path A); freeing them
+  // would corrupt the caller's allocation.
+  if (!buffer->is_aliased) {
+    pool_release(buffer->gpu_ptr, buffer->size_bytes);
+  }
   buffer->gpu_ptr = nullptr;
+  buffer->is_aliased = false;
 }
 
 //===----------------------------------------------------------------------===//
