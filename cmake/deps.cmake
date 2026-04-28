@@ -78,33 +78,39 @@ set(morphizen_OUTPUT_NAME "onnxruntime_morphizen_ep" CACHE STRING "Set output na
 set(MORPHIZEN_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
 
-# Compile a hipHostMalloc(Mapped|Coherent)-based OrtAllocator + DataTransfer
-# into the EP factory so that all EP consumers (hip-onnx-runner, perf_test,
-# OGA via ORT) place tensors in GPU-mapped memory rather than host RAM. This
-# is what lets OGA recognise MorphiZen EP as a GPU device and skip the full
-# H2D/D2H copy of the KV cache on every decode step.
+# Cross-wire BUILD_MOCK_RUNTIME (this project) <-> morphizen's HIP GPU
+# allocator option so the same build invocation does the right thing on
+# both sides:
 #
-# Mock builds (BUILD_MOCK_RUNTIME=ON, the CMake default) intentionally don't
-# require ROCm/TheRock, so the morphizen ort-bridge `find_package(hip)` would
-# fail. Leave the option at its standalone-MorphiZen default (OFF) for those
-# builds. For real builds we also need to seed HIP_PLATFORM here, before the
-# add_subdirectory(3rd-party/morphizen) below triggers find_package(hip),
-# because TheRock's hip-config.cmake errors out on "Unexpected HIP_PLATFORM"
-# otherwise. (3rd-party/custom_kernels/cmake/hip_utils.cmake also seeds it,
-# but that subdir is added later in the top-level CMakeLists.txt.)
+#   * Real build (BUILD_MOCK_RUNTIME=OFF): we want morphizen's HIP allocator,
+#     which means find_package(hip) needs HIP_PLATFORM seeded *before*
+#     add_subdirectory(3rd-party/morphizen) below; otherwise TheRock's
+#     hip-config.cmake errors out with "Unexpected HIP_PLATFORM:".
+#     (3rd-party/custom_kernels/cmake/hip_utils.cmake seeds it too, but
+#     that subdir is added later in the top-level CMakeLists.txt.)
+#     Morphizen's option default is already ON, so we don't have to FORCE
+#     it -- but we don't actively turn it off either.
+#
+#   * Mock build (BUILD_MOCK_RUNTIME=ON, the project default): the toolchain
+#     by definition has no ROCm SDK, so find_package(hip REQUIRED) inside
+#     morphizen's ort-bridge would fail at configure time. Force morphizen's
+#     allocator OFF so the EP DLL still compiles in mock mode (it just won't
+#     register a HIP-backed allocator -- which is fine, mock can't run on
+#     GPU anyway). Morphizen's own configure-time WARNING for ORT_BRIDGE +
+#     ALLOCATOR=OFF is the expected, advertised-behavior signal here.
 #
 # This deps.cmake is included from the top-level CMakeLists.txt before its
-# own `option(BUILD_MOCK_RUNTIME ...)` declaration, so we re-declare the
-# same option here (option() is idempotent — keeps the value if already set
-# on the command line via -DBUILD_MOCK_RUNTIME=...). Keep the default in
-# sync with the top-level declaration.
+# own `option(BUILD_MOCK_RUNTIME ...)` declaration, so we re-declare it
+# here (option() keeps the value if already set on the command line via
+# -DBUILD_MOCK_RUNTIME=...). Keep the default in sync with the top-level.
 option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 
-if(NOT BUILD_MOCK_RUNTIME)
+if(BUILD_MOCK_RUNTIME)
+  set(morphizen_ENABLE_HIP_GPU_ALLOCATOR OFF CACHE BOOL "disabled in mock builds (no ROCm SDK available)" FORCE)
+else()
   if(NOT DEFINED HIP_PLATFORM)
     set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
   endif()
-  set(morphizen_ENABLE_HIP_GPU_ALLOCATOR ON CACHE BOOL "enable hipHostMalloc-based OrtAllocator + DataTransfer in MorphiZen EP factory (requires HIP runtime)" FORCE)
 endif()
 
 # Add morphizen subdirectory (after all options are set)
