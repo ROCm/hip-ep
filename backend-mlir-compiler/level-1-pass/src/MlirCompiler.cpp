@@ -42,11 +42,30 @@ struct CompilerError {
 };
 
 // Build JSON options string from compilation config
+// Escape backslashes and double quotes for JSON string values.
+std::string json_escape(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    if (c == '\\')
+      out += "\\\\";
+    else if (c == '"')
+      out += "\\\"";
+    else
+      out += c;
+  }
+  return out;
+}
+
 std::string build_compiler_options_json(const CompilationConfig &config) {
   std::ostringstream json;
   json << "{";
   json << "\"opt_level\": " << config.optLevel;
   json << ", \"output_mode\": \"DLL\"";
+  if (config.dumpTensors) {
+    json << ", \"dump_tensors\": true";
+    json << ", \"dump_tensors_dir\": \"" << json_escape(config.dumpDir) << "\"";
+  }
   json << "}";
   return json.str();
 }

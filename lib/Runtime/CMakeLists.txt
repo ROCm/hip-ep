@@ -230,6 +230,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
+    compile_to_bitcode(real/dump.cpp runtime_dump.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -254,12 +255,14 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dump.bc
     )
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)
     compile_to_bitcode(mock/memory.cpp runtime_memory.bc)
     compile_to_bitcode(mock/test_hip_from_dll.cpp test_hip_from_dll.bc)
+    compile_to_bitcode(mock/dump.cpp runtime_dump.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -267,6 +270,7 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dump.bc
     )
 endif()
 

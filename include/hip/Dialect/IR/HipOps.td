@@ -1284,4 +1284,28 @@ def Hip_GemmOp : Hip_DpsOp<"gemm">{
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+//===----------------------------------------------------------------------===//
+// Debug / Instrumentation Ops
+//===----------------------------------------------------------------------===//
+
+def Hip_DumpTensorOp : Hip_Op<"dump_tensor", []> {
+  let summary = "Dump a GPU tensor to disk (debug instrumentation)";
+  let description = [{
+    Copies tensor data from GPU to host and saves it as a NumPy .npy file.
+    Inserted by the InsertTensorDump pass when dump_tensors is enabled.
+    Lowered to a runtime call `hipdnn_ep_dump_tensor` by HipToLLVM.
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    AnyMemRef:$input,
+    StrAttr:$name,
+    StrAttr:$dump_tensors_dir
+  );
+  let results = (outs);
+  let assemblyFormat = [{
+    `(` $ctx `)` $input attr-dict `:` type($input)
+  }];
+}
+
 #endif // HIP_OPS

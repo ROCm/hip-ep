@@ -58,6 +58,11 @@ static CompilationConfig load_config(PassContext *ctx) {
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
 
+    // Parse tensor dump options
+    config.dumpTensors =
+        ctx->get_provider_option("dump_tensors", "0") == "1";
+    config.dumpDir = ctx->get_provider_option("dump_tensors_dir", "");
+
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";

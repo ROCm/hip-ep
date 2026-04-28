@@ -5,6 +5,7 @@
 
 #include "hip/Compiler/CompilerDriver.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 
@@ -214,6 +215,10 @@ bool CompilerDriver::runMLIRPasses(
         static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
   } else {
     mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+  }
+
+  if (options.dump_tensors && !options.dump_tensors_dir.empty()) {
+    pm.addPass(mlir::hip::createInsertTensorDumpPass(options.dump_tensors_dir));
   }
 
   mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
