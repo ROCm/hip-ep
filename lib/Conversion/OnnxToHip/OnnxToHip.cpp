@@ -18,6 +18,7 @@
 #include "morphizen-foundation/file_io.hpp"
 
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MD5.h"
 #include "llvm/Support/FormatVariadic.h"
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -610,6 +611,30 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // attributes.
   if (extState && extState->constantIndex > 0) {
     extState->writer.reset();
+
+    // Compute MD5 of the constants map (offsets + sizes) as a lightweight
+    // identity fingerprint.  Two models with identical maps have identical
+    // constants.bin content because the data comes from the same source
+    // weights and the layout is fully determined by the offset/size sequence.
+    llvm::MD5 mapMd5;
+    mapMd5.update(llvm::ArrayRef<uint8_t>(
+        reinterpret_cast<const uint8_t *>(extState->constantOffsets.data()),
+        extState->constantOffsets.size() * sizeof(int64_t)));
+    mapMd5.update(llvm::ArrayRef<uint8_t>(
+        reinterpret_cast<const uint8_t *>(extState->constantSizes.data()),
+        extState->constantSizes.size() * sizeof(int64_t)));
+    llvm::MD5::MD5Result md5Result;
+    mapMd5.final(md5Result);
+    llvm::SmallString<32> hashStr;
+    llvm::MD5::stringifyResult(md5Result, hashStr);
+    std::string constantsMd5(hashStr.str());
+    llvm::errs() << "[MD5] constants map hash=" << constantsMd5
+                 << " (" << extState->constantIndex << " entries)\n";
+
+    if (!constantsMd5.empty()) {
+      module->setAttr("hipdnn.constants_md5",
+                      mlir::StringAttr::get(ctx, constantsMd5));
+    }
 
     // Set hip.constants_file on the module so downstream passes/tools know
     // where the sidecar lives.
