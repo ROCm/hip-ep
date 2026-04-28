@@ -43,6 +43,49 @@ namespace hip {
 namespace {
 
 //===----------------------------------------------------------------------===//
+// Location promotion
+//===----------------------------------------------------------------------===//
+
+/// The ORT->MLIR bridge (morphizen mlir-imp) attaches the original ORT node
+/// identity to every onnx.* op as plain string attributes ("node.outputs"
+/// holds the ONNX output tensor names) but leaves the op's MLIR Location as
+/// UnknownLoc.  Without a real Location, downstream passes (in particular
+/// InsertTensorDump's buildDumpName) fall back to "<mnemonic>_<index>"
+/// names, losing the original tensor identity.
+///
+/// This helper walks the module and, for every onnx.* op whose Location is
+/// still UnknownLoc, replaces it with a NameLoc derived from the first
+/// non-empty entry in "node.outputs".  The new Location is inherited by the
+/// hip.* op produced for it during conversion (every OnnxToHip pattern
+/// forwards op->getLoc()), and survives bufferization.
+static void promoteFirstOutputNameToLoc(mlir::ModuleOp module) {
+  module.walk([](mlir::Operation *op) {
+    if (!op->getName().getStringRef().starts_with("onnx."))
+      return;
+    if (!mlir::isa<mlir::UnknownLoc>(op->getLoc()))
+      return;
+
+    auto outs = op->getAttrOfType<mlir::ArrayAttr>("node.outputs");
+    if (!outs)
+      return;
+
+    llvm::StringRef chosen;
+    for (mlir::Attribute v : outs) {
+      if (auto s = mlir::dyn_cast<mlir::StringAttr>(v);
+          s && !s.getValue().empty()) {
+        chosen = s.getValue();
+        break;
+      }
+    }
+    if (chosen.empty())
+      return;
+
+    op->setLoc(mlir::NameLoc::get(
+        mlir::StringAttr::get(op->getContext(), chosen)));
+  });
+}
+
+//===----------------------------------------------------------------------===//
 // Constant externalization helpers
 //===----------------------------------------------------------------------===//
 
@@ -504,6 +547,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
 
   auto passStart = timing_now();
   auto phaseStart = passStart;
+
+  // Promote the original ORT output tensor name onto each onnx.* op's
+  // Location before any conversion runs, so the resulting hip.* ops carry
+  // a meaningful NameLoc through bufferization and into InsertTensorDump.
+  promoteFirstOutputNameToLoc(module);
 
   auto logSubpass = [&](const char *name, const char *extra = nullptr) {
     if (!timing)

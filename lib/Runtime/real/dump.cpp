@@ -14,6 +14,27 @@
 
 namespace {
 
+/// Replace characters that would make the tensor name unusable as a flat
+/// filename with '_'.  ONNX tensor names typically use '/' as a hierarchy
+/// separator and '.' inside identifiers, and ':' is reserved on Windows.
+/// Without this, fopen() either tries to descend into nested directories
+/// that do not exist or fails outright on Windows.  Sanitization happens
+/// only here, at the point of file creation, so the original tensor name
+/// is preserved everywhere else (IR, logs, debug output).
+std::string sanitize_for_filename(const char *raw) {
+  std::string out;
+  if (!raw)
+    return out;
+  for (const char *p = raw; *p; ++p) {
+    char c = *p;
+    if (c == '/' || c == ':' || c == '.')
+      out.push_back('_');
+    else
+      out.push_back(c);
+  }
+  return out;
+}
+
 const char *npy_descr(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
@@ -114,10 +135,12 @@ extern "C" void hipdnn_ep_dump_tensor(RuntimeState *state, void *gpu_ptr,
     hipStreamSynchronize(state->stream);
   }
 
-  std::string path = std::string(dump_tensors_dir) + "/" + name + ".npy";
+  std::string path = std::string(dump_tensors_dir) + "/" +
+                     sanitize_for_filename(name) + ".npy";
 
   if (!write_npy(path.c_str(), host_buf.data(), shape, rank, data_type)) {
-    RUNTIME_DEBUG_LOG("[DUMP] Failed to write '%s'\n", path.c_str());
+    RUNTIME_DEBUG_LOG("[DUMP] Failed to write '%s' (tensor '%s')\n",
+                      path.c_str(), name);
     return;
   }
 
