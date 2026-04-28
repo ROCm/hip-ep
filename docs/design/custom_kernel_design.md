@@ -227,6 +227,29 @@ The `custom_kernels/CMakeLists.txt` install rules ensure that after `cmake --ins
 
 CompilerDriver discovers the `.lib` at model-compile time via the configured install prefix path, and passes it to DLLLinker alongside MIOpen/hipBLASLt import libs.
 
+### 10. `custom_kernels/hip/matmul_nbits_kernel.hip`
+
+Implements MatMulNBits — fused dequant + matmul for INT4 packed weights (FP16 activations). This is the dominant operator in INT4 LLM decode (~78% of GPU time for Llama 8B).
+
+Three execution paths, auto-dispatched by shape:
+
+| Path | Condition | Strategy |
+|------|-----------|----------|
+| WMMA | batch==1, K%32==0, M≥16 | RDNA3 wave matrix multiply with double-buffered shared memory, grid swizzling |
+| GEMV | batch==1, K%32==0, M<16 | K-parallel reduction, autotuned (BLOCK_SIZE×TILE_N) |
+| Naive | fallback | Per-element row-major, uint8 zero points |
+
+**Single-token decode (M=1) uses the GEMV path.** Key design choices:
+
+- **K-parallel reduction**: Each threadblock cooperates on the K dimension for TILE_N output columns. This gives sequential per-row B access that is prefetcher-friendly on LPDDR5X (APU shared memory). An N-parallel approach (each thread reads all K/2 bytes) was tried and abandoned — scattered reads across hundreds of loads defeated the LPDDR5X prefetcher.
+- **Factored dequant**: Computes `dot(A,B)*scale - a_sum*zp*scale`, saving ~40% FLOPs vs the naive `sum(a[k] * (b[k]-zp) * scale)`.
+- **Vectorized B loads**: 64-bit (uint2) loads fetch 16 nibbles per transaction, extracting via bit shifts. Load-compute separation issues all B loads before FMA compute.
+- **Runtime autotune**: First call for each (M,N,K,block_size) benchmarks all 28 (BLOCK_SIZE, TILE_N) configurations and caches the fastest. Configs with TILE_N=32 tested only when N≥1024.
+
+**Weight layout**: B is stored as `[N, K/2]` with pairs of 4-bit values packed into bytes (low nibble first). Scales and zero-points are per quantization group: `[N, ceil(K/block_size)]`. block_size is always power-of-2 (typically 32), enabling bit-shift group index calculation.
+
+**WMMA path** (prefill, M≥16): Transposes A/C to column-major internally, converts uint8 zero-points to FP16, then uses `__builtin_amdgcn_wmma_f16_16x16x16_f16` intrinsics with double-buffered shared memory for A tiles and grid swizzling (Morton-order blocks) for L2 cache locality.
+
 ## Key Design Decisions
 
 - **Static lib, not DLL**: The kernel code is embedded in `model.dll` via static linking. No extra DLL dependency beyond amdhip64.dll.

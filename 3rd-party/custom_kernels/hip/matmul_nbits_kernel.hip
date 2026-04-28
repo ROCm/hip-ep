@@ -193,28 +193,29 @@ __global__ void matmul_nbits_gemv_kernel(
         return static_cast<float>(a_base[k_off * a_stride]);
     };
 
-    // ---- Phase 1: 16-nibble (64-bit) vectorized main loop ----
-    const int64_t num_u64 = K / 16;
-    for (int64_t idx = static_cast<int64_t>(tid); idx < num_u64;
-         idx += static_cast<int64_t>(BLOCK_SIZE)) {
-        const int64_t k16 = idx * 16;
+    // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
+    // Use int for loop vars — K <= 32768, idx <= K/32 = 1024, fits 32-bit.
+    // uint4 (128-bit) loads process 32 nibbles (one full block_size=32 group).
+    const int num_u128 = static_cast<int>(K / 32);
+    for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+        const int k32 = idx * 32;
 
-        float a_vals[16];
+        float a_vals[32];
         float a_sum = 0.0f;
 #pragma unroll
-        for (int i = 0; i < 16; i++) {
-            a_vals[i] = read_a(k16 + i);
+        for (int i = 0; i < 32; i++) {
+            a_vals[i] = read_a(k32 + i);
             a_sum += a_vals[i];
         }
 
-        const int64_t grp = k16 >> bs_shift;
+        const int grp = k32 >> bs_shift;
 
-        uint2   b_pk[TILE_N];
+        uint4   b_pk[TILE_N];
         float   sv[TILE_N];
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
-            b_pk[tn] = *reinterpret_cast<const uint2*>(
-                            &b_base_arr[tn][idx * 8]);
+            b_pk[tn] = *reinterpret_cast<const uint4*>(
+                            &b_base_arr[tn][idx * 16]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
         }
 
@@ -229,6 +230,14 @@ __global__ void matmul_nbits_gemv_kernel(
             for (int i = 0; i < 8; i++)
                 dot += a_vals[8 + i] *
                        static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
+#pragma unroll
+            for (int i = 0; i < 8; i++)
+                dot += a_vals[16 + i] *
+                       static_cast<float>((b_pk[tn].z >> (i * 4)) & 0xF);
+#pragma unroll
+            for (int i = 0; i < 8; i++)
+                dot += a_vals[24 + i] *
+                       static_cast<float>((b_pk[tn].w >> (i * 4)) & 0xF);
 
             if (has_zp) {
                 float zv = read_zp(n_idx[tn], grp);
@@ -239,13 +248,60 @@ __global__ void matmul_nbits_gemv_kernel(
         }
     }
 
-    // ---- Phase 2: 8-nibble (32-bit) middle (K%16 remainder) ----
+    // ---- Phase 1b: 16-nibble (64-bit) remainder (K%32 ≥ 16) ----
     {
-        const int64_t k8_base   = num_u64 * 16;
-        const int64_t num_u32_m = (K - k8_base) / 8;
-        for (int64_t idx2 = static_cast<int64_t>(tid); idx2 < num_u32_m;
-             idx2 += static_cast<int64_t>(BLOCK_SIZE)) {
-            const int64_t k8 = k8_base + idx2 * 8;
+        const int k16_base = num_u128 * 32;
+        const int num_u64 = (static_cast<int>(K) - k16_base) / 16;
+        for (int idx = tid; idx < num_u64; idx += BLOCK_SIZE) {
+            const int k16 = k16_base + idx * 16;
+
+            float a_vals[16];
+            float a_sum = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 16; i++) {
+                a_vals[i] = read_a(k16 + i);
+                a_sum += a_vals[i];
+            }
+
+            const int grp = k16 >> bs_shift;
+
+            uint2   b_pk[TILE_N];
+            float   sv[TILE_N];
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                b_pk[tn] = *reinterpret_cast<const uint2*>(
+                                &b_base_arr[tn][(k16_base / 2) + idx * 8]);
+                sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+            }
+
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                float dot = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot += a_vals[i] *
+                           static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF);
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot += a_vals[8 + i] *
+                           static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
+
+                if (has_zp) {
+                    float zv = read_zp(n_idx[tn], grp);
+                    partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
+                } else {
+                    partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
+                }
+            }
+        }
+    }
+
+    // ---- Phase 2: 8-nibble (32-bit) middle (K%8 remainder after uint4+uint2) ----
+    {
+        const int k8_base   = (static_cast<int>(K) / 16) * 16;
+        const int num_u32_m = (static_cast<int>(K) - k8_base) / 8;
+        for (int idx2 = tid; idx2 < num_u32_m; idx2 += BLOCK_SIZE) {
+            const int k8 = k8_base + idx2 * 8;
 
             float a_vals[8];
             float a_sum = 0.0f;
@@ -255,7 +311,7 @@ __global__ void matmul_nbits_gemv_kernel(
                 a_sum += a_vals[i];
             }
 
-            const int64_t grp = k8 >> bs_shift;
+            const int grp = k8 >> bs_shift;
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
@@ -281,12 +337,12 @@ __global__ void matmul_nbits_gemv_kernel(
 
     // ---- Phase 3: scalar tail (K%8 remainder) ----
     {
-        const int64_t k_tail = (K / 8) * 8;
-        for (int64_t k = k_tail + static_cast<int64_t>(tid);
-             k < K; k += static_cast<int64_t>(BLOCK_SIZE)) {
-            const float   a_val  = read_a(k);
-            const int64_t grp    = k >> bs_shift;
-            const int     nibble = static_cast<int>(k & 1);
+        const int k_tail = (static_cast<int>(K) / 8) * 8;
+        for (int k = k_tail + tid; k < static_cast<int>(K);
+             k += BLOCK_SIZE) {
+            const float a_val  = read_a(k);
+            const int   grp    = k >> bs_shift;
+            const int   nibble = k & 1;
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
