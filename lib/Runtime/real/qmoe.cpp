@@ -55,10 +55,32 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe(tokens=%lld, hidden=%lld, inter=%lld, "
-                    "experts=%lld, k=%lld, bits=%lld, elem=%lld)\n",
+                    "experts=%lld, k=%lld, bits=%lld, block=%lld, elem=%lld)\n",
                     (long long)num_tokens, (long long)hidden_size,
                     (long long)inter_size, (long long)num_experts, (long long)k,
-                    (long long)expert_weight_bits, (long long)elem_size);
+                    (long long)expert_weight_bits, (long long)block_size,
+                    (long long)elem_size);
+
+  // Guard against pathological metadata: block_size==0 would otherwise crash
+  // with STATUS_INTEGER_DIVIDE_BY_ZERO inside the k_blocks computations below
+  // (and produces invalid quant layouts even at >0 if not a multiple of 2).
+  if (block_size <= 0 || (block_size & 1) != 0) {
+    fprintf(stderr,
+            "wrap_qmoe: invalid block_size=%lld (must be a positive even "
+            "value matching the weights' quant block layout)\n",
+            (long long)block_size);
+    return -1;
+  }
+  if (hidden_size <= 0 || inter_size <= 0 || num_experts <= 0 || k <= 0 ||
+      num_tokens <= 0 || elem_size <= 0) {
+    fprintf(stderr,
+            "wrap_qmoe: invalid sizes (tokens=%lld hidden=%lld inter=%lld "
+            "experts=%lld k=%lld elem=%lld)\n",
+            (long long)num_tokens, (long long)hidden_size,
+            (long long)inter_size, (long long)num_experts, (long long)k,
+            (long long)elem_size);
+    return -1;
+  }
 
   void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {

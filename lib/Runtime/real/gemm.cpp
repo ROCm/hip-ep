@@ -111,6 +111,18 @@ static bool resolveGemmMiopenType(int64_t typeCode, miopenDataType_t &dt) {
   }
 }
 
+// MIOpen contract for miopenOpTensor: the A-operand descriptor and the
+// destination descriptor must have *identical* shapes; only the B operand may
+// broadcast. The previous implementation passed the small bias descriptor
+// (cDesc) as both A and B while the destination was the full-output descriptor,
+// which MIOpen rejected with "A and C Tensors do not match" (status 7) any time
+// the bias actually needed broadcasting (e.g. a [1,N] bias onto [M,N]).
+//
+// Fix: zero the output buffer, then compute
+//     output = 1.0 * output + beta * broadcast(C)
+// so the A operand and destination both use outDesc and only B (the bias)
+// broadcasts. Pre-zeroing avoids dependency on uninitialized output (which
+// could contain NaNs that 1.0*NaN would propagate).
 static int broadcastBiasToOutput(RuntimeState *state, const void *C,
                                  void *output, int64_t M, int64_t N,
                                  int64_t cDim0, int64_t cDim1, float beta,
@@ -122,6 +134,13 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
     return -1;
   }
 
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  if (!stream) {
+    fprintf(stderr, "wrap_gemm: broadcastBiasToOutput: null stream\n");
+    return -1;
+  }
+
   miopenDataType_t dt;
   if (!resolveGemmMiopenType(typeCode, dt)) {
     fprintf(stderr,
@@ -130,10 +149,25 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
     return -1;
   }
 
+  size_t elemSize = (typeCode == kTypeFloat64)   ? 8
+                    : (typeCode == kTypeFloat32) ? 4
+                                                 : 2; // fp16 / bf16
+
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: broadcastBiasToOutput C[%lld,%lld] -> "
                     "[%lld,%lld], beta=%f\n",
                     (long long)cDim0, (long long)cDim1, (long long)M,
                     (long long)N, beta);
+
+  // Pre-zero the destination so 1.0*output contributes 0 in the op below.
+  size_t outBytes = static_cast<size_t>(M) * static_cast<size_t>(N) * elemSize;
+  hipError_t hipErr = hipMemsetAsync(output, 0, outBytes, stream);
+  if (hipErr != hipSuccess) {
+    fprintf(stderr,
+            "wrap_gemm: broadcastBiasToOutput: hipMemsetAsync(%zu bytes) "
+            "failed (%d): %s\n",
+            outBytes, (int)hipErr, hipGetErrorString(hipErr));
+    return -1;
+  }
 
   miopenTensorDescriptor_t cDesc = nullptr;
   miopenTensorDescriptor_t outDesc = nullptr;
@@ -147,15 +181,18 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(
       outDesc, dt, 1, 1, static_cast<int>(M), static_cast<int>(N)));
 
-  // output = beta * (C + 0 * C) + 0 * output = beta * C_broadcast
+  // output = 1.0 * output + beta * broadcast(C) + 0 * output
+  //        = beta * broadcast(C)              (since output was zeroed)
   if (typeCode == kTypeFloat64) {
-    double alpha1 = static_cast<double>(beta), alpha2 = 0.0, beta_c = 0.0;
-    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, cDesc, C,
-                                &alpha2, cDesc, C, &beta_c, outDesc, output));
+    double alpha1 = 1.0, alpha2 = static_cast<double>(beta), beta_c = 0.0;
+    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, outDesc,
+                                output, &alpha2, cDesc, C, &beta_c, outDesc,
+                                output));
   } else {
-    float alpha1 = beta, alpha2 = 0.0f, beta_c = 0.0f;
-    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, cDesc, C,
-                                &alpha2, cDesc, C, &beta_c, outDesc, output));
+    float alpha1 = 1.0f, alpha2 = beta, beta_c = 0.0f;
+    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, outDesc,
+                                output, &alpha2, cDesc, C, &beta_c, outDesc,
+                                output));
   }
 
 cleanup:
