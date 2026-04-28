@@ -71,9 +71,16 @@ __global__ void stft_split_complex_kernel(const float *__restrict__ complex_in,
     if (flat >= total_pairs)
         return;
     // complex_in is laid out as [re0, im0, re1, im1, ...]; output uses
-    // the same byte order, so we just copy the two floats.
-    output[2 * flat]     = complex_in[2 * flat];
-    output[2 * flat + 1] = complex_in[2 * flat + 1];
+    // the same byte order.  Canonicalize near-zero imaginary parts on the
+    // negative real axis so the downstream ONNX atan2 decomposition selects
+    // +pi, matching CPU/CUDA convention instead of depending on rocFFT's
+    // signed roundoff around zero.
+    float re = complex_in[2 * flat];
+    float im = complex_in[2 * flat + 1];
+    if (re < 0.0f && fabsf(im) < 1.0e-12f)
+        im = 1.0e-12f;
+    output[2 * flat]     = re;
+    output[2 * flat + 1] = im;
 }
 
 inline void compute_grid(int64_t total, int kBlockSize, dim3 &grid,

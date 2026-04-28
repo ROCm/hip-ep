@@ -172,8 +172,9 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
                        : 0;
       // effective_kernel = dilation*(kernel-1) + 1
       int64_t effK = dl * (k - 1) + 1;
-      // constant adjustment = pb + pe - effK + 1
-      int64_t adj = pb + pe - effK + 1;
+      // ONNX Conv output dim:
+      //   floor((in + pad_begin + pad_end - effective_kernel) / stride) + 1
+      int64_t adj = pb + pe - effK;
 
       mlir::Value inDim =
           mlir::tensor::DimOp::create(rewriter, loc, input, d);
@@ -183,11 +184,15 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
           rewriter, loc, rewriter.getI64IntegerAttr(adj));
       mlir::Value strideVal = mlir::arith::ConstantOp::create(
           rewriter, loc, rewriter.getI64IntegerAttr(s));
-      // (in + adj) / stride, using floor-div
+      // floor((in + adj) / stride) + 1
       mlir::Value sum =
           mlir::arith::AddIOp::create(rewriter, loc, inIdx, adjVal);
-      mlir::Value outDim64 =
+      mlir::Value div =
           mlir::arith::DivSIOp::create(rewriter, loc, sum, strideVal);
+      mlir::Value one = mlir::arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI64IntegerAttr(1));
+      mlir::Value outDim64 =
+          mlir::arith::AddIOp::create(rewriter, loc, div, one);
       mlir::Value outDim = mlir::arith::IndexCastOp::create(
           rewriter, loc, rewriter.getIndexType(), outDim64);
       dynSizes.push_back(outDim);

@@ -3,11 +3,13 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <unordered_map>
 #include <vector>
 
 // Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
@@ -61,43 +63,65 @@
 //
 //===----------------------------------------------------------------------===//
 
-// TODO: Cache miopenFindConvolutionForwardAlgorithm() results
+//===----------------------------------------------------------------------===//
+// Per-shape convolution algorithm cache.
 //
-// RATIONALE: Algorithm finding is expensive (benchmarks multiple algorithms on
-// GPU). MIOpen documentation explicitly states: "miopenFindConvolution*() is
-// expensive in terms of run time and required workspace, so it's highly
-// recommended to reserve the required algorithm and workspace to reuse them
-// later."
-//
-// PyTorch achieves 30-40% speedup by caching algorithm selection via
-// torch.backends.cudnn.benchmark = True.
-//
-// IMPLEMENTATION: Store in RuntimeState as AlgorithmCache keyed by:
-//   (input_shape, weights_shape, output_shape, pad_h, pad_w, stride_h,
-//   stride_w,
-//    dilation_h, dilation_w)
-//
-// For dynamic shapes: Cache hit rate depends on shape variation. If shapes
-// change frequently, cache effectiveness is reduced (PyTorch docs warn about
-// this).
-//
-// Sources:
-// -
-// https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
-// - https://docs.pytorch.org/docs/stable/notes/cuda.html
+// miopenFindConvolutionForwardAlgorithm() is expensive (benchmarks multiple
+// algorithms on GPU).  We cache the result keyed on the full set of
+// shape/conv parameters so that repeated calls with the same configuration
+// skip the search entirely.
+//===----------------------------------------------------------------------===//
 
-// TODO: Pool workspace memory instead of malloc/free every call
-//
-// RATIONALE: GPU memory allocation (hipMalloc) is expensive - involves kernel
-// launch, synchronization, and memory manager overhead. Current code allocates
-// and frees workspace on every inference call (lines 95, 107).
-//
-// IMPLEMENTATION: Add WorkspacePool to RuntimeState that:
-//   - Pre-allocates workspace of maximum required size
-//   - Reuses across multiple calls
-//   - Grows dynamically if larger workspace needed
-//
-// BENEFIT: Eliminates malloc/free from hot path.
+struct ConvFwdCacheKey {
+  int64_t in_n, in_c, in_h, in_w;
+  int64_t w_k;
+  int64_t out_h, out_w;
+  int64_t kern_h, kern_w;
+  int64_t stride_h, stride_w;
+  int64_t pad_t, pad_l;
+  int64_t dil_h, dil_w;
+  int64_t group;
+  bool operator==(const ConvFwdCacheKey &o) const {
+    return in_n == o.in_n && in_c == o.in_c && in_h == o.in_h &&
+           in_w == o.in_w && w_k == o.w_k && out_h == o.out_h &&
+           out_w == o.out_w && kern_h == o.kern_h && kern_w == o.kern_w &&
+           stride_h == o.stride_h && stride_w == o.stride_w &&
+           pad_t == o.pad_t && pad_l == o.pad_l && dil_h == o.dil_h &&
+           dil_w == o.dil_w && group == o.group;
+  }
+};
+
+struct ConvFwdCacheKeyHash {
+  size_t operator()(const ConvFwdCacheKey &k) const {
+    size_t h = 0;
+    hash_combine_val(h, k.in_n);
+    hash_combine_val(h, k.in_c);
+    hash_combine_val(h, k.in_h);
+    hash_combine_val(h, k.in_w);
+    hash_combine_val(h, k.w_k);
+    hash_combine_val(h, k.out_h);
+    hash_combine_val(h, k.out_w);
+    hash_combine_val(h, k.kern_h);
+    hash_combine_val(h, k.kern_w);
+    hash_combine_val(h, k.stride_h);
+    hash_combine_val(h, k.stride_w);
+    hash_combine_val(h, k.pad_t);
+    hash_combine_val(h, k.pad_l);
+    hash_combine_val(h, k.dil_h);
+    hash_combine_val(h, k.dil_w);
+    hash_combine_val(h, k.group);
+    return h;
+  }
+};
+
+struct ConvFwdCacheEntry {
+  miopenConvFwdAlgorithm_t algo;
+  size_t workspace_size;
+};
+
+static std::unordered_map<ConvFwdCacheKey, ConvFwdCacheEntry,
+                          ConvFwdCacheKeyHash>
+    g_conv_fwd_cache;
 
 // MIOpen convolution forward implementation
 // Follows opaque RuntimeState pattern - extracts handle/stream from state
@@ -137,7 +161,7 @@ int wrap_miopenConvolutionForward(
   float beta = 0.0f;
 
   // Check inputs near the NaN-producing operation (op ~492)
-  {
+  if (nan_trace_enabled()) {
     int next_op = g_nan_trace_counter + 1;
     if (next_op >= 485 && next_op <= 500 && !g_nan_first_found) {
       nan_trace_check_input("conv_fwd", next_op, "data", input,
@@ -198,75 +222,76 @@ int wrap_miopenConvolutionForward(
     MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
   }
 
-  // Allocate workspace for algorithm search
-  // MIOpen's Find API needs workspace to test algorithms
-  HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
-
-  // Find best algorithm. Request multiple candidates and use exhaustive
-  // search to avoid problematic algorithms (Winograd for non-3x3 kernels).
+  // Look up or compute the best algorithm for this configuration.
   {
-    const int kMaxAlgos = 8;
-    miopenConvAlgoPerf_t all_results[8];
-    int total_returned = 0;
-    MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
-        miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
-        output_desc, output,
-        kMaxAlgos,       // requestAlgoCount
-        &total_returned, // returnedAlgoCount
-        all_results,     // perfResults
-        find_workspace,  // workspace for algorithm testing
-        find_workspace_size,
-        true)); // exhaustiveSearch = true
+    ConvFwdCacheKey cache_key{input_n, input_c, input_h,    input_w,
+                              weights_k, output_h, output_w,
+                              kernel_h,  kernel_w, stride_h, stride_w,
+                              pad_top,   pad_left, dilation_h, dilation_w,
+                              group};
+    auto cache_it = g_conv_fwd_cache.find(cache_key);
+    if (cache_it != g_conv_fwd_cache.end()) {
+      algo = cache_it->second.algo;
+      workspace_size = cache_it->second.workspace_size;
+    } else {
+      HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
 
-    bool winograd_safe =
-        (kernel_h == kernel_w) && (kernel_h == 3 || kernel_h == 5) &&
-        (input_h > 1) && (input_w > 1);
+      const int kMaxAlgos = 8;
+      miopenConvAlgoPerf_t all_results[8];
+      int total_returned = 0;
+      MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
+          miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
+          output_desc, output,
+          kMaxAlgos,       // requestAlgoCount
+          &total_returned, // returnedAlgoCount
+          all_results,     // perfResults
+          find_workspace,  // workspace for algorithm testing
+          find_workspace_size,
+          true)); // exhaustiveSearch = true
 
-    int best_idx = -1;
-    for (int i = 0; i < total_returned; ++i) {
-      if (!winograd_safe &&
-          all_results[i].fwd_algo == miopenConvolutionFwdAlgoWinograd)
-        continue;
-      best_idx = i;
-      break;
+      bool winograd_safe =
+          (kernel_h == kernel_w) && (kernel_h == 3 || kernel_h == 5) &&
+          (input_h > 1) && (input_w > 1);
+
+      int best_idx = -1;
+      for (int i = 0; i < total_returned; ++i) {
+        if (!winograd_safe &&
+            all_results[i].fwd_algo == miopenConvolutionFwdAlgoWinograd)
+          continue;
+        best_idx = i;
+        break;
+      }
+
+      if (best_idx < 0 && !winograd_safe) {
+        fprintf(stderr,
+                "[conv_fwd] NOTE: using Winograd for "
+                "in=[%lld,%lld,%lld,%lld] kern=[%lld,%lld]\n",
+                (long long)input_n, (long long)input_c,
+                (long long)input_h, (long long)input_w,
+                (long long)kernel_h, (long long)kernel_w);
+        best_idx = 0;
+      }
+
+      if (best_idx < 0)
+        best_idx = 0;
+
+      algo = all_results[best_idx].fwd_algo;
+      returned_algo_count = total_returned;
+      perf_results[0] = all_results[best_idx];
+      workspace_size = perf_results[0].memory;
+
+      g_conv_fwd_cache[cache_key] = {algo, workspace_size};
+
+      hipError_t err = hipFree(find_workspace);
+      if (err != hipSuccess) {
+        fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
+      }
+      find_workspace = nullptr;
     }
-
-    if (best_idx < 0 && !winograd_safe) {
-      // All returned algorithms are Winograd for a shape we previously
-      // considered unsafe.  Accept the best Winograd result rather than
-      // falling back to host-side computation (which violates the
-      // zero-CPU-fallback requirement).
-      fprintf(stderr,
-              "[conv_fwd] NOTE: using Winograd for "
-              "in=[%lld,%lld,%lld,%lld] kern=[%lld,%lld]\n",
-              (long long)input_n, (long long)input_c,
-              (long long)input_h, (long long)input_w,
-              (long long)kernel_h, (long long)kernel_w);
-      best_idx = 0; // Accept the best Winograd result
-    }
-
-    if (best_idx < 0)
-      best_idx = 0;
-
-    algo = all_results[best_idx].fwd_algo;
-    returned_algo_count = total_returned;
-    perf_results[0] = all_results[best_idx];
   }
 
-  // Use workspace size reported by the selected algorithm.
-  // miopenConvolutionForwardGetWorkSpaceSize returns the maximum over all
-  // algorithms and can return 0 when the selected algorithm actually needs
-  // workspace, causing "0 provided, N required" errors.
-  workspace_size = perf_results[0].memory;
-
-  // Reuse find_workspace if it's large enough, otherwise reallocate
-  workspace = find_workspace;
-  if (workspace_size > find_workspace_size) {
-    hipError_t err = hipFree(find_workspace);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
-    }
-    find_workspace = nullptr; // Mark as freed to avoid double-free
+  // Allocate workspace for the selected algorithm
+  if (workspace_size > 0) {
     HIP_CHECK(hipMalloc(&workspace, workspace_size));
   }
 
@@ -278,8 +303,7 @@ int wrap_miopenConvolutionForward(
     hipMemsetAsync(output, 0, out_elems * sizeof(float), hip_stream);
   }
 
-  // Log algorithm choice near the NaN-producing op
-  {
+  if (nan_trace_enabled()) {
     int next_op = g_nan_trace_counter + 1;
     if (next_op >= 491 && next_op <= 493) {
       fprintf(stderr,
@@ -295,8 +319,7 @@ int wrap_miopenConvolutionForward(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
       conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
 
-  // Check output BEFORE bias addition
-  {
+  if (nan_trace_enabled()) {
     int next_op = g_nan_trace_counter + 1;
     if (next_op >= 491 && next_op <= 493 && !g_nan_first_found) {
       nan_trace_check_input("conv_fwd", next_op, "PRE_BIAS_output", output,
@@ -327,7 +350,7 @@ cleanup:
       fprintf(stderr, "Warning: hipFree failed for workspace: %d\n", err);
     }
   }
-  if (find_workspace && find_workspace != workspace) {
+  if (find_workspace) {
     hipError_t err = hipFree(find_workspace);
     if (err != hipSuccess) {
       fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);

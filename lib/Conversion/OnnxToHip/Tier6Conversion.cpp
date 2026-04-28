@@ -131,7 +131,26 @@ struct PadToHip : public RewritePattern {
     }
 
     Location loc = op->getLoc();
-    Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    SmallVector<Value> dynSizes;
+    for (int64_t d = 0; d < resultType.getRank(); ++d) {
+      if (!resultType.isDynamicDim(d))
+        continue;
+      Value inDim = tensor::DimOp::create(rewriter, loc, input, d);
+      Value inDim64 = arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getI64Type(), inDim);
+      Value padBegin = arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI64IntegerAttr(padsBegin[d]));
+      Value padEnd = arith::ConstantOp::create(
+          rewriter, loc, rewriter.getI64IntegerAttr(padsEnd[d]));
+      Value padded = arith::AddIOp::create(
+          rewriter, loc, arith::AddIOp::create(rewriter, loc, inDim64, padBegin),
+          padEnd);
+      dynSizes.push_back(arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), padded));
+    }
+    Value init = tensor::EmptyOp::create(
+        rewriter, loc, resultType.getShape(), resultType.getElementType(),
+        dynSizes);
     auto hipOp = PadOp::create(rewriter, loc, resultType, context, input, init,
                                 rewriter.getI64ArrayAttr(padsBegin),
                                 rewriter.getI64ArrayAttr(padsEnd),
@@ -188,16 +207,15 @@ struct ExpandToHip : public RewritePattern {
           continue;
         }
       }
-      // Fallback: tensor.dim on the input at the corresponding position
-      // (right-aligned ONNX broadcast).
-      int64_t inRank = inputType.getRank();
-      int64_t srcDim = d - (outRank - inRank);
-      if (srcDim >= 0 && srcDim < inRank)
-        dynSizes.push_back(
-            mlir::tensor::DimOp::create(rewriter, loc, input, srcDim));
-      else
-        dynSizes.push_back(
-            mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
+      // Dynamic Expand shape: read the requested output dimension from the
+      // runtime shape tensor.  Falling back to the input dim is incorrect for
+      // broadcast axes (for Kokoro style conditioning it collapses [1,N,128]
+      // to [1,1,128]).
+      Value idx = mlir::arith::ConstantIndexOp::create(rewriter, loc, d);
+      Value dim = mlir::tensor::ExtractOp::create(
+          rewriter, loc, op->getOperand(1), ValueRange{idx});
+      dynSizes.push_back(mlir::arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), dim));
     }
     Value init = mlir::tensor::EmptyOp::create(
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
@@ -475,7 +493,6 @@ struct ResizeToHip : public RewritePattern {
         return rewriter.notifyMatchFailure(
             op, "onnx.Resize mode must be nearest/linear/cubic");
     }
-
     int64_t coordXform = 0; // half_pixel by default
     if (auto a = op->getAttrOfType<StringAttr>("coordinate_transformation_mode")) {
       StringRef s = a.getValue();

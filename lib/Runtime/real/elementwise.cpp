@@ -210,52 +210,28 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     return -1;
   }
 
-  bool op_ok;
-  miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op, op_ok);
-
-  // MIOpen miopenOpTensor requires `aDesc == cDesc` (the A tensor must
-  // already be at the broadcast result shape).  ONNX Add/Mul are
-  // commutative for our purposes, so when `lhs` doesn't match `output`
-  // but `rhs` does, swap them. (Not applicable for Sub - operand order matters.)
   bool lhs_matches = (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h &&
                        lhs_w == out_w);
   bool rhs_matches = (rhs_n == out_n && rhs_c == out_c && rhs_h == out_h &&
                        rhs_w == out_w);
-  if (!lhs_matches && rhs_matches && op_ok &&
-      (miopen_op == miopenTensorOpAdd || miopen_op == miopenTensorOpMul)) {
-    std::swap(lhs, rhs);
-    std::swap(lhs_n, rhs_n);
-    std::swap(lhs_c, rhs_c);
-    std::swap(lhs_h, rhs_h);
-    std::swap(lhs_w, rhs_w);
-    lhs_matches = true;
-  }
+  auto miopen_broadcastable = [&](int64_t n, int64_t c, int64_t h,
+                                  int64_t w) {
+    return (n == 1 || n == out_n) && (c == 1 || c == out_c) &&
+           (h == 1 || h == out_h) && (w == 1 || w == out_w);
+  };
 
-  int64_t lhs_total = lhs_n * lhs_c * lhs_h * lhs_w;
-  int64_t rhs_total = rhs_n * rhs_c * rhs_h * rhs_w;
-  int64_t out_total = out_n * out_c * out_h * out_w;
-
-  if (!g_nan_first_found) {
-    int op_id = g_nan_trace_counter + 1;
-    nan_trace_check_input("optensor", op_id, "lhs", lhs, lhs_total);
-    nan_trace_check_input("optensor", op_id, "rhs", rhs, rhs_total);
-    fprintf(stderr,
-            "[NAN_TRACE] op#%d optensor: op=%s "
-            "lhs=[%lld,%lld,%lld,%lld](%lld) rhs=[%lld,%lld,%lld,%lld](%lld) "
-            "out=[%lld,%lld,%lld,%lld](%lld)\n",
-            op_id, op_name,
-            (long long)lhs_n, (long long)lhs_c, (long long)lhs_h, (long long)lhs_w, (long long)lhs_total,
-            (long long)rhs_n, (long long)rhs_c, (long long)rhs_h, (long long)rhs_w, (long long)rhs_total,
-            (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w, (long long)out_total);
-    fflush(stderr);
-  }
-
-  // Use custom GPU kernels for Add/Mul/Sub instead of MIOpen to match CPU
-  // floating-point semantics (MIOpen's internal reordering can accumulate
-  // different rounding errors over thousands of ops).
-  if (tensor_op == HIPDNN_EP_TENSOR_OP_ADD ||
-      tensor_op == HIPDNN_EP_TENSOR_OP_MUL ||
-      tensor_op == HIPDNN_EP_TENSOR_OP_SUB) {
+  // SUB is not supported by MIOpen. Add/Mul normally stay on MIOpen, but
+  // MIOpen OpTensor requires one operand (A) to match C exactly; for mutual
+  // broadcasting neither operand matches C, so use the custom ONNX-broadcast
+  // kernel only for that case.
+  bool add_or_mul = (tensor_op == HIPDNN_EP_TENSOR_OP_ADD ||
+                     tensor_op == HIPDNN_EP_TENSOR_OP_MUL);
+  bool use_custom_binary =
+      (tensor_op == HIPDNN_EP_TENSOR_OP_SUB) ||
+      (add_or_mul &&
+       !((lhs_matches && miopen_broadcastable(rhs_n, rhs_c, rhs_h, rhs_w)) ||
+         (rhs_matches && miopen_broadcastable(lhs_n, lhs_c, lhs_h, lhs_w))));
+  if (use_custom_binary) {
     int kind;
     if (tensor_op == HIPDNN_EP_TENSOR_OP_ADD)
       kind = HIP_BINARY_ADD;
@@ -269,6 +245,8 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
       hip_dtype = HIP_DTYPE_FLOAT32;
     else if (data_type == HIPDNN_EP_DATATYPE_HALF)
       hip_dtype = HIP_DTYPE_FLOAT16;
+    else if (data_type == HIPDNN_EP_DATATYPE_INT64)
+      hip_dtype = HIP_DTYPE_INT64;
     else {
       fprintf(stderr, "wrap_miopenOpTensor: unsupported data_type %lld for "
                        "custom binary kernel\n",
@@ -293,27 +271,62 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
       }
     }
 
+    int64_t total = out_n * out_c * out_h * out_w;
+
+    if (nan_trace_enabled() && !g_nan_first_found) {
+      int op_id = g_nan_trace_counter + 1;
+      int64_t lhs_total = lhs_n * lhs_c * lhs_h * lhs_w;
+      int64_t rhs_total = rhs_n * rhs_c * rhs_h * rhs_w;
+      nan_trace_check_input("optensor", op_id, "lhs", lhs, lhs_total);
+      nan_trace_check_input("optensor", op_id, "rhs", rhs, rhs_total);
+      fprintf(stderr,
+              "[NAN_TRACE] op#%d optensor: op=%s "
+              "lhs=[%lld,%lld,%lld,%lld](%lld) rhs=[%lld,%lld,%lld,%lld](%lld) "
+              "out=[%lld,%lld,%lld,%lld](%lld)\n",
+              op_id, op_name,
+              (long long)lhs_n, (long long)lhs_c, (long long)lhs_h, (long long)lhs_w, (long long)lhs_total,
+              (long long)rhs_n, (long long)rhs_c, (long long)rhs_h, (long long)rhs_w, (long long)rhs_total,
+              (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w, (long long)total);
+      fflush(stderr);
+    }
+
     void *stream = hipdnn_ep_state_get_stream(state);
-    int rc = hip_elementwise_binary(stream, lhs, rhs, output, out_total,
-                                    hip_dtype, kind, 4, out_shape, lhs_strides,
-                                    rhs_strides);
+    int rc = hip_elementwise_binary(stream, lhs, rhs, output, total,
+                                    hip_dtype, kind, 4, out_shape,
+                                    lhs_strides, rhs_strides);
     if (rc != 0) {
-      fprintf(stderr, "wrap_miopenOpTensor: custom binary kernel failed (%d)\n",
-              rc);
+      fprintf(stderr, "wrap_miopenOpTensor: custom binary kernel failed "
+                       "(op=%s, rc=%d)\n", op_name, rc);
       return -1;
     }
 
-    nan_trace_check("optensor", output, out_total);
+    nan_trace_check("optensor", output, total);
     return 0;
   }
 
-  // For Min/Max: use MIOpen
+  // MIOpen path: Add, Mul, Min, Max.
+  bool op_ok;
+  miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op, op_ok);
   if (!op_ok) {
-    fprintf(stderr, "wrap_miopenOpTensor: unsupported tensor_op %lld for MIOpen\n",
+    fprintf(stderr, "wrap_miopenOpTensor: unsupported tensor_op %lld\n",
             (long long)tensor_op);
     return -1;
   }
-  OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,    rhs_h,
+
+  if (!lhs_matches && rhs_matches &&
+      (miopen_op == miopenTensorOpAdd || miopen_op == miopenTensorOpMul ||
+       miopen_op == miopenTensorOpMin || miopen_op == miopenTensorOpMax)) {
+    std::swap(lhs, rhs);
+    std::swap(lhs_n, rhs_n);
+    std::swap(lhs_c, rhs_c);
+    std::swap(lhs_h, rhs_h);
+    std::swap(lhs_w, rhs_w);
+    lhs_matches = true;
+  }
+
+  int64_t out_total = out_n * out_c * out_h * out_w;
+
+  OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c, rhs_h,
                        rhs_w, out_n, out_c, out_h, out_w, data_type};
   const OpTensorCacheEntry *c = queryOrCreateOpTensor(key);
   if (!c) {

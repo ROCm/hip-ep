@@ -4,14 +4,75 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <unordered_map>
 
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
+
+//===----------------------------------------------------------------------===//
+// Per-shape backward-data (ConvTranspose) algorithm cache.
+//===----------------------------------------------------------------------===//
+
+struct ConvBwdCacheKey {
+  int64_t in_n, in_c, in_h, in_w;
+  int64_t w_k, out_c;
+  int64_t out_h, out_w;
+  int64_t kern_h, kern_w;
+  int64_t stride_h, stride_w;
+  int64_t pad_t, pad_l;
+  int64_t dil_h, dil_w;
+  int64_t group;
+  int64_t data_type;
+  bool operator==(const ConvBwdCacheKey &o) const {
+    return in_n == o.in_n && in_c == o.in_c && in_h == o.in_h &&
+           in_w == o.in_w && w_k == o.w_k && out_c == o.out_c &&
+           out_h == o.out_h && out_w == o.out_w && kern_h == o.kern_h &&
+           kern_w == o.kern_w && stride_h == o.stride_h &&
+           stride_w == o.stride_w && pad_t == o.pad_t && pad_l == o.pad_l &&
+           dil_h == o.dil_h && dil_w == o.dil_w && group == o.group &&
+           data_type == o.data_type;
+  }
+};
+
+struct ConvBwdCacheKeyHash {
+  size_t operator()(const ConvBwdCacheKey &k) const {
+    size_t h = 0;
+    hash_combine_val(h, k.in_n);
+    hash_combine_val(h, k.in_c);
+    hash_combine_val(h, k.in_h);
+    hash_combine_val(h, k.in_w);
+    hash_combine_val(h, k.w_k);
+    hash_combine_val(h, k.out_c);
+    hash_combine_val(h, k.out_h);
+    hash_combine_val(h, k.out_w);
+    hash_combine_val(h, k.kern_h);
+    hash_combine_val(h, k.kern_w);
+    hash_combine_val(h, k.stride_h);
+    hash_combine_val(h, k.stride_w);
+    hash_combine_val(h, k.pad_t);
+    hash_combine_val(h, k.pad_l);
+    hash_combine_val(h, k.dil_h);
+    hash_combine_val(h, k.dil_w);
+    hash_combine_val(h, k.group);
+    hash_combine_val(h, k.data_type);
+    return h;
+  }
+};
+
+struct ConvBwdCacheEntry {
+  miopenConvBwdDataAlgorithm_t algo;
+  size_t workspace_size;
+};
+
+static std::unordered_map<ConvBwdCacheKey, ConvBwdCacheEntry,
+                          ConvBwdCacheKeyHash>
+    g_conv_bwd_cache;
 
 //===----------------------------------------------------------------------===//
 // MIOpen Convolution Backward-Data Wrapper (a.k.a. ONNX ConvTranspose)
@@ -203,34 +264,42 @@ extern "C" int wrap_miopenConvolutionBackwardData(
     MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, (int)group));
   }
 
-  // Workspace for algorithm search.  We follow the same pattern as
-  // wrap_miopenConvolutionForward: allocate 10MB scratch, ask MIOpen to
-  // benchmark candidates within it, then resize if the chosen algo needs
-  // more.  TODO: switch to the shared workspace pool once we add
-  // per-call sizing on the bwd path.
-  HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
+  // Look up or compute the best backward-data algorithm for this configuration.
+  {
+    ConvBwdCacheKey cache_key{input_n,   input_c,  input_h,    input_w,
+                              weights_k, output_c, output_h,   output_w,
+                              kernel_h,  kernel_w, stride_h,   stride_w,
+                              pad_top,   pad_left, dilation_h, dilation_w,
+                              group,     data_type};
+    auto cache_it = g_conv_bwd_cache.find(cache_key);
+    if (cache_it != g_conv_bwd_cache.end()) {
+      algo = cache_it->second.algo;
+      workspace_size = cache_it->second.workspace_size;
+    } else {
+      HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
 
-  MIOPEN_CHECK(miopenFindConvolutionBackwardDataAlgorithm(
-      miopen_handle, dy_desc, input, w_desc, weights, conv_desc, dx_desc,
-      output,
-      /*requestAlgoCount=*/1, &returned_algo_count, perf_results,
-      find_workspace, find_workspace_size, /*exhaustiveSearch=*/false));
-  if (returned_algo_count < 1) {
-    fprintf(stderr,
-            "wrap_miopenConvolutionBackwardData: no algorithm returned\n");
-    result = -1;
-    goto cleanup;
+      MIOPEN_CHECK(miopenFindConvolutionBackwardDataAlgorithm(
+          miopen_handle, dy_desc, input, w_desc, weights, conv_desc, dx_desc,
+          output,
+          /*requestAlgoCount=*/1, &returned_algo_count, perf_results,
+          find_workspace, find_workspace_size, /*exhaustiveSearch=*/false));
+      if (returned_algo_count < 1) {
+        fprintf(stderr,
+                "wrap_miopenConvolutionBackwardData: no algorithm returned\n");
+        result = -1;
+        goto cleanup;
+      }
+      algo = perf_results[0].bwd_data_algo;
+      workspace_size = perf_results[0].memory;
+
+      g_conv_bwd_cache[cache_key] = {algo, workspace_size};
+
+      HIP_CLEANUP(hipFree(find_workspace));
+      find_workspace = nullptr;
+    }
   }
-  algo = perf_results[0].bwd_data_algo;
 
-  // Use workspace size from the selected algorithm rather than the API
-  // query, which can return 0 when the algorithm actually needs workspace.
-  workspace_size = perf_results[0].memory;
-
-  workspace = find_workspace;
-  if (workspace_size > find_workspace_size) {
-    HIP_CLEANUP(hipFree(find_workspace));
-    find_workspace = nullptr;
+  if (workspace_size > 0) {
     HIP_CHECK(hipMalloc(&workspace, workspace_size));
   }
 
@@ -254,7 +323,7 @@ extern "C" int wrap_miopenConvolutionBackwardData(
   nan_trace_check("conv_transpose", output, input_n * output_c * output_h * output_w);
 
 cleanup:
-  if (workspace && workspace != find_workspace)
+  if (workspace)
     HIP_CLEANUP(hipFree(workspace));
   if (find_workspace)
     HIP_CLEANUP(hipFree(find_workspace));

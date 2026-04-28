@@ -28,6 +28,13 @@
 
 namespace {
 
+// Two-pass LayerNorm for numerical stability (matches onnxruntime/GGUF):
+//   Pass 1: compute mean via Kahan-compensated sum
+//   Pass 2: compute variance as mean((x - mean)^2) via Kahan-compensated sum
+//   Pass 3: normalize, scale, shift
+// The single-pass E[X^2]-E[X]^2 formula suffers from catastrophic
+// cancellation when values have a non-trivial mean. The two-pass approach
+// avoids this entirely.
 template <typename T, typename ToF, typename FromF>
 __global__ void layer_norm_kernel(const T *__restrict__ x,
                                   const T *__restrict__ gamma,
@@ -36,8 +43,8 @@ __global__ void layer_norm_kernel(const T *__restrict__ x,
                                   int64_t norm_size, float epsilon,
                                   ToF to_float, FromF from_float) {
     extern __shared__ float smem[];
-    float *sums = smem;
-    float *sumsq = smem + blockDim.x;
+    float *sdata = smem;
+    float *comp  = smem + blockDim.x;
 
     int64_t row = blockIdx.x;
     if (row >= outer)
@@ -49,31 +56,62 @@ __global__ void layer_norm_kernel(const T *__restrict__ x,
     const T *row_in = x + row * norm_size;
     T *row_out = y + row * norm_size;
 
+    // --- Pass 1: compute mean ---
     float local_sum = 0.0f;
-    float local_sumsq = 0.0f;
+    float cs = 0.0f;
     for (int64_t i = tid; i < norm_size; i += stride) {
         float v = to_float(row_in[i]);
-        local_sum += v;
-        local_sumsq += v * v;
+        float ys = v - cs;
+        float ts = local_sum + ys;
+        cs = (ts - local_sum) - ys;
+        local_sum = ts;
     }
-    sums[tid] = local_sum;
-    sumsq[tid] = local_sumsq;
+    sdata[tid] = local_sum;
+    comp[tid] = cs;
     __syncthreads();
 
     for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (static_cast<unsigned int>(tid) < s) {
-            sums[tid] += sums[tid + s];
-            sumsq[tid] += sumsq[tid + s];
+            float ys = sdata[tid + s] - (comp[tid] + comp[tid + s]);
+            float ts = sdata[tid] + ys;
+            comp[tid] = (ts - sdata[tid]) - ys;
+            sdata[tid] = ts;
         }
         __syncthreads();
     }
 
-    float mean = sums[0] / static_cast<float>(norm_size);
-    float var = sumsq[0] / static_cast<float>(norm_size) - mean * mean;
-    if (var < 0.0f)
-        var = 0.0f;
+    float mean = sdata[0] / static_cast<float>(norm_size);
+    __syncthreads();
+
+    // --- Pass 2: compute variance = mean((x - mean)^2) ---
+    float local_var = 0.0f;
+    float cv = 0.0f;
+    for (int64_t i = tid; i < norm_size; i += stride) {
+        float d = to_float(row_in[i]) - mean;
+        float sq = d * d;
+        float yv = sq - cv;
+        float tv = local_var + yv;
+        cv = (tv - local_var) - yv;
+        local_var = tv;
+    }
+    sdata[tid] = local_var;
+    comp[tid] = cv;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (static_cast<unsigned int>(tid) < s) {
+            float yv = sdata[tid + s] - (comp[tid] + comp[tid + s]);
+            float tv = sdata[tid] + yv;
+            comp[tid] = (tv - sdata[tid]) - yv;
+            sdata[tid] = tv;
+        }
+        __syncthreads();
+    }
+
+    float var = sdata[0] / static_cast<float>(norm_size);
     float inv_std = rsqrtf(var + epsilon);
 
+    // --- Pass 3: normalize, scale, shift ---
     for (int64_t i = tid; i < norm_size; i += stride) {
         float v = to_float(row_in[i]);
         float n = (v - mean) * inv_std;

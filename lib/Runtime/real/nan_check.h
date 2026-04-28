@@ -5,6 +5,30 @@
 #include <cstdlib>
 #include <hip/hip_runtime.h>
 
+// NAN_TRACE is a heavyweight debug tool that syncs the GPU and copies every
+// tensor back to the host after each op to scan for NaN/Inf.  It is OFF by
+// default; set HIPDNN_EP_NAN_TRACE=1 to enable.
+inline bool nan_trace_enabled() {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *v = ::getenv("HIPDNN_EP_NAN_TRACE");
+    enabled = (v && v[0] == '1') ? 1 : 0;
+  }
+  return enabled != 0;
+}
+
+// Lightweight sync-only mode: just hipDeviceSynchronize() after each op
+// to prevent async-related crashes without the D2H copy overhead.
+// Set HIPDNN_EP_SYNC_OPS=1 to enable.
+inline bool sync_ops_enabled() {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *v = ::getenv("HIPDNN_EP_SYNC_OPS");
+    enabled = (v && v[0] == '1') ? 1 : 0;
+  }
+  return enabled != 0;
+}
+
 static int g_nan_trace_counter = 0;
 static bool g_nan_first_found = false;
 static int g_nan_target_op = 0;
@@ -15,6 +39,8 @@ static int64_t g_watched_n = 0;
 static int g_watched_last_op = 0;
 
 inline void nan_watch_check(const char *caller, int op_id) {
+  if (!nan_trace_enabled())
+    return;
   if (!g_watched_ptr || g_watched_n <= 0)
     return;
   hipDeviceSynchronize();
@@ -42,6 +68,11 @@ inline void nan_watch_check(const char *caller, int op_id) {
 
 inline void nan_trace_check(const char *op_name, const void *gpu_buf,
                             int64_t num_elements, int elem_bytes = 4) {
+  if (!nan_trace_enabled()) {
+    if (sync_ops_enabled())
+      hipDeviceSynchronize();
+    return;
+  }
   int op_id = ++g_nan_trace_counter;
 
   // Re-check watched buffer
@@ -126,6 +157,8 @@ inline void nan_trace_check(const char *op_name, const void *gpu_buf,
 inline void nan_trace_check_input(const char *op_name, int op_id,
                                   const char *input_name, const void *gpu_buf,
                                   int64_t num_elements) {
+  if (!nan_trace_enabled())
+    return;
   if (!gpu_buf || num_elements <= 0)
     return;
   hipDeviceSynchronize();

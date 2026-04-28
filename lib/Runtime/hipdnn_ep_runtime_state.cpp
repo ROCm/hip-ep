@@ -634,26 +634,43 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state) {
   return state->pool_base;
 }
 
+// Sentinel for zero-element tensors: a single managed allocation that is
+// never freed, returned for all size==0 requests so that downstream null
+// checks pass.  No kernel should read/write a 0-element tensor.
+static void *g_zero_sentinel = nullptr;
+
 void *hip_device_malloc(size_t size_bytes) {
+  if (size_bytes == 0) {
+    if (!g_zero_sentinel)
+      hipMallocManaged(&g_zero_sentinel, 64);
+    return g_zero_sentinel;
+  }
   void *ptr = nullptr;
   // When PoolAllocsPass is skipped (MORPHIZEN_NO_BUFFER_OPT=1), the MLIR
   // bufferization emits direct CPU loads/stores (scalar index math, Range,
   // Gather index construction, etc.) against these buffers.  hipMalloc
   // returns device-only memory that faults on CPU access; hipMallocManaged
   // returns unified memory that the HIP runtime migrates on demand.
+  //
+  // Drain all GPU work before allocating to prevent managed-memory page
+  // faults from racing with in-flight kernels on gfx1201.
+  hipDeviceSynchronize();
   hipError_t err = hipMallocManaged(&ptr, size_bytes);
   if (err != hipSuccess) {
     fprintf(stderr, "[hip_device_malloc] hipMallocManaged(%zu) failed: %d\n",
             size_bytes, (int)err);
     return nullptr;
   }
-  memset(ptr, 0, size_bytes);
+  hipMemset(ptr, 0, size_bytes);
+  hipDeviceSynchronize();
   return ptr;
 }
 
 void hip_device_free(void *ptr) {
-  if (ptr)
+  if (ptr && ptr != g_zero_sentinel) {
+    hipDeviceSynchronize();
     hipFree(ptr);
+  }
 }
 
 //===----------------------------------------------------------------------===//

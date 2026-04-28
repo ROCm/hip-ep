@@ -32,9 +32,20 @@ namespace {
 template <hip_binary_kind_t Kind>
 __device__ __forceinline__ float apply(float a, float b) {
     if constexpr (Kind == HIP_BINARY_DIV)
-        return (b == 0.0f) ? 0.0f : (a / b);
-    else if constexpr (Kind == HIP_BINARY_POW)
+        return (a == 0.0f && b == 0.0f) ? 0.0f : (a / b);
+    else if constexpr (Kind == HIP_BINARY_POW) {
+        // Fast-path small integer exponents: more precise than powf()
+        // (which uses exp(b*log(a)) and fails for negative a with
+        // non-integer b) and matches what CUDA libdevice does internally.
+        // Kokoro uses Pow(x,2) for Snake activation (sin²) and Pow(x,3)
+        // for GELU, both of which have negative inputs.
+        if (b == 2.0f) return a * a;
+        if (b == 3.0f) return a * a * a;
+        if (b == 0.5f) return sqrtf(a);
+        if (b == 0.0f) return 1.0f;
+        if (b == 1.0f) return a;
         return powf(a, b);
+    }
     else if constexpr (Kind == HIP_BINARY_MUL)
         return a * b;
     else if constexpr (Kind == HIP_BINARY_ADD)
@@ -75,8 +86,9 @@ __global__ void
 binary_kernel(const T *__restrict__ lhs, const T *__restrict__ rhs,
               T *__restrict__ out, int64_t num_elements, BroadcastDesc desc,
               ToF to_float, FromF from_float) {
-    int64_t flat =
-        static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t bx =
+        static_cast<int64_t>(blockIdx.y) * gridDim.x + blockIdx.x;
+    int64_t flat = bx * blockDim.x + threadIdx.x;
     if (flat >= num_elements)
         return;
     int64_t idx[HIP_BINARY_MAX_RANK];
@@ -93,14 +105,22 @@ int launch_binary(hipStream_t stream, const void *lhs, const void *rhs,
                   void *out, int64_t num_elements, int hip_dtype,
                   const BroadcastDesc &desc) {
     constexpr int kBlockSize = 256;
-    int grid_size =
-        static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+    int64_t blocks = (num_elements + kBlockSize - 1) / kBlockSize;
+    constexpr int64_t kMaxGridX = 65535;
+    int64_t grid_x = blocks;
+    int64_t grid_y = 1;
+    if (blocks > kMaxGridX) {
+        grid_y = (blocks + kMaxGridX - 1) / kMaxGridX;
+        grid_x = (blocks + grid_y - 1) / grid_y;
+    }
+    dim3 grid(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), 1);
+    dim3 block(kBlockSize, 1, 1);
     switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32: {
         auto id = [] __device__(float v) { return v; };
         hipLaunchKernelGGL(
             (binary_kernel<Kind, float, decltype(id), decltype(id)>),
-            dim3(grid_size), dim3(kBlockSize), 0, stream,
+            grid, block, 0, stream,
             static_cast<const float *>(lhs), static_cast<const float *>(rhs),
             static_cast<float *>(out), num_elements, desc, id, id);
         break;
@@ -110,7 +130,7 @@ int launch_binary(hipStream_t stream, const void *lhs, const void *rhs,
         auto from_f = [] __device__(float v) { return __float2half(v); };
         hipLaunchKernelGGL(
             (binary_kernel<Kind, __half, decltype(to_f), decltype(from_f)>),
-            dim3(grid_size), dim3(kBlockSize), 0, stream,
+            grid, block, 0, stream,
             static_cast<const __half *>(lhs), static_cast<const __half *>(rhs),
             static_cast<__half *>(out), num_elements, desc, to_f, from_f);
         break;
@@ -121,11 +141,21 @@ int launch_binary(hipStream_t stream, const void *lhs, const void *rhs,
         auto from_f = [] __device__(float v) { return __float2bfloat16(v); };
         hipLaunchKernelGGL((binary_kernel<Kind, __hip_bfloat16, decltype(to_f),
                                           decltype(from_f)>),
-                           dim3(grid_size), dim3(kBlockSize), 0, stream,
+                           grid, block, 0, stream,
                            static_cast<const __hip_bfloat16 *>(lhs),
                            static_cast<const __hip_bfloat16 *>(rhs),
                            static_cast<__hip_bfloat16 *>(out), num_elements,
                            desc, to_f, from_f);
+        break;
+    }
+    case HIP_DTYPE_INT64: {
+        auto to_f = [] __device__(int64_t v) { return static_cast<float>(v); };
+        auto from_f = [] __device__(float v) { return static_cast<int64_t>(v); };
+        hipLaunchKernelGGL(
+            (binary_kernel<Kind, int64_t, decltype(to_f), decltype(from_f)>),
+            grid, block, 0, stream,
+            static_cast<const int64_t *>(lhs), static_cast<const int64_t *>(rhs),
+            static_cast<int64_t *>(out), num_elements, desc, to_f, from_f);
         break;
     }
     default:

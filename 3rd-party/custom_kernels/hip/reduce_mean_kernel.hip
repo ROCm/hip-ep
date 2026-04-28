@@ -28,6 +28,8 @@ __global__ void reduce_mean_kernel(const T *__restrict__ data,
                                    int64_t num_output_elements, ToF to_float,
                                    FromF from_float) {
     extern __shared__ float smem[];
+    float *sums = smem;
+    float *comp = smem + blockDim.x;
 
     int64_t out_idx = blockIdx.x;
     if (out_idx >= num_output_elements)
@@ -38,21 +40,31 @@ __global__ void reduce_mean_kernel(const T *__restrict__ data,
     int stride = blockDim.x;
 
     float partial = 0.0f;
-    for (int64_t i = tid; i < reduce_size; i += stride)
-        partial += to_float(slice[i]);
+    float c = 0.0f;
+    for (int64_t i = tid; i < reduce_size; i += stride) {
+        float y = to_float(slice[i]) - c;
+        float t = partial + y;
+        c = (t - partial) - y;
+        partial = t;
+    }
 
-    smem[tid] = partial;
+    sums[tid] = partial;
+    comp[tid] = c;
     __syncthreads();
 
     for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (static_cast<unsigned int>(tid) < s)
-            smem[tid] += smem[tid + s];
+        if (static_cast<unsigned int>(tid) < s) {
+            float y = sums[tid + s] - (comp[tid] + comp[tid + s]);
+            float t = sums[tid] + y;
+            comp[tid] = (t - sums[tid]) - y;
+            sums[tid] = t;
+        }
         __syncthreads();
     }
 
     if (tid == 0)
         output[out_idx] =
-            from_float(smem[0] / static_cast<float>(reduce_size));
+            from_float(sums[0] / static_cast<float>(reduce_size));
 }
 
 // Strided variant for non-tail-axis reduction.
@@ -67,6 +79,8 @@ __global__ void reduce_mean_strided_kernel(const T *__restrict__ data,
                                            int64_t num_output_elements,
                                            ToF to_float, FromF from_float) {
     extern __shared__ float smem[];
+    float *sums = smem;
+    float *comp = smem + blockDim.x;
 
     int64_t out_idx = blockIdx.x;
     if (out_idx >= num_output_elements)
@@ -80,21 +94,31 @@ __global__ void reduce_mean_strided_kernel(const T *__restrict__ data,
     int stride = blockDim.x;
 
     float partial = 0.0f;
-    for (int64_t r = tid; r < reduce_size; r += stride)
-        partial += to_float(data[base + r * inner_size]);
+    float c = 0.0f;
+    for (int64_t r = tid; r < reduce_size; r += stride) {
+        float y = to_float(data[base + r * inner_size]) - c;
+        float t = partial + y;
+        c = (t - partial) - y;
+        partial = t;
+    }
 
-    smem[tid] = partial;
+    sums[tid] = partial;
+    comp[tid] = c;
     __syncthreads();
 
     for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (static_cast<unsigned int>(tid) < s)
-            smem[tid] += smem[tid + s];
+        if (static_cast<unsigned int>(tid) < s) {
+            float y = sums[tid + s] - (comp[tid] + comp[tid + s]);
+            float t = sums[tid] + y;
+            comp[tid] = (t - sums[tid]) - y;
+            sums[tid] = t;
+        }
         __syncthreads();
     }
 
     if (tid == 0)
         output[out_idx] =
-            from_float(smem[0] / static_cast<float>(reduce_size));
+            from_float(sums[0] / static_cast<float>(reduce_size));
 }
 
 } // namespace
@@ -123,7 +147,7 @@ extern "C" int hip_reduce_mean(void *stream, const void *data, void *output,
         if (block_size < 1)
             block_size = 1;
     }
-    size_t shared_mem = block_size * sizeof(float);
+    size_t shared_mem = 2 * block_size * sizeof(float);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_reduce_mean: dtype=%d, in=%lld, out=%lld, "
@@ -203,7 +227,7 @@ extern "C" int hip_reduce_mean_strided(void *stream, const void *data,
         if (block_size < 1)
             block_size = 1;
     }
-    size_t shared_mem = block_size * sizeof(float);
+    size_t shared_mem = 2 * block_size * sizeof(float);
 
     switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32: {
