@@ -231,22 +231,24 @@ CompilerDriver discovers the `.lib` at model-compile time via the configured ins
 
 Implements MatMulNBits — fused dequant + matmul for INT4 packed weights (FP16 activations). This is the dominant operator in INT4 LLM decode (~78% of GPU time for Llama 8B).
 
-Three execution paths, auto-dispatched by shape:
+Four execution paths, auto-dispatched by shape:
 
 | Path | Condition | Strategy |
 |------|-----------|----------|
 | WMMA | batch==1, K%32==0, M≥16 | RDNA3 wave matrix multiply with double-buffered shared memory, grid swizzling |
-| GEMV | batch==1, K%32==0, M<16 | K-parallel reduction, autotuned (BLOCK_SIZE×TILE_N) |
+| GEMV col-major | batch==1, K%32==0, 1<M<16 | K-parallel GEMV with internal row→col transpose, FP16 zero points, autotuned |
+| GEMV row-major | batch==1, K%32==0, M=1 | K-parallel GEMV, uint8 zero points (no ZP conversion), autotuned |
 | Naive | fallback | Per-element row-major, uint8 zero points |
 
-**Single-token decode (M=1) uses the GEMV path.** Key design choices:
+**Single-token decode (M=1) uses the GEMV row-major path.** Key design choices:
 
 - **K-parallel reduction**: Each threadblock cooperates on the K dimension for TILE_N output columns. This gives sequential per-row B access that is prefetcher-friendly on LPDDR5X (APU shared memory). An N-parallel approach (each thread reads all K/2 bytes) was tried and abandoned — scattered reads across hundreds of loads defeated the LPDDR5X prefetcher. A tiled B layout variant `[K/32, N, 16]` was also tried (28% regression).
-- **Factored dequant**: Computes `dot(A,B)*scale - a_sum*zp*scale`, saving ~40% FLOPs vs the naive `sum(a[k] * (b[k]-zp) * scale)`.
-- **Vectorized B loads**: 128-bit (uint4) main loop processes 32 nibbles per transaction, with uint2 (16-nibble) and uint32 (8-nibble) remainder phases. Load-compute separation issues all B loads before FMA compute.
-- **Runtime autotune**: First call for each (M,N,K,block_size) benchmarks all 35 (BLOCK_SIZE, TILE_N) configurations and caches the fastest. BLOCK_SIZE ∈ {32,64,128,256,512,1024}, TILE_N ∈ {1,2,4,8,16,32,64}. BS=32 configs use single-warp shuffle-only reduction (no LDS). Configs with TILE_N≥32 tested only when N≥1024.
+- **Factored dequant**: Computes `(dot(A,B) - a_sum*zp) * scale`, saving ~40% FLOPs vs the naive `sum(a[k] * (b[k]-zp) * scale)`. Single multiply per group instead of per-element.
+- **Vectorized B loads**: 128-bit (uint4) main loop processes 32 nibbles per transaction, with uint2 (16-nibble) and uint32 (8-nibble) remainder phases. Load-compute separation issues all B loads before FMA compute. Explicit `__fmaf_rn` intrinsics for dot product accumulation.
+- **Runtime autotune**: First call for each (M,N,K,block_size) benchmarks all 35 (BLOCK_SIZE, TILE_N) configurations and caches the fastest. BLOCK_SIZE ∈ {32,64,128,256,512,1024}, TILE_N ∈ {1,2,4,8,16,32,64}. BS=32 configs use single-warp shuffle-only reduction (no LDS). TILE_N=32 tested only when N≥1024; TILE_N=64 only when N≥2048.
 - **Compile-time warp size**: RDNA 3 (gfx11xx) runs wave32 by default. The reduction uses `constexpr int WARP_SIZE = 32` for dead-code elimination — a runtime `__builtin_amdgcn_wavefrontsize()` check caused 13% regression due to both branches being compiled for every template instantiation.
-- **M=1 col-major bypass**: For M=1 decode, the GEMV path skips the col-major GEMV route (which requires FP16 zero-point conversion via `convertZpToFp16`) and falls through to the row-major GEMV path which reads uint8 zero_points natively. Saves 225 kernel launches per Llama 8B inference.
+- **Single-warp fast path**: For BLOCK_SIZE=32 (one wave on RDNA 3), `if constexpr (BLOCK_SIZE <= WARP_SIZE)` eliminates the shared memory reduction entirely — warp shuffle result is final, no `__syncthreads` or LDS write/read needed.
+- **M=1 col-major bypass**: For M=1 decode, the GEMV path skips the col-major GEMV route (which requires FP16 zero-point conversion via `convertZpToFp16`) and falls through to the row-major GEMV path which reads uint8 zero_points natively. Saves 225 kernel launches per Llama 8B inference. The M=1 autotune cache key also deduplicates row/col entries since the layouts are identical for a single row.
 - **Optimization attempts that regressed**: K-loop unroll x2 (+5% register spilling), nontemporal stores (+3%, output too small to pollute cache), N-parallel tiled GEMV (+28%, prefetcher defeated). All reverted with comments documenting the regression.
 
 **Weight layout**: B is stored as `[N, K/2]` with pairs of 4-bit values packed into bytes (low nibble first). Scales and zero-points are per quantization group: `[N, ceil(K/block_size)]`. block_size is always power-of-2 (typically 32), enabling bit-shift group index calculation.
