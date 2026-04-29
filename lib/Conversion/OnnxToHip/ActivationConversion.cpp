@@ -38,7 +38,7 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
-/// onnx.Sigmoid -> hip.sigmoid
+/// onnx.Sigmoid -> hip.unary_elementwise(kind=SIGMOID)
 struct SigmoidToHip : public mlir::RewritePattern {
   SigmoidToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Sigmoid", /*benefit=*/1, ctx) {}
@@ -61,8 +61,10 @@ SigmoidToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-  auto hipOp = mlir::hip::SigmoidOp::create(rewriter, loc, resultType, context,
-                                            input, init);
+  auto hipOp = mlir::hip::UnaryElementwiseOp::create(
+      rewriter, loc, resultType, context, input, init,
+      rewriter.getI64IntegerAttr(9), rewriter.getF32FloatAttr(0.0f),
+      rewriter.getF32FloatAttr(0.0f));
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

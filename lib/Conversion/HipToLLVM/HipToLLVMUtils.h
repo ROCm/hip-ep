@@ -61,6 +61,9 @@ inline constexpr const char *kWrapCast = "wrap_cast";
 inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapElementwiseUnary = "wrap_elementwise_unary";
 inline constexpr const char *kWrapElementwiseBinary = "wrap_elementwise_binary";
+inline constexpr const char *kWrapDequantizeLinear =
+    "wrap_dequantize_linear";
+inline constexpr const char *kWrapQuantizeLinear = "wrap_quantize_linear";
 inline constexpr const char *kWrapSlice = "wrap_slice";
 inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
 inline constexpr const char *kWrapConcat = "wrap_concat";
@@ -118,8 +121,21 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return 3; // HIPDNN_EP_DATATYPE_INT32
   if (elemType.isInteger(64))
     return 4; // HIPDNN_EP_DATATYPE_INT64
-  if (elemType.isInteger(8))
-    return 5; // HIPDNN_EP_DATATYPE_INT8
+  if (auto intType = dyn_cast<IntegerType>(elemType)) {
+    if (intType.getWidth() == 8) {
+      if (intType.getSignedness() == IntegerType::Unsigned)
+        return 6; // HIPDNN_EP_DATATYPE_UINT8
+      return 5;   // HIPDNN_EP_DATATYPE_INT8
+    }
+  }
+  return -1;
+}
+
+inline int64_t getElementTypeBitWidth(Type elemType) {
+  if (auto intType = dyn_cast<IntegerType>(elemType))
+    return intType.getWidth();
+  if (auto floatType = dyn_cast<FloatType>(elemType))
+    return floatType.getWidth();
   return -1;
 }
 
@@ -339,6 +355,8 @@ void populateUnaryElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateBinaryElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateQDQMLIRLoweringPatterns(const LLVMTypeConverter &converter,
+                                     RewritePatternSet &patterns);
 void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateTier2ShapeLoweringPatterns(const LLVMTypeConverter &converter,

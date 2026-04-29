@@ -408,6 +408,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateGemmConversionPatterns(patterns, ctx);
   populateUnaryElementwiseConversionPatterns(patterns, ctx);
   populateBinaryElementwiseConversionPatterns(patterns, ctx);
+  populateQDQConversionPatterns(patterns, ctx);
   populateSliceConversionPatterns(patterns, ctx);
   populateTier2ShapeConversionPatterns(patterns, ctx);
   populateTier3CompareConversionPatterns(patterns, ctx);
@@ -426,15 +427,10 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
-  // Single greedy pass is enough: each onnx.* op converts to hip.*
-  // (or arith.constant for shape folds) and none of those match any of
-  // our patterns themselves.  Capping the rewriter avoids a quadratic
-  // re-walk over Kokoro's ~2000-op graph.
-  // The rewriter needs at least 2 iterations to confirm convergence (one
-  // walk to apply, a second walk to verify nothing else matches).  Cap at
-  // 4 so a runaway pattern surfaces as a clean failure rather than a hang.
-  config.setMaxIterations(4);
-  config.setMaxNumRewrites(50000);
+  // Large graphs such as Kokoro FP16 need several rewrites per original ONNX
+  // node because some conversions expand 1-D ops through tensor shape ops.
+  config.setMaxIterations(8);
+  config.setMaxNumRewrites(1000000);
 
   // Heartbeat listener.  Every 50 events log the last erased + last
   // inserted op kind so when the compiler crashes mid-rewrite we know
@@ -507,6 +503,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
                                             mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
+  populateQDQConstantFoldPatterns(patterns, ctx);
   populateSliceConversionPatterns(patterns, ctx);
   populateUnaryElementwiseConversionPatterns(patterns, ctx);
   populateTier2ShapeConversionPatterns(patterns, ctx);
@@ -527,7 +524,7 @@ static mlir::LogicalResult preLowerShapeOps(mlir::func::FuncOp funcOp,
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
   config.setMaxIterations(8);
-  config.setMaxNumRewrites(100000);
+  config.setMaxNumRewrites(1000000);
   (void)mlir::applyPatternsGreedily(funcOp, std::move(patterns), config);
   return mlir::success();
 }

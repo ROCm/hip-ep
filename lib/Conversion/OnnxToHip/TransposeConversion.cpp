@@ -51,8 +51,8 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
   mlir::Value data = op->getOperand(0);
 
-  auto permAttr = op->getAttrOfType<mlir::ArrayAttr>("perm");
-  if (!permAttr)
+  auto perm = getI64ArrayAttrValues(op, "perm");
+  if (perm.empty())
     return rewriter.notifyMatchFailure(
         op, "hip.transpose requires explicit perm attribute");
 
@@ -67,8 +67,7 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
     rewriter.replaceOp(op, data);
     return mlir::success();
   }
-  if (rank != static_cast<int64_t>(permAttr.size()) ||
-      rank != resultType.getRank())
+  if (rank != static_cast<int64_t>(perm.size()) || rank != resultType.getRank())
     return rewriter.notifyMatchFailure(op, "perm size != tensor rank");
 
   // Materialize the original input dim sizes once; we pull from this when
@@ -78,10 +77,6 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
     srcDimSizes[i] = mlir::tensor::DimOp::create(rewriter, loc, data, i);
 
   // Compute final perm[].
-  llvm::SmallVector<int64_t> perm(rank);
-  for (int64_t i = 0; i < rank; ++i)
-    perm[i] = mlir::cast<mlir::IntegerAttr>(permAttr[i]).getValue().getSExtValue();
-
   // Cycle-decomposition of `perm` into a sequence of 2-element swaps.
   // Algorithm: starting from the identity, for each i find the position j
   // that currently holds perm[i] and swap (i, j) in the running state.

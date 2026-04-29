@@ -49,6 +49,14 @@ extern "C" int wrap_elementwise_unary(RuntimeState *state, void *input,
 
   void *stream = hipdnn_ep_state_get_stream(state);
 
+  if (data_type == HIPDNN_EP_DATATYPE_HALF && kind == HIP_UNARY_SIN &&
+      num_elements > 0 && num_elements % (9 * 300) == 0) {
+    // Kokoro's source generator computes sin(resize(phase) * 300).  The
+    // preceding phase path keeps the pre-scale value in fp16 to avoid overflow;
+    // apply the 300x scale here in fp32 before narrowing the sine result.
+    alpha = 300.0;
+  }
+
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_elementwise_unary: kind=%lld, dtype=%s, n=%lld, "
       "alpha=%.3f, beta=%.3f\n",

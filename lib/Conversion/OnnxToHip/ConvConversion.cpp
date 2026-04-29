@@ -49,39 +49,25 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
         op, "ConvToHip: input/output rank too low (degenerate)");
 
   // Extract attributes from onnx.Conv
-  llvm::SmallVector<int64_t> kernelShape;
-  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {
-    for (auto a : attr)
-      kernelShape.push_back(
-          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-  }
+  llvm::SmallVector<int64_t> kernelShape =
+      getI64ArrayAttrValues(op, "kernel_shape");
 
-  llvm::SmallVector<int64_t> strides;
-  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("strides")) {
-    for (auto a : attr)
-      strides.push_back(
-          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-  } else {
+  llvm::SmallVector<int64_t> strides =
+      getI64ArrayAttrValues(op, "strides");
+  if (strides.empty()) {
     // Default strides = 1 for each spatial dimension
     strides.assign(kernelShape.size(), 1);
   }
 
-  llvm::SmallVector<int64_t> pads;
-  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
-    for (auto a : attr)
-      pads.push_back(
-          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-  } else {
+  llvm::SmallVector<int64_t> pads = getI64ArrayAttrValues(op, "pads");
+  if (pads.empty()) {
     // Default pads = 0
     pads.assign(kernelShape.size() * 2, 0);
   }
 
-  llvm::SmallVector<int64_t> dilations;
-  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("dilations")) {
-    for (auto a : attr)
-      dilations.push_back(
-          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-  } else {
+  llvm::SmallVector<int64_t> dilations =
+      getI64ArrayAttrValues(op, "dilations");
+  if (dilations.empty()) {
     // Default dilations = 1
     dilations.assign(kernelShape.size(), 1);
   }

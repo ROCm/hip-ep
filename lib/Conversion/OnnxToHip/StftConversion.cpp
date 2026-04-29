@@ -168,9 +168,10 @@ struct StftToHip : public RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.STFT lowering requires a rank-4 output "
               "(batch, n_frames, n_freqs, 2)");
-    if (!resultType.getElementType().isF32())
+    if (!resultType.getElementType().isF32() &&
+        !resultType.getElementType().isF16())
       return rewriter.notifyMatchFailure(
-          op, "onnx.STFT lowering currently supports f32 output only");
+          op, "onnx.STFT lowering currently supports f32/f16 output only");
 
     int64_t onesided = 1;
     if (auto a = op->getAttrOfType<IntegerAttr>("onesided"))
@@ -213,9 +214,10 @@ struct StftToHip : public RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.STFT lowering requires a 2-D (batch, signal_length) "
               "signal after collapsing the trailing unit dim");
-    if (!signalType2D.getElementType().isF32())
+    if (!signalType2D.getElementType().isF32() &&
+        !signalType2D.getElementType().isF16())
       return rewriter.notifyMatchFailure(
-          op, "onnx.STFT lowering currently supports f32 signals only");
+          op, "onnx.STFT lowering currently supports f32/f16 signals only");
 
     // Build the empty output tensor.  Batch (d=0) inherits from the signal,
     // n_frames (d=1) is derived from signal_length if dynamic.

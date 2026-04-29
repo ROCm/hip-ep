@@ -36,6 +36,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_unary_kernel.hip
     hip/elementwise_binary_kernel.hip
+    hip/qdq_kernel.hip
     hip/slice_kernel.hip
     hip/reduce_mean_kernel.hip
     hip/concat_kernel.hip

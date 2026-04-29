@@ -35,6 +35,8 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
 #define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
 #define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
+#define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
+#define HIPDNN_EP_DATATYPE_UINT8 6    // ui8/u8, 1 byte
 
 //===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
@@ -79,6 +81,10 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 4;
   case HIPDNN_EP_DATATYPE_INT64:
     return 8;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return 1;
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return 1;
   default:
     return -1;
   }
@@ -96,6 +102,10 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "i32";
   case HIPDNN_EP_DATATYPE_INT64:
     return "i64";
+  case HIPDNN_EP_DATATYPE_INT8:
+    return "i8";
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return "u8";
   default:
     return "unknown";
   }
@@ -391,7 +401,8 @@ int wrap_miopenConvolutionForward(
     int64_t pad_right,   // Padding right
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
-    int64_t group);      // Number of groups
+    int64_t group,       // Number of groups
+    int64_t data_type);  // HIPDNN_EP_DATATYPE_* enum
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations

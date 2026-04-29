@@ -121,6 +121,93 @@ __global__ void reduce_mean_strided_kernel(const T *__restrict__ data,
             from_float(sums[0] / static_cast<float>(reduce_size));
 }
 
+__global__ void reduce_mean_f16_kernel(const __half *__restrict__ data,
+                                       __half *__restrict__ output,
+                                       int64_t reduce_size,
+                                       int64_t num_output_elements) {
+    extern __shared__ float smem[];
+    float *sums = smem;
+    float *comp = smem + blockDim.x;
+
+    int64_t out_idx = blockIdx.x;
+    if (out_idx >= num_output_elements)
+        return;
+
+    const __half *slice = data + out_idx * reduce_size;
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+
+    float partial = 0.0f;
+    float c = 0.0f;
+    for (int64_t i = tid; i < reduce_size; i += stride) {
+        float y = __half2float(slice[i]) - c;
+        float t = partial + y;
+        c = (t - partial) - y;
+        partial = t;
+    }
+    sums[tid] = partial;
+    comp[tid] = c;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (static_cast<unsigned int>(tid) < s) {
+            float y = sums[tid + s] - (comp[tid] + comp[tid + s]);
+            float t = sums[tid] + y;
+            comp[tid] = (t - sums[tid]) - y;
+            sums[tid] = t;
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0)
+        output[out_idx] = __float2half(sums[0] / static_cast<float>(reduce_size));
+}
+
+__global__ void reduce_mean_f16_strided_kernel(const __half *__restrict__ data,
+                                               __half *__restrict__ output,
+                                               int64_t reduce_size,
+                                               int64_t inner_size,
+                                               int64_t num_output_elements) {
+    extern __shared__ float smem[];
+    float *sums = smem;
+    float *comp = smem + blockDim.x;
+
+    int64_t out_idx = blockIdx.x;
+    if (out_idx >= num_output_elements)
+        return;
+
+    int64_t outer = out_idx / inner_size;
+    int64_t inner = out_idx % inner_size;
+    int64_t base = outer * reduce_size * inner_size + inner;
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+
+    float partial = 0.0f;
+    float c = 0.0f;
+    for (int64_t r = tid; r < reduce_size; r += stride) {
+        float y = __half2float(data[base + r * inner_size]) - c;
+        float t = partial + y;
+        c = (t - partial) - y;
+        partial = t;
+    }
+    sums[tid] = partial;
+    comp[tid] = c;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (static_cast<unsigned int>(tid) < s) {
+            float y = sums[tid + s] - (comp[tid] + comp[tid + s]);
+            float t = sums[tid] + y;
+            comp[tid] = (t - sums[tid]) - y;
+            sums[tid] = t;
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0)
+        output[out_idx] = __float2half(sums[0] / static_cast<float>(reduce_size));
+}
+
 } // namespace
 
 extern "C" int hip_reduce_mean(void *stream, const void *data, void *output,
@@ -138,6 +225,7 @@ extern "C" int hip_reduce_mean(void *stream, const void *data, void *output,
 
     int64_t reduce_size = num_input_elements / num_output_elements;
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+    (void)hipGetLastError();
 
     int block_size = 256;
     if (reduce_size < 256) {
@@ -168,14 +256,12 @@ extern "C" int hip_reduce_mean(void *stream, const void *data, void *output,
         break;
     }
     case HIP_DTYPE_FLOAT16: {
-        auto to_f = [] __device__(__half v) { return __half2float(v); };
-        auto from_f = [] __device__(float v) { return __float2half(v); };
-        hipLaunchKernelGGL(
-            (reduce_mean_kernel<__half, decltype(to_f), decltype(from_f)>),
-            dim3(static_cast<unsigned>(num_output_elements)),
-            dim3(block_size), shared_mem, hip_stream,
-            static_cast<const __half *>(data), static_cast<__half *>(output),
-            reduce_size, num_output_elements, to_f, from_f);
+        hipLaunchKernelGGL(reduce_mean_f16_kernel,
+                           dim3(static_cast<unsigned>(num_output_elements)),
+                           dim3(block_size), shared_mem, hip_stream,
+                           static_cast<const __half *>(data),
+                           static_cast<__half *>(output), reduce_size,
+                           num_output_elements);
         break;
     }
     case HIP_DTYPE_BFLOAT16: {
@@ -218,6 +304,7 @@ extern "C" int hip_reduce_mean_strided(void *stream, const void *data,
 
     int64_t reduce_size = num_input_elements / num_output_elements;
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+    (void)hipGetLastError();
 
     int block_size = 256;
     if (reduce_size < 256) {
@@ -241,16 +328,12 @@ extern "C" int hip_reduce_mean_strided(void *stream, const void *data,
         break;
     }
     case HIP_DTYPE_FLOAT16: {
-        auto to_f = [] __device__(__half v) { return __half2float(v); };
-        auto from_f = [] __device__(float v) { return __float2half(v); };
-        hipLaunchKernelGGL(
-            (reduce_mean_strided_kernel<__half, decltype(to_f),
-                                        decltype(from_f)>),
-            dim3(static_cast<unsigned>(num_output_elements)),
-            dim3(block_size), shared_mem, hip_stream,
-            static_cast<const __half *>(data),
-            static_cast<__half *>(output), reduce_size, inner_size,
-            num_output_elements, to_f, from_f);
+        hipLaunchKernelGGL(reduce_mean_f16_strided_kernel,
+                           dim3(static_cast<unsigned>(num_output_elements)),
+                           dim3(block_size), shared_mem, hip_stream,
+                           static_cast<const __half *>(data),
+                           static_cast<__half *>(output), reduce_size,
+                           inner_size, num_output_elements);
         break;
     }
     case HIP_DTYPE_BFLOAT16: {

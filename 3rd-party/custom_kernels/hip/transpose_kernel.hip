@@ -59,6 +59,7 @@ int launch_transpose(hipStream_t stream, const void *in, void *out,
                      const TPArgs &args) {
     if (args.total <= 0)
         return 0;
+    (void)hipGetLastError();
     constexpr int kBlock = 256;
     int64_t blocks = (args.total + kBlock - 1) / kBlock;
     int64_t grid_x = (blocks > 65535) ? 65535 : blocks;

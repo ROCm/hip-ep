@@ -16,7 +16,18 @@
 
 #include <cstdio>
 #include <cstdint>
-#include <vector>
+
+static int reduce_mean_elem_bytes(int64_t data_type) {
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return 4;
+  case HIPDNN_EP_DATATYPE_HALF:
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return 2;
+  default:
+    return 0;
+  }
+}
 
 static int hipdnn_ep_to_hip_dtype_reduce(int64_t data_type) {
   switch (data_type) {
@@ -71,6 +82,7 @@ extern "C" int wrap_reduce_mean(RuntimeState *state, void *input, void *output,
             rc, (long long)num_input_elements, (long long)num_output_elements,
             (long long)inner_size);
   }
-  nan_trace_check("reduce_mean", output, num_output_elements);
+  nan_trace_check("reduce_mean", output, num_output_elements,
+                  reduce_mean_elem_bytes(data_type));
   return rc;
 }

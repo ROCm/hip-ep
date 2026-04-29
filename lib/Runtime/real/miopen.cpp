@@ -2,9 +2,11 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "nan_check.h"
 #include "runtime_types.h"
 
@@ -81,13 +83,14 @@ struct ConvFwdCacheKey {
   int64_t pad_t, pad_l;
   int64_t dil_h, dil_w;
   int64_t group;
+  int64_t data_type;
   bool operator==(const ConvFwdCacheKey &o) const {
     return in_n == o.in_n && in_c == o.in_c && in_h == o.in_h &&
            in_w == o.in_w && w_k == o.w_k && out_h == o.out_h &&
            out_w == o.out_w && kern_h == o.kern_h && kern_w == o.kern_w &&
            stride_h == o.stride_h && stride_w == o.stride_w &&
            pad_t == o.pad_t && pad_l == o.pad_l && dil_h == o.dil_h &&
-           dil_w == o.dil_w && group == o.group;
+           dil_w == o.dil_w && group == o.group && data_type == o.data_type;
   }
 };
 
@@ -110,6 +113,7 @@ struct ConvFwdCacheKeyHash {
     hash_combine_val(h, k.dil_h);
     hash_combine_val(h, k.dil_w);
     hash_combine_val(h, k.group);
+    hash_combine_val(h, k.data_type);
     return h;
   }
 };
@@ -123,6 +127,23 @@ static std::unordered_map<ConvFwdCacheKey, ConvFwdCacheEntry,
                           ConvFwdCacheKeyHash>
     g_conv_fwd_cache;
 
+static miopenDataType_t conv_fwd_to_miopen_type(int64_t data_type, bool &ok) {
+  ok = true;
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return miopenFloat;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return miopenHalf;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return miopenBFloat16;
+  default:
+    fprintf(stderr, "wrap_miopenConvolutionForward: unsupported data_type %lld\n",
+            (long long)data_type);
+    ok = false;
+    return miopenFloat;
+  }
+}
+
 // MIOpen convolution forward implementation
 // Follows opaque RuntimeState pattern - extracts handle/stream from state
 int wrap_miopenConvolutionForward(
@@ -131,7 +152,8 @@ int wrap_miopenConvolutionForward(
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t data_type) {
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
@@ -143,6 +165,62 @@ int wrap_miopenConvolutionForward(
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   hipStream_t hip_stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  if (data_type == HIPDNN_EP_DATATYPE_HALF) {
+    const int64_t input_elems = input_n * input_c * input_h * input_w;
+    const int64_t weights_c_per_group =
+        (group > 1) ? (input_c / group) : input_c;
+    const int64_t weight_elems =
+        weights_k * weights_c_per_group * kernel_h * kernel_w;
+    const int64_t output_elems = input_n * weights_k * output_h * output_w;
+    void *input32 = nullptr, *weights32 = nullptr, *bias32 = nullptr,
+         *output32 = nullptr;
+    int rc = 0;
+    auto alloc32 = [&](void **ptr, int64_t elems) -> int {
+      return static_cast<int>(
+          hipMalloc(ptr, static_cast<size_t>(elems) * sizeof(float)));
+    };
+    if ((rc = alloc32(&input32, input_elems)) != 0 ||
+        (rc = alloc32(&weights32, weight_elems)) != 0 ||
+        (bias && (rc = alloc32(&bias32, weights_k)) != 0) ||
+        (rc = alloc32(&output32, output_elems)) != 0) {
+      fprintf(stderr, "wrap_miopenConvolutionForward: f16 upcast alloc "
+                      "failed rc=%d\n", rc);
+      goto conv_f16_cleanup;
+    }
+    if ((rc = hip_cast(hip_stream, input, input32, input_elems,
+                       HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32)) != 0 ||
+        (rc = hip_cast(hip_stream, weights, weights32, weight_elems,
+                       HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32)) != 0 ||
+        (bias && (rc = hip_cast(hip_stream, bias, bias32, weights_k,
+                                HIP_DTYPE_FLOAT16,
+                                HIP_DTYPE_FLOAT32)) != 0)) {
+      fprintf(stderr, "wrap_miopenConvolutionForward: f16 upcast input cast "
+                      "failed rc=%d\n", rc);
+      goto conv_f16_cleanup;
+    }
+    rc = wrap_miopenConvolutionForward(
+        state, input32, input_n, input_c, input_h, input_w, weights32,
+        weights_k, bias ? bias32 : nullptr, output32, output_h, output_w,
+        kernel_h, kernel_w, stride_h, stride_w, pad_top, pad_left, pad_bottom,
+        pad_right, dilation_h, dilation_w, group, HIPDNN_EP_DATATYPE_FLOAT);
+    if (rc == 0) {
+      rc = hip_cast(hip_stream, output32, output, output_elems,
+                    HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16);
+    }
+
+  conv_f16_cleanup:
+    if (input32) hipFree(input32);
+    if (weights32) hipFree(weights32);
+    if (bias32) hipFree(bias32);
+    if (output32) hipFree(output32);
+    return rc;
+  }
+
+  bool dtype_ok = false;
+  miopenDataType_t mio_dtype = conv_fwd_to_miopen_type(data_type, dtype_ok);
+  if (!dtype_ok)
+    return -1;
+  const int64_t elem_size = hipdnn_ep_datatype_size(data_type);
 
   // Initialize all resource pointers to nullptr for safe cleanup
   miopenTensorDescriptor_t input_desc = nullptr;
@@ -198,13 +276,13 @@ int wrap_miopenConvolutionForward(
   {
     int in_c_per_group = (group > 1) ? (int)(input_c / group) : (int)input_c;
     MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        input_desc, miopenFloat, (int)input_n, (int)input_c,
+        input_desc, mio_dtype, (int)input_n, (int)input_c,
         (int)input_h, (int)input_w));
     MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        weights_desc, miopenFloat, (int)weights_k, in_c_per_group,
+        weights_desc, mio_dtype, (int)weights_k, in_c_per_group,
         (int)kernel_h, (int)kernel_w));
     MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        output_desc, miopenFloat, (int)input_n, (int)weights_k,
+        output_desc, mio_dtype, (int)input_n, (int)weights_k,
         (int)output_h, (int)output_w));
   }
 
@@ -228,7 +306,7 @@ int wrap_miopenConvolutionForward(
                               weights_k, output_h, output_w,
                               kernel_h,  kernel_w, stride_h, stride_w,
                               pad_top,   pad_left, dilation_h, dilation_w,
-                              group};
+                              group,     data_type};
     auto cache_it = g_conv_fwd_cache.find(cache_key);
     if (cache_it != g_conv_fwd_cache.end()) {
       algo = cache_it->second.algo;
@@ -263,12 +341,12 @@ int wrap_miopenConvolutionForward(
       }
 
       if (best_idx < 0 && !winograd_safe) {
-        fprintf(stderr,
-                "[conv_fwd] NOTE: using Winograd for "
-                "in=[%lld,%lld,%lld,%lld] kern=[%lld,%lld]\n",
-                (long long)input_n, (long long)input_c,
-                (long long)input_h, (long long)input_w,
-                (long long)kernel_h, (long long)kernel_w);
+        RUNTIME_DEBUG_LOG(
+            "[conv_fwd] using Winograd for "
+            "in=[%lld,%lld,%lld,%lld] kern=[%lld,%lld]\n",
+            (long long)input_n, (long long)input_c,
+            (long long)input_h, (long long)input_w,
+            (long long)kernel_h, (long long)kernel_w);
         best_idx = 0;
       }
 
@@ -300,7 +378,7 @@ int wrap_miopenConvolutionForward(
   // masking errors during NAN_TRACE debugging).
   {
     int64_t out_elems = input_n * weights_k * output_h * output_w;
-    hipMemsetAsync(output, 0, out_elems * sizeof(float), hip_stream);
+    hipMemsetAsync(output, 0, out_elems * elem_size, hip_stream);
   }
 
   if (nan_trace_enabled()) {
@@ -332,7 +410,7 @@ int wrap_miopenConvolutionForward(
     MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
     int bias_dims[] = {1, (int)weights_k, 1, 1};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        bias_desc, miopenFloat, miopenTensorNCHW, bias_dims, 4));
+        bias_desc, mio_dtype, miopenTensorNCHW, bias_dims, 4));
     float alpha_a = 1.0f, alpha_b = 1.0f, beta_c = 0.0f;
     MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &alpha_a,
                                 output_desc, output, &alpha_b, bias_desc, bias,
@@ -341,7 +419,8 @@ int wrap_miopenConvolutionForward(
   }
 
   nan_trace_check("conv_fwd", output,
-                  input_n * weights_k * output_h * output_w);
+                  input_n * weights_k * output_h * output_w,
+                  elem_size);
 
 cleanup:
   if (workspace) {

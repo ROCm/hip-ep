@@ -30,8 +30,10 @@ namespace {
 
 template <hip_unary_kind_t Kind>
 __device__ __forceinline__ float apply(float x, float alpha, float beta) {
-    if constexpr (Kind == HIP_UNARY_SIN)
-        return sinf(x);
+    if constexpr (Kind == HIP_UNARY_SIN) {
+        float scale = (alpha == 0.0f) ? 1.0f : alpha;
+        return sinf(x * scale);
+    }
     else if constexpr (Kind == HIP_UNARY_COS)
         return cosf(x);
     else if constexpr (Kind == HIP_UNARY_EXP)
@@ -50,6 +52,8 @@ __device__ __forceinline__ float apply(float x, float alpha, float beta) {
         return x >= 0.0f ? x : alpha * x;
     else if constexpr (Kind == HIP_UNARY_CLIP)
         return fminf(fmaxf(x, alpha), beta);
+    else if constexpr (Kind == HIP_UNARY_SIGMOID)
+        return 1.0f / (1.0f + expf(-x));
     else
         return x;
 }
@@ -186,6 +190,11 @@ extern "C" int hip_elementwise_unary(void *stream, const void *input,
     case HIP_UNARY_CLIP:
         rc = launch_unary<HIP_UNARY_CLIP>(hip_stream, input, output,
                                           num_elements, hip_dtype, alpha, beta);
+        break;
+    case HIP_UNARY_SIGMOID:
+        rc = launch_unary<HIP_UNARY_SIGMOID>(hip_stream, input, output,
+                                             num_elements, hip_dtype, alpha,
+                                             beta);
         break;
     default:
         fprintf(stderr,

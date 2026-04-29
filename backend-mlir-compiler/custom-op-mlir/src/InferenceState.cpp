@@ -12,6 +12,7 @@
 #include "morphizen/plugin.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -34,6 +35,11 @@ std::string artifactExtension() {
   return ".so";
 #endif
 }
+
+bool gpuRuntimeAllowed() {
+  const char *value = std::getenv("HIPDNN_EP_ALLOW_GPU_RUNTIME");
+  return value && std::strcmp(value, "1") == 0;
+}
 } // anonymous namespace
 
 namespace mlir_compilation::customop {
@@ -48,6 +54,13 @@ std::unique_ptr<InferenceState>
 InferenceState::create(const std::vector<uint8_t> &dll_bytes,
                        morphizen::FileSystem *fs) {
   MY_LOG(1) << "Loading inference plugin from memory...";
+
+  if (!gpuRuntimeAllowed()) {
+    LOG(FATAL) << "Refusing to load generated HIP EP runtime DLL without "
+                  "HIPDNN_EP_ALLOW_GPU_RUNTIME=1. This path initializes "
+                  "amdhip64/MIOpen/hipBLASLt and can trigger GPU watchdog "
+                  "resets on display-attached Windows systems.";
+  }
 
   auto t0 = timing_now();
   auto t_prev = t0;

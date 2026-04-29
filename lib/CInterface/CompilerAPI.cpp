@@ -14,7 +14,9 @@
 
 #include "llvm/ADT/StringRef.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <string>
 
 #ifdef HIPDNN_GRAPH_RUNTIME_AVAILABLE
@@ -52,6 +54,13 @@ static void setError(CompilerError *error, const std::string &message) {
   }
 }
 
+#ifdef HIPDNN_GRAPH_RUNTIME_AVAILABLE
+static bool hipdnnGraphCompileEnabled() {
+  const char *value = std::getenv("HIPDNN_EP_ENABLE_GRAPHS");
+  return value && std::strcmp(value, "1") == 0;
+}
+#endif
+
 extern "C" {
 
 COMPILER_API CompilerErrorCode hip_compile_with_fs(
@@ -79,9 +88,16 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
     driver.setFileSystem(static_cast<morphizen::FileSystem *>(fs));
 
 #ifdef HIPDNN_GRAPH_RUNTIME_AVAILABLE
-    void *hipdnn_handle = hipdnn_graph_create_handle();
-    if (hipdnn_handle)
-      driver.setHipdnnHandle(hipdnn_handle);
+    void *hipdnn_handle = nullptr;
+    if (hipdnnGraphCompileEnabled()) {
+      hipdnn_handle = hipdnn_graph_create_handle();
+      if (hipdnn_handle)
+        driver.setHipdnnHandle(hipdnn_handle);
+    } else {
+      std::fprintf(stderr,
+                   "[hip-compiler] hipDNN graph compile disabled; set "
+                   "HIPDNN_EP_ENABLE_GRAPHS=1 to opt in\n");
+    }
 #endif
 
     std::string error_message;

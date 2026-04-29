@@ -120,7 +120,8 @@ int hip_elementwise_sqrt(
  *
  *   HIP_UNARY_SIN, HIP_UNARY_COS, HIP_UNARY_EXP, HIP_UNARY_TANH,
  *   HIP_UNARY_FLOOR, HIP_UNARY_ROUND (round-half-to-even),
- *   HIP_UNARY_ATAN, HIP_UNARY_LEAKY_RELU (alpha), HIP_UNARY_CLIP (min, max)
+ *   HIP_UNARY_ATAN, HIP_UNARY_LEAKY_RELU (alpha), HIP_UNARY_CLIP (min, max),
+ *   HIP_UNARY_SIGMOID
  *
  * `alpha` and `beta` carry op-specific scalars and are ignored otherwise:
  *   - LeakyRelu: alpha = negative slope, beta unused
@@ -139,6 +140,7 @@ typedef enum {
     HIP_UNARY_ATAN       = 6,
     HIP_UNARY_LEAKY_RELU = 7,
     HIP_UNARY_CLIP       = 8,
+    HIP_UNARY_SIGMOID    = 9,
 } hip_unary_kind_t;
 
 int hip_elementwise_unary(
@@ -191,6 +193,47 @@ int hip_elementwise_binary(
     const int64_t* out_shape,
     const int64_t* lhs_strides_elems,
     const int64_t* rhs_strides_elems);
+
+/* =========================================================================
+ * ONNX QuantizeLinear / DequantizeLinear
+ * =========================================================================
+ *
+ * Standard ONNX Q/DQ semantics:
+ *   DequantizeLinear: y = (x - x_zero_point) * x_scale
+ *   QuantizeLinear:   y = saturate(round_even(x / y_scale) + y_zero_point)
+ *
+ * `axis` selects the per-axis scale/zero-point dimension.  When
+ * scale_num_elements == 1, per-tensor quantization is used and axis is ignored.
+ * `inner_size` is product(shape[axis + 1:]) for per-axis indexing.
+ *
+ * Supported quantized dtype: HIP_DTYPE_INT8, HIP_DTYPE_UINT8.
+ * Supported real dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
+ */
+int hip_dequantize_linear(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* zero_point,
+    void* output,
+    int64_t num_elements,
+    int input_dtype,
+    int scale_dtype,
+    int output_dtype,
+    int64_t scale_num_elements,
+    int64_t inner_size);
+
+int hip_quantize_linear(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* zero_point,
+    void* output,
+    int64_t num_elements,
+    int input_dtype,
+    int scale_dtype,
+    int output_dtype,
+    int64_t scale_num_elements,
+    int64_t inner_size);
 
 /* =========================================================================
  * Strided Slice

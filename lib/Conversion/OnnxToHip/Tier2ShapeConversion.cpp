@@ -121,9 +121,8 @@ struct ReduceMeanToHip : public RewritePattern {
         return rewriter.notifyMatchFailure(
             op, "onnx.ReduceMean axes input must be an int64 constant");
       axes = *axesOr;
-    } else if (auto axesAttr = op->getAttrOfType<ArrayAttr>("axes")) {
-      for (Attribute a : axesAttr)
-        axes.push_back(cast<IntegerAttr>(a).getInt());
+    } else if (op->hasAttr("axes")) {
+      axes = getI64ArrayAttrValues(op, "axes");
     } else {
       // ONNX default: reduce over all axes.
       for (int64_t i = 0; i < inRank; ++i)

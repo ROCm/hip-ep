@@ -24,6 +24,7 @@ add_library(OnnxToHip STATIC
   GemmConversion.cpp
   UnaryElementwiseConversion.cpp
   BinaryElementwiseConversion.cpp
+  QDQConversion.cpp
   SliceConversion.cpp
   Tier2ShapeConversion.cpp
   Tier3CompareConversion.cpp

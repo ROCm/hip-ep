@@ -48,13 +48,13 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "nan_check.h"
 #include "runtime_types.h"
 
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <vector>
+#include <cstdlib>
 
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
@@ -122,6 +122,93 @@ extern "C" int wrap_miopenRNNForwardInference(
     return -1;
   }
 
+  if (data_type == HIPDNN_EP_DATATYPE_HALF) {
+    const int num_dir = (direction == 2) ? 2 : 1;
+    const int64_t x_elems = seq_len * batch * input_size;
+    const int64_t w_elems = num_dir * 4 * hidden_size * input_size;
+    const int64_t r_elems = num_dir * 4 * hidden_size * hidden_size;
+    const int64_t b_elems = num_dir * 8 * hidden_size;
+    const int64_t state_elems = num_dir * batch * hidden_size;
+    const int64_t y_elems = seq_len * num_dir * batch * hidden_size;
+    hipStream_t stream =
+        static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+
+    void *x32 = nullptr, *w32 = nullptr, *r32 = nullptr, *b32 = nullptr;
+    void *hx32 = nullptr, *cx32 = nullptr, *y32 = nullptr, *hy32 = nullptr,
+         *cy32 = nullptr;
+    auto alloc = [&](void **ptr, int64_t elems) -> int {
+      return static_cast<int>(hipMalloc(ptr, static_cast<size_t>(elems) *
+                                                 sizeof(float)));
+    };
+    auto cast = [&](void *src, void *dst, int64_t elems, int src_dtype,
+                    int dst_dtype) -> int {
+      return hip_cast(stream, src, dst, elems, src_dtype, dst_dtype);
+    };
+
+    int rc = 0;
+    if ((rc = alloc(&x32, x_elems)) != 0 ||
+        (rc = alloc(&w32, w_elems)) != 0 ||
+        (rc = alloc(&r32, r_elems)) != 0 ||
+        (b && (rc = alloc(&b32, b_elems)) != 0) ||
+        (hx && (rc = alloc(&hx32, state_elems)) != 0) ||
+        (cx && (rc = alloc(&cx32, state_elems)) != 0) ||
+        (rc = alloc(&y32, y_elems)) != 0 ||
+        (rc = alloc(&hy32, state_elems)) != 0 ||
+        (rc = alloc(&cy32, state_elems)) != 0) {
+      fprintf(stderr, "wrap_miopenRNNForwardInference: f16->f32 hipMalloc "
+                      "failed rc=%d\n", rc);
+      goto f16_cleanup;
+    }
+
+    if ((rc = cast(x, x32, x_elems, HIP_DTYPE_FLOAT16,
+                   HIP_DTYPE_FLOAT32)) != 0 ||
+        (rc = cast(w, w32, w_elems, HIP_DTYPE_FLOAT16,
+                   HIP_DTYPE_FLOAT32)) != 0 ||
+        (rc = cast(r, r32, r_elems, HIP_DTYPE_FLOAT16,
+                   HIP_DTYPE_FLOAT32)) != 0 ||
+        (b && (rc = cast(b, b32, b_elems, HIP_DTYPE_FLOAT16,
+                         HIP_DTYPE_FLOAT32)) != 0) ||
+        (hx && (rc = cast(hx, hx32, state_elems, HIP_DTYPE_FLOAT16,
+                          HIP_DTYPE_FLOAT32)) != 0) ||
+        (cx && (rc = cast(cx, cx32, state_elems, HIP_DTYPE_FLOAT16,
+                          HIP_DTYPE_FLOAT32)) != 0)) {
+      fprintf(stderr, "wrap_miopenRNNForwardInference: f16->f32 input cast "
+                      "failed rc=%d\n", rc);
+      goto f16_cleanup;
+    }
+
+    rc = wrap_miopenRNNForwardInference(
+        state, x32, seq_len, batch, input_size, w32, r32, b ? b32 : nullptr,
+        hx ? hx32 : nullptr, cx ? cx32 : nullptr, y32, hy32, cy32, hidden_size,
+        direction, HIPDNN_EP_DATATYPE_FLOAT);
+    if (rc != 0)
+      goto f16_cleanup;
+
+    if ((rc = cast(y32, y, y_elems, HIP_DTYPE_FLOAT32,
+                   HIP_DTYPE_FLOAT16)) != 0 ||
+        (rc = cast(hy32, hy, state_elems, HIP_DTYPE_FLOAT32,
+                   HIP_DTYPE_FLOAT16)) != 0 ||
+        (rc = cast(cy32, cy, state_elems, HIP_DTYPE_FLOAT32,
+                   HIP_DTYPE_FLOAT16)) != 0) {
+      fprintf(stderr, "wrap_miopenRNNForwardInference: f32->f16 output cast "
+                      "failed rc=%d\n", rc);
+      goto f16_cleanup;
+    }
+    nan_trace_check("lstm", y, y_elems, hipdnn_ep_datatype_size(data_type));
+
+  f16_cleanup:
+    if (x32) hipFree(x32);
+    if (w32) hipFree(w32);
+    if (r32) hipFree(r32);
+    if (b32) hipFree(b32);
+    if (hx32) hipFree(hx32);
+    if (cx32) hipFree(cx32);
+    if (y32) hipFree(y32);
+    if (hy32) hipFree(hy32);
+    if (cy32) hipFree(cy32);
+    return rc;
+  }
+
   miopenDataType_t mio_dtype = to_miopen_dtype(data_type);
   if (static_cast<int>(mio_dtype) < 0) {
     fprintf(stderr,
@@ -157,13 +244,12 @@ extern "C" int wrap_miopenRNNForwardInference(
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
-  // Always-on diagnostic line so we can see we're hitting the wrapper.
-  fprintf(stderr,
-          "[lstm] wrap_miopenRNNForwardInference: dtype=%s seq=%lld batch=%lld "
-          "in=%lld hidden=%lld dir=%lld bias=%d hx=%p cx=%p\n",
-          hipdnn_ep_datatype_name(data_type), (long long)seq_len,
-          (long long)batch, (long long)input_size, (long long)hidden_size,
-          (long long)direction, b ? 1 : 0, hx, cx);
+  RUNTIME_DEBUG_LOG(
+      "[lstm] wrap_miopenRNNForwardInference: dtype=%s seq=%lld batch=%lld "
+      "in=%lld hidden=%lld dir=%lld bias=%d hx=%p cx=%p\n",
+      hipdnn_ep_datatype_name(data_type), (long long)seq_len,
+      (long long)batch, (long long)input_size, (long long)hidden_size,
+      (long long)direction, b ? 1 : 0, hx, cx);
 
   // Resource handles: zero-initialise so cleanup is safe on early bail-out.
   miopenRNNDescriptor_t rnn_desc = nullptr;
@@ -290,10 +376,10 @@ extern "C" int wrap_miopenRNNForwardInference(
         return -1;
       }
       const size_t byte_offset = param_offset * static_cast<size_t>(elem);
-      fprintf(stderr,
-              "[lstm] set_gate layer=%d paramID=%d offset_elems=%zu "
-              "slab_bytes=%lld\n",
-              layer, paramID, param_offset, (long long)slab);
+      RUNTIME_DEBUG_LOG(
+          "[lstm] set_gate layer=%d paramID=%d offset_elems=%zu "
+          "slab_bytes=%lld\n",
+          layer, paramID, param_offset, (long long)slab);
       hipError_t herr = hipMemcpyAsync(
           static_cast<char *>(w_buf) + byte_offset, src,
           static_cast<size_t>(slab), hipMemcpyDeviceToDevice, stream);
@@ -393,7 +479,7 @@ extern "C" int wrap_miopenRNNForwardInference(
 
   // No CPU-side post-processing; MIOpen's LSTM output is used as-is.
 
-  nan_trace_check("lstm", y, y_count);
+  nan_trace_check("lstm", y, y_count, hipdnn_ep_datatype_size(data_type));
 
 cleanup: {
   hipError_t err;

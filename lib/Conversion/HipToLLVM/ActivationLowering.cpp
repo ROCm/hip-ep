@@ -161,7 +161,7 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 };
 
 // hip.miopen.softmax(%handle) ins(%input) outs(%output)
-//   -> hip_miopen_softmax(handle, input, output, rows, cols)
+//   -> hip_miopen_softmax(handle, input, output, rows, cols, data_type)
 // Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D.
 struct MiopenSoftmaxOpLowering
     : public ConvertOpToLLVMPattern<MiopenSoftmaxOp> {
@@ -176,8 +176,9 @@ struct MiopenSoftmaxOpLowering
     Type ptrType = getPtrType();
     Type indexType = getIndexType();
 
+    Type i64Type = rewriter.getI64Type();
     SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, indexType,
-                                    indexType};
+                                    indexType, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenSoftmax, paramTypes, voidType);
     if (failed(funcOp))
@@ -192,10 +193,17 @@ struct MiopenSoftmaxOpLowering
     for (int i = 1; i < rank - 1; i++)
       rows = LLVM::MulOp::create(rewriter, loc, rows,
                                  inputDesc.size(rewriter, loc, i));
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported softmax element type");
+    Value dtypeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(dataType));
 
     SmallVector<Value> args = {
         adaptor.getCtx(), extractMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc), rows, cols};
+        extractMemRefPtr(adaptor.getOutput(), rewriter, loc), rows, cols,
+        dtypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

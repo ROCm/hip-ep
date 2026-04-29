@@ -333,37 +333,22 @@ struct ConvTransposeToHip : public RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "ConvTransposeToHip: input/output rank too low (degenerate)");
 
-    SmallVector<int64_t> kernelShape;
-    if (auto attr = op->getAttrOfType<ArrayAttr>("kernel_shape")) {
-      for (auto a : attr)
-        kernelShape.push_back(cast<IntegerAttr>(a).getValue().getSExtValue());
-    }
-    SmallVector<int64_t> strides;
-    if (auto attr = op->getAttrOfType<ArrayAttr>("strides"))
-      for (auto a : attr)
-        strides.push_back(cast<IntegerAttr>(a).getValue().getSExtValue());
-    else
+    SmallVector<int64_t> kernelShape =
+        getI64ArrayAttrValues(op, "kernel_shape");
+    SmallVector<int64_t> strides = getI64ArrayAttrValues(op, "strides");
+    if (strides.empty())
       strides.assign(kernelShape.size(), 1);
 
-    SmallVector<int64_t> pads;
-    if (auto attr = op->getAttrOfType<ArrayAttr>("pads"))
-      for (auto a : attr)
-        pads.push_back(cast<IntegerAttr>(a).getValue().getSExtValue());
-    else
+    SmallVector<int64_t> pads = getI64ArrayAttrValues(op, "pads");
+    if (pads.empty())
       pads.assign(kernelShape.size() * 2, 0);
 
-    SmallVector<int64_t> dilations;
-    if (auto attr = op->getAttrOfType<ArrayAttr>("dilations"))
-      for (auto a : attr)
-        dilations.push_back(cast<IntegerAttr>(a).getValue().getSExtValue());
-    else
+    SmallVector<int64_t> dilations = getI64ArrayAttrValues(op, "dilations");
+    if (dilations.empty())
       dilations.assign(kernelShape.size(), 1);
 
-    SmallVector<int64_t> outputPadding;
-    if (auto attr = op->getAttrOfType<ArrayAttr>("output_padding"))
-      for (auto a : attr)
-        outputPadding.push_back(
-            cast<IntegerAttr>(a).getValue().getSExtValue());
+    SmallVector<int64_t> outputPadding =
+        getI64ArrayAttrValues(op, "output_padding");
 
     int64_t group = 1;
     if (auto attr = op->getAttrOfType<IntegerAttr>("group"))

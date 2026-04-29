@@ -77,6 +77,16 @@ __global__ void cast_i64_to_f32_kernel(
   }
 }
 
+__global__ void cast_i64_to_f16_kernel(
+    const int64_t* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = __float2half(static_cast<float>(input[idx]));
+  }
+}
+
 __global__ void cast_f32_to_i64_kernel(
     const float* __restrict__ input,
     int64_t* __restrict__ output,
@@ -84,6 +94,56 @@ __global__ void cast_f32_to_i64_kernel(
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < num_elements) {
     output[idx] = static_cast<int64_t>(input[idx]);
+  }
+}
+
+__global__ void cast_f16_to_i64_kernel(
+    const __half* __restrict__ input,
+    int64_t* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<int64_t>(__half2float(input[idx]));
+  }
+}
+
+__global__ void cast_f16_to_i8_kernel(
+    const __half* __restrict__ input,
+    int8_t* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<int8_t>(__half2float(input[idx]));
+  }
+}
+
+__global__ void cast_f16_to_u8_kernel(
+    const __half* __restrict__ input,
+    uint8_t* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<uint8_t>(__half2float(input[idx]));
+  }
+}
+
+__global__ void cast_i8_to_f16_kernel(
+    const int8_t* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = __float2half(static_cast<float>(input[idx]));
+  }
+}
+
+__global__ void cast_u8_to_f16_kernel(
+    const uint8_t* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = __float2half(static_cast<float>(input[idx]));
   }
 }
 
@@ -127,6 +187,16 @@ __global__ void cast_i8_to_f32_kernel(
   }
 }
 
+__global__ void cast_u8_to_f32_kernel(
+    const uint8_t* __restrict__ input,
+    float* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<float>(input[idx]);
+  }
+}
+
 __global__ void cast_f32_to_i8_kernel(
     const float* __restrict__ input,
     int8_t* __restrict__ output,
@@ -134,6 +204,16 @@ __global__ void cast_f32_to_i8_kernel(
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < num_elements) {
     output[idx] = static_cast<int8_t>(input[idx]);
+  }
+}
+
+__global__ void cast_f32_to_u8_kernel(
+    const float* __restrict__ input,
+    uint8_t* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<uint8_t>(input[idx]);
   }
 }
 
@@ -218,6 +298,9 @@ extern "C" int hip_cast(
   } else if (input_dtype == HIP_DTYPE_INT64 &&
              output_dtype == HIP_DTYPE_FLOAT32) {
     CAST_LAUNCH(cast_i64_to_f32_kernel, int64_t, float);
+  } else if (input_dtype == HIP_DTYPE_INT64 &&
+             output_dtype == HIP_DTYPE_FLOAT16) {
+    CAST_LAUNCH(cast_i64_to_f16_kernel, int64_t, __half);
   } else if (input_dtype == HIP_DTYPE_INT32 &&
              output_dtype == HIP_DTYPE_INT64) {
     CAST_LAUNCH(cast_i32_to_i64_kernel, int32_t, int64_t);
@@ -239,12 +322,33 @@ extern "C" int hip_cast(
   } else if (input_dtype == HIP_DTYPE_FLOAT16 &&
              output_dtype == HIP_DTYPE_FLOAT32) {
     CAST_LAUNCH(cast_f16_to_f32_kernel, __half, float);
-  } else if ((input_dtype == HIP_DTYPE_INT8 || input_dtype == HIP_DTYPE_UINT8) &&
+  } else if (input_dtype == HIP_DTYPE_FLOAT16 &&
+             output_dtype == HIP_DTYPE_INT64) {
+    CAST_LAUNCH(cast_f16_to_i64_kernel, __half, int64_t);
+  } else if (input_dtype == HIP_DTYPE_FLOAT16 &&
+             output_dtype == HIP_DTYPE_INT8) {
+    CAST_LAUNCH(cast_f16_to_i8_kernel, __half, int8_t);
+  } else if (input_dtype == HIP_DTYPE_FLOAT16 &&
+             output_dtype == HIP_DTYPE_UINT8) {
+    CAST_LAUNCH(cast_f16_to_u8_kernel, __half, uint8_t);
+  } else if (input_dtype == HIP_DTYPE_INT8 &&
              output_dtype == HIP_DTYPE_FLOAT32) {
     CAST_LAUNCH(cast_i8_to_f32_kernel, int8_t, float);
+  } else if (input_dtype == HIP_DTYPE_UINT8 &&
+             output_dtype == HIP_DTYPE_FLOAT32) {
+    CAST_LAUNCH(cast_u8_to_f32_kernel, uint8_t, float);
+  } else if (input_dtype == HIP_DTYPE_INT8 &&
+             output_dtype == HIP_DTYPE_FLOAT16) {
+    CAST_LAUNCH(cast_i8_to_f16_kernel, int8_t, __half);
+  } else if (input_dtype == HIP_DTYPE_UINT8 &&
+             output_dtype == HIP_DTYPE_FLOAT16) {
+    CAST_LAUNCH(cast_u8_to_f16_kernel, uint8_t, __half);
   } else if (input_dtype == HIP_DTYPE_FLOAT32 &&
-             (output_dtype == HIP_DTYPE_INT8 || output_dtype == HIP_DTYPE_UINT8)) {
+             output_dtype == HIP_DTYPE_INT8) {
     CAST_LAUNCH(cast_f32_to_i8_kernel, float, int8_t);
+  } else if (input_dtype == HIP_DTYPE_FLOAT32 &&
+             output_dtype == HIP_DTYPE_UINT8) {
+    CAST_LAUNCH(cast_f32_to_u8_kernel, float, uint8_t);
   } else if (input_dtype == output_dtype) {
     launched = false;
     size_t esz = dtype_size(input_dtype);
@@ -274,46 +378,10 @@ extern "C" int hip_cast(
   if (err == hipSuccess)
     return 0;
 
-  // GPU kernel launch failed -- fall back to host-side cast.
   fprintf(stderr,
-          "[custom_kernels] hip_cast GPU launch failed (%s), "
-          "using host fallback for n=%lld src=%d dst=%d\n",
+          "[custom_kernels] hip_cast GPU launch failed (%s) "
+          "for n=%lld src=%d dst=%d\n",
           hipGetErrorString(err), (long long)num_elements,
-          input_dtype, output_dtype);
-
-  (void)hipGetLastError(); // clear the error before host fallback
-
-  // Dispatch host fallback for common integer conversions.
-  if (input_dtype == HIP_DTYPE_INT64 && output_dtype == HIP_DTYPE_FLOAT32)
-    return host_cast_fallback<int64_t, float>(hip_stream, input, output,
-                                              num_elements);
-  if (input_dtype == HIP_DTYPE_FLOAT32 && output_dtype == HIP_DTYPE_INT64)
-    return host_cast_fallback<float, int64_t>(hip_stream, input, output,
-                                              num_elements);
-  if (input_dtype == HIP_DTYPE_INT64 && output_dtype == HIP_DTYPE_INT32)
-    return host_cast_fallback<int64_t, int32_t>(hip_stream, input, output,
-                                                num_elements);
-  if (input_dtype == HIP_DTYPE_INT32 && output_dtype == HIP_DTYPE_INT64)
-    return host_cast_fallback<int32_t, int64_t>(hip_stream, input, output,
-                                                num_elements);
-  if (input_dtype == HIP_DTYPE_INT32 && output_dtype == HIP_DTYPE_FLOAT32)
-    return host_cast_fallback<int32_t, float>(hip_stream, input, output,
-                                              num_elements);
-  if (input_dtype == HIP_DTYPE_FLOAT32 && output_dtype == HIP_DTYPE_INT32)
-    return host_cast_fallback<float, int32_t>(hip_stream, input, output,
-                                              num_elements);
-  if ((input_dtype == HIP_DTYPE_INT8 || input_dtype == HIP_DTYPE_UINT8) &&
-      output_dtype == HIP_DTYPE_FLOAT32)
-    return host_cast_fallback<int8_t, float>(hip_stream, input, output,
-                                             num_elements);
-  if (input_dtype == HIP_DTYPE_FLOAT32 &&
-      (output_dtype == HIP_DTYPE_INT8 || output_dtype == HIP_DTYPE_UINT8))
-    return host_cast_fallback<float, int8_t>(hip_stream, input, output,
-                                             num_elements);
-
-  fprintf(stderr,
-          "[custom_kernels] hip_cast: no host fallback for "
-          "input_dtype=%d -> output_dtype=%d\n",
           input_dtype, output_dtype);
   return static_cast<int>(err);
 }

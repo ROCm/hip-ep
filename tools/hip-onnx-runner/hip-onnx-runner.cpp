@@ -933,6 +933,17 @@ int main(int argc, char *argv[]) {
   const std::string ep_dll = "onnxruntime_morphizen_ep.dll";
 
   if (!no_ep) {
+    const char *allow_gpu_runtime = std::getenv("HIPDNN_EP_ALLOW_GPU_RUNTIME");
+    if (!allow_gpu_runtime || std::string(allow_gpu_runtime) != "1") {
+      std::cerr
+          << "Refusing to register the HIP EP without "
+             "HIPDNN_EP_ALLOW_GPU_RUNTIME=1.\n"
+          << "This runner loads generated EP DLLs and initializes AMD GPU "
+             "runtime libraries; run with -n for CPU ORT or set the env var "
+             "only on a safe test machine.\n";
+      return 1;
+    }
+
     auto lib_path = std::filesystem::u8path(ep_dll);
     if (!std::filesystem::exists(lib_path)) {
       std::cerr << "EP library not found: " << ep_dll << "\n"

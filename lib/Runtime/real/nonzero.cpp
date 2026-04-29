@@ -58,10 +58,12 @@ extern "C" int wrap_nonzero(RuntimeState *state, void *input, void *output,
     fprintf(stderr, "wrap_nonzero: invalid rank=%lld\n", (long long)rank);
     return -1;
   }
-  if (k_max <= 0) {
+  if (k_max < 0) {
     fprintf(stderr, "wrap_nonzero: invalid k_max=%lld\n", (long long)k_max);
     return -1;
   }
+  if (k_max == 0 || total_elements <= 0)
+    return 0;
 
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));

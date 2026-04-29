@@ -80,6 +80,23 @@ inline FailureOr<SmallVector<int64_t>> extractI64Constant(Value v) {
   return out;
 }
 
+/// Read an ONNX integer-list attribute.  The ORT/MorphiZen bridge can emit
+/// these either as legacy ArrayAttr<IntegerAttr> or MLIR DenseI64ArrayAttr.
+inline SmallVector<int64_t> getI64ArrayAttrValues(Operation *op,
+                                                  StringRef attrName) {
+  SmallVector<int64_t> values;
+  if (auto attr = op->getAttrOfType<ArrayAttr>(attrName)) {
+    for (auto elem : attr)
+      values.push_back(cast<IntegerAttr>(elem).getValue().getSExtValue());
+    return values;
+  }
+  if (auto attr = op->getAttrOfType<DenseI64ArrayAttr>(attrName)) {
+    for (int64_t value : attr.asArrayRef())
+      values.push_back(value);
+  }
+  return values;
+}
+
 /// Sanitize an arbitrary string (typically an ONNX node name) into a valid
 /// MLIR bare identifier fragment.  Non-alphanumeric characters are replaced
 /// with '_', consecutive underscores are collapsed, and leading/trailing
@@ -244,6 +261,10 @@ void populateUnaryElementwiseConversionPatterns(RewritePatternSet &patterns,
                                                 MLIRContext *ctx);
 void populateBinaryElementwiseConversionPatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx);
+void populateQDQConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateQDQConstantFoldPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateTier2ShapeConversionPatterns(RewritePatternSet &patterns,

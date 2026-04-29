@@ -43,7 +43,8 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
         (long long)total_bytes);
     HIP_CHECK(hipMemcpyAsync(output, data, total_bytes, hipMemcpyDeviceToDevice,
                              static_cast<hipStream_t>(stream)));
-    nan_trace_check("reduce_sum", output, output_num_elements);
+    nan_trace_check("reduce_sum", output, output_num_elements,
+                    element_size_bytes);
     return 0;
   }
 
@@ -70,7 +71,9 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
 
   int rc = hip_reduce_sum(stream, data, output, data_num_elements,
                           output_num_elements, hip_dtype);
-  if (rc == 0)
-    nan_trace_check("reduce_sum", output, output_num_elements);
+  if (rc == 0) {
+    nan_trace_check("reduce_sum", output, output_num_elements,
+                    element_size_bytes);
+  }
   return rc;
 }

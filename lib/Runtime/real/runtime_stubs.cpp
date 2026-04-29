@@ -19,6 +19,7 @@
 // correctness blocker for a model we want to ship.
 
 #include "../hipdnn_ep_runtime.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdint>
@@ -36,7 +37,8 @@ extern "C" {
 // dimension, which is what onnx.Softmax with axis=-1 expands to).
 __declspec(dllexport) int hip_miopen_softmax(void *handle_v, const void *input,
                                               void *output, int64_t rows,
-                                              int64_t cols) {
+                                              int64_t cols,
+                                              int64_t data_type) {
   if (!handle_v || !input || !output || rows <= 0 || cols <= 0) {
     fprintf(stderr,
             "[hipdnn_ep] hip_miopen_softmax: bad args (handle=%p in=%p "
@@ -47,13 +49,59 @@ __declspec(dllexport) int hip_miopen_softmax(void *handle_v, const void *input,
   RuntimeState *state = static_cast<RuntimeState *>(handle_v);
   miopenHandle_t miopen_handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  if (data_type == HIPDNN_EP_DATATYPE_HALF) {
+    int64_t elems = rows * cols;
+    void *in32 = nullptr;
+    void *out32 = nullptr;
+    if (hipMalloc(&in32, static_cast<size_t>(elems) * sizeof(float)) !=
+            hipSuccess ||
+        hipMalloc(&out32, static_cast<size_t>(elems) * sizeof(float)) !=
+            hipSuccess) {
+      fprintf(stderr,
+              "[hipdnn_ep] hip_miopen_softmax: f16 upcast alloc failed\n");
+      if (in32) hipFree(in32);
+      if (out32) hipFree(out32);
+      return -1;
+    }
+    int rc = hip_cast(stream, input, in32, elems, HIP_DTYPE_FLOAT16,
+                      HIP_DTYPE_FLOAT32);
+    if (rc == 0) {
+      rc = hip_miopen_softmax(handle_v, in32, out32, rows, cols,
+                              HIPDNN_EP_DATATYPE_FLOAT);
+    }
+    if (rc == 0) {
+      rc = hip_cast(stream, out32, output, elems, HIP_DTYPE_FLOAT32,
+                    HIP_DTYPE_FLOAT16);
+    }
+    hipFree(in32);
+    hipFree(out32);
+    return rc;
+  }
+  miopenDataType_t mio_dtype;
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    mio_dtype = miopenFloat;
+    break;
+  case HIPDNN_EP_DATATYPE_HALF:
+    mio_dtype = miopenHalf;
+    break;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    mio_dtype = miopenBFloat16;
+    break;
+  default:
+    fprintf(stderr, "[hipdnn_ep] hip_miopen_softmax: unsupported dtype %lld\n",
+            (long long)data_type);
+    return -1;
+  }
   miopenTensorDescriptor_t inout_desc = nullptr;
   if (miopenCreateTensorDescriptor(&inout_desc) != miopenStatusSuccess)
     return -1;
   // MIOpen wants 4-D NCHW.  We treat (rows, cols) as (rows, cols, 1, 1)
   // -- equivalent for SOFTMAX_MODE_INSTANCE which reduces along
   // C*H*W per N.
-  if (miopenSet4dTensorDescriptor(inout_desc, miopenFloat,
+  if (miopenSet4dTensorDescriptor(inout_desc, mio_dtype,
                                    static_cast<int>(rows),
                                    static_cast<int>(cols), 1, 1) !=
       miopenStatusSuccess) {

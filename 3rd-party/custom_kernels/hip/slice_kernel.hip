@@ -80,6 +80,7 @@ extern "C" int hip_slice(void *stream, const void *input, void *output,
     }
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+    (void)hipGetLastError();
     constexpr int kBlockSize = 256;
     int grid_size =
         static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);

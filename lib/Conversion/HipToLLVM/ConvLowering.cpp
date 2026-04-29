@@ -145,9 +145,13 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     Value dilationH = createI64Const(getI64(dilations[0]));
     Value dilationW = createI64Const(getI64(dilations[1]));
     Value groupVal = createI64Const(group);
+    int64_t dataType = getHipdnnDataType(outputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported convolution element type");
+    Value dataTypeVal = createI64Const(dataType);
 
     // Build function signature
-    SmallVector<Type, 24> paramTypes = {
+    SmallVector<Type, 25> paramTypes = {
         ptrType, // state
         ptrType, // input
         i64Type, // input_n
@@ -170,7 +174,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
         i64Type, // pad_right
         i64Type, // dilation_h
         i64Type, // dilation_w
-        i64Type  // group
+        i64Type, // group
+        i64Type  // data_type
     };
 
     // Lookup or create the runtime function
@@ -180,11 +185,11 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       return failure();
 
     // Build argument list matching the signature
-    SmallVector<Value, 24> args = {
+    SmallVector<Value, 25> args = {
         statePtr,   inputPtr, inputN,    inputC,    inputH,  inputW,
         weightsPtr, weightsK, biasPtr,   outputPtr, outputH, outputW,
         kernelH,    kernelW,  strideH,   strideW,   padTop,  padLeft,
-        padBottom,  padRight, dilationH, dilationW, groupVal};
+        padBottom,  padRight, dilationH, dilationW, groupVal, dataTypeVal};
 
     // Call the runtime function
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

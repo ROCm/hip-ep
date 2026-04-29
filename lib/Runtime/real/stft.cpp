@@ -142,8 +142,21 @@ static int hipdnn_ep_to_hip_dtype_stft(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
     return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
   default:
     return -1;
+  }
+}
+
+static int stft_elem_bytes(int hip_dtype) {
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT32:
+    return 4;
+  case HIP_DTYPE_FLOAT16:
+    return 2;
+  default:
+    return 0;
   }
 }
 
@@ -238,30 +251,6 @@ extern "C" int wrap_stft(RuntimeState *state, void *signal, void *window,
       (long long)onesided, hipdnn_ep_datatype_name(data_type), total_bytes,
       frames_bytes, complex_bytes, work_bytes);
 
-  // Debug: check input signal for NaN/Inf before processing.
-  {
-    hipStreamSynchronize(static_cast<hipStream_t>(stream));
-    (void)hipGetLastError();
-    int64_t sig_count = batch * signal_len;
-    int check_len = sig_count < 16 ? (int)sig_count : 16;
-    std::vector<float> sig_head(check_len);
-    hipMemcpy(sig_head.data(), signal, check_len * sizeof(float),
-              hipMemcpyDeviceToHost);
-    int nan_count = 0;
-    float sig_max = 0;
-    for (int i = 0; i < check_len; ++i) {
-      if (std::isnan(sig_head[i])) ++nan_count;
-      if (std::abs(sig_head[i]) > sig_max) sig_max = std::abs(sig_head[i]);
-    }
-    fprintf(stderr,
-            "[stft_dbg] INPUT signal: n=%lld first=[%.4f,%.4f,%.4f,%.4f] "
-            "max=%.4f nan_in_first%d=%d\n",
-            (long long)sig_count, sig_head[0], sig_head.size() > 1 ? sig_head[1] : 0.f,
-            sig_head.size() > 2 ? sig_head[2] : 0.f,
-            sig_head.size() > 3 ? sig_head[3] : 0.f, sig_max, check_len, nan_count);
-    fflush(stderr);
-  }
-
   // Step 1: framing + window multiply.
   int rc = hip_stft_frame_window(stream, signal, window, frames, batch,
                                  signal_len, frame_length, frame_step,
@@ -304,24 +293,7 @@ extern "C" int wrap_stft(RuntimeState *state, void *signal, void *window,
     return rc;
 
   int64_t out_count = batch * n_frames * n_freqs * 2;
-  nan_trace_check("stft", output, out_count);
-
-  // Debug: check output values.
-  {
-    hipStreamSynchronize(static_cast<hipStream_t>(stream));
-    (void)hipGetLastError();
-    float first4[4] = {0};
-    hipMemcpy(first4, output, sizeof(first4), hipMemcpyDeviceToHost);
-    float maxv = 0;
-    std::vector<float> h(out_count);
-    hipMemcpy(h.data(), output, out_count * sizeof(float), hipMemcpyDeviceToHost);
-    for (auto v : h) if (std::abs(v) > maxv) maxv = std::abs(v);
-    fprintf(stderr,
-            "[stft_dbg] output: n=%lld first=[%.4f,%.4f,%.4f,%.4f] max=%.4f\n",
-            (long long)out_count, first4[0], first4[1], first4[2], first4[3],
-            maxv);
-    fflush(stderr);
-  }
+  nan_trace_check("stft", output, out_count, stft_elem_bytes(hip_dtype));
 
   return 0;
 }

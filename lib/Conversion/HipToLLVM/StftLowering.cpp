@@ -64,10 +64,12 @@ struct StftLowering : public ConvertOpToLLVMPattern<StftOp> {
       return rewriter.notifyMatchFailure(
           op, "hip.stft lowering requires a rank-4 output "
               "(batch, n_frames, n_freqs, 2)");
-    if (!signalType.getElementType().isF32() ||
-        !outputType.getElementType().isF32())
+    if ((!signalType.getElementType().isF32() &&
+         !signalType.getElementType().isF16()) ||
+        (!outputType.getElementType().isF32() &&
+         !outputType.getElementType().isF16()))
       return rewriter.notifyMatchFailure(
-          op, "hip.stft lowering currently supports f32 only");
+          op, "hip.stft lowering currently supports f32/f16 only");
 
     int64_t frameStep = op.getFrameStep();
     int64_t frameLength = op.getFrameLength();

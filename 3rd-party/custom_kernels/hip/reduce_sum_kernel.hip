@@ -72,6 +72,42 @@ __global__ void reduce_sum_f32_kernel(
   if (tid == 0) output[out_idx] = sums[0];
 }
 
+__global__ void reduce_sum_f16_kernel(
+    const __half *__restrict__ data, __half *__restrict__ output,
+    int64_t reduce_size, int64_t num_output_elements) {
+  extern __shared__ float sdata_f32[];
+  float *sums = sdata_f32;
+  float *comp = sdata_f32 + blockDim.x;
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+  const __half *slice = data + out_idx * reduce_size;
+  int tid = threadIdx.x;
+
+  float s = 0.0f;
+  float c = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
+    float y = __half2float(slice[i]) - c;
+    float t = s + y;
+    c = (t - s) - y;
+    s = t;
+  }
+  sums[tid] = s;
+  comp[tid] = c;
+  __syncthreads();
+
+  for (unsigned int j = blockDim.x / 2; j > 0; j >>= 1) {
+    if ((unsigned)tid < j) {
+      float y = sums[tid + j] - (comp[tid] + comp[tid + j]);
+      float t = sums[tid] + y;
+      comp[tid] = (t - sums[tid]) - y;
+      sums[tid] = t;
+    }
+    __syncthreads();
+  }
+  if (tid == 0) output[out_idx] = __float2half(sums[0]);
+}
+
 // Parallel sum reduction for i64. Each block reduces one output element
 // by summing reduce_size consecutive input elements using shared memory.
 __global__ void reduce_sum_i64_kernel(
@@ -224,11 +260,14 @@ extern "C" int hip_reduce_sum(
       break;
     }
     case HIP_DTYPE_FLOAT16: {
-      // FP16 reduce: use f32 kernel reinterpreting pointers.
-      // For correctness we'd need a real FP16 kernel or cast, but Kokoro FP32
-      // doesn't hit this path. Just error out cleanly for now.
-      fprintf(stderr, "[custom_kernels] hip_reduce_sum: FP16 not yet supported\n");
-      return -1;
+      constexpr int kBlock = 256;
+      size_t smem = 2 * kBlock * sizeof(float);
+      hipLaunchKernelGGL(
+          reduce_sum_f16_kernel,
+          dim3(static_cast<unsigned>(num_output_elements)), dim3(kBlock),
+          smem, hip_stream, static_cast<const __half *>(data),
+          static_cast<__half *>(output), reduce_size, num_output_elements);
+      break;
     }
     case HIP_DTYPE_INT32: {
       constexpr int kBlock = 256;

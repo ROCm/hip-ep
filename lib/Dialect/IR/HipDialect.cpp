@@ -607,6 +607,30 @@ void BinaryElementwiseOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QuantizeLinear / DequantizeLinear
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DequantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange QuantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SliceOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

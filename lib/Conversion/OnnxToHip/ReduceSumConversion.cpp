@@ -50,12 +50,8 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     axesOperand = op->getOperand(1);
   } else {
     // Axes provided as attribute - convert to constant tensor
-    llvm::SmallVector<int64_t> axesVec;
-    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-      for (auto a : axesAttr)
-        axesVec.push_back(
-            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else if (noopWithEmptyAxes == 0) {
+    llvm::SmallVector<int64_t> axesVec = getI64ArrayAttrValues(op, "axes");
+    if (axesVec.empty() && noopWithEmptyAxes == 0) {
       // Default: reduce all axes (when noop_with_empty_axes is 0)
       auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
       for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))

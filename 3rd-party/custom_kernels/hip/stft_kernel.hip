@@ -30,15 +30,41 @@
 #include "debug_log.h"
 #include "hip_custom_kernels.h"
 
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
+#include <type_traits>
 
 namespace {
 
-__global__ void stft_frame_window_kernel(const float *__restrict__ signal,
-                                         const float *__restrict__ window,
+template <typename T>
+__device__ __forceinline__ float stft_to_float(T v) {
+    return static_cast<float>(v);
+}
+
+template <>
+__device__ __forceinline__ float stft_to_float<__half>(__half v) {
+    return __half2float(v);
+}
+
+template <typename T>
+__device__ __forceinline__ T stft_from_float(float v);
+
+template <>
+__device__ __forceinline__ float stft_from_float<float>(float v) {
+    return v;
+}
+
+template <>
+__device__ __forceinline__ __half stft_from_float<__half>(float v) {
+    return __float2half(v);
+}
+
+template <typename T>
+__global__ void stft_frame_window_kernel(const T *__restrict__ signal,
+                                         const T *__restrict__ window,
                                          float *__restrict__ frames,
                                          int64_t batch, int64_t signal_len,
                                          int64_t frame_len,
@@ -56,14 +82,17 @@ __global__ void stft_frame_window_kernel(const float *__restrict__ signal,
     int64_t b = flat / (frame_len * n_frames);
 
     int64_t in_idx = b * signal_len + fi * frame_step + k;
-    float v = (in_idx < (b + 1) * signal_len) ? signal[in_idx] : 0.0f;
+    float v = (in_idx < (b + 1) * signal_len)
+                  ? stft_to_float(signal[in_idx])
+                  : 0.0f;
     if (window)
-        v *= window[k];
+        v *= stft_to_float(window[k]);
     frames[flat] = v;
 }
 
+template <typename T>
 __global__ void stft_split_complex_kernel(const float *__restrict__ complex_in,
-                                          float *__restrict__ output,
+                                          T *__restrict__ output,
                                           int64_t total_pairs) {
     int64_t bx =
         static_cast<int64_t>(blockIdx.y) * gridDim.x + blockIdx.x;
@@ -77,10 +106,14 @@ __global__ void stft_split_complex_kernel(const float *__restrict__ complex_in,
     // signed roundoff around zero.
     float re = complex_in[2 * flat];
     float im = complex_in[2 * flat + 1];
-    if (re < 0.0f && fabsf(im) < 1.0e-12f)
-        im = 1.0e-12f;
-    output[2 * flat]     = re;
-    output[2 * flat + 1] = im;
+    if (re < 0.0f && fabsf(im) < 1.0e-12f) {
+        if constexpr (std::is_same_v<T, __half>)
+            im = 1.0e-4f;
+        else
+            im = 1.0e-12f;
+    }
+    output[2 * flat]     = stft_from_float<T>(re);
+    output[2 * flat + 1] = stft_from_float<T>(im);
 }
 
 inline void compute_grid(int64_t total, int kBlockSize, dim3 &grid,
@@ -110,13 +143,6 @@ extern "C" int hip_stft_frame_window(void *stream, const void *signal,
                 "[custom_kernels] hip_stft_frame_window: null pointer\n");
         return -1;
     }
-    if (hip_dtype != HIP_DTYPE_FLOAT32) {
-        fprintf(stderr,
-                "[custom_kernels] hip_stft_frame_window: unsupported dtype "
-                "%d (only FLOAT32 supported today)\n",
-                hip_dtype);
-        return -1;
-    }
     if (batch <= 0 || signal_len <= 0 || frame_len <= 0 || frame_step <= 0 ||
         n_frames <= 0)
         return 0;
@@ -133,11 +159,27 @@ extern "C" int hip_stft_frame_window(void *stream, const void *signal,
         (long long)batch, (long long)signal_len, (long long)frame_len,
         (long long)frame_step, (long long)n_frames);
 
-    hipLaunchKernelGGL(stft_frame_window_kernel, grid, block, 0, hip_stream,
-                       static_cast<const float *>(signal),
-                       static_cast<const float *>(window),
-                       static_cast<float *>(frames), batch, signal_len,
-                       frame_len, frame_step, n_frames);
+    switch (hip_dtype) {
+    case HIP_DTYPE_FLOAT32:
+        hipLaunchKernelGGL((stft_frame_window_kernel<float>), grid, block, 0,
+                           hip_stream, static_cast<const float *>(signal),
+                           static_cast<const float *>(window),
+                           static_cast<float *>(frames), batch, signal_len,
+                           frame_len, frame_step, n_frames);
+        break;
+    case HIP_DTYPE_FLOAT16:
+        hipLaunchKernelGGL((stft_frame_window_kernel<__half>), grid, block, 0,
+                           hip_stream, static_cast<const __half *>(signal),
+                           static_cast<const __half *>(window),
+                           static_cast<float *>(frames), batch, signal_len,
+                           frame_len, frame_step, n_frames);
+        break;
+    default:
+        fprintf(stderr,
+                "[custom_kernels] hip_stft_frame_window: unsupported dtype %d\n",
+                hip_dtype);
+        return -1;
+    }
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -158,13 +200,6 @@ extern "C" int hip_stft_split_complex(void *stream, const void *complex_in,
                 "[custom_kernels] hip_stft_split_complex: null pointer\n");
         return -1;
     }
-    if (hip_dtype != HIP_DTYPE_FLOAT32) {
-        fprintf(stderr,
-                "[custom_kernels] hip_stft_split_complex: unsupported dtype "
-                "%d (only FLOAT32 supported today)\n",
-                hip_dtype);
-        return -1;
-    }
     if (batch <= 0 || n_frames <= 0 || n_freqs <= 0)
         return 0;
 
@@ -180,9 +215,23 @@ extern "C" int hip_stft_split_complex(void *stream, const void *complex_in,
         (long long)batch, (long long)n_frames, (long long)n_freqs,
         (long long)total_pairs);
 
-    hipLaunchKernelGGL(stft_split_complex_kernel, grid, block, 0, hip_stream,
-                       static_cast<const float *>(complex_in),
-                       static_cast<float *>(output), total_pairs);
+    switch (hip_dtype) {
+    case HIP_DTYPE_FLOAT32:
+        hipLaunchKernelGGL((stft_split_complex_kernel<float>), grid, block, 0,
+                           hip_stream, static_cast<const float *>(complex_in),
+                           static_cast<float *>(output), total_pairs);
+        break;
+    case HIP_DTYPE_FLOAT16:
+        hipLaunchKernelGGL((stft_split_complex_kernel<__half>), grid, block, 0,
+                           hip_stream, static_cast<const float *>(complex_in),
+                           static_cast<__half *>(output), total_pairs);
+        break;
+    default:
+        fprintf(stderr,
+                "[custom_kernels] hip_stft_split_complex: unsupported dtype %d\n",
+                hip_dtype);
+        return -1;
+    }
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {

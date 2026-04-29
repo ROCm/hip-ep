@@ -73,8 +73,8 @@ wrap_elementwise_binary(RuntimeState *state, void *lhs, void *rhs, void *out,
   }
   int64_t rhs_actual_n = rhs_max_offset + 1;
 
-  // Trace inputs
-  if (!g_nan_first_found) {
+  // Trace inputs only when the heavyweight NaN scanner is explicitly enabled.
+  if (nan_trace_enabled() && !g_nan_first_found) {
     int op_id = g_nan_trace_counter + 1;
     nan_trace_check_input("ew_binary", op_id, "lhs", lhs, num_elements);
     // Check rhs with ACTUAL valid count, not output count

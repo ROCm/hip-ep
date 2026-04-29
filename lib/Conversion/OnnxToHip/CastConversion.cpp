@@ -44,16 +44,19 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
     onnxDataType = 1;
   else if (targetType.isF64())
     onnxDataType = 11;
-  else if (targetType.isInteger(8))
-    onnxDataType = 3;
-  else if (targetType.isInteger(16))
-    onnxDataType = 5;
-  else if (targetType.isInteger(32))
-    onnxDataType = 6;
-  else if (targetType.isInteger(64))
-    onnxDataType = 7;
-  else if (targetType.isInteger(1))
-    onnxDataType = 9;
+  else if (auto intType = mlir::dyn_cast<mlir::IntegerType>(targetType)) {
+    if (intType.getWidth() == 8)
+      onnxDataType =
+          (intType.getSignedness() == mlir::IntegerType::Unsigned) ? 2 : 3;
+    else if (intType.getWidth() == 16)
+      onnxDataType = 5;
+    else if (intType.getWidth() == 32)
+      onnxDataType = 6;
+    else if (intType.getWidth() == 64)
+      onnxDataType = 7;
+    else if (intType.getWidth() == 1)
+      onnxDataType = 9;
+  }
 
   // Validate that we have a supported type
   if (onnxDataType == 0)
