@@ -40,9 +40,14 @@ typedef int (*InferenceComputeFunc)(void *state, void *inputs, void *outputs);
 typedef int (*InferenceCleanupFunc)(void *state);
 typedef const char *(*InferenceGetMetadataJsonFunc)(void);
 
-// Tensor structures matching hipdnn_ep_runtime.h. Keep in sync with the
-// definitions there (and with custom_op_mlir.hpp); the layout is the
-// on-the-wire ABI between marshalling and the MLIR-compiled model.dll.
+// Local copy of the tensor_t wire-protocol ABI -- the three components
+// (compiler-emitted model.dll, EP runtime DLL, this hip-test-dll harness)
+// are intentionally kept decoupled, so we re-declare the struct here
+// instead of sharing a header. The static_assert block below catches
+// any layout drift between the three copies. Sibling copies live at:
+//   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
+//   * `lib/Runtime/hipdnn_ep_runtime.h`                             (EP
+//   runtime)
 enum {
   TENSOR_MEMORY_CPU = 0,  // == OrtMemoryInfoDeviceType_CPU
   TENSOR_MEMORY_GPU = 1,  // == OrtMemoryInfoDeviceType_GPU
@@ -58,16 +63,12 @@ typedef struct {
   int memory_type;     // TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 } tensor_t;
 
-// Compile-time guard against silent layout drift between the three places
-// that duplicate this struct (this file,
-// backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp, and
-// lib/Runtime/hipdnn_ep_runtime.h). The same three asserts live in all
-// three files; if you reorder/add/remove a field in one place you have to
-// touch all three or one of these will fire at build time.
-//
-// We assert per-field offsets, not raw sizeof(tensor_t), because trailing
-// padding after `memory_type` is compiler-defined and not part of what the
-// MLIR-emitted model.dll actually reads.
+// Compile-time guard for the wire-protocol ABI described above. The same
+// three asserts live in each of the three sibling headers; if you reorder
+// / add / remove a field in one copy and forget to mirror it in the others,
+// at least one of them fails to build. Per-field offsets (not raw sizeof)
+// because trailing padding after `memory_type` is compiler-defined and not
+// part of what model.dll actually reads.
 static_assert(offsetof(tensor_t, data) == 0,
               "tensor_t.data must remain the first field");
 static_assert(offsetof(tensor_t, shape) == sizeof(void *),
