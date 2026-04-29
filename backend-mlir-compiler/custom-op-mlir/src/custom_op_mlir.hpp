@@ -42,9 +42,13 @@ enum {
 // Memory ownership: caller-owned. `memory_type` selects the data pointer's
 // placement (see the enum above) and tells the DLL whether to copy or alias.
 //
-// IMPORTANT: this layout is duplicated as `tensor_t` in
-// `lib/Runtime/hipdnn_ep_runtime.h` (extern-C version consumed by the
-// MLIR-compiled model.dll). Keep the two definitions byte-for-byte identical.
+// tensor_t is the wire-protocol ABI between three components that are
+// intentionally kept decoupled (compiler-emitted model.dll, EP runtime
+// DLL, hip-test-dll harness), so we re-declare it here instead of
+// sharing a header. The static_assert block below catches any layout
+// drift at compile time. Sibling copies live at:
+//   * `lib/Runtime/hipdnn_ep_runtime.h`            (extern-C, EP runtime)
+//   * `tools/hip-test-dll/hip-test-dll.cpp`        (test driver, local)
 struct tensor_t {
   void *data;     // Pointer to contiguous tensor data (caller-owned)
   int64_t *shape; // Pointer to shape array of length `rank` (caller-owned)
@@ -53,15 +57,12 @@ struct tensor_t {
   int memory_type;     // One of TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 };
 
-// Compile-time guard against silent layout drift between the three places
-// that duplicate this struct (this header, lib/Runtime/hipdnn_ep_runtime.h,
-// tools/hip-test-dll/hip-test-dll.cpp). The same three asserts live in all
-// three files; if you reorder/add/remove a field in one place you have to
-// touch all three or one of these will fire at build time.
-//
-// We assert per-field offsets, not raw sizeof(tensor_t), because trailing
-// padding after `memory_type` is compiler-defined and not part of what the
-// MLIR-emitted model.dll actually reads.
+// Compile-time guard for the wire-protocol ABI described above. The same
+// three asserts live in each of the three sibling headers; if you reorder
+// / add / remove a field in one copy and forget to mirror it in the others,
+// at least one of them fails to build. Per-field offsets (not raw sizeof)
+// because trailing padding after `memory_type` is compiler-defined and not
+// part of what model.dll actually reads.
 static_assert(offsetof(tensor_t, data) == 0,
               "tensor_t.data must remain the first field");
 static_assert(offsetof(tensor_t, shape) == sizeof(void *),
