@@ -36,10 +36,9 @@ llvm_repos = use_extension("@llvm-project-overlay//:llvm_repo.bzl", "llvm_extens
 use_repo(llvm_repos, "llvm-project")
 
 # Toolchain override for custom C++ toolchain with clang-cl support
-git_override(
+local_path_override(
     module_name = "bazel_cpp_toolchain",
-    remote = "https://github.com/ROCm/bazel-cpp-toolchain",
-    commit = "bbfb5248c0e310a55859497e7ea9eb5dfc718d00",  # Fixes /VERBOSE flag issue
+    path = "../../bazel-cpp-toolchain/bazel-cpp-toolchain-1",
 )
 
 # Local override for MorphiZen module

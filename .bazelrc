@@ -9,6 +9,9 @@
 # Enable Bzlmod (modern module system)
 common --enable_bzlmod
 
+# Make system PATH available to repository rules (needed for OpenSSL Python genrules)
+common --repo_env=PATH
+
 # -----------------------------------------------------------------------------
 # Module Registry
 # -----------------------------------------------------------------------------
@@ -28,6 +31,7 @@ common --registry=https://bcr.bazel.build
 # Workspace status stamping — inject git hash into stamped build targets.
 # Only active when --stamp is passed (e.g. release builds).
 build --workspace_status_command="python workspace_status.py"
+
 
 # Enable platform-specific config sections (auto-applies build:windows or build:linux)
 common --enable_platform_specific_config
@@ -90,6 +94,12 @@ build:remote --extra_execution_platforms=@bazel_cpp_toolchain//toolchain/platfor
 
 # Hermetic toolchain only
 build:remote --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+# Use Git Bash for genrules on remote Windows executor
+# NOTE: --action_env=BAZEL_SH doesn't work with remote execution
+# (see https://github.com/bazelbuild/bazel/issues/23533)
+# Solution: Use --shell_executable to override auto-detected bash path
+build:remote --shell_executable=C:/PROGRA~1/Git/bin/bash.exe
 
 # Disable strict header checking for cross-compilation
 build:remote --noincompatible_validate_top_level_header_inclusions
