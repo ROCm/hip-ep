@@ -66,32 +66,6 @@ static FailureOr<SmallVector<double>> readFloatConst(Value v) {
   return out;
 }
 
-static FailureOr<int64_t> computeInnerSize(RankedTensorType inputType,
-                                           int64_t axis) {
-  if (inputType.getRank() == 0)
-    return 1;
-  if (axis < 0)
-    axis += inputType.getRank();
-  if (axis < 0 || axis >= inputType.getRank())
-    return failure();
-  int64_t inner = 1;
-  for (int64_t i = axis + 1; i < inputType.getRank(); ++i) {
-    if (inputType.isDynamicDim(i))
-      return failure();
-    inner *= inputType.getDimSize(i);
-  }
-  return inner;
-}
-
-static int64_t getDefaultAxis(RankedTensorType inputType) {
-  int64_t axis = 1;
-  if (inputType.getRank() == 0)
-    return 0;
-  if (axis < 0)
-    axis += inputType.getRank();
-  return axis;
-}
-
 static Value makeScalarZeroPoint(PatternRewriter &rewriter, Location loc,
                                  Type elemType) {
   auto type = RankedTensorType::get({}, elemType);
@@ -455,12 +429,14 @@ struct FoldConstantDequantizeLinear : public RewritePattern {
     auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
     if (!inputType)
       return failure();
-    int64_t axis = getDefaultAxis(inputType);
-    auto innerOr = computeInnerSize(inputType, axis);
-    if (failed(innerOr))
-      return failure();
+    int64_t inner = 1;
+    int64_t axis = inputType.getRank() == 0 ? 0 : 1;
+    for (int64_t i = axis + 1; i < inputType.getRank(); ++i) {
+      if (inputType.isDynamicDim(i))
+        return failure();
+      inner *= inputType.getDimSize(i);
+    }
     int64_t scaleN = scaleOr->size();
-    int64_t inner = *innerOr;
 
     SmallVector<Attribute> attrs;
     attrs.reserve(xOr->size());
