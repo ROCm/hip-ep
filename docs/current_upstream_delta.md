@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # Current upstream delta
 
-This document records the current uncommitted delta for Kokoro FP16 EP work.
+This document records the Kokoro FP16/QDQ EP delta carried on this branch.
 
 ## Verified FP32 quality baseline
 
