@@ -765,15 +765,12 @@ void GemmFp16U4Impl(
                     bv[6] = static_cast<_Float16>((pf_b4 >> 24) & 0xFu) * s16 + nzs;
                     bv[7] = static_cast<_Float16>((pf_b4 >> 28)       ) * s16 + nzs;
                 } else {
-                    _Float16 nzs = (_Float16)(-8) * s16;
-                    bv[0] = static_cast<_Float16>((pf_b4      ) & 0xFu) * s16 + nzs;
-                    bv[1] = static_cast<_Float16>((pf_b4 >>  4) & 0xFu) * s16 + nzs;
-                    bv[2] = static_cast<_Float16>((pf_b4 >>  8) & 0xFu) * s16 + nzs;
-                    bv[3] = static_cast<_Float16>((pf_b4 >> 12) & 0xFu) * s16 + nzs;
-                    bv[4] = static_cast<_Float16>((pf_b4 >> 16) & 0xFu) * s16 + nzs;
-                    bv[5] = static_cast<_Float16>((pf_b4 >> 20) & 0xFu) * s16 + nzs;
-                    bv[6] = static_cast<_Float16>((pf_b4 >> 24) & 0xFu) * s16 + nzs;
-                    bv[7] = static_cast<_Float16>((pf_b4 >> 28)       ) * s16 + nzs;
+                    #define S4(shift) static_cast<_Float16>(((int((pf_b4 >> (shift)) & 0xFu) << 28) >> 28)) * s16
+                    bv[0] = S4( 0); bv[1] = S4( 4);
+                    bv[2] = S4( 8); bv[3] = S4(12);
+                    bv[4] = S4(16); bv[5] = S4(20);
+                    bv[6] = S4(24); bv[7] = S4(28);
+                    #undef S4
                 }
                 *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8])     = *reinterpret_cast<uint2*>(&bv[0]);
                 *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8 + 4]) = *reinterpret_cast<uint2*>(&bv[4]);
