@@ -113,5 +113,20 @@ else()
   endif()
 endif()
 
+# cpptrace for crash backtraces
+set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
+if(WIN32)
+  set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
+  set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
+endif()
+FetchContent_Declare(
+  cpptrace
+  GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+  GIT_TAG v0.8.3
+)
+FetchContent_MakeAvailable(cpptrace)
+set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
+
 # Add morphizen subdirectory (after all options are set)
 add_subdirectory(3rd-party/morphizen)
