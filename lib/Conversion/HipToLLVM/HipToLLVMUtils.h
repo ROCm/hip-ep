@@ -171,8 +171,8 @@ inline Value extractOptionalMemRefPtr(Value memrefDesc,
 // measurably expensive and the underlying library natively accepts strides).
 // No in-tree callers today.
 inline MemRefDescriptor
-extractMemRefDescriptor(Value memrefDesc,
-                        ConversionPatternRewriter &rewriter, Location loc) {
+extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter &rewriter,
+                        Location loc) {
   (void)rewriter;
   (void)loc;
   return MemRefDescriptor(memrefDesc);

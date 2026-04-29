@@ -72,9 +72,12 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
 
     // Extract memref pointers (aligned pointers from descriptors)
     Value statePtr = adaptor.getCtx(); // RuntimeState* (opaque)
-    Value inputPtr = extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value weightsPtr = extractContiguousMemRefPtr(adaptor.getWeights(), rewriter, loc);
-    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value weightsPtr =
+        extractContiguousMemRefPtr(adaptor.getWeights(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     // Handle optional bias
     Value biasPtr;
