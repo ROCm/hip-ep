@@ -9,7 +9,6 @@
 // done in fp32; half/bf16 inputs are promoted then narrowed back, matching
 // the precision of the existing reciprocal/sqrt kernels.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -237,12 +236,6 @@ extern "C" int hip_reduce_mean(void *stream, const void *data, void *output,
     }
     size_t shared_mem = 2 * block_size * sizeof(float);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_reduce_mean: dtype=%d, in=%lld, out=%lld, "
-        "reduce=%lld, block=%d, smem=%zu\n",
-        hip_dtype, (long long)num_input_elements,
-        (long long)num_output_elements, (long long)reduce_size, block_size,
-        shared_mem);
 
     switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32: {

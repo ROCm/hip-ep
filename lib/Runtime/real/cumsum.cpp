@@ -8,7 +8,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -58,7 +57,5 @@ extern "C" int wrap_cumsum(RuntimeState *state, void *input, void *output,
   int64_t num_out = outer * axis_size * inner;
   int rc = hip_cumsum(stream, input, output, outer, axis_size, inner, hip_dtype,
                       static_cast<int>(exclusive), static_cast<int>(reverse));
-  if (rc == 0)
-    nan_trace_check("cumsum", output, num_out);
   return rc;
 }

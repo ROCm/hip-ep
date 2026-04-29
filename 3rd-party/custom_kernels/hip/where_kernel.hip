@@ -12,7 +12,6 @@
 // We dispatch by element size of x/y so the same kernel covers fp16, bf16,
 // fp32, and int64 inputs.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
@@ -114,9 +113,6 @@ extern "C" int hip_where(void *stream, const void *cond, const void *x,
     }
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_where: elem=%d, n=%lld, rank=%d\n",
-        element_size_bytes, (long long)num_elements, rank);
 
     int rc = -1;
     switch (element_size_bytes) {

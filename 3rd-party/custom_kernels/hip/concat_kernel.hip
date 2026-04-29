@@ -23,7 +23,6 @@
 // Element-size dispatch (1/2/4/8 bytes) follows the slice kernel pattern,
 // so f16/bf16/f32/i64 all share the same compiled code paths.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
@@ -80,11 +79,6 @@ extern "C" int hip_concat(void *stream, void *output, int element_size_bytes,
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_concat: elem=%d, outer=%lld, out_inner=%lld, "
-        "n_in=%d\n",
-        element_size_bytes, (long long)outer, (long long)output_inner,
-        num_inputs);
 
     int64_t base_inner = 0;
     int rc = 0;

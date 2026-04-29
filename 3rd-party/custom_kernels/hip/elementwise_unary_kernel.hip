@@ -15,7 +15,6 @@
 //
 // Dispatch is by hip_unary_kind_t; see hip_custom_kernels.h.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -145,10 +144,6 @@ extern "C" int hip_elementwise_unary(void *stream, const void *input,
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_elementwise_unary: kind=%d, dtype=%d, "
-        "n=%lld, alpha=%.3f, beta=%.3f\n",
-        kind, hip_dtype, (long long)num_elements, alpha, beta);
 
     int rc = -1;
     switch (kind) {

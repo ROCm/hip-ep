@@ -7,7 +7,6 @@
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -230,8 +229,6 @@ int wrap_miopenConvolutionForward(
   void *find_workspace = nullptr;
   void *workspace = nullptr;
   int result = 0;
-  miopenConvAlgoPerf_t perf_results[1];
-  int returned_algo_count = 0;
   miopenConvFwdAlgorithm_t algo;
   size_t workspace_size = 0;
   const size_t find_workspace_size = 256 * 1024 * 1024; // 256MB
@@ -239,31 +236,6 @@ int wrap_miopenConvolutionForward(
   float beta = 0.0f;
 
   // Check inputs near the NaN-producing operation (op ~492)
-  if (nan_trace_enabled()) {
-    int next_op = g_nan_trace_counter + 1;
-    if (next_op >= 485 && next_op <= 500 && !g_nan_first_found) {
-      nan_trace_check_input("conv_fwd", next_op, "data", input,
-                            input_n * input_c * input_h * input_w);
-      nan_trace_check_input("conv_fwd", next_op, "weights", weights,
-                            weights_k * input_c * kernel_h * kernel_w);
-      if (bias)
-        nan_trace_check_input("conv_fwd", next_op, "bias", bias, weights_k);
-      fprintf(stderr,
-              "[NAN_TRACE] op#%d conv_fwd shapes: in=[%lld,%lld,%lld,%lld] "
-              "w_k=%lld kern=[%lld,%lld] stride=[%lld,%lld] pad=[%lld,%lld,%lld,%lld] "
-              "dil=[%lld,%lld] group=%lld out=[_,%lld,%lld,%lld]\n",
-              next_op, (long long)input_n, (long long)input_c,
-              (long long)input_h, (long long)input_w, (long long)weights_k,
-              (long long)kernel_h, (long long)kernel_w,
-              (long long)stride_h, (long long)stride_w,
-              (long long)pad_top, (long long)pad_left,
-              (long long)pad_bottom, (long long)pad_right,
-              (long long)dilation_h, (long long)dilation_w,
-              (long long)group, (long long)weights_k,
-              (long long)output_h, (long long)output_w);
-      fflush(stderr);
-    }
-  }
 
   // Create tensor descriptors
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
@@ -354,9 +326,7 @@ int wrap_miopenConvolutionForward(
         best_idx = 0;
 
       algo = all_results[best_idx].fwd_algo;
-      returned_algo_count = total_returned;
-      perf_results[0] = all_results[best_idx];
-      workspace_size = perf_results[0].memory;
+      workspace_size = all_results[best_idx].memory;
 
       g_conv_fwd_cache[cache_key] = {algo, workspace_size};
 
@@ -373,37 +343,13 @@ int wrap_miopenConvolutionForward(
     HIP_CHECK(hipMalloc(&workspace, workspace_size));
   }
 
-  // Zero output buffer before convolution (belt-and-suspenders; MIOpen with
-  // beta=0 overwrites output fully, but zeroing prevents stale data from
-  // masking errors during NAN_TRACE debugging).
-  {
-    int64_t out_elems = input_n * weights_k * output_h * output_w;
-    hipMemsetAsync(output, 0, out_elems * elem_size, hip_stream);
-  }
 
-  if (nan_trace_enabled()) {
-    int next_op = g_nan_trace_counter + 1;
-    if (next_op >= 491 && next_op <= 493) {
-      fprintf(stderr,
-              "[NAN_TRACE] op#%d conv_fwd: algo=%d, workspace_size=%zu, "
-              "returned_algo_count=%d\n",
-              next_op, (int)algo, workspace_size, returned_algo_count);
-      fflush(stderr);
-    }
-  }
 
   // Perform convolution
   MIOPEN_CHECK(miopenConvolutionForward(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
       conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
 
-  if (nan_trace_enabled()) {
-    int next_op = g_nan_trace_counter + 1;
-    if (next_op >= 491 && next_op <= 493 && !g_nan_first_found) {
-      nan_trace_check_input("conv_fwd", next_op, "PRE_BIAS_output", output,
-                            input_n * weights_k * output_h * output_w);
-    }
-  }
 
   if (bias) {
     miopenTensorDescriptor_t bias_desc = nullptr;
@@ -418,9 +364,6 @@ int wrap_miopenConvolutionForward(
     miopenDestroyTensorDescriptor(bias_desc);
   }
 
-  nan_trace_check("conv_fwd", output,
-                  input_n * weights_k * output_h * output_w,
-                  elem_size);
 
 cleanup:
   if (workspace) {

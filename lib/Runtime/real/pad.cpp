@@ -8,7 +8,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -59,7 +58,5 @@ extern "C" int wrap_pad(RuntimeState *state, void *input, void *output,
   int rc = hip_pad(stream, input, output, in_shape, in_strides_elems, out_shape,
                    out_strides_elems, rank, pads_begin, pads_begin_len, hip_dtype,
                    static_cast<int>(mode), value);
-  if (rc == 0)
-    nan_trace_check("pad", output, num_out);
   return rc;
 }

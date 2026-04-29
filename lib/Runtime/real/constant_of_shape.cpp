@@ -10,7 +10,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -34,7 +33,5 @@ extern "C" int wrap_constant_of_shape(RuntimeState *state, void *output,
   int rc = hip_constant_of_shape(stream, output, num_elements,
                                  static_cast<int>(element_size_bytes),
                                  scalar_bits);
-  if (rc == 0)
-    nan_trace_check("const_of_shape", output, num_elements);
   return rc;
 }

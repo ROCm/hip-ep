@@ -10,7 +10,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -36,7 +35,5 @@ extern "C" int wrap_concat(RuntimeState *state, void *output,
   int rc = hip_concat(stream, output, static_cast<int>(element_size_bytes),
                       outer, output_inner, static_cast<int>(num_inputs), inputs,
                       input_inner_sizes);
-  if (rc == 0)
-    nan_trace_check("concat", output, num_out);
   return rc;
 }

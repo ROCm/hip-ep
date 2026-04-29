@@ -11,7 +11,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -82,7 +81,5 @@ extern "C" int wrap_reduce_mean(RuntimeState *state, void *input, void *output,
             rc, (long long)num_input_elements, (long long)num_output_elements,
             (long long)inner_size);
   }
-  nan_trace_check("reduce_mean", output, num_output_elements,
-                  reduce_mean_elem_bytes(data_type));
   return rc;
 }

@@ -5,7 +5,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -31,7 +30,5 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   int rc = hip_gather(stream, data, indices, output, axis, data_num_elements,
                       indices_num_elements, output_num_elements,
                       static_cast<int>(element_size_bytes), pre_axis_size);
-  if (rc == 0)
-    nan_trace_check("gather", output, output_num_elements);
   return rc;
 }

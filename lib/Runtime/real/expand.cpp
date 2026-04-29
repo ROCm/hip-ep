@@ -18,7 +18,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdint>
@@ -98,7 +97,5 @@ extern "C" int wrap_expand(RuntimeState *state, void *input, void *output,
     num_out *= out_shape[d];
   int rc = hip_expand(stream, input, output, aligned_in_shape,
                       effective_in_strides, out_shape, out_rank, hip_dtype);
-  if (rc == 0)
-    nan_trace_check("expand", output, num_out);
   return rc;
 }

@@ -6,7 +6,6 @@
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -320,7 +319,6 @@ extern "C" int wrap_miopenConvolutionBackwardData(
                                 &beta_c, dx_desc, output));
   }
 
-  nan_trace_check("conv_transpose", output, input_n * output_c * output_h * output_w);
 
 cleanup:
   if (workspace)

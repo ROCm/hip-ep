@@ -18,7 +18,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdint>
@@ -104,7 +103,5 @@ extern "C" int wrap_nonzero(RuntimeState *state, void *input, void *output,
 
   int rc = hip_nonzero(stream, input, output, counter, in_shape, rank,
                        total_elements, k_max, hip_dtype);
-  if (rc == 0)
-    nan_trace_check("nonzero", output, rank * k_max);
   return rc;
 }

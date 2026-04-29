@@ -19,7 +19,6 @@
 //   output_off  = block_off + j
 //   updates_off = i * inner_block + j
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -264,11 +263,6 @@ extern "C" int hip_scatter_nd(void *stream, void *output, const void *indices,
         num_slices *= indices_shape[d];
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_scatter_nd: data_rank=%lld, coord_len=%lld, "
-        "num_slices=%lld, inner_block=%lld, reduction=%d\n",
-        (long long)data_rank, (long long)coord_len, (long long)num_slices,
-        (long long)inner_block, reduction);
 
     int rc = -1;
     switch (data_hip_dtype) {

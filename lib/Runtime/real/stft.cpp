@@ -26,7 +26,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <rocfft/rocfft.h>
@@ -293,7 +292,6 @@ extern "C" int wrap_stft(RuntimeState *state, void *signal, void *window,
     return rc;
 
   int64_t out_count = batch * n_frames * n_freqs * 2;
-  nan_trace_check("stft", output, out_count, stft_elem_bytes(hip_dtype));
 
   return 0;
 }

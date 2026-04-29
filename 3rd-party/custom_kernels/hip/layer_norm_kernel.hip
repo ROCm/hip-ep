@@ -15,7 +15,6 @@
 // One block per outer row.  Math in fp32; half/bf16 storage formats are
 // promoted on load and narrowed on store.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -158,10 +157,6 @@ extern "C" int hip_layer_norm(void *stream, const void *x, const void *gamma,
     }
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_layer_norm: dtype=%d, outer=%lld, norm=%lld, "
-        "eps=%.6f\n",
-        hip_dtype, (long long)outer, (long long)norm_size, epsilon);
 
     int rc = -1;
     switch (hip_dtype) {

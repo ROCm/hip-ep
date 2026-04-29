@@ -15,7 +15,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -65,40 +64,13 @@ wrap_elementwise_binary(RuntimeState *state, void *lhs, void *rhs, void *out,
       (long long)kind, hipdnn_ep_datatype_name(data_type),
       (long long)num_elements, (long long)rank);
 
-  // Compute actual rhs element count from strides
-  int64_t rhs_max_offset = 0;
-  for (int64_t d = 0; d < rank; d++) {
-    if (rhs_strides_elems[d] > 0)
-      rhs_max_offset += (out_shape[d] - 1) * rhs_strides_elems[d];
-  }
-  int64_t rhs_actual_n = rhs_max_offset + 1;
 
   // Trace inputs only when the heavyweight NaN scanner is explicitly enabled.
-  if (nan_trace_enabled() && !g_nan_first_found) {
-    int op_id = g_nan_trace_counter + 1;
-    nan_trace_check_input("ew_binary", op_id, "lhs", lhs, num_elements);
-    // Check rhs with ACTUAL valid count, not output count
-    nan_trace_check_input("ew_binary", op_id, "rhs_actual", rhs, rhs_actual_n);
-    fprintf(stderr,
-            "[NAN_TRACE] op#%d ew_binary: kind=%lld rank=%lld n=%lld "
-            "rhs_actual_n=%lld",
-            op_id, (long long)kind, (long long)rank,
-            (long long)num_elements, (long long)rhs_actual_n);
-    fprintf(stderr, " shape=[");
-    for (int64_t d = 0; d < rank; d++)
-      fprintf(stderr, "%s%lld", d ? "," : "", (long long)out_shape[d]);
-    fprintf(stderr, "] rhs_str=[");
-    for (int64_t d = 0; d < rank; d++)
-      fprintf(stderr, "%s%lld", d ? "," : "", (long long)rhs_strides_elems[d]);
-    fprintf(stderr, "]\n");
-    fflush(stderr);
-  }
 
   int rc = hip_elementwise_binary(stream, lhs, rhs, out, num_elements, hip_dtype,
                                   static_cast<int>(kind), static_cast<int>(rank),
                                   out_shape, lhs_strides_elems,
                                   rhs_strides_elems);
 
-  nan_trace_check("ew_binary", out, num_elements);
   return rc;
 }

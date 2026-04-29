@@ -6,7 +6,6 @@
 // Generic N-D transpose kernel.  Swaps two dimensions of a contiguous
 // row-major tensor.  One thread per output element.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
@@ -142,10 +141,6 @@ extern "C" int hip_transpose_nd(void *stream, const void *input, void *output,
     }
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_transpose_nd: dtype=%d, rank=%d, dim0=%d, "
-        "dim1=%d, total=%lld\n",
-        hip_dtype, rank, dim0, dim1, (long long)total);
 
     switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32:

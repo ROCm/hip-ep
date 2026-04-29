@@ -7,7 +7,6 @@
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <algorithm>
@@ -266,7 +265,6 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                 hipGetErrorString(rc));
         return static_cast<int>(rc);
       }
-      nan_trace_check("optensor", output, out_total);
       return 0;
     }
   }
@@ -342,22 +340,6 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 
     int64_t total = out_n * out_c * out_h * out_w;
 
-    if (nan_trace_enabled() && !g_nan_first_found) {
-      int op_id = g_nan_trace_counter + 1;
-      int64_t lhs_total = lhs_n * lhs_c * lhs_h * lhs_w;
-      int64_t rhs_total = rhs_n * rhs_c * rhs_h * rhs_w;
-      nan_trace_check_input("optensor", op_id, "lhs", lhs, lhs_total);
-      nan_trace_check_input("optensor", op_id, "rhs", rhs, rhs_total);
-      fprintf(stderr,
-              "[NAN_TRACE] op#%d optensor: op=%s "
-              "lhs=[%lld,%lld,%lld,%lld](%lld) rhs=[%lld,%lld,%lld,%lld](%lld) "
-              "out=[%lld,%lld,%lld,%lld](%lld)\n",
-              op_id, op_name,
-              (long long)lhs_n, (long long)lhs_c, (long long)lhs_h, (long long)lhs_w, (long long)lhs_total,
-              (long long)rhs_n, (long long)rhs_c, (long long)rhs_h, (long long)rhs_w, (long long)rhs_total,
-              (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w, (long long)total);
-      fflush(stderr);
-    }
 
     void *stream = hipdnn_ep_state_get_stream(state);
     int rc = hip_elementwise_binary(stream, lhs, rhs, output, total,
@@ -369,7 +351,6 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
       return -1;
     }
 
-    nan_trace_check("optensor", output, total);
     return 0;
   }
 
@@ -411,7 +392,6 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     return -1;
   }
 
-  nan_trace_check("optensor", output, out_total);
   return 0;
 }
 
@@ -451,11 +431,6 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
       "element_size=%lld, dtype=%d -> calling hip_elementwise_sub\n",
       (long long)num_elements, (long long)element_size_bytes, hip_dtype);
 
-  if (nan_trace_enabled() && !g_nan_first_found && element_size_bytes == 4) {
-    int op_id = g_nan_trace_counter + 1;
-    nan_trace_check_input("sub", op_id, "lhs", lhs, num_elements);
-    nan_trace_check_input("sub", op_id, "rhs", rhs, num_elements);
-  }
 
   {
     int rc = hip_elementwise_sub(stream, lhs, rhs, output, num_elements,
@@ -463,6 +438,5 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
     if (rc != 0)
       return rc;
   }
-  nan_trace_check("sub", output, num_elements);
   return 0;
 }

@@ -4,55 +4,18 @@ Licensed under the MIT License.
 -->
 # Kokoro ONNX EP Runbook
 
-This document summarizes the Kokoro-related EP changes on this branch and how to
-run the validated FP32 and standard ONNX Q/DQ variants.
+This branch adds the Kokoro operator coverage needed to run the ONNX model with the MorphiZen EP, plus a conservative standard ONNX Q/DQ path.
 
-## What Changed
+## Branch Changes
 
-### Safety Guards
+- Added Kokoro runtime/conversion support for STFT, LSTM, ConvTranspose, Resize, Pad, Expand, NonZero, ScatterND, CumSum, comparisons, reductions, data movement, and elementwise ops.
+- Stabilized sensitive FP16 MIOpen paths by running LSTM, Conv, and Softmax internally in FP32 and casting back.
+- Added standard ONNX Q/DQ handling through validated cast/elementwise decomposition, constant DQ folding, and smoke coverage for `QLinearMatMul`, `MatMulInteger`, and `QLinearConv`.
+- Kept GPU runtime startup behind explicit opt-in because the FP16 investigation previously triggered Windows `LiveKernelEvent 141` watchdog resets.
 
-The ONNX EP path initializes AMD GPU runtime libraries and has previously
-triggered Windows `LiveKernelEvent 141` watchdog resets while the FP16 path was
-being debugged.  GPU runtime use is therefore explicit opt-in:
+Use Q/DQ or FP32 for quality-sensitive runs. FP16 EP is finite and non-silent, but its voice quality remains worse because of pitch/source artifacts.
 
-```cmd
-set HIPDNN_EP_ALLOW_GPU_RUNTIME=1
-```
-
-Guarded paths:
-
-- `backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp`
-- `tools/hip-onnx-runner/hip-onnx-runner.cpp`
-- `D:\jam\lemondate\src\kokoro-onnx-server\main.cpp`
-- `D:\jam\lemondate\src\lemond\src\cpp\server\backends\kokoro_server.cpp`
-
-Keep `HIPDNN_EP_ENABLE_GRAPHS` unset unless intentionally testing hipDNN graph
-compilation:
-
-```cmd
-set HIPDNN_EP_ENABLE_GRAPHS=
-```
-
-### Runtime and Conversion Support
-
-The branch adds the missing Kokoro operator coverage needed for GPU-only ONNX EP
-execution, including:
-
-- STFT / iSTFT-related support through rocFFT-backed STFT handling.
-- Dynamic-shape conversion and lowering improvements.
-- Custom HIP kernels for data movement, reductions, comparisons, padding,
-  resize, nonzero, scatter, cumsum, and elementwise ops.
-- FP16 stabilization for LSTM, Conv, and Softmax by running sensitive MIOpen
-  paths internally in FP32 and casting results back.
-- Standard ONNX Q/DQ support:
-  - runtime Q/DQ decomposes into validated cast and elementwise paths;
-  - constant weight `DequantizeLinear` folds to float constants;
-  - `QLinearMatMul`, `MatMulInteger`, and a smoke path for `QLinearConv`
-    decompose through the validated Q/DQ and float kernels.
-
-### Quality Status
-
-Validated reference metrics for the current branch:
+Reference quality snapshot:
 
 ```text
 CPU_ONNX      dur=3.100s rms=0.080251 hf=0.4017
@@ -62,13 +25,9 @@ GGUF          dur=3.000s rms=0.056262 hf=0.3629
 FP16_EP       dur=3.100s rms=0.071007 hf=0.4173
 ```
 
-FP16 EP is finite and non-silent, but subjective voice quality is worse than
-FP32/QDQ/GGUF due to pitch/source artifacts.  Use Q/DQ rather than all-FP16 for
-quality-preserving quantization work.
+## Environment
 
-## Common Environment
-
-Run these from a Visual Studio x64 developer shell or after `vcvarsall.bat x64`:
+Run from a Visual Studio x64 developer shell, or after `vcvarsall.bat x64`:
 
 ```cmd
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
@@ -88,9 +47,7 @@ set HIPDNN_EP_AUTOTUNE=0
 set PATH=%THEROCK_DIST%\bin;%THEROCK_DIST%\lib;%EP_BIN%;%EP_LIB%;%PATH%
 ```
 
-## Run Kokoro FP32 ONNX EP
-
-Start the server:
+## Run FP32 ONNX EP
 
 ```cmd
 %LEMONDATE_ROOT%\build\bin\kokoro-onnx-server.exe ^
@@ -101,7 +58,7 @@ Start the server:
   --port 15002
 ```
 
-Generate a test WAV:
+Generate a WAV:
 
 ```powershell
 $body = @{
@@ -119,12 +76,9 @@ Invoke-WebRequest `
   -OutFile "D:\jam\demos\fp32_ep_test.wav"
 ```
 
-Stop the server when done.
+## Build and Run Q/DQ
 
-## Build Kokoro Q/DQ Model
-
-The Q/DQ model generator lives in the demos workspace because it consumes local
-voice/test inputs:
+Create the validated smoke model:
 
 ```cmd
 D:\jam\demos\.venv\Scripts\python.exe ^
@@ -134,17 +88,9 @@ D:\jam\demos\.venv\Scripts\python.exe ^
   --run-cpu
 ```
 
-Notes:
+Omit `--max-weights` to create `D:\jam\lemondate\models\kokoro-v1.0-local-qdq.onnx`. The full Q/DQ model still exposes a compiler/runtime stress case, so increase `--max-weights` gradually when expanding coverage.
 
-- `--max-weights 16` creates the validated smoke model.
-- Omitting `--max-weights` creates the full weight-only Q/DQ model:
-  `D:\jam\lemondate\models\kokoro-v1.0-local-qdq.onnx`.
-- The full Q/DQ model currently exposes a compiler/runtime stress case.  Expand
-  the smoke model gradually and validate after each increase.
-
-## Run Kokoro Q/DQ ONNX EP
-
-Start the server with the Q/DQ smoke model:
+Run the smoke model:
 
 ```cmd
 %LEMONDATE_ROOT%\build\bin\kokoro-onnx-server.exe ^
@@ -155,49 +101,23 @@ Start the server with the Q/DQ smoke model:
   --port 15002
 ```
 
-Generate a test WAV using the same PowerShell request shown in the FP32 section,
-for example:
+Use the same PowerShell request above and change `-OutFile` to `D:\jam\demos\qdq_ep_test.wav`.
 
-```powershell
-Invoke-WebRequest `
-  -Uri "http://127.0.0.1:15002/v1/audio/speech" `
-  -Method POST `
-  -Body $body `
-  -ContentType "application/json" `
-  -OutFile "D:\jam\demos\qdq_ep_test.wav"
-```
-
-## Validation Commands
-
-Standard Q/DQ and quantized-op smoke tests:
+## Validation
 
 ```cmd
 set HIPDNN_EP_ALLOW_GPU_RUNTIME=1
 D:\jam\demos\.venv\Scripts\python.exe D:\jam\demos\scripts\verify_qdq_quant_ops.py
 ```
 
-Expected result:
+Expected output ends with:
 
 ```text
-dq_per_tensor: ok
-q_per_axis: ok
-qlinear_matmul: ok
-matmul_integer: ok
-qlinear_conv: ok
 All Q/DQ quantized op checks passed.
 ```
 
-Quality/performance report:
+The full quality/performance report is in `D:\jam\demos\FINAL_ONNX_EP_QUALITY_PERF_REPORT.md`.
 
-```text
-D:\jam\demos\FINAL_ONNX_EP_QUALITY_PERF_REPORT.md
-```
+## Limits
 
-## Known Limitations
-
-- Q/DQ smoke preserves FP32-like quality but is not faster than FP32 EP yet.
-  The current stable path uses float kernels after Q/DQ decomposition.
-- The full Q/DQ Kokoro model still stresses the compiler/runtime.  Use the
-  smoke model or gradually increase `--max-weights`.
-- GGUF remains much faster until the EP gains fused int8 Conv/Gemm/MatMul
-  kernels for Q/DQ weight paths.
+Q/DQ smoke preserves FP32-like quality but is not faster than FP32 EP yet because the stable path still decomposes into float kernels. GGUF remains much faster until the EP has fused int8 Conv/Gemm/MatMul kernels for Q/DQ weight paths.

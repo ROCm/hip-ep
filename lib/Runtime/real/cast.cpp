@@ -5,7 +5,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -71,7 +70,5 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
             (long long)num_elements);
     fflush(stderr);
   }
-  nan_trace_check("cast", output, num_elements,
-                  hipdnn_ep_datatype_size(dst_data_type));
   return rc;
 }

@@ -6,7 +6,6 @@
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <algorithm>
@@ -387,7 +386,6 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
     return -1;
   }
 
-  nan_trace_check("matmul", output, batch_count * M * N, (int)elem_size);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");
   return 0;

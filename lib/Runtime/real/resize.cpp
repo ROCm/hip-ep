@@ -8,7 +8,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -75,7 +74,5 @@ extern "C" int wrap_resize(RuntimeState *state, void *input, void *output,
                       out_shape, out_strides_elems, rank, hip_dtype,
                       static_cast<int>(mode), static_cast<int>(coord_xform),
                       cubic_coeff_a);
-  if (rc == 0)
-    nan_trace_check("resize", output, num_out);
   return rc;
 }

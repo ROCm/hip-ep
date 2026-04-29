@@ -12,7 +12,6 @@
 // integer type for the copy.  That keeps slice fast for f16/bf16/f32/i64
 // without one specialised kernel per dtype.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
@@ -85,9 +84,6 @@ extern "C" int hip_slice(void *stream, const void *input, void *output,
     int grid_size =
         static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_slice: n=%lld, rank=%d, elem=%d\n",
-        (long long)num_elements, rank, element_size_bytes);
 
     switch (element_size_bytes) {
     case 1:

@@ -23,7 +23,6 @@
 // This is essential for Kokoro -- long audio inflates the innermost dim past
 // the single-axis grid cap.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -204,10 +203,6 @@ extern "C" int hip_pad(void *stream, const void *input, void *output,
         return 0;
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_pad: dtype=%d, rank=%lld, mode=%d, "
-        "total=%lld\n",
-        hip_dtype, (long long)rank, mode, (long long)total);
 
     int rc = -1;
     switch (hip_dtype) {

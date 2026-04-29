@@ -21,7 +21,6 @@
 // Element-type dispatch is by raw byte width (1/2/4/8) so f16/bf16/f32
 // and i32/i64 all share the same code paths.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
@@ -112,9 +111,6 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
     (void)in_shape;
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_expand: dtype=%d, rank=%lld, n=%lld\n", hip_dtype,
-        (long long)rank, (long long)num_elements);
 
     int element_size_bytes = -1;
     switch (hip_dtype) {

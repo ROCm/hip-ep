@@ -16,7 +16,6 @@
 // for duration alignment); a parallel scan can be added if the workload
 // changes.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -98,11 +97,6 @@ extern "C" int hip_cumsum(void *stream, const void *input, void *output,
         return -1;
     }
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_cumsum: dtype=%d, outer=%lld, axis=%lld, "
-        "inner=%lld, excl=%d, rev=%d\n",
-        hip_dtype, (long long)outer, (long long)axis_size, (long long)inner,
-        exclusive, reverse);
 
     int rc = -1;
     switch (hip_dtype) {

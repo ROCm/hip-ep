@@ -17,7 +17,6 @@
 //      "best-effort with static K bound" contract documented in
 //      hip_custom_kernels.h).
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -159,10 +158,6 @@ extern "C" int hip_nonzero(void *stream, const void *input, void *output,
     }
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_nonzero: dtype=%d, rank=%lld, total=%lld, "
-        "k_max=%lld\n",
-        hip_dtype, (long long)rank, (long long)total_elements, (long long)k_max);
 
     // The host has zero-filled output and counter; just dispatch.
     int rc = -1;

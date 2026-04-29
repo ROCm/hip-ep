@@ -110,26 +110,7 @@ int hip_elementwise_sqrt(
     int64_t num_elements,
     int hip_dtype);
 
-/* =========================================================================
- * Generic Element-wise Unary
- * =========================================================================
- *
- * Dispatches one of the ONNX unary ops listed below over `num_elements`
- * elements.  All math is done in fp32 internally; half/bf16 inputs are
- * promoted and the result is narrowed back.
- *
- *   HIP_UNARY_SIN, HIP_UNARY_COS, HIP_UNARY_EXP, HIP_UNARY_TANH,
- *   HIP_UNARY_FLOOR, HIP_UNARY_ROUND (round-half-to-even),
- *   HIP_UNARY_ATAN, HIP_UNARY_LEAKY_RELU (alpha), HIP_UNARY_CLIP (min, max),
- *   HIP_UNARY_SIGMOID
- *
- * `alpha` and `beta` carry op-specific scalars and are ignored otherwise:
- *   - LeakyRelu: alpha = negative slope, beta unused
- *   - Clip:      alpha = min, beta = max
- *
- * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
- * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
- */
+/* Branch-added Kokoro kernels.  All return 0 on success. */
 typedef enum {
     HIP_UNARY_SIN        = 0,
     HIP_UNARY_COS        = 1,
@@ -153,26 +134,6 @@ int hip_elementwise_unary(
     float alpha,
     float beta);
 
-/* =========================================================================
- * Generic Element-wise Binary (with broadcasting)
- * =========================================================================
- *
- * Dispatches one of the ONNX binary ops listed below over `num_elements`
- * output elements.  `out_shape`, `lhs_strides_elems`, and `rhs_strides_elems`
- * describe the broadcast layout:
- *   - `out_shape` has length `rank` and gives the shape of the output tensor.
- *   - Each stride array has length `rank` and gives the lhs/rhs stride (in
- *     elements) per output dimension.  A stride of 0 along an axis means
- *     "broadcast that axis from a single source value".
- *
- * Up to HIP_BINARY_MAX_RANK (8) is supported; the host-side wrapper is
- * expected to left-pad lower-rank operands with size-1 dims.
- *
- *   HIP_BINARY_DIV (a / b), HIP_BINARY_POW (powf(a, b))
- *
- * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
- * Returns: 0 on success, non-zero on failure
- */
 typedef enum {
     HIP_BINARY_DIV = 0,
     HIP_BINARY_POW = 1,
@@ -194,28 +155,6 @@ int hip_elementwise_binary(
     const int64_t* lhs_strides_elems,
     const int64_t* rhs_strides_elems);
 
-/* =========================================================================
- * Strided Slice
- * =========================================================================
- *
- * ONNX Slice (opset 13).  Produces `num_elements` output elements by gathering
- * from `input` at offsets:
- *
- *   in_off = sum_d  (starts[d] + out_idx[d] * step[d]) * in_stride[d]
- *
- * The host-side wrapper folds `step` into `in_strides_elems` so this kernel
- * only sees:
- *   - `out_shape[d]`        : output extent along axis d
- *   - `in_strides_elems[d]` : input stride per **output** step along axis d
- *                              (= original input stride * step)
- *   - `starts_elems[d]`     : per-axis input offset for the first output
- *                              element (already step-corrected)
- *
- * Supported element sizes: 1, 2, 4, 8 bytes (covers f16, bf16, f32, i64,
- * etc.).  Up to 8 dimensions.
- *
- * Returns: 0 on success, non-zero on failure
- */
 int hip_slice(
     void* stream,
     const void* input,
@@ -227,18 +166,6 @@ int hip_slice(
     const int64_t* in_strides_elems,
     const int64_t* starts_elems);
 
-/* =========================================================================
- * ReduceMean
- * =========================================================================
- *
- * Computes the mean over `num_input_elements / num_output_elements`
- * consecutive elements per output entry.  The host-side wrapper is expected
- * to permute the input so the reduced axes are innermost (or to compose
- * a reshape that yields a `[outer, reduce_size]` view).
- *
- * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
- * Returns: 0 on success, non-zero on failure
- */
 int hip_reduce_mean(
     void* stream,
     const void* data,
@@ -256,29 +183,6 @@ int hip_reduce_mean_strided(
     int64_t inner_size,
     int hip_dtype);
 
-/* =========================================================================
- * Concat (along arbitrary axis)
- * =========================================================================
- *
- * Concatenates `num_inputs` tensors along the axis the host has flattened
- * into the (outer, inner) layout below:
- *
- *   - outer        = product(output.shape[:axis])  (same for every input)
- *   - output_inner = product(output.shape[axis:])
- *   - input_inner_sizes[i] = product(inputs[i].shape[axis:])
- *
- * For each input slice i, the kernel writes its `outer * input_inner_sizes[i]`
- * elements to:
- *
- *   output[o * output_inner + base_inner + j] = inputs[i][o * input_inner + j]
- *
- * with base_inner = sum(input_inner_sizes[0..i-1]).
- *
- * Element-size dispatch matches the slice kernel (1, 2, 4, 8 bytes), so all
- * float and integer dtypes that fit in 8 bytes share the same code paths.
- *
- * Returns: 0 on success, non-zero on failure
- */
 int hip_concat(
     void* stream,
     void* output,
@@ -289,19 +193,6 @@ int hip_concat(
     const void* const* inputs,
     const int64_t* input_inner_sizes);
 
-/* =========================================================================
- * ConstantOfShape (scalar fill)
- * =========================================================================
- *
- * Fills `num_elements` of `output` with `scalar_bits` reinterpreted as a
- * `element_size_bytes`-wide value.  The host packs the scalar into the low
- * bits of `scalar_bits` (e.g. for fp16 the low 16 bits hold the raw fp16
- * bit pattern).
- *
- * Element-size dispatch (1, 2, 4, 8 bytes) covers every Kokoro use case.
- *
- * Returns: 0 on success, non-zero on failure
- */
 int hip_constant_of_shape(
     void* stream,
     void* output,
@@ -309,25 +200,6 @@ int hip_constant_of_shape(
     int element_size_bytes,
     uint64_t scalar_bits);
 
-/* =========================================================================
- * Element-wise Compare / Logical (bool output)
- * =========================================================================
- *
- * ONNX ops that take two tensors of any numeric type and produce a boolean
- * tensor (1 byte per element):
- *
- *   HIP_COMPARE_EQ  (Equal),  HIP_COMPARE_GT  (Greater),
- *   HIP_COMPARE_LT  (Less),   HIP_COMPARE_GE  (GreaterOrEqual),
- *   HIP_COMPARE_AND (logical And; inputs must be bool/i8)
- *
- * Broadcasting follows the same convention as hip_elementwise_binary
- * (per-axis lhs/rhs strides, 0 = broadcast).
- *
- * Supported hip_dtype for EQ/GT/LT/GE: float32, float16, bfloat16, int32, int64.
- * Supported hip_dtype for AND: ignored (always treats inputs as bool/i8).
- *
- * Returns: 0 on success, non-zero on failure
- */
 typedef enum {
     HIP_COMPARE_EQ  = 0,
     HIP_COMPARE_GT  = 1,
@@ -349,17 +221,6 @@ int hip_compare(
     const int64_t* lhs_strides_elems,
     const int64_t* rhs_strides_elems);
 
-/* =========================================================================
- * Where (cond ? x : y)
- * =========================================================================
- *
- * `cond` is a bool tensor (1 byte per element) broadcastable to the output
- * shape; `x` and `y` are tensors of the same element type as the output,
- * also broadcastable.  Element-size dispatch (1/2/4/8 bytes) covers every
- * float/int dtype that fits in a 64-bit word.
- *
- * Returns: 0 on success, non-zero on failure
- */
 int hip_where(
     void* stream,
     const void* cond,
@@ -374,21 +235,6 @@ int hip_where(
     const int64_t* x_strides_elems,
     const int64_t* y_strides_elems);
 
-/* =========================================================================
- * LayerNormalization
- * =========================================================================
- *
- * y = (x - mean) / sqrt(var + epsilon) * gamma + beta
- *
- * Mean and variance are taken over the innermost `norm_size` elements of
- * each row.  The host flattens the input to (outer * norm_size,) so the
- * kernel can launch one block per row.
- *
- * `beta` may be NULL (treated as zero).
- *
- * Supported hip_dtype: float32, float16, bfloat16
- * Returns: 0 on success, non-zero on failure
- */
 int hip_layer_norm(
     void* stream,
     const void* x,
@@ -400,25 +246,6 @@ int hip_layer_norm(
     float epsilon,
     int hip_dtype);
 
-/* =========================================================================
- * CumSum
- * =========================================================================
- *
- * Cumulative sum along an axis.  The host flattens the input as
- * (outer * axis_size * inner) where:
- *   - outer     = product(input.shape[:axis])
- *   - axis_size = input.shape[axis]
- *   - inner     = product(input.shape[axis+1:])
- *
- * Per ONNX:
- *   exclusive: 0 = inclusive (sum includes current element)
- *              1 = exclusive (sum excludes current element)
- *   reverse:   0 = scan from index 0 forward
- *              1 = scan from end backward
- *
- * Supported hip_dtype: float32, float16, bfloat16, int32, int64
- * Returns: 0 on success, non-zero on failure
- */
 int hip_cumsum(
     void* stream,
     const void* input,
@@ -430,25 +257,6 @@ int hip_cumsum(
     int exclusive,
     int reverse);
 
-/* =========================================================================
- * Pad (ONNX Pad opset 18)
- * =========================================================================
- *
- * Pads `input` along each axis with `pads_begin[axis]` elements before and
- * `pads_end[axis]` elements after, producing `output`.  The host computes
- * the output strides; this kernel only needs `out_shape`, `in_shape`,
- * `in_strides_elems`, and `pads_begin` (along with the mode and pad value).
- *
- * Modes (HIP_PAD_MODE_*):
- *   0 = constant : write `value` (cast to T) for out-of-bounds reads
- *   1 = reflect  : mirror without repeating the boundary sample
- *   2 = edge     : replicate the boundary sample (clamp)
- *
- * Up to HIP_PAD_MAX_RANK (8) is supported.
- *
- * Supported hip_dtype: float32, float16, bfloat16
- * Returns: 0 on success, non-zero on failure
- */
 typedef enum {
     HIP_PAD_MODE_CONSTANT = 0,
     HIP_PAD_MODE_REFLECT  = 1,
@@ -470,30 +278,6 @@ int hip_pad(
     int mode,
     float value);
 
-/* =========================================================================
- * Resize (ONNX Resize opset 18)
- * =========================================================================
- *
- * Resizes the spatial dims (last 2) of an N-D tensor.  Batch / channel /
- * any leading dims pass through unchanged.  Modes:
- *   0 = nearest (round_prefer_floor per ONNX 18 default)
- *   1 = linear  (bilinear over the last 2 dims)
- *   2 = cubic   (bicubic with `cubic_coeff_a`, default -0.75)
- *
- * Coordinate-transform modes (output -> input mapping):
- *   0 = half_pixel        (default)
- *   1 = pytorch_half_pixel
- *   2 = align_corners
- *   3 = asymmetric
- *   4 = tf_crop_and_resize (rejected at lowering time; the runtime
- *                           kernel still falls back to half_pixel for
- *                           safety if it ever gets here)
- *
- * Up to HIP_RESIZE_MAX_RANK (8) dims; rank must be >= 2.
- *
- * Supported hip_dtype: float32, float16, bfloat16
- * Returns: 0 on success, non-zero on failure
- */
 typedef enum {
     HIP_RESIZE_MODE_NEAREST = 0,
     HIP_RESIZE_MODE_LINEAR  = 1,
@@ -522,10 +306,6 @@ int hip_resize(
     int coord_xform,
     float cubic_coeff_a);
 
-/* =========================================================================
- * Generic N-D transpose (swap dim0 and dim1 of a row-major contiguous
- * tensor)
- * ========================================================================= */
 int hip_transpose_nd(
     void* stream,
     const void* input,
@@ -535,10 +315,6 @@ int hip_transpose_nd(
     int dim0,
     int dim1,
     int hip_dtype);
-
-/* =========================================================================
- * ONNX Range: out[i] = start + i*delta for i in [0, n)
- * ========================================================================= */
 
 int hip_range_i64(
     void* stream,
@@ -554,11 +330,6 @@ int hip_range_f32(
     int64_t n,
     void* output);
 
-/* Variant: scalar inputs live in device memory (used when MLIR can't
- * extract them at compile time).  hip_range_dyn reads them back via
- * hipMemcpy, computes n, then invokes the right launch internally.
- * `output_capacity` is the max number of elements the caller has
- * pre-allocated; the runtime n is clamped to that. */
 int hip_range_dyn(
     void* stream,
     const void* start_dev,
@@ -984,34 +755,7 @@ int hip_qmoe_scatter_add(
 int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
-/* =========================================================================
- * Expand (ONNX Expand opset 13 - numpy-style broadcast)
- * =========================================================================
- *
- * Broadcasts `input` into the shape described by `out_shape` using
- * right-aligned numpy broadcasting.  The host-side wrapper has already
- * right-aligned everything to `rank` (= out_rank):
- *
- *   - `out_shape[d]`        : output extent along axis d (length = rank)
- *   - `in_strides_elems[d]` : effective input element-stride along axis d.
- *                              0 means "broadcast" (the corresponding
- *                              right-aligned input dim is 1 or absent).
- *   - `in_shape[d]`         : right-aligned input shape (length = rank).
- *                              Currently informational only; the broadcast
- *                              semantics are fully encoded in
- *                              `in_strides_elems`.
- *
- * One thread per output element:
- *   in_off = sum_d (out_coord[d] * in_strides_elems[d])
- *   output[flat] = input[in_off]
- *
- * Element-type dispatch is by raw byte width (1/2/4/8), so f16/bf16/f32
- * and i32/i64 all share the same code paths.  Up to HIP_EXPAND_MAX_RANK
- * (8) is supported.
- *
- * Supported hip_dtype: float32, float16, bfloat16, int32, int64
- * Returns: 0 on success, non-zero on failure
- */
+/* More branch-added Kokoro helpers. */
 int hip_expand(
     void* stream,
     const void* input,
@@ -1022,35 +766,6 @@ int hip_expand(
     int64_t rank,
     int hip_dtype);
 
-/* =========================================================================
- * NonZero (ONNX NonZero opset 13)
- * =========================================================================
- *
- * Computes the row-major N-D coordinates of every nonzero element in
- * `input` and writes them column-by-column into `output`.  The output
- * tensor is shaped `(rank, k_max)` where `k_max` is a worst-case upper
- * bound supplied by the host (typically equal to `total_elements` of
- * the input).
- *
- * One thread per input element.  When the element is nonzero the thread
- * grabs the next free slot in the output via an atomic counter and
- * writes the N-D coordinate.  Slots beyond `k_max` are silently dropped
- * (they cannot occur when `k_max >= total_elements`).
- *
- * On entry the kernel zero-fills the output buffer so that
- * unused/trailing slots read back as the zero coordinate (matches the
- * "all-zero coords" convention used by Kokoro's downstream Transpose +
- * Gather chain).
- *
- * `k_dev_counter` is a device pointer to a single int64 the kernel
- * uses for the atomic counter and writes the final K back to.  The
- * host wrapper allocates and reads it.
- *
- * Supported hip_dtype: float32, float16, bfloat16, int32, int64, int8
- * (every dtype with a clear "is zero" predicate).
- *
- * Returns: 0 on success, non-zero on failure
- */
 int hip_nonzero(
     void* stream,
     const void* input,
@@ -1062,30 +777,6 @@ int hip_nonzero(
     int64_t k_max,
     int hip_dtype);
 
-/* =========================================================================
- * ScatterND (ONNX ScatterND opset 13)
- * =========================================================================
- *
- * Implements ONNX ScatterND.  The host has already (memcpy'd or aliased)
- * `data` into `output`; this kernel applies the per-index updates:
- *
- *   for i in [0, N):
- *     coord = indices[i, :indices_last_dim]
- *     output[coord, ...] = updates[i, ...]   (reduction == 0)
- *     output[coord, ...] += updates[i, ...]  (reduction == 1, atomic)
- *
- * `indices_shape` is the full indices shape (length = indices_rank); the
- * leading `indices_rank - 1` dims define `N` (the number of update
- * slices), and the innermost dim is the coordinate length used to
- * address `output`.  The kernel computes per-update inner block size
- * from `data_shape[indices_last_dim:]`.
- *
- * Supported data hip_dtype: float32, float16, bfloat16, int32, int64
- * Supported indices hip_dtype: int32, int64
- * Supported reduction: 0 (none/overwrite), 1 (add)
- *
- * Returns: 0 on success, non-zero on failure (e.g. unsupported reduction)
- */
 int hip_scatter_nd(
     void* stream,
     void* output,
@@ -1099,31 +790,6 @@ int hip_scatter_nd(
     int indices_hip_dtype,
     int reduction);
 
-/* =========================================================================
- * STFT helpers (Short-Time Fourier Transform, ONNX opset 17)
- * =========================================================================
- *
- * The runtime wrapper (real/stft.cpp) drives rocFFT for the actual
- * real-to-complex DFT.  These helpers prepare the framing buffer rocFFT
- * consumes, and (optionally) repack rocFFT's interleaved output into the
- * (..., 2) layout ONNX expects.
- *
- *   - hip_stft_frame_window:
- *       For each (batch, frame, k) writes
- *         frames[b, f, k] = signal[b, f * frame_step + k] * window[k]
- *       (window can be NULL for a rectangular window).
- *
- *   - hip_stft_split_complex:
- *       Copy `batch * n_frames * n_freqs` interleaved (re, im) f32 pairs
- *       into the destination tensor.  For onesided=1, n_freqs =
- *       frame_length / 2 + 1.  rocFFT's hipfftComplex layout is already
- *       {re, im} f32 pairs in row-major order, so this is a contiguous
- *       copy today; the kernel exists to give us a single seam where we
- *       can later add half-precision narrowing or strided writes.
- *
- * Currently supported hip_dtype: HIP_DTYPE_FLOAT32
- * Returns: 0 on success, non-zero on failure
- */
 int hip_stft_frame_window(
     void* stream,
     const void* signal,

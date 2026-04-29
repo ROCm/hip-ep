@@ -8,7 +8,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -57,7 +56,5 @@ extern "C" int wrap_compare(RuntimeState *state, void *lhs, void *rhs, void *out
   int rc = hip_compare(stream, lhs, rhs, out, num_elements, hip_dtype,
                        static_cast<int>(kind), static_cast<int>(rank), out_shape,
                        lhs_strides_elems, rhs_strides_elems);
-  if (rc == 0)
-    nan_trace_check("compare", out, num_elements);
   return rc;
 }

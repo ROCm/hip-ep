@@ -7,7 +7,6 @@
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cmath>
@@ -216,7 +215,6 @@ int launchReciprocalHip(RuntimeState *state, void *input, void *output,
 
   int rc = hip_elementwise_reciprocal(stream, input, output, num_elements,
                                       hip_dtype);
-  nan_trace_check("reciprocal", output, num_elements);
   return rc;
 }
 
@@ -241,7 +239,6 @@ int launchSqrtHip(RuntimeState *state, void *input, void *output,
       (long long)num_elements, hipdnn_ep_datatype_name(data_type));
 
   int rc = hip_elementwise_sqrt(stream, input, output, num_elements, hip_dtype);
-  nan_trace_check("sqrt", output, num_elements);
   return rc;
 }
 
@@ -293,7 +290,6 @@ int wrap_power(RuntimeState *state, void *input, void *output,
     return -1;
   }
 
-  nan_trace_check("power", output, num_elements);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_power: completed successfully\n");
   return 0;

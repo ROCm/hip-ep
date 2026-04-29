@@ -11,7 +11,6 @@
 // with the appropriate bit pattern) plus the element size.  This lets one
 // kernel cover f16/bf16/f32/i32/i64.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
@@ -72,10 +71,6 @@ extern "C" int hip_constant_of_shape(void *stream, void *output,
     }
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_constant_of_shape: n=%lld, elem=%d, bits=0x%llx\n",
-        (long long)num_elements, element_size_bytes,
-        (unsigned long long)scalar_bits);
 
     int rc = -1;
     switch (element_size_bytes) {

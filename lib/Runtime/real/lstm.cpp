@@ -49,7 +49,6 @@
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdint>
@@ -194,7 +193,6 @@ extern "C" int wrap_miopenRNNForwardInference(
                       "failed rc=%d\n", rc);
       goto f16_cleanup;
     }
-    nan_trace_check("lstm", y, y_elems, hipdnn_ep_datatype_size(data_type));
 
   f16_cleanup:
     if (x32) hipFree(x32);
@@ -479,7 +477,6 @@ extern "C" int wrap_miopenRNNForwardInference(
 
   // No CPU-side post-processing; MIOpen's LSTM output is used as-is.
 
-  nan_trace_check("lstm", y, y_count, hipdnn_ep_datatype_size(data_type));
 
 cleanup: {
   hipError_t err;

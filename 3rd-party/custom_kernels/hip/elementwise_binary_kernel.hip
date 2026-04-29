@@ -14,7 +14,6 @@
 // scalar->tensor.  Up to 8 dimensions are supported, which is enough for
 // every Kokoro tensor (max rank ~5).
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -202,10 +201,6 @@ extern "C" int hip_elementwise_binary(void *stream, const void *lhs,
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_elementwise_binary: kind=%d, dtype=%d, n=%lld, "
-        "rank=%d\n",
-        kind, hip_dtype, (long long)num_elements, rank);
 
     int rc = -1;
     switch (kind) {

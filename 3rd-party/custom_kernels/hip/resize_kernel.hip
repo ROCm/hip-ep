@@ -32,7 +32,6 @@
 // vocoder upsamples 1-D audio frames where the resized spatial dim ends
 // up well past 65535 * 256.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_bf16.h>
@@ -375,11 +374,6 @@ extern "C" int hip_resize(void *stream, const void *input, void *output,
         return 0;
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_resize: dtype=%d, rank=%lld, mode=%d, "
-        "xform=%d, cubic_a=%g, total=%lld\n",
-        hip_dtype, (long long)rank, mode, coord_xform, (double)cubic_coeff_a,
-        (long long)total);
 
     int rc = -1;
     switch (hip_dtype) {

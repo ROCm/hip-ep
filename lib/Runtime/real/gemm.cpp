@@ -6,7 +6,6 @@
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -422,7 +421,6 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
     }
   }
 
-  nan_trace_check("gemm", output, M * N);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: completed successfully\n");
 

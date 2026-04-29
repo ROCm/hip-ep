@@ -6,7 +6,6 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
-#include "nan_check.h"
 #include "runtime_types.h"
 
 #include <cstdint>
@@ -33,7 +32,5 @@ extern "C" int wrap_transpose(RuntimeState *state, void *input, void *output,
                             in_shape, static_cast<int>(dim0),
                             static_cast<int>(dim1),
                             static_cast<int>(hip_dtype));
-  if (rc == 0)
-    nan_trace_check("transpose", output, num_elements);
   return rc;
 }

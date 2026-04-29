@@ -27,7 +27,6 @@
 //      can convert between data types in the future and so the runtime
 //      wrapper sees a single uniform interface.
 
-#include "debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_fp16.h>
@@ -153,11 +152,6 @@ extern "C" int hip_stft_frame_window(void *stream, const void *signal,
     compute_grid(total, kBlockSize, grid, block);
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_stft_frame_window: batch=%lld, signal_len=%lld, "
-        "frame_len=%lld, frame_step=%lld, n_frames=%lld\n",
-        (long long)batch, (long long)signal_len, (long long)frame_len,
-        (long long)frame_step, (long long)n_frames);
 
     switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32:
@@ -209,11 +203,6 @@ extern "C" int hip_stft_split_complex(void *stream, const void *complex_in,
     compute_grid(total_pairs, kBlockSize, grid, block);
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_stft_split_complex: batch=%lld, n_frames=%lld, "
-        "n_freqs=%lld, total_pairs=%lld\n",
-        (long long)batch, (long long)n_frames, (long long)n_freqs,
-        (long long)total_pairs);
 
     switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32:
