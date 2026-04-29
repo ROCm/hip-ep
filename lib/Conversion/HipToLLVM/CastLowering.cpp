@@ -34,8 +34,10 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
     // Extract pointers using alignedPtr (respects memref.view offsets)
 
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());

@@ -158,8 +158,10 @@ struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
@@ -236,7 +238,8 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
       return failure();
 
     SmallVector<Value> args = {
-        adaptor.getCtx(), extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
@@ -279,8 +282,10 @@ struct MiopenSoftmaxOpLowering
                                  inputDesc.size(rewriter, loc, i));
 
     SmallVector<Value> args = {
-        adaptor.getCtx(), extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc), rows, cols};
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc), rows,
+        cols};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

@@ -49,8 +49,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value statePtr = adaptor.getCtx();
 
     // Required inputs
-    Value queryPtr = extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
-    Value seqlensKPtr = extractContiguousMemRefPtr(adaptor.getSeqlensK(), rewriter, loc);
+    Value queryPtr =
+        extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
+    Value seqlensKPtr =
+        extractContiguousMemRefPtr(adaptor.getSeqlensK(), rewriter, loc);
     Value totalSeqLenPtr =
         extractContiguousMemRefPtr(adaptor.getTotalSeqLen(), rewriter, loc);
 
@@ -68,7 +70,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value vScalePtr = getMemRefPtrOrNull(adaptor.getVScale());
 
     // Output pointers
-    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value presentKeyPtr =
         extractContiguousMemRefPtr(adaptor.getPresentKey(), rewriter, loc);
     Value presentValuePtr =

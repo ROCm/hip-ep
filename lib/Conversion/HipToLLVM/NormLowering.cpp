@@ -27,9 +27,12 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value scalePtr = extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
-    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value scalePtr =
+        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     // Compute num_elements with dynamic shape support
     auto inputType = cast<MemRefType>(op.getInput().getType());
@@ -108,16 +111,20 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value skipPtr = extractContiguousMemRefPtr(adaptor.getSkip(), rewriter, loc);
-    Value gammaPtr = extractContiguousMemRefPtr(adaptor.getGamma(), rewriter, loc);
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value skipPtr =
+        extractContiguousMemRefPtr(adaptor.getSkip(), rewriter, loc);
+    Value gammaPtr =
+        extractContiguousMemRefPtr(adaptor.getGamma(), rewriter, loc);
     Value biasPtr = getMemRefPtrOrNull(adaptor.getBias());
     // DPS outputs: outputs[0]=output, outputs[1]=input_skip_bias_sum (optional)
     auto outputs = adaptor.getOutputs();
     Value outputPtr = extractContiguousMemRefPtr(outputs[0], rewriter, loc);
-    Value skipOutputPtr = outputs.size() > 1
-                              ? extractContiguousMemRefPtr(outputs[1], rewriter, loc)
-                              : nullPtr;
+    Value skipOutputPtr =
+        outputs.size() > 1
+            ? extractContiguousMemRefPtr(outputs[1], rewriter, loc)
+            : nullPtr;
 
     // Compute num_elements for input and gamma
     auto inputType = cast<MemRefType>(op.getInput().getType());

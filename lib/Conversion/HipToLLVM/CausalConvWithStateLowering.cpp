@@ -40,16 +40,20 @@ struct CausalConvWithStateOpLowering
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value weightPtr = extractContiguousMemRefPtr(adaptor.getWeight(), rewriter, loc);
-    Value biasPtr = adaptor.getBias()
-                        ? extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc)
-                        : nullPtr;
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value weightPtr =
+        extractContiguousMemRefPtr(adaptor.getWeight(), rewriter, loc);
+    Value biasPtr =
+        adaptor.getBias()
+            ? extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc)
+            : nullPtr;
     Value pastStatePtr =
         adaptor.getPastState()
             ? extractContiguousMemRefPtr(adaptor.getPastState(), rewriter, loc)
             : nullPtr;
-    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value presentStatePtr =
         extractContiguousMemRefPtr(adaptor.getPresentState(), rewriter, loc);
 
