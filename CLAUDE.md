@@ -192,9 +192,9 @@ pytest test/python/test_llama8b.py -v -s   # 8B model
 
 **Structure:** `conftest.py` has shared utilities (`download`, `fix_shapes`, `run_timed`, `report`, `compare_outputs`, `register_morphizen_ep`, `LlamaModelConfig`, `make_llama_inputs`, `run_timed_iobinding`). Each test file owns its model config (HF URLs, filenames, `LlamaModelConfig`). Adding a new model = new test file following the same pattern.
 
-**IOBinding for MorphiZen EP tests:** MorphiZen EP perf tests use `run_timed_iobinding` which binds the same `OrtValue` to both the past KV input and present KV output. The runtime detects matching host pointers and reuses the same GPU allocation, so `past_key_gpu == present_key_gpu`. This makes GQA skip the per-layer D2H + `hipStreamSynchronize` stall (the `past_key != present_key` condition is false).
+**IOBinding with device memory for MorphiZen EP tests:** MorphiZen EP perf tests use `run_timed_iobinding(..., use_device_memory=True)` which allocates KV cache OrtValues via the EP's `hipHostMalloc` GPU allocator (`device_type="gpu", vendor_id=0x1002`). The runtime sees `memory_type == TENSOR_MEMORY_GPU` and aliases the buffer directly (zero-copy). The same OrtValue is bound to both past KV input and present KV output, so `past_key_gpu == present_key_gpu` — GQA skips the per-layer D2H + `hipStreamSynchronize` stall.
 
-**KV cache shape convention:** Both `past_sequence_length` and `total_sequence_length` are set to `max_seq_len` (128) in the dim map. This makes past and present KV tensors the same shape, enabling shared buffer detection in the runtime.
+**KV cache shape convention:** Both `past_sequence_length` and `total_sequence_length` are set to `max_seq_len` (128) in the dim map. This makes past and present KV tensors the same shape, enabling the memory_type aliasing fast path in the runtime.
 
 ### MorphiZen EP from Python
 
@@ -223,13 +223,14 @@ Set `HIPDNN_EP_PERF=1` to enable two levels of profiling output (to stderr):
 HIPDNN_EP_PERF=1 pytest test/python/test_llama8b.py -v -s
 ```
 
-When disabled (default), profiling is zero-overhead: `std::optional` guards prevent `hipEvent` creation.
+When disabled (default), profiling is zero-overhead: `hipdnn_ep_perf_enabled()` is a `static const bool` checked once, and `std::optional` guards prevent any GPU event or string operations.
 
 ### Architecture
 
 - Per-op profiling uses RAII scope guards (`OpProfileScope`, `OpProfileCpuScope`) that record `hipEvent_t` start/stop pairs on the HIP stream. Events are resolved in bulk after `hipStreamSynchronize` — no per-op sync.
+- **Event pool**: HIP events are pre-allocated in `OpProfileState` and reused across inferences — no `hipEventCreate/Destroy` per operator call. The pool grows on demand but never shrinks.
 - Profiling state lives in `RuntimeState->op_profile` (opaque `void*`), not globals — each inference session has its own state. Two-level data model: `OpEntry` (per op name) → `ShapeEntry` (per shape string).
-- Key files: `op_profile.h` (RAII scopes + macros), `op_profile.cpp` (state + printing), `debug_log.h` (env var check)
+- Key files: `op_profile.h` (RAII scopes + macros), `op_profile.cpp` (state + event pool + printing), `debug_log.h` (env var check)
 - Each operator wrapper adds one line: `OP_PROFILE("opname", shape_lambda, state)` or `OP_PROFILE_CPU("opname", state)`. The shape lambda is only invoked when profiling is active — zero `snprintf` overhead on the hot path.
 
 ### Llama 8B baseline (gfx1150, single-token decode, April 2026)
@@ -238,31 +239,32 @@ CPU time tracks host-side overhead — GPU ops should show near-zero CPU time (a
 
 | Operator | Calls | GPU (ms) | CPU (ms) | GPU % |
 |----------|------:|---------:|---------:|------:|
-| matmul_nbits | 225 | 66.3 | 0.4 | 77.7% |
-|   m=1,n=14336,k=4096 | 64 | 30.1 | 0.1 | 35.3% |
-|   m=1,n=4096,k=14336 | 32 | 13.6 | 0.1 | 15.9% |
-|   m=1,n=4096,k=4096 | 64 | 11.8 | 0.1 | 13.8% |
-|   m=1,n=1024,k=4096 | 64 | 5.5 | 0.1 | 6.4% |
-|   m=1,n=128256,k=4096 | 1 | 3.5 | 0.0 | 4.1% |
-| skip_layernorm (1x4096) | 64 | 4.8 | 0.3 | 5.6% |
-| gqa (b=1,sq=1,skv=128,h=32,d=128) | 32 | 4.3 | 0.1 | 5.0% |
-| rotary_emb | 64 | 3.9 | 0.1 | 4.6% |
-|   h=32,d=128 | 32 | 2.1 | 0.1 | 2.5% |
-|   h=8,d=128 | 32 | 1.8 | 0.1 | 2.1% |
-| elementwise (1x1x1x14336) | 64 | 2.8 | 0.2 | 3.3% |
-| activation (n=14336) | 32 | 2.2 | 0.1 | 2.6% |
-| stream_sync | 1 | n/a | 85.0 | n/a |
-| **TOTAL** | | **85.3** | **87.6** | |
+| matmul_nbits | 225 | 62.3 | 0.3 | 78.0% |
+|   m=1,n=14336,k=4096 | 64 | 27.6 | 0.1 | 34.6% |
+|   m=1,n=4096,k=14336 | 32 | 12.9 | 0.0 | 16.1% |
+|   m=1,n=4096,k=4096 | 64 | 11.7 | 0.1 | 14.6% |
+|   m=1,n=1024,k=4096 | 64 | 5.9 | 0.1 | 7.4% |
+|   m=1,n=128256,k=4096 | 1 | 4.3 | 0.0 | 5.3% |
+| skip_layernorm (1x4096) | 64 | 5.2 | 0.3 | 6.5% |
+| rotary_emb | 64 | 4.2 | 0.1 | 5.3% |
+|   h=32,d=128 | 32 | 2.3 | 0.0 | 2.9% |
+|   h=8,d=128 | 32 | 1.9 | 0.0 | 2.4% |
+| gqa (b=1,sq=1,skv=128,h=32,d=128) | 32 | 3.9 | 0.1 | 4.9% |
+| activation (n=14336) | 32 | 2.2 | 0.1 | 2.7% |
+| elementwise (1x1x1x14336) | 64 | 2.1 | 0.1 | 2.6% |
+| **TOTAL** | | **79.9** | **0.9** | |
 
-End-to-end: **~67 ms avg** (14.9 tok/s)
+End-to-end: **~57 ms avg** (17.5 tok/s)
+
+Profiling overhead (event pool): ~35 ms (+60%), from 972 `hipEventRecord` + 486 `hipEventElapsedTime` calls. This is the inherent cost of GPU timing instrumentation.
 
 **GQA fused decode path:** For single-token decode (`sq==1`) with supported head dimensions (`d∈{64,128,256}`), GQA uses a fused custom HIP kernel path (rope + KV append + fused attention decode). This path is fully async — no D2H copies, no per-layer sync. The `local_window_size` attribute must be `<= 0` (ONNX uses `-1` for no windowing). The decomposed hipBLASLt path (used for prefill or unsupported configs) falls back to D2H + sync per layer.
 
-**Shared buffer detection:** The runtime (`hipdnn_ep_runtime_tensor.cpp`) detects when an output's host pointer matches a previously-prepared input's host pointer (IOBinding with shared OrtValue for past/present KV cache). It reuses the same GPU allocation so `past_key_gpu == present_key_gpu`, which makes GQA skip the per-layer D2H `seqlens_k` copy + `hipStreamSynchronize` in the decomposed path.
+**GPU memory aliasing:** When the EP's `hipHostMalloc` allocator is used (OGA or IOBinding with `device_type="gpu"`), KV cache tensors arrive with `memory_type == TENSOR_MEMORY_GPU`. The runtime aliases them directly — zero H2D/D2H. This makes `past_key_gpu == present_key_gpu`, so GQA skips the per-layer D2H `seqlens_k` copy + `hipStreamSynchronize` in the decomposed path.
 
-**GQA path selection:** With shared buffers, `past_key == present_key` at the GPU level → the `need_host_past_len` condition (`past_key && past_key != present_key`) is false → no D2H copy, no `hipStreamSynchronize` per layer. The concat path (which requires host-side `past_len`) is only triggered when `past_key != present_key`.
+**GQA path selection:** With aliased GPU buffers, `past_key == present_key` at the GPU level → the `need_host_past_len` condition (`past_key && past_key != present_key`) is false → no D2H copy, no `hipStreamSynchronize` per layer. The concat path (which requires host-side `past_len`) is only triggered when `past_key != present_key`.
 
-**Runtime state:** Buffer pool, shared-buffer detection map, and GQA GEMM descriptor cache are all per-session (stored in `RuntimeState` as opaque pointers), not globals. This supports concurrent inference sessions.
+**Runtime state:** Buffer pool and GQA GEMM descriptor cache are per-session (stored in `RuntimeState` as opaque pointers), not globals. This supports concurrent inference sessions.
 
 ## Crash Reporting (cpptrace)
 
