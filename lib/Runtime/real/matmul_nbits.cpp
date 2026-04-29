@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 
@@ -17,6 +18,15 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       int64_t M, int64_t N, int64_t K, int64_t batch_count,
                       int64_t bits, int64_t block_size, int64_t elem_size,
                       int64_t zp_elem_size) {
+  OP_PROFILE(
+      "matmul_nbits",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
+                 (long long)N, (long long)K);
+        return std::string(b);
+      },
+      state);
   if (!state || !A || !B || !scales || !output) {
     fprintf(stderr, "wrap_matmul_nbits: null argument\n");
     return -1;

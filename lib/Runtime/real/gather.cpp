@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -13,6 +14,14 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
                 int64_t element_size_bytes) {
+  OP_PROFILE(
+      "gather",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)output_num_elements);
+        return std::string(b);
+      },
+      state);
   if (!state || !data || !indices || !output) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_gather: null argument\n");
     return -1;
