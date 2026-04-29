@@ -127,7 +127,7 @@ Already-downloaded zip files are skipped on subsequent runs.
 
 ### 3. Build onnx-hipdnn-ep
 
-**Prerequisites**: Complete steps 1-2 (build ONNX Runtime, download prebuilt dependencies) and install [TheRock SDK](https://repo.amd.com/rocm/tarball/).
+**Prerequisites**: Complete steps 1-2 (build ONNX Runtime, download prebuilt dependencies) and install [TheRock SDK](https://repo.amd.com/rocm/tarball/). Recommended version: **TheRock 7.11.0**.
 
 Run from the project root:
 
@@ -180,14 +180,80 @@ cmake --build ../build/$(basename $PWD) --config Release --parallel
 cmake --install ../build/$(basename $PWD) --config Release
 ```
 
-## Performance Testing
+## Model Preparation
+
+Use `tools/onnx-model-splitter` to export prefill/decode ONNX models for
+benchmarking with ONNX Runtime GenAI. Install Python dependencies first:
+
+```bash
+pip install -r tools/onnx-model-splitter/requirements.txt
+```
+
+**Step 1 — Generate `genai_config_pipeline.json`:**
+
+```bash
+python tools/onnx-model-splitter/genai_config_pipeline_from_folder.py \
+  /path/to/model_folder \
+  --max-length 16384
+```
+
+This reads the model's config (e.g. `config.json`) and produces
+`genai_config_pipeline.json` in the model folder.
+
+**Step 2 — Export prefill/decode ONNX:**
+
+```bash
+python tools/onnx-model-splitter/export_chunk_model.py \
+  --model /path/to/model_folder/model.onnx \
+  --output /path/to/output \
+  -T /path/to/model_folder/genai_config_pipeline.json
+```
+
+This exports `prefill_p512m16384.onnx`, `decode_p512m16384.onnx`,
+`genai_config_p512m16384.json`, and shared external weights into the output
+directory. See
+[tools/onnx-model-splitter/README.md](../tools/onnx-model-splitter/README.md)
+for full details.
+
+## Testing & Benchmarking
+
+### Model Inference with hip-onnx-runner
+
+`hip-onnx-runner` runs a single ONNX model through MorphiZen EP and reports
+timing. It is built automatically when `BUILD_HIP_TOOLS=ON`.
+
+```bash
+export THEROCK_DIST=$(cd ../therock && pwd)
+export PATH="$THEROCK_DIST/bin:$PATH"
+
+# Run with MorphiZen EP (default), using a fixed-shape model from Model Preparation
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx
+
+# Run with CPU only (no EP)
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -n
+
+# Dump outputs for comparison
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -d 2
+```
+
+**Key flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-m` | Path to `.onnx` model |
+| `-n` | CPU only, skip EP registration |
+| `-d 0\|1\|2\|3` | Dump level: 0=off, 1=inputs, 2=outputs, 3=both |
+| `-i <dir>` | Load inputs from directory instead of random |
+| `-L dir1,dir2` | L2-norm comparison of two output directories |
+
+### Latency Benchmarking with onnxruntime_perf_test
 
 Use `onnxruntime_perf_test` to benchmark inference latency. The examples below
 compare MorphiZen EP (AMD GPU via HIP) against DML EP.
 
 **Setup:**
 
-`onnxruntime_perf_test.exe` are not installed by
+`onnxruntime_perf_test.exe` is not installed by
 default. Copy it into `../prebuilt-local/bin` before running:
 
 ```bash
@@ -202,11 +268,11 @@ cd $PREBUILT_DIR/bin
 
 ```bash
 ./onnxruntime_perf_test.exe \
-  --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" \
-  --plugin_eps "MorphiZenExecutionProvider" \
+  --plugin_ep_libs "MorphiZenEP|onnxruntime_morphizen_ep.dll" \
+  --plugin_eps "MorphiZenEP" \
   --plugin_ep_options "config_file|morphizen_config.json" \
   -t 60 -c 1 -s -I \
-  /path/to/models/full_model_seq1.onnx
+  /path/to/output/prefill_p512m16384.onnx
 ```
 
 **DML EP:**
@@ -216,7 +282,7 @@ cd $PREBUILT_DIR/bin
   -e dml \
   -C "ep.dml.disable_graph_fusion|1" \
   -t 60 -c 1 -s -I \
-  /path/to/models/full_model_seq1.onnx
+  /path/to/output/prefill_p512m16384.onnx
 ```
 
 **Key flags:**
@@ -227,6 +293,39 @@ cd $PREBUILT_DIR/bin
 | `-c 1` | 1 concurrent thread |
 | `-s` | Show per-iteration latency statistics |
 | `-I` | Use sequential inputs (do not randomize) |
+
+### OGA End-to-End Benchmarking with model_benchmark
+
+`model_benchmark` benchmarks the full generative pipeline (prefill + decode
+token generation). It is included in the release package under `bin/`.
+
+```bash
+# Auto-generated prompt (512 tokens)
+./model_benchmark.exe \
+  -i /path/to/output \
+  --ep_library MorphiZenEP onnxruntime_morphizen_ep.dll \
+  -l 512 -g 128 \
+  -r 5 -w 1
+
+# Prompt from file
+./model_benchmark.exe \
+  -i /path/to/output \
+  --ep_library MorphiZenEP onnxruntime_morphizen_ep.dll \
+  --prompt_file /path/to/prompt.txt -g 128 \
+  -r 5 -w 1
+```
+
+**Key flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-i <path>` | Path to OGA model directory (with `genai_config.json`) |
+| `--ep_library <name> <path>` | Register a custom EP library |
+| `-l <n>` | The number of auto-generated prompts (exclusive with `--prompt_file`) |
+| `--prompt_file <path>` | Load prompt text from a file (exclusive with `-l`) |
+| `-g <n>` | Max number of tokens to generate |
+| `-r <n>` | Number of benchmark repetitions |
+| `-w <n>` | Number of warmup runs |
 
 ## ABI Note
 
