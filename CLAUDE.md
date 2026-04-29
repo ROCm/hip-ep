@@ -10,7 +10,7 @@ bazel build //target:name --config=remote
 bazel test //target:name --config=remote
 ```
 
-Never build without `--config=remote` - local builds will fail with dependency download issues.
+Remote builds are significantly faster than local builds.
 
 ### Use bazel_dep for Dependencies
 **Prefer bazel_dep over other dependency mechanisms**. Create a module in bazel-registry if needed.
