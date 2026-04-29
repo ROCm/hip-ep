@@ -201,11 +201,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       // `packed_cols = (groups_k + 1) / 2` in
       // 3rd-party/custom_kernels/hip/matmul_nbits_kernel.hip and the
       // hard-coded `zp_elem_size = 1` we pass to hip_matmul_nbits below.
-      const void *fc1_zp_e = fc1_zero_points
-                                 ? static_cast<const char *>(fc1_zero_points) +
-                                       e * fusion_inter *
-                                           ((k_blocks_fc1 + 1) / 2)
-                                 : nullptr;
+      const void *fc1_zp_e =
+          fc1_zero_points ? static_cast<const char *>(fc1_zero_points) +
+                                e * fusion_inter * ((k_blocks_fc1 + 1) / 2)
+                          : nullptr;
       const void *fc1_b_e = fc1_bias ? static_cast<const char *>(fc1_bias) +
                                            e * fusion_inter * elem_size
                                      : nullptr;
@@ -233,11 +232,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       const char *fc2_s_e = static_cast<const char *>(fc2_scales) +
                             e * hidden_size * k_blocks_fc2 * elem_size;
       // See fc1_zp_e comment above -- same packed-nibble layout for fc2.
-      const void *fc2_zp_e = fc2_zero_points
-                                 ? static_cast<const char *>(fc2_zero_points) +
-                                       e * hidden_size *
-                                           ((k_blocks_fc2 + 1) / 2)
-                                 : nullptr;
+      const void *fc2_zp_e =
+          fc2_zero_points ? static_cast<const char *>(fc2_zero_points) +
+                                e * hidden_size * ((k_blocks_fc2 + 1) / 2)
+                          : nullptr;
       const void *fc2_b_e = fc2_bias ? static_cast<const char *>(fc2_bias) +
                                            e * hidden_size * elem_size
                                      : nullptr;
