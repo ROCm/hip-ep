@@ -95,7 +95,9 @@ class TestLlama8BPerformance:
         so.add_provider_for_devices(devices, {})
         sess = ort.InferenceSession(fixed_model_path_8b, sess_options=so)
 
-        times = run_timed_iobinding(sess, make_llama_inputs(_CFG), _CFG)
+        times = run_timed_iobinding(
+            sess, make_llama_inputs(_CFG), _CFG, use_device_memory=True
+        )
         report("MorphiZen EP (8B)", times)
 
     def test_morphizen_ep_accuracy(self, fixed_model_path_8b, repo_root):
