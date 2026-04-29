@@ -71,6 +71,11 @@ struct MatmulCacheEntry {
   bool tuned;
   int num_candidates;
   size_t max_candidate_workspace;
+  // True if no heuristic algorithm could be found and we should fall back to
+  // hipblasLtMatmul(..., algo=nullptr, ws=nullptr, ws_size=0). Lets gfx1151
+  // outliers (e.g. lm_head M=128 N=201088 K=2880) use hipBLASLt's internal
+  // default kernel when its Tensile library has no matching tile.
+  bool use_default_algo;
   hipblasLtMatmulHeuristicResult_t candidates[MAX_ALGO_CANDIDATES];
 };
 
@@ -138,45 +143,76 @@ static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
         sizeof(sC)));
   }
 
-  MATMUL_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
-  {
-    const size_t max_ws = kMaxWorkspaceBytes;
-    MATMUL_CACHE_CHECK(hipblasLtMatmulPreferenceSetAttribute(
-        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
-        sizeof(max_ws)));
-  }
-
+  // Algorithm selection with escalating fallback.
+  //
+  // hipblasLtMatmulAlgoGetHeuristic is sensitive to (workspace_limit,
+  // request_count): for outlier shapes such as the gpt-oss-120b lm_head
+  // (M=128 N=201088 K=2880, ld=N) it returns 0 algorithms / status 3 with
+  // the default (256MB, 1) on gfx1151's Tensile library because no tiled
+  // algorithm satisfies the leading-dimension constraint. Try a small
+  // escalation ladder so common outlier shapes pick up a non-tiled or
+  // larger-candidate-set algorithm:
+  //   1. (256MB, requested)   original behaviour
+  //   2. (0,     requested)   force non-workspace (often unblocks huge ld)
+  //   3. (256MB, MAX)         broader candidate sweep
+  //   4. (0,     MAX)         non-workspace + broader sweep
   {
     bool do_autotune = autotune_enabled();
     int request_count = do_autotune ? MAX_ALGO_CANDIDATES : 1;
 
     int returned = 0;
-    hipblasLtMatmulAlgoGetHeuristic(handle, entry.desc, entry.layA, entry.layB,
-                                    entry.layC, entry.layC, pref, request_count,
-                                    entry.candidates, &returned);
-    hipblasLtMatmulPreferenceDestroy(pref);
-    pref = nullptr;
+    auto try_heuristic = [&](size_t ws_bytes, int req_count) -> bool {
+      hipblasLtMatmulPreference_t local_pref = nullptr;
+      if (hipblasLtMatmulPreferenceCreate(&local_pref) !=
+          HIPBLAS_STATUS_SUCCESS) {
+        return false;
+      }
+      hipblasLtMatmulPreferenceSetAttribute(
+          local_pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes,
+          sizeof(ws_bytes));
+      returned = 0;
+      hipblasStatus_t s = hipblasLtMatmulAlgoGetHeuristic(
+          handle, entry.desc, entry.layA, entry.layB, entry.layC, entry.layC,
+          local_pref, req_count, entry.candidates, &returned);
+      hipblasLtMatmulPreferenceDestroy(local_pref);
+      return s == HIPBLAS_STATUS_SUCCESS && returned > 0;
+    };
 
-    if (returned == 0) {
+    bool ok = try_heuristic(kMaxWorkspaceBytes, request_count) ||
+              try_heuristic(0, request_count) ||
+              try_heuristic(kMaxWorkspaceBytes, MAX_ALGO_CANDIDATES) ||
+              try_heuristic(0, MAX_ALGO_CANDIDATES);
+
+    if (!ok) {
+      // Final fallback: let hipBLASLt pick its internal default kernel by
+      // passing algo=nullptr at call time. This keeps the cached layout/desc
+      // so we don't pay create cost again, but avoids the heuristic on a
+      // shape gfx1151's Tensile library has no tile for.
       fprintf(stderr,
-              "queryOrCreateMatmul: no algo for M=%lld N=%lld K=%lld "
-              "batch=%lld\n",
+              "queryOrCreateMatmul: no algo from heuristic for M=%lld "
+              "N=%lld K=%lld batch=%lld; falling back to default algo "
+              "(algo=nullptr, ws=0)\n",
               (long long)M, (long long)N, (long long)K,
               (long long)key.batch_count);
-      goto cache_fail;
-    }
-
-    entry.num_candidates = returned;
-    entry.algo = entry.candidates[0].algo;
-    entry.workspace_size = entry.candidates[0].workspaceSize;
-
-    if (do_autotune) {
-      for (int i = 0; i < returned; i++)
-        entry.max_candidate_workspace = std::max(
-            entry.max_candidate_workspace, entry.candidates[i].workspaceSize);
-      entry.tuned = (returned <= 1);
-    } else {
+      entry.num_candidates = 0;
+      entry.workspace_size = 0;
+      entry.max_candidate_workspace = 0;
+      entry.use_default_algo = true;
       entry.tuned = true;
+    } else {
+      entry.num_candidates = returned;
+      entry.algo = entry.candidates[0].algo;
+      entry.workspace_size = entry.candidates[0].workspaceSize;
+      entry.use_default_algo = false;
+
+      if (do_autotune) {
+        for (int i = 0; i < returned; i++)
+          entry.max_candidate_workspace = std::max(
+              entry.max_candidate_workspace, entry.candidates[i].workspaceSize);
+        entry.tuned = (returned <= 1);
+      } else {
+        entry.tuned = true;
+      }
     }
   }
 
@@ -373,13 +409,21 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   float alpha = 1.0f;
   float beta = 0.0f;
 
+  // For shapes the heuristic could not satisfy (use_default_algo), pass
+  // algo=nullptr and zero workspace to let hipBLASLt use its internal default.
+  hipblasLtMatmulAlgo_t *algo_ptr =
+      cached->use_default_algo
+          ? nullptr
+          : const_cast<hipblasLtMatmulAlgo_t *>(&cached->algo);
+  void *call_ws_ptr = cached->use_default_algo ? nullptr : ws_ptr;
+  size_t call_ws_size = cached->use_default_algo ? 0 : ws_size;
+
   hipblasStatus_t st =
       hipblasLtMatmul(handle, cached->desc, &alpha, B,
                       cached->layA,    // "A" = B (row->col trick)
                       A, cached->layB, // "B" = A (row->col trick)
                       &beta, output, cached->layC, output, cached->layC,
-                      const_cast<hipblasLtMatmulAlgo_t *>(&cached->algo),
-                      ws_ptr, ws_size, stream);
+                      algo_ptr, call_ws_ptr, call_ws_size, stream);
 
   if (st != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "wrap_hipblasLtMatmul: hipblasLtMatmul failed (%d)\n", st);

@@ -78,6 +78,12 @@ struct GemmCacheKeyHash {
 struct GemmCacheEntry {
   hipblasLtMatmulAlgo_t algo;
   size_t workspace_size;
+  // True if no heuristic algorithm could be found and we should fall back to
+  // hipblasLtMatmul(..., algo=nullptr, ws=nullptr, ws_size=0). This unblocks
+  // outlier shapes where gfx1151's Tensile library has no tile (e.g. router
+  // M=128 N=128 K=2880 and lm_head M=128 N=201088 K=2880) but the default
+  // internal kernel still works.
+  bool use_default_algo = false;
 };
 
 static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash>
@@ -111,6 +117,18 @@ static bool resolveGemmMiopenType(int64_t typeCode, miopenDataType_t &dt) {
   }
 }
 
+// MIOpen contract for miopenOpTensor: the A-operand descriptor and the
+// destination descriptor must have *identical* shapes; only the B operand may
+// broadcast. The previous implementation passed the small bias descriptor
+// (cDesc) as both A and B while the destination was the full-output descriptor,
+// which MIOpen rejected with "A and C Tensors do not match" (status 7) any time
+// the bias actually needed broadcasting (e.g. a [1,N] bias onto [M,N]).
+//
+// Fix: zero the output buffer, then compute
+//     output = 1.0 * output + beta * broadcast(C)
+// so the A operand and destination both use outDesc and only B (the bias)
+// broadcasts. Pre-zeroing avoids dependency on uninitialized output (which
+// could contain NaNs that 1.0*NaN would propagate).
 static int broadcastBiasToOutput(RuntimeState *state, const void *C,
                                  void *output, int64_t M, int64_t N,
                                  int64_t cDim0, int64_t cDim1, float beta,
@@ -122,6 +140,13 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
     return -1;
   }
 
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  if (!stream) {
+    fprintf(stderr, "wrap_gemm: broadcastBiasToOutput: null stream\n");
+    return -1;
+  }
+
   miopenDataType_t dt;
   if (!resolveGemmMiopenType(typeCode, dt)) {
     fprintf(stderr,
@@ -130,10 +155,25 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
     return -1;
   }
 
+  size_t elemSize = (typeCode == kTypeFloat64)   ? 8
+                    : (typeCode == kTypeFloat32) ? 4
+                                                 : 2; // fp16 / bf16
+
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: broadcastBiasToOutput C[%lld,%lld] -> "
                     "[%lld,%lld], beta=%f\n",
                     (long long)cDim0, (long long)cDim1, (long long)M,
                     (long long)N, beta);
+
+  // Pre-zero the destination so 1.0*output contributes 0 in the op below.
+  size_t outBytes = static_cast<size_t>(M) * static_cast<size_t>(N) * elemSize;
+  hipError_t hipErr = hipMemsetAsync(output, 0, outBytes, stream);
+  if (hipErr != hipSuccess) {
+    fprintf(stderr,
+            "wrap_gemm: broadcastBiasToOutput: hipMemsetAsync(%zu bytes) "
+            "failed (%d): %s\n",
+            outBytes, (int)hipErr, hipGetErrorString(hipErr));
+    return -1;
+  }
 
   miopenTensorDescriptor_t cDesc = nullptr;
   miopenTensorDescriptor_t outDesc = nullptr;
@@ -147,15 +187,18 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(
       outDesc, dt, 1, 1, static_cast<int>(M), static_cast<int>(N)));
 
-  // output = beta * (C + 0 * C) + 0 * output = beta * C_broadcast
+  // output = 1.0 * output + beta * broadcast(C) + 0 * output
+  //        = beta * broadcast(C)              (since output was zeroed)
   if (typeCode == kTypeFloat64) {
-    double alpha1 = static_cast<double>(beta), alpha2 = 0.0, beta_c = 0.0;
-    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, cDesc, C,
-                                &alpha2, cDesc, C, &beta_c, outDesc, output));
+    double alpha1 = 1.0, alpha2 = static_cast<double>(beta), beta_c = 0.0;
+    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, outDesc,
+                                output, &alpha2, cDesc, C, &beta_c, outDesc,
+                                output));
   } else {
-    float alpha1 = beta, alpha2 = 0.0f, beta_c = 0.0f;
-    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, cDesc, C,
-                                &alpha2, cDesc, C, &beta_c, outDesc, output));
+    float alpha1 = 1.0f, alpha2 = beta, beta_c = 0.0f;
+    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, outDesc,
+                                output, &alpha2, cDesc, C, &beta_c, outDesc,
+                                output));
   }
 
 cleanup:
@@ -318,35 +361,65 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
         matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB)));
   }
 
-  // Algorithm selection with caching
+  // Algorithm selection with caching.
+  //
+  // hipblasLtMatmulAlgoGetHeuristic is sensitive to (workspace_limit,
+  // request_count): for outlier shapes such as the gpt-oss-120b MoE router
+  // (M=128 N=128 K=2880) and lm_head (M=128 N=201088 K=2880) the default
+  // (256MB, 1) returns HIPBLAS_STATUS_INVALID_VALUE on gfx1151's Tensile
+  // library because no tiled algorithm satisfies the leading-dimension /
+  // small-N constraints. Try a small escalation ladder so common outlier
+  // shapes pick up a non-tiled or larger-candidate-set algorithm:
+  //   1. (256MB, 1)         original behaviour
+  //   2. (0,     1)         force non-workspace algo
+  //                          (often unblocks narrow N or huge ld)
+  //   3. (256MB, 16)        broader candidate sweep
+  //   4. (0,     16)        non-workspace + broader sweep
   if (it == g_gemm_algo_cache.end()) {
-    HIPBLAS_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
-    const size_t max_ws = 256ULL << 20; // 256 MB
-    HIPBLAS_CHECK(hipblasLtMatmulPreferenceSetAttribute(
-        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
-        sizeof(max_ws)));
-
-    hipblasLtMatmulHeuristicResult_t heur;
+    constexpr int kMaxCandidates = 16;
+    hipblasLtMatmulHeuristicResult_t heurs[kMaxCandidates];
     int returned = 0;
-    HIPBLAS_CHECK(hipblasLtMatmulAlgoGetHeuristic(
-        handle, matmul_desc, matA_layout, matB_layout, matC_layout, matC_layout,
-        pref, 1, &heur, &returned));
-    hipblasLtMatmulPreferenceDestroy(pref);
-    pref = nullptr;
 
-    if (returned == 0) {
-      fprintf(stderr,
-              "wrap_gemm: no algorithm found for M=%lld N=%lld K=%lld "
-              "transA=%lld transB=%lld typeCode=%lld\n",
-              (long long)M, (long long)N, (long long)K, (long long)transA,
-              (long long)transB, (long long)typeCode);
-      result = -1;
-      goto cleanup;
-    }
+    auto try_heuristic = [&](size_t ws_bytes, int req_count) -> bool {
+      hipblasLtMatmulPreference_t local_pref = nullptr;
+      if (hipblasLtMatmulPreferenceCreate(&local_pref) !=
+          HIPBLAS_STATUS_SUCCESS) {
+        return false;
+      }
+      hipblasLtMatmulPreferenceSetAttribute(
+          local_pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes,
+          sizeof(ws_bytes));
+      returned = 0;
+      hipblasStatus_t st = hipblasLtMatmulAlgoGetHeuristic(
+          handle, matmul_desc, matA_layout, matB_layout, matC_layout,
+          matC_layout, local_pref, req_count, heurs, &returned);
+      hipblasLtMatmulPreferenceDestroy(local_pref);
+      return st == HIPBLAS_STATUS_SUCCESS && returned > 0;
+    };
+
+    bool ok = try_heuristic(256ULL << 20, 1) || try_heuristic(0, 1) ||
+              try_heuristic(256ULL << 20, kMaxCandidates) ||
+              try_heuristic(0, kMaxCandidates);
 
     GemmCacheEntry entry;
-    entry.algo = heur.algo;
-    entry.workspace_size = heur.workspaceSize;
+    if (ok) {
+      entry.algo = heurs[0].algo;
+      entry.workspace_size = heurs[0].workspaceSize;
+      entry.use_default_algo = false;
+    } else {
+      // Final fallback: let hipBLASLt pick its internal default kernel by
+      // passing algo=nullptr at call time. This is what hipblas.cpp's fp32
+      // GEMM already does unconditionally and it's the documented escape
+      // hatch when the heuristic can't satisfy the layout constraints.
+      fprintf(stderr,
+              "wrap_gemm: no algorithm from heuristic for M=%lld N=%lld "
+              "K=%lld transA=%lld transB=%lld typeCode=%lld; falling back "
+              "to default algo (algo=nullptr, ws=0)\n",
+              (long long)M, (long long)N, (long long)K, (long long)transA,
+              (long long)transB, (long long)typeCode);
+      entry.workspace_size = 0;
+      entry.use_default_algo = true;
+    }
     it = g_gemm_algo_cache.emplace(key, entry).first;
 
     RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: cached algo for M=%lld N=%lld K=%lld "
@@ -365,23 +438,28 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
       }
     }
 
-    void *ws_ptr = hipdnn_ep_state_get_workspace(state);
-    size_t ws_size = hipdnn_ep_state_get_workspace_size(state);
+    void *ws_ptr = cached.use_default_algo
+                       ? nullptr
+                       : hipdnn_ep_state_get_workspace(state);
+    size_t ws_size =
+        cached.use_default_algo ? 0 : hipdnn_ep_state_get_workspace_size(state);
+    hipblasLtMatmulAlgo_t *algo_ptr =
+        cached.use_default_algo
+            ? nullptr
+            : const_cast<hipblasLtMatmulAlgo_t *>(&cached.algo);
 
     if (typeCode == kTypeFloat64) {
       double alpha_d = static_cast<double>(alpha);
       double beta_d = static_cast<double>(effective_beta);
       HIPBLAS_CHECK(hipblasLtMatmul(
           handle, matmul_desc, &alpha_d, B, matA_layout, A, matB_layout,
-          &beta_d, effective_C, matC_layout, output, matC_layout,
-          const_cast<hipblasLtMatmulAlgo_t *>(&cached.algo), ws_ptr, ws_size,
-          stream));
+          &beta_d, effective_C, matC_layout, output, matC_layout, algo_ptr,
+          ws_ptr, ws_size, stream));
     } else {
       HIPBLAS_CHECK(hipblasLtMatmul(
           handle, matmul_desc, &alpha, B, matA_layout, A, matB_layout,
           &effective_beta, effective_C, matC_layout, output, matC_layout,
-          const_cast<hipblasLtMatmulAlgo_t *>(&cached.algo), ws_ptr, ws_size,
-          stream));
+          algo_ptr, ws_ptr, ws_size, stream));
     }
   }
 
