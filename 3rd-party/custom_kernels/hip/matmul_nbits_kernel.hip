@@ -128,7 +128,8 @@ __global__ void matmul_nbits_kernel(
  * ======================================================================= */
 
 template <int BLOCK_SIZE, int TILE_N, bool HAS_ZP = true>
-__global__ void matmul_nbits_gemv_kernel(
+__global__ __launch_bounds__(1024, 4)
+void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
@@ -185,12 +186,9 @@ __global__ void matmul_nbits_gemv_kernel(
         const int64_t k16 = idx * 16;
 
         float a_vals[16];
-        [[maybe_unused]] float a_sum = 0.0f;
 #pragma unroll
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < 16; i++)
             a_vals[i] = read_a(k16 + i);
-            if constexpr (HAS_ZP) a_sum += a_vals[i];
-        }
 
         const int64_t grp = k16 >> bs_shift;
 
@@ -206,20 +204,26 @@ __global__ void matmul_nbits_gemv_kernel(
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
             float dot = 0.0f;
-#pragma unroll
-            for (int i = 0; i < 8; i++)
-                dot += a_vals[i] *
-                       static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF);
-#pragma unroll
-            for (int i = 0; i < 8; i++)
-                dot += a_vals[8 + i] *
-                       static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
-
             if constexpr (HAS_ZP) {
-                float zv = read_zp(n_idx[tn], grp);
-                partial[tn] += (dot - a_sum * zv) * sv[tn];
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot += a_vals[i] *
+                           static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF);
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot += a_vals[8 + i] *
+                           static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
+                partial[tn] += dot * sv[tn];
             } else {
-                partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot += a_vals[i] *
+                           static_cast<float>(static_cast<int>((b_pk[tn].x >> (i * 4)) & 0xF) - 8);
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot += a_vals[8 + i] *
+                           static_cast<float>(static_cast<int>((b_pk[tn].y >> (i * 4)) & 0xF) - 8);
+                partial[tn] += dot * sv[tn];
             }
         }
     }
@@ -233,12 +237,9 @@ __global__ void matmul_nbits_gemv_kernel(
             const int64_t k8 = k8_base + idx2 * 8;
 
             float a_vals[8];
-            [[maybe_unused]] float a_sum = 0.0f;
 #pragma unroll
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < 8; i++)
                 a_vals[i] = read_a(k8 + i);
-                if constexpr (HAS_ZP) a_sum += a_vals[i];
-            }
 
             const int64_t grp = k8 >> bs_shift;
 
@@ -249,16 +250,18 @@ __global__ void matmul_nbits_gemv_kernel(
                                       &b_base_arr[tn][k8 / 2]);
 
                 float dot = 0.0f;
-#pragma unroll
-                for (int i = 0; i < 8; i++)
-                    dot += a_vals[i] *
-                           static_cast<float>((packed >> (i * 4)) & 0xF);
-
                 if constexpr (HAS_ZP) {
-                    float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += (dot - a_sum * zv) * sv;
+#pragma unroll
+                    for (int i = 0; i < 8; i++)
+                        dot += a_vals[i] *
+                               static_cast<float>((packed >> (i * 4)) & 0xF);
+                    partial[tn] += dot * sv;
                 } else {
-                    partial[tn] += dot * sv - a_sum * 8.0f * sv;
+#pragma unroll
+                    for (int i = 0; i < 8; i++)
+                        dot += a_vals[i] *
+                               static_cast<float>(static_cast<int>((packed >> (i * 4)) & 0xF) - 8);
+                    partial[tn] += dot * sv;
                 }
             }
         }
@@ -276,12 +279,15 @@ __global__ void matmul_nbits_gemv_kernel(
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
-                float zv = HAS_ZP ? read_zp(n_idx[tn], grp) : 8.0f;
                 uint8_t packed = b_base_arr[tn][k / 2];
-                float   qval   = (nibble == 0)
-                                   ? static_cast<float>(packed & 0xF)
-                                   : static_cast<float>(packed >> 4);
-                partial[tn] += a_val * (qval - zv) * sv;
+                int ival = (nibble == 0)
+                             ? static_cast<int>(packed & 0xF)
+                             : static_cast<int>(packed >> 4);
+                if constexpr (HAS_ZP) {
+                    partial[tn] += a_val * static_cast<float>(ival) * sv;
+                } else {
+                    partial[tn] += a_val * static_cast<float>(ival - 8) * sv;
+                }
             }
         }
     }
@@ -309,6 +315,29 @@ __global__ void matmul_nbits_gemv_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
+        [[maybe_unused]] float zp_correction[TILE_N];
+        if constexpr (HAS_ZP) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zp_correction[tn] = 0.0f;
+            if (lane_id == 0) {
+                for (int64_t g = 0; g < k_blocks; g++) {
+                    int64_t k_start = g * block_size;
+                    int64_t k_end   = k_start + block_size;
+                    if (k_end > K) k_end = K;
+                    float a_sum = 0.0f;
+                    for (int64_t k = k_start; k < k_end; k++)
+                        a_sum += static_cast<float>(a_base[k]);
+#pragma unroll
+                    for (int tn = 0; tn < TILE_N; tn++) {
+                        float sv = static_cast<float>(s_rows[tn][g]);
+                        float zv = read_zp(n_idx[tn], g);
+                        zp_correction[tn] += a_sum * zv * sv;
+                    }
+                }
+            }
+        }
+
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
             float val = (lane_id < num_warps)
@@ -319,6 +348,8 @@ __global__ void matmul_nbits_gemv_kernel(
             if (lane_id == 0) {
                 int64_t n = n_base + tn;
                 if (n < N) {
+                    if constexpr (HAS_ZP)
+                        val -= zp_correction[tn];
                     if (bias)
                         val += static_cast<float>(bias[n]);
                     output[batch * M * N + m * N + n] =
