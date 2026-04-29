@@ -53,11 +53,11 @@ module {
 // CHECK-NOT: tensor.extract_slice
 // CHECK-NOT: func.func
 
-// Verify split lowering reaches LLVM and materializes outputs through memrefCopy.
-// CHECK: llvm.func @memrefCopy(i64, !llvm.ptr, !llvm.ptr)
+// Split / bufferization may emit D2D copies as HIP wrappers (no in-tree memrefCopy).
+// CHECK-NOT: llvm.call @memrefCopy
 // CHECK: llvm.func private @main_graph
 // CHECK: llvm.func private @main_graph_internal
-// CHECK: llvm.call @memrefCopy
+// CHECK: wrap_hipMemcpy
 
 // Verify additional split test functions survive to LLVM lowering.
 // CHECK: llvm.func @test_cascaded_splits

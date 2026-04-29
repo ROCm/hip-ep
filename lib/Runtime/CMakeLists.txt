@@ -217,7 +217,6 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
     compile_to_bitcode(real/memory.cpp runtime_memory.bc)
-    compile_to_bitcode(real/mlir_memref_copy.cpp runtime_memref_copy.bc)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
     compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
@@ -240,7 +239,6 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/runtime_memref_copy.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hipblas.bc
