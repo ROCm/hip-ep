@@ -11,27 +11,34 @@
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
+
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+#  include "./morphizen-hip-gpu-allocator.hpp"
+#endif
+
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY, "0")
 //  Why MORPHIZEN_EP_ENABLE_CPU_DEVICE is Required
-//  The Morphizen Execution Provider is designed to run on **AMD NPU hardware**
-//  in production. However, for development and testing purposes, this
-//  environment
-// variable enables a workaround:
+//
+//  The Morphizen Execution Provider runs on **AMD GPU hardware** in
+//  production via the hipMalloc-based OrtAllocator + hipMemcpy DataTransfer
+//  registered by this factory. Only debug / unit-test builds that need the
+//  EP to load on machines without a usable AMD GPU should opt into the
+//  legacy "CPU device" mode by setting MORPHIZEN_EP_ENABLE_CPU_DEVICE=1.
+//
 // **Production Mode (default, ENV=0):**
-// - Morphizen EP only accepts **NPU devices** with AMD vendor_id (0x1022)
-// - Rejects CPU and GPU devices
-// - Returns zero EP devices if no NPU is present
-// - Tests will be skipped with "Morphizen EP V2 device API not yet implemented"
+// - Morphizen EP only accepts **AMD GPU** devices (vendor_id 0x1002 ==
+// OrtDevice::VendorIds::AMD)
+// - Rejects CPU/NPU devices
+// - Returns zero EP devices if no AMD GPU is present
 //
-// **Test Mode (ENV=1):**
-// - Morphizen EP accepts **CPU devices** for testing
-// - Allows MLIR pass execution and session creation
-// - Used for internal testing without NPU hardware
-// - **Future:** GPU support is planned to be added
-//
-// currently, this is mainly used in our internal test environments to allow the
-// execution of tests that verify the MLIR pass integration
-DEF_ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE, "1")
+// **Debug / Test Mode (ENV=1):**
+// - Morphizen EP accepts **CPU devices** instead
+// - Allows MLIR pass execution and session creation on machines without a
+//   usable AMD GPU; no GPU allocator / DataTransfer is registered, so any
+//   model I/O stays in host RAM and the EP runtime does the copy itself
+//   (the pre-2026-04 behavior)
+DEF_ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE, "0")
 #define MY_LOG(n)                                                              \
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY) >= n)
 namespace morphizen {
@@ -89,6 +96,12 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
   size_t& num_ep_devices = *p_num_ep_devices;
   auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
 
+  // ORT plugin EP V2 requires every OrtEpDevice registered by a single
+  // factory to share the same OrtDeviceMemoryInfo. We therefore pick a single
+  // device "mode" up-front: production = AMD GPU, debug = CPU. See the
+  // MORPHIZEN_EP_ENABLE_CPU_DEVICE comment near the top of this file.
+  const bool cpu_debug_mode = ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE) != 0;
+
   for (size_t i = 0; i < num_devices && num_ep_devices < max_ep_devices; ++i) {
     // C API
     const OrtHardwareDevice* hardware_device = devices[i];
@@ -96,16 +109,18 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
         factory->ort_api.HardwareDevice_VendorId(hardware_device);
     const OrtHardwareDeviceType device_type =
         factory->ort_api.HardwareDevice_Type(hardware_device);
-    // static constexpr std::uint32_t hardware_vendor_id{0x1022};
 
-    if (ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE)) {
-      // only for internal test, we pretend to support CPU EP.
+    if (cpu_debug_mode) {
+      // Debug mode: pretend to support CPU EP so unit tests can load the EP
+      // on machines without a usable AMD GPU.
       if (device_type != OrtHardwareDeviceType_CPU) {
         continue;
       }
     } else {
-      if ((vendor_id != factory->vendor_id_) ||
-          (device_type != OrtHardwareDeviceType_NPU)) {
+      // Production: only accept AMD GPU devices (PCI vendor 0x1002 ==
+      // OrtDevice::VendorIds::AMD).
+      if (device_type != OrtHardwareDeviceType_GPU ||
+          vendor_id != factory->vendor_id_) {
         continue;
       }
     }
@@ -125,12 +140,65 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
           ORT_INVALID_ARGUMENT, "Not enough space to return EP devices.");
     }
     // OrtEpDevice copies ep_metadata and ep_options.
+    OrtEpDevice* registered_ep_device = nullptr;
     auto* status = factory->ort_api.GetEpApi()->CreateEpDevice(
         factory, hardware_device, ep_metadata, ep_options,
-        &ep_devices[num_ep_devices++]);
+        &registered_ep_device);
     if (status != nullptr) {
       return status;
     }
+    ep_devices[num_ep_devices++] = registered_ep_device;
+
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+    // For AMD GPU devices, also register the OrtMemoryInfo entries that
+    // describe where our allocator places tensors. ORT will later look these
+    // up by OrtMemoryInfo and call CreateAllocator/CreateDataTransfer.
+    if (!cpu_debug_mode) {
+      const OrtEpApi* ep_api_ptr = factory->ort_api.GetEpApi();
+
+      // Lazily create the two OrtMemoryInfo instances on first use; reuse
+      // them across subsequent factory invocations.
+      if (!factory->gpu_memory_info_) {
+        OrtMemoryInfo* raw = nullptr;
+        auto* st = factory->ort_api.CreateMemoryInfo_V2(
+            "MorphiZen", OrtMemoryInfoDeviceType_GPU,
+            /*vendor*/ factory->vendor_id_,
+            /*device_id*/ 0, OrtDeviceMemoryType_DEFAULT,
+            /*alignment*/ 0, OrtAllocatorType::OrtDeviceAllocator, &raw);
+        if (st != nullptr) {
+          return st;
+        }
+        factory->gpu_memory_info_ = MorphiZenEpFactory::MemoryInfoPtr(
+            raw, factory->ort_api.ReleaseMemoryInfo);
+      }
+      if (!factory->gpu_host_accessible_memory_info_) {
+        OrtMemoryInfo* raw = nullptr;
+        auto* st = factory->ort_api.CreateMemoryInfo_V2(
+            "MorphiZen host accessible", OrtMemoryInfoDeviceType_GPU,
+            /*vendor*/ factory->vendor_id_,
+            /*device_id*/ 0, OrtDeviceMemoryType_HOST_ACCESSIBLE,
+            /*alignment*/ 0, OrtAllocatorType::OrtDeviceAllocator, &raw);
+        if (st != nullptr) {
+          return st;
+        }
+        factory->gpu_host_accessible_memory_info_ =
+            MorphiZenEpFactory::MemoryInfoPtr(
+                raw, factory->ort_api.ReleaseMemoryInfo);
+      }
+
+      if (auto* st = ep_api_ptr->EpDevice_AddAllocatorInfo(
+              registered_ep_device, factory->gpu_memory_info_.get())) {
+        return st;
+      }
+      if (auto* st = ep_api_ptr->EpDevice_AddAllocatorInfo(
+              registered_ep_device,
+              factory->gpu_host_accessible_memory_info_.get())) {
+        return st;
+      }
+      factory->gpu_device_registered_ = true;
+    }
+#endif
   }
   return nullptr;
 }
@@ -141,18 +209,20 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
     _In_reads_(num_devices) const OrtKeyValuePairs* const* ep_metadata,
     _In_ size_t num_devices, _In_ const OrtSessionOptions* session_options,
     _In_ const OrtLogger* logger, _Out_ OrtEp** ep) noexcept {
-  MY_LOG(1) << "CreateEpImpl: ";
+  MY_LOG(1) << "CreateEpImpl: num_devices=" << num_devices;
   auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
   *ep = nullptr;
 
-  if (num_devices != 1) {
-    // we only registered for NPU and only expected to be selected for one NPU
-    // if you register for multiple devices (e.g. CPU, GPU and maybe NPU) you
-    // will get an entry for each device the EP has been selected for.
+  if (num_devices == 0) {
     return factory->ort_api.CreateStatus(
         ORT_INVALID_ARGUMENT,
-        "MorphiZen EP only supports selection for one device.");
+        "MorphiZen EP requires at least one device to be selected.");
   }
+  // Note: a single factory may be selected for multiple OrtEpDevices (e.g.
+  // multiple AMD GPUs of the same type in a future multi-device build).
+  // Tools like hip-onnx-runner pass *every* OrtEpDevice belonging to this
+  // EP into AppendExecutionProvider_V2, so we must accept num_devices >= 1
+  // here. A single MorphiZenEP instance can serve all of them.
 
   // Create the execution provider
   factory->throw_if_error(factory->ort_api.Logger_LogMessage(
@@ -204,10 +274,24 @@ MorphiZenEpFactory::ValidateCompiledModelCompatibilityInfoImpl(
 }
 
 OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
-    OrtEpFactory* this_ptr, const OrtMemoryInfo* /*memory_info*/,
+    OrtEpFactory* this_ptr,
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+    const OrtMemoryInfo* memory_info,
+#else
+    const OrtMemoryInfo* /*memory_info*/,
+#endif
     const OrtKeyValuePairs* /*allocator_options*/,
     OrtAllocator** allocator) noexcept {
   auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
+
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+  if (factory->gpu_device_registered_ && memory_info != nullptr) {
+    *allocator = new HipGpuAllocator(memory_info, factory->ort_api);
+    return nullptr;
+  }
+#endif
 
   *allocator = nullptr;
   return factory->ort_api.CreateStatus(
@@ -216,15 +300,36 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
 }
 
 void ORT_API_CALL MorphiZenEpFactory::ReleaseAllocatorImpl(
-    OrtEpFactory* /*this*/, OrtAllocator* /*allocator*/) noexcept {
-  // should never be called as we don't implement CreateAllocator
-  // TODO : implement release allocator if needed
+    OrtEpFactory* /*this*/, OrtAllocator* allocator) noexcept {
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+  if (allocator != nullptr) {
+    delete static_cast<HipGpuAllocator*>(allocator);
+  }
+#else
+  (void)allocator;
+  // Should never be called when CreateAllocator returns an error.
   LOG(FATAL) << "TODO";
+#endif
 }
 
 OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateDataTransferImpl(
-    OrtEpFactory* /*this_ptr*/, OrtDataTransferImpl** data_transfer) noexcept {
-  *data_transfer = nullptr; // not implemented
+    OrtEpFactory* this_ptr, OrtDataTransferImpl** data_transfer) noexcept {
+  auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+  if (factory->gpu_device_registered_) {
+    if (!factory->data_transfer_impl_) {
+      factory->data_transfer_impl_ =
+          std::make_unique<HipDataTransferImpl>(factory->ort_api);
+    }
+    *data_transfer = factory->data_transfer_impl_.get();
+    return nullptr;
+  }
+#else
+  (void)factory;
+#endif
+  *data_transfer = nullptr; // not implemented when GPU allocator is disabled
   return nullptr;
 }
 

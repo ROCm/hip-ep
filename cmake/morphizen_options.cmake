@@ -89,6 +89,27 @@ option(morphizen_ENABLE_ONNX_BACKEND "enable ONNX backend for ORT bridge" OFF)
 option(morphizen_ENABLE_MLIR_BACKEND "enable MLIR as a backend of morphizen_ort_api for ORT bridge" ON)
 option(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT "enable ONNX schema support for node_with_named_args feature in morphizen-core-static" OFF)
 option(morphizen_ENABLE_PATTERN_MATCHING "enable pattern matching library (morphizen-pattern)" ON)
+# HIP-backed OrtAllocator + OrtDataTransferImpl in the EP factory: lets
+# ORT (and OGA via ORT) place tensors in AMD GPU memory instead of paying
+# a per-call host H2D/D2H copy. Requires find_package(hip) from ROCm/TheRock.
+#
+# Default ON for the production AMD GPU path (~6x speedup on m=16384 LLM
+# decode). OFF is kept for onnx-hipdnn-ep's BUILD_MOCK_RUNTIME=ON build,
+# which has no ROCm SDK and would fail find_package(hip REQUIRED) -- with
+# OFF the EP DLL still builds, the factory just returns errors from its
+# CreateAllocator / CreateDataTransfer hooks (mock can't run on GPU anyway).
+# The WARNING below catches the footgun if anyone flips it OFF for a
+# non-mock reason.
+option(morphizen_ENABLE_HIP_GPU_ALLOCATOR "enable hipHostMalloc-based OrtAllocator + DataTransfer in MorphiZen EP factory (requires HIP runtime; the parent project's mock build forces this OFF)" ON)
+if(morphizen_ENABLE_ORT_BRIDGE AND NOT morphizen_ENABLE_HIP_GPU_ALLOCATOR)
+  message(WARNING
+    "morphizen_ENABLE_HIP_GPU_ALLOCATOR=OFF -- the MorphiZen EP factory "
+    "will not register a HIP-backed OrtAllocator / OrtDataTransfer, so "
+    "downstream consumers (OGA, ORT) will keep tensors in host RAM and "
+    "pay full H2D/D2H per inference (~6x slowdown on m=16384 LLM decode). "
+    "This is expected for onnx-hipdnn-ep's BUILD_MOCK_RUNTIME=ON path; "
+    "any build that actually targets AMD GPU should keep this ON.")
+endif()
 
 # Validate backend configuration when ORT bridge is enabled
 if(morphizen_ENABLE_ORT_BRIDGE)
@@ -114,3 +135,4 @@ message(STATUS "  morphizen_ENABLE_UNIT_TEST : ${morphizen_ENABLE_UNIT_TEST}")
 message(STATUS "  morphizen_ENABLE_BOOST : ${morphizen_ENABLE_BOOST}")
 message(STATUS "  morphizen_ENABLE_ONNX_SCHEMA_SUPPORT : ${morphizen_ENABLE_ONNX_SCHEMA_SUPPORT}")
 message(STATUS "  morphizen_ENABLE_PATTERN_MATCHING : ${morphizen_ENABLE_PATTERN_MATCHING}")
+message(STATUS "  morphizen_ENABLE_HIP_GPU_ALLOCATOR : ${morphizen_ENABLE_HIP_GPU_ALLOCATOR}")
