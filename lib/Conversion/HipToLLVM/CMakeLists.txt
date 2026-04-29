@@ -25,7 +25,6 @@ add_library(HipToLLVM STATIC
   GemmLowering.cpp
   UnaryElementwiseLowering.cpp
   BinaryElementwiseLowering.cpp
-  QDQMLIRLowering.cpp
   SliceLowering.cpp
   Tier2ShapeLowering.cpp
   Tier3CompareLowering.cpp

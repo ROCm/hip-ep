@@ -61,9 +61,6 @@ inline constexpr const char *kWrapCast = "wrap_cast";
 inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapElementwiseUnary = "wrap_elementwise_unary";
 inline constexpr const char *kWrapElementwiseBinary = "wrap_elementwise_binary";
-inline constexpr const char *kWrapDequantizeLinear =
-    "wrap_dequantize_linear";
-inline constexpr const char *kWrapQuantizeLinear = "wrap_quantize_linear";
 inline constexpr const char *kWrapSlice = "wrap_slice";
 inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
 inline constexpr const char *kWrapConcat = "wrap_concat";
@@ -355,8 +352,6 @@ void populateUnaryElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateBinaryElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateQDQMLIRLoweringPatterns(const LLVMTypeConverter &converter,
-                                     RewritePatternSet &patterns);
 void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateTier2ShapeLoweringPatterns(const LLVMTypeConverter &converter,

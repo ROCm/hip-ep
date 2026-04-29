@@ -416,12 +416,6 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateTier6ConversionPatterns(patterns, ctx);
   populateLstmConversionPatterns(patterns, ctx);
   populateStftConversionPatterns(patterns, ctx);
-  // NonzeroConversion is disabled while we investigate a heap
-  // corruption that surfaces ~50 events into convertComputeOps when
-  // the pattern is merely registered (the corruption isn't triggered
-  // by NonzeroToHip::matchAndRewrite firing -- bisected by env-var
-  // gating).  Tracked for follow-up; the runtime kernel +
-  // declarations stay in tree so re-enabling is a one-line change.
   populateNonzeroConversionPatterns(patterns, ctx);
   populateScatterNdConversionPatterns(patterns, ctx);
 

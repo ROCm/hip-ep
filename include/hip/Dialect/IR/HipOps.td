@@ -841,58 +841,6 @@ def Hip_BinaryElementwiseOp : Hip_DpsOp<"binary_elementwise"> {
   }];
 }
 
-// ===== Standard ONNX QuantizeLinear / DequantizeLinear =======================
-
-def Hip_DequantizeLinearOp : Hip_DpsOp<"dequantize_linear"> {
-  let summary = "ONNX DequantizeLinear";
-  let description = [{
-    Computes y = (x - x_zero_point) * x_scale.  Supports per-tensor and
-    per-axis scale/zero-point.  `inner_size` is product(shape[axis+1:]) and is
-    used by the runtime to map each flat element to a scale index.
-  }];
-  let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$scale,
-    Hip_TensorOrMemRef:$zero_point,
-    Hip_TensorOrMemRef:$output,
-    I64Attr:$axis,
-    I64Attr:$scale_num_elements,
-    I64Attr:$inner_size
-  );
-  let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `,` $scale `,` $zero_point `:`
-      type($input) `,` type($scale) `,` type($zero_point) `)`
-    `outs` `(` $output `:` type($output) `)`
-    attr-dict (`:` type($result_tensors)^)?
-  }];
-}
-
-def Hip_QuantizeLinearOp : Hip_DpsOp<"quantize_linear"> {
-  let summary = "ONNX QuantizeLinear";
-  let description = [{
-    Computes y = saturate(round_even(x / y_scale) + y_zero_point).  Supports
-    per-tensor and per-axis scale/zero-point.  Missing zero_point means zero of
-    the quantized output type.
-  }];
-  let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$scale,
-    Hip_TensorOrMemRef:$zero_point,
-    Hip_TensorOrMemRef:$output,
-    I64Attr:$axis,
-    I64Attr:$scale_num_elements,
-    I64Attr:$inner_size
-  );
-  let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `,` $scale `,` $zero_point `:`
-      type($input) `,` type($scale) `,` type($zero_point) `)`
-    `outs` `(` $output `:` type($output) `)`
-    attr-dict (`:` type($result_tensors)^)?
-  }];
-}
-
 // ===== Strided Slice =========================================================
 // ONNX Slice (opset 13).  The `starts`, `ends`, `steps` arrays are normalised
 // at conversion time into per-axis (start_offset, step) carried as i64 array

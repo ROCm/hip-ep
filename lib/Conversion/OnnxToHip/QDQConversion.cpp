@@ -3,8 +3,11 @@
  * Licensed under the MIT License.
  */
 //
-// ONNX QuantizeLinear / DequantizeLinear -> hip.quantize_linear /
-// hip.dequantize_linear.
+// ONNX QuantizeLinear / DequantizeLinear support.
+//
+// Runtime Q/DQ currently decomposes into existing HIP cast/elementwise ops.
+// Constant weight DQ folds to normal float constants so Conv/Gemm/MatMul can
+// keep using the validated float kernels.
 
 #include "OnnxToHipUtils.h"
 
@@ -63,14 +66,6 @@ static FailureOr<SmallVector<double>> readFloatConst(Value v) {
   return out;
 }
 
-static FailureOr<int64_t> getScaleNumElements(Value scale) {
-  auto scaleType = dyn_cast<RankedTensorType>(scale.getType());
-  if (!scaleType || !scaleType.hasStaticShape())
-    return failure();
-  int64_t n = scaleType.getNumElements();
-  return n <= 0 ? 1 : n;
-}
-
 static FailureOr<int64_t> computeInnerSize(RankedTensorType inputType,
                                            int64_t axis) {
   if (inputType.getRank() == 0)
@@ -88,7 +83,7 @@ static FailureOr<int64_t> computeInnerSize(RankedTensorType inputType,
   return inner;
 }
 
-static int64_t getAxis(Operation *op, RankedTensorType inputType) {
+static int64_t getDefaultAxis(RankedTensorType inputType) {
   int64_t axis = 1;
   if (inputType.getRank() == 0)
     return 0;
@@ -466,7 +461,7 @@ struct FoldConstantDequantizeLinear : public RewritePattern {
     auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
     if (!inputType)
       return failure();
-    int64_t axis = getAxis(op, inputType);
+    int64_t axis = getDefaultAxis(inputType);
     auto innerOr = computeInnerSize(inputType, axis);
     if (failed(innerOr))
       return failure();

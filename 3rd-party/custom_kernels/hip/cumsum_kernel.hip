@@ -24,7 +24,6 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
-#include <cmath>
 #include <cstdio>
 
 namespace {
@@ -68,33 +67,6 @@ __global__ void cumsum_kernel(const T *__restrict__ in, T *__restrict__ out,
                 out[idx] = from_acc(acc);
             }
         }
-    }
-}
-
-__global__ void cumsum_f16_mod1_kernel(const __half *__restrict__ in,
-                                       __half *__restrict__ out,
-                                       int64_t outer, int64_t axis_size,
-                                       int64_t inner) {
-    int64_t flat =
-        static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t lines = outer * inner;
-    if (flat >= lines)
-        return;
-    int64_t o = flat / inner;
-    int64_t i = flat % inner;
-    int64_t base = o * axis_size * inner + i;
-
-    float acc = 0.0f;
-    for (int64_t k = 0; k < axis_size; ++k) {
-        int64_t idx = base + k * inner;
-        acc += __half2float(in[idx]);
-        // Kokoro's 9-harmonic source generator later computes
-        // sin(2*pi*300*phase).  Keeping phase modulo 1 preserves the sine
-        // result while avoiding large FP16 cumulative phase quantization.
-        float wrapped = acc - floorf(acc);
-        if (wrapped < 0.0f)
-            wrapped += 1.0f;
-        out[idx] = __float2half(wrapped);
     }
 }
 
@@ -142,24 +114,11 @@ extern "C" int hip_cumsum(void *stream, const void *input, void *output,
         break;
     }
     case HIP_DTYPE_FLOAT16: {
-        if (!exclusive && !reverse && inner == 9 && axis_size > 128) {
-            int64_t lines = outer * inner;
-            constexpr int kBlockSize = 128;
-            int grid =
-                static_cast<int>((lines + kBlockSize - 1) / kBlockSize);
-            hipLaunchKernelGGL(cumsum_f16_mod1_kernel, dim3(grid),
-                               dim3(kBlockSize), 0, hip_stream,
-                               static_cast<const __half *>(input),
-                               static_cast<__half *>(output), outer, axis_size,
-                               inner);
-            rc = static_cast<int>(hipGetLastError());
-        } else {
-            auto to = [] __device__(__half v) { return __half2float(v); };
-            auto from = [] __device__(float v) { return __float2half(v); };
-            rc = launch_cumsum<__half, float, decltype(to), decltype(from)>(
-                hip_stream, input, output, outer, axis_size, inner, exclusive,
-                reverse, to, from);
-        }
+        auto to = [] __device__(__half v) { return __half2float(v); };
+        auto from = [] __device__(float v) { return __float2half(v); };
+        rc = launch_cumsum<__half, float, decltype(to), decltype(from)>(
+            hip_stream, input, output, outer, axis_size, inner, exclusive,
+            reverse, to, from);
         break;
     }
     case HIP_DTYPE_BFLOAT16: {
