@@ -11,7 +11,7 @@
  *        zeros  : FP16 [N, num_groups_k]  (or NULL, default zp=8)
  *        output : FP16 row-major [batch, M, N]
  *
- * Internally auto-dispatched to one of three execution paths:
+ * Internally auto-dispatched to one of four execution paths:
  *
  *   1. RDNA3 WMMA fast path (batch==1, K%32==0, M>=16):
  *      Transposes A/C to col-major internally, then uses WMMA intrinsics
@@ -197,6 +197,10 @@ __global__ void matmul_nbits_gemv_kernel(
     // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
     // Use int for loop vars — K <= 32768, idx <= K/32 = 1024, fits 32-bit.
     // uint4 (128-bit) loads process 32 nibbles (one full block_size=32 group).
+    //
+    // NOTE: K-loop unroll x2 was tried (processing two K-groups per iteration
+    // to overlap B loads) but regressed performance by ~5% due to doubled
+    // register pressure causing spilling on RDNA 3. Reverted to single-group.
     const int num_u128 = static_cast<int>(K / 32);
     for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
         const int k32 = idx * 32;
@@ -362,45 +366,70 @@ __global__ void matmul_nbits_gemv_kernel(
     }
 
     // --- Reduction: warp shuffle then shared memory ---
-    const int wave_size = __builtin_amdgcn_wavefrontsize();
-    const int warp_id   = tid / wave_size;
-    const int lane_id   = tid % wave_size;
-    const int num_warps = BLOCK_SIZE / wave_size;
+    // RDNA 3/3.5 (gfx11xx) runs wave32 by default. Compile-time constant
+    // for warp_size allows the compiler to dead-strip unused branches.
+    constexpr int WARP_SIZE = 32;
+    const int warp_id   = tid / WARP_SIZE;
+    const int lane_id   = tid % WARP_SIZE;
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
 
 #pragma unroll
     for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = wave_size >> 1; offset > 0; offset >>= 1)
+        for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
             partial[tn] += __shfl_down(partial[tn], offset);
     }
 
-    constexpr int MAX_WARPS = BLOCK_SIZE / 32;
-    __shared__ float warp_sums[TILE_N * MAX_WARPS];
-
-    if (lane_id == 0) {
+    // Single warp (BLOCK_SIZE==32 in wave32): shuffle has the final result.
+    if constexpr (BLOCK_SIZE <= WARP_SIZE) {
+        if (lane_id == 0) {
 #pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++)
-            warp_sums[tn * MAX_WARPS + warp_id] = partial[tn];
-    }
-    __syncthreads();
-
-    if (warp_id == 0) {
-#pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++) {
-            float val = (lane_id < num_warps)
-                            ? warp_sums[tn * MAX_WARPS + lane_id] : 0.0f;
-            for (int offset = wave_size >> 1; offset > 0; offset >>= 1)
-                val += __shfl_down(val, offset);
-
-            if (lane_id == 0) {
+            for (int tn = 0; tn < TILE_N; tn++) {
                 int64_t n = n_base + tn;
                 if (n < N) {
+                    float val = partial[tn];
                     if (bias)
                         val += static_cast<float>(bias[n]);
+                    // NOTE: nontemporal stores were tried here but regressed
+                    // perf by ~3% on gfx1150 LPDDR5X — the output is too small
+                    // (28KB) to pollute cache, and NT writes compete with read
+                    // traffic on the shared memory bus.
                     if constexpr (COL_MAJOR)
                         output[n * M + m] = static_cast<__half>(val);
                     else
                         output[batch * M * N + m * N + n] =
                             static_cast<__half>(val);
+                }
+            }
+        }
+    } else {
+        __shared__ float warp_sums[TILE_N * NUM_WARPS];
+
+        if (lane_id == 0) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                warp_sums[tn * NUM_WARPS + warp_id] = partial[tn];
+        }
+        __syncthreads();
+
+        if (warp_id == 0) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                float val = (lane_id < NUM_WARPS)
+                                ? warp_sums[tn * NUM_WARPS + lane_id] : 0.0f;
+                for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+                    val += __shfl_down(val, offset);
+
+                if (lane_id == 0) {
+                    int64_t n = n_base + tn;
+                    if (n < N) {
+                        if (bias)
+                            val += static_cast<float>(bias[n]);
+                        if constexpr (COL_MAJOR)
+                            output[n * M + m] = static_cast<__half>(val);
+                        else
+                            output[batch * M * N + m * N + n] =
+                                static_cast<__half>(val);
+                    }
                 }
             }
         }
@@ -417,6 +446,8 @@ struct GemvConfig {
 };
 
 static constexpr GemvConfig kGemvConfigs[] = {
+    // BLOCK_SIZE=32: single warp (wave32) — shuffle-only reduction, no LDS
+    { 32, 1}, { 32, 2}, { 32, 4}, { 32, 8},
     { 64, 1}, { 64, 2}, { 64, 4}, { 64, 8}, { 64, 16},
     {128, 1}, {128, 2}, {128, 4}, {128, 8}, {128, 16},
     {256, 1}, {256, 2}, {256, 4}, {256, 8}, {256, 16},
@@ -456,25 +487,27 @@ static void launchGemvConfig(
         break
 
     switch (config_id) {
-        GEMV_CASE( 0,  64,  1);  GEMV_CASE( 1,  64,  2);
-        GEMV_CASE( 2,  64,  4);  GEMV_CASE( 3,  64,  8);
-        GEMV_CASE( 4,  64, 16);
-        GEMV_CASE( 5, 128,  1);  GEMV_CASE( 6, 128,  2);
-        GEMV_CASE( 7, 128,  4);  GEMV_CASE( 8, 128,  8);
-        GEMV_CASE( 9, 128, 16);
-        GEMV_CASE(10, 256,  1);  GEMV_CASE(11, 256,  2);
-        GEMV_CASE(12, 256,  4);  GEMV_CASE(13, 256,  8);
-        GEMV_CASE(14, 256, 16);
-        GEMV_CASE(15, 512,  1);  GEMV_CASE(16, 512,  2);
-        GEMV_CASE(17, 512,  4);  GEMV_CASE(18, 512,  8);
-        GEMV_CASE(19, 512, 16);
-        GEMV_CASE(20, 1024,  1); GEMV_CASE(21, 1024,  2);
-        GEMV_CASE(22, 1024,  4); GEMV_CASE(23, 1024,  8);
-        GEMV_CASE(24, 1024, 16);
-        GEMV_CASE(25,  64, 32);  GEMV_CASE(26, 128, 32);
-        GEMV_CASE(27, 256, 32);
-        GEMV_CASE(28,  64, 64);  GEMV_CASE(29, 128, 64);
-        GEMV_CASE(30, 256, 64);
+        GEMV_CASE( 0,  32,  1);  GEMV_CASE( 1,  32,  2);
+        GEMV_CASE( 2,  32,  4);  GEMV_CASE( 3,  32,  8);
+        GEMV_CASE( 4,  64,  1);  GEMV_CASE( 5,  64,  2);
+        GEMV_CASE( 6,  64,  4);  GEMV_CASE( 7,  64,  8);
+        GEMV_CASE( 8,  64, 16);
+        GEMV_CASE( 9, 128,  1);  GEMV_CASE(10, 128,  2);
+        GEMV_CASE(11, 128,  4);  GEMV_CASE(12, 128,  8);
+        GEMV_CASE(13, 128, 16);
+        GEMV_CASE(14, 256,  1);  GEMV_CASE(15, 256,  2);
+        GEMV_CASE(16, 256,  4);  GEMV_CASE(17, 256,  8);
+        GEMV_CASE(18, 256, 16);
+        GEMV_CASE(19, 512,  1);  GEMV_CASE(20, 512,  2);
+        GEMV_CASE(21, 512,  4);  GEMV_CASE(22, 512,  8);
+        GEMV_CASE(23, 512, 16);
+        GEMV_CASE(24, 1024,  1); GEMV_CASE(25, 1024,  2);
+        GEMV_CASE(26, 1024,  4); GEMV_CASE(27, 1024,  8);
+        GEMV_CASE(28, 1024, 16);
+        GEMV_CASE(29,  64, 32);  GEMV_CASE(30, 128, 32);
+        GEMV_CASE(31, 256, 32);
+        GEMV_CASE(32,  64, 64);  GEMV_CASE(33, 128, 64);
+        GEMV_CASE(34, 256, 64);
         default: break;
     }
 #undef GEMV_CASE
@@ -582,6 +615,7 @@ static int getOrTuneGemvConfig(
 
     return best;
 }
+
 
 /* =======================================================================
  * Section 2: RDNA3 WMMA Fused GEMM + Dequantization Kernel
@@ -1545,12 +1579,13 @@ extern "C" int hip_matmul_nbits(
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-  // Convert uint8 packed nibble zero_points to FP16 for WMMA/GEMV-col-major
-  // paths which require FP16 zero_points. Row-major GEMV and naive fallback
-  // read uint8 directly and don't need this conversion.
+  // Convert uint8 packed nibble zero_points to FP16 for WMMA and
+  // col-major GEMV (M>1) paths. Row-major GEMV reads uint8 natively.
+  // For M=1 decode, skip entirely: falls through to row-major GEMV,
+  // avoiding 225 unnecessary kernel launches per Llama 8B inference.
   const void* zp_for_fp16_paths = zero_points;
   bool wmma_data_format_pre = (batch_count == 1) && (K % 32 == 0);
-  if (zero_points && zp_elem_size == 1 && wmma_data_format_pre) {
+  if (zero_points && zp_elem_size == 1 && wmma_data_format_pre && M > 1) {
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
     zp_for_fp16_paths = convertZpToFp16(
         hip_stream, zero_points, static_cast<int>(N), ngk);
@@ -1633,13 +1668,16 @@ extern "C" int hip_matmul_nbits(
   }
 
   /* -------------------------------------------------------------------
-   * GEMV path with col-major data — small M, WMMA data format
+   * GEMV path with col-major data — small M (>1), WMMA data format
    *
-   * When batch==1, K%32==0, but M < kBlockDim: internally transpose
+   * When batch==1, K%32==0, but 1 < M < kBlockDim: internally transpose
    * A row->col and output col->row so the caller sees row-major I/O.
    * GEMV kernel runs with COL_MAJOR=true for K-parallel reduction.
+   *
+   * M=1 skips this path entirely — row/col layouts are identical for a
+   * single row, and the row-major GEMV avoids the ZP conversion kernel.
    * ------------------------------------------------------------------- */
-  if (wmma_data_format && M < kBlockDim) {
+  if (wmma_data_format && M > 1 && M < kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
