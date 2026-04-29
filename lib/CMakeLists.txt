@@ -3,6 +3,7 @@
 # ** Licensed under the MIT License.
 ##
 
+add_subdirectory(Support)
 add_subdirectory(Dialect)
 option(BUILD_HIPDNN_GRAPH "Build hipDNN fused-graph support" OFF)
 set(HIPDNN_AVAILABLE OFF)
