@@ -39,7 +39,11 @@ module {
     %fc1_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<32x5760x90xf16>} : () -> tensor<32x5760x90xf16>
     %fc2_w = "onnx.Constant"() {value = dense<1> : tensor<32x2880x1440xui8>} : () -> tensor<32x2880x1440xui8>
     %fc2_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<32x2880x90xf16>} : () -> tensor<32x2880x90xf16>
-    %Y = "onnx.Custom"(%input, %router_probs, %fc1_w, %fc1_s, %fc2_w, %fc2_s) {
+    // QMoE conversion requires >= 7 operands; insert a NoValue at the
+    // fc1_bias slot (operand index 4) so we satisfy the count without
+    // adding a real bias tensor.
+    %none_fc1b = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router_probs, %fc1_w, %fc1_s, %none_fc1b, %fc2_w, %fc2_s) {
       function_name = "QMoE",
       domain_name = "com.microsoft",
       activation_alpha = 1.702000e+00 : f32, activation_beta = 1.000000e+00 : f32,
@@ -49,7 +53,7 @@ module {
       swiglu_limit = 7.000000e+00 : f32, use_sparse_mixer = 0 : si64,
       onnx_node_name = "QMoE_no_block_size_per_group"
     } : (tensor<1x128x2880xf16>, tensor<128x32xf16>,
-         tensor<32x5760x1440xui8>, tensor<32x5760x90xf16>,
+         tensor<32x5760x1440xui8>, tensor<32x5760x90xf16>, none,
          tensor<32x2880x1440xui8>, tensor<32x2880x90xf16>) -> tensor<1x128x2880xf16>
     return %Y : tensor<1x128x2880xf16>
   }
@@ -72,7 +76,8 @@ module {
     %fc1_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<32x5760x1xf16>} : () -> tensor<32x5760x1xf16>
     %fc2_w = "onnx.Constant"() {value = dense<1> : tensor<32x2880x1440xui8>} : () -> tensor<32x2880x1440xui8>
     %fc2_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<32x2880x1xf16>} : () -> tensor<32x2880x1xf16>
-    %Y = "onnx.Custom"(%input, %router_probs, %fc1_w, %fc1_s, %fc2_w, %fc2_s) {
+    %none_fc1b = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router_probs, %fc1_w, %fc1_s, %none_fc1b, %fc2_w, %fc2_s) {
       function_name = "QMoE",
       domain_name = "com.microsoft",
       activation_alpha = 1.702000e+00 : f32, activation_beta = 1.000000e+00 : f32,
@@ -82,7 +87,7 @@ module {
       swiglu_limit = 7.000000e+00 : f32, use_sparse_mixer = 0 : si64,
       onnx_node_name = "QMoE_no_block_size_per_channel"
     } : (tensor<1x128x2880xf16>, tensor<128x32xf16>,
-         tensor<32x5760x1440xui8>, tensor<32x5760x1xf16>,
+         tensor<32x5760x1440xui8>, tensor<32x5760x1xf16>, none,
          tensor<32x2880x1440xui8>, tensor<32x2880x1xf16>) -> tensor<1x128x2880xf16>
     return %Y : tensor<1x128x2880xf16>
   }
