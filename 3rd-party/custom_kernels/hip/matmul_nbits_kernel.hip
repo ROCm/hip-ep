@@ -279,13 +279,13 @@ __global__ void matmul_nbits_gemv_kernel(
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
                 uint8_t packed = b_base_arr[tn][k / 2];
-                int ival = (nibble == 0)
-                             ? static_cast<int>(packed & 0xF)
-                             : static_cast<int>(packed >> 4);
+                float qval = (nibble == 0)
+                               ? static_cast<float>(packed & 0xF)
+                               : static_cast<float>(packed >> 4);
                 if constexpr (HAS_ZP) {
-                    partial[tn] += a_val * static_cast<float>(ival) * sv;
+                    partial[tn] += a_val * qval * sv;
                 } else {
-                    partial[tn] += a_val * static_cast<float>(ival) * sv;
+                    partial[tn] += a_val * qval * sv;
                 }
             }
         }
@@ -314,27 +314,24 @@ __global__ void matmul_nbits_gemv_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
-        float zp_correction[TILE_N];
+        [[maybe_unused]] float zp_correction[TILE_N];
+        if constexpr (HAS_ZP) {
 #pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++)
-            zp_correction[tn] = 0.0f;
-
-        if (lane_id == 0) {
-            for (int64_t g = 0; g < k_blocks; g++) {
-                int64_t k_start = g * block_size;
-                int64_t k_end   = k_start + block_size;
-                if (k_end > K) k_end = K;
-                float a_sum = 0.0f;
-                for (int64_t k = k_start; k < k_end; k++)
-                    a_sum += static_cast<float>(a_base[k]);
+            for (int tn = 0; tn < TILE_N; tn++)
+                zp_correction[tn] = 0.0f;
+            if (lane_id == 0) {
+                for (int64_t g = 0; g < k_blocks; g++) {
+                    int64_t k_start = g * block_size;
+                    int64_t k_end   = k_start + block_size;
+                    if (k_end > K) k_end = K;
+                    float a_sum = 0.0f;
+                    for (int64_t k = k_start; k < k_end; k++)
+                        a_sum += static_cast<float>(a_base[k]);
 #pragma unroll
-                for (int tn = 0; tn < TILE_N; tn++) {
-                    float sv = static_cast<float>(s_rows[tn][g]);
-                    if constexpr (HAS_ZP) {
+                    for (int tn = 0; tn < TILE_N; tn++) {
+                        float sv = static_cast<float>(s_rows[tn][g]);
                         float zv = read_zp(n_idx[tn], g);
                         zp_correction[tn] += a_sum * zv * sv;
-                    } else {
-                        zp_correction[tn] += a_sum * 8.0f * sv;
                     }
                 }
             }
@@ -350,7 +347,8 @@ __global__ void matmul_nbits_gemv_kernel(
             if (lane_id == 0) {
                 int64_t n = n_base + tn;
                 if (n < N) {
-                    val -= zp_correction[tn];
+                    if constexpr (HAS_ZP)
+                        val -= zp_correction[tn];
                     if (bias)
                         val += static_cast<float>(bias[n]);
                     output[batch * M * N + m * N + n] =
