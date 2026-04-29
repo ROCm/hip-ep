@@ -32,14 +32,15 @@ module {
   // function argument. The lit test verifies the conversion still lowers
   // cleanly to hip.gqa; the runtime sentinel branch is what actually consumes
   // the value.
-  func.func @test_gqa_prefill_sentinel(
+  // Function must be named @main_graph for --hip-add-context-arg to fire.
+  func.func @main_graph(
       %query: tensor<1x128x12288xf16>,
       %past_key: tensor<1x8x0x128xf16>,
       %past_value: tensor<1x8x0x128xf16>,
       %total_seq_len: tensor<i32>)
       -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>) {
 
-    // CHECK-LABEL: func.func @test_gqa_prefill_sentinel
+    // CHECK-LABEL: func.func @main_graph
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
 
     // ORT prefill sentinel: seqlens_k[b] = -1 means "no past KV yet, this
@@ -67,10 +68,9 @@ module {
         -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
 
     // The constant -1 must reach the conversion intact and the op must
-    // lower cleanly to hip.gqa. We do not need to inspect the constant
-    // value in the lowered IR - it is consumed at runtime.
-    // CHECK: onnx.Constant
-    // CHECK-SAME: dense<-1> : tensor<1xi32>
+    // lower cleanly to hip.gqa. The onnx.Constant is folded to
+    // arith.constant; the value must be preserved verbatim.
+    // CHECK: arith.constant dense<-1> : tensor<1xi32>
     // CHECK: hip.gqa(%[[CTX]])
     // CHECK-SAME: kv_num_heads = 8
     // CHECK-SAME: num_heads = 32
