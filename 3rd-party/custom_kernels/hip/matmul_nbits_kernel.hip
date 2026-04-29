@@ -18,12 +18,18 @@
  *      with double-buffered shared memory, grid swizzling, and inline-asm
  *      batched dequant. Requires gfx11xx/gfx12xx.
  *
- *   2. GEMV col-major path (batch==1, K%32==0, M<16):
- *      Transposes A/C internally (skipped for M=1). K-parallel reduction
- *      GEMV with COL_MAJOR=true, autotuned (BLOCK_SIZE, TILE_N).
+ *   2. GEMV col-major path (batch==1, K%32==0, 1 < M < 16):
+ *      Transposes A/C internally. K-parallel reduction GEMV with
+ *      COL_MAJOR=true, autotuned (BLOCK_SIZE, TILE_N).
  *
- *   3. Naive fallback (arbitrary alignment, batched):
- *      Row-major kernels, uint8 zero points.
+ *   3. GEMV row-major path (batch==1, K%32==0, M=1 or fallthrough):
+ *      Direct row-major GEMV with uint8 zero points (no ZP conversion).
+ *      M=1 decode skips path #2 entirely — row/col layouts are identical
+ *      for a single row, avoiding 225 unnecessary ZP conversion kernels
+ *      per Llama 8B inference.
+ *
+ *   4. Naive fallback (arbitrary alignment, batched):
+ *      Per-element row-major kernel, uint8 zero points.
  *
  * When zero_points is NULL, dequantization uses the ONNX MatMulNBits
  * default zp = 2^(bits-1) (= 8 for bits=4) to match the CPU EP (MLAS).
@@ -105,24 +111,31 @@ __global__ void matmul_nbits_kernel(
  *
  * Template parameters:
  *   BLOCK_SIZE - threads per block (K-reduction parallelism)
- *   TILE_N     - N columns per block (1/2/4/8/16, amortizes A loads)
+ *   TILE_N     - N columns per block (1..64, amortizes A loads)
  *
  * When M is small (e.g. M=1 decode token), each threadblock computes
  * TILE_N output elements sharing the same A row load, with BLOCK_SIZE
  * threads cooperating on the K reduction via warp shuffle + shared mem.
  *
  * Key optimizations:
- *   - 32-nibble main loop: uint4 (128-bit) B load → 32 nibbles per txn
+ *   - 32-nibble main loop: uint4 (128-bit) B load → 32 nibbles per txn,
+ *     with uint2 (16-nibble) and uint32 (8-nibble) remainder phases
  *   - Load-compute separation: all B loads issued before FMA compute
  *   - Explicit __fmaf_rn intrinsics for dot product accumulation
  *   - Factored dequant:  (dot - a_sum*zp) * scale  (saves ~40% FLOPs)
  *   - Bit-shift group index (block_size is always power-of-2)
- *   - TILE_N up to 16 for large-N shapes (e.g. N=200k)
+ *   - TILE_N up to 64 for large-N shapes (N>=2048)
+ *   - Compile-time WARP_SIZE=32 for RDNA 3 dead-code elimination
+ *     (runtime __builtin_amdgcn_wavefrontsize() caused 13% regression)
+ *   - Single-warp fast path: BLOCK_SIZE=32 uses shuffle-only reduction
+ *     (no LDS sync needed)
  *
- * At runtime, an autotune pass benchmarks all 28 (BLOCK_SIZE, TILE_N)
+ * At runtime, an autotune pass benchmarks all 35 (BLOCK_SIZE, TILE_N)
  * combinations on the first call for each problem shape and caches the
  * fastest configuration for subsequent calls.
- * TILE_N=32 configs are only tested when N >= 1024.
+ * BLOCK_SIZE ∈ {32,64,128,256,512,1024}, TILE_N ∈ {1,2,4,8,16,32,64}.
+ * BS=32 configs use single-warp shuffle-only reduction (no LDS).
+ * TILE_N=32 tested only when N>=1024; TILE_N=64 only when N>=2048.
  *
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
