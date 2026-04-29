@@ -11,18 +11,8 @@ namespace {
 
 // ===== Custom HIP kernel ops ================================================
 
-// hip.transpose(%handle, %dim0, %dim1) ins(%input) outs(%output)
-//   -> hip_transpose(handle, input, output, rank, dim0, dim1, s0, s1, s2)
-// Swaps the two specified dimensions. Pads shape to 3 dims (trailing 1s).
-/// hip.transpose lowers to either:
-///
-///   - the legacy `hip_transpose(handle, in, out, rank, dim0, dim1, s0, s1, s2)`
-///     kernel for rank <= 3 (kept for back-compat with existing test_transpose
-///     LIT tests); OR
-///   - the new generic `hip_transpose_nd(stream, in, out, rank, in_shape,
-///     dim0, dim1, hip_dtype)` kernel (in `transpose_kernel.hip`) for
-///     rank >= 4 -- needed for Kokoro Conv1D-via-NC1W and any 4-D
-///     Transpose with perm = [0, 2, 1, 3].
+// hip.transpose lowers to wrap_transpose, which launches the generic
+// hip_transpose_nd kernel from runtime bitcode.
 struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 

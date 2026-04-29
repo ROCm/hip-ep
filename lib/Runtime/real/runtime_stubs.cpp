@@ -121,25 +121,4 @@ __declspec(dllexport) int hip_miopen_softmax(void *handle_v, const void *input,
   return 0;
 }
 
-// hip_transpose: legacy stub removed.  TransposeLowering now routes all
-// ranks to hip_transpose_nd.  Keeping a dllexport C function for
-// link-time compatibility in case an old model DLL references it, but
-// it's a no-op that doesn't touch any HIP stream (to avoid poisoning
-// the stream with errors).
-__declspec(dllexport) void hip_transpose(void *handle, const void *input,
-                                          void *output, intptr_t rank,
-                                          intptr_t dim0, intptr_t dim1,
-                                          intptr_t s0, intptr_t s1,
-                                          intptr_t s2) {
-  (void)handle;
-  (void)input;
-  (void)output;
-  (void)rank;
-  (void)dim0;
-  (void)dim1;
-  (void)s0;
-  (void)s1;
-  (void)s2;
-}
-
 } // extern "C"
