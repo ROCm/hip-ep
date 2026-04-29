@@ -127,6 +127,22 @@ int wrap_new_op(RuntimeState *state, ..., int64_t M, int64_t N, ...) {
 
 Use `OP_PROFILE_CPU` instead for operations that don't launch GPU kernels (e.g., `stream_sync`). The shape lambda is only called when profiling is active, so there is no `snprintf` overhead on the hot path.
 
+## Future optimization ideas
+
+Current profiling-on overhead is ~35 ms (+60%) on Llama 8B, from 972 `hipEventRecord` + 486 `hipEventElapsedTime` HIP driver calls. Three approaches to reduce this further:
+
+### Two-tier profiling (recommended next step)
+
+`HIPDNN_EP_PERF=1` → CPU-only timing (`steady_clock::now()`, no GPU events). `HIPDNN_EP_PERF=2` → full GPU events (current behavior). CPU-only mode has near-zero overhead and still catches the most important signal: unexpected `hipStreamSynchronize` stalls showing up as high CPU time on a GPU op. Per-op GPU breakdown is lost, but total GPU time is available from the phase-level H2D/Compute/D2H timing.
+
+### Sampling
+
+Only instrument every Nth inference (e.g., `HIPDNN_EP_PERF=10` → profile 1 in 10). The event pool and resolve logic stay the same, the `OP_PROFILE` emplace is just skipped most of the time. Amortized overhead drops to ~3.5 ms.
+
+### Fuse adjacent events
+
+Many ops share a stop→start boundary (op N's stop event immediately precedes op N+1's start event on the same stream). Instead of 2 events at the boundary, use 1 event as both — record a single "fence" event between ops and compute elapsed time as `fence[i+1] - fence[i]`. Cuts `hipEventRecord` calls roughly in half (from 972 to ~487).
+
 ## Build dependency: bitcode recompilation
 
 The `compile_to_bitcode` macro in `lib/Runtime/CMakeLists.txt` has a `DEPENDS` list that controls when bitcode is recompiled. **All headers included by runtime `.cpp` files must appear in this list.** Missing a header means changes to it don't trigger recompilation, producing stale bitcode that gets linked into compiled model DLLs.
