@@ -214,15 +214,17 @@ __global__ void matmul_nbits_gemv_kernel(
                            static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
                 partial[tn] += dot * sv[tn];
             } else {
+                // No-zp: unsigned nibbles [0..15] map to signed [-8..7] via
+                // subtracting the implicit zero point of 8.
 #pragma unroll
                 for (int i = 0; i < 8; i++) {
                     int nib = (b_pk[tn].x >> (i * 4)) & 0xF;
-                    dot += a_vals[i] * static_cast<float>((nib << 28) >> 28);
+                    dot += a_vals[i] * (static_cast<float>(nib) - 8.0f);
                 }
 #pragma unroll
                 for (int i = 0; i < 8; i++) {
                     int nib = (b_pk[tn].y >> (i * 4)) & 0xF;
-                    dot += a_vals[8 + i] * static_cast<float>((nib << 28) >> 28);
+                    dot += a_vals[8 + i] * (static_cast<float>(nib) - 8.0f);
                 }
                 partial[tn] += dot * sv[tn];
             }
@@ -258,10 +260,12 @@ __global__ void matmul_nbits_gemv_kernel(
                                static_cast<float>((packed >> (i * 4)) & 0xF);
                     partial[tn] += dot * sv;
                 } else {
+                    // No-zp: unsigned nibbles [0..15] -> signed [-8..7]
+                    // via (nib - 8).
 #pragma unroll
                     for (int i = 0; i < 8; i++) {
                         int nib = (packed >> (i * 4)) & 0xF;
-                        dot += a_vals[i] * static_cast<float>((nib << 28) >> 28);
+                        dot += a_vals[i] * (static_cast<float>(nib) - 8.0f);
                     }
                     partial[tn] += dot * sv;
                 }
@@ -288,9 +292,8 @@ __global__ void matmul_nbits_gemv_kernel(
                 if constexpr (HAS_ZP) {
                     partial[tn] += a_val * qval * sv;
                 } else {
-                    int nib = static_cast<int>(qval);
-                    float s4 = static_cast<float>((nib << 28) >> 28);
-                    partial[tn] += a_val * s4 * sv;
+                    // No-zp: signed int4 in [-8..7] = unsigned nibble - 8.
+                    partial[tn] += a_val * (qval - 8.0f) * sv;
                 }
             }
         }
@@ -765,7 +768,13 @@ void GemmFp16U4Impl(
                     bv[6] = static_cast<_Float16>((pf_b4 >> 24) & 0xFu) * s16 + nzs;
                     bv[7] = static_cast<_Float16>((pf_b4 >> 28)       ) * s16 + nzs;
                 } else {
-                    #define S4(shift) static_cast<_Float16>(((int((pf_b4 >> (shift)) & 0xFu) << 28) >> 28)) * s16
+                    // No-zp path: unsigned nibbles [0..15] map to signed
+                    // [-8..7] via subtracting the implicit zero point of 8.
+                    // Fold the subtraction into the scale: (nib - 8) * s16
+                    // = nib * s16 + neg8_s, where neg8_s is computed once
+                    // per group outside the unrolled nibble block below.
+                    const _Float16 neg8_s = static_cast<_Float16>(-8.0f) * s16;
+                    #define S4(shift) static_cast<_Float16>((pf_b4 >> (shift)) & 0xFu) * s16 + neg8_s
                     bv[0] = S4( 0); bv[1] = S4( 4);
                     bv[2] = S4( 8); bv[3] = S4(12);
                     bv[4] = S4(16); bv[5] = S4(20);
