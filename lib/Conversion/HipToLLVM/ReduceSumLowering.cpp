@@ -33,9 +33,9 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
 
     // Extract pointers using alignedPtr
     Value statePtr = adaptor.getCtx();
-    Value dataPtr = extractMemRefPtr(adaptor.getData(), rewriter, loc);
-    Value axesPtr = extractMemRefPtr(adaptor.getAxes(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value dataPtr = extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
+    Value axesPtr = extractContiguousMemRefPtr(adaptor.getAxes(), rewriter, loc);
+    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto dataType = cast<MemRefType>(op.getData().getType());
     auto axesType = cast<MemRefType>(op.getAxes().getType());

@@ -58,9 +58,9 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value numB = computeNumElements(bType, adaptor.getB(), rewriter, loc);
 
     SmallVector<Value> args = {adaptor.getCtx(),
-                               extractMemRefPtr(adaptor.getA(), rewriter, loc),
-                               extractMemRefPtr(adaptor.getB(), rewriter, loc),
-                               extractMemRefPtr(adaptor.getC(), rewriter, loc),
+                               extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
+                               extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc),
+                               extractContiguousMemRefPtr(adaptor.getC(), rewriter, loc),
                                numA,
                                numB};
 
@@ -133,9 +133,9 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
       return failure();
 
     SmallVector<Value, 18> args = {
-        adaptor.getCtx(), extractMemRefPtr(adaptor.getLhs(), rewriter, loc),
-        extractMemRefPtr(adaptor.getRhs(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+        adaptor.getCtx(), extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};
     args.append(lhsDims.begin(), lhsDims.end());
     args.append(rhsDims.begin(), rhsDims.end());
     args.append(outDims.begin(), outDims.end());
@@ -188,9 +188,9 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
     };
 
     Value statePtr = adaptor.getCtx();
-    Value lhsPtr = extractMemRefPtr(adaptor.getLhs(), rewriter, loc);
-    Value rhsPtr = extractMemRefPtr(adaptor.getRhs(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value lhsPtr = extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc);
+    Value rhsPtr = extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc);
+    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 

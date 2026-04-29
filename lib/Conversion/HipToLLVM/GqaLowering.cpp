@@ -41,7 +41,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     auto getMemRefPtrOrNull = [&](Value memref) -> Value {
       if (!memref)
         return nullPtr;
-      return extractMemRefPtr(memref, rewriter, loc);
+      return extractContiguousMemRefPtr(memref, rewriter, loc);
     };
 
     // === Extract all inputs (required + optional) ===
@@ -49,10 +49,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value statePtr = adaptor.getCtx();
 
     // Required inputs
-    Value queryPtr = extractMemRefPtr(adaptor.getQuery(), rewriter, loc);
-    Value seqlensKPtr = extractMemRefPtr(adaptor.getSeqlensK(), rewriter, loc);
+    Value queryPtr = extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
+    Value seqlensKPtr = extractContiguousMemRefPtr(adaptor.getSeqlensK(), rewriter, loc);
     Value totalSeqLenPtr =
-        extractMemRefPtr(adaptor.getTotalSeqLen(), rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getTotalSeqLen(), rewriter, loc);
 
     // Optional inputs (may be nullptr)
     Value keyPtr = getMemRefPtrOrNull(adaptor.getKey());
@@ -68,11 +68,11 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value vScalePtr = getMemRefPtrOrNull(adaptor.getVScale());
 
     // Output pointers
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value presentKeyPtr =
-        extractMemRefPtr(adaptor.getPresentKey(), rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getPresentKey(), rewriter, loc);
     Value presentValuePtr =
-        extractMemRefPtr(adaptor.getPresentValue(), rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getPresentValue(), rewriter, loc);
     Value outputQkPtr = getMemRefPtrOrNull(adaptor.getOutputQk());
 
     // === Extract attributes ===
