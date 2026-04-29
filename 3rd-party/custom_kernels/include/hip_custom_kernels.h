@@ -415,6 +415,13 @@ int hip_matmul_nbits(
     int64_t element_size_bytes,
     int64_t zp_elem_size);  // 1=uint8 packed nibbles, 2=fp16
 
+/* Release internal scratch buffers (transpose / dequant).
+ * Useful for benchmarking cold-cache scenarios. */
+void hip_matmul_nbits_release_buffers(void);
+
+/* Returns a string describing the autotune config used by the last call. */
+const char* hip_matmul_nbits_last_tune_info(void);
+
 /* =========================================================================
  * QMoE Sub-Kernels
  * =========================================================================

@@ -207,6 +207,9 @@ gendata_model:
 test_model: gendata_model direct
 	$(call RUN_CMD,$(TARGET_DIRECT)) --model $(MODEL_JSON) --data-root $(MODEL_DATA_DIR) --group-size $(GS) $(CXX_NZ_FLAG)
 
+test_model_cold: gendata_model direct
+	$(call RUN_CMD,$(TARGET_DIRECT)) --model $(MODEL_JSON) --data-root $(MODEL_DATA_DIR) --group-size $(GS) $(CXX_NZ_FLAG) --cold-cache
+
 # Benchmark M=512..3072 at K=2880, N=201088 (no zeros)
 bench_large_n:
 	$(MAKE) test SIZE=512x2880x201088 GS=128 NO_ZEROS=1
@@ -216,4 +219,4 @@ bench_large_n:
 
 FORCE:
 
-.PHONY: all lib direct clean run run_lib run_custom gendata gendata_model test test_lib test_real test_all test_model bench_large_n FORCE
+.PHONY: all lib direct clean run run_lib run_custom gendata gendata_model test test_lib test_real test_all test_model test_model_cold bench_large_n FORCE
