@@ -8,7 +8,10 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "CrashHandler.h"
+
 int main(int argc, char **argv) {
+  hip::install_crash_handlers("hip-compiler");
   std::string inputFilename;
   std::string outputDll;
 

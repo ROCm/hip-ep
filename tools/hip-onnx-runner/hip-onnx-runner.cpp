@@ -34,6 +34,7 @@ Options:
 
 #include <onnxruntime_cxx_api.h>
 
+#include "CrashHandler.h"
 #include "hip/timing.h"
 #include <algorithm>
 #include <cctype>
@@ -795,6 +796,7 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
 // ---------------------------------------------------------------------------
 
 int main(int argc, char *argv[]) {
+  hip::install_crash_handlers("hip-onnx-runner");
   MiniOptions mo;
   mo.add_option("m", "model", "Path to .onnx model", "");
   mo.add_option("L", "l2norm",

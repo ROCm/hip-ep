@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -151,6 +152,14 @@ cache_done:
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
+  OP_PROFILE(
+      "activation",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
   if (!state || !input || !output) {
     fprintf(stderr, "wrap_miopenActivationForward: null argument\n");
     return -1;
@@ -227,6 +236,14 @@ static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
 
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate) {
+  OP_PROFILE(
+      "gelu",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
   if (!state || !input || !output) {
     fprintf(stderr, "[REAL] wrap_gelu: null argument\n");
     return -1;

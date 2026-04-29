@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -106,6 +107,17 @@ int wrap_miopenConvolutionForward(
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
     int64_t dilation_h, int64_t dilation_w, int64_t group) {
+  OP_PROFILE(
+      "conv",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld,k=%lldx%lldx%lld",
+                 (long long)input_n, (long long)input_c, (long long)input_h,
+                 (long long)input_w, (long long)weights_k, (long long)kernel_h,
+                 (long long)kernel_w);
+        return std::string(b);
+      },
+      state);
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
