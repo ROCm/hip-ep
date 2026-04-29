@@ -297,19 +297,27 @@ static int gqa_forward_hipblaslt(
         return -1;
       }
 
-      int64_t total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-      int64_t past_len_check = total_seq - sq;
-      if (total_seq < 1 || past_len_check < 0 || total_seq > present_seq ||
-          past_len_check > past_buf_seq) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt (fused decode): invalid "
-                "seqlens_k[0]+1=%lld (sq=%lld, past_len=%lld, "
-                "present_seq=%lld, past_buf_seq=%lld)\n",
-                (long long)total_seq, (long long)sq, (long long)past_len_check,
-                (long long)present_seq, (long long)past_buf_seq);
-        return -1;
+      // ORT prefill sentinel: when there is no past KV yet, the producer
+      // initialises seqlens_k[b] to -1 (so seqlens_k[b]+1 == 0). Treat that
+      // as a fresh prefill (past_len=0) instead of rejecting it as invalid.
+      if (seqlens_k_val < 0) {
+        past_len = 0;
+      } else {
+        int64_t total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
+        int64_t past_len_check = total_seq - sq;
+        if (total_seq < 1 || past_len_check < 0 || total_seq > present_seq ||
+            past_len_check > past_buf_seq) {
+          fprintf(stderr,
+                  "gqa_forward_hipblaslt (fused decode): invalid "
+                  "seqlens_k[0]+1=%lld (sq=%lld, past_len=%lld, "
+                  "present_seq=%lld, past_buf_seq=%lld)\n",
+                  (long long)total_seq, (long long)sq,
+                  (long long)past_len_check, (long long)present_seq,
+                  (long long)past_buf_seq);
+          return -1;
+        }
+        past_len = past_len_check;
       }
-      past_len = past_len_check;
     } else if (!seqlens_k_ptr) {
       past_len = skv - sq;
     }
@@ -402,17 +410,25 @@ static int gqa_forward_hipblaslt(
       if (hipStreamSynchronize(stream) != hipSuccess)
         return -1;
     }
-    total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-    past_len = total_seq - sq;
-    if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
-        past_len > past_buf_seq) {
-      fprintf(stderr,
-              "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
-              "(sq=%lld, past_len=%lld, present_seq=%lld, "
-              "past_buf_seq=%lld)\n",
-              (long long)total_seq, (long long)sq, (long long)past_len,
-              (long long)present_seq, (long long)past_buf_seq);
-      return -1;
+    // ORT prefill sentinel: when there is no past KV yet, the producer
+    // initialises seqlens_k[b] to -1. Treat that as a fresh prefill
+    // (past_len=0, total_seq=sq) instead of rejecting it as invalid.
+    if (seqlens_k_val < 0) {
+      total_seq = sq;
+      past_len = 0;
+    } else {
+      total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
+      past_len = total_seq - sq;
+      if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
+          past_len > past_buf_seq) {
+        fprintf(stderr,
+                "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
+                "(sq=%lld, past_len=%lld, present_seq=%lld, "
+                "past_buf_seq=%lld)\n",
+                (long long)total_seq, (long long)sq, (long long)past_len,
+                (long long)present_seq, (long long)past_buf_seq);
+        return -1;
+      }
     }
   }
   if (past_len < 0)
