@@ -19,12 +19,17 @@ Export fixed-shape Llama prefill/decode ONNX variants.
   ``12200``.
   ``128`` and ``2048`` still keep their sliding-window variants ``prefill_pSm...``;
   ``12200`` is fixed-only (no ``p12200m...`` variant).
-  **Control fixed-prompt** (chunk=0 only, when ``128`` / ``2048`` appear in ``--seq-lens``):
+  **Control fixed-prompt** (chunk=0 only, when ``128`` / ``2048`` appear in the full export
+  matrix ``DEFAULT_SEQ_LENS`` used with ``--all``):
   ``prefill_128_m256.onnx`` / ``genai_config_128_m256.json`` (``context_length``/KV = 256,
   ``fixed_prompt_length`` 128) and ``prefill_2k_m3072.onnx`` /
   ``genai_config_2k_m3072.json`` (3072 / 2048; stem ``2k`` like other fixed 2048 files).
-- Prefill: default ``--seq-lens`` expands to 10 variants (two for ``128`` and ``2048`` plus
-  the rest); Decode maps one-to-one with these variants.
+- **Default (no ``--all``):** export a single sliding-window variant only:
+  ``prefill_p512m{max_length}.onnx``, ``decode_p512m{max_length}.onnx``, and
+  ``genai_config_p512m{max_length}.json`` (plus shared external weights as today).
+- **With ``--all``:** export the full fixed matrix (same tuple as ``DEFAULT_SEQ_LENS`` in
+  code: ``128,256,512,1024,2048,3072,4096,12200`` and their expanded variants); decode
+  maps one-to-one with prefill.
 - input_ids: [1, S] (prefill) or [1, 1] (decode); attention_mask: [1, max_length];
   position_ids: [1, S] (prefill) or [1, 1] (decode), matching the current-step sequence.
 - past_key_values.*.key/value: the 3rd dimension is forced to max_length, with layout
@@ -119,7 +124,10 @@ total_seq_len_scalar_from_dim_map = _es.total_seq_len_scalar_from_dim_map
 upsert_total_seq_len_const_initializer = _es.upsert_total_seq_len_const_initializer
 
 
+# Full export matrix when CLI ``--all`` is set (not configurable).
 DEFAULT_SEQ_LENS = (128, 256, 512, 1024, 2048, 3072, 4096, 12200)
+# Default quick export: one sliding variant ``p512m{max_length}`` only.
+DEFAULT_QUICK_EXPORT_SEQ_LENS = (512,)
 GQA_INIT_PREFIX = "gqa_ctxfix_"
 
 # Fallback when the source ONNX has no external-data initializers
@@ -321,7 +329,7 @@ def expand_export_variant_specs(
     *,
     decode_mode: bool,
 ) -> list[tuple[str, dict[str, int], int, int | None, int | None]]:
-    """Expand ``--seq-lens`` into the ONNX/genai variant list.
+    """Expand a sequence-length tuple into the ONNX/genai variant list.
 
     Each item is
     ``(file_stem, dim_map, genai_window_chunk, fixed_prompt_len, genai_context_length)``:
@@ -934,7 +942,9 @@ class FixedCtxExtractor(SingleOpExtractor):
         export_prefix: str = "prefill",
     ):
         self._max_length = max_length
-        self._seq_lens = seq_lens or DEFAULT_SEQ_LENS
+        self._seq_lens = (
+            seq_lens if seq_lens is not None else DEFAULT_QUICK_EXPORT_SEQ_LENS
+        )
         self._decode_mode = decode_mode
         self._export_prefix = export_prefix
         super().__init__(model_path, output_dir=output_dir)
@@ -1099,17 +1109,14 @@ def run_export(
     ext.extract_full_model()
 
 
-def parse_seq_lens(s: str | None) -> tuple[int, ...]:
-    if not s:
-        return DEFAULT_SEQ_LENS
-    parts = [p.strip() for p in s.split(",") if p.strip()]
-    return tuple(int(p) for p in parts)
-
-
 def main():
     p = argparse.ArgumentParser(
-        description="Export Llama prefill/decode ONNX with fixed max_length "
-        f"(default {16384}) and per-variant sequence lengths."
+        description=(
+            "Export Llama prefill/decode ONNX with fixed max_length "
+            f"(default {16384}). By default exports only the "
+            f"p512m{{max_length}} pair plus genai_config; pass --all for the full "
+            f"variant matrix ({', '.join(map(str, DEFAULT_SEQ_LENS))} and expanded stems)."
+        )
     )
     p.add_argument(
         "--model",
@@ -1149,9 +1156,13 @@ def main():
         "second dim. --cache-len is an alias.",
     )
     p.add_argument(
-        "--seq-lens",
-        default=None,
-        help=f"Comma-separated sequence lengths (default {','.join(map(str, DEFAULT_SEQ_LENS))})",
+        "--all",
+        action="store_true",
+        help=(
+            "Export the full variant matrix (sequence lengths "
+            f"{', '.join(map(str, DEFAULT_SEQ_LENS))} and all derived fixed-prompt / "
+            "control stems). Default is a single sliding variant p512m{max_length} only."
+        ),
     )
 
     args = p.parse_args()
@@ -1175,14 +1186,15 @@ def main():
             os.path.abspath(args.config_template) if args.config_template else None
         )
 
-    seq_lens = parse_seq_lens(args.seq_lens)
+    seq_lens = DEFAULT_SEQ_LENS if args.all else DEFAULT_QUICK_EXPORT_SEQ_LENS
     out = os.path.abspath(args.output)
 
     model_abs = os.path.abspath(args.model)
     if not os.path.isfile(model_abs):
         p.error(f"Model file does not exist: {model_abs}")
 
-    print(f"=== Prefill (out={out}, prefill_*m{args.max_length}.onnx, etc.) ===")
+    mode = "full matrix (--all)" if args.all else "quick (p512 only)"
+    print(f"=== Prefill ({mode}, out={out}, max_length={args.max_length}) ===")
     run_export(
         model_abs,
         out,
@@ -1191,7 +1203,7 @@ def main():
         decode_mode=False,
         export_prefix="prefill",
     )
-    print(f"=== Decode (out={out}, decode_*m{args.max_length}.onnx, etc.) ===")
+    print(f"=== Decode ({mode}, out={out}, max_length={args.max_length}) ===")
     run_export(
         model_abs,
         out,
