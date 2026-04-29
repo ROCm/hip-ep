@@ -26,26 +26,6 @@ namespace {
 // regenerated frequently during multi-agent development).
 inline constexpr const char *kLocalWrapNonzero = "wrap_nonzero";
 
-static Value materialiseI64Array(ArrayRef<int64_t> vals, Type i64Type,
-                                 Type ptrType,
-                                 ConversionPatternRewriter &rewriter,
-                                 Location loc) {
-  auto arrayType = LLVM::LLVMArrayType::get(i64Type, vals.size());
-  Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                       rewriter.getI64IntegerAttr(1));
-  Value alloca = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayType, one,
-                                        /*alignment=*/8);
-  for (size_t i = 0; i < vals.size(); ++i) {
-    Value v = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                       rewriter.getI64IntegerAttr(vals[i]));
-    SmallVector<LLVM::GEPArg, 2> indices = {0, static_cast<int32_t>(i)};
-    Value elemPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, arrayType,
-                                        alloca, indices);
-    LLVM::StoreOp::create(rewriter, loc, v, elemPtr);
-  }
-  return alloca;
-}
-
 struct NonzeroLowering : public ConvertOpToLLVMPattern<NonzeroOp> {
   using ConvertOpToLLVMPattern<NonzeroOp>::ConvertOpToLLVMPattern;
 

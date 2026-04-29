@@ -40,15 +40,6 @@ static Value materialiseI64Array(ArrayRef<int64_t> vals, Type i64Type,
   return alloca;
 }
 
-// Compute row-major element strides for `shape`.
-static SmallVector<int64_t> computeRowMajorStrides(ArrayRef<int64_t> shape) {
-  int64_t rank = shape.size();
-  SmallVector<int64_t> strides(rank, 1);
-  for (int64_t d = rank - 2; d >= 0; --d)
-    strides[d] = strides[d + 1] * shape[d + 1];
-  return strides;
-}
-
 //===----------------------------------------------------------------------===//
 // hip.pad
 //===----------------------------------------------------------------------===//
