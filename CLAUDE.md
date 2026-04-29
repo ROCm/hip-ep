@@ -254,9 +254,9 @@ CPU time tracks host-side overhead — GPU ops should show near-zero CPU time (a
 | elementwise (1x1x1x14336) | 64 | 2.1 | 0.1 | 2.6% |
 | **TOTAL** | | **79.9** | **0.9** | |
 
-End-to-end: **~57 ms avg** (17.5 tok/s)
+End-to-end: **~59 ms avg** (17.0 tok/s)
 
-Profiling overhead (event pool): ~35 ms (+60%), from 972 `hipEventRecord` + 486 `hipEventElapsedTime` calls. This is the inherent cost of GPU timing instrumentation.
+Profiling overhead (event pool): ~34 ms (+58%), from 972 `hipEventRecord` + 486 `hipEventElapsedTime` calls. This is the inherent cost of GPU timing instrumentation. With profiling on: ~93 ms avg (10.7 tok/s).
 
 **GQA fused decode path:** For single-token decode (`sq==1`) with supported head dimensions (`d∈{64,128,256}`), GQA uses a fused custom HIP kernel path (rope + KV append + fused attention decode). This path is fully async — no D2H copies, no per-layer sync. The `local_window_size` attribute must be `<= 0` (ONNX uses `-1` for no windowing). The decomposed hipBLASLt path (used for prefill or unsupported configs) falls back to D2H + sync per layer.
 
