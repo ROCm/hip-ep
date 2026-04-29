@@ -1,0 +1,18 @@
+# Backend MLIR Compiler Components
+#
+# This package contains the MLIR-based compilation backend for HipDNN EP:
+#   - proto: Protobuf metadata definitions
+#   - level-1-pass: Compile-time MLIR compilation pass
+#   - custom-op-mlir: Runtime custom op execution
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "all",
+    srcs = [
+        "//backend-mlir-compiler/proto:mlir_compilation_proto",
+        "//backend-mlir-compiler/level-1-pass:morphizen-level1-pass-mlir-compiler",
+        "//backend-mlir-compiler/custom-op-mlir:morphizen-custom-op-mlir",
+    ],
+    visibility = ["//visibility:public"],
+)

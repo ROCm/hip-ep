@@ -1,0 +1,21 @@
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+proto_library(
+    name = "metadata_proto",
+    srcs = ["metadata.proto"],
+    visibility = ["//visibility:public"],
+)
+
+cc_proto_library(
+    name = "metadata_cc_proto",
+    deps = [":metadata_proto"],
+    visibility = ["//visibility:public"],
+)
+
+# Alias for CMake compatibility
+alias(
+    name = "mlir_compilation_proto",
+    actual = ":metadata_cc_proto",
+    visibility = ["//visibility:public"],
+)

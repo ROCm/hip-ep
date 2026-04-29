@@ -1,0 +1,17 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# HIP headers (timing.h, compiler_api.h, etc.)
+cc_library(
+    name = "hip_headers",
+    hdrs = glob(["hip/**/*.h"]) + glob(["hip/**/*.hpp"], allow_empty = True),
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
+
+# MorphiZen Foundation headers (file_io.hpp)
+cc_library(
+    name = "foundation_headers",
+    hdrs = glob(["morphizen-foundation/**/*.hpp"]) + glob(["morphizen-foundation/**/*.h"], allow_empty = True),
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)

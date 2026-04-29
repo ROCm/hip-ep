@@ -1,0 +1,7 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "common_headers",
+    hdrs = ["temp_path.hpp"],
+    visibility = ["//backend-mlir-compiler:__subpackages__"],
+)
