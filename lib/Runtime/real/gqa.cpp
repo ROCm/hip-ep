@@ -5,6 +5,8 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
+#include "../runtime_state_internal.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -82,18 +84,23 @@ struct GqaGemmCacheEntry {
   size_t workspace_size;      // workspace bytes required by algo
 };
 
-static std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash>
-    g_gqa_gemm_cache;
+struct GqaGemmCache {
+  std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash> entries;
+};
 
-/// Look up or create cached hipBLASLt descriptors + algorithm for a GEMM shape.
-/// On first call for a given key, creates all descriptors, queries the
-/// heuristic, and caches the result. Returns nullptr on any API failure
-/// (partially created descriptors are cleaned up).
-static const GqaGemmCacheEntry *queryOrCreateGemmState(hipblasLtHandle_t handle,
+static GqaGemmCache *get_gemm_cache(RuntimeState *state) {
+  if (!state->gqa_gemm_cache)
+    state->gqa_gemm_cache = new GqaGemmCache;
+  return static_cast<GqaGemmCache *>(state->gqa_gemm_cache);
+}
+
+static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
+                                                       hipblasLtHandle_t handle,
                                                        const GqaGemmKey &key) {
   assert(handle && "queryOrCreateGemmState: null handle");
-  auto it = g_gqa_gemm_cache.find(key);
-  if (it != g_gqa_gemm_cache.end())
+  auto *cache = get_gemm_cache(state);
+  auto it = cache->entries.find(key);
+  if (it != cache->entries.end())
     return &it->second;
 
   int64_t m = key.m, n = key.n, k = key.k;
@@ -188,7 +195,7 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = g_gqa_gemm_cache.emplace(key, entry);
+  auto [ins, _] = cache->entries.emplace(key, entry);
   return &ins->second;
 }
 
@@ -275,8 +282,10 @@ static int gqa_forward_hipblaslt(
   // (sliding window, smooth softmax, head sink) are supported.
   //===--------------------------------------------------------------------===//
   bool fused_d = (d == 64 || d == 128 || d == 256);
+  // ONNX uses local_window_size=-1 for "no sliding window"; <= 0 means
+  // disabled.
   if (fused_d && sq == 1 && key && value && present_key && present_value &&
-      local_window_size == 0 && !head_sink && !use_smooth_softmax) {
+      local_window_size <= 0 && !head_sink && !use_smooth_softmax) {
     const void *qSrc = query;
     const void *kSrc = key;
 
@@ -495,11 +504,11 @@ static int gqa_forward_hipblaslt(
   GqaGemmKey valueKey{d,     sq,    total_seq,
                       B * H, false, false}; // outputFp32=false
   const GqaGemmCacheEntry *scoreState =
-      queryOrCreateGemmState(ltHandle, scoreKey);
+      queryOrCreateGemmState(state, ltHandle, scoreKey);
   if (!scoreState)
     return -1;
   const GqaGemmCacheEntry *valueState =
-      queryOrCreateGemmState(ltHandle, valueKey);
+      queryOrCreateGemmState(state, ltHandle, valueKey);
   if (!valueState)
     return -1;
 
@@ -678,6 +687,17 @@ int wrap_group_query_attention(
     // (may differ from actual past token count for pre-allocated caches)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
+  OP_PROFILE(
+      "gqa",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "b=%lld,sq=%lld,skv=%lld,h=%lld,d=%lld",
+                 (long long)batch_size, (long long)seq_len_q,
+                 (long long)seq_len_kv, (long long)num_heads,
+                 (long long)head_dim);
+        return std::string(b);
+      },
+      state);
 
   if (!state) {
     fprintf(stderr, "wrap_group_query_attention: null state\n");
@@ -815,4 +835,23 @@ int wrap_group_query_attention(
   }
 
   return rc;
+}
+
+void hipdnn_ep_gqa_gemm_cache_destroy(void *cache_ptr) {
+  auto *cache = static_cast<GqaGemmCache *>(cache_ptr);
+  if (!cache)
+    return;
+  for (auto &[k, e] : cache->entries) {
+    if (e.layD)
+      hipblasLtMatrixLayoutDestroy(e.layD);
+    if (e.layC)
+      hipblasLtMatrixLayoutDestroy(e.layC);
+    if (e.layB)
+      hipblasLtMatrixLayoutDestroy(e.layB);
+    if (e.layA)
+      hipblasLtMatrixLayoutDestroy(e.layA);
+    if (e.desc)
+      hipblasLtMatmulDescDestroy(e.desc);
+  }
+  delete cache;
 }

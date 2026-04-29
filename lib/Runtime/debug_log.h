@@ -10,10 +10,31 @@
 #include <cstdio>
 #include <cstdlib>
 
+#ifdef _WIN32
+// Static CRT (/MT) DLLs have their own CRT env — _dupenv_s can't see env vars
+// set by the host process. Use Win32 API to read the real process environment.
+extern "C" __declspec(
+    dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char *,
+                                                               char *,
+                                                               unsigned long);
+
+namespace detail {
+inline bool check_env(const char *name) {
+  char buf[8];
+  unsigned long n = GetEnvironmentVariableA(name, buf, sizeof(buf));
+  return n > 0 && buf[0] >= '1';
+}
+} // namespace detail
+#endif
+
 inline bool hipdnn_ep_debug_enabled() {
   static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_DEBUG");
+#else
     const char *v = std::getenv("HIPDNN_EP_DEBUG");
     return v && v[0] >= '1';
+#endif
   }();
   return enabled;
 }
@@ -25,8 +46,12 @@ inline bool hipdnn_ep_perf_enabled() {
   // pipeline and skews measurements. Users who only want the per-call
   // [Runtime DEBUG] traces should not pay that cost.
   static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_PERF");
+#else
     const char *v = std::getenv("HIPDNN_EP_PERF");
     return v && v[0] >= '1';
+#endif
   }();
   return enabled;
 }
