@@ -475,7 +475,8 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
             1,         // batch_count
             4,         // bits
             group_size,// block_size
-            2);        // element_size_bytes (fp16)
+            2,         // element_size_bytes (fp16)
+            use_zeros ? 2 : 0);
     };
 
     int PRE_WARMUP = g_cold_cache ? 10 : 2000;
@@ -503,7 +504,8 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
             nullptr,
             d_C,
             M, N, K,
-            1, 4, group_size, 2);
+            1, 4, group_size, 2,
+            use_zeros ? 2 : 0);
         if(status != 0) break;
     }
     HIP_CHECK(hipStreamSynchronize(stream));
@@ -739,7 +741,8 @@ static int runModelSweep(const std::string& json_path, int group_size,
             auto launch = [&]() {
                 hip_matmul_nbits(stream, dA, dB, dS,
                                  use_zeros ? dZ : nullptr, nullptr, dC,
-                                 M, N, K, 1, 4, group_size, 2);
+                                 M, N, K, 1, 4, group_size, 2,
+                                 use_zeros ? 2 : 0);
             };
 
             // Pre-warmup (once, on first successfully loaded shape)
@@ -768,7 +771,8 @@ static int runModelSweep(const std::string& json_path, int group_size,
             {
                 status = hip_matmul_nbits(stream, dA, dB, dS,
                                           use_zeros ? dZ : nullptr, nullptr, dC,
-                                          M, N, K, 1, 4, group_size, 2);
+                                          M, N, K, 1, 4, group_size, 2,
+                                          use_zeros ? 2 : 0);
                 if(status != 0) break;
             }
             HIP_CHECK(hipStreamSynchronize(stream));

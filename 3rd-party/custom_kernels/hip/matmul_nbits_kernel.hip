@@ -1585,7 +1585,6 @@ extern "C" int hip_matmul_nbits(
    * autotuned (BLOCK_SIZE, TILE_N). Zero points are FP16 (same as API).
    * ------------------------------------------------------------------- */
   if (wmma_data_format && M < kBlockDim) {
-    snprintf(g_last_tune_info, sizeof(g_last_tune_info), "gemv-row");
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV row-major M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s\n",
@@ -1604,6 +1603,11 @@ extern "C" int hip_matmul_nbits(
     int config_id = getOrTuneGemvConfig(
         hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
         M, N, K, 1, block_size, gemv_has_zp);
+
+    snprintf(g_last_tune_info, sizeof(g_last_tune_info),
+             "gemv-row t=%d tn=%d",
+             kGemvConfigs[config_id].threads,
+             kGemvConfigs[config_id].tile_n);
 
     launchGemvConfig(config_id, hip_stream,
                      a_h, b_u, s_h, z_u, b_h, o_h,
@@ -1626,7 +1630,6 @@ extern "C" int hip_matmul_nbits(
    * are benchmarked and the fastest is cached for subsequent calls.
    * ------------------------------------------------------------------- */
   if (M <= kBlockDim) {
-    snprintf(g_last_tune_info, sizeof(g_last_tune_info), "gemv-row");
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV path M=%lld N=%lld K=%lld "
         "batch=%lld bs=%lld zp=%s bias=%s\n",
@@ -1646,6 +1649,11 @@ extern "C" int hip_matmul_nbits(
     int config_id = getOrTuneGemvConfig(
         hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
         M, N, K, batch_count, block_size, gemv_has_zp);
+
+    snprintf(g_last_tune_info, sizeof(g_last_tune_info),
+             "gemv-row t=%d tn=%d",
+             kGemvConfigs[config_id].threads,
+             kGemvConfigs[config_id].tile_n);
 
     launchGemvConfig(config_id, hip_stream,
                      a_h, b_u, s_h, z_u, b_h, o_h,
