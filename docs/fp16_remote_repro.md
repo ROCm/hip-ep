@@ -2,10 +2,12 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# FP16 remote reproduction plan
+# Remote reproduction plan
 
-This is the safe path for continuing Kokoro FP16 EP debugging without risking
-the display-attached Windows workstation.
+This is the safer path for risky Kokoro EP experiments that may stress the GPU
+driver.  The display-attached Windows workstation can run guarded single-shot
+validation, but long or exploratory EP runs should still use a remote or
+non-display test machine.
 
 ## Preconditions
 
@@ -29,25 +31,20 @@ set HIP_CUSTOM_KERNELS_DIR=D:\jam\prebuilt-local\lib
 
 Start with isolated ops, not full Kokoro:
 
-0. FP16 Kokoro session compilation only.
-   - Current working path: start `kokoro-onnx-server` and stop after `ready`,
-     before sending `/v1/audio/speech`.
-   - Avoid `D:\jam\demos\scripts\compile_only_fp16_session.py` for now; Python
-     ORT registration does not expose `MorphiZenExecutionProvider` to
-     `InferenceSession` in this environment.
+0. Kokoro session compilation only.
+   - Start `kokoro-onnx-server` and stop after `ready`, before sending
+     `/v1/audio/speech`.
 1. FP16 `Sigmoid`
 2. FP16 `ReduceSum`
 3. FP16 `Cast(f16 -> i64)`
 4. Combined duration chain:
    `Sigmoid -> ReduceSum -> Div -> Round -> Clip -> Cast -> CumSum`
 5. Full `kokoro-v1.0-local-fp16.onnx`
+6. Q/DQ isolated validation via `D:\jam\demos\scripts\verify_qdq_quant_ops.py`
+7. Q/DQ smoke/full Kokoro variants from
+   `D:\jam\demos\scripts\quantize_kokoro_qdq.py`
 
 Stop at the first hang or mismatch.
-
-Latest local result: compile/session creation reached `ready`, but a single
-guarded full Kokoro FP16 inference request still produced the broken 43.75 s
-waveform and fresh watchdog reports. Continue inference debugging only on the
-safe remote/non-display target.
 
 `scripts/run_fp16_repro.ps1` prepares the remote shell environment and verifies
 the explicit opt-in, but intentionally does not launch `hip-onnx-runner` itself.
@@ -63,21 +60,22 @@ EP_ONNX  dur=3.100s rms=0.083199 diff_rms=0.030492 hf=0.3665
 GGUF     dur=3.000s rms=0.056199 diff_rms=0.020468 hf=0.3642
 ```
 
-Current FP16 split:
+Current FP16 status:
 
 ```text
-FP16_CPU dur=3.100s raw=3.875s rms=0.063739 diff_rms=0.032930 hf=0.5166
-FP16_EP  dur=21.900s raw=43.750s rms=0.823046 diff_rms=0.797948 hf=0.9695
+FP16_EP dur=3.100s rms=0.071007 diff_rms=0.029629 hf=0.4173
 ```
 
-This means the converted FP16 model is structurally sane under CPU ORT, but the
-EP/runtime path corrupts or miscomputes the FP16 graph.
+The current FP16 EP path is finite and non-silent, but subjective voice quality
+is still worse than FP32/GGUF due to pitch/source artifacts. Prefer Q/DQ for
+quality-preserving quantization work.
 
-## Current leading suspicion
+Current Q/DQ smoke status:
 
-The first tight repro that hung locally was isolated FP16 `Sigmoid`.
-Duration prediction depends on Sigmoid, and the broken full model emits a much
-larger/noisy waveform. The in-progress source change routes ONNX Sigmoid through
-the custom HIP unary kernel instead of the MIOpen activation path.
+```text
+QDQ_EP_SMOKE dur=3.100s rms=0.083188 hf=0.3665
+QDQ_CPU      dur=3.100s rms=0.080239 hf=0.4017
+```
 
-Do not validate that change on the display workstation.
+The full Q/DQ model still exposes a compiler/runtime limitation; expand the
+smoke policy gradually and validate after each increase.

@@ -49,85 +49,16 @@ The final FP16-specific fixes that changed the bad-output behavior were:
   applying the `300x` scale inside the following 9-harmonic `Sin` kernel in
   FP32.
 
-The guarded raw-output probe now reports:
+The guarded raw-output probe reported:
 
 ```text
 n=2097152 nonzero=83523 nan=0 inf=0
 range=[-0.520996,0.555664] mean_abs=0.00146713
 ```
 
-Historical notes follow.
-
-CPU ORT on `kokoro-v1.0-local-fp16.onnx` is structurally sane:
-
-```text
-FP16_CPU dur=3.100s raw=3.875s rms=0.063739 diff_rms=0.032930 hf=0.5166
-```
-
-EP runtime output is broken:
-
-```text
-FP16_EP dur=21.900s raw=43.750s rms=0.823046 diff_rms=0.797948 hf=0.9695
-```
-
-The failure is EP/runtime-specific, not simply a bad converted model.
-
-For compile-only validation, use:
-
-- `D:\jam\demos\scripts\compile_only_fp16_session.py`
-
-The pure Python variant is currently not viable with this ORT binding:
-`register_execution_provider_library()` returns without making
-`MorphiZenExecutionProvider` available to Python `InferenceSession`, so ORT
-falls back to CPU and errors because CPU fallback is disabled.
-
-The C++ `kokoro-onnx-server` compile/session path was tested with
-`HIPDNN_EP_ALLOW_GPU_RUNTIME=1` and no inference request:
-
-```text
-[get_supported_nodes] Found 2503 supported (of 2503 meta_def)
-[SHARED_CONSTANTS] Published new blob (162317906 bytes)
-[kokoro-onnx] session created in 7313 ms
-[kokoro-onnx] ready (sr=24000 Hz, default_voice=af_heart)
-```
-
-No new WER/watchdog event appeared after that compile-only run.
-
-Guarded inference was then tested once:
-
-```text
-HTTP 200, 2100044 bytes
-FP16_EP_GUARDED dur=21.900s raw=43.750s rms=0.823046 diff_rms=0.797948 hf=0.9695 peak=0.999969
-```
-
-That inference run produced fresh `LiveKernelEvent 141` watchdog reports:
-
-```text
-C:\WINDOWS\LiveKernelReports\WATCHDOG\WATCHDOG-20260429-0816.dmp
-C:\WINDOWS\LiveKernelReports\WATCHDOG\WATCHDOG-20260429-0817.dmp
-```
-
-Conclusion: compile/session creation is stable enough to reach `ready`, but the
-FP16 inference path still both produces invalid audio and trips the GPU
-watchdog. Do not continue local inference testing on the display workstation.
-
-After rebuilding the candidate Sigmoid custom-kernel route, the same single
-inference was repeated:
-
-```text
-FP16_EP_SIGMOID_FIX dur=21.900s raw=43.750s rms=0.823046 diff_rms=0.797948 hf=0.9695 peak=0.999969
-```
-
-It produced another watchdog report:
-
-```text
-C:\WINDOWS\LiveKernelReports\WATCHDOG\WATCHDOG-20260429-0819.dmp
-```
-
-Conclusion: routing ONNX `Sigmoid` away from the MIOpen activation path is not
-the full-model fix. The next likely culprit is FP16 LSTM / downstream MIOpen
-runtime, because full-model inference enters `wrap_miopenRNNForwardInference`
-with `dtype=f16` before the bad output.
+Historical failed runs produced 43.75 s noisy output and several
+`LiveKernelEvent 141` reports before the LSTM/Conv/Softmax/source-generator
+fixes landed. Those details are recorded in `docs/gpu_watchdog_safety.md`.
 
 ## Safety / watchdog changes
 
@@ -155,10 +86,10 @@ Local demo launcher guards:
 - every `D:\jam\demos\run_onnx_server*.bat` now calls that guard before
   launching `kokoro-onnx-server.exe`.
 
-These guards have not been built into binaries on the display workstation. They
-are source-level and script-level protection only.
+These guards are source-level protection and must be present in whatever
+binaries/scripts are deployed for local testing.
 
-## FP16 runtime fix notes
+## Runtime fix notes
 
 These changes are part of the validated FP16 path:
 
@@ -188,6 +119,9 @@ These changes are part of the validated FP16 path:
 - `lib/Conversion/OnnxToHip/ActivationConversion.cpp`
   - routes ONNX `Sigmoid` through `hip.unary_elementwise(kind=SIGMOID)`
     instead of the MIOpen activation path.
+- `lib/Conversion/OnnxToHip/QDQConversion.cpp`
+  - supports standard ONNX Q/DQ by folding constant weight DQ and decomposing
+    runtime Q/DQ through validated cast/elementwise ops.
 
 Temporary `HIPDNN_EP_TRACE_DURATION` / `[DURATION_TRACE]` helpers used during
 NaN isolation were removed after the source-generator overflow fix was

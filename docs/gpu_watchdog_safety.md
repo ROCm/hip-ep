@@ -104,14 +104,10 @@ On the display workstation, prefer:
 - guarded single-shot EP validation only when `HIPDNN_EP_ALLOW_GPU_RUNTIME=1`
   is explicitly set and the machine owner accepts the risk
 
-2026-04-29 update: compile/session creation reached `ready` without a new
-watchdog event, but a single guarded FP16 `/v1/audio/speech` inference request
-produced invalid full-buffer audio and fresh `LiveKernelEvent 141` reports.
-Local inference testing is therefore unsafe even when guarded.
-
-The first post-rebuild Sigmoid-route inference still produced the identical bad
-43.75 s waveform and a fresh `WATCHDOG-20260429-0819.dmp`, so the issue is not
-resolved by moving ONNX Sigmoid to the custom unary kernel.
+2026-04-29 historical note: before the FP16 runtime fixes landed, guarded
+full-model inference produced invalid full-buffer audio and fresh
+`LiveKernelEvent 141` reports.  The first Sigmoid-route rebuild still produced
+the same 43.75 s waveform and `WATCHDOG-20260429-0819.dmp`.
 
 2026-04-29 final update: after FP16 LSTM/Conv/Softmax upcasting and the Kokoro
 source-generator phase overflow fix, the guarded three-way quality check
@@ -125,3 +121,7 @@ GGUF     dur=3.000s rms=0.056199 diff_rms=0.020468 hf=0.3642
 
 Recent Application/System event checks after the validation run did not show a
 new WER, `LiveKernelEvent`, or display-driver watchdog entry.
+
+Q/DQ smoke validation also completed successfully and preserves FP32-like
+quality.  The full Q/DQ model is still a compiler/runtime stress case, so keep
+full-model Q/DQ iteration remote or single-shot guarded.
