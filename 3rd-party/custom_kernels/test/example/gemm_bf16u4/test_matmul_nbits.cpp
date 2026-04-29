@@ -87,17 +87,32 @@ static bool readBin(const std::string& path, std::vector<T>& data, size_t count)
 }
 
 // ============================================================
+// Theoretical peaks — auto-detected from hipDeviceProp_t in main()
+//   WMMA FP16: 512 FLOP/CU/cycle (2× VALU)
+//   VALU FP16: 256 FLOP/CU/cycle (packed FP16)
+// ============================================================
+static double g_peak_wmma_gflops = 0;
+static double g_peak_valu_gflops = 0;
+static double g_peak_bw_gbs     = 0;
+static double g_wmma_ridge_ai   = 0;
+static double g_valu_ridge_ai   = 0;
+
+// ============================================================
 // Benchmark helpers
 // ============================================================
+static bool g_cold_cache = false;
+
 static int calibrateIters(double warmup_ms, int warmup_count,
                           double target_ms = 2000.0, int lo = 5, int hi = 200)
 {
+    if(g_cold_cache) return 1;
     double per_iter = warmup_ms / warmup_count;
     if(per_iter <= 0) return lo;
     return std::max(lo, std::min(hi, static_cast<int>(target_ms / per_iter)));
 }
 
-constexpr int NROUNDS = 5;
+static constexpr int NROUNDS      = 5;
+static constexpr int NROUNDS_COLD = 11;
 
 struct MeasureResult {
     double median_ms;
@@ -105,35 +120,74 @@ struct MeasureResult {
     double max_ms;
 };
 
+static void* g_l2_polluter = nullptr;
+static size_t g_l2_polluter_bytes = 32 * 1024 * 1024; // default 32 MB, updated from prop
+
+static void ensureL2Polluter()
+{
+    if(!g_l2_polluter)
+        hipMalloc(&g_l2_polluter, g_l2_polluter_bytes);
+}
+
+static void flushL2(hipStream_t stream)
+{
+    hipMemsetAsync(g_l2_polluter, 0x42, g_l2_polluter_bytes, stream);
+}
+
 static MeasureResult measureMedian(hipStream_t stream, int niters,
                                    const std::function<void()>& launch)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
     hipEventCreate(&ev1);
-    std::vector<float> round_ms(NROUNDS);
-    for(int r = 0; r < NROUNDS; r++)
+
+    const int nrounds = g_cold_cache ? NROUNDS_COLD : NROUNDS;
+    std::vector<float> round_ms(nrounds);
+
+    if(g_cold_cache)
+        ensureL2Polluter();
+
+    for(int r = 0; r < nrounds; r++)
     {
-        hipEventRecord(ev0, stream);
-        for(int i = 0; i < niters; i++)
+        if(g_cold_cache)
+        {
+            flushL2(stream);
+            hip_matmul_nbits_release_buffers();
+            hipStreamSynchronize(stream);
+
+            hipEventRecord(ev0, stream);
             launch();
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-        hipEventElapsedTime(&round_ms[r], ev0, ev1);
+            hipEventRecord(ev1, stream);
+            hipEventSynchronize(ev1);
+            hipEventElapsedTime(&round_ms[r], ev0, ev1);
+        }
+        else
+        {
+            hipEventRecord(ev0, stream);
+            for(int i = 0; i < niters; i++)
+                launch();
+            hipEventRecord(ev1, stream);
+            hipEventSynchronize(ev1);
+            hipEventElapsedTime(&round_ms[r], ev0, ev1);
+        }
     }
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
-    std::cout << "\n  [debug] per-round raw (ms): ";
-    for(int r = 0; r < NROUNDS; r++)
-        std::cout << std::fixed << std::setprecision(2) << round_ms[r] << " ";
-    std::cout << "  (per-iter: ";
-    for(int r = 0; r < NROUNDS; r++)
-        std::cout << std::fixed << std::setprecision(3) << round_ms[r] / niters << " ";
-    std::cout << ")" << std::endl;
+    std::cout << "\n  [debug] " << nrounds << " rounds (ms):";
+    for(int r = 0; r < nrounds; r++)
+        std::cout << " " << std::fixed << std::setprecision(3) << round_ms[r];
+    if(!g_cold_cache)
+    {
+        std::cout << "  (per-iter:";
+        for(int r = 0; r < nrounds; r++)
+            std::cout << " " << std::setprecision(3) << round_ms[r] / niters;
+        std::cout << ")";
+    }
+    std::cout << std::endl;
 
     std::sort(round_ms.begin(), round_ms.end());
-    return {round_ms[NROUNDS / 2], round_ms[0], round_ms[NROUNDS - 1]};
+    return {round_ms[nrounds / 2], round_ms[0], round_ms[nrounds - 1]};
 }
 
 // ============================================================
@@ -421,10 +475,11 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
             1,         // batch_count
             4,         // bits
             group_size,// block_size
-            2);        // element_size_bytes (fp16)
+            2,         // element_size_bytes (fp16)
+            use_zeros ? 2 : 0);
     };
 
-    constexpr int PRE_WARMUP = 2000;
+    int PRE_WARMUP = g_cold_cache ? 10 : 2000;
     std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
     auto pw0 = std::chrono::steady_clock::now();
     for(int w = 0; w < PRE_WARMUP; w++)
@@ -449,7 +504,8 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
             nullptr,
             d_C,
             M, N, K,
-            1, 4, group_size, 2);
+            1, 4, group_size, 2,
+            use_zeros ? 2 : 0);
         if(status != 0) break;
     }
     HIP_CHECK(hipStreamSynchronize(stream));
@@ -477,6 +533,11 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
               << std::flush;
     auto mr = measureMedian(stream, niters, launch_kernel);
 
+    std::string tune = hip_matmul_nbits_last_tune_info();
+    bool is_wmma     = (tune.find("gemv") == std::string::npos);
+    double peak_gf   = is_wmma ? g_peak_wmma_gflops : g_peak_valu_gflops;
+    double ridge_ai  = peak_gf / g_peak_bw_gbs;
+
     double avg_ms    = mr.median_ms / niters;
     double gflops    = (2.0 * M * N * K) / (avg_ms * 1e6);
     double mem_bytes = static_cast<double>(countA) * 2 + static_cast<double>(countB)
@@ -484,16 +545,27 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
                      + (use_zeros ? static_cast<double>(countZ) * 2 : 0.0)
                      + static_cast<double>(countC) * 2;
     double bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
+    double ai        = (2.0 * M * N * K) / mem_bytes;
+    double roofline  = std::min(peak_gf, ai * g_peak_bw_gbs);
+    double pct_roof  = gflops / roofline * 100.0;
+    double pct_bw    = bw_gbs / g_peak_bw_gbs * 100.0;
     double range_pct = (mr.max_ms - mr.min_ms) / mr.median_ms * 100.0;
+    const char* bound = (ai < ridge_ai) ? "BW" : "FLOPs";
 
     std::cout << " done" << std::endl;
-    std::cout << "\n  === Performance ===" << std::endl;
-    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "\n  === Performance (" << (is_wmma ? "WMMA" : "VALU") << " peak="
+              << std::fixed << std::setprecision(0) << peak_gf << " GFLOPS) ===" << std::endl;
+    std::cout << std::fixed;
+    std::cout << "  Kernel: " << tune << std::endl;
     std::cout << "  Median: "
-              << std::setprecision(6) << avg_ms << " ms, "
-              << gflops << " GFLOPS, "
-              << bw_gbs << " GB/s" << std::endl;
-    std::cout << "  Range:  " << mr.min_ms / niters << " ~ " << mr.max_ms / niters
+              << std::setprecision(6) << avg_ms << " ms" << std::endl;
+    std::cout << "  GFLOPS: " << std::setprecision(2) << gflops
+              << " / " << roofline << " (" << std::setprecision(1) << pct_roof << "% roofline)" << std::endl;
+    std::cout << "  BW:     " << std::setprecision(2) << bw_gbs
+              << " / " << g_peak_bw_gbs << " GB/s (" << std::setprecision(1) << pct_bw << "%)" << std::endl;
+    std::cout << "  AI:     " << std::setprecision(1) << ai
+              << " FLOP/byte -> " << bound << "-bound (ridge=" << ridge_ai << ")" << std::endl;
+    std::cout << "  Range:  " << std::setprecision(6) << mr.min_ms / niters << " ~ " << mr.max_ms / niters
               << " ms  (jitter " << std::setprecision(1) << range_pct << "%)" << std::endl;
 
     std::vector<__half> h_C(countC);
@@ -568,9 +640,14 @@ struct ShapeResult {
     double median_ms;
     double gflops;
     double bw_gbs;
+    double ai;
+    double roofline_gflops;
+    double pct_roofline;
+    double pct_bw;
     bool   pass;
     int    errors;
     int    checked;
+    std::string tune_info;
 };
 
 static int runModelSweep(const std::string& json_path, int group_size,
@@ -636,7 +713,7 @@ static int runModelSweep(const std::string& json_path, int group_size,
             {
                 std::cerr << "  ERROR: cannot read data from " << shape_dir << "/" << std::endl;
                 std::cerr << "  Run: make gendata_model  to generate all data first" << std::endl;
-                results.push_back({M, K, N, 0, 0, 0, false, -1, 0});
+                results.push_back({M, K, N, 0, 0, 0, 0, 0, 0, 0, false, -1, 0, "N/A"});
                 continue;
             }
             std::cout << "  Loaded data from " << shape_dir << "/" << std::endl;
@@ -664,13 +741,14 @@ static int runModelSweep(const std::string& json_path, int group_size,
             auto launch = [&]() {
                 hip_matmul_nbits(stream, dA, dB, dS,
                                  use_zeros ? dZ : nullptr, nullptr, dC,
-                                 M, N, K, 1, 4, group_size, 2);
+                                 M, N, K, 1, 4, group_size, 2,
+                                 use_zeros ? 2 : 0);
             };
 
             // Pre-warmup (once, on first successfully loaded shape)
             if(!warmup_done)
             {
-                constexpr int PRE_WARMUP = 200;
+                int PRE_WARMUP = g_cold_cache ? 10 : 200;
                 std::cout << "  Pre-warmup (" << PRE_WARMUP << " iters)..." << std::flush;
                 auto t0 = std::chrono::steady_clock::now();
                 for(int w = 0; w < PRE_WARMUP; w++)
@@ -693,7 +771,8 @@ static int runModelSweep(const std::string& json_path, int group_size,
             {
                 status = hip_matmul_nbits(stream, dA, dB, dS,
                                           use_zeros ? dZ : nullptr, nullptr, dC,
-                                          M, N, K, 1, 4, group_size, 2);
+                                          M, N, K, 1, 4, group_size, 2,
+                                          use_zeros ? 2 : 0);
                 if(status != 0) break;
             }
             HIP_CHECK(hipStreamSynchronize(stream));
@@ -703,7 +782,7 @@ static int runModelSweep(const std::string& json_path, int group_size,
             if(status != 0)
             {
                 std::cout << " FAILED (status=" << status << ")" << std::endl;
-                results.push_back({M, K, N, 0, 0, 0, false, -1, 0});
+                results.push_back({M, K, N, 0, 0, 0, 0, 0, 0, 0, false, -1, 0, "N/A"});
                 hipFree(dA); hipFree(dB); hipFree(dS);
                 if(dZ) hipFree(dZ); hipFree(dC);
                 continue;
@@ -717,6 +796,11 @@ static int runModelSweep(const std::string& json_path, int group_size,
                       << niters << " iters)..." << std::flush;
             auto mr = measureMedian(stream, niters, launch);
 
+            std::string tune = hip_matmul_nbits_last_tune_info();
+            bool is_wmma     = (tune.find("gemv") == std::string::npos);
+            double peak_gf   = is_wmma ? g_peak_wmma_gflops : g_peak_valu_gflops;
+            double ridge_ai  = peak_gf / g_peak_bw_gbs;
+
             double avg_ms    = mr.median_ms / niters;
             double gflops    = (2.0 * M * N * K) / (avg_ms * 1e6);
             double mem_bytes = (double)countA * 2 + (double)countB
@@ -724,12 +808,23 @@ static int runModelSweep(const std::string& json_path, int group_size,
                              + (use_zeros ? (double)countZ * 2 : 0.0)
                              + (double)countC * 2;
             double bw_gbs    = mem_bytes * niters / (mr.median_ms * 1e6);
+            double ai        = (2.0 * M * N * K) / mem_bytes;
+            double roofline  = std::min(peak_gf, ai * g_peak_bw_gbs);
+            double pct_roof  = gflops / roofline * 100.0;
+            double pct_bw    = bw_gbs / g_peak_bw_gbs * 100.0;
+            const char* bound = (ai < ridge_ai) ? "BW" : "FLOPs";
 
             std::cout << " done" << std::endl;
-            std::cout << "\n  === Performance ===" << std::endl;
+            std::cout << "\n  === Performance (" << (is_wmma ? "WMMA" : "VALU")
+                      << " peak=" << std::fixed << std::setprecision(0) << peak_gf << ") ===" << std::endl;
             std::cout << std::fixed << std::setprecision(6);
-            std::cout << "  Median: " << avg_ms << " ms, "
-                      << gflops << " GFLOPS, " << bw_gbs << " GB/s" << std::endl;
+            std::cout << "  Median: " << avg_ms << " ms" << std::endl;
+            std::cout << "  GFLOPS: " << std::setprecision(2) << gflops
+                      << " / " << roofline << " (" << std::setprecision(1) << pct_roof << "% roofline)" << std::endl;
+            std::cout << "  BW:     " << std::setprecision(2) << bw_gbs
+                      << " / " << g_peak_bw_gbs << " GB/s (" << std::setprecision(1) << pct_bw << "%)" << std::endl;
+            std::cout << "  AI:     " << std::setprecision(1) << ai
+                      << " FLOP/byte -> " << bound << "-bound" << std::endl;
 
             // Download and verify against Python reference
             std::vector<__half> h_C(countC);
@@ -769,7 +864,8 @@ static int runModelSweep(const std::string& json_path, int group_size,
             }
 
             results.push_back({M, K, N, avg_ms, gflops, bw_gbs,
-                               pass, errors, total});
+                               ai, roofline, pct_roof, pct_bw,
+                               pass, errors, total, tune});
 
             hipFree(dA); hipFree(dB); hipFree(dS);
             if(dZ) hipFree(dZ); hipFree(dC);
@@ -791,32 +887,48 @@ static int runModelSweep(const std::string& json_path, int group_size,
               << std::setw(7)  << "N"    << " | "
               << std::setw(11) << "Median(ms)"  << " | "
               << std::setw(9)  << "GFLOPS"  << " | "
+              << std::setw(10) << "Roofline"  << " | "
+              << std::setw(5)  << "Eff%"    << " | "
               << std::setw(8)  << "GB/s"    << " | "
-              << "Status" << std::endl;
-    std::cout << "-----+-------+-------+---------+-------------+-----------+----------+--------"
-              << std::endl;
+              << std::setw(5)  << "BW%"     << " | "
+              << std::setw(6)  << "AI"      << " | "
+              << std::setw(5)  << "Bound"   << " | "
+              << std::setw(6)  << "Status"  << " | "
+              << "Autotune" << std::endl;
+    std::cout << std::string(140, '-') << std::endl;
 
     int pass_count = 0, fail_count = 0;
     for(size_t i = 0; i < results.size(); i++)
     {
         auto& r = results[i];
         if(r.pass) pass_count++; else fail_count++;
+        bool wmma = (r.tune_info.find("gemv") == std::string::npos);
+        double ridge = wmma ? g_wmma_ridge_ai : g_valu_ridge_ai;
+        const char* b = (r.ai < ridge) ? "BW" : "FLOPs";
         std::cout << std::right << std::setw(4) << (i + 1) << " | "
                   << std::setw(5) << r.M << " | "
                   << std::setw(5) << r.K << " | "
                   << std::setw(7) << r.N << " | "
                   << std::setw(11) << std::fixed << std::setprecision(6) << r.median_ms << " | "
                   << std::setw(9)  << std::setprecision(2) << r.gflops << " | "
+                  << std::setw(10) << std::setprecision(2) << r.roofline_gflops << " | "
+                  << std::setw(4)  << std::setprecision(1) << r.pct_roofline << "%" << " | "
                   << std::setw(8)  << std::setprecision(2) << r.bw_gbs << " | "
-                  << (r.pass ? "PASS" : "FAIL") << std::endl;
+                  << std::setw(4)  << std::setprecision(1) << r.pct_bw << "%" << " | "
+                  << std::setw(6)  << std::setprecision(1) << r.ai << " | "
+                  << std::setw(5)  << b << " | "
+                  << std::setw(6)  << (r.pass ? "PASS" : "FAIL") << " | "
+                  << r.tune_info << std::endl;
     }
 
-    std::cout << "=========================================================================="
-              << std::endl;
+    std::cout << std::string(140, '=') << std::endl;
     std::cout << "Total: " << results.size() << " shapes, "
               << pass_count << " passed, " << fail_count << " failed" << std::endl;
-    std::cout << "=========================================================================="
-              << std::endl;
+    std::cout << "Theory: WMMA " << std::fixed << std::setprecision(0) << g_peak_wmma_gflops
+              << " / VALU " << g_peak_valu_gflops << " GFLOPS, BW " << g_peak_bw_gbs
+              << " GB/s, Ridge " << std::setprecision(1) << g_wmma_ridge_ai
+              << " / " << g_valu_ridge_ai << " FLOP/byte" << std::endl;
+    std::cout << std::string(140, '=') << std::endl;
 
     return (fail_count == 0) ? 0 : 1;
 }
@@ -828,14 +940,76 @@ int main(int argc, char* argv[])
 
     hipDeviceProp_t prop;
     HIP_CHECK(hipGetDeviceProperties(&prop, 0));
-    std::cout << "GPU: " << prop.name << " (arch: " << prop.gcnArchName << ")" << std::endl;
-
     std::string arch(prop.gcnArchName);
-    if(arch.find("gfx11") == std::string::npos && arch.find("gfx12") == std::string::npos)
+    bool is_rdna3_plus = (arch.find("gfx11") != std::string::npos ||
+                          arch.find("gfx12") != std::string::npos);
+
+    std::cout << "GPU: " << prop.name << " (arch: " << arch << ")" << std::endl;
+    std::cout << "  HW: " << prop.multiProcessorCount << " WGPs"
+              << ", GPU " << prop.clockRate / 1000 << " MHz"
+              << ", Mem " << prop.memoryClockRate / 1000 << " MHz"
+              << ", Bus " << prop.memoryBusWidth << "-bit"
+              << ", L2 " << prop.l2CacheSize / 1024 << " KB" << std::endl;
+
+    // RDNA 3/3.5: multiProcessorCount reports WGPs (each WGP = 2 CUs = 128 shaders)
+    //   VALU FP16 packed: 256 FLOP/CU/cycle → 512 FLOP/WGP/cycle
+    //   WMMA AI accel:    512 FLOP/CU/cycle → 1024 FLOP/WGP/cycle (AMD GPUOpen doc)
+    //   Official "FP16" spec (29.7T) = VALU only; WMMA peak = 2× VALU = 59.4T
+    int valu_per_mp = is_rdna3_plus ? 512 : 256;
+    g_peak_valu_gflops = prop.multiProcessorCount * (double)valu_per_mp
+                       * (prop.clockRate * 1e3) / 1e9;
+    g_peak_wmma_gflops = g_peak_valu_gflops * 2.0;
+
+    // HIP often mis-reports memory specs for iGPUs sharing system memory.
+    // Auto-detect, but fall back to 256 GB/s (LPDDR5X-8000 × 256-bit) if unreasonable.
+    double auto_bw = 2.0 * (prop.memoryClockRate * 1e3) * (prop.memoryBusWidth / 8.0) / 1e9;
+    constexpr double kDefaultBwGbs = 256.0;
+    if(auto_bw >= 128.0 && auto_bw <= 2048.0)
+        g_peak_bw_gbs = auto_bw;
+    else {
+        g_peak_bw_gbs = kDefaultBwGbs;
+        std::cout << "  NOTE: HIP reported BW " << std::fixed << std::setprecision(1)
+                  << auto_bw << " GB/s looks wrong, using default "
+                  << kDefaultBwGbs << " GB/s" << std::endl;
+    }
+
+    // Allow command-line overrides: --peak-bw=N  --peak-wmma=N  --peak-valu=N
+    for(int i = 1; i < argc; i++)
+    {
+        std::string arg(argv[i]);
+        if(arg == "--cold-cache")
+            g_cold_cache = true;
+        else if(arg.rfind("--peak-bw=", 0) == 0)
+            g_peak_bw_gbs = std::stod(arg.substr(10));
+        else if(arg.rfind("--peak-wmma=", 0) == 0)
+            g_peak_wmma_gflops = std::stod(arg.substr(12));
+        else if(arg.rfind("--peak-valu=", 0) == 0)
+            g_peak_valu_gflops = std::stod(arg.substr(12));
+    }
+
+    g_wmma_ridge_ai = g_peak_wmma_gflops / g_peak_bw_gbs;
+    g_valu_ridge_ai = g_peak_valu_gflops / g_peak_bw_gbs;
+
+    if(prop.l2CacheSize > 0)
+        g_l2_polluter_bytes = std::max((size_t)(prop.l2CacheSize * 2), (size_t)(32 * 1024 * 1024));
+
+    std::cout << std::fixed;
+    std::cout << "  Peak WMMA FP16: " << std::setprecision(0) << g_peak_wmma_gflops
+              << " GFLOPS (ridge " << std::setprecision(1) << g_wmma_ridge_ai << " FLOP/byte)" << std::endl;
+    std::cout << "  Peak VALU FP16: " << std::setprecision(0) << g_peak_valu_gflops
+              << " GFLOPS (ridge " << std::setprecision(1) << g_valu_ridge_ai << " FLOP/byte)" << std::endl;
+    std::cout << "  Peak BW: " << std::setprecision(1) << g_peak_bw_gbs << " GB/s" << std::endl;
+    std::cout << "  L2 flush: " << g_l2_polluter_bytes / (1024 * 1024) << " MB" << std::endl;
+
+    if(!is_rdna3_plus)
     {
         std::cerr << "WARNING: WMMA fast path requires RDNA3+ (gfx11xx/gfx12xx). "
                   << "Current arch: " << arch << std::endl;
     }
+
+    if(g_cold_cache)
+        std::cout << "*** COLD-CACHE mode: L2 flush + buffer release between each kernel call ***"
+                  << std::endl;
 
     // --- Check for --true-data mode ---
     std::string true_data_folder;
