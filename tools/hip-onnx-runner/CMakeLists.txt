@@ -9,16 +9,21 @@ if(NOT onnxruntime_FOUND)
   return()
 endif()
 
-add_executable(hip-onnx-runner hip-onnx-runner.cpp)
+add_executable(hip-onnx-runner
+  hip-onnx-runner.cpp
+  ${CMAKE_SOURCE_DIR}/lib/Support/CrashHandler.cpp
+)
 
 target_compile_features(hip-onnx-runner PRIVATE cxx_std_17)
 
 target_include_directories(hip-onnx-runner PRIVATE
   ${CMAKE_SOURCE_DIR}/include  # Shared project headers (timing.h, etc.)
+  ${CMAKE_SOURCE_DIR}/lib/Support  # CrashHandler.h
 )
 
 target_link_libraries(hip-onnx-runner PRIVATE
   onnxruntime::onnxruntime
+  cpptrace::cpptrace
 )
 
 install(TARGETS hip-onnx-runner

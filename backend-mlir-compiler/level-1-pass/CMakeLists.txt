@@ -15,6 +15,7 @@ set(LIB_NAME morphizen-level1-pass-mlir-compiler)
 add_library(${LIB_NAME} STATIC
     src/pass_main.cpp
     src/MlirCompiler.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Support/CrashHandler.cpp
 )
 
 # Link dependencies
@@ -22,6 +23,7 @@ target_link_libraries(${LIB_NAME} PRIVATE
     morphizen::morphizen-core-static
     glog::glog
     mlir_compilation_proto  # Shared protobuf library
+    cpptrace::cpptrace
     # NOTE: hip-compiler.dll is loaded dynamically at runtime, not linked
 )
 
@@ -30,6 +32,7 @@ target_include_directories(${LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated proto headers from parent
     ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
+    ${CMAKE_SOURCE_DIR}/lib/Support # CrashHandler.h
 )
 
 target_compile_definitions(${LIB_NAME} PRIVATE

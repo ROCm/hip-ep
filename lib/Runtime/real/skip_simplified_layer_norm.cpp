@@ -8,6 +8,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
@@ -168,6 +169,18 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
+  OP_PROFILE(
+      "skip_layernorm",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lld",
+                 (long long)(gamma_num_elements > 0
+                                 ? input_num_elements / gamma_num_elements
+                                 : 0),
+                 (long long)gamma_num_elements);
+        return std::string(b);
+      },
+      state);
   if (!state || !input || !skip || !gamma || !output) {
     fprintf(stderr,
             "wrap_skip_simplified_layer_norm: null required argument\n");

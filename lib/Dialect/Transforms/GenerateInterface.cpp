@@ -446,6 +446,7 @@ private:
         {"hipdnn_ep_tensor_buffer_get_rank", i64, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_size_bytes", i64, {ptr}},
         {"hipdnn_ep_state_init_with_fs", i32, {ptr, ptr, ptr, i64}},
+        {"hipdnn_ep_stream_sync", i32, {ptr}},
     };
   }
 
@@ -709,6 +710,8 @@ private:
     auto freeInputFunc =
         module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_tensor_free_input");
 
+    auto streamSyncFunc =
+        module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_stream_sync");
     auto getGpuPtrFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
         "hipdnn_ep_tensor_buffer_get_gpu_ptr");
     auto getShapePtrFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
@@ -869,6 +872,10 @@ private:
                            ValueRange{state, bufferPtr}, errorCodePtr,
                            errorCleanupBlock, funcOp);
     }
+
+    // Synchronize GPU stream (prints PERF timing + per-op profile when enabled)
+    emitErrorCheckedCall(builder, loc, streamSyncFunc, ValueRange{state},
+                         errorCodePtr, errorCleanupBlock, funcOp);
 
     // Free input tensors
     for (auto i : llvm::seq<size_t>(0, numInputs)) {
