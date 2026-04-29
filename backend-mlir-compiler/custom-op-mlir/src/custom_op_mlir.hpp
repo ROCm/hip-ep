@@ -13,14 +13,64 @@ namespace mlir_compilation {
 // Data structures — C-compatible, stable ABI
 // ============================================================================
 
+// Memory placement of a tensor's `data` pointer. Carried as an int in
+// tensor_t so the enum is forward-compatible without breaking the on-the-wire
+// ABI between marshalling (onnxruntime_morphizen_ep.dll) and the MLIR-compiled
+// model.dll.
+//
+// IMPORTANT: values are 1:1 with ORT's OrtMemoryInfoDeviceType
+// (onnxruntime_c_api.h). MlirCustomOp can therefore write the ORT value
+// straight into tensor_t.memory_type with no remapping. Today the runtime
+// only special-cases TENSOR_MEMORY_GPU (alias path); CPU / FPGA / NPU all
+// fall through to the legacy host H2D / D2H path, preserving existing
+// behaviour for hip-test-dll, hip-onnx-runner, and any other host-input
+// caller.
+//
+// Must match the matching enum in `lib/Runtime/hipdnn_ep_runtime.h`.
+enum {
+  TENSOR_MEMORY_CPU = 0, // == OrtMemoryInfoDeviceType_CPU
+  TENSOR_MEMORY_GPU = 1, // == OrtMemoryInfoDeviceType_GPU  (alias path; only
+                         // mode optimized today)
+  TENSOR_MEMORY_FPGA =
+      2, // == OrtMemoryInfoDeviceType_FPGA (treated as host today)
+  TENSOR_MEMORY_NPU =
+      3, // == OrtMemoryInfoDeviceType_NPU  (treated as host today)
+};
+
 // Describes a single tensor passed across the DLL boundary.
-// All memory is caller-owned CPU memory; the DLL copies H2D/D2H internally.
+//
+// Memory ownership: caller-owned. `memory_type` selects the data pointer's
+// placement (see the enum above) and tells the DLL whether to copy or alias.
+//
+// tensor_t is the wire-protocol ABI between three components that are
+// intentionally kept decoupled (compiler-emitted model.dll, EP runtime
+// DLL, hip-test-dll harness), so we re-declare it here instead of
+// sharing a header. The static_assert block below catches any layout
+// drift at compile time. Sibling copies live at:
+//   * `lib/Runtime/hipdnn_ep_runtime.h`            (extern-C, EP runtime)
+//   * `tools/hip-test-dll/hip-test-dll.cpp`        (test driver, local)
 struct tensor_t {
-  void *data; // Pointer to contiguous tensor data (CPU memory, caller-owned)
+  void *data;     // Pointer to contiguous tensor data (caller-owned)
   int64_t *shape; // Pointer to shape array of length `rank` (caller-owned)
   size_t rank;    // Number of dimensions (must match the compiled model's rank)
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
+  int memory_type;     // One of TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 };
+
+// Compile-time guard for the wire-protocol ABI described above. The same
+// three asserts live in each of the three sibling headers; if you reorder
+// / add / remove a field in one copy and forget to mirror it in the others,
+// at least one of them fails to build. Per-field offsets (not raw sizeof)
+// because trailing padding after `memory_type` is compiler-defined and not
+// part of what model.dll actually reads.
+static_assert(offsetof(tensor_t, data) == 0,
+              "tensor_t.data must remain the first field");
+static_assert(offsetof(tensor_t, shape) == sizeof(void *),
+              "tensor_t.shape moved -- update all three tensor_t copies");
+static_assert(offsetof(tensor_t, memory_type) ==
+                  offsetof(tensor_t, element_size) + sizeof(size_t),
+              "tensor_t.memory_type moved -- update all three tensor_t "
+              "copies");
 
 // A contiguous array of tensor_t descriptors (inputs or outputs).
 struct span_t {

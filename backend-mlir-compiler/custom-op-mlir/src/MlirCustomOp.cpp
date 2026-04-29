@@ -138,10 +138,17 @@ TensorData marshal_input_tensors(OrtKernelContext *context,
     data.tensors[i].rank = data.shapes[i].size();
     data.tensors[i].element_size =
         ort_element_size(tensor_info.GetElementType());
+    // Carry the OrtValue's OrtMemoryInfoDeviceType straight into
+    // tensor_t.memory_type (the enum values are 1:1, see custom_op_mlir.hpp).
+    // prepare_input fast-paths TENSOR_MEMORY_GPU into an alias (no H2D copy);
+    // CPU / FPGA / NPU fall through to the legacy host H2D path.
+    data.tensors[i].memory_type =
+        static_cast<int>(input_tensor.GetTensorMemoryInfo().GetDeviceType());
 
     MY_LOG(3) << "Input[" << i << "] (ort_idx=" << ort_idx
               << "): rank=" << data.tensors[i].rank
-              << " element_size=" << data.tensors[i].element_size;
+              << " element_size=" << data.tensors[i].element_size
+              << " memory_type=" << data.tensors[i].memory_type;
   }
 
   data.span.data = data.tensors.data();
@@ -213,10 +220,17 @@ TensorData marshal_output_tensors(
     data.tensors[i].shape = data.shapes[i].data();
     data.tensors[i].rank = data.shapes[i].size();
     data.tensors[i].element_size = onnx_elem_type_size(output_meta.elem_type());
+    // Same memory-type carry-over as inputs (lets finalize_output skip the
+    // per-inference D2H when ORT pre-allocated the output OrtValue in our
+    // morphizen GPU-mapped memory; matters for present_key/value sharing
+    // buffers with past_key/value under past_present_share_buffer=true).
+    data.tensors[i].memory_type =
+        static_cast<int>(output_tensor.GetTensorMemoryInfo().GetDeviceType());
 
     MY_LOG(3) << "Output[" << i << "] (ort_idx=" << ort_idx
               << "): rank=" << data.tensors[i].rank
-              << " element_size=" << data.tensors[i].element_size;
+              << " element_size=" << data.tensors[i].element_size
+              << " memory_type=" << data.tensors[i].memory_type;
   }
 
   data.span.data = data.tensors.data();
