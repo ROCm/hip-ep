@@ -412,6 +412,85 @@ int hip_reduce_sum(
     int hip_dtype);
 
 /* =========================================================================
+ * SkipSimplifiedLayerNormalization (fused add + RMS norm)
+ * =========================================================================
+ *
+ * ONNX com.microsoft SkipSimplifiedLayerNormalization:
+ *   sum = input + skip [+ bias]
+ *   output = SimplifiedLayerNormalization(sum) * gamma
+ *
+ * RMS norm (no mean subtraction): inv_std = rsqrt(mean(sum^2) + epsilon)
+ * with mean over the last dimension (hidden_dim).
+ *
+ * Parameters:
+ *   stream               - hipStream_t cast to void*
+ *   input, skip          - [num_rows, hidden_dim]
+ *   gamma                - [hidden_dim]
+ *   bias                 - [hidden_dim] or NULL (optional)
+ *   output               - [num_rows, hidden_dim]
+ *   input_skip_bias_sum  - NULL or same shape as input; when non-NULL, writes
+ *                          fused sum (input + skip [+ bias]) for downstream use
+ *   num_rows             - leading dimension (e.g. batch * seq)
+ *   hidden_dim           - normalized axis size (= gamma length)
+ *   hip_dtype            - HIP_DTYPE_FLOAT32 or HIP_DTYPE_FLOAT16
+ *   epsilon              - numeric stability (same as ONNX epsilon)
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_skip_simplified_layer_norm(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,
+    void* output,
+    void* input_skip_bias_sum,
+    int64_t num_rows,
+    int64_t hidden_dim,
+    int hip_dtype,
+    float epsilon);
+
+/* =========================================================================
+ * SkipLayerNormalization (fused add + LayerNorm)
+ * =========================================================================
+ *
+ * ONNX Runtime com.microsoft SkipLayerNormalization:
+ *   sum = input + skip
+ *   output = LayerNormalization(sum) * gamma + beta
+ *
+ * LayerNorm uses population variance on the last axis:
+ *   var = mean(sum^2) - mean(sum)^2 (clamped to >= 0), then
+ *   y_j = (sum_j - mean) * rsqrt(var + epsilon) * gamma_j + beta_j
+ *
+ * Parameters:
+ *   stream          - hipStream_t cast to void*
+ *   input, skip     - [num_rows, hidden_dim]
+ *   gamma           - [hidden_dim]
+ *   beta            - [hidden_dim] or NULL (affine bias; omit = zeros)
+ *   output          - [num_rows, hidden_dim]
+ *   input_skip_sum  - NULL or same shape as input; when non-NULL, writes
+ *                     input + skip before normalization
+ *   num_rows        - leading flattened dim (e.g. batch * seq)
+ *   hidden_dim      - normalized axis size
+ *   hip_dtype       - HIP_DTYPE_FLOAT32 or HIP_DTYPE_FLOAT16
+ *   epsilon         - same as ONNX epsilon
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_skip_layer_norm(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* beta,
+    void* output,
+    void* input_skip_sum,
+    int64_t num_rows,
+    int64_t hidden_dim,
+    int hip_dtype,
+    float epsilon);
+
+/* =========================================================================
  * MatMulNBits (Fused Dequant + MatMul)
  * =========================================================================
  *
