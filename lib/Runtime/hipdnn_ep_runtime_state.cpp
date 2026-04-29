@@ -993,6 +993,22 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   if (state->workspace_size >= needed_size)
     return 0;
 
+  // Amortize growth: when enlarging an existing workspace, round the new
+  // size up to at least 1.5x the current buffer. Callers whose request
+  // size grows monotonically by a small increment per inference (e.g. the
+  // GQA decode path, which sizes S buffers to B*H*total_seq and adds B*H
+  // elements per token) would otherwise trigger a hipStreamSynchronize +
+  // hipFree + hipMalloc cycle on every decode step; with the 1.5x factor
+  // that drops to O(log N) reallocations over the whole generation.
+  // Cold-start (no existing workspace) keeps the exact requested size so
+  // warmup doesn't silently double large initial allocations.
+  size_t alloc_size = needed_size;
+  if (state->workspace_size > 0) {
+    size_t grown = state->workspace_size + state->workspace_size / 2; // 1.5x
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
   // Grow: free old, allocate new.
   // Sync the stream first to ensure no in-flight kernel is still using the
   // old workspace buffer (prevents use-after-free on async GPU execution).
@@ -1005,17 +1021,18 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
     state->workspace_size = 0;
   }
 
-  if (hipMalloc(&state->workspace, needed_size) != hipSuccess) {
+  if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
     fprintf(
         stderr,
         "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
-        needed_size);
+        alloc_size);
     return -1;
   }
 
-  state->workspace_size = needed_size;
-  RUNTIME_DEBUG_LOG("[workspace] Allocated shared workspace: %zu bytes\n",
-                    needed_size);
+  state->workspace_size = alloc_size;
+  RUNTIME_DEBUG_LOG(
+      "[workspace] Allocated shared workspace: %zu bytes (requested %zu)\n",
+      alloc_size, needed_size);
   return 0;
 }
 
