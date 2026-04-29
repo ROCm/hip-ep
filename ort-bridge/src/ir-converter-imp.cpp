@@ -5,6 +5,7 @@
 #define MORPHIZEN_USER 1
 #include "./ir-converter-imp.hpp"
 #include "./ort-graph-wrapper.hpp"
+#include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <morphizen-utils/morphizen-utils.hpp>
@@ -236,56 +237,131 @@ IRConverterImp::convert_graph_outputs(morphizen::Graph& graph) const {
 OrtStatus*
 IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting graph initializers to ONNX format";
+
+  // Get the model path so we can resolve relative external-data paths
+  // returned by OrtApi to absolute paths that downstream passes can fopen.
+  const ORTCHAR_T* api_model_path = nullptr;
+  throw_if_error(ort_api.Graph_GetModelPath(&graph_.get(), &api_model_path));
+  std::filesystem::path model_path = api_model_path
+                                         ? std::filesystem::path(api_model_path)
+                                         : std::filesystem::path();
+  std::filesystem::path model_dir =
+      model_path.has_parent_path() ? model_path.parent_path() : model_path;
+
   // Get initializers from the ORT graph
   auto initializers = graph_.initializers();
   for (const OrtValueInfo* initializer : initializers) {
     // Create ValueInfo wrapper for the initializer
     auto value_info =
         Ort::ConstValueInfo(initializer); // Create ONNX ValueInfoProto
-    const OrtValue* ort_value = nullptr;
-    throw_if_error(
-        ort_api.ValueInfo_GetInitializerValue(value_info, &ort_value));
-    if (ort_value == nullptr) {
-      MY_LOG(2) << "Initializer value is null for: " << value_info.GetName();
-      throw_error(std::string("cannot get OrtValue from OrtValueInfo: name=") +
-                  value_info.GetName());
+
+    // Try the file-reference path first: ValueInfo_GetExternalInitializerInfo
+    // returns the {file_path, offset, byte_size} triple WITHOUT triggering
+    // ORT to mmap the data. Avoiding mmap here is the whole point of this
+    // path -- for multi-GB models, mmap pulls the whole external data file
+    // into the system page cache, doubling peak memory alongside the
+    // hipMalloc'd VRAM blob.
+    Ort::ExternalInitializerInfo ext_info{nullptr};
+    auto ext_status = value_info.GetExternalInitializerInfo(ext_info);
+    if (!ext_status.IsOK()) {
+      throw_if_error(ext_status.release());
     }
-    // Get tensor type and shape information
-    auto tensor_value = Ort::ConstValue(ort_value);
-    auto type_info = tensor_value.GetTypeInfo();
-    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
 
-    // Set tensor name (if available)
-    // Note: ORT ConstValue doesn't have a direct name accessor
-    // This would need to be provided from the calling context
-    // tensor_proto->set_name("tensor_name");
-
-    // Set element type
-    auto element_type = tensor_info.GetElementType();
-    auto shape = tensor_info.GetShape();
-
-    // Get raw tensor data
-    const void* tensor_data = tensor_value.GetTensorRawData();
-    size_t data_size = tensor_value.GetTensorSizeInBytes();
-
-    // For tensors above the threshold, use the no-copy memory-address
-    // mechanism: encode the raw pointer as an int64 in the external data offset
-    // field with location sentinel "*/_ORT_MEM_ADDR_/*". The downstream decoder
-    // reconstructs the pointer — zero copy. ORT owns the tensor data for the
-    // session lifetime.
     morphizen::TensorProto* raw_proto = nullptr;
-    if (data_size > config_.external_data_threshold) {
+
+    if (ext_info && static_cast<size_t>(ext_info.GetByteSize()) >
+                        config_.external_data_threshold) {
+      // External data above threshold: emit a real file path + file offset
+      // into the IR. pass_main / OnnxToHip will fread the data per-tensor
+      // into a small staging buffer at upload time.
+      auto rel_path_ws = ext_info.GetFilePath();
+      std::filesystem::path rel_path(rel_path_ws);
+      // The OrtApi guarantees a relative path; we resolve against the model
+      // directory to get an absolute path the runtime can fopen without
+      // needing to know the model location.
+      std::filesystem::path abs_path =
+          rel_path.is_absolute() ? rel_path : (model_dir / rel_path);
+      std::string abs_path_str = abs_path.u8string();
+      int64_t file_offset = ext_info.GetFileOffset();
+      size_t byte_size = ext_info.GetByteSize();
+
+      // Need shape + element type, which require the OrtValue. ORT will
+      // construct a stub tensor descriptor without materializing the data
+      // bytes here, but the call API still expects an OrtValue handle.
+      // (Retrieving type info via a separate API would be cleaner; this
+      // matches the existing wrapper surface area for now.)
+      const OrtValue* ort_value = nullptr;
+      throw_if_error(
+          ort_api.ValueInfo_GetInitializerValue(value_info, &ort_value));
+      if (ort_value == nullptr) {
+        throw_error(
+            std::string("cannot get OrtValue from OrtValueInfo: name=") +
+            value_info.GetName());
+      }
+      auto tensor_value = Ort::ConstValue(ort_value);
+      auto type_info = tensor_value.GetTypeInfo();
+      auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+      auto element_type = tensor_info.GetElementType();
+      auto shape = tensor_info.GetShape();
+
       MY_LOG(2) << "Initializer '" << value_info.GetName()
-                << "': no-copy path (size=" << data_size << ")";
+                << "': file-ref path (size=" << byte_size << ", file=\""
+                << abs_path_str << "\", offset=" << file_offset << ")";
       raw_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_with_external_data)(
-          value_info.GetName(), shape, element_type, "*/_ORT_MEM_ADDR_/*",
-          data_size,
-          static_cast<int64_t>(reinterpret_cast<uintptr_t>(tensor_data)));
+          value_info.GetName(), shape, element_type, abs_path_str, byte_size,
+          static_cast<size_t>(file_offset));
     } else {
-      MY_LOG(2) << "Initializer '" << value_info.GetName()
-                << "': copy path (size=" << data_size << ")";
-      raw_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
-          value_info.GetName(), shape, element_type, tensor_data, data_size);
+      // No external file info available for this initializer (either it is
+      // stored inline in the .onnx, or ORT chose not to expose its file
+      // location). Resolve the OrtValue and pick between the legacy
+      // no-copy mem-addr path (large tensors -- pointer aliases an OrtValue
+      // backing buffer that lives for the session) and the inline copy path
+      // (small tensors -- bytes are memcpy'd into the morphizen
+      // TensorProto so we don't carry an extra liveness dependency).
+      //
+      // IMPORTANT: do NOT default to tensor_proto_new_raw_data for large
+      // tensors. The morphizen-core wrapper memcpy's `data_size` bytes into
+      // the TensorProto, but downstream OnnxToHip emits a DenseElementsAttr
+      // pointing into that copy whose lifetime is the MLIRContext --
+      // released as soon as compile_mlir() returns. The mem-addr pointer
+      // we record into the transfer file would then be dangling by the
+      // time pass_main streams it into hipMemcpy.
+      const OrtValue* ort_value = nullptr;
+      throw_if_error(
+          ort_api.ValueInfo_GetInitializerValue(value_info, &ort_value));
+      if (ort_value == nullptr) {
+        MY_LOG(2) << "Initializer value is null for: " << value_info.GetName();
+        throw_error(
+            std::string("cannot get OrtValue from OrtValueInfo: name=") +
+            value_info.GetName());
+      }
+      auto tensor_value = Ort::ConstValue(ort_value);
+      auto type_info = tensor_value.GetTypeInfo();
+      auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+      auto element_type = tensor_info.GetElementType();
+      auto shape = tensor_info.GetShape();
+      const void* tensor_data = tensor_value.GetTensorRawData();
+      size_t data_size = tensor_value.GetTensorSizeInBytes();
+
+      if (data_size > config_.external_data_threshold) {
+        // Large tensor: use the no-copy memory-address mechanism. Encode the
+        // raw pointer as an int64 in the external_data offset field with
+        // location sentinel "*/_ORT_MEM_ADDR_/*". ORT owns the tensor data
+        // for the session lifetime, so the pointer remains valid.
+        MY_LOG(2) << "Initializer '" << value_info.GetName()
+                  << "': no-copy mem-addr path (size=" << data_size << ")";
+        raw_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_with_external_data)(
+            value_info.GetName(), shape, element_type, "*/_ORT_MEM_ADDR_/*",
+            data_size,
+            static_cast<int64_t>(reinterpret_cast<uintptr_t>(tensor_data)));
+      } else {
+        // Small tensor: memcpy the bytes into the morphizen TensorProto so
+        // there is no liveness dependency on the OrtValue backing buffer.
+        MY_LOG(2) << "Initializer '" << value_info.GetName()
+                  << "': copy path (size=" << data_size << ")";
+        raw_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
+            value_info.GetName(), shape, element_type, tensor_data, data_size);
+      }
     }
 
     morphizen_cxx::GraphRef(graph).add_initialized_tensor(*raw_proto);
