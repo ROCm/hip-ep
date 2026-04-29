@@ -82,7 +82,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements));
+        fs, options.externalizeMinNumElements, options.skipConstantData));
   } else {
     ConvertOnnxToHipPassOptions onnxToHipOpts;
     onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
@@ -107,7 +107,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements));
+        fs, options.externalizeMinNumElements, options.skipConstantData));
   } else {
     ConvertOnnxToHipPassOptions onnxToHipOpts;
     onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;

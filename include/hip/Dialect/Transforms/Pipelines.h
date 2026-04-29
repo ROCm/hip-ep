@@ -42,6 +42,11 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc(
           "Minimum number of tensor elements to externalize (0 = disabled)"),
       llvm::cl::init(0)};
+  Option<bool> skipConstantData{
+      *this, "skip-constant-data",
+      llvm::cl::desc("Skip writing constant data to constants.bin (metadata "
+                     "only). Used for ORT EP live-compile path."),
+      llvm::cl::init(false)};
 };
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.
