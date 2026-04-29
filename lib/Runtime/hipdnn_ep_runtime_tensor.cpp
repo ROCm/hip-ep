@@ -5,6 +5,7 @@
 #include "debug_log.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
+#include "op_profile.h"
 #include "runtime_state_internal.h"
 
 #include <cassert>
@@ -375,6 +376,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     g_perf.d2h_count = 0;
     (void)hipEventRecord(g_perf.h2d_start,
                          static_cast<hipStream_t>(state->stream));
+    op_profile_reset(static_cast<OpProfileState *>(state->op_profile));
     g_perf.inference_num++; // marks "window opened"; flush above guards on this
   }
 
@@ -627,6 +629,8 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
             total_ms > 0 ? (h2d_ms / total_ms * 100.0) : 0.0,
             total_ms > 0 ? (compute_ms / total_ms * 100.0) : 0.0,
             total_ms > 0 ? (d2h_ms / total_ms * 100.0) : 0.0);
+    auto *op_ps = static_cast<OpProfileState *>(state->op_profile);
+    op_profile_resolve_and_print(op_ps);
   }
 
   return HIPDNN_EP_SUCCESS;
