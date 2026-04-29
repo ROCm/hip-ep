@@ -132,7 +132,7 @@ extern "C" int hip_skip_layer_norm(void *stream, const void *input,
         (long long)num_rows, (long long)hidden_dim, (double)epsilon, has_beta,
         write_sum, grid.x, block.x);
     hipLaunchKernelGGL(
-        skip_layer_norm_row_kernel<float, kBlockSize>, grid, block, 0,
+        (skip_layer_norm_row_kernel<float, kBlockSize>), grid, block, 0,
         hip_stream, static_cast<const float *>(input),
         static_cast<const float *>(skip), static_cast<const float *>(gamma),
         has_beta ? static_cast<const float *>(beta) : nullptr,
@@ -147,7 +147,7 @@ extern "C" int hip_skip_layer_norm(void *stream, const void *input,
         (long long)num_rows, (long long)hidden_dim, (double)epsilon, has_beta,
         write_sum, grid.x, block.x);
     hipLaunchKernelGGL(
-        skip_layer_norm_row_kernel<__half, kBlockSize>, grid, block, 0,
+        (skip_layer_norm_row_kernel<__half, kBlockSize>), grid, block, 0,
         hip_stream, static_cast<const __half *>(input),
         static_cast<const __half *>(skip), static_cast<const __half *>(gamma),
         has_beta ? static_cast<const __half *>(beta) : nullptr,
