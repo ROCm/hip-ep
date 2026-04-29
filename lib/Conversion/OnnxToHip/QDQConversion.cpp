@@ -92,12 +92,6 @@ static int64_t getDefaultAxis(RankedTensorType inputType) {
   return axis;
 }
 
-static Value makeScalarF32(PatternRewriter &rewriter, Location loc, float v) {
-  auto type = RankedTensorType::get({}, rewriter.getF32Type());
-  auto attr = DenseElementsAttr::get(type, ArrayRef<float>{v});
-  return arith::ConstantOp::create(rewriter, loc, type, attr);
-}
-
 static Value makeScalarZeroPoint(PatternRewriter &rewriter, Location loc,
                                  Type elemType) {
   auto type = RankedTensorType::get({}, elemType);

@@ -79,12 +79,12 @@ existing `--convert-hip-to-llvm` pipeline.
 |---|---|
 | `GroupQueryAttention` | `hip.gqa` |
 
-### Quantization (placeholder, no-op for now)
+### Quantization
 
 | ONNX | HIP |
 |---|---|
-| `QuantizeLinear` | `hip.quantize_linear` |
-| `DequantizeLinear` | `hip.dequantize_linear` |
+| `QuantizeLinear` | decomposed to `hip.cast`, `hip.binary_elementwise`, `hip.add`, and `hip.unary_elementwise` |
+| `DequantizeLinear` | decomposed to `hip.cast`, `hip.sub`, and `hip.mul`; constant weight DQ folds to float constants |
 
 ### MIOpen: Activation (`miopenActivationForward`)
 
@@ -153,7 +153,6 @@ Tested on `Llama-3.2-1B-Instruct` quantized ONNX model:
 | `hip.miopen.mul` | 16 |
 | `hip.gqa` | 16 |
 | `hip.silu` | 16 |
-| `hip.quantize_linear` | 193 |
-| `hip.dequantize_linear` | 274 |
+| Q/DQ | decomposed/folded before HIP lowering |
 
 Remaining `onnx.*` / `com.microsoft.*` ops: **0**.
