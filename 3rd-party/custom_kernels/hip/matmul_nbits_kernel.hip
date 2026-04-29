@@ -314,11 +314,12 @@ __global__ void matmul_nbits_gemv_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
-        [[maybe_unused]] float zp_correction[TILE_N];
-        if constexpr (HAS_ZP) {
+        float zp_correction[TILE_N];
 #pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++)
-                zp_correction[tn] = 0.0f;
+        for (int tn = 0; tn < TILE_N; tn++)
+            zp_correction[tn] = 0.0f;
+
+        if constexpr (HAS_ZP) {
             if (lane_id == 0) {
                 for (int64_t g = 0; g < k_blocks; g++) {
                     int64_t k_start = g * block_size;
@@ -335,6 +336,22 @@ __global__ void matmul_nbits_gemv_kernel(
                     }
                 }
             }
+        } else {
+            if (lane_id == 0) {
+                for (int64_t g = 0; g < k_blocks; g++) {
+                    int64_t k_start = g * block_size;
+                    int64_t k_end   = k_start + block_size;
+                    if (k_end > K) k_end = K;
+                    float a_sum = 0.0f;
+                    for (int64_t k = k_start; k < k_end; k++)
+                        a_sum += static_cast<float>(a_base[k]);
+#pragma unroll
+                    for (int tn = 0; tn < TILE_N; tn++) {
+                        float sv = static_cast<float>(s_rows[tn][g]);
+                        zp_correction[tn] += a_sum * 8.0f * sv;
+                    }
+                }
+            }
         }
 
 #pragma unroll
@@ -347,8 +364,7 @@ __global__ void matmul_nbits_gemv_kernel(
             if (lane_id == 0) {
                 int64_t n = n_base + tn;
                 if (n < N) {
-                    if constexpr (HAS_ZP)
-                        val -= zp_correction[tn];
+                    val -= zp_correction[tn];
                     if (bias)
                         val += static_cast<float>(bias[n]);
                     output[batch * M * N + m * N + n] =
