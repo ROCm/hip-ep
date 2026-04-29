@@ -554,6 +554,19 @@ void SoftplusOp::getEffects(
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
+
+//===----------------------------------------------------------------------===//
+// GeluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GeluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void GeluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 //===----------------------------------------------------------------------===//
 // ReciprocalOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
