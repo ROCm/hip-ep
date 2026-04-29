@@ -212,13 +212,25 @@ def make_llama_inputs(cfg: LlamaModelConfig) -> dict:
     return inputs
 
 
+AMD_VENDOR_ID = 0x1002
+
+
 def run_timed_iobinding(
-    sess, inputs, cfg: LlamaModelConfig, warmup=NUM_WARMUP, runs=NUM_RUNS
+    sess,
+    inputs,
+    cfg: LlamaModelConfig,
+    warmup=NUM_WARMUP,
+    runs=NUM_RUNS,
+    use_device_memory=False,
 ):
     """Run inference using IOBinding with shared past/present KV cache buffers.
 
     Binds the same OrtValue to both past_key_values.N.{key,value} (input) and
     present.N.{key,value} (output) so the runtime sees past_ptr == present_ptr.
+
+    When use_device_memory=True, KV cache OrtValues are allocated via the EP's
+    GPU allocator (hipHostMalloc on AMD iGPU) so the runtime sees
+    memory_type==TENSOR_MEMORY_GPU and aliases them directly — zero H2D/D2H.
     """
     io = sess.io_binding()
 
@@ -226,9 +238,17 @@ def run_timed_iobinding(
     kv_cache = {}
     for i in range(cfg.num_kv_layers):
         for kind in ("key", "value"):
-            kv_cache[(i, kind)] = ort.OrtValue.ortvalue_from_numpy(
-                np.zeros(kv_shape, dtype=np.float16)
-            )
+            if use_device_memory:
+                kv_cache[(i, kind)] = ort.OrtValue.ortvalue_from_shape_and_type(
+                    list(kv_shape),
+                    np.float16,
+                    device_type="gpu",
+                    vendor_id=AMD_VENDOR_ID,
+                )
+            else:
+                kv_cache[(i, kind)] = ort.OrtValue.ortvalue_from_numpy(
+                    np.zeros(kv_shape, dtype=np.float16)
+                )
 
     _ORT_TYPE_MAP = {
         "tensor(float16)": np.float16,
