@@ -218,11 +218,11 @@ void matmul_nbits_gemv_kernel(
 #pragma unroll
                 for (int i = 0; i < 8; i++)
                     dot += a_vals[i] *
-                           static_cast<float>(static_cast<int>((b_pk[tn].x >> (i * 4)) & 0xF) - 8);
+                           static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF);
 #pragma unroll
                 for (int i = 0; i < 8; i++)
                     dot += a_vals[8 + i] *
-                           static_cast<float>(static_cast<int>((b_pk[tn].y >> (i * 4)) & 0xF) - 8);
+                           static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
                 partial[tn] += dot * sv[tn];
             }
         }
@@ -260,7 +260,7 @@ void matmul_nbits_gemv_kernel(
 #pragma unroll
                     for (int i = 0; i < 8; i++)
                         dot += a_vals[i] *
-                               static_cast<float>(static_cast<int>((packed >> (i * 4)) & 0xF) - 8);
+                               static_cast<float>((packed >> (i * 4)) & 0xF);
                     partial[tn] += dot * sv;
                 }
             }
@@ -286,7 +286,7 @@ void matmul_nbits_gemv_kernel(
                 if constexpr (HAS_ZP) {
                     partial[tn] += a_val * static_cast<float>(ival) * sv;
                 } else {
-                    partial[tn] += a_val * static_cast<float>(ival - 8) * sv;
+                    partial[tn] += a_val * static_cast<float>(ival) * sv;
                 }
             }
         }
