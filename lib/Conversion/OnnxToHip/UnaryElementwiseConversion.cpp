@@ -7,7 +7,7 @@
 // with a numeric `kind` discriminator.  alpha/beta carry op-specific scalar
 // attributes (LeakyRelu negative slope; Clip min/max).
 //
-// Supported ONNX ops (Tier 1 in docs/kokoro_tts_plan.md):
+// Supported ONNX ops:
 //   onnx.Sin, onnx.Cos, onnx.Exp, onnx.Tanh, onnx.Floor, onnx.Round,
 //   onnx.Atan, onnx.LeakyRelu, onnx.Clip
 //

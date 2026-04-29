@@ -8,7 +8,7 @@
 // runtime layer (kernel reads per-axis lhs/rhs strides; stride==0 means
 // broadcast).
 //
-// Supported ONNX ops (Tier 1 in docs/kokoro_tts_plan.md):
+// Supported ONNX ops:
 //   onnx.Div, onnx.Pow
 //
 // Kind values must match hip_binary_kind_t in hip_custom_kernels.h:
