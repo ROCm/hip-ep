@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -350,6 +351,15 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                          void *output, int64_t M, int64_t N, int64_t K,
                          int64_t batch_count, int64_t elem_size) {
+  OP_PROFILE(
+      "matmul",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
+                 (long long)N, (long long)K);
+        return std::string(b);
+      },
+      state);
   if (!state || !A || !B || !output) {
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
     return -1;

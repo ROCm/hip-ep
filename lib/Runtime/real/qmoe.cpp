@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -33,6 +34,16 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
               int64_t normalize_routing_weights, int64_t elem_size) {
+  OP_PROFILE(
+      "qmoe",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lldx%lld,e=%lld", (long long)num_tokens,
+                 (long long)hidden_size, (long long)inter_size,
+                 (long long)num_experts);
+        return std::string(b);
+      },
+      state);
   if (router_weights) {
     fprintf(stderr, "wrap_qmoe: router_weights is not supported yet\n");
     return -1;

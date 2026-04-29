@@ -6,6 +6,7 @@
 #include "hip/timing.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
+#include "op_profile.h"
 #include "runtime_state_internal.h"
 
 #include "model_metadata_generated.h"
@@ -214,6 +215,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->gqa_gemm_cache = nullptr;
+  state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
 
@@ -839,6 +842,18 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->gpu_constants)
     free(state->gpu_constants);
 
+  // Free GQA GEMM descriptor cache
+  if (state->gqa_gemm_cache) {
+    hipdnn_ep_gqa_gemm_cache_destroy(state->gqa_gemm_cache);
+    state->gqa_gemm_cache = nullptr;
+  }
+
+  // Free op profiling state
+  if (state->op_profile) {
+    op_profile_destroy(static_cast<OpProfileState *>(state->op_profile));
+    state->op_profile = nullptr;
+  }
+
   // Destroy hipBLASLt handle
   if (state->hipblas_handle) {
     hipblasLtDestroy(state->hipblas_handle);
@@ -879,6 +894,10 @@ void *hipdnn_ep_state_get_miopen_handle(RuntimeState *state) {
 
 void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
   return state ? static_cast<void *>(state->hipblas_handle) : nullptr;
+}
+
+void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
+  return state ? state->op_profile : nullptr;
 }
 
 //===----------------------------------------------------------------------===//

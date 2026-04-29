@@ -369,6 +369,13 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state, TensorBuffer *buffer);
 //   buffer: TensorBuffer from prepare_input
 void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer);
 
+// Per-operator profiling state accessor (OpProfileState*, gated on
+// HIPDNN_EP_PERF)
+void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
+
+// GQA GEMM cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
+
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
 //
