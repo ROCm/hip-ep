@@ -17,6 +17,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "../common/DllLoader.h"
+#include "CrashHandler.h"
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4244) // Conversion warnings in LLVM JSON.h
@@ -151,6 +152,7 @@ static void printHelp(const char *argv0) {
 }
 
 int main(int argc, char **argv) {
+  hip::install_crash_handlers("hip-inspect-dll");
   std::string dllPath;
   bool dumpJson = false;
 
