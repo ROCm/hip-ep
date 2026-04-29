@@ -31,14 +31,14 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     };
 
     Value statePtr = adaptor.getHandle();
-    Value APtr = extractMemRefPtr(adaptor.getA(), rewriter, loc);
-    Value BPtr = extractMemRefPtr(adaptor.getB(), rewriter, loc);
-    Value scalesPtr = extractMemRefPtr(adaptor.getScales(), rewriter, loc);
+    Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
+    Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
+    Value scalesPtr = extractContiguousMemRefPtr(adaptor.getScales(), rewriter, loc);
     Value zeroPointsPtr =
         extractOptionalMemRefPtr(adaptor.getZeroPoints(), rewriter, loc);
     Value gIdxPtr = extractOptionalMemRefPtr(adaptor.getGIdx(), rewriter, loc);
     Value biasPtr = extractOptionalMemRefPtr(adaptor.getBias(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto AType = cast<MemRefType>(op.getA().getType());
     int64_t ARank = AType.getRank();
