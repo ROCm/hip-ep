@@ -55,10 +55,32 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe(tokens=%lld, hidden=%lld, inter=%lld, "
-                    "experts=%lld, k=%lld, bits=%lld, elem=%lld)\n",
+                    "experts=%lld, k=%lld, bits=%lld, block=%lld, elem=%lld)\n",
                     (long long)num_tokens, (long long)hidden_size,
                     (long long)inter_size, (long long)num_experts, (long long)k,
-                    (long long)expert_weight_bits, (long long)elem_size);
+                    (long long)expert_weight_bits, (long long)block_size,
+                    (long long)elem_size);
+
+  // Guard against pathological metadata: block_size==0 would otherwise crash
+  // with STATUS_INTEGER_DIVIDE_BY_ZERO inside the k_blocks computations below
+  // (and produces invalid quant layouts even at >0 if not a multiple of 2).
+  if (block_size <= 0 || (block_size & 1) != 0) {
+    fprintf(stderr,
+            "wrap_qmoe: invalid block_size=%lld (must be a positive even "
+            "value matching the weights' quant block layout)\n",
+            (long long)block_size);
+    return -1;
+  }
+  if (hidden_size <= 0 || inter_size <= 0 || num_experts <= 0 || k <= 0 ||
+      num_tokens <= 0 || elem_size <= 0) {
+    fprintf(stderr,
+            "wrap_qmoe: invalid sizes (tokens=%lld hidden=%lld inter=%lld "
+            "experts=%lld k=%lld elem=%lld)\n",
+            (long long)num_tokens, (long long)hidden_size,
+            (long long)inter_size, (long long)num_experts, (long long)k,
+            (long long)elem_size);
+    return -1;
+  }
 
   void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {
@@ -167,10 +189,22 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                             e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
       const char *fc1_s_e = static_cast<const char *>(fc1_scales) +
                             e * fusion_inter * k_blocks_fc1 * elem_size;
-      const void *fc1_zp_e = fc1_zero_points
-                                 ? static_cast<const char *>(fc1_zero_points) +
-                                       e * fusion_inter * k_blocks_fc1
-                                 : nullptr;
+      // Per-expert ZP slice: ONNX MatMulNBits with bits=4 stores
+      // zero_points as uint8 packed nibbles (two 4-bit values per byte),
+      // so the per-row size is ceil(k_blocks/2) bytes, NOT k_blocks. Using
+      // the unpacked stride here makes expert e read ZPs from a region 2x
+      // too large, overshooting into the next expert's bytes; downstream
+      // dequantization grows ~10x per MoE layer until fp16 overflows
+      // (router_probs becomes Inf -> SSLN T5LN emits NaN -> topk routing
+      // returns -1 for every token -> 0/N experts active from layer ~3 on
+      // -> garbage logits). Matches `convertZpToFp16`'s
+      // `packed_cols = (groups_k + 1) / 2` in
+      // 3rd-party/custom_kernels/hip/matmul_nbits_kernel.hip and the
+      // hard-coded `zp_elem_size = 1` we pass to hip_matmul_nbits below.
+      const void *fc1_zp_e =
+          fc1_zero_points ? static_cast<const char *>(fc1_zero_points) +
+                                e * fusion_inter * ((k_blocks_fc1 + 1) / 2)
+                          : nullptr;
       const void *fc1_b_e = fc1_bias ? static_cast<const char *>(fc1_bias) +
                                            e * fusion_inter * elem_size
                                      : nullptr;
@@ -197,10 +231,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                             e * hidden_size * k_blocks_fc2 * blob_size_fc2;
       const char *fc2_s_e = static_cast<const char *>(fc2_scales) +
                             e * hidden_size * k_blocks_fc2 * elem_size;
-      const void *fc2_zp_e = fc2_zero_points
-                                 ? static_cast<const char *>(fc2_zero_points) +
-                                       e * hidden_size * k_blocks_fc2
-                                 : nullptr;
+      // See fc1_zp_e comment above -- same packed-nibble layout for fc2.
+      const void *fc2_zp_e =
+          fc2_zero_points ? static_cast<const char *>(fc2_zero_points) +
+                                e * hidden_size * ((k_blocks_fc2 + 1) / 2)
+                          : nullptr;
       const void *fc2_b_e = fc2_bias ? static_cast<const char *>(fc2_bias) +
                                            e * hidden_size * elem_size
                                      : nullptr;
