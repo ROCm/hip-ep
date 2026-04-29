@@ -13,6 +13,7 @@ llvm_map_components_to_libnames(llvm_libs Support)
 
 target_link_libraries(hip-test-dll
   PRIVATE
+  HipSupport
   ${llvm_libs}
 )
 

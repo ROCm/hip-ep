@@ -54,6 +54,14 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
+  // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
+  // Caches hipBLASLt descriptors + algorithms by GEMM shape.
+  void *gqa_gemm_cache;
+
+  // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
+  // Allocated in state_init, freed in state_cleanup.
+  void *op_profile;
+
   // hipDNN graph execution support.
   // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
   // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up

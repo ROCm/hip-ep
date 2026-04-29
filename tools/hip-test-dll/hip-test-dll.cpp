@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "../common/DllLoader.h"
+#include "CrashHandler.h"
 #include "hip/Support/DiskFileSystem.h"
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -306,6 +307,7 @@ static bool parseMetadata(const char *json_str, std::vector<TensorMeta> &inputs,
 }
 
 int main(int argc, char **argv) {
+  hip::install_crash_handlers("hip-test-dll");
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
               << " <model.dll> [--input-shape INDEX=DIMS;...] [--iterations N] "

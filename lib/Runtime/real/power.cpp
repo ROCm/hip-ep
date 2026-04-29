@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -243,6 +244,14 @@ int launchSqrtHip(RuntimeState *state, void *input, void *output,
 int wrap_power(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha,
                double beta, double gamma) {
+  OP_PROFILE(
+      "power",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
   if (!state || !input || !output) {
     fprintf(stderr, "wrap_power: null argument\n");
     return -1;
