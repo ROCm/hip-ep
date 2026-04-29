@@ -24,11 +24,14 @@ void op_profile_destroy(OpProfileState *ps);
 void op_profile_reset(OpProfileState *ps);
 void op_profile_resolve_and_print(OpProfileState *ps);
 void op_profile_add_pending(OpProfileState *ps, const std::string &name,
-                            const std::string &shape, hipEvent_t start,
-                            hipEvent_t stop, double cpuMs);
+                            const std::string &shape, int eventIndex,
+                            double cpuMs);
 void op_profile_add_cpu(OpProfileState *ps, const std::string &name,
                         double cpuMs);
 bool op_profile_is_active(OpProfileState *ps);
+int op_profile_acquire_event_pair(OpProfileState *ps);
+hipEvent_t op_profile_get_start_event(OpProfileState *ps, int index);
+hipEvent_t op_profile_get_stop_event(OpProfileState *ps, int index);
 
 struct OpProfileCpuScope {
   OpProfileState *ps;
@@ -54,26 +57,24 @@ struct OpProfileScope {
   OpProfileState *ps;
   std::string name;
   std::string shape;
-  hipEvent_t start, stop;
+  int eventIndex;
   hipStream_t stream;
   std::chrono::steady_clock::time_point cpuStart;
 
   OpProfileScope(OpProfileState *p, std::string n, std::string sh,
-                 hipStream_t s)
-      : ps(p), name(std::move(n)), shape(std::move(sh)), stream(s),
-        cpuStart(std::chrono::steady_clock::now()) {
-    hipEventCreate(&start);
-    hipEventCreate(&stop);
-    hipEventRecord(start, stream);
+                 hipStream_t s, int evIdx)
+      : ps(p), name(std::move(n)), shape(std::move(sh)), eventIndex(evIdx),
+        stream(s), cpuStart(std::chrono::steady_clock::now()) {
+    hipEventRecord(op_profile_get_start_event(ps, eventIndex), stream);
   }
 
   ~OpProfileScope() {
-    hipEventRecord(stop, stream);
+    hipEventRecord(op_profile_get_stop_event(ps, eventIndex), stream);
     double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - cpuStart)
                     .count();
     if (ps)
-      op_profile_add_pending(ps, name, shape, start, stop, ms);
+      op_profile_add_pending(ps, name, shape, eventIndex, ms);
   }
 
   OpProfileScope(const OpProfileScope &) = delete;
@@ -87,8 +88,10 @@ struct OpProfileScope {
         hipdnn_ep_state_get_op_profile(state_arg));                            \
     auto *_stream =                                                            \
         static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state_arg));       \
-    if (_ps && _stream && op_profile_is_active(_ps))                           \
-      _opProf.emplace(_ps, opname, (shape_fn)(), _stream);                     \
+    if (_ps && _stream && op_profile_is_active(_ps)) {                         \
+      int _evIdx = op_profile_acquire_event_pair(_ps);                         \
+      _opProf.emplace(_ps, opname, (shape_fn)(), _stream, _evIdx);             \
+    }                                                                          \
   }
 
 #define OP_PROFILE_CPU(opname, state_arg)                                      \

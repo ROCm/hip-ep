@@ -28,10 +28,19 @@ struct OpProfileState {
   struct PendingEvent {
     std::string name;
     std::string shape;
-    hipEvent_t start;
-    hipEvent_t stop;
+    int eventIndex;
     double cpuMs;
   };
+
+  // Pre-allocated event pool: each pair is (start, stop).
+  // Grows on demand but never shrinks — avoids hipEventCreate/Destroy per op.
+  struct EventPair {
+    hipEvent_t start;
+    hipEvent_t stop;
+  };
+  std::vector<EventPair> eventPool;
+  int nextEventIndex = 0;
+
   std::map<std::string, OpEntry> profile;
   std::vector<PendingEvent> pending;
   bool active = false;
@@ -42,9 +51,9 @@ OpProfileState *op_profile_create() { return new OpProfileState; }
 void op_profile_destroy(OpProfileState *ps) {
   if (!ps)
     return;
-  for (auto &ev : ps->pending) {
-    hipEventDestroy(ev.start);
-    hipEventDestroy(ev.stop);
+  for (auto &ep : ps->eventPool) {
+    hipEventDestroy(ep.start);
+    hipEventDestroy(ep.stop);
   }
   delete ps;
 }
@@ -53,22 +62,38 @@ void op_profile_reset(OpProfileState *ps) {
   if (!ps)
     return;
   ps->profile.clear();
-  for (auto &ev : ps->pending) {
-    hipEventDestroy(ev.start);
-    hipEventDestroy(ev.stop);
-  }
   ps->pending.clear();
+  ps->nextEventIndex = 0;
   ps->active = true;
 }
 
 bool op_profile_is_active(OpProfileState *ps) { return ps && ps->active; }
 
+int op_profile_acquire_event_pair(OpProfileState *ps) {
+  int idx = ps->nextEventIndex++;
+  if (idx >= (int)ps->eventPool.size()) {
+    OpProfileState::EventPair ep;
+    hipEventCreateWithFlags(&ep.start, hipEventDefault);
+    hipEventCreateWithFlags(&ep.stop, hipEventDefault);
+    ps->eventPool.push_back(ep);
+  }
+  return idx;
+}
+
+hipEvent_t op_profile_get_start_event(OpProfileState *ps, int index) {
+  return ps->eventPool[index].start;
+}
+
+hipEvent_t op_profile_get_stop_event(OpProfileState *ps, int index) {
+  return ps->eventPool[index].stop;
+}
+
 void op_profile_add_pending(OpProfileState *ps, const std::string &name,
-                            const std::string &shape, hipEvent_t start,
-                            hipEvent_t stop, double cpuMs) {
+                            const std::string &shape, int eventIndex,
+                            double cpuMs) {
   if (!ps)
     return;
-  ps->pending.push_back({name, shape, start, stop, cpuMs});
+  ps->pending.push_back({name, shape, eventIndex, cpuMs});
 }
 
 void op_profile_add_cpu(OpProfileState *ps, const std::string &name,
@@ -91,7 +116,8 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
 
   for (auto &ev : ps->pending) {
     float gpuMs = 0.0f;
-    hipEventElapsedTime(&gpuMs, ev.start, ev.stop);
+    hipEventElapsedTime(&gpuMs, ps->eventPool[ev.eventIndex].start,
+                        ps->eventPool[ev.eventIndex].stop);
     auto &op = ps->profile[ev.name];
     if (op.name.empty())
       op.name = ev.name;
@@ -105,8 +131,6 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     op.totalGpuMs += gpuMs;
     op.totalCpuMs += ev.cpuMs;
     op.totalCount++;
-    hipEventDestroy(ev.start);
-    hipEventDestroy(ev.stop);
   }
   ps->pending.clear();
 
@@ -146,7 +170,6 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     rows.push_back(std::move(row));
   }
 
-  // GPU ops sorted by GPU time desc, then CPU-only ops sorted by CPU time desc
   std::sort(rows.begin(), rows.end(), [](const OpRow &a, const OpRow &b) {
     if (a.hasGpu != b.hasGpu)
       return a.hasGpu;
@@ -182,7 +205,6 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
               r.name.c_str(), (long long)r.totalCount, "n/a", r.totalCpuMs,
               "n/a");
     }
-    // Print shape sub-rows if there are shapes (non-empty shape key)
     bool hasShapes = r.shapes.size() > 1 ||
                      (r.shapes.size() == 1 && !r.shapes[0].shape.empty());
     if (hasShapes) {
