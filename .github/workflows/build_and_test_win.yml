@@ -30,6 +30,7 @@ env:
   GTEST_VERSION: "v1.15.0"
   GLOG_VERSION: "v0.7.1"
   GSL_VERSION: "v4.0.0"
+  THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
 
 jobs:
   build-and-test:
@@ -299,8 +300,37 @@ jobs:
           path: ${{ env.MORPHIZEN_PREFIX }}
           key: deps-win-x64-release-mt-ort-${{ env.ONNXRUNTIME_VERSION }}-llvm-${{ env.LLVM_COMMIT }}-proto-${{ env.PROTOBUF_VERSION }}-gtest-${{ env.GTEST_VERSION }}-glog-${{ env.GLOG_VERSION }}-gsl-${{ env.GSL_VERSION }}
 
+      # TheRock HIP SDK (separate cache key — ~1.5 GB tarball, doesn't share
+      # the deps cache key because TheRock is updated independently of LLVM /
+      # ONNXRuntime). Required by ort-bridge's find_package(hip REQUIRED)
+      # since morphizen_ENABLE_HIP_GPU_ALLOCATOR defaults to ON.
+      - name: Cache TheRock
+        id: cache-therock
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/therock-dist
+          key: ${{ env.THEROCK_VERSION }}
+
+      - name: Download & extract TheRock
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          THEROCK_DIST="$(cygpath -u '${{ runner.workspace }}/therock-dist')"
+          mkdir -p "$THEROCK_DIST"
+          curl -fsSL \
+            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" \
+            -o therock.tar.gz
+          tar -xzf therock.tar.gz -C "$THEROCK_DIST" --strip-components=1
+          rm therock.tar.gz
+
       # Build MorphiZen (Release build for CI - faster, still validates functionality)
       # For debugging MorphiZen issues, use /build-and-test skill locally with Debug build
+      #
+      # CMAKE_PREFIX_PATH includes both our prebuilt deps install tree and the
+      # TheRock dist so find_package(hip) inside ort-bridge resolves against the
+      # same SDK that ROCm/onnx-hipdnn-ep links against.
+      # HIP_PLATFORM=amd is required by TheRock's hip-config.cmake (otherwise
+      # it errors out with "Unexpected HIP_PLATFORM:").
       - name: CMake Configure
         shell: cmd
         run: |
@@ -308,7 +338,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
             -Dmorphizen_ENABLE_UNIT_TEST=ON ^
-            -DCMAKE_PREFIX_PATH=${{ env.MORPHIZEN_PREFIX }}
+            "-DCMAKE_PREFIX_PATH=${{ env.MORPHIZEN_PREFIX }};${{ runner.workspace }}/therock-dist" ^
+            -DHIP_PLATFORM=amd
 
       - name: CMake Build
         shell: cmd
@@ -319,6 +350,21 @@ jobs:
       # Tests are now enabled as CI gate after Issue #028-#036 tracking (skipping known failures)
       - name: Run Tests
         shell: cmd
+        # PATH must include therock-dist\bin so Windows LoadLibrary resolves
+        # amdhip64_7.dll, which onnxruntime_vitisai_ep.dll now imports as a
+        # load-time dep (via ort-bridge's `target_link_libraries(... PUBLIC
+        # hip::host)`). On Linux dlopen walks RPATH set by CMake so this is
+        # automatic, but Windows LoadLibrary doesn't, hence the explicit
+        # PATH prepend here. Same pattern as ROCm/onnx-hipdnn-ep CI.
         run: |
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%PATH%
           cd ${{ env.MORPHIZEN_BUILD_DIR }}
           ctest -C Release --output-on-failure --timeout 120 -j4
+        env:
+          # GitHub Windows runners don't have an AMD GPU, so the EP factory's
+          # production GPU-device registration would fail to find any
+          # OrtEpDevice for unit tests like HelloEpTest to bind to. Flip
+          # the runtime knob so the factory registers a CPU-device entry
+          # instead (read by GetSupportedDevicesImpl in
+          # ort-bridge/src/morphizen-ep-factory.cpp).
+          MORPHIZEN_EP_ENABLE_CPU_DEVICE: "1"

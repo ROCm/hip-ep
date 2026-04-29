@@ -4,7 +4,20 @@
  */
 #pragma once
 #include "./api-ptrs.hpp"
+
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+// Pull in the full HipDataTransferImpl definition so that
+// std::unique_ptr<HipDataTransferImpl> in MorphiZenEpFactory below has a
+// complete type when this header is included from translation units that
+// instantiate the destructor. The header itself does not include any HIP
+// runtime headers, so this stays cheap for callers.
+#  include "./morphizen-hip-gpu-allocator.hpp"
+#  include <memory>
+#endif
+
 namespace morphizen {
+
 struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
   MorphiZenEpFactory(const char* ep_name, ApiPtrs apis,
                      const OrtLogger& default_logger);
@@ -86,14 +99,37 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
       const OrtKeyValuePairs* /*stream_options*/,
       OrtSyncStreamImpl** stream) noexcept;
 
-  const OrtLogger& default_logger_;       // default logger for the EP factory
-  const std::string ep_name_;             // EP name
-  const std::string vendor_{"AMD"};       // EP vendor name
-  const uint32_t vendor_id_{0x1022};      // EP vendor ID
+  const OrtLogger& default_logger_; // default logger for the EP factory
+  const std::string ep_name_;       // EP name
+  const std::string vendor_{"AMD"}; // EP vendor name
+  // PCI vendor id of the AMD GPU we serve (== OrtDevice::VendorIds::AMD).
+  // The AMD CPU / NPU PCI vendor id is 0x1022 (AuthenticAMD), which is a
+  // different value but is not relevant for the production GPU path.
+  const uint32_t vendor_id_{0x1002};
   const std::string ep_version_{"0.1.0"}; // EP version
   std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>
       ep_metadata_;                       // EP metadata
   std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>
       ep_options_;                        // EP metadata
+
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+  // Lazily-created OrtMemoryInfo describing where the EP's GPU allocator places
+  // tensors. Owned by the factory; OrtEpDevice copies them when registered via
+  // EpDevice_AddAllocatorInfo, so we may free them when the factory dies.
+  using MemoryInfoPtr =
+      std::unique_ptr<OrtMemoryInfo, void (*)(OrtMemoryInfo*)>;
+  MemoryInfoPtr gpu_memory_info_{nullptr, nullptr}; // hipMalloc-backed
+  MemoryInfoPtr gpu_host_accessible_memory_info_{
+      nullptr, nullptr};                            // hipHostMalloc-backed
+
+  // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
+  std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;
+
+  // Whether GetSupportedDevicesImpl actually claimed any AMD GPU. Used by
+  // CreateAllocatorImpl to decide between the new hipMalloc allocator and the
+  // legacy "not implemented" error path.
+  bool gpu_device_registered_{false};
+#endif
 };
 } // namespace morphizen

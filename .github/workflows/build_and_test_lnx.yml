@@ -29,6 +29,7 @@ env:
   GTEST_VERSION: "v1.15.0"
   GLOG_VERSION: "v0.7.1"
   GSL_VERSION: "v4.0.0"
+  THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
 
 jobs:
   build-and-test:
@@ -290,15 +291,62 @@ jobs:
           path: ${{ env.MORPHIZEN_PREFIX }}
           key: deps-linux-x64-release-fpic-ort-${{ env.ONNXRUNTIME_VERSION }}-llvm-${{ env.LLVM_COMMIT }}-proto-${{ env.PROTOBUF_VERSION }}-gtest-${{ env.GTEST_VERSION }}-glog-${{ env.GLOG_VERSION }}-gsl-${{ env.GSL_VERSION }}
 
+      # ubuntu-latest ships only ~14 GB of usable SSD, and our build now needs
+      # to fit: install/ deps tree (~5-8 GB), TheRock tarball (2.2 GB) plus
+      # extracted (~5 GB), repo source / git / Python tools, and the build
+      # tree itself. Without freeing space the runner SIGKILLs the TheRock
+      # download mid-extract (the failure mode is "no log output, job dies"
+      # because writes to a full disk fail). Removing the preinstalled
+      # Docker images / dotnet / android / Haskell / swap recovers ~25-30 GB,
+      # which puts us comfortably under the limit.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false       # keep Python toolchain we already use
+          docker-images: true     # ~10 GB
+          android: true           # ~10 GB
+          dotnet: true            # ~3 GB
+          haskell: true           # ~5 GB
+          large-packages: false   # skipped: very slow, not needed for the gain
+          swap-storage: true      # ~4 GB
+
+      # TheRock HIP SDK (separate cache key — ~2.2 GB tarball). Required by
+      # ort-bridge's find_package(hip REQUIRED) since
+      # morphizen_ENABLE_HIP_GPU_ALLOCATOR defaults to ON. Linux tarballs
+      # live alongside the Windows ones at repo.amd.com/rocm/tarball/.
+      - name: Cache TheRock
+        id: cache-therock
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/therock-dist
+          key: ${{ env.THEROCK_VERSION }}
+
+      - name: Download & extract TheRock
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        run: |
+          THEROCK_DIST="${{ runner.workspace }}/therock-dist"
+          mkdir -p "$THEROCK_DIST"
+          curl -fsSL \
+            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" \
+            -o therock.tar.gz
+          tar -xzf therock.tar.gz -C "$THEROCK_DIST" --strip-components=1
+          rm therock.tar.gz
+
       # Build MorphiZen (Release build for CI - faster, still validates functionality)
       # For debugging MorphiZen issues, use /build-and-test skill locally with Debug build
+      #
+      # CMAKE_PREFIX_PATH includes both our prebuilt deps install tree and the
+      # TheRock dist so find_package(hip) inside ort-bridge resolves against
+      # the same SDK ROCm/onnx-hipdnn-ep links against. HIP_PLATFORM=amd is
+      # required by TheRock's hip-config.cmake.
       - name: CMake Configure
         run: |
           cmake -B ${{ env.MORPHIZEN_BUILD_DIR }} -S . \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -Dmorphizen_ENABLE_UNIT_TEST=ON \
-            -DCMAKE_PREFIX_PATH=${{ env.MORPHIZEN_PREFIX }}
+            "-DCMAKE_PREFIX_PATH=${{ env.MORPHIZEN_PREFIX }};${{ runner.workspace }}/therock-dist" \
+            -DHIP_PLATFORM=amd
 
       - name: CMake Build
         run: |
@@ -314,3 +362,10 @@ jobs:
           # Add lib directory to LD_LIBRARY_PATH so tests can find libonnxruntime_vitisai_ep.so
           # On Linux, shared libraries go to lib/ (CMAKE_LIBRARY_OUTPUT_DIRECTORY)
           LD_LIBRARY_PATH: ${{ env.MORPHIZEN_BUILD_DIR }}/lib:${{ env.LD_LIBRARY_PATH }}
+          # GitHub Linux runners don't have an AMD GPU, so the EP factory's
+          # production GPU-device registration would fail to find any
+          # OrtEpDevice for unit tests like HelloEpTest to bind to. Flip
+          # the runtime knob so the factory registers a CPU-device entry
+          # instead (read by GetSupportedDevicesImpl in
+          # ort-bridge/src/morphizen-ep-factory.cpp).
+          MORPHIZEN_EP_ENABLE_CPU_DEVICE: "1"

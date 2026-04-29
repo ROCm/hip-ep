@@ -2,8 +2,7 @@
 # ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-add_library(ort-bridge
-  STATIC
+set(_ORT_BRIDGE_SOURCES
   src/ort-bridge.cpp
   src/api-ptrs.hpp
   src/api-ptrs.cpp
@@ -19,6 +18,18 @@ add_library(ort-bridge
   src/ir-converter.cpp
   src/ir-converter-imp.hpp
   src/ir-converter-imp.cpp
+)
+
+if(morphizen_ENABLE_HIP_GPU_ALLOCATOR)
+  list(APPEND _ORT_BRIDGE_SOURCES
+    src/morphizen-hip-gpu-allocator.hpp
+    src/morphizen-hip-gpu-allocator.cpp
+  )
+endif()
+
+add_library(ort-bridge
+  STATIC
+  ${_ORT_BRIDGE_SOURCES}
 )
 
 target_include_directories(ort-bridge
@@ -49,6 +60,19 @@ target_link_libraries(ort-bridge
   morphizen-core-static
   protobuf::libprotobuf
 )
+
+if(morphizen_ENABLE_HIP_GPU_ALLOCATOR)
+  # The hipMalloc-based OrtAllocator + DataTransfer needs the HIP runtime.
+  # The parent project (onnx-hipdnn-ep / lib/Runtime) already does
+  # find_package(hip QUIET) against the same TheRock-distributed ROCm, so we
+  # require it here. Use PUBLIC so the dependency propagates to the SHARED
+  # EP DLL (${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}) that links us via
+  # WHOLE_ARCHIVE below.
+  find_package(hip REQUIRED)
+  target_link_libraries(ort-bridge PUBLIC hip::host)
+  target_compile_definitions(ort-bridge PUBLIC MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR=1)
+endif()
+
 if(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
   target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,ort-bridge>)
 endif(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
