@@ -1527,6 +1527,56 @@ __global__ void unpack_zp_u8_to_fp16_kernel(
         zp_fp16[n * groups_k + g_hi] = static_cast<_Float16>(packed >> 4);
 }
 
+/* Unpack packed nibble ZPs [N, ceil(k_blocks/2)] → [N, k_blocks] uint8,
+ * one byte per zero_point (0-15). Needed because the GEMV row-major and
+ * naive kernels index zp[n * k_blocks + grp], expecting one value per byte. */
+__global__ void unpack_zp_nibbles_to_u8_kernel(
+    const uint8_t* __restrict__ packed,
+    uint8_t* __restrict__ out,
+    int N, int k_blocks, int packed_cols)
+{
+    int n  = static_cast<int>(blockIdx.y);
+    int g2 = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (n >= N || g2 >= packed_cols) return;
+
+    uint8_t p = packed[n * packed_cols + g2];
+    int g_lo = g2 * 2;
+    out[n * k_blocks + g_lo] = p & 0xF;
+    if (g_lo + 1 < k_blocks)
+        out[n * k_blocks + g_lo + 1] = p >> 4;
+}
+
+static uint8_t*  g_zp_u8_buf = nullptr;
+static size_t    g_zp_u8_buf_elems = 0;
+
+static uint8_t* ensureZpU8Buffer(size_t need) {
+    if (g_zp_u8_buf && g_zp_u8_buf_elems >= need) return g_zp_u8_buf;
+    if (g_zp_u8_buf) hipFree(g_zp_u8_buf);
+    hipMalloc(&g_zp_u8_buf, need);
+    g_zp_u8_buf_elems = need;
+    return g_zp_u8_buf;
+}
+
+static const uint8_t* unpackZpNibblesToU8(
+    hipStream_t stream,
+    const void* zp_packed_ptr,
+    int N, int groups_k)
+{
+    int packed_cols = (groups_k + 1) / 2;
+    size_t out_elems = static_cast<size_t>(N) * groups_k;
+    uint8_t* out = ensureZpU8Buffer(out_elems);
+
+    constexpr int THR = 256;
+    dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
+              static_cast<unsigned>(N));
+    dim3 block(THR);
+    hipLaunchKernelGGL(unpack_zp_nibbles_to_u8_kernel,
+                       grid, block, 0, stream,
+                       static_cast<const uint8_t*>(zp_packed_ptr),
+                       out, N, groups_k, packed_cols);
+    return out;
+}
+
 static _Float16* g_zp_fp16_buf = nullptr;
 static size_t    g_zp_fp16_buf_elems = 0;
 
@@ -1592,16 +1642,21 @@ extern "C" int hip_matmul_nbits(
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-  // Convert uint8 packed nibble zero_points to FP16 for WMMA and
-  // col-major GEMV (M>1) paths. Row-major GEMV reads uint8 natively.
-  // For M=1 decode, skip entirely: falls through to row-major GEMV,
-  // avoiding 225 unnecessary kernel launches per Llama 8B inference.
+  // Packed nibble ZPs [N, ceil(k_blocks/2)] must be unpacked before use:
+  //   - FP16 for WMMA and col-major GEMV paths (only when M > 1)
+  //   - Individual uint8 for row-major GEMV and naive fallback paths
+  // When zp_elem_size == 2 (FP16) or ZPs are NULL, no conversion needed.
   const void* zp_for_fp16_paths = zero_points;
+  const void* zp_for_u8_paths = zero_points;
   bool wmma_data_format_pre = (batch_count == 1) && (K % 32 == 0);
-  if (zero_points && zp_elem_size == 1 && wmma_data_format_pre && M > 1) {
+  if (zero_points && zp_elem_size == 1) {
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
-    zp_for_fp16_paths = convertZpToFp16(
+    zp_for_u8_paths = unpackZpNibblesToU8(
         hip_stream, zero_points, static_cast<int>(N), ngk);
+    if (wmma_data_format_pre && M > 1) {
+      zp_for_fp16_paths = convertZpToFp16(
+          hip_stream, zero_points, static_cast<int>(N), ngk);
+    }
   }
 
   /* -------------------------------------------------------------------
@@ -1774,7 +1829,7 @@ extern "C" int hip_matmul_nbits(
     const auto* a_h = static_cast<const __half*>(A);
     const auto* b_u = static_cast<const uint8_t*>(B);
     const auto* s_h = static_cast<const __half*>(scales);
-    const auto* z_u = static_cast<const uint8_t*>(zero_points);
+    const auto* z_u = static_cast<const uint8_t*>(zp_for_u8_paths);
     const auto* b_h = static_cast<const __half*>(bias);
     auto*       o_h = static_cast<__half*>(output);
 
@@ -1814,7 +1869,7 @@ extern "C" int hip_matmul_nbits(
       matmul_nbits_kernel, grd, blk, 0, hip_stream,
       static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
       static_cast<const __half*>(scales),
-      static_cast<const uint8_t*>(zero_points),
+      static_cast<const uint8_t*>(zp_for_u8_paths),
       static_cast<const __half*>(bias), static_cast<__half*>(output),
       M, N, K, block_size);
 
