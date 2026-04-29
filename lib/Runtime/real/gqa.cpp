@@ -300,6 +300,7 @@ static int gqa_forward_hipblaslt(
       // ORT prefill sentinel: when there is no past KV yet, the producer
       // initialises seqlens_k[b] to -1 (so seqlens_k[b]+1 == 0). Treat that
       // as a fresh prefill (past_len=0) instead of rejecting it as invalid.
+      // IR fixture: test/lit/Conversion/onnx-to-hip/test_gqa_prefill_sentinel.mlir
       if (seqlens_k_val < 0) {
         past_len = 0;
       } else {
@@ -413,6 +414,7 @@ static int gqa_forward_hipblaslt(
     // ORT prefill sentinel: when there is no past KV yet, the producer
     // initialises seqlens_k[b] to -1. Treat that as a fresh prefill
     // (past_len=0, total_seq=sq) instead of rejecting it as invalid.
+    // IR fixture: test/lit/Conversion/onnx-to-hip/test_gqa_prefill_sentinel.mlir
     if (seqlens_k_val < 0) {
       total_seq = sq;
       past_len = 0;
