@@ -73,8 +73,8 @@ int op_profile_acquire_event_pair(OpProfileState *ps) {
   int idx = ps->nextEventIndex++;
   if (idx >= (int)ps->eventPool.size()) {
     OpProfileState::EventPair ep;
-    hipEventCreateWithFlags(&ep.start, hipEventDefault);
-    hipEventCreateWithFlags(&ep.stop, hipEventDefault);
+    hipEventCreate(&ep.start);
+    hipEventCreate(&ep.stop);
     ps->eventPool.push_back(ep);
   }
   return idx;
