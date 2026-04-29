@@ -16,6 +16,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <unordered_map>
@@ -23,6 +24,31 @@
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
+
+// Env-var gate for the group-batched "no-expand" decode fast path.
+// When HIPDNN_EP_GQA_NO_EXPAND=1 (default), the decode (sq==1) call into
+// gqa_forward_hipblaslt switches to a group-batched hipBLASLt pipeline that:
+//   * reads K / V directly from the BNSD [B, G, skv, d] cache (no
+//     expand_kv_k / expand_kv_v kernel launches), and
+//   * reads Q and writes O directly from / to the BSHD [B, sq=1, H, d]
+//     host tensors (no q_transpose / o_transpose, since sq==1 makes BSHD
+//     and BNSD bit-identical in memory).
+// Both Score and Value GEMMs are batched over G (B==1 only) with explicit
+// per-operand strides so a single strided-batched matmul covers all KV
+// groups without materializing an HPG-expanded copy:
+//   A (K or V):  stride = present_seq * d   (one BNSD group matrix)
+//   B (Q or S):  stride = HPG * d           (score) / HPG * skv (value)
+//   C (S or O):  stride = HPG * total_seq   (score) / HPG * d (value)
+// Produces S / O bit-identical (modulo fp16 rounding in a different GEMM
+// tile schedule) to the expand+transpose path. Set HIPDNN_EP_GQA_NO_EXPAND=0
+// to fall back to the original pipeline for A/B testing.
+static bool gqa_no_expand_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_NO_EXPAND");
+    return !v || std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
 
 //===----------------------------------------------------------------------===//
 // hipBLASLt layout helper
@@ -55,9 +81,19 @@ struct GqaGemmKey {
   int64_t m, n, k, batch;
   bool transA; // true for Score GEMM (K^T * Q), false for Value GEMM (V * S)
   bool outputFp32; // true to use HIP_R_32F for C/D layouts (Score GEMM)
+  // Optional explicit per-operand batch strides (in elements). A value of 0
+  // means "use the default dense stride" (m*k for A, n*k for B, n*m for C/D).
+  // Non-zero values override the default and enable batch layouts that differ
+  // from the packed-batched layout -- used by the no-expand decode path where
+  // K/V are shared across HPG heads (stride = present_seq*d across G groups)
+  // while Q/O advance by HPG entries per group (stride = HPG*d or HPG*skv).
+  int64_t strideA;
+  int64_t strideB;
+  int64_t strideC;
   bool operator==(const GqaGemmKey &o) const {
     return m == o.m && n == o.n && k == o.k && batch == o.batch &&
-           transA == o.transA && outputFp32 == o.outputFp32;
+           transA == o.transA && outputFp32 == o.outputFp32 &&
+           strideA == o.strideA && strideB == o.strideB && strideC == o.strideC;
   }
 };
 
@@ -70,6 +106,9 @@ struct GqaGemmKeyHash {
     hash_combine_val(h, k.batch);
     hash_combine_val(h, k.transA);
     hash_combine_val(h, k.outputFp32);
+    hash_combine_val(h, k.strideA);
+    hash_combine_val(h, k.strideB);
+    hash_combine_val(h, k.strideC);
     return h;
   }
 };
@@ -130,21 +169,25 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
   }
 
   {
+    int64_t strideA = key.strideA != 0 ? key.strideA : m * k;
+    int64_t strideB = key.strideB != 0 ? key.strideB : n * k;
+    int64_t strideC = key.strideC != 0 ? key.strideC : n * m;
+
     int64_t a_rows = key.transA ? k : m;
     int64_t a_cols = key.transA ? m : k;
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, HIP_R_16F, a_rows,
                                                 a_cols, a_rows));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, m * k));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, strideA));
 
     GQA_CACHE_CHECK(
         hipblasLtMatrixLayoutCreate(&entry.layB, HIP_R_16F, k, n, k));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, n * k));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, strideB));
 
     hipDataType outType = key.outputFp32 ? HIP_R_32F : HIP_R_16F;
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, outType, m, n, m));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, n * m));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, strideC));
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, outType, m, n, m));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, n * m));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, strideC));
   }
 
   GQA_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
@@ -448,6 +491,158 @@ static int gqa_forward_hipblaslt(
     past_len = 0;
 
   bool packed_qkv = (key == nullptr && value == nullptr);
+
+  //===--------------------------------------------------------------------===//
+  // Decode fast path: group-batched hipBLASLt with no expand, no Q/O transpose
+  //
+  // Active only when:
+  //   * sq == 1 (single-token decode)
+  //   * B == 1 (single batch; strided-batched GEMM can't express B*G with
+  //     heterogeneous strides in one call, and we want to avoid host-side
+  //     loops that defeat the purpose of collapsing launches)
+  //   * key != nullptr && value != nullptr (not packed QKV -- we need Q, K, V
+  //     as separate buffers; packed splits would need an extra kernel)
+  //   * present_key != nullptr && present_value != nullptr (we always read
+  //     K/V from the present cache; update_kv_cache makes that valid both
+  //     for in-place (past==present) and concat (past!=present) paths)
+  //   * !need_rope (external rotary, which is the norm for Mistral/Llama
+  //     GQA where do_rotary=0 on the op and RoPE is a separate op upstream)
+  //   * !use_smooth_softmax && head_sink == nullptr (shared softmax kernel
+  //     handles these but they're not on the decode hot path for now)
+  //
+  // All other cases (prefill sq>1, packed QKV, rope, smooth softmax) fall
+  // through to the original expand + transpose pipeline below.
+  //===--------------------------------------------------------------------===//
+  if (gqa_no_expand_enabled() && sq == 1 && B == 1 && key && value &&
+      present_key && present_value && !need_rope && !use_smooth_softmax &&
+      !head_sink && !packed_qkv) {
+    int64_t HPG = H / G;
+
+    // Score GEMM: C = K^T @ Q  with layouts
+    //   A = K  [d x total_seq] col-major (first total_seq rows/cols used,
+    //          buffer is [d x present_seq]); stride across G = present_seq*d
+    //   B = Q  [d x HPG]       col-major, stride across G = HPG*d
+    //   C = S  [total_seq x HPG] col-major fp32, stride across G =
+    //   HPG*total_seq
+    // Batch = G (since B==1). strideA uses present_seq (the buffer
+    // dimension of the BNSD cache, typically max_length) so we step over
+    // full cache pages between groups even though the GEMM only consumes
+    // the first total_seq tokens per page.
+    GqaGemmKey scoreKey{/*m=*/total_seq,
+                        /*n=*/HPG,
+                        /*k=*/d,
+                        /*batch=*/G,
+                        /*transA=*/true,
+                        /*outputFp32=*/true,
+                        /*strideA=*/present_seq * d,
+                        /*strideB=*/HPG * d,
+                        /*strideC=*/HPG * total_seq};
+
+    // Value GEMM: C = V @ S  with layouts
+    //   A = V  [d x total_seq] col-major (buffer [d x present_seq]);
+    //          stride across G = present_seq*d
+    //   B = S  [total_seq x HPG] col-major fp16 (softmax output, tightly
+    //          packed in our workspace); stride = HPG*total_seq
+    //   C = O  [d x HPG]         col-major fp16, stride = HPG*d
+    // Writes directly into the user's BSHD output tensor: for sq==1 the
+    // [B=1, sq=1, H, d] memory layout is bit-identical to [B=1, G, HPG, d],
+    // so no output transpose is needed.
+    GqaGemmKey valueKey{/*m=*/d,
+                        /*n=*/HPG,
+                        /*k=*/total_seq,
+                        /*batch=*/G,
+                        /*transA=*/false,
+                        /*outputFp32=*/false,
+                        /*strideA=*/present_seq * d,
+                        /*strideB=*/HPG * total_seq,
+                        /*strideC=*/HPG * d};
+
+    const GqaGemmCacheEntry *scoreStateNX =
+        queryOrCreateGemmState(ltHandle, scoreKey);
+    if (!scoreStateNX)
+      return -1;
+    const GqaGemmCacheEntry *valueStateNX =
+        queryOrCreateGemmState(ltHandle, valueKey);
+    if (!valueStateNX)
+      return -1;
+
+    // Workspace layout: [S_f32 | S_fp16 | gemm_ws].
+    // S shape is [B=1, G, HPG, total_seq] which is bit-identical to
+    // [B*H, sq=1, total_seq], so the existing softmax kernel can read /
+    // write these buffers with total_head_queries = B*H*sq = H and
+    // batch stride = total_seq. No layout conversion needed.
+    size_t S_f32_bytes = static_cast<size_t>(B) * H * total_seq * sizeof(float);
+    size_t S_fp16_bytes = static_cast<size_t>(B) * H * total_seq * elem_sz;
+    size_t gemm_ws =
+        std::max(scoreStateNX->workspace_size, valueStateNX->workspace_size);
+    size_t total_needed = S_f32_bytes + S_fp16_bytes + gemm_ws;
+    if (hipdnn_ep_state_ensure_workspace(state, total_needed) != 0)
+      return -1;
+
+    char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+    size_t ws_total = hipdnn_ep_state_get_workspace_size(state);
+    void *d_S_f32 = ws;
+    void *d_S_fp16 = ws + S_f32_bytes;
+    void *gemm_ws_ptr = ws + S_f32_bytes + S_fp16_bytes;
+    size_t gemm_ws_bytes = ws_total - (S_f32_bytes + S_fp16_bytes);
+
+    // Steps 4-5: KV Cache Update (append new key/value into cache in-place
+    // when past==present, or concat past into present otherwise). seqlens_k
+    // is passed so the append kernel reads past_len on-device; past_len
+    // here is only used by the concat branch.
+    if (update_kv_cache(stream, past_key, past_value, key, value, present_key,
+                        present_value, static_cast<int>(B),
+                        static_cast<int>(past_len), static_cast<int>(sq),
+                        static_cast<int>(G), static_cast<int>(d),
+                        static_cast<int>(past_buf_seq),
+                        static_cast<int>(present_seq), seqlens_k_ptr) != 0)
+      return -1;
+
+    // Step 8: Score GEMM (group-batched, fp16 in, fp32 out).
+    float scoreAlpha = scale;
+    float beta = 0.0f;
+    hipblasLtMatmulAlgo_t sAlgo = scoreStateNX->algo;
+    if (hipblasLtMatmul(ltHandle, scoreStateNX->desc, &scoreAlpha, present_key,
+                        scoreStateNX->layA, query, scoreStateNX->layB, &beta,
+                        d_S_f32, scoreStateNX->layC, d_S_f32,
+                        scoreStateNX->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes,
+                        stream) != HIPBLAS_STATUS_SUCCESS) {
+      fprintf(stderr, "gqa_forward_hipblaslt (no-expand): score GEMM failed\n");
+      return -1;
+    }
+
+    // Step 9: Softmax (fp32 -> fp16). Reinterpret [B, G, HPG, total_seq] as
+    // [B*H, 1, total_seq] -- same memory, no kernel change.
+    int scoreBatchStride = static_cast<int>(total_seq);
+    if (hip_gqa_softmax_f32_to_f16(
+            stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
+            static_cast<int>(total_seq), static_cast<int>(sq), scoreBatchStride,
+            scoreBatchStride, /*head_sink=*/nullptr, static_cast<int>(H),
+            /*use_smooth_softmax=*/0) != 0)
+      return -1;
+
+    // Step 10: Value GEMM (group-batched, fp16 in, fp16 out).
+    // Writes directly to `output` which is the user's BSHD [B=1, sq=1, H, d]
+    // buffer -- same memory as [B=1, G, HPG, d].
+    float valAlpha = 1.0f;
+    hipblasLtMatmulAlgo_t vAlgo = valueStateNX->algo;
+    if (hipblasLtMatmul(ltHandle, valueStateNX->desc, &valAlpha, present_value,
+                        valueStateNX->layA, d_S_fp16, valueStateNX->layB, &beta,
+                        output, valueStateNX->layC, output, valueStateNX->layD,
+                        &vAlgo, gemm_ws_ptr, gemm_ws_bytes,
+                        stream) != HIPBLAS_STATUS_SUCCESS) {
+      fprintf(stderr, "gqa_forward_hipblaslt (no-expand): value GEMM failed\n");
+      return -1;
+    }
+
+    RUNTIME_DEBUG_LOG(
+        "[REAL] GQA no-expand decode: B=%lld sq=1 total_seq=%lld H=%lld "
+        "G=%lld HPG=%lld d=%lld\n",
+        (long long)B, (long long)total_seq, (long long)H, (long long)G,
+        (long long)HPG, (long long)d);
+    return 0;
+  }
+  // Falls through to the original expand + transpose pipeline below.
 
   // ---- Workspace layout ----
   // All temp buffers are packed contiguously into the shared workspace,
