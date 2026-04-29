@@ -36,7 +36,7 @@ jobs:
       THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       SCCACHE_GHA_ENABLED: "true"
       OGA_REPO: AMDmoore/onnxruntime-genai
-      OGA_REF: c4fc2873abe020438e5cf8289b161fb6747554e5
+      OGA_REF: 220b79ff0f19501957b56c40eb2a0089bf3d97c9
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
