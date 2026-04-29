@@ -67,6 +67,8 @@ def main():
     B_even = B_uint4[:, 0::2]
     B_odd  = B_uint4[:, 1::2]
     B_packed = (B_even | (B_odd << 4)).astype(np.uint8)
+    if args.no_zeros:
+        B_packed ^= 0x88
 
     scales = np.random.uniform(0.01, 0.05, (N, num_groups_k)).astype(np.float16)
 
