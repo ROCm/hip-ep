@@ -155,6 +155,14 @@ extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
   return hipSuccess;
 }
 
+extern "C" hipError_t hipMemsetAsync(void *dst, int value, size_t size,
+                                     hipStream_t stream) {
+  MOCK_PRINT("[MOCK] hipMemsetAsync(dst=%p, value=%d, size=%zu, stream=%p)\n",
+             dst, value, size, stream);
+  memset(dst, value, size);
+  return hipSuccess;
+}
+
 // Mock MIOpen types and constants
 typedef void *miopenTensorDescriptor_t;
 typedef void *miopenConvolutionDescriptor_t;
