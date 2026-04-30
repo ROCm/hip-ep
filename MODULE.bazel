@@ -9,9 +9,9 @@ bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "bazel_cpp_toolchain", version = "0.1.0")
 
 # Build system dependencies
-# Use custom rules_foreign_cc 0.15.1.1 with pkgconfig disabled for bazel-cpp-toolchain compatibility
-# See bazel-registry-1/modules/rules_foreign_cc/0.15.1.1/MODULE.bazel for detailed explanation
-bazel_dep(name = "rules_foreign_cc", version = "0.15.1.1")
+# Use rules_foreign_cc 0.15.1 with preinstalled pkgconfig toolchain (no-op)
+# This avoids nmake.exe dependency from pkgconfig build-from-source on Windows
+bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
 bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 
@@ -35,6 +35,10 @@ python.toolchain(
 cmake_tools = use_extension("@rules_foreign_cc//foreign_cc:extensions.bzl", "tools")
 use_repo(cmake_tools, "cmake_3.31.8_toolchains")
 register_toolchains("@cmake_3.31.8_toolchains//:all")
+
+# Register preinstalled pkgconfig toolchain (no-op) to satisfy cmake() rule requirements.
+# This avoids nmake.exe + glib build-from-source on Windows with clang-cl.
+register_toolchains("@rules_foreign_cc//toolchains:preinstalled_pkgconfig_toolchain")
 
 # llvm-project: expose @llvm-project targets via the llvm-project-overlay module extension.
 # Unlike openssl (which uses use_repo_rule), llvm-project-overlay uses a module extension
