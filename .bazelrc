@@ -83,7 +83,7 @@ build:prod --strip=never
 build:remote --remote_executor=grpc://127.0.0.1:50051
 build:remote --remote_cache=grpc://127.0.0.1:50051
 build:remote --remote_upload_local_results=true
-build:remote --remote_download_outputs=toplevel
+build:remote --remote_download_outputs=minimal
 build:remote --remote_timeout=600
 build:remote --jobs=1000
 build:remote --spawn_strategy=remote
@@ -112,6 +112,10 @@ build:remote-dev --config=remote
 build:remote-nocache --config=remote
 build:remote-nocache --noremote_upload_local_results
 build:remote-nocache --noremote_accept_cached
+
+# Remote with full output downloads (when you need the actual binaries/libraries)
+build:remote-full --config=remote
+build:remote-full --remote_download_outputs=all
 
 # -----------------------------------------------------------------------------
 # Remote Execution with PDB Downloads (for debugging)
