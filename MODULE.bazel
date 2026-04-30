@@ -10,12 +10,12 @@ bazel_dep(name = "bazel_cpp_toolchain", version = "0.1.0")
 
 # Build system dependencies
 bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
-bazel_dep(name = "rules_python", version = "1.6.3")
-bazel_dep(name = "rules_proto", version = "7.0.2")
+bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "rules_proto", version = "7.1.0")
 
 # External dependencies for backend-mlir-compiler
 bazel_dep(name = "glog", version = "0.7.1")
-bazel_dep(name = "protobuf", version = "29.0")
+bazel_dep(name = "protobuf", version = "33.4")
 
 bazel_dep(name = "llvm-project-overlay", version = "22.1.3")
 bazel_dep(name = "morphizen", version = "1.0")
@@ -39,15 +39,3 @@ register_toolchains("@cmake_3.31.8_toolchains//:all")
 # that the root module must invoke to make @llvm-project visible.
 llvm_repos = use_extension("@llvm-project-overlay//:llvm_repo.bzl", "llvm_extension")
 use_repo(llvm_repos, "llvm-project")
-
-# Toolchain override for custom C++ toolchain with clang-cl support
-local_path_override(
-    module_name = "bazel_cpp_toolchain",
-    path = "../../bazel-cpp-toolchain/bazel-cpp-toolchain-1",
-)
-
-# Local override for MorphiZen module
-local_path_override(
-    module_name = "morphizen",
-    path = "../../MorphiZen-1",
-)

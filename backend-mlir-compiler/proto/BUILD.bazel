@@ -13,6 +13,15 @@ cc_proto_library(
     visibility = ["//visibility:public"],
 )
 
+# Wrapper to expose generated headers with proper includes
+cc_library(
+    name = "metadata_headers",
+    hdrs = [":metadata_cc_proto"],
+    includes = ["."],
+    deps = [":metadata_cc_proto"],
+    visibility = ["//visibility:public"],
+)
+
 # Alias for CMake compatibility
 alias(
     name = "mlir_compilation_proto",
