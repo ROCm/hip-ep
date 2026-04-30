@@ -214,14 +214,16 @@ __global__ void matmul_nbits_gemv_kernel(
                            static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
                 partial[tn] += dot * sv[tn];
             } else {
+                uint32_t b_x = b_pk[tn].x ^ 0x88888888u;
+                uint32_t b_y = b_pk[tn].y ^ 0x88888888u;
 #pragma unroll
                 for (int i = 0; i < 8; i++) {
-                    int nib = (b_pk[tn].x >> (i * 4)) & 0xF;
+                    int nib = (b_x >> (i * 4)) & 0xF;
                     dot += a_vals[i] * static_cast<float>((nib << 28) >> 28);
                 }
 #pragma unroll
                 for (int i = 0; i < 8; i++) {
-                    int nib = (b_pk[tn].y >> (i * 4)) & 0xF;
+                    int nib = (b_y >> (i * 4)) & 0xF;
                     dot += a_vals[8 + i] * static_cast<float>((nib << 28) >> 28);
                 }
                 partial[tn] += dot * sv[tn];
@@ -258,6 +260,7 @@ __global__ void matmul_nbits_gemv_kernel(
                                static_cast<float>((packed >> (i * 4)) & 0xF);
                     partial[tn] += dot * sv;
                 } else {
+                    packed ^= 0x88888888u;
 #pragma unroll
                     for (int i = 0; i < 8; i++) {
                         int nib = (packed >> (i * 4)) & 0xF;
@@ -282,13 +285,16 @@ __global__ void matmul_nbits_gemv_kernel(
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
                 uint8_t packed = b_base_arr[tn][k / 2];
-                float qval = (nibble == 0)
-                               ? static_cast<float>(packed & 0xF)
-                               : static_cast<float>(packed >> 4);
                 if constexpr (HAS_ZP) {
+                    float qval = (nibble == 0)
+                                   ? static_cast<float>(packed & 0xF)
+                                   : static_cast<float>(packed >> 4);
                     partial[tn] += a_val * qval * sv;
                 } else {
-                    int nib = static_cast<int>(qval);
+                    uint8_t packed_s4 = packed ^ 0x88u;
+                    int nib = (nibble == 0)
+                                  ? static_cast<int>(packed_s4 & 0xF)
+                                  : static_cast<int>((packed_s4 >> 4) & 0xF);
                     float s4 = static_cast<float>((nib << 28) >> 28);
                     partial[tn] += a_val * s4 * sv;
                 }
