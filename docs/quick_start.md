@@ -234,6 +234,9 @@ $PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx
 
 # Dump outputs for comparison
 $PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -d 2
+
+# L2-norm compare EP vs CPU outputs
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -L ep_o_dump,cpu_o_dump
 ```
 
 **Key flags:**
