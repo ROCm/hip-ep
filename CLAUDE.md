@@ -27,6 +27,7 @@ conda activate hipdnn-ep
 python build.py                # full build
 python build.py --skip-build   # download deps only
 python build.py --clean        # wipe install/ and start fresh
+python build.py --build-oga    # full build + OGA fork (onnxruntime-genai)
 ```
 
 `build.py` auto-detects VS2022 via `vswhere.exe`, injects MSVC environment, detects GPU architecture via `amdgpu-arch.exe`, and selects real vs mock runtime accordingly. Idempotent — skips already-completed steps.
@@ -81,12 +82,18 @@ For manual builds without `build.py`, see the cmake invocations in `build.py`'s 
 - **DIA SDK junction** may be needed: prebuilt LLVM hardcodes `C:\msvsn2022` for DIA SDK path. `build.py` creates this automatically.
 - **sccache + RelWithDebInfo**: CMakeLists.txt swaps `/Zi` → `/Z7` and disables incremental linking to prevent PDB file contention during parallel builds.
 - **TheRock DLLs on PATH at runtime.** Compiled model DLLs link against `amdhip64_7.dll`, `MIOpen.dll`, etc. from `install/therock/bin/`. Add that directory to PATH before running `hip-onnx-runner` or any compiled model.
-- **Models must have static shapes.** The MLIR compiler does not support dynamic/symbolic tensor dimensions. Convert models to fixed shapes before use (see Test Models section).
+- **Dynamic shapes are supported for batch/sequence dimensions.** The MLIR compiler handles ONNX models with symbolic dimensions (e.g., `batch_size`, `sequence_length`). Architecture-constant dimensions (hidden_size, num_heads, vocab_size) must remain static. The `fix_shapes()` utility in `test/python/conftest.py` is still available for backward compatibility but is no longer required — unmodified ONNX models compile to a single DLL that works for any shape.
 - **ORT version must match pip.** `build.py` pins `ORT_VERSION` to match the pip `onnxruntime-directml` package. The MorphiZen EP DLL checks the ORT API version at registration; a mismatch (e.g. EP built against API v25 vs pip API v24) causes segfault. When upgrading, update `ORT_VERSION` in `build.py` and `onnxruntime-directml` in pip in lockstep.
 - **Runtime functions called from generated code need `extern "C"` linkage.** Declare them in `hipdnn_ep_runtime.h` (which wraps everything in `extern "C"`). Without this, Clang produces C++-mangled names in the bitcode but `GenerateInterface.cpp` emits unmangled references — causing link failures.
 - **Stale compiled-model DLLs after runtime changes.** Compiled model DLLs embed the runtime bitcode from build time. The MorphiZen cache key is based on the ONNX graph hash, not the runtime version — so changing runtime `.cpp` files (or custom kernels) and rebuilding does NOT invalidate cached models. After rebuilding, delete stale DLLs manually: `rm "$TEMP"/morphizen_mlir_*` (bash) or `del %TEMP%\morphizen_mlir_*` (cmd).
 - **Bitcode DEPENDS list must include all headers.** The `compile_to_bitcode` macro in `lib/Runtime/CMakeLists.txt` uses a `DEPENDS` list to track when recompilation is needed. Every header that a runtime `.cpp` file `#include`s must be listed there — otherwise, editing the header doesn't rebuild the bitcode, and compiled models silently use stale runtime code. When adding a new `#include` to a runtime `.cpp` file, always update the `DEPENDS` list in the macro.
+- **OGA gives tight attention_mask, pure ORT gives padded.** OGA sets `attention_mask.shape[1]` to the actual token count (e.g., `[1,7]` for a 7-token prompt, `[1,8]` after one decode step). Pure ORT tests typically pad to `max_seq_len` (e.g., `[1,128]`). Since DimSource maps `total_sequence_length` to `attention_mask` (first input defining that dim_param), this difference causes DimSource to resolve different shapes for present KV outputs. The shape override in `marshal_output_tensors` handles this correctly — it only triggers when needed (OGA case) and is a no-op when shapes already match (padded ORT case).
+- **OGA `generate_next_token()` syncs the PREVIOUS step.** The call is async for the current step but synchronizes the previous dispatch before starting new work. So the 1st call dispatches prefill (returns immediately), the 2nd call syncs prefill + dispatches decode 1 (wall time = TTFT), and calls 3+ each sync one decode step (steady-state tps). Neither `get_next_tokens()` nor `get_sequence()` provides a GPU sync point.
 - **Linker byproducts not cleaned up.** `CompilerDriver::cleanupIntermediates()` removes `.ll` and `.obj` files after linking, but LLD also creates `.lib`, `.pdb`, and `.exp` byproducts alongside each `.dll`. These accumulate in `%TEMP%` (hundreds of files over time). Known issue — fix requires extending `cleanupIntermediates()` in `CompilerDriver.cpp`.
+- **OGA chunked prefill requires `og.Config.overlay()`.** Setting `chunk_size` directly in `genai_config.json`'s `search` section is ignored — it must be applied at runtime via `config = og.Config(model_dir); config.overlay(json.dumps({"search": {"chunk_size": 128}})); model = og.Model(config)`. This is the same mechanism OGA's official `model-generate.py` example uses. With chunking enabled, OGA splits prompts longer than `chunk_size` into multiple EP calls (e.g., a 200-token prompt with chunk_size=128 produces calls with `input_ids` shapes `[1,128]` + `[1,72]`).
+- **OGA requires `MorphiZenEP` (short name) everywhere — not `MorphiZenExecutionProvider`.** The OGA dispatch table (`session_options.cpp`) maps the short name `MorphiZenEP` to `MorphiZenEPExecutionProvider::AppendExecutionProvider`, which sets `DeviceType::MorphiZenEP`. Using the long name `MorphiZenExecutionProvider` makes OGA fall through to `AppendExecutionProviderV2` with `DeviceType::CPU` — the model runs correctly but with CPU memory semantics, causing ~40% TPS degradation (no GPU memory aliasing). This applies to `genai_config.json` `provider_options`, `og.register_execution_provider_library()` calls, and `patch_genai_config_for_morphizen()`. Note: pure ORT (not OGA) uses the long name `MorphiZenExecutionProvider` for `ort.register_execution_provider_library()` — these are different APIs.
+- **`model_benchmark.exe` requires `genai_config.json` with `MorphiZenEP` in `provider_options`.** The EP DLL is auto-discovered next to `onnxruntime-genai.dll` or `model_benchmark.exe` — do NOT pass `--ep_library`, which causes a double registration and a crash (`STATUS_STACK_BUFFER_OVERRUN` / `0xC0000409`) during OGA shutdown. Required env vars: `PATH` must include `install/dist/bin` and `install/therock/bin`; `THEROCK_DIST` must point to `install/therock`. No other env vars (`LIB`, `HIP_CUSTOM_KERNELS_DIR`) are needed — compile-time defaults cover them. Example: `PATH=install/dist/bin:install/therock/bin:$PATH THEROCK_DIST=install/therock model_benchmark.exe -i models/<model> -l 128 -g 128 -r 3 -w 1 -v`.
+- **MORPHIZEN_DEBUG_MLIR_BACKEND shape logging.** Set `MORPHIZEN_DEBUG_MLIR_BACKEND=3` (env var, must be set before process starts) to see per-tensor input shapes on stderr from `MlirCustomOp::marshal_input_tensors`. Uses `fprintf(stderr, ...)` — not glog — because the EP DLL's static CRT (`/MT`) has its own stderr FILE* that glog's `LOG(INFO)` routes to files rather than fd 2. The `ENV_PARAM()` value is cached at DLL load time via static initialization.
 
 ## Architecture
 
@@ -131,9 +138,15 @@ Runtime functions called from generated code must be declared in `hipdnn_ep_runt
 ### Backend integration (MorphiZen EP)
 
 `backend-mlir-compiler/` bridges this compiler to ONNX Runtime:
-- **Level-1 pass** dispatches to Level-2 passes for per-op pattern matching
-- **Custom Op** executes compiled DLLs at inference time with a shared HIP stream
+- **Level-1 pass** (`pass_main.cpp`): compiles MLIR bytecode, builds metadata (including DimSource entries for dynamic output dims), fuses graph into a single custom op
+- **Custom Op** (`MlirCustomOp.cpp`): executes compiled DLLs at inference time — marshals inputs/outputs, resolves dynamic shapes via DimSource, manages the compiled DLL lifecycle
 - All ops on the same stream — no explicit synchronization needed between MIOpen/hipBLASLt/kernel calls
+
+**DimSource resolution (dynamic shapes):** For dynamic output dimensions (shape == -1 in metadata), `marshal_output_tensors` resolves the actual size at runtime. Each output dim has a `DimSource{input_idx, dim_idx}` entry built by `pass_main.cpp::build_metadata_json()` from the model's `dim_params_map` (symbolic dimension names like `total_sequence_length`). The dim_param is mapped to whichever input tensor *first* defines that symbolic name. For transformer models, `total_sequence_length` maps to `attention_mask` (which appears before `past_key_values` in input order).
+
+**OGA past_present_share_buffer shape override:** OGA binds the same OrtValue to both `past_key_values.N.key` (input) and `present.N.key` (output) for zero-copy KV cache reuse. DimSource resolves `present.N.key`'s sequence dim from `attention_mask.shape[1]`, which OGA sets to the tight token count (e.g., 7 for a 7-token prompt) rather than the pre-allocated buffer size (e.g., 128). If `ctx.GetOutput()` is called with the tight shape, ORT allocates a *new* buffer instead of returning the pre-allocated one — breaking pointer identity (`past_key != present_key`) and corrupting multi-token generation (GQA writes to the new buffer, but OGA reads from the old one next step). The fix in `marshal_output_tensors` overrides dynamic dims of `present.N.{key,value}` outputs from the corresponding `past_key_values.N.{key,value}` input's actual runtime shape *before* calling `GetOutput`. The override uses a `>` guard (not `!=`) so it only fires for shared-buffer mode (past is `max_length` > DimSource's tight count). For `past_present_share_buffer=false`, past is `prev_total` which is smaller than DimSource-resolved `curr_total` — the override is skipped and OGA's growing allocations work correctly. Only dims marked dynamic (-1) in compiled metadata are overridden — static dims (batch, num_heads, head_dim) are never touched. See `find_past_input_for_present()` helper.
+
+**`past_present_share_buffer=false` is supported.** When OGA uses separate past/present buffers, the GQA runtime handles `past_key != present_key` via the concat path (copies past into present, then appends new tokens). Performance is lower than shared-buffer mode (D2H copy + `hipStreamSynchronize` per GQA layer for the concat path) but correctness is maintained.
 
 ### Tools
 
@@ -162,7 +175,7 @@ Zero-cost shape ops (Reshape, Squeeze, Unsqueeze) lower through standard MLIR `t
 
 ONNX models live under `models/<model-name>/` (gitignored). Python perf tests auto-download models on first run.
 
-**Fixed-shape requirement:** The compiler requires all tensor dimensions to be static. Models with dynamic dimensions (e.g. `batch_size`, `sequence_length`) must be converted to fixed shapes before use. The perf test fixtures handle this automatically via `fix_shapes()` in `test/python/conftest.py`.
+**Dynamic shapes:** The compiler supports ONNX models with dynamic batch and sequence dimensions. Architecture-constant dimensions (hidden_size, num_heads, head_dim, vocab_size) must remain static in the model. A single compiled DLL handles any input shape at runtime. The `fix_shapes()` utility in `test/python/conftest.py` is still available for backward compatibility.
 
 | Model | Quant | Layers | KV Heads | Head Dim | Size | Source |
 |-------|-------|--------|----------|----------|------|--------|
@@ -183,18 +196,34 @@ install\dist\bin\hip-onnx-runner.exe -m models\Llama-3.2-1B-Instruct\model_q4f16
 
 ## Python Performance Tests
 
-Tests in `test/python/` compare single-token decode latency across three EPs using the **same** ORT Python API:
+**Never run GPU benchmarks in parallel.** GPU contention between concurrent benchmarks produces unreliable numbers. Always run benchmark approaches (DML, ORT EP, OGA Python, model_benchmark) sequentially — one at a time.
+
+Two test files with identical coverage per model. **Prefer 1B tests when debugging or iterating on fixes** — they run significantly faster (~4 min vs ~15 min) due to the smaller model:
 
 ```bash
-pytest test/python/test_llama1b.py -v -s   # 1B model
-pytest test/python/test_llama8b.py -v -s   # 8B model
+pytest test/python/test_llama1b.py -v -s   # 1B: DML, EP (fixed/dynamic, prefill/decode, accuracy, per-step logits), OGA
+pytest test/python/test_llama8b.py -v -s   # 8B: DML, EP (fixed/dynamic, prefill/decode, accuracy, per-step logits), OGA
 ```
 
-**Structure:** `conftest.py` has shared utilities (`download`, `fix_shapes`, `run_timed`, `report`, `compare_outputs`, `register_morphizen_ep`, `LlamaModelConfig`, `make_llama_inputs`, `run_timed_iobinding`). Each test file owns its model config (HF URLs, filenames, `LlamaModelConfig`). Adding a new model = new test file following the same pattern.
+**Structure:** `conftest.py` has shared utilities — session helpers (`create_cpu_session`, `create_ep_session`, `create_dml_session`, `cleanup`), input builders (`make_prefill_inputs`, `make_decode_inputs`, `extract_kv_cache`, `get_next_token`, `compare_logits`), model download (`ensure_model`, `ensure_fixed_model`), OGA helpers (`setup_oga_ep`, `oga_generate`, `oga_generate_timed`, `patch_genai_config_for_morphizen`, `restore_genai_config`), plus low-level utilities (`download`, `fix_shapes`, `run_timed`, `report`, `compare_outputs`, `register_morphizen_ep`, `LlamaModelConfig`, `make_llama_inputs`, `run_timed_iobinding`, `run_iobinding_once`). Each test file owns its model config. Adding a new model = new test file following the same pattern.
+
+Both test files have three test classes ordered to avoid GPU memory contention on iGPU:
+
+| Class | Tests | What it covers |
+|-------|-------|----------------|
+| `TestLlama{1B,8B}DML` | `test_dml_decode` | DML latency baseline (runs before EP registration) |
+| `TestLlama{1B,8B}ORT` | `test_ort_fixed_decode`, `test_ort_fixed_prefill_128`, `test_ort_dynamic_prefill_128`, `test_ort_dynamic_decode`, `test_ort_dynamic_vs_fixed`, `test_ort_per_step_logits` | MorphiZen EP accuracy vs CPU + latency (IOBinding + device memory) |
+| `TestLlama{1B,8B}OGA` | `test_oga_ep_generation`, `test_oga_ep_shape_switching`, `test_oga_ep_chunked_prefill` | OGA+EP generation, shape switching, chunked prefill accuracy vs CPU |
+
+**1B OGA config:** The 1B HuggingFace repo lacks `genai_config.json`. The test generates it programmatically with hardcoded 1B model parameters (16 layers, head_size=64, hidden_size=2048, no position_ids). Tokenizer files are downloaded from the HF repo.
+
+**Memory management:** Sessions are explicitly deleted and `gc.collect()` called between tests to free GPU memory. DML and EP sessions must never coexist — DML tests run first in their own class. OGA tests create/destroy `og.Model` within each test.
+
+**Accuracy vs latency:** Accuracy tests use `run_iobinding_once(use_device_memory=False)` with zero-initialized KV cache matching CPU `sess.run()`. Latency tests use `run_timed_iobinding(use_device_memory=True)` with the production `hipHostMalloc` path. OGA latency includes a warmup generation before the timed run.
 
 **IOBinding with device memory for MorphiZen EP tests:** MorphiZen EP perf tests use `run_timed_iobinding(..., use_device_memory=True)` which allocates KV cache OrtValues via the EP's `hipHostMalloc` GPU allocator (`device_type="gpu", vendor_id=0x1002`). The runtime sees `memory_type == TENSOR_MEMORY_GPU` and aliases the buffer directly (zero-copy). The same OrtValue is bound to both past KV input and present KV output, so `past_key_gpu == present_key_gpu` — GQA skips the per-layer D2H + `hipStreamSynchronize` stall.
 
-**KV cache shape convention:** Both `past_sequence_length` and `total_sequence_length` are set to `max_seq_len` (128) in the dim map. This makes past and present KV tensors the same shape, enabling the memory_type aliasing fast path in the runtime.
+**KV cache shape convention:** Both `past_sequence_length` and `total_sequence_length` are set to `max_seq_len` (256) in the dim map — matching OGA's `max_length = prompt_len + generation_len = 128 + 128`. This makes past and present KV tensors the same shape, enabling the memory_type aliasing fast path in the runtime.
 
 ### MorphiZen EP from Python
 
@@ -266,6 +295,8 @@ Profiling overhead (event pool): ~34 ms (+58%), from 972 `hipEventRecord` + 486 
 
 **Runtime state:** Buffer pool and GQA GEMM descriptor cache are per-session (stored in `RuntimeState` as opaque pointers), not globals. This supports concurrent inference sessions.
 
+**Pool grow-on-demand:** The GPU memory pool is initially allocated at `inference_init` with the static pool size (sum of compile-time-known buffer sizes). When dynamic shapes require additional space (e.g., batch-dependent intermediate tensors), `hipdnn_ep_get_pool_base()` grows the pool via `hipFree` + `hipMalloc` at `inference_compute` time. The pool never shrinks. Dynamic buffer offsets are computed at runtime by `PoolAllocs`-emitted arithmetic in the `main_graph` function.
+
 ## Crash Reporting (cpptrace)
 
 All executables and DLLs register crash handlers via `hip::install_crash_handlers()` (`lib/Support/CrashHandler.h`). On crash, a stack trace is printed to stderr.
@@ -293,7 +324,7 @@ Always enabled — no environment variable needed. The `CrashHandler.h` header i
 - Use MorphiZen C++ wrappers (`morphizen_cxx::NodeConstRef`, etc.) for graph/node APIs — do not use raw ONNX protobuf methods.
 - The ONNX-to-HIP conversion uses MLIR's generic `Operation` API to match ops by name — no onnx-mlir headers required.
 - Always use `python build.py` to build — never suggest manual cmake invocations unless specifically asked.
-- Use `onnxruntime-genai-directml` (not plain or CUDA variant) when installing genai tools.
+- **OGA fork required for EP tests.** Use `python build.py --build-oga` to build the `onnxruntime-genai` fork with `DeviceType::MorphiZenEP`. The repo/ref are read from `.github/workflows/windows-build.yml` (single source of truth). Do not install the stock `onnxruntime-genai-directml` pip package — it lacks the MorphiZen device type.
 - **MANDATORY:** Do not use `.claude/memory`. All persistent knowledge belongs in this file or `docs/`.
 - **Comments on non-obvious code are mandatory.** When adding or fixing code whose behavior isn't self-explanatory — especially workarounds, spec quirks, or subtle correctness invariants — add a short comment explaining *why*. Examples: ONNX convention differences (`local_window_size=-1` meaning "disabled"), shared-buffer detection rationale, or why a condition uses `<=` instead of `==`. Don't comment obvious code; do comment anything a reader might question.
 - When an approach fails, revert immediately and completely — no partial experimental code left in the tree. Prefer runtime-only fixes (`lib/Runtime/real/`) over cross-cutting changes spanning compiler + interface + runtime. If a multi-layer fix doesn't work after one attempt, revert and reassess.

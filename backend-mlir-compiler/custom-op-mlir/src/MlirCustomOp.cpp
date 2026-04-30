@@ -160,6 +160,15 @@ TensorData marshal_input_tensors(OrtKernelContext *context,
               << "): rank=" << data.tensors[i].rank
               << " element_size=" << data.tensors[i].element_size
               << " memory_type=" << data.tensors[i].memory_type;
+    if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 3) {
+      fprintf(stderr, "Input[%zu] shape=[", i);
+      for (size_t d = 0; d < data.shapes[i].size(); ++d) {
+        if (d > 0)
+          fprintf(stderr, ",");
+        fprintf(stderr, "%lld", (long long)data.shapes[i][d]);
+      }
+      fprintf(stderr, "]\n");
+    }
   }
 
   data.span.data = data.tensors.data();
@@ -201,13 +210,32 @@ static std::vector<int> build_output_index_map(
   return map;
 }
 
+// Map "present.N.key" → compiler input index of "past_key_values.N.key"
+// (and likewise for ".value"). Returns -1 if no matching input found.
+static int find_past_input_for_present(
+    const std::string &output_name,
+    const google::protobuf::RepeatedPtrField<mlir_metadata::Input> &inputs) {
+  if (output_name.size() < 9 || output_name.substr(0, 8) != "present.")
+    return -1;
+  std::string past_name = "past_key_values." + output_name.substr(8);
+  for (int i = 0; i < inputs.size(); ++i) {
+    if (inputs[i].name() == past_name)
+      return i;
+  }
+  return -1;
+}
+
 // Marshal output tensors from ORT context using metadata outputs.
 // output_index_map maps from metadata output index (= DLL output index) to
 // the ORT kernel context output index.
+// For dynamic shapes (dim == -1 in metadata), resolves the actual dimension
+// value from the corresponding input tensor using DimSource references.
 TensorData marshal_output_tensors(
     OrtKernelContext *context,
     const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
-    const std::vector<int> &output_index_map) {
+    const google::protobuf::RepeatedPtrField<mlir_metadata::Input> &inputs,
+    const std::vector<int> &output_index_map,
+    const std::vector<int> &input_index_map) {
   if (outputs.size() == 0) {
     LOG(FATAL) << "No output shapes in metadata";
   }
@@ -223,6 +251,64 @@ TensorData marshal_output_tensors(
     const auto &output_meta = outputs[i];
     data.shapes[i].assign(output_meta.shape().begin(),
                           output_meta.shape().end());
+
+    // Resolve dynamic dims (-1) using DimSource entries from metadata.
+    // Each DimSource says "this output dim equals input[X].shape[Y]".
+    for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
+      if (data.shapes[i][d] == -1 && d < output_meta.dim_sources_size()) {
+        const auto &ds = output_meta.dim_sources(d);
+        int src_input = ds.input_idx();
+        int src_dim = ds.dim_idx();
+        if (src_input < static_cast<int>(input_index_map.size())) {
+          int ort_input_idx = input_index_map[src_input];
+          auto src_tensor = ctx.GetInput(ort_input_idx);
+          auto src_info = src_tensor.GetTensorTypeAndShapeInfo();
+          auto src_shape = src_info.GetShape();
+          if (src_dim < static_cast<int>(src_shape.size())) {
+            data.shapes[i][d] = src_shape[src_dim];
+          }
+        }
+      }
+    }
+
+    // OGA's past_present_share_buffer binds the same OrtValue to both
+    // past_key (input) and present_key (output). DimSource may resolve
+    // present_key's seq dim from attention_mask (tight shape, e.g. 7) instead
+    // of the pre-allocated buffer size (e.g. 128). Override from the matching
+    // past input's actual shape BEFORE GetOutput so ORT returns the pre-
+    // allocated buffer (preserving pointer identity for in-place GQA append).
+    // Only override when past is larger (shared-buffer mode: past is
+    // max_length, DimSource is tight). Skip for non-shared buffers where
+    // past is prev_total < curr_total from DimSource.
+    int past_idx = find_past_input_for_present(output_meta.name(), inputs);
+    if (past_idx >= 0 && past_idx < static_cast<int>(input_index_map.size())) {
+      int ort_past_idx = input_index_map[past_idx];
+      auto past_tensor = ctx.GetInput(ort_past_idx);
+      auto past_shape = past_tensor.GetTensorTypeAndShapeInfo().GetShape();
+      if (past_shape.size() == data.shapes[i].size()) {
+        // Only override dimensions that were dynamic (-1) in the compiled
+        // metadata.  Static dims are architecture constants (batch=1,
+        // num_heads, head_dim) and must never change — restricting the
+        // override to dynamic dims prevents accidental corruption.
+        bool overridden = false;
+        for (int d = 0; d < static_cast<int>(past_shape.size()); ++d) {
+          if (output_meta.shape(d) == -1 && past_shape[d] > data.shapes[i][d]) {
+            data.shapes[i][d] = past_shape[d];
+            overridden = true;
+          }
+        }
+        if (overridden) {
+          MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
+                    << "': overrode dynamic dims from past input shape";
+        }
+      }
+    }
+
+    for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
+      CHECK(data.shapes[i][d] >= 0)
+          << "Output '" << output_meta.name() << "' dim " << d
+          << " is still dynamic (-1) after DimSource resolution";
+    }
 
     int ort_idx = output_index_map[i];
     auto output_tensor = ctx.GetOutput(ort_idx, data.shapes[i]);
@@ -489,7 +575,8 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     // --- Fast path: original behaviour, no timing overhead. ---
     auto inputs = marshal_input_tensors(context, input_index_map_);
     auto outputs =
-        marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
+        marshal_output_tensors(context, metadata_.outputs(), metadata_.inputs(),
+                               output_index_map_, input_index_map_);
 
     int ret = inference_state_->compute(&inputs.span, &outputs.span);
     if (ret != 0) {
@@ -512,7 +599,8 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   auto inputs = marshal_input_tensors(context, input_index_map_);
   const auto t_after_in = clock::now();
   auto outputs =
-      marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
+      marshal_output_tensors(context, metadata_.outputs(), metadata_.inputs(),
+                             output_index_map_, input_index_map_);
   const auto t_after_out = clock::now();
 
   // Stream used by inference_compute (first field of RuntimeState).  May be

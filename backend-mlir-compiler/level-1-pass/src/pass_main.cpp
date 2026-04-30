@@ -9,10 +9,12 @@
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <glog/logging.h>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -131,27 +133,120 @@ static bool write_artifact_to_epcontext(PassContext *ctx,
   return true;
 }
 
-// Step 5: Build metadata JSON from graph outputs
+// MLIR uses kDynamic (INT64_MIN) for dynamic dims; ONNX metadata uses -1.
+// The MLIR backend may mutate graph shapes during bytecode construction,
+// replacing -1 with kDynamic.  Normalize back to -1 for the metadata.
+static constexpr int64_t kMLIRDynamic = std::numeric_limits<int64_t>::min();
+static int64_t normalizeDim(int64_t dim) {
+  return dim == kMLIRDynamic ? -1 : dim;
+}
+
+// Parse "name1:p0,p1;name2:p0,p1,p2;..." into {name → [dim_params]}.
+static std::unordered_map<std::string, std::vector<std::string>>
+parse_dim_params_map(const std::string &encoded) {
+  std::unordered_map<std::string, std::vector<std::string>> result;
+  if (encoded.empty())
+    return result;
+  std::istringstream outer(encoded);
+  std::string entry;
+  while (std::getline(outer, entry, ';')) {
+    auto colon = entry.find(':');
+    if (colon == std::string::npos)
+      continue;
+    auto name = entry.substr(0, colon);
+    auto params_str = entry.substr(colon + 1);
+    std::vector<std::string> params;
+    std::istringstream inner(params_str);
+    std::string p;
+    while (std::getline(inner, p, ','))
+      params.push_back(p);
+    result[name] = std::move(params);
+  }
+  return result;
+}
+
+// Step 5: Build metadata JSON from graph inputs and outputs.
+// For dynamic shapes, records DimSource entries that map each dynamic output
+// dimension to the input tensor + dimension index that provides its runtime
+// value. Uses dim_params_map model metadata (populated by IR converter from
+// ORT's GetSymbolicDimensions) to match dimensions across tensors.
 static std::string build_metadata_json(const CompilationArtifact &artifact,
                                        Graph &graph) {
   mlir_metadata::Metadata metadata;
   metadata.set_artifact_filename(artifact.filename);
 
   GraphRef graphRef(graph);
+
+  // Retrieve dim_params_map from model metadata (set by IR converter).
+  auto dim_params_encoded = morphizen::model_get_meta_data(
+      morphizen::graph_get_model(graph), "dim_params_map");
+  auto all_dim_params = parse_dim_params_map(dim_params_encoded);
+
+  // Build dim_param → (input_idx, dim_idx) map from graph inputs.
+  // Only the first occurrence of each symbolic name is recorded — later inputs
+  // sharing the same dim_param inherit from this one at runtime.
+  std::unordered_map<std::string, std::pair<int, int>> dim_param_map;
+  int input_idx = 0;
+  for (const auto &input : graphRef.inputs()) {
+    auto *input_proto = metadata.add_inputs();
+    input_proto->set_name(input.name());
+    input_proto->set_elem_type(input.element_type());
+
+    auto shape_ptr = input.shape();
+    if (shape_ptr && !input.is_unknown_shape()) {
+      input_proto->set_rank(static_cast<int32_t>(shape_ptr->size()));
+      for (int64_t dim : *shape_ptr) {
+        input_proto->add_shape(normalizeDim(dim));
+      }
+
+      auto it = all_dim_params.find(input.name());
+      if (it != all_dim_params.end()) {
+        const auto &dp = it->second;
+        for (int d = 0; d < static_cast<int>(dp.size()); ++d) {
+          if (!dp[d].empty() &&
+              dim_param_map.find(dp[d]) == dim_param_map.end()) {
+            dim_param_map[dp[d]] = {input_idx, d};
+          }
+        }
+      }
+    } else {
+      input_proto->set_rank(-1);
+    }
+    ++input_idx;
+  }
+
   for (const auto &output : graphRef.outputs()) {
     auto *output_proto = metadata.add_outputs();
     output_proto->set_name(output.name());
     output_proto->set_elem_type(output.element_type());
 
-    // Get shape and rank
     auto shape_ptr = output.shape();
     if (shape_ptr && !output.is_unknown_shape()) {
       output_proto->set_rank(static_cast<int32_t>(shape_ptr->size()));
-      for (int64_t dim : *shape_ptr) {
-        output_proto->add_shape(dim);
+
+      auto it = all_dim_params.find(output.name());
+      const std::vector<std::string> *dp =
+          (it != all_dim_params.end()) ? &it->second : nullptr;
+
+      for (int d = 0; d < static_cast<int>(shape_ptr->size()); ++d) {
+        int64_t dim_val = normalizeDim((*shape_ptr)[d]);
+        output_proto->add_shape(dim_val);
+
+        // For dynamic dims, look up the symbolic name and resolve to the
+        // input tensor that defines it. Static dims get a default DimSource
+        // (both fields zero) which marshal_output_tensors ignores.
+        auto *ds = output_proto->add_dim_sources();
+        if (dim_val == -1 && dp && d < static_cast<int>(dp->size())) {
+          const auto &param_name = (*dp)[d];
+          auto pit = dim_param_map.find(param_name);
+          if (pit != dim_param_map.end()) {
+            ds->set_input_idx(pit->second.first);
+            ds->set_dim_idx(pit->second.second);
+          }
+        }
       }
     } else {
-      output_proto->set_rank(-1); // Unknown rank
+      output_proto->set_rank(-1);
     }
 
     MY_LOG(2) << "Output " << output.name() << ": rank=" << output_proto->rank()
