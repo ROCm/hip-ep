@@ -182,6 +182,7 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t rhs_h, int64_t rhs_w, int64_t out_n,
                         int64_t out_c, int64_t out_h, int64_t out_w,
                         int64_t data_type, int64_t tensor_op) {
+  HIPDNN_EP_BAIL_IF_DEAD();
   OP_PROFILE(
       "elementwise",
       [&] {

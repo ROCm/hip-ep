@@ -34,6 +34,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
               int64_t normalize_routing_weights, int64_t elem_size) {
+  HIPDNN_EP_BAIL_IF_DEAD();
   OP_PROFILE(
       "qmoe",
       [&] {

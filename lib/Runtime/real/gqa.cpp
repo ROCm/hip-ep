@@ -886,6 +886,7 @@ int wrap_group_query_attention(
     // (may differ from actual past token count for pre-allocated caches)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
+  HIPDNN_EP_BAIL_IF_DEAD();
   OP_PROFILE(
       "gqa",
       [&] {
