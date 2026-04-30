@@ -201,7 +201,7 @@ int hip_rope_forward(
     int64_t interleaved,
     int64_t element_size_bytes);
 
-int hip_rope_forward_opt(
+int hip_rope_forward_bak(
     void* stream,
     const void* input,
     const void* position_ids,

@@ -1,7 +1,7 @@
 // ============================================================
 // custom_kernels RoPE (Rotary Positional Embedding) Verification
 //
-// Tests hip_rope_forward_opt() and hip_rope_forward() (old) against
+// Tests hip_rope_forward() and hip_rope_forward_bak() (old) against
 // NumPy reference and compares their performance side by side.
 //
 // Modes:
@@ -236,13 +236,13 @@ static TestResult runOneTest(const std::string& data_dir, int bench_iters)
     HIP_CHECK(hipMemcpy(d_sin,   h_sin.data(),   cache_count * sizeof(__half), hipMemcpyHostToDevice));
 
     res.opt = benchOneKernel(
-        hip_rope_forward_opt,
+        hip_rope_forward,
         d_input, d_pos, d_cos, d_sin, d_output,
         h_ref.data(), B, S, H, D, RD, MS, interleaved,
         input_count, bench_iters);
 
     res.old = benchOneKernel(
-        hip_rope_forward,
+        hip_rope_forward_bak,
         d_input, d_pos, d_cos, d_sin, d_output,
         h_ref.data(), B, S, H, D, RD, MS, interleaved,
         input_count, bench_iters);
