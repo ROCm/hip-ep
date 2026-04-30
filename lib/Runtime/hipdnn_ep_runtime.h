@@ -198,10 +198,12 @@ void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
 // Ownership: Caller does NOT own pointer (freed in cleanup)
 void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 
-// Get the base pointer of the GPU memory pool
-// Returns: GPU base pointer of pool (NULL if pool not initialized)
-// Used by hip.get_pool lowering in generated compute kernels
-void *hipdnn_ep_get_pool_base(RuntimeState *state);
+// Get the base pointer of the GPU memory pool, growing it if needed.
+// Called from PoolAllocs-generated code at the start of each inference.
+// When needed_size exceeds the current allocation, the pool is grown via
+// hipFree + hipMalloc. The pool never shrinks.
+// Returns: GPU base pointer (NULL on allocation failure)
+void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size);
 
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);

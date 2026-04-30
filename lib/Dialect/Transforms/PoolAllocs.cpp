@@ -397,10 +397,26 @@ void PoolAllocsPass::runOnOperation() {
   Location loc = funcOp.getLoc();
   OpBuilder builder(funcOp.getContext());
 
+  // Pool setup must be inserted before the first alloc. Dynamic allocs use
+  // SSA values for their sizes (e.g. memref.dim extracting a dimension from
+  // a function argument). These ops may appear between allocs in the block.
+  // Move them before the first alloc so they dominate the pool size
+  // computation. Safe because they only depend on function arguments.
   Operation *firstPooledAlloc = allInfos.front().allocOp.getOperation();
   for (auto &info : allInfos)
     if (info.allocOp->isBeforeInBlock(firstPooledAlloc))
       firstPooledAlloc = info.allocOp.getOperation();
+
+  for (auto &info : dynamics) {
+    for (Value dynDim : info.allocOp.getDynamicSizes()) {
+      if (auto *defOp = dynDim.getDefiningOp()) {
+        if (firstPooledAlloc->isBeforeInBlock(defOp) ||
+            defOp == firstPooledAlloc)
+          defOp->moveBefore(firstPooledAlloc);
+      }
+    }
+  }
+
   builder.setInsertionPoint(firstPooledAlloc);
 
   auto dynBuckets = packDynamicAllocs(dynamics, builder, loc, align);

@@ -24,7 +24,9 @@ Usage:
 """
 
 import argparse
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +43,8 @@ DEPS = INSTALL / "deps"
 ORT = INSTALL / "onnxruntime"
 BUILD = INSTALL / "build"
 DIST = INSTALL / "dist"
+OGA_SOURCE = INSTALL / "oga-source"
+OGA_BUILD = INSTALL / "oga-build"
 
 THEROCK_URL = (
     "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1150-7.11.0.tar.gz"
@@ -135,6 +139,19 @@ def _zip_extract(archive, dest, *, strip=0):
             out.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info) as src, open(out, "wb") as dst:
                 shutil.copyfileobj(src, dst)
+
+
+def _read_ci_env(*keys):
+    """Read env var values from .github/workflows/windows-build.yml (single source of truth)."""
+    ci_yaml = ROOT / ".github" / "workflows" / "windows-build.yml"
+    text = ci_yaml.read_text()
+    result = {}
+    for key in keys:
+        m = re.search(rf"^\s+{re.escape(key)}:\s*(.+?)\s*$", text, re.MULTILINE)
+        if not m:
+            raise RuntimeError(f"{key} not found in {ci_yaml}")
+        result[key] = m.group(1).strip().strip('"').strip("'")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +465,136 @@ def configure_and_build():
 
 
 # ---------------------------------------------------------------------------
+# OGA (onnxruntime-genai) fork
+# ---------------------------------------------------------------------------
+
+
+def _ensure_dml_header():
+    """Fetch dml_provider_factory.h from ORT DirectML NuGet if missing."""
+    header = ORT / "include" / "dml_provider_factory.h"
+    if header.exists():
+        return
+    log("  Fetching dml_provider_factory.h from ORT DirectML NuGet ...")
+    url = (
+        "https://www.nuget.org/api/v2/package/"
+        f"Microsoft.ML.OnnxRuntime.DirectML/{ORT_VERSION}"
+    )
+    data = urllib.request.urlopen(url).read()
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for name in z.namelist():
+            if name.endswith("dml_provider_factory.h"):
+                header.write_bytes(z.read(name))
+                return
+    raise RuntimeError("dml_provider_factory.h not found in NuGet package")
+
+
+def build_oga():
+    """Build the onnxruntime-genai fork with MorphiZen EP device support."""
+    ci = _read_ci_env("OGA_REPO", "OGA_REF")
+    oga_repo = f"https://github.com/{ci['OGA_REPO']}.git"
+    oga_ref = ci["OGA_REF"]
+    log(f"Building OGA fork ({ci['OGA_REPO']} @ {oga_ref[:10]}) ...")
+
+    if not (ORT / ".ok").exists():
+        log(
+            "  ERROR: ONNX Runtime not installed. Run build.py without --skip-build first."
+        )
+        sys.exit(1)
+
+    _ensure_msvc_env()
+
+    # -- clone --
+    sentinel = OGA_SOURCE / ".ok"
+    if not sentinel.exists():
+        if OGA_SOURCE.exists():
+            shutil.rmtree(OGA_SOURCE)
+        log("  Cloning OGA fork ...")
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--branch",
+                "feat/oga_hipdnn_experiment",
+                oga_repo,
+                str(OGA_SOURCE),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "checkout", oga_ref],
+            check=True,
+            cwd=str(OGA_SOURCE),
+        )
+        subprocess.run(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            check=True,
+            cwd=str(OGA_SOURCE),
+        )
+        sentinel.touch()
+    else:
+        log("  OGA source already cloned.")
+
+    _ensure_dml_header()
+
+    # -- build --
+    log("  Building OGA ...")
+    build_cmd = [
+        sys.executable,
+        str(OGA_SOURCE / "build.py"),
+        "--config",
+        "RelWithDebInfo",
+        "--cmake_generator",
+        "Ninja",
+        "--use_dml",
+        "--ort_home",
+        str(ORT),
+        "--skip_tests",
+        "--skip_examples",
+        "--parallel",
+        "--build_dir",
+        str(OGA_BUILD),
+        "--cmake_extra_defines",
+        "CMAKE_CXX_FLAGS=/EHsc",
+    ]
+    subprocess.run(build_cmd, check=True)
+
+    # -- install binaries --
+    bin_dir = DIST / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    oga_bin = OGA_BUILD / "RelWithDebInfo"
+    oga_files = {
+        "onnxruntime-genai.dll": oga_bin / "onnxruntime-genai.dll",
+        "model_benchmark.exe": oga_bin / "benchmark" / "c" / "model_benchmark.exe",
+    }
+    for name, src in oga_files.items():
+        if src.exists():
+            shutil.copy2(src, bin_dir / name)
+            log(f"  Installed {name}")
+
+    # -- install wheel --
+    wheel_dir = oga_bin / "wheel"
+    wheels = list(wheel_dir.glob("onnxruntime_genai_directml-*.whl"))
+    if wheels:
+        log(f"  Installing wheel: {wheels[0].name}")
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--force-reinstall",
+                "--no-deps",
+                str(wheels[0]),
+            ],
+            check=True,
+        )
+    else:
+        log("  WARNING: No OGA wheel found.")
+
+    log("  OGA build complete.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -465,6 +612,11 @@ def main():
         "--skip-build",
         action="store_true",
         help="Only download dependencies, do not build",
+    )
+    parser.add_argument(
+        "--build-oga",
+        action="store_true",
+        help="Build and install onnxruntime-genai fork with MorphiZen EP device support",
     )
     args = parser.parse_args()
 
@@ -487,12 +639,18 @@ def main():
         log("")
         log("Setup + build complete!")
 
+    if args.build_oga:
+        build_oga()
+
     log(f"  TheRock SDK:    {THEROCK}")
     log(f"  Dependencies:   {DEPS}")
     log(f"  ONNX Runtime:   {ORT}")
     if not args.skip_build:
         log(f"  Build output:   {BUILD}")
         log(f"  Install dir:    {DIST}")
+    if args.build_oga:
+        log(f"  OGA source:     {OGA_SOURCE}")
+        log(f"  OGA build:      {OGA_BUILD}")
 
 
 if __name__ == "__main__":
