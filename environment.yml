@@ -23,4 +23,4 @@ dependencies:
     - pytest
     - onnx
     - onnx_ir
-    - onnxruntime-genai-directml
+    - onnxruntime-directml

@@ -9,6 +9,22 @@ package mlir_metadata;
 message Metadata {
   string artifact_filename = 1;
   repeated Output outputs = 2;
+  repeated Input inputs = 3;
+}
+
+// Tracks which input tensor dimension provides a dynamic output dimension's
+// runtime value. For static dims, input_idx and dim_idx are both 0 (default)
+// and ignored — the static value in Output.shape is used instead.
+message DimSource {
+  int32 input_idx = 1;
+  int32 dim_idx = 2;
+}
+
+message Input {
+  string name = 1;
+  int32 rank = 2;
+  int32 elem_type = 3;
+  repeated int64 shape = 4;
 }
 
 message Output {
@@ -16,4 +32,7 @@ message Output {
   int32 rank = 2;
   int32 elem_type = 3;
   repeated int64 shape = 4;
+  // One per dimension. For dynamic dims (shape[i] == -1), specifies which
+  // input tensor + dimension provides the runtime value.
+  repeated DimSource dim_sources = 5;
 }

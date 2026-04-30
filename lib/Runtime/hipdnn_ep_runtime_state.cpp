@@ -1018,10 +1018,27 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
   return pool_ptr + offset;
 }
 
-void *hipdnn_ep_get_pool_base(RuntimeState *state) {
+void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
+  }
+  // Grow-on-demand: when dynamic shapes produce larger intermediates than
+  // the static pool allocated at inference_init, reallocate. The pool
+  // never shrinks — subsequent calls with smaller needed_size are no-ops.
+  if (needed_size > state->pool_size) {
+    if (state->pool_base)
+      hipFree(state->pool_base);
+    if (hipMalloc(&state->pool_base, needed_size) != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_get_pool_base: hipMalloc failed for pool grow "
+              "(%zu -> %zu bytes)\n",
+              state->pool_size, needed_size);
+      state->pool_base = nullptr;
+      state->pool_size = 0;
+      return nullptr;
+    }
+    state->pool_size = needed_size;
   }
   return state->pool_base;
 }

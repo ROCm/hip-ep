@@ -4,8 +4,12 @@
 #
 """Shared fixtures and helpers for Python performance tests."""
 
+import gc
+import itertools
+import json
 import os
 import pathlib
+import shutil
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -194,14 +198,20 @@ class LlamaModelConfig:
     has_position_ids: bool = False
 
 
-def make_llama_inputs(cfg: LlamaModelConfig) -> dict:
-    """Create decode-step inputs for a Llama model with pre-allocated KV cache."""
+def make_llama_inputs(cfg: LlamaModelConfig, seq_len=1) -> dict:
+    """Create inputs for a Llama model.
+
+    seq_len=1 (default) creates single-token decode inputs.
+    seq_len>1 creates prefill inputs with that many tokens.
+    """
     inputs = {
-        "input_ids": np.array([[1]], dtype=np.int64),
+        "input_ids": np.random.randint(1, 32000, (1, seq_len), dtype=np.int64),
         "attention_mask": np.ones((1, cfg.max_seq_len), dtype=np.int64),
     }
     if cfg.has_position_ids:
-        inputs["position_ids"] = np.array([[cfg.max_seq_len - 1]], dtype=np.int64)
+        inputs["position_ids"] = np.arange(
+            cfg.max_seq_len - seq_len, cfg.max_seq_len, dtype=np.int64
+        ).reshape(1, seq_len)
     for i in range(cfg.num_kv_layers):
         inputs[f"past_key_values.{i}.key"] = np.zeros(
             (1, cfg.num_kv_heads, cfg.max_seq_len, cfg.head_dim), dtype=np.float16
@@ -222,6 +232,7 @@ def run_timed_iobinding(
     warmup=NUM_WARMUP,
     runs=NUM_RUNS,
     use_device_memory=False,
+    dim_map=None,
 ):
     """Run inference using IOBinding with shared past/present KV cache buffers.
 
@@ -262,7 +273,10 @@ def run_timed_iobinding(
         if o.name.startswith("present."):
             continue
         dtype = _ORT_TYPE_MAP.get(o.type, np.float32)
-        output_vals[o.name] = ort.OrtValue.ortvalue_from_shape_and_type(o.shape, dtype)
+        shape = o.shape
+        if dim_map:
+            shape = [dim_map.get(d, d) if isinstance(d, str) else d for d in shape]
+        output_vals[o.name] = ort.OrtValue.ortvalue_from_shape_and_type(shape, dtype)
 
     def bind_all():
         io.clear_binding_inputs()
@@ -290,6 +304,350 @@ def run_timed_iobinding(
         sess.run_with_iobinding(io)
         times.append(time.perf_counter() - t0)
     return times
+
+
+def run_iobinding_once(
+    sess,
+    inputs,
+    cfg: LlamaModelConfig,
+    use_device_memory=False,
+    dim_map=None,
+):
+    """Run single inference with IOBinding, return outputs as list.
+
+    Returns outputs in sess.get_outputs() order, compatible with
+    compare_outputs(). Same IOBinding setup as run_timed_iobinding (shared
+    past/present KV cache buffers).
+
+    use_device_memory=False (default) zero-initializes KV cache from numpy,
+    matching CPU sess.run() for fair accuracy comparison.
+    """
+    io = sess.io_binding()
+
+    kv_shape = (1, cfg.num_kv_heads, cfg.max_seq_len, cfg.head_dim)
+    kv_cache = {}
+    for i in range(cfg.num_kv_layers):
+        for kind in ("key", "value"):
+            if use_device_memory:
+                kv_cache[(i, kind)] = ort.OrtValue.ortvalue_from_shape_and_type(
+                    list(kv_shape),
+                    np.float16,
+                    device_type="gpu",
+                    vendor_id=AMD_VENDOR_ID,
+                )
+            else:
+                past_name = f"past_key_values.{i}.{kind}"
+                arr = inputs.get(past_name, np.zeros(kv_shape, dtype=np.float16))
+                kv_cache[(i, kind)] = ort.OrtValue.ortvalue_from_numpy(arr)
+
+    _ORT_TYPE_MAP = {
+        "tensor(float16)": np.float16,
+        "tensor(float)": np.float32,
+        "tensor(int64)": np.int64,
+        "tensor(int32)": np.int32,
+    }
+
+    output_vals = {}
+    for o in sess.get_outputs():
+        if o.name.startswith("present."):
+            continue
+        dtype = _ORT_TYPE_MAP.get(o.type, np.float32)
+        shape = o.shape
+        if dim_map:
+            shape = [dim_map.get(d, d) if isinstance(d, str) else d for d in shape]
+        output_vals[o.name] = ort.OrtValue.ortvalue_from_shape_and_type(shape, dtype)
+
+    for name, arr in inputs.items():
+        if name.startswith("past_key_values"):
+            continue
+        io.bind_ortvalue_input(name, ort.OrtValue.ortvalue_from_numpy(arr))
+    for i in range(cfg.num_kv_layers):
+        for kind in ("key", "value"):
+            val = kv_cache[(i, kind)]
+            io.bind_ortvalue_input(f"past_key_values.{i}.{kind}", val)
+            io.bind_ortvalue_output(f"present.{i}.{kind}", val)
+    for name, val in output_vals.items():
+        io.bind_ortvalue_output(name, val)
+
+    sess.run_with_iobinding(io)
+
+    results = []
+    for o in sess.get_outputs():
+        if o.name.startswith("present."):
+            parts = o.name.split(".")
+            idx, kind = int(parts[1]), parts[2]
+            results.append(kv_cache[(idx, kind)].numpy())
+        else:
+            results.append(output_vals[o.name].numpy())
+    return results
+
+
+# ── Session helpers ──────────────────────────────────────────────────────────
+
+
+def create_cpu_session(model_path):
+    return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+
+
+def create_ep_session(model_path, repo_root):
+    devices = register_morphizen_ep(repo_root)
+    if not devices:
+        pytest.skip("MorphiZen EP not found — run build.py first")
+    so = ort.SessionOptions()
+    so.add_provider_for_devices(devices, {})
+    return ort.InferenceSession(model_path, sess_options=so)
+
+
+def create_dml_session(model_path):
+    providers = get_amd_dml_providers()
+    if providers is None:
+        pytest.skip("DmlExecutionProvider not available")
+    return ort.InferenceSession(model_path, providers=providers)
+
+
+def cleanup(*args):
+    for obj in args:
+        del obj
+    gc.collect()
+
+
+# ── Dim map ─────────────────────────────────────────────────────────────────
+
+
+def make_dim_map(seq_len, kv_len):
+    return {
+        "batch_size": 1,
+        "sequence_length": seq_len,
+        "past_sequence_length": kv_len,
+        "total_sequence_length": kv_len,
+    }
+
+
+# ── Model download ─────────────────────────────────────────────────────────
+
+
+def ensure_model(model_dir, onnx_file, data_file, hf_base):
+    model_dir.mkdir(parents=True, exist_ok=True)
+    onnx_path = model_dir / onnx_file
+    data_path = model_dir / data_file
+    if not onnx_path.exists():
+        download(f"{hf_base}/{onnx_file}", onnx_path)
+    if not data_path.exists():
+        download(f"{hf_base}/{data_file}", data_path)
+    return str(onnx_path)
+
+
+def ensure_fixed_model(model_dir, onnx_file, seq_len, kv_len):
+    name = f"{onnx_file.rsplit('.', 1)[0]}_fixed_kv{kv_len}_sq{seq_len}.onnx"
+    dst = model_dir / name
+    if not dst.exists():
+        dim_map = make_dim_map(seq_len, kv_len)
+        fix_shapes(model_dir / onnx_file, dst, dim_map)
+    return str(dst)
+
+
+# ── Generation loop helpers ─────────────────────────────────────────────────
+
+
+def make_prefill_inputs(cfg, prompt_tokens, max_seq_len):
+    seq_len = len(prompt_tokens)
+    inputs = {
+        "input_ids": np.array([prompt_tokens], dtype=np.int64),
+        "attention_mask": np.zeros((1, max_seq_len), dtype=np.int64),
+    }
+    inputs["attention_mask"][0, :seq_len] = 1
+    if cfg.has_position_ids:
+        inputs["position_ids"] = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+    for i in range(cfg.num_kv_layers):
+        inputs[f"past_key_values.{i}.key"] = np.zeros(
+            (1, cfg.num_kv_heads, max_seq_len, cfg.head_dim), dtype=np.float16
+        )
+        inputs[f"past_key_values.{i}.value"] = np.zeros(
+            (1, cfg.num_kv_heads, max_seq_len, cfg.head_dim), dtype=np.float16
+        )
+    return inputs
+
+
+def make_decode_inputs(cfg, token_id, position, kv_cache, max_seq_len):
+    inputs = {
+        "input_ids": np.array([[token_id]], dtype=np.int64),
+        "attention_mask": np.zeros((1, max_seq_len), dtype=np.int64),
+    }
+    inputs["attention_mask"][0, : position + 1] = 1
+    if cfg.has_position_ids:
+        inputs["position_ids"] = np.array([[position]], dtype=np.int64)
+    for i in range(cfg.num_kv_layers):
+        inputs[f"past_key_values.{i}.key"] = kv_cache[(i, "key")]
+        inputs[f"past_key_values.{i}.value"] = kv_cache[(i, "value")]
+    return inputs
+
+
+def extract_kv_cache(outputs, output_names):
+    kv = {}
+    for idx, name in enumerate(output_names):
+        if name.startswith("present."):
+            parts = name.split(".")
+            kv[(int(parts[1]), parts[2])] = outputs[idx]
+    return kv
+
+
+def get_next_token(logits):
+    return int(np.argmax(logits[0, -1, :].astype(np.float32)))
+
+
+def compare_logits(ref_logits, test_logits, step_name):
+    ref = ref_logits.astype(np.float32).flatten()
+    test = test_logits.astype(np.float32).flatten()
+    finite = np.isfinite(ref) & np.isfinite(test)
+    ref_f, test_f = ref[finite], test[finite]
+    if ref_f.size == 0:
+        print(f"  {step_name}: no finite elements [SKIP]")
+        return True
+    dot = np.dot(ref_f, test_f)
+    norms = np.linalg.norm(ref_f) * np.linalg.norm(test_f)
+    cosine = float(dot / norms) if norms > 0 else 1.0
+    ref_norm = np.linalg.norm(ref_f)
+    diff_norm = np.linalg.norm(ref_f - test_f)
+    rel_l2 = float(diff_norm / ref_norm) if ref_norm > 0 else 0.0
+    top1_match = np.argmax(ref_f) == np.argmax(test_f)
+    ok = cosine > 0.95
+    status = "OK" if ok else "FAIL"
+    print(
+        f"  {step_name}: cosine={cosine:.6f}  rel_L2={rel_l2:.4e}"
+        f"  top1_match={top1_match}  [{status}]"
+    )
+    return ok
+
+
+# ── OGA helpers ─────────────────────────────────────────────────────────────
+
+
+def make_prompt_tokens(bos_token, filler_tokens, length):
+    return [bos_token] + list(
+        itertools.islice(itertools.cycle(filler_tokens), length - 1)
+    )
+
+
+_oga_ep_registered = False
+
+
+def setup_oga_ep(repo_root):
+    try:
+        import onnxruntime_genai as og
+    except ImportError:
+        pytest.skip("onnxruntime-genai not installed")
+
+    if not hasattr(og, "register_execution_provider_library"):
+        pytest.skip("OGA version does not support custom EP registration")
+
+    dist_bin = repo_root / "install" / "dist" / "bin"
+    therock_bin = repo_root / "install" / "therock" / "bin"
+    ep_dll = dist_bin / "onnxruntime_morphizen_ep.dll"
+    if not ep_dll.exists():
+        pytest.skip("MorphiZen EP DLL not found — run build.py first")
+
+    for d in [dist_bin, therock_bin]:
+        if d.exists() and str(d) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+
+    global _oga_ep_registered
+    if not _oga_ep_registered:
+        og.register_execution_provider_library("MorphiZenEP", str(ep_dll))
+        _oga_ep_registered = True
+
+    return og, ep_dll
+
+
+def patch_genai_config_for_morphizen(model_dir, ep_dll):
+    config_path = model_dir / "genai_config.json"
+    backup_path = model_dir / "genai_config.json.bak"
+    if not config_path.exists():
+        return
+    shutil.copy2(config_path, backup_path)
+    with open(config_path) as f:
+        config = json.load(f)
+    config["model"]["decoder"]["session_options"]["provider_options"] = [
+        {"MorphiZenEP": {}}
+    ]
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=4)
+
+
+def restore_genai_config(model_dir):
+    config_path = model_dir / "genai_config.json"
+    backup_path = model_dir / "genai_config.json.bak"
+    if backup_path.exists():
+        shutil.move(backup_path, config_path)
+
+
+def oga_generate(og, model, tokenizer, prompt_tokens, max_new=30):
+    """Generate tokens with OGA, return (tokens, ttft_ms, tps)."""
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=len(prompt_tokens) + max_new, do_sample=False)
+    generator = og.Generator(model, params)
+
+    t0 = time.perf_counter()
+    generator.append_tokens(np.array(prompt_tokens, dtype=np.int32))
+    generator.generate_next_token()
+    ttft_ms = (time.perf_counter() - t0) * 1000
+    generated = [int(generator.get_next_tokens()[0])]
+
+    if generator.is_done() or len(generated) >= max_new:
+        return generated, ttft_ms, 0.0
+
+    t_decode = time.perf_counter()
+    while not generator.is_done() and len(generated) < max_new:
+        generator.generate_next_token()
+        generated.append(int(generator.get_next_tokens()[0]))
+    decode_ms = (time.perf_counter() - t_decode) * 1000
+
+    n_decode = len(generated) - 1
+    tps = n_decode / (decode_ms / 1000) if decode_ms > 0 and n_decode > 0 else 0.0
+    return generated, ttft_ms, tps
+
+
+def oga_generate_timed(og, model, tokenizer, prompt_tokens, max_new=128):
+    """Benchmark OGA generation, methodology aligned with model_benchmark.exe.
+
+    Uses min_length to force exact token count and a clean decode loop
+    (no get_next_tokens / list building inside timed section).
+    """
+    total_len = len(prompt_tokens) + max_new
+    prompt_np = np.array(prompt_tokens, dtype=np.int32)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        max_length=total_len,
+        min_length=total_len,
+        do_sample=False,
+    )
+    generator = og.Generator(model, params)
+
+    # Warmup: full prefill + all decode tokens (same generator object)
+    generator.append_tokens(prompt_np)
+    while not generator.is_done():
+        generator.generate_next_token()
+    generator.rewind_to(0)
+
+    # Timed prefill (TTFT)
+    t0 = time.perf_counter()
+    generator.append_tokens(prompt_np)
+    generator.generate_next_token()
+    ttft_ms = (time.perf_counter() - t0) * 1000
+
+    # Timed decode — only generate_next_token() + is_done() in hot loop
+    n_decode = 0
+    t_decode = time.perf_counter()
+    while not generator.is_done():
+        generator.generate_next_token()
+        n_decode += 1
+    decode_ms = (time.perf_counter() - t_decode) * 1000
+    tps = n_decode / (decode_ms / 1000) if decode_ms > 0 and n_decode > 0 else 0.0
+
+    generated = n_decode + 1  # +1 for the prefill token
+
+    del generator
+    return generated, ttft_ms, tps
 
 
 # ── Shared fixtures ──────────────────────────────────────────────────────────

@@ -140,6 +140,8 @@ void populateGqaConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateShapeConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
