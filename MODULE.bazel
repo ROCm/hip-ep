@@ -9,7 +9,9 @@ bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "bazel_cpp_toolchain", version = "0.1.0")
 
 # Build system dependencies
-bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+# Use custom rules_foreign_cc 0.15.1.1 with pkgconfig disabled for bazel-cpp-toolchain compatibility
+# See bazel-registry-1/modules/rules_foreign_cc/0.15.1.1/MODULE.bazel for detailed explanation
+bazel_dep(name = "rules_foreign_cc", version = "0.15.1.1")
 bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 
