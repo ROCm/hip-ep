@@ -18,6 +18,7 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       int64_t M, int64_t N, int64_t K, int64_t batch_count,
                       int64_t bits, int64_t block_size, int64_t elem_size,
                       int64_t zp_elem_size) {
+  HIPDNN_EP_BAIL_IF_DEAD();
   OP_PROFILE(
       "matmul_nbits",
       [&] {

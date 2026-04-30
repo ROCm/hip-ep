@@ -247,6 +247,7 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               void *output, int64_t M, int64_t N, int64_t K, float alpha,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
               int64_t cDim0, int64_t cDim1) {
+  HIPDNN_EP_BAIL_IF_DEAD();
   OP_PROFILE(
       "gemm",
       [&] {

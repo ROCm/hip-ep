@@ -36,6 +36,40 @@ __global__ void topk_routing_kernel(
   const __half* logits = router_probs + token * num_experts;
   int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
 
+  // -- Defensive non-finite-input guard ----------------------------------
+  // If the model upstream has overflowed fp16 (e.g. AWQ-quantised models
+  // whose outlier scales saturate the residual stream after enough layers)
+  // `router_probs` can arrive with NaN or +/-Inf elements. The softmax
+  // path below would then propagate NaN through the entire kernel; on
+  // some ROCm builds (gfx1151 + ROCm 7.11 has been observed) the kernel
+  // raises `hipErrorLaunchFailure (719)` instead of returning quiet NaN
+  // outputs, which puts the device into a sticky-error state and crashes
+  // the rest of inference inside hipBLASLt's error-recovery path.
+  //
+  // Short-circuit with a safe sentinel: write `expert_indices = -1` for
+  // every k slot. The host-side dispatch loop in `wrap_qmoe`
+  // (lib/Runtime/real/qmoe.cpp) already filters indices via
+  //     `if (eid >= 0 && eid < num_experts)`
+  // so -1 cleanly skips this token's per-expert dispatch. The benchmark
+  // produces wrong outputs (the residual was already poisoned upstream)
+  // but the GPU stays alive and inference completes deterministically
+  // instead of hard-crashing with 0xC0000005 inside libhipblaslt.
+  bool any_bad = false;
+  for (int64_t e = 0; e < num_experts; e++) {
+    float v = static_cast<float>(logits[e]);
+    if (v != v || v == HUGE_VALF || v == -HUGE_VALF) {
+      any_bad = true;
+      break;
+    }
+  }
+  if (any_bad) {
+    for (int i = 0; i < ik; i++) {
+      expert_indices[token * k + i] = -1;
+      expert_weights[token * k + i] = static_cast<__half>(0.0f);
+    }
+    return;
+  }
+
   // Pass 1: find max logit for numerically stable softmax
   float max_logit = -1e30f;
   for (int64_t e = 0; e < num_experts; e++) {
