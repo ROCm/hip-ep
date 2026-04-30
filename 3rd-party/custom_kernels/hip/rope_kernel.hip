@@ -2,230 +2,517 @@
  * Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * High-performance RoPE (Rotary Positional Embedding) kernel for FP16.
+ * RoPE (Rotary Positional Embedding) kernel for FP16.
  * Optimized for RDNA 3.5/4 (gfx1150/gfx1151, wave32).
  *
- * Key optimizations vs rope_kernel_bak.hip:
- *   1. One block per (batch, seq) position — ALL heads in one block
- *      → 32x fewer blocks, eliminates scheduling overhead at large S
- *   2. cos/sin cached in LDS (shared memory)
- *      → all heads share the same cos/sin, loaded once from global
- *   3. __half2 vectorized loads/stores for rotary computation
- *   4. Bit-shift indexing (no integer division in hot loop)
- *   5. Block size 256 → 8 waves, optimal RDNA occupancy
- *   6. Single kernel handles rotary + passthrough (no copy kernel)
- *   7. __launch_bounds__ for register allocation hints
+ * Two execution paths, auto-selected per shape via runtime autotune:
  *
- * API: hip_rope_forward() — same signature as hip_rope_forward_bak()
+ *  Float4 fast path  (128-bit vectorized, flat grid)
+ *    - No LDS / no __syncthreads: cos/sin served via L0/L1 cache
+ *    - __hfma2 fused-multiply-add reduces ALU count
+ *    - Flat grid: uniform thread utilization for any num_heads
+ *    - Bit-shift index decomposition: zero integer division
+ *
+ *  Half2 fallback  (block-per-position, LDS-cached cos/sin)
+ *    - Handles arbitrary dimension combinations
+ *
+ * Autotune: on the first call for each (npos, H, D, RD, interleaved)
+ * shape, all applicable configs are benchmarked and the fastest is
+ * cached for subsequent calls.
+ *
+ * API: hip_rope_forward()
  */
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include "hip_custom_kernels.h"
 
-/* ======================================================================
- * Half-rotated RoPE (GPT-NeoX / LLaMA style)
- *
- * Grid:  (B * S)       — one block per sequence position
- * Block: (256)          — 8 waves, optimal for RDNA wave32
- * LDS:   cos[half_rot] + sin[half_rot]
- *
- * All heads for a given position share cos/sin → cached in LDS.
- * Threads iterate over (head, half2_pair) tuples via bit-shift indexing.
- * ====================================================================== */
-__launch_bounds__(256)
-__global__ void rope_half_rotated_opt(
-    const __half* __restrict__ input,
-    const int64_t* __restrict__ position_ids,
-    const __half* __restrict__ cos_cache,
-    const __half* __restrict__ sin_cache,
-    __half* __restrict__ output,
-    const int seq_len,
-    const int num_heads,
-    const int head_dim,
-    const int half_rot,
-    const int half2_shift,
-    const int max_seq_len)
+/* ================================================================
+ * HALF-ROTATED  —  float4 fast path (templated on block size)
+ * ================================================================ */
+template <int BLOCK>
+__launch_bounds__(BLOCK)
+__global__ void rope_hr_f4(
+    const float4* __restrict__ in,
+    const int64_t* __restrict__ pid,
+    const float4* __restrict__ cc,
+    const float4* __restrict__ sc,
+    float4* __restrict__       out,
+    const int f4_stride,
+    const int f4_head,
+    const int f4_half,
+    const int fh_mask,
+    const int fh_shift,
+    const int nh_mask,
+    const int nh_shift,
+    const int max_pos,
+    const int total)
 {
-    const int bs_idx = blockIdx.x;
-    const int b = bs_idx / seq_len;
-    const int s = bs_idx % seq_len;
+    const int gid = blockIdx.x * BLOCK + threadIdx.x;
+    if (gid >= total) return;
 
-    int64_t pos_raw = position_ids[b * seq_len + s];
-    int pos = static_cast<int>(pos_raw < 0 ? 0 :
-                  (pos_raw >= max_seq_len ? max_seq_len - 1 : pos_raw));
+    const int chunk = gid & fh_mask;
+    const int tmp   = gid >> fh_shift;
+    const int h     = tmp  & nh_mask;
+    const int bs    = tmp  >> nh_shift;
 
-    // ---- Load cos/sin into LDS (shared by all heads) ----
-    extern __shared__ __half smem[];
-    __half* s_cos = smem;
-    __half* s_sin = smem + half_rot;
+    const int64_t pr = pid[bs];
+    const int pos = static_cast<int>(pr < 0 ? 0 :
+                        (pr >= max_pos ? max_pos - 1 : pr));
 
-    {
-        const __half* g_cos = cos_cache + pos * half_rot;
-        const __half* g_sin = sin_cache + pos * half_rot;
-        const int h2_load = half_rot >> 1;
-        for (int i = threadIdx.x; i < h2_load; i += blockDim.x) {
-            reinterpret_cast<__half2*>(s_cos)[i] =
-                reinterpret_cast<const __half2*>(g_cos)[i];
-            reinterpret_cast<__half2*>(s_sin)[i] =
-                reinterpret_cast<const __half2*>(g_sin)[i];
-        }
-        if ((half_rot & 1) && threadIdx.x == 0) {
-            s_cos[half_rot - 1] = g_cos[half_rot - 1];
-            s_sin[half_rot - 1] = g_sin[half_rot - 1];
-        }
+    const int ho = bs * f4_stride + h * f4_head;
+    const int co = pos * f4_half + chunk;
+
+    float4 x0 = in[ho + chunk];
+    float4 x1 = in[ho + f4_half + chunk];
+    float4 cv = cc[co];
+    float4 sv = sc[co];
+
+    __half2 *va = reinterpret_cast<__half2*>(&x0);
+    __half2 *vb = reinterpret_cast<__half2*>(&x1);
+    __half2 *vc = reinterpret_cast<__half2*>(&cv);
+    __half2 *vs = reinterpret_cast<__half2*>(&sv);
+
+    float4 r0, r1;
+    __half2 *d0 = reinterpret_cast<__half2*>(&r0);
+    __half2 *d1 = reinterpret_cast<__half2*>(&r1);
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        d0[i] = __hfma2(va[i], vc[i], __hneg2(__hmul2(vb[i], vs[i])));
+        d1[i] = __hfma2(vb[i], vc[i],          __hmul2(va[i], vs[i]));
     }
+
+    out[ho + chunk]            = r0;
+    out[ho + f4_half + chunk]  = r1;
+}
+
+/* ================================================================
+ * INTERLEAVED  —  float4 fast path (templated on block size)
+ * ================================================================ */
+template <int BLOCK>
+__launch_bounds__(BLOCK)
+__global__ void rope_il_f4(
+    const float4* __restrict__ in,
+    const int64_t* __restrict__ pid,
+    const float4* __restrict__ cc,
+    const float4* __restrict__ sc,
+    float4* __restrict__       out,
+    const int f4_stride,
+    const int f4_head,
+    const int cph,
+    const int cm,
+    const int cs,
+    const int nm,
+    const int ns,
+    const int max_pos,
+    const int total)
+{
+    const int gid = blockIdx.x * BLOCK + threadIdx.x;
+    if (gid >= total) return;
+
+    const int ch = gid & cm;
+    const int tmp = gid >> cs;
+    const int h   = tmp  & nm;
+    const int bs  = tmp  >> ns;
+
+    const int64_t pr = pid[bs];
+    const int pos = static_cast<int>(pr < 0 ? 0 :
+                        (pr >= max_pos ? max_pos - 1 : pr));
+
+    const int ho = bs * f4_stride + h * f4_head;
+    const int co = pos * cph + ch;
+
+    float4 da = in[ho + ch * 2];
+    float4 db = in[ho + ch * 2 + 1];
+    float4 cv = cc[co];
+    float4 sv = sc[co];
+
+    __half *ia = reinterpret_cast<__half*>(&da);
+    __half *ib = reinterpret_cast<__half*>(&db);
+    __half *cH = reinterpret_cast<__half*>(&cv);
+    __half *sH = reinterpret_cast<__half*>(&sv);
+
+    #pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        __half x0 = ia[2*p], x1 = ia[2*p+1];
+        __half c_ = cH[p],   s_ = sH[p];
+        ia[2*p]   = __hsub(__hmul(x0, c_), __hmul(x1, s_));
+        ia[2*p+1] = __hadd(__hmul(x0, s_), __hmul(x1, c_));
+    }
+    #pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        __half x0 = ib[2*p], x1 = ib[2*p+1];
+        __half c_ = cH[4+p], s_ = sH[4+p];
+        ib[2*p]   = __hsub(__hmul(x0, c_), __hmul(x1, s_));
+        ib[2*p+1] = __hadd(__hmul(x0, s_), __hmul(x1, c_));
+    }
+
+    out[ho + ch * 2]     = da;
+    out[ho + ch * 2 + 1] = db;
+}
+
+/* ================================================================
+ * PASSTHROUGH COPY  —  float4
+ * ================================================================ */
+__launch_bounds__(256)
+__global__ void rope_pass_f4(
+    const float4* __restrict__ in,
+    float4* __restrict__       out,
+    const int f4_stride,
+    const int f4_head,
+    const int f4_rot,
+    const int f4_pass,
+    const int num_heads,
+    const int total)
+{
+    const int gid = blockIdx.x * 256 + threadIdx.x;
+    if (gid >= total) return;
+
+    int t   = gid % f4_pass;
+    int tmp = gid / f4_pass;
+    int h   = tmp % num_heads;
+    int bs  = tmp / num_heads;
+
+    int off = bs * f4_stride + h * f4_head + f4_rot + t;
+    out[off] = in[off];
+}
+
+/* ================================================================
+ * HALF-ROTATED  —  fallback (templated on block size)
+ * ================================================================ */
+template <int BLOCK>
+__launch_bounds__(BLOCK)
+__global__ void rope_hr_fb(
+    const __half* __restrict__ in,
+    const int64_t* __restrict__ pid,
+    const __half* __restrict__ cc,
+    const __half* __restrict__ sc,
+    __half* __restrict__       out,
+    const int nh,
+    const int hd,
+    const int hr,
+    const int max_pos)
+{
+    const int bs = blockIdx.x;
+    const int64_t pr = pid[bs];
+    const int pos = static_cast<int>(pr < 0 ? 0 :
+                        (pr >= max_pos ? max_pos - 1 : pr));
+
+    extern __shared__ __half sm[];
+    __half *lc = sm, *ls = sm + hr;
+    const __half *gc = cc + pos * hr, *gs = sc + pos * hr;
+    for (int i = threadIdx.x; i < hr; i += BLOCK)
+    { lc[i] = gc[i]; ls[i] = gs[i]; }
     __syncthreads();
 
-    const int base = bs_idx * num_heads * head_dim;
-    const int half2_count = half_rot >> 1;
-    const int half2_mask  = half2_count - 1;
-    const int total_h2    = num_heads * half2_count;
+    const int base = bs * nh * hd;
+    const int h2n  = hr >> 1;
+    const int tot  = nh * h2n;
 
-    // ---- Rotary: all heads, __half2 vectorized ----
-    for (int idx = threadIdx.x; idx < total_h2; idx += blockDim.x) {
-        const int h = idx >> half2_shift;
-        const int d = (idx & half2_mask) << 1;
-        const int off = base + h * head_dim;
+    for (int i = threadIdx.x; i < tot; i += BLOCK) {
+        int h = i / h2n;
+        int d = (i - h * h2n) << 1;
+        int off = base + h * hd;
 
-        __half2 x0 = *reinterpret_cast<const __half2*>(&input[off + d]);
-        __half2 x1 = *reinterpret_cast<const __half2*>(&input[off + d + half_rot]);
-        __half2 c2 = *reinterpret_cast<const __half2*>(&s_cos[d]);
-        __half2 s2 = *reinterpret_cast<const __half2*>(&s_sin[d]);
+        __half2 x0 = *reinterpret_cast<const __half2*>(&in[off + d]);
+        __half2 x1 = *reinterpret_cast<const __half2*>(&in[off + d + hr]);
+        __half2 c2 = *reinterpret_cast<const __half2*>(&lc[d]);
+        __half2 s2 = *reinterpret_cast<const __half2*>(&ls[d]);
 
-        *reinterpret_cast<__half2*>(&output[off + d]) =
-            __hsub2(__hmul2(x0, c2), __hmul2(x1, s2));
-        *reinterpret_cast<__half2*>(&output[off + d + half_rot]) =
-            __hadd2(__hmul2(x0, s2), __hmul2(x1, c2));
+        *reinterpret_cast<__half2*>(&out[off + d]) =
+            __hfma2(x0, c2, __hneg2(__hmul2(x1, s2)));
+        *reinterpret_cast<__half2*>(&out[off + d + hr]) =
+            __hfma2(x1, c2, __hmul2(x0, s2));
     }
 
-    // Scalar tail for odd half_rot
-    if ((half_rot & 1) && threadIdx.x < num_heads) {
-        const int d = half_rot - 1;
-        const int off = base + threadIdx.x * head_dim;
-        __half x0 = input[off + d], x1 = input[off + d + half_rot];
-        __half cv = s_cos[d], sv = s_sin[d];
-        output[off + d]            = __hsub(__hmul(x0, cv), __hmul(x1, sv));
-        output[off + d + half_rot] = __hadd(__hmul(x0, sv), __hmul(x1, cv));
+    if ((hr & 1) && threadIdx.x < nh) {
+        int d = hr - 1, off = base + threadIdx.x * hd;
+        __half x0 = in[off + d], x1 = in[off + d + hr];
+        __half cv = lc[d], sv = ls[d];
+        out[off + d]      = __hsub(__hmul(x0, cv), __hmul(x1, sv));
+        out[off + d + hr] = __hadd(__hmul(x0, sv), __hmul(x1, cv));
     }
 
-    // ---- Passthrough: copy dimensions beyond rotary_dim ----
-    const int rot_full = half_rot << 1;
-    const int pass = head_dim - rot_full;
+    const int rfull = hr << 1;
+    const int pass  = hd - rfull;
     if (pass > 0) {
-        const int pass_h2 = pass >> 1;
-        const int total_pass = num_heads * pass_h2;
-        for (int idx = threadIdx.x; idx < total_pass; idx += blockDim.x) {
-            int h = idx / pass_h2;
-            int t = idx - h * pass_h2;
-            int d = rot_full + (t << 1);
-            int off = base + h * head_dim;
-            *reinterpret_cast<__half2*>(&output[off + d]) =
-                *reinterpret_cast<const __half2*>(&input[off + d]);
-        }
-        if ((pass & 1) && threadIdx.x < num_heads) {
-            int off = base + threadIdx.x * head_dim;
-            output[off + head_dim - 1] = input[off + head_dim - 1];
+        const int pt = nh * pass;
+        for (int i = threadIdx.x; i < pt; i += BLOCK) {
+            int h = i / pass;
+            int d = rfull + i - h * pass;
+            int off = base + h * hd + d;
+            out[off] = in[off];
         }
     }
 }
 
-/* ======================================================================
- * Interleaved RoPE (GPT-J style)
- *
- * Pair: (2d, 2d+1) for d in [0, half_rot)
- * Same grid/block strategy: one block per position, all heads.
- * ====================================================================== */
-__launch_bounds__(256)
-__global__ void rope_interleaved_opt(
-    const __half* __restrict__ input,
-    const int64_t* __restrict__ position_ids,
-    const __half* __restrict__ cos_cache,
-    const __half* __restrict__ sin_cache,
-    __half* __restrict__ output,
-    const int seq_len,
-    const int num_heads,
-    const int head_dim,
-    const int half_rot,
-    const int hr_shift,
-    const int max_seq_len)
+/* ================================================================
+ * INTERLEAVED  —  fallback (templated on block size)
+ * ================================================================ */
+template <int BLOCK>
+__launch_bounds__(BLOCK)
+__global__ void rope_il_fb(
+    const __half* __restrict__ in,
+    const int64_t* __restrict__ pid,
+    const __half* __restrict__ cc,
+    const __half* __restrict__ sc,
+    __half* __restrict__       out,
+    const int nh,
+    const int hd,
+    const int hr,
+    const int max_pos)
 {
-    const int bs_idx = blockIdx.x;
-    const int b = bs_idx / seq_len;
-    const int s = bs_idx % seq_len;
+    const int bs = blockIdx.x;
+    const int64_t pr = pid[bs];
+    const int pos = static_cast<int>(pr < 0 ? 0 :
+                        (pr >= max_pos ? max_pos - 1 : pr));
 
-    int64_t pos_raw = position_ids[b * seq_len + s];
-    int pos = static_cast<int>(pos_raw < 0 ? 0 :
-                  (pos_raw >= max_seq_len ? max_seq_len - 1 : pos_raw));
-
-    extern __shared__ __half smem[];
-    __half* s_cos = smem;
-    __half* s_sin = smem + half_rot;
-
-    {
-        const __half* g_cos = cos_cache + pos * half_rot;
-        const __half* g_sin = sin_cache + pos * half_rot;
-        const int h2_load = half_rot >> 1;
-        for (int i = threadIdx.x; i < h2_load; i += blockDim.x) {
-            reinterpret_cast<__half2*>(s_cos)[i] =
-                reinterpret_cast<const __half2*>(g_cos)[i];
-            reinterpret_cast<__half2*>(s_sin)[i] =
-                reinterpret_cast<const __half2*>(g_sin)[i];
-        }
-        if ((half_rot & 1) && threadIdx.x == 0) {
-            s_cos[half_rot - 1] = g_cos[half_rot - 1];
-            s_sin[half_rot - 1] = g_sin[half_rot - 1];
-        }
-    }
+    extern __shared__ __half sm[];
+    __half *lc = sm, *ls = sm + hr;
+    const __half *gc = cc + pos * hr, *gs = sc + pos * hr;
+    for (int i = threadIdx.x; i < hr; i += BLOCK)
+    { lc[i] = gc[i]; ls[i] = gs[i]; }
     __syncthreads();
 
-    const int base = bs_idx * num_heads * head_dim;
-    const int hr_mask = half_rot - 1;
-    const int total_work = num_heads * half_rot;
+    const int base = bs * nh * hd;
+    const int tot  = nh * hr;
 
-    // ---- Rotary: all heads ----
-    for (int idx = threadIdx.x; idx < total_work; idx += blockDim.x) {
-        const int h = idx >> hr_shift;
-        const int d = idx & hr_mask;
-        const int off = base + h * head_dim;
+    for (int i = threadIdx.x; i < tot; i += BLOCK) {
+        int h = i / hr;
+        int d = i - h * hr;
+        int off = base + h * hd;
 
-        __half2 x_pair = *reinterpret_cast<const __half2*>(&input[off + d * 2]);
-        __half x0 = __low2half(x_pair);
-        __half x1 = __high2half(x_pair);
+        __half2 xy = *reinterpret_cast<const __half2*>(&in[off + d * 2]);
+        __half x0 = __low2half(xy), x1 = __high2half(xy);
+        __half cv = lc[d], sv = ls[d];
 
-        __half cv = s_cos[d];
-        __half sv = s_sin[d];
-
-        __half out0 = __hsub(__hmul(x0, cv), __hmul(x1, sv));
-        __half out1 = __hadd(__hmul(x0, sv), __hmul(x1, cv));
-
-        *reinterpret_cast<__half2*>(&output[off + d * 2]) =
-            __halves2half2(out0, out1);
+        __half o0 = __hsub(__hmul(x0, cv), __hmul(x1, sv));
+        __half o1 = __hadd(__hmul(x0, sv), __hmul(x1, cv));
+        *reinterpret_cast<__half2*>(&out[off + d * 2]) =
+            __halves2half2(o0, o1);
     }
 
-    // ---- Passthrough ----
-    const int rot_full = half_rot << 1;
-    const int pass = head_dim - rot_full;
+    const int rfull = hr << 1;
+    const int pass  = hd - rfull;
     if (pass > 0) {
-        const int pass_h2 = pass >> 1;
-        const int total_pass = num_heads * pass_h2;
-        for (int idx = threadIdx.x; idx < total_pass; idx += blockDim.x) {
-            int h = idx / pass_h2;
-            int t = idx - h * pass_h2;
-            int d = rot_full + (t << 1);
-            int off = base + h * head_dim;
-            *reinterpret_cast<__half2*>(&output[off + d]) =
-                *reinterpret_cast<const __half2*>(&input[off + d]);
-        }
-        if ((pass & 1) && threadIdx.x < num_heads) {
-            int off = base + threadIdx.x * head_dim;
-            output[off + head_dim - 1] = input[off + head_dim - 1];
+        const int pt = nh * pass;
+        for (int i = threadIdx.x; i < pt; i += BLOCK) {
+            int h = i / pass;
+            int d = rfull + i - h * pass;
+            int off = base + h * hd + d;
+            out[off] = in[off];
         }
     }
 }
+
+/* ================================================================
+ * Autotune infrastructure
+ * ================================================================ */
+
+static int ilog2_(int x)
+{
+    int n = 0;
+    while (x > 1) { x >>= 1; ++n; }
+    return n;
+}
+
+static bool ipow2_(int x) { return x > 0 && (x & (x - 1)) == 0; }
+
+struct RopeConfig {
+    int  block_size;
+    bool use_f4;
+};
+
+static constexpr RopeConfig kRopeConfigs[] = {
+    { 64, true},   // 0
+    {128, true},   // 1
+    {256, true},   // 2
+    {128, false},  // 3
+    {256, false},  // 4
+};
+static constexpr int kNumRopeConfigs =
+    static_cast<int>(sizeof(kRopeConfigs) / sizeof(kRopeConfigs[0]));
+
+struct RopeLaunchParams {
+    const __half*   ih;
+    const int64_t*  ps;
+    const __half*   ch;
+    const __half*   sh;
+    __half*         oh;
+    int H, D, hr, M, N;
+    bool interleaved;
+    bool f4ok;
+};
+
+static void launchRopeConfig(
+    int config_id, hipStream_t st,
+    const RopeLaunchParams& p)
+{
+    auto& cfg = kRopeConfigs[config_id];
+    const int BS = cfg.block_size;
+
+    if (cfg.use_f4 && p.f4ok) {
+        const auto* i4 = reinterpret_cast<const float4*>(p.ih);
+        const auto* c4 = reinterpret_cast<const float4*>(p.ch);
+        const auto* s4 = reinterpret_cast<const float4*>(p.sh);
+        auto*       o4 = reinterpret_cast<float4*>(p.oh);
+        const int fh = p.D >> 3;
+        const int fs = p.H * fh;
+
+        if (p.interleaved) {
+            const int cp  = p.hr >> 3;
+            const int tot = p.N * p.H * cp;
+            dim3 g((tot + BS - 1) / BS);
+
+#define ROPE_IL_F4_CASE(B) \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(rope_il_f4<B>), \
+        g, dim3(B), 0, st, \
+        i4, p.ps, c4, s4, o4, \
+        fs, fh, cp, cp-1, ilog2_(cp), p.H-1, ilog2_(p.H), p.M, tot)
+
+            switch (BS) {
+                case  64: ROPE_IL_F4_CASE(64);  break;
+                case 128: ROPE_IL_F4_CASE(128); break;
+                default:  ROPE_IL_F4_CASE(256); break;
+            }
+#undef ROPE_IL_F4_CASE
+        } else {
+            const int fp  = p.hr >> 3;
+            const int tot = p.N * p.H * fp;
+            dim3 g((tot + BS - 1) / BS);
+
+#define ROPE_HR_F4_CASE(B) \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(rope_hr_f4<B>), \
+        g, dim3(B), 0, st, \
+        i4, p.ps, c4, s4, o4, \
+        fs, fh, fp, fp-1, ilog2_(fp), p.H-1, ilog2_(p.H), p.M, tot)
+
+            switch (BS) {
+                case  64: ROPE_HR_F4_CASE(64);  break;
+                case 128: ROPE_HR_F4_CASE(128); break;
+                default:  ROPE_HR_F4_CASE(256); break;
+            }
+#undef ROPE_HR_F4_CASE
+        }
+
+        if (p.D > p.hr * 2 && (p.D - p.hr * 2) % 8 == 0) {
+            const int fr = (p.hr * 2) >> 3;
+            const int fp = (p.D - p.hr * 2) >> 3;
+            const int fh = p.D >> 3;
+            const int fs = p.H * fh;
+            const int pt = p.N * p.H * fp;
+            hipLaunchKernelGGL(rope_pass_f4,
+                dim3((pt + 255) >> 8), dim3(256), 0, st,
+                i4, o4, fs, fh, fr, fp, p.H, pt);
+        }
+    } else {
+        dim3 g(p.N);
+        dim3 b(BS);
+        int smem = 2 * p.hr * static_cast<int>(sizeof(__half));
+
+        if (p.interleaved) {
+#define ROPE_IL_FB_CASE(B) \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(rope_il_fb<B>), \
+        g, b, smem, st, \
+        p.ih, p.ps, p.ch, p.sh, p.oh, p.H, p.D, p.hr, p.M)
+
+            switch (BS) {
+                case 128: ROPE_IL_FB_CASE(128); break;
+                default:  ROPE_IL_FB_CASE(256); break;
+            }
+#undef ROPE_IL_FB_CASE
+        } else {
+#define ROPE_HR_FB_CASE(B) \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(rope_hr_fb<B>), \
+        g, b, smem, st, \
+        p.ih, p.ps, p.ch, p.sh, p.oh, p.H, p.D, p.hr, p.M)
+
+            switch (BS) {
+                case 128: ROPE_HR_FB_CASE(128); break;
+                default:  ROPE_HR_FB_CASE(256); break;
+            }
+#undef ROPE_HR_FB_CASE
+        }
+    }
+}
+
+static int tuneRopeConfig(
+    hipStream_t st,
+    const RopeLaunchParams& p)
+{
+    hipEvent_t ev0, ev1;
+    (void)hipEventCreate(&ev0);
+    (void)hipEventCreate(&ev1);
+
+    float best_ms = 1e30f;
+    int   best_id = 2;
+    constexpr int WARMUP = 2;
+    constexpr int ITERS  = 10;
+
+    for (int cid = 0; cid < kNumRopeConfigs; cid++) {
+        auto& cfg = kRopeConfigs[cid];
+        if (cfg.use_f4 && !p.f4ok) continue;
+
+        for (int w = 0; w < WARMUP; w++)
+            launchRopeConfig(cid, st, p);
+
+        (void)hipEventRecord(ev0, st);
+        for (int i = 0; i < ITERS; i++)
+            launchRopeConfig(cid, st, p);
+        (void)hipEventRecord(ev1, st);
+        (void)hipEventSynchronize(ev1);
+
+        float ms = 0.0f;
+        (void)hipEventElapsedTime(&ms, ev0, ev1);
+
+        if (ms < best_ms) {
+            best_ms = ms;
+            best_id = cid;
+        }
+    }
+
+    (void)hipEventDestroy(ev0);
+    (void)hipEventDestroy(ev1);
+    return best_id;
+}
+
+static std::unordered_map<std::string, int> rope_cache;
+static std::mutex rope_tune_mutex;
+
+static std::string ropeCacheKey(int N, int H, int D, int hr, int interleaved) {
+    return std::to_string(N) + "_" + std::to_string(H) + "_" +
+           std::to_string(D) + "_" + std::to_string(hr) + "_" +
+           std::to_string(interleaved);
+}
+
+static int getOrTuneRopeConfig(
+    hipStream_t st,
+    const RopeLaunchParams& p)
+{
+    std::string key = ropeCacheKey(p.N, p.H, p.D, p.hr,
+                                   p.interleaved ? 1 : 0);
+
+    std::lock_guard<std::mutex> lock(rope_tune_mutex);
+
+    auto it = rope_cache.find(key);
+    if (it != rope_cache.end())
+        return it->second;
+
+    int best = tuneRopeConfig(st, p);
+    rope_cache[key] = best;
+    return best;
+}
+
+/* ================================================================
+ * Host dispatcher
+ * ================================================================ */
 
 extern "C" int hip_rope_forward(
     void* stream_ptr,
@@ -244,61 +531,52 @@ extern "C" int hip_rope_forward(
     int64_t element_size_bytes)
 {
     if (!input || !position_ids || !cos_cache || !sin_cache || !output) {
-        fprintf(stderr, "hip_rope_forward: null pointer argument\n");
+        fprintf(stderr, "hip_rope_forward: null pointer\n");
         return -1;
     }
-
     if (element_size_bytes != 2) {
-        fprintf(stderr,
-                "hip_rope_forward: only fp16 supported, got elem_size=%lld\n",
+        fprintf(stderr, "hip_rope_forward: fp16 only (got %lld)\n",
                 (long long)element_size_bytes);
         return -1;
     }
 
-    hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+    hipStream_t st = static_cast<hipStream_t>(stream_ptr);
+    const int H  = static_cast<int>(num_heads);
+    const int D  = static_cast<int>(head_dim);
+    const int R  = static_cast<int>(rotary_dim);
+    const int hr = R / 2;
+    const int M  = static_cast<int>(max_seq_len_i64);
+    const int N  = static_cast<int>(batch_size) * static_cast<int>(seq_len);
 
-    const int bs  = static_cast<int>(batch_size);
-    const int sl  = static_cast<int>(seq_len);
-    const int nh  = static_cast<int>(num_heads);
-    const int hd  = static_cast<int>(head_dim);
-    const int rd  = static_cast<int>(rotary_dim);
-    const int hr  = rd / 2;
-    const int msl = static_cast<int>(max_seq_len_i64);
+    bool f4ok = (hr >= 8)
+             && (hr % 8 == 0)
+             && (D % 8 == 0)
+             && ipow2_(H)
+             && ipow2_(hr >> 3);
 
-    const auto* in   = static_cast<const __half*>(input);
-    const auto* pos  = static_cast<const int64_t*>(position_ids);
-    const auto* cosc = static_cast<const __half*>(cos_cache);
-    const auto* sinc = static_cast<const __half*>(sin_cache);
-    auto*       out  = static_cast<__half*>(output);
+    if (f4ok && R < D && (D - R) % 8 != 0)
+        f4ok = false;
 
-    const int smem_bytes = 2 * hr * static_cast<int>(sizeof(__half));
+    RopeLaunchParams p;
+    p.ih = static_cast<const __half*>(input);
+    p.ps = static_cast<const int64_t*>(position_ids);
+    p.ch = static_cast<const __half*>(cos_cache);
+    p.sh = static_cast<const __half*>(sin_cache);
+    p.oh = static_cast<__half*>(output);
+    p.H  = H;
+    p.D  = D;
+    p.hr = hr;
+    p.M  = M;
+    p.N  = N;
+    p.interleaved = (interleaved != 0);
+    p.f4ok = f4ok;
 
-    dim3 grid(bs * sl);
-    dim3 block(256);
-
-    if (interleaved) {
-        int hr_shift = 0;
-        { int v = hr; while (v > 1) { v >>= 1; hr_shift++; } }
-
-        hipLaunchKernelGGL(rope_interleaved_opt,
-            grid, block, smem_bytes, stream,
-            in, pos, cosc, sinc, out,
-            sl, nh, hd, hr, hr_shift, msl);
-    } else {
-        int half2_count = hr >> 1;
-        int half2_shift = 0;
-        { int v = half2_count; while (v > 1) { v >>= 1; half2_shift++; } }
-
-        hipLaunchKernelGGL(rope_half_rotated_opt,
-            grid, block, smem_bytes, stream,
-            in, pos, cosc, sinc, out,
-            sl, nh, hd, hr, half2_shift, msl);
-    }
+    int config_id = getOrTuneRopeConfig(st, p);
+    launchRopeConfig(config_id, st, p);
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
-        fprintf(stderr, "hip_rope_forward: launch failed: %s\n",
-                hipGetErrorString(err));
+        fprintf(stderr, "hip_rope_forward: %s\n", hipGetErrorString(err));
         return -1;
     }
     return 0;
