@@ -38,6 +38,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 /* =======================================================================
  * Section 1: Naive fallback kernel (row-major, any alignment, batched)
@@ -1254,6 +1255,59 @@ static _Float16* ensureDqBuffer(int N, int K) {
     return g_dq_buf;
 }
 
+/* -----------------------------------------------------------------------
+ * Weight pre-shift state (PR 174 companion / POC)
+ *
+ * PR 174 changed the no-zp dequant path (HAS_ZP=false / USE_ZEROS=false)
+ * to read each nibble as signed int4 via sign-extend, *assuming* the
+ * caller has already folded the default zp = 8 into the weight bytes
+ * (q' = q - 8 mod 16, equivalent to per-byte XOR 0x88). The MLIR /
+ * compile-time pipeline does not yet emit pre-shifted weights, so this
+ * runtime helper does the XOR in-place on the GPU constant blob the
+ * first time we observe each B pointer with zero_points == nullptr.
+ *
+ * Subsequent calls observing the same B pointer skip the XOR. The XOR
+ * kernel is launched on the same stream as the GEMM, so HIP stream
+ * ordering guarantees the GEMM sees the pre-shifted bytes (no host
+ * sync needed).
+ *
+ * The set is cleared by hip_matmul_nbits_release_buffers so that
+ * cold-cache benchmarks (test_matmul_nbits.cpp --cold-cache) re-run
+ * the XOR each round.
+ * ----------------------------------------------------------------------- */
+__global__ void weight_pre_shift_xor_0x88_kernel(
+    unsigned char* __restrict__ B, size_t n_bytes)
+{
+    size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n_bytes) B[i] ^= 0x88;
+}
+
+static std::unordered_set<const void*> g_pre_shifted_weights;
+static std::mutex g_pre_shift_mutex;
+
+static void preShiftWeightIfFirstSeen(
+    hipStream_t stream, const void* B, int64_t N, int64_t K)
+{
+    if (B == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(g_pre_shift_mutex);
+        if (!g_pre_shifted_weights.insert(B).second) return;
+    }
+    size_t n_bytes = static_cast<size_t>(N) * static_cast<size_t>(K / 2);
+    if (n_bytes == 0) return;
+    constexpr int THR = 256;
+    unsigned blocks = static_cast<unsigned>((n_bytes + THR - 1) / THR);
+    hipLaunchKernelGGL(weight_pre_shift_xor_0x88_kernel,
+                       dim3(blocks), dim3(THR), 0, stream,
+                       const_cast<unsigned char*>(
+                           static_cast<const unsigned char*>(B)),
+                       n_bytes);
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits pre-shift weight "
+        "(N=%lld K=%lld bytes=%zu)\n",
+        (long long)N, (long long)K, n_bytes);
+}
+
 static int tuneWmmaConfig(
     hipStream_t stream,
     int M, int N, int K,
@@ -1485,6 +1539,15 @@ extern "C" int hip_matmul_nbits(
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
+  // PR 174 companion: when zero_points is null, all kernel paths assume
+  // the weight has been pre-folded with the default zp=8 (each byte
+  // XOR 0x88 -> nibbles become signed int4 q'=q-8). Since the compile-
+  // time pipeline does not emit pre-shifted weights yet, do the XOR
+  // in-place on the GPU constant the first time we see each B pointer.
+  if (zero_points == nullptr) {
+    preShiftWeightIfFirstSeen(hip_stream, B, N, K);
+  }
+
   // Convert uint8 packed nibble zero_points to FP16 for WMMA/GEMV-col-major
   // paths which require FP16 zero_points. Row-major GEMV and naive fallback
   // read uint8 directly and don't need this conversion.
@@ -1705,4 +1768,8 @@ extern "C" int hip_matmul_nbits(
 
 extern "C" void hip_matmul_nbits_release_buffers() {
   if (g_dq_buf) { hipFree(g_dq_buf); g_dq_buf = nullptr; g_dq_buf_elems = 0; }
+  {
+    std::lock_guard<std::mutex> lock(g_pre_shift_mutex);
+    g_pre_shifted_weights.clear();
+  }
 }
