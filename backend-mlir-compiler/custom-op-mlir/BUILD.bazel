@@ -22,7 +22,8 @@ cc_library(
     linkstatic = True,
     visibility = ["//visibility:public"],
     deps = [
-        "//backend-mlir-compiler/proto:mlir_compilation_proto",
+        "//backend-mlir-compiler/common:common_headers",
+        "//backend-mlir-compiler/proto:metadata_headers",
         "//include:hip_headers",
         "//include:foundation_headers",
         "@glog//:glog",

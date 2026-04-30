@@ -23,6 +23,11 @@ namespace mlir_compilation::customop {
 // Manages inference state and owns the plugin that provides inference
 // functions. Uses morphizen::Plugin infrastructure for dynamic library loading.
 class InferenceState {
+private:
+  // Passkey tag — only members/friends of this class can construct one,
+  // preventing direct construction while allowing std::make_unique in create().
+  struct PrivateTag {};
+
 public:
   // Create inference state from DLL bytes.
   // fs: FileSystem for resolving model constants (passed to inference_init).
@@ -43,15 +48,11 @@ public:
 
   // Public constructor gated by PrivateTag: use create() factory instead.
   // PrivateTag is declared private below — external callers cannot form one.
-  struct PrivateTag;
-  InferenceState(PrivateTag, void *state,
+  InferenceState(struct PrivateTag, void *state,
                  std::unique_ptr<morphizen::Plugin> plugin,
                  const std::string &temp_dll_path);
 
 private:
-  // Passkey tag — only members/friends of this class can construct one,
-  // preventing direct construction while allowing std::make_unique in create().
-  struct PrivateTag {};
   // Opaque handle returned by inference_init()
   void *state_;
 
