@@ -16,6 +16,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <unordered_map>
@@ -23,6 +24,53 @@
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
+
+// Env-var gate for the group-batched "no-expand" hipBLASLt GQA pipeline.
+// When HIPDNN_EP_GQA_NO_EXPAND=1 (default) the Score and Value GEMMs read
+// K and V directly from the BNSD [B, G, skv, d] present cache using
+// strided-batched mode with batch = B*G and per-operand batch strides:
+//   A (K or V):  stride = present_seq * d       (one BNSD group matrix)
+//   B (Q or S):  stride = HPG * sq * d          (score)
+//                         HPG * sq * total_seq  (value)
+//   C (S or O):  stride = HPG * sq * total_seq  (score)
+//                         HPG * sq * d          (value)
+// This eliminates the explicit expand_kv_k / expand_kv_v kernels and the
+// B*H*total_seq*d fp16 scratch buffers they wrote into.
+//
+// At sq == 1 (decode) BSHD [B, 1, H, d] and BNSD [B, H, 1, d] share the
+// same memory, so Q and O are also read / written in place (no
+// Q-transpose / O-transpose kernels). At sq > 1 (prefill) the Q-transpose
+// and O-transpose kernels still run because the two layouts diverge.
+//
+// Output is S / O bit-identical (modulo fp16 rounding in a different GEMM
+// tile schedule) to the expand + transpose path. Set
+// HIPDNN_EP_GQA_NO_EXPAND=0 to fall back fully for A/B testing.
+static bool gqa_no_expand_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_NO_EXPAND");
+    return !v || std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
+
+// Env-var gate for enabling the no-expand path on prefill (sq > 1).
+// Default off: today only decode (sq == 1) takes the no-expand fast path,
+// matching the verified pre-step-2 behaviour. Set
+// HIPDNN_EP_GQA_NO_EXPAND_PREFILL=1 to opt prefill into the same
+// group-batched pipeline -- same strides as decode, but with Q/O transpose
+// kernels kept in place because BSHD and BNSD diverge at sq > 1.
+//
+// Keeping this behind a separate flag lets us A/B just the new prefill
+// behaviour without touching decode. Once verified across model families
+// (Mistral / Llama / GPT-OSS / ...), this can be folded into the main
+// HIPDNN_EP_GQA_NO_EXPAND flag.
+static bool gqa_no_expand_prefill_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_NO_EXPAND_PREFILL");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
 
 //===----------------------------------------------------------------------===//
 // hipBLASLt layout helper
@@ -55,9 +103,19 @@ struct GqaGemmKey {
   int64_t m, n, k, batch;
   bool transA; // true for Score GEMM (K^T * Q), false for Value GEMM (V * S)
   bool outputFp32; // true to use HIP_R_32F for C/D layouts (Score GEMM)
+  // Optional explicit per-operand batch strides (in elements). A value of 0
+  // means "use the default dense stride" (m*k for A, n*k for B, n*m for C/D).
+  // Non-zero values override the default and enable batch layouts that differ
+  // from the packed-batched layout -- used by the no-expand decode path where
+  // K/V are shared across HPG heads (stride = present_seq*d across G groups)
+  // while Q/O advance by HPG entries per group (stride = HPG*d or HPG*skv).
+  int64_t strideA;
+  int64_t strideB;
+  int64_t strideC;
   bool operator==(const GqaGemmKey &o) const {
     return m == o.m && n == o.n && k == o.k && batch == o.batch &&
-           transA == o.transA && outputFp32 == o.outputFp32;
+           transA == o.transA && outputFp32 == o.outputFp32 &&
+           strideA == o.strideA && strideB == o.strideB && strideC == o.strideC;
   }
 };
 
@@ -70,6 +128,9 @@ struct GqaGemmKeyHash {
     hash_combine_val(h, k.batch);
     hash_combine_val(h, k.transA);
     hash_combine_val(h, k.outputFp32);
+    hash_combine_val(h, k.strideA);
+    hash_combine_val(h, k.strideB);
+    hash_combine_val(h, k.strideC);
     return h;
   }
 };
@@ -130,21 +191,25 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
   }
 
   {
+    int64_t strideA = key.strideA != 0 ? key.strideA : m * k;
+    int64_t strideB = key.strideB != 0 ? key.strideB : n * k;
+    int64_t strideC = key.strideC != 0 ? key.strideC : n * m;
+
     int64_t a_rows = key.transA ? k : m;
     int64_t a_cols = key.transA ? m : k;
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, HIP_R_16F, a_rows,
                                                 a_cols, a_rows));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, m * k));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, strideA));
 
     GQA_CACHE_CHECK(
         hipblasLtMatrixLayoutCreate(&entry.layB, HIP_R_16F, k, n, k));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, n * k));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, strideB));
 
     hipDataType outType = key.outputFp32 ? HIP_R_32F : HIP_R_16F;
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, outType, m, n, m));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, n * m));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, strideC));
     GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, outType, m, n, m));
-    GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, n * m));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, strideC));
   }
 
   GQA_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
@@ -449,26 +514,141 @@ static int gqa_forward_hipblaslt(
 
   bool packed_qkv = (key == nullptr && value == nullptr);
 
+  //===--------------------------------------------------------------------===//
+  // Unified hipBLASLt GQA pipeline (shared by expand and no-expand paths)
+  //
+  // Two orthogonal knobs control the layout choices for the two GEMMs:
+  //
+  //   use_no_expand : when true, Score reads K and Value reads V directly
+  //                   from the BNSD cache (present_key / present_value) and
+  //                   both GEMMs use strided-batched mode with batch = B*G
+  //                   plus per-operand strides to broadcast each KV group
+  //                   across its HPG queries. When false (original path)
+  //                   expand_kv_* duplicates the G groups into H heads in
+  //                   d_Kexp / d_Vexp and both GEMMs run with dense batch
+  //                   = B*H. The no-expand flavour skips two kernels and
+  //                   two B*H*total_seq*d fp16 scratch buffers.
+  //
+  //   need_transpose: true when sq > 1. The BSHD (Q, output) and BNSD
+  //                   (GEMM-native) layouts only coincide when sq == 1,
+  //                   so for prefill we still need a Q-transpose before
+  //                   Score and an O-transpose after Value. For decode
+  //                   (sq == 1) both transposes are pure pointer
+  //                   reinterpretations and the kernels are skipped.
+  //
+  // Gate rationale: the no-expand path is correctness-orthogonal to most
+  // GQA features -- packed-QKV split runs in Step 0 and redirects qSrc /
+  // kSrc / vSrc; RoPE runs in Steps 1-2 and redirects them again; the
+  // softmax / causal-mask kernels see S in the same BNSD [B, H, sq,
+  // total_seq] layout regardless of which GEMM flavour produced it; and
+  // the strided-batched GEMM addressing is correct for any B and any sq
+  // (I walked the stride math for both dimensions separately before
+  // dropping their gates). The only hard correctness requirement is that
+  // present_key / present_value be valid BNSD caches the GEMMs can read
+  // directly -- everything else is just pipeline plumbing that works
+  // identically across the two flavours.
+  //
+  // Prefill (sq > 1) is additionally guarded by
+  // HIPDNN_EP_GQA_NO_EXPAND_PREFILL (default off) so the new behaviour can
+  // be verified in isolation -- with the prefill flag off the path is
+  // byte-identical to the pre-step-2 decode-only gate. Once prefill is
+  // verified across model families this extra gate can be removed.
+  //
+  // Pointer plumbing:
+  //   Score A (K):  use_no_expand ? present_key  : d_Kexp
+  //   Score B (Q):  need_transpose ? d_Qtrans    : qSrc  (BSHD == BNSD @sq=1)
+  //   Value A (V):  use_no_expand ? present_value: d_Vexp
+  //   Value C (O):  need_transpose ? d_O         : output
+  //===--------------------------------------------------------------------===//
+
+  bool use_no_expand = gqa_no_expand_enabled() && present_key &&
+                       present_value &&
+                       (sq == 1 || gqa_no_expand_prefill_enabled());
+  bool need_transpose = (sq > 1);
+
+  // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
+  // strides (non-zero stride fields); the expand flavour leaves them zero
+  // so queryOrCreateGemmState falls back to the dense packed-batch defaults.
+  GqaGemmKey scoreKey, valueKey;
+  if (use_no_expand) {
+    // Score: C[total_seq, HPG*sq] = K^T[d,total_seq] * Q[d, HPG*sq] per
+    // (b, g) pair. strideA steps over the buffer page (present_seq*d) even
+    // though only the first total_seq tokens are read, which lets the
+    // descriptor stay stable across token steps.
+    scoreKey = {/*m=*/total_seq,
+                /*n=*/HPG * sq,
+                /*k=*/d,
+                /*batch=*/B * G,
+                /*transA=*/true,
+                /*outputFp32=*/true,
+                /*strideA=*/present_seq * d,
+                /*strideB=*/HPG * sq * d,
+                /*strideC=*/HPG * sq * total_seq};
+    // Value: C[d, HPG*sq] = V[d, total_seq] * S[total_seq, HPG*sq] per
+    // (b, g) pair, writing into BNSD [B, G, HPG, sq, d] which at sq==1
+    // coincides with BSHD [B, 1, H, d].
+    valueKey = {/*m=*/d,
+                /*n=*/HPG * sq,
+                /*k=*/total_seq,
+                /*batch=*/B * G,
+                /*transA=*/false,
+                /*outputFp32=*/false,
+                /*strideA=*/present_seq * d,
+                /*strideB=*/HPG * sq * total_seq,
+                /*strideC=*/HPG * sq * d};
+  } else {
+    scoreKey = {total_seq,     sq, d, B * H, true, true,
+                /*strideA=*/0,
+                /*strideB=*/0,
+                /*strideC=*/0};
+    valueKey = {d,
+                sq,
+                total_seq,
+                B * H,
+                false,
+                false,
+                /*strideA=*/0,
+                /*strideB=*/0,
+                /*strideC=*/0};
+  }
+
+  const GqaGemmCacheEntry *scoreState =
+      queryOrCreateGemmState(state, ltHandle, scoreKey);
+  if (!scoreState)
+    return -1;
+  const GqaGemmCacheEntry *valueState =
+      queryOrCreateGemmState(state, ltHandle, valueKey);
+  if (!valueState)
+    return -1;
+
   // ---- Workspace layout ----
   // All temp buffers are packed contiguously into the shared workspace,
   // followed by the GEMM workspace region. This eliminates per-call
   // hipMalloc/hipFree -- after the first inference the workspace is
   // already large enough and reuse is zero-cost.
   //
-  // Layout: [Qtrans | Kexp | Vexp | S | O | Qroped? | Kroped? | Qsplit? |
-  // Ksplit? | Vsplit? | GEMM ws]
+  // Layout: [Qtrans? | Kexp? | Vexp? | S_f32 | S_fp16 | O? | Qroped? |
+  // Kroped? | Qsplit? | Ksplit? | Vsplit? | GEMM ws]
+  //
+  // Qtrans / O are only allocated when need_transpose is true.
+  // Kexp / Vexp are only allocated when use_no_expand is false.
+  // S_f32 and S_fp16 are always allocated (softmax is on every path).
 
-  size_t Qtrans_bytes = static_cast<size_t>(B) * H * sq * d * elem_sz;
-  size_t Kexp_bytes = static_cast<size_t>(B) * H * total_seq * d * elem_sz;
+  size_t Qtrans_bytes =
+      need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
+  size_t Kexp_bytes =
+      use_no_expand ? 0 : static_cast<size_t>(B) * H * total_seq * d * elem_sz;
+  size_t Vexp_bytes = Kexp_bytes;
   size_t S_f32_bytes =
       static_cast<size_t>(B) * H * sq * total_seq * sizeof(float);
   size_t S_fp16_bytes = static_cast<size_t>(B) * H * sq * total_seq * elem_sz;
-  size_t O_bytes = static_cast<size_t>(B) * H * sq * d * elem_sz;
+  size_t O_bytes =
+      need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
 
   size_t off_Qtrans = 0;
   size_t off_Kexp = off_Qtrans + Qtrans_bytes;
   size_t off_Vexp = off_Kexp + Kexp_bytes;
-  size_t off_S_f32 = off_Vexp + Kexp_bytes;
+  size_t off_S_f32 = off_Vexp + Vexp_bytes;
   size_t off_S_fp16 = off_S_f32 + S_f32_bytes;
   size_t off_O = off_S_fp16 + S_fp16_bytes;
   size_t temp_end = off_O + O_bytes;
@@ -497,21 +677,6 @@ static int gqa_forward_hipblaslt(
     temp_end = off_Vsplit + K_bytes;
   }
 
-  // Query or create cached GEMM descriptors + algorithms. On first call for
-  // a given shape the descriptors and layouts are created and the heuristic
-  // is queried; subsequent calls reuse the cached state.
-  GqaGemmKey scoreKey{total_seq, sq, d, B * H, true, true}; // outputFp32=true
-  GqaGemmKey valueKey{d,     sq,    total_seq,
-                      B * H, false, false}; // outputFp32=false
-  const GqaGemmCacheEntry *scoreState =
-      queryOrCreateGemmState(state, ltHandle, scoreKey);
-  if (!scoreState)
-    return -1;
-  const GqaGemmCacheEntry *valueState =
-      queryOrCreateGemmState(state, ltHandle, valueKey);
-  if (!valueState)
-    return -1;
-
   int result = 0;
 
   // Single workspace allocation: temp buffers + GEMM workspace
@@ -526,12 +691,12 @@ static int gqa_forward_hipblaslt(
     char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
     size_t ws_total = hipdnn_ep_state_get_workspace_size(state);
 
-    void *d_Qtrans = ws + off_Qtrans;
-    void *d_Kexp = ws + off_Kexp;
-    void *d_Vexp = ws + off_Vexp;
+    void *d_Qtrans = need_transpose ? (ws + off_Qtrans) : nullptr;
+    void *d_Kexp = use_no_expand ? nullptr : (ws + off_Kexp);
+    void *d_Vexp = use_no_expand ? nullptr : (ws + off_Vexp);
     void *d_S_f32 = ws + off_S_f32;
     void *d_S_fp16 = ws + off_S_fp16;
-    void *d_O = ws + off_O;
+    void *d_O = need_transpose ? (ws + off_O) : nullptr;
 
     void *gemm_ws_ptr = ws + temp_end;
     size_t gemm_ws_bytes = ws_total - temp_end;
@@ -583,28 +748,37 @@ static int gqa_forward_hipblaslt(
     }
 
     // ---- Step 3: Q Transpose BSHD [B,S,H,d] -> BNSD [B,H,S,d] ----
-    HIP_CHECK(hip_gqa_transpose_mid_dims(
-        stream, qSrc, d_Qtrans, static_cast<int>(B), static_cast<int>(sq),
-        static_cast<int>(H), static_cast<int>(d)));
+    // Skipped for sq == 1 because BSHD [B, 1, H, d] and BNSD [B, H, 1, d]
+    // are bit-identical in memory -- the Score GEMM can read qSrc directly.
+    if (need_transpose) {
+      HIP_CHECK(hip_gqa_transpose_mid_dims(
+          stream, qSrc, d_Qtrans, static_cast<int>(B), static_cast<int>(sq),
+          static_cast<int>(H), static_cast<int>(d)));
+    }
 
     // ---- Steps 4-5: KV Cache Update ----
     // The concat/append kernels write the valid range [0, total_seq) in full;
     // positions [total_seq, present_seq) are never read downstream (expand_kv
     // is called with copy_elems = total_seq * d), so the unused tail is left
     // untouched to avoid redundant memory bandwidth during prefill.
+    //
+    // For the no-expand path we hand seqlens_k_ptr to the append kernel so
+    // it can resolve past_len on-device, avoiding a D2H stall on every
+    // decode step. The expand path has already consumed total_seq host-side
+    // above, so it passes nullptr to preserve the pre-refactor behaviour.
     if (present_key && present_value) {
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-          nullptr));
+          use_no_expand ? seqlens_k_ptr : nullptr));
     }
 
     // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, total_seq, d]
-    // Source reads from present_key with buffer stride present_seq*d; dest
-    // uses total_seq*d since GEMM only operates on total_seq tokens.
-    {
+    // Skipped in no-expand mode: the Score / Value GEMMs read K/V directly
+    // from the BNSD cache via per-operand batch strides instead.
+    if (!use_no_expand) {
       const void *kCache = present_key ? present_key : key;
       const void *vCache = present_value ? present_value : value;
       int kvSrcStride = static_cast<int>(present_seq * d);
@@ -620,16 +794,25 @@ static int gqa_forward_hipblaslt(
     }
 
     // ---- Step 8: Score GEMM (fp16 in, fp32 out) ----
+    // A = K : no-expand reads the BNSD cache (present_key) directly;
+    //         the expand path reads the already-duplicated d_Kexp.
+    // B = Q : need_transpose reads d_Qtrans (BNSD); at sq==1 qSrc points
+    //         straight at the BSHD input which shares memory with BNSD.
+    const void *scoreA = use_no_expand ? present_key : d_Kexp;
+    const void *scoreB = need_transpose ? d_Qtrans : qSrc;
     float scoreAlpha = scale;
     float beta = 0.0f;
     hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
 
     HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, scoreState->desc, &scoreAlpha, d_Kexp, scoreState->layA,
-        d_Qtrans, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
+        ltHandle, scoreState->desc, &scoreAlpha, scoreA, scoreState->layA,
+        scoreB, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
         scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16) ----
+    // Both kernels treat S as [B*H, sq, total_seq] with head_stride
+    // sq*total_seq, which is the layout produced by both GEMM flavours
+    // (the no-expand strided-batched output lands in BNSD order too).
     int scoreF32BatchStride = static_cast<int>(sq * total_seq);
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
     if (sq > 1 || local_window_size > 0) {
@@ -645,18 +828,34 @@ static int gqa_forward_hipblaslt(
         static_cast<int>(use_smooth_softmax)));
 
     // ---- Step 10: Value GEMM (fp16 in, fp16 out) ----
+    // A = V : no-expand reads present_value directly; expand reads d_Vexp.
+    // C = O : need_transpose writes d_O (BNSD), later transposed to output;
+    //         at sq==1 the GEMM writes directly to the caller's output
+    //         buffer because BSHD and BNSD coincide.
+    const void *valueA = use_no_expand ? present_value : d_Vexp;
+    void *valueC = need_transpose ? d_O : output;
     float valAlpha = 1.0f;
     hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
 
     HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, valueState->desc, &valAlpha, d_Vexp, valueState->layA,
-        d_S_fp16, valueState->layB, &beta, d_O, valueState->layC, d_O,
+        ltHandle, valueState->desc, &valAlpha, valueA, valueState->layA,
+        d_S_fp16, valueState->layB, &beta, valueC, valueState->layC, valueC,
         valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 11: O Transpose BNSD [B,H,S,d] -> BSHD [B,S,H,d] ----
-    HIP_CHECK(hip_gqa_transpose_mid_dims(
-        stream, d_O, output, static_cast<int>(B), static_cast<int>(H),
-        static_cast<int>(sq), static_cast<int>(d)));
+    // Skipped at sq == 1 -- the Value GEMM already wrote into `output`.
+    if (need_transpose) {
+      HIP_CHECK(hip_gqa_transpose_mid_dims(
+          stream, d_O, output, static_cast<int>(B), static_cast<int>(H),
+          static_cast<int>(sq), static_cast<int>(d)));
+    }
+
+    RUNTIME_DEBUG_LOG(
+        "[REAL] GQA hipBLASLt: B=%lld sq=%lld total_seq=%lld H=%lld G=%lld "
+        "d=%lld no_expand=%d transpose=%d\n",
+        (long long)B, (long long)sq, (long long)total_seq, (long long)H,
+        (long long)G, (long long)d, static_cast<int>(use_no_expand),
+        static_cast<int>(need_transpose));
   }
 
 cleanup:
