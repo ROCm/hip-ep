@@ -201,6 +201,22 @@ int hip_rope_forward(
     int64_t interleaved,
     int64_t element_size_bytes);
 
+int hip_rope_forward_bak(
+    void* stream,
+    const void* input,
+    const void* position_ids,
+    const void* cos_cache,
+    const void* sin_cache,
+    void* output,
+    int64_t batch_size,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t head_dim,
+    int64_t rotary_dim,
+    int64_t max_seq_len,
+    int64_t interleaved,
+    int64_t element_size_bytes);
+
 /* =========================================================================
  * GQA Device Kernel Launchers
  * =========================================================================
