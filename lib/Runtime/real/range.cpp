@@ -21,6 +21,7 @@ int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
       "[REAL] wrap_range: output_num_elements=%lld, hip_dtype=%lld\n",
       (long long)output_num_elements, (long long)hip_dtype);
 
+  void *deviceErrorFlag = hipdnn_ep_state_get_error_flag_device_ptr(state);
   return hip_range(stream, start, limit, delta, output, output_num_elements,
-                   hip_dtype);
+                   hip_dtype, deviceErrorFlag);
 }

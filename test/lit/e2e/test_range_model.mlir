@@ -5,11 +5,13 @@
 // 2. convert-hip-to-llvm: hip.range -> llvm.call @wrap_range
 // 3. generate-interface: inference_init/compute/cleanup/metadata
 
-// CHECK: llvm.func @wrap_range
-// CHECK: llvm.func @inference_init
-// CHECK: llvm.func @inference_compute
-// CHECK: llvm.func @inference_cleanup
-// CHECK: llvm.func @inference_get_metadata_json
+// CHECK-DAG: llvm.func @wrap_range
+// CHECK-DAG: llvm.func @hipdnn_ep_state_reset_error_flag
+// CHECK-DAG: llvm.func @hipdnn_ep_state_read_and_clear_error_flag
+// CHECK-LABEL: llvm.func @inference_compute
+// CHECK: llvm.call @hipdnn_ep_state_reset_error_flag
+// CHECK: llvm.call @main_graph
+// CHECK: llvm.call @hipdnn_ep_state_read_and_clear_error_flag
 // CHECK-NOT: onnx.Range
 
 module {
