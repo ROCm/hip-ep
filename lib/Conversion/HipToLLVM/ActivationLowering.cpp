@@ -43,8 +43,8 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
 
   // Extract pointers
   Value statePtr = adaptor.getCtx();
-  Value inputPtr = extractMemRefPtr(adaptor.getX(), rewriter, loc);
-  Value outputPtr = extractMemRefPtr(adaptor.getY(), rewriter, loc);
+  Value inputPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
+  Value outputPtr = extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc);
 
   auto outputType = cast<MemRefType>(op.getY().getType());
 
@@ -158,8 +158,10 @@ struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
@@ -236,8 +238,9 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
       return failure();
 
     SmallVector<Value> args = {
-        adaptor.getCtx(), extractMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -279,8 +282,10 @@ struct MiopenSoftmaxOpLowering
                                  inputDesc.size(rewriter, loc, i));
 
     SmallVector<Value> args = {
-        adaptor.getCtx(), extractMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc), rows, cols};
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc), rows,
+        cols};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
