@@ -155,18 +155,6 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           expert_tokens[eid].push_back(
               {static_cast<int32_t>(t), static_cast<int32_t>(s)});
         } else {
-          // CASCADE-SUPPRESSION A/B (PR #186 test branch only): when
-          // topk_routing returns -1 for a slot (e.g. NaN router logits leave
-          // top_idx at its init value, see topk_routing_kernel in
-          // 3rd-party/custom_kernels/hip/qmoe_kernel.hip), route the slot
-          // round-robin across experts. This forces the expert FFNs to
-          // actually execute even though numerics are broken, isolating
-          // "QMoE-skip wall-time savings" from any potential kernel-level
-          // speedup of MatMulNBits at zp=16. Only enabled on
-          // fhanuman/test-zp16-perf-attribution; would not ship.
-          int64_t fallback_eid = (t * k + s) % num_experts;
-          expert_tokens[fallback_eid].push_back(
-              {static_cast<int32_t>(t), static_cast<int32_t>(s)});
           num_invalid++;
         }
       }
