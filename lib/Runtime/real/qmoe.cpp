@@ -147,12 +147,15 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     HIP_CHECK(hipStreamSynchronize(hip_stream));
 
     std::vector<std::vector<TokenEntry>> expert_tokens(num_experts);
+    int64_t num_invalid = 0;
     for (int64_t t = 0; t < num_tokens; t++) {
       for (int64_t s = 0; s < k; s++) {
         int32_t eid = h_indices[t * k + s];
         if (eid >= 0 && eid < num_experts) {
           expert_tokens[eid].push_back(
               {static_cast<int32_t>(t), static_cast<int32_t>(s)});
+        } else {
+          num_invalid++;
         }
       }
     }
@@ -168,6 +171,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
+    fprintf(stderr,
+            "[ZP_DEBUG_QMOE] active=%lld/%lld invalid=%lld/%lld tokens=%lld "
+            "k=%lld\n",
+            (long long)active_experts, (long long)num_experts,
+            (long long)num_invalid, (long long)(num_tokens * k),
+            (long long)num_tokens, (long long)k);
 
     for (int64_t e = 0; e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(expert_tokens[e].size());
