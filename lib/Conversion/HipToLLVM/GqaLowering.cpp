@@ -123,6 +123,20 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     int64_t headDimDivisor = packedQKV
                                  ? (op.getNumHeads() + 2 * op.getKvNumHeads())
                                  : op.getNumHeads();
+    // Compile-time sanity: when query_hidden is static, it must be evenly
+    // divisible by the divisor. A mismatch means num_heads/kv_num_heads is
+    // wrong for this model — fail loudly here rather than silently producing
+    // a truncated head_dim at runtime via integer SDiv.
+    if (!queryType.isDynamicDim(2)) {
+      int64_t queryHidden = queryType.getDimSize(2);
+      if (headDimDivisor <= 0 || queryHidden % headDimDivisor != 0)
+        return op.emitOpError()
+               << "query_hidden (" << queryHidden << ") not divisible by "
+               << (packedQKV ? "(H + 2*G)" : "H") << " = " << headDimDivisor
+               << " (num_heads=" << op.getNumHeads()
+               << ", kv_num_heads=" << op.getKvNumHeads()
+               << (packedQKV ? ", packed QKV)" : ")");
+    }
     Value headDimVal = LLVM::SDivOp::create(rewriter, loc, queryHiddenVal,
                                             createI64Const(headDimDivisor));
     unsigned elementSizeBytes =

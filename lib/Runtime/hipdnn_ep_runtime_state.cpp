@@ -974,8 +974,20 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
   // the static pool allocated at inference_init, reallocate. The pool
   // never shrinks — subsequent calls with smaller needed_size are no-ops.
   if (needed_size > state->pool_size) {
-    if (state->pool_base)
+    // Sync the stream before freeing: the previous inference may have
+    // dispatched async kernels that still hold pointers into the pool.
+    // hipFree on an in-flight buffer is undefined behavior — synchronize
+    // first to drain pending work. Grow events are rare (only when an
+    // input shape exceeds anything seen before) so the cost is amortized.
+    if (state->pool_base) {
+      if (state->stream)
+        hipStreamSynchronize(state->stream);
+      fprintf(stderr,
+              "hipdnn_ep_get_pool_base: growing pool %zu -> %zu bytes "
+              "(rare; first time this large input shape was seen)\n",
+              state->pool_size, needed_size);
       hipFree(state->pool_base);
+    }
     if (hipMalloc(&state->pool_base, needed_size) != hipSuccess) {
       fprintf(stderr,
               "hipdnn_ep_get_pool_base: hipMalloc failed for pool grow "
