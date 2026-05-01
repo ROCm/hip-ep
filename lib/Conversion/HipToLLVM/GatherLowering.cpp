@@ -23,9 +23,12 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
     Type i64Type = rewriter.getI64Type();
 
     Value statePtr = adaptor.getCtx();
-    Value dataPtr = extractMemRefPtr(adaptor.getData(), rewriter, loc);
-    Value indicesPtr = extractMemRefPtr(adaptor.getIndices(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value dataPtr =
+        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
+    Value indicesPtr =
+        extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     // Compute data_num_elements
     auto dataType = cast<MemRefType>(op.getData().getType());

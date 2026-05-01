@@ -40,18 +40,22 @@ struct CausalConvWithStateOpLowering
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value weightPtr = extractMemRefPtr(adaptor.getWeight(), rewriter, loc);
-    Value biasPtr = adaptor.getBias()
-                        ? extractMemRefPtr(adaptor.getBias(), rewriter, loc)
-                        : nullPtr;
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value weightPtr =
+        extractContiguousMemRefPtr(adaptor.getWeight(), rewriter, loc);
+    Value biasPtr =
+        adaptor.getBias()
+            ? extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc)
+            : nullPtr;
     Value pastStatePtr =
         adaptor.getPastState()
-            ? extractMemRefPtr(adaptor.getPastState(), rewriter, loc)
+            ? extractContiguousMemRefPtr(adaptor.getPastState(), rewriter, loc)
             : nullPtr;
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value presentStatePtr =
-        extractMemRefPtr(adaptor.getPresentState(), rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getPresentState(), rewriter, loc);
 
     // Extract shape info from input memref: (batch, channels, L) for ndim=1
     auto inputType = cast<MemRefType>(op.getInput().getType());
