@@ -149,21 +149,6 @@ TensorData marshal_input_tensors(OrtKernelContext *context,
               << "): rank=" << data.tensors[i].rank
               << " element_size=" << data.tensors[i].element_size
               << " memory_type=" << data.tensors[i].memory_type;
-    // Per-input shape fprintf was disabled: even gated, the env-var check
-    // and the shape-formatting work runs on the per-token decode hot path
-    // (~70 inputs × every step). Kept commented (not deleted) so it can be
-    // pasted back in for one-off debugging without rewriting the loop.
-    // Re-enable temporarily by uncommenting; do NOT enable in benchmark
-    // runs — the fprintf path is slow once active and skews TPS numbers.
-    // if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 3) {
-    //   fprintf(stderr, "Input[%zu] shape=[", i);
-    //   for (size_t d = 0; d < data.shapes[i].size(); ++d) {
-    //     if (d > 0)
-    //       fprintf(stderr, ",");
-    //     fprintf(stderr, "%lld", (long long)data.shapes[i][d]);
-    //   }
-    //   fprintf(stderr, "]\n");
-    // }
   }
 
   data.span.data = data.tensors.data();
@@ -369,20 +354,6 @@ TensorData marshal_output_tensors(
               << "): rank=" << data.tensors[i].rank
               << " element_size=" << data.tensors[i].element_size
               << " memory_type=" << data.tensors[i].memory_type;
-    // Per-output shape fprintf disabled for the same reason as the input
-    // path above: even gated, the env-var check + formatting work runs on
-    // the per-token decode hot path and skews TPS numbers when measuring.
-    // Re-enable temporarily by uncommenting; do NOT enable in benchmarks.
-    // if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 3) {
-    //   fprintf(stderr, "Output[%d] '%s' shape=[", i,
-    //           output_meta.name().c_str());
-    //   for (size_t d = 0; d < data.shapes[i].size(); ++d) {
-    //     if (d > 0)
-    //       fprintf(stderr, ",");
-    //     fprintf(stderr, "%lld", (long long)data.shapes[i][d]);
-    //   }
-    //   fprintf(stderr, "]\n");
-    // }
   }
 
   data.span.data = data.tensors.data();
