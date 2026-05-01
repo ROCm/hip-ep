@@ -407,14 +407,58 @@ void PoolAllocsPass::runOnOperation() {
     if (info.allocOp->isBeforeInBlock(firstPooledAlloc))
       firstPooledAlloc = info.allocOp.getOperation();
 
-  for (auto &info : dynamics) {
-    for (Value dynDim : info.allocOp.getDynamicSizes()) {
-      if (auto *defOp = dynDim.getDefiningOp()) {
-        if (firstPooledAlloc->isBeforeInBlock(defOp) ||
-            defOp == firstPooledAlloc)
-          defOp->moveBefore(firstPooledAlloc);
-      }
-    }
+  // Recursively hoist the def-chain that computes each dynamic size in
+  // front of the first pooled alloc.  A single-level hoist is not enough:
+  // dynamic sizes are typically computed as `arith.muli %dim, %const` where
+  // %dim itself comes from `memref.dim %arg, %i` and %const from
+  // `arith.constant`.  Moving only the muli but leaving its operands behind
+  // breaks SSA dominance for the pool-size arithmetic emitted in Phase 5.
+  //
+  // Whitelist intentionally narrow: only side-effect-free pure ops whose
+  // operands are themselves trivial (block args, constants, or other
+  // whitelisted ops).  This guarantees the move never reorders observable
+  // behavior — the ops are restricted to shape/index arithmetic, never any
+  // op that might read or mutate buffers.
+  auto isHoistable = [](Operation *op) {
+    return isa<memref::DimOp, arith::ConstantOp, arith::ConstantIndexOp,
+               arith::MulIOp, arith::AddIOp, arith::SubIOp, arith::IndexCastOp>(
+        op);
+  };
+  llvm::SetVector<Operation *> hoistWorklist;
+  for (auto &info : dynamics)
+    for (Value dynDim : info.allocOp.getDynamicSizes())
+      if (auto *defOp = dynDim.getDefiningOp())
+        hoistWorklist.insert(defOp);
+
+  // Worklist grows as we walk operands of ops we visit; SetVector preserves
+  // the discovery order while preventing duplicate visits.  We process
+  // index-by-index instead of pop_back so additions during the loop are
+  // visited before we exit.
+  for (size_t idx = 0; idx < hoistWorklist.size(); ++idx) {
+    Operation *op = hoistWorklist[idx];
+    if (!isHoistable(op))
+      continue; // Not hoistable; leave it alone — Phase 5's createOrFold
+                // will see the original SSA value at its current position.
+                // If that position post-dominates firstPooledAlloc the
+                // verifier will catch the SSA error so we fail loudly.
+    for (Value operand : op->getOperands())
+      if (auto *defOp = operand.getDefiningOp())
+        hoistWorklist.insert(defOp);
+  }
+
+  // Move in reverse worklist order so producers land before consumers.  Each
+  // move is idempotent: if defOp is already before firstPooledAlloc we skip.
+  for (auto it = hoistWorklist.rbegin(); it != hoistWorklist.rend(); ++it) {
+    Operation *defOp = *it;
+    if (!isHoistable(defOp))
+      continue;
+    if (defOp->getBlock() != firstPooledAlloc->getBlock())
+      continue; // Defined in a different region/block — already dominates.
+    if (defOp == firstPooledAlloc)
+      continue;
+    if (defOp->isBeforeInBlock(firstPooledAlloc))
+      continue; // Already in the right place.
+    defOp->moveBefore(firstPooledAlloc);
   }
 
   builder.setInsertionPoint(firstPooledAlloc);

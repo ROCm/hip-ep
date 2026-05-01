@@ -160,15 +160,21 @@ TensorData marshal_input_tensors(OrtKernelContext *context,
               << "): rank=" << data.tensors[i].rank
               << " element_size=" << data.tensors[i].element_size
               << " memory_type=" << data.tensors[i].memory_type;
-    if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 3) {
-      fprintf(stderr, "Input[%zu] shape=[", i);
-      for (size_t d = 0; d < data.shapes[i].size(); ++d) {
-        if (d > 0)
-          fprintf(stderr, ",");
-        fprintf(stderr, "%lld", (long long)data.shapes[i][d]);
-      }
-      fprintf(stderr, "]\n");
-    }
+    // Per-input shape fprintf was disabled: even gated, the env-var check
+    // and the shape-formatting work runs on the per-token decode hot path
+    // (~70 inputs × every step). Kept commented (not deleted) so it can be
+    // pasted back in for one-off debugging without rewriting the loop.
+    // Re-enable temporarily by uncommenting; do NOT enable in benchmark
+    // runs — the fprintf path is slow once active and skews TPS numbers.
+    // if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 3) {
+    //   fprintf(stderr, "Input[%zu] shape=[", i);
+    //   for (size_t d = 0; d < data.shapes[i].size(); ++d) {
+    //     if (d > 0)
+    //       fprintf(stderr, ",");
+    //     fprintf(stderr, "%lld", (long long)data.shapes[i][d]);
+    //   }
+    //   fprintf(stderr, "]\n");
+    // }
   }
 
   data.span.data = data.tensors.data();
@@ -210,19 +216,34 @@ static std::vector<int> build_output_index_map(
   return map;
 }
 
-// Map "present.N.key" → compiler input index of "past_key_values.N.key"
-// (and likewise for ".value"). Returns -1 if no matching input found.
-static int find_past_input_for_present(
-    const std::string &output_name,
+// Precompute, for each metadata output, the compiler-input index of the
+// matching past_key_values input (or -1 if the output is not a `present.*`
+// tensor / no matching past input was found). Built once at MlirCustomOp
+// construction so the per-inference shape-override path is O(1) per output
+// instead of an O(N×M) name-string scan on the decode hot path.
+//
+// TODO: replace this name-based heuristic by emitting explicit past↔present
+// pairs from the compiler — the Level-1 pass already walks GqaOp operands,
+// which carry the pairing directly.
+static std::vector<int> build_present_to_past_input_idx(
+    const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
     const google::protobuf::RepeatedPtrField<mlir_metadata::Input> &inputs) {
-  if (output_name.size() < 9 || output_name.substr(0, 8) != "present.")
-    return -1;
-  std::string past_name = "past_key_values." + output_name.substr(8);
-  for (int i = 0; i < inputs.size(); ++i) {
-    if (inputs[i].name() == past_name)
-      return i;
+  std::unordered_map<std::string, int> input_name_to_idx;
+  input_name_to_idx.reserve(inputs.size());
+  for (int i = 0; i < inputs.size(); ++i)
+    input_name_to_idx.emplace(inputs[i].name(), i);
+
+  std::vector<int> result(outputs.size(), -1);
+  for (int i = 0; i < outputs.size(); ++i) {
+    const std::string &name = outputs[i].name();
+    if (name.size() < 9 || name.substr(0, 8) != "present.")
+      continue;
+    std::string past_name = "past_key_values." + name.substr(8);
+    auto it = input_name_to_idx.find(past_name);
+    if (it != input_name_to_idx.end())
+      result[i] = it->second;
   }
-  return -1;
+  return result;
 }
 
 // Marshal output tensors from ORT context using metadata outputs.
@@ -230,12 +251,14 @@ static int find_past_input_for_present(
 // the ORT kernel context output index.
 // For dynamic shapes (dim == -1 in metadata), resolves the actual dimension
 // value from the corresponding input tensor using DimSource references.
+// present_to_past_input_idx is precomputed at MlirCustomOp construction;
+// entry is -1 for outputs that are not `present.*` tensors.
 TensorData marshal_output_tensors(
     OrtKernelContext *context,
     const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
-    const google::protobuf::RepeatedPtrField<mlir_metadata::Input> &inputs,
     const std::vector<int> &output_index_map,
-    const std::vector<int> &input_index_map) {
+    const std::vector<int> &input_index_map,
+    const std::vector<int> &present_to_past_input_idx) {
   if (outputs.size() == 0) {
     LOG(FATAL) << "No output shapes in metadata";
   }
@@ -253,22 +276,33 @@ TensorData marshal_output_tensors(
                           output_meta.shape().end());
 
     // Resolve dynamic dims (-1) using DimSource entries from metadata.
-    // Each DimSource says "this output dim equals input[X].shape[Y]".
+    // Each DimSource with resolved=true says "this output dim equals
+    // input[X].shape[Y]". Static dims and unresolved dynamic dims have
+    // resolved=false and are left alone here (the post-loop CHECK below
+    // will catch any unresolved dynamic dim that survives).
     for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
-      if (data.shapes[i][d] == -1 && d < output_meta.dim_sources_size()) {
-        const auto &ds = output_meta.dim_sources(d);
-        int src_input = ds.input_idx();
-        int src_dim = ds.dim_idx();
-        if (src_input < static_cast<int>(input_index_map.size())) {
-          int ort_input_idx = input_index_map[src_input];
-          auto src_tensor = ctx.GetInput(ort_input_idx);
-          auto src_info = src_tensor.GetTensorTypeAndShapeInfo();
-          auto src_shape = src_info.GetShape();
-          if (src_dim < static_cast<int>(src_shape.size())) {
-            data.shapes[i][d] = src_shape[src_dim];
-          }
-        }
-      }
+      if (data.shapes[i][d] != -1)
+        continue;
+      if (d >= output_meta.dim_sources_size())
+        continue;
+      const auto &ds = output_meta.dim_sources(d);
+      if (!ds.resolved())
+        continue;
+      int src_input = ds.input_idx();
+      int src_dim = ds.dim_idx();
+      CHECK(src_input >= 0 &&
+            src_input < static_cast<int>(input_index_map.size()))
+          << "Output '" << output_meta.name() << "' dim " << d
+          << ": DimSource references input " << src_input << " but only "
+          << input_index_map.size() << " inputs are mapped";
+      int ort_input_idx = input_index_map[src_input];
+      auto src_tensor = ctx.GetInput(ort_input_idx);
+      auto src_shape = src_tensor.GetTensorTypeAndShapeInfo().GetShape();
+      CHECK(src_dim >= 0 && src_dim < static_cast<int>(src_shape.size()))
+          << "Output '" << output_meta.name() << "' dim " << d
+          << ": DimSource references input[" << src_input << "] dim " << src_dim
+          << " but that input has rank " << src_shape.size();
+      data.shapes[i][d] = src_shape[src_dim];
     }
 
     // OGA's past_present_share_buffer binds the same OrtValue to both
@@ -280,19 +314,30 @@ TensorData marshal_output_tensors(
     // Only override when past is larger (shared-buffer mode: past is
     // max_length, DimSource is tight). Skip for non-shared buffers where
     // past is prev_total < curr_total from DimSource.
-    int past_idx = find_past_input_for_present(output_meta.name(), inputs);
+    int past_idx = (i < static_cast<int>(present_to_past_input_idx.size()))
+                       ? present_to_past_input_idx[i]
+                       : -1;
     if (past_idx >= 0 && past_idx < static_cast<int>(input_index_map.size())) {
       int ort_past_idx = input_index_map[past_idx];
       auto past_tensor = ctx.GetInput(ort_past_idx);
       auto past_shape = past_tensor.GetTensorTypeAndShapeInfo().GetShape();
-      if (past_shape.size() == data.shapes[i].size()) {
+      if (past_shape.size() != data.shapes[i].size()) {
+        MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
+                  << "': share-buffer override skipped (rank mismatch: past="
+                  << past_shape.size() << " vs out=" << data.shapes[i].size()
+                  << ")";
+      } else {
         // Only override dimensions that were dynamic (-1) in the compiled
         // metadata.  Static dims are architecture constants (batch=1,
         // num_heads, head_dim) and must never change — restricting the
         // override to dynamic dims prevents accidental corruption.
         bool overridden = false;
+        bool any_dynamic = false;
         for (int d = 0; d < static_cast<int>(past_shape.size()); ++d) {
-          if (output_meta.shape(d) == -1 && past_shape[d] > data.shapes[i][d]) {
+          if (output_meta.shape(d) != -1)
+            continue;
+          any_dynamic = true;
+          if (past_shape[d] > data.shapes[i][d]) {
             data.shapes[i][d] = past_shape[d];
             overridden = true;
           }
@@ -300,6 +345,10 @@ TensorData marshal_output_tensors(
         if (overridden) {
           MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
                     << "': overrode dynamic dims from past input shape";
+        } else if (any_dynamic) {
+          MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
+                    << "': share-buffer override skipped (past not larger "
+                       "than DimSource — non-shared-buffer mode or pre-grow)";
         }
       }
     }
@@ -307,7 +356,10 @@ TensorData marshal_output_tensors(
     for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
       CHECK(data.shapes[i][d] >= 0)
           << "Output '" << output_meta.name() << "' dim " << d
-          << " is still dynamic (-1) after DimSource resolution";
+          << " is still dynamic (-1) after DimSource resolution. "
+          << "This means the compiler emitted no resolvable DimSource and "
+          << "no past-input override fired. Check that the dynamic dim has "
+          << "a dim_param shared with at least one input.";
     }
 
     int ort_idx = output_index_map[i];
@@ -328,6 +380,20 @@ TensorData marshal_output_tensors(
               << "): rank=" << data.tensors[i].rank
               << " element_size=" << data.tensors[i].element_size
               << " memory_type=" << data.tensors[i].memory_type;
+    // Per-output shape fprintf disabled for the same reason as the input
+    // path above: even gated, the env-var check + formatting work runs on
+    // the per-token decode hot path and skews TPS numbers when measuring.
+    // Re-enable temporarily by uncommenting; do NOT enable in benchmarks.
+    // if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 3) {
+    //   fprintf(stderr, "Output[%d] '%s' shape=[", i,
+    //           output_meta.name().c_str());
+    //   for (size_t d = 0; d < data.shapes[i].size(); ++d) {
+    //     if (d > 0)
+    //       fprintf(stderr, ",");
+    //     fprintf(stderr, "%lld", (long long)data.shapes[i][d]);
+    //   }
+    //   fprintf(stderr, "]\n");
+    // }
   }
 
   data.span.data = data.tensors.data();
@@ -548,6 +614,11 @@ MlirCustomOp::MlirCustomOp(
   // Precompute index mappings (compiler order -> ORT kernel context order)
   input_index_map_ = build_input_index_map(*meta_def);
   output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);
+  // Precompute present.* -> past_key_values.* input index lookup so the
+  // shape-override loop in marshal_output_tensors is O(1) per output instead
+  // of an O(N×M) name-string scan on the per-token decode hot path.
+  present_to_past_input_idx_ =
+      build_present_to_past_input_idx(metadata_.outputs(), metadata_.inputs());
   // Get FileSystem from PassContext for constants file resolution.
   // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
   auto fs =
@@ -575,8 +646,8 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     // --- Fast path: original behaviour, no timing overhead. ---
     auto inputs = marshal_input_tensors(context, input_index_map_);
     auto outputs =
-        marshal_output_tensors(context, metadata_.outputs(), metadata_.inputs(),
-                               output_index_map_, input_index_map_);
+        marshal_output_tensors(context, metadata_.outputs(), output_index_map_,
+                               input_index_map_, present_to_past_input_idx_);
 
     int ret = inference_state_->compute(&inputs.span, &outputs.span);
     if (ret != 0) {
@@ -599,8 +670,8 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   auto inputs = marshal_input_tensors(context, input_index_map_);
   const auto t_after_in = clock::now();
   auto outputs =
-      marshal_output_tensors(context, metadata_.outputs(), metadata_.inputs(),
-                             output_index_map_, input_index_map_);
+      marshal_output_tensors(context, metadata_.outputs(), output_index_map_,
+                             input_index_map_, present_to_past_input_idx_);
   const auto t_after_out = clock::now();
 
   // Stream used by inference_compute (first field of RuntimeState).  May be
