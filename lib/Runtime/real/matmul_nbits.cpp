@@ -9,7 +9,9 @@
 #include "hip_custom_kernels.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
@@ -18,7 +20,41 @@
 // output tensor. Capped at the first kZpDebugMatmulMaxLogged calls per thread
 // so the CI log stays parseable. Used to pin where Inf/NaN first appears in
 // the forward pass under the zp=16 toggle (see PR #186 / commit 0f0fade).
+//
+// Note: this file is compiled to bitcode and JIT-linked at runtime by morphizen.
+// The runtime link does NOT include compiler-rt, so we cannot use _Float16 or
+// __half conversions (those emit a __extendhfsf2 reference). Instead we read
+// fp16 as raw uint16_t and decode by bit manipulation.
 static constexpr int64_t kZpDebugMatmulMaxLogged = 600;
+
+static inline bool fp16_bits_is_nan(uint16_t h) {
+  return ((h >> 10) & 0x1FU) == 0x1FU && (h & 0x3FFU) != 0U;
+}
+
+static inline bool fp16_bits_is_inf(uint16_t h) {
+  return ((h >> 10) & 0x1FU) == 0x1FU && (h & 0x3FFU) == 0U;
+}
+
+// IEEE 754 binary16 -> binary32. Treats fp16 subnormals as 0 (good enough for
+// max-abs tracking; subnormals are below 6e-5 and irrelevant for overflow
+// detection). NaN/Inf should be filtered out by the callers above before
+// invoking this.
+static inline float fp16_bits_to_float(uint16_t h) {
+  uint32_t sign = static_cast<uint32_t>(h & 0x8000U) << 16;
+  uint32_t exp = static_cast<uint32_t>((h >> 10) & 0x1FU);
+  uint32_t mant = static_cast<uint32_t>(h & 0x3FFU);
+  uint32_t out;
+  if (exp == 0U) {
+    out = sign;
+  } else if (exp == 0x1FU) {
+    out = sign | 0x7F800000U | (mant << 13);
+  } else {
+    out = sign | ((exp + 127U - 15U) << 23) | (mant << 13);
+  }
+  float f;
+  std::memcpy(&f, &out, sizeof(f));
+  return f;
+}
 
 static void log_matmul_nbits_stats(RuntimeState *state, const void *output,
                                    int64_t M, int64_t N, int64_t K,
@@ -57,15 +93,15 @@ static void log_matmul_nbits_stats(RuntimeState *state, const void *output,
   int64_t inf_count = 0;
   float max_abs = 0.0f;
   if (elem_size == 2) {
-    const _Float16 *p = reinterpret_cast<const _Float16 *>(host_buf.data());
+    const uint16_t *p = reinterpret_cast<const uint16_t *>(host_buf.data());
     for (size_t i = 0; i < total_elems; i++) {
-      float v = static_cast<float>(p[i]);
-      if (std::isnan(v)) {
+      uint16_t h = p[i];
+      if (fp16_bits_is_nan(h)) {
         nan_count++;
-      } else if (std::isinf(v)) {
+      } else if (fp16_bits_is_inf(h)) {
         inf_count++;
       } else {
-        float a = std::fabs(v);
+        float a = std::fabs(fp16_bits_to_float(h));
         if (a > max_abs) {
           max_abs = a;
         }
