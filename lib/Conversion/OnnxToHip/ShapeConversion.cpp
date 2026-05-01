@@ -43,10 +43,21 @@ struct ShapeToTensorDims : public mlir::RewritePattern {
     start = std::max(start, int64_t(0));
     end = std::min(end, rank);
 
-    if (start >= end)
-      return rewriter.notifyMatchFailure(op, "empty shape range");
-
     auto i64Type = rewriter.getI64Type();
+
+    // ONNX spec: when the requested range is empty (start >= end after
+    // normalization), Shape returns a 1-D tensor with zero elements.
+    // Returning notifyMatchFailure here would leave onnx.Shape in the IR
+    // and crash later — emit the empty constant directly.
+    if (start >= end) {
+      auto emptyType = mlir::RankedTensorType::get({0}, i64Type);
+      auto emptyAttr =
+          mlir::DenseElementsAttr::get(emptyType, llvm::ArrayRef<int64_t>{});
+      mlir::Value result =
+          arith::ConstantOp::create(rewriter, loc, emptyType, emptyAttr);
+      rewriter.replaceOp(op, result);
+      return mlir::success();
+    }
 
     llvm::SmallVector<mlir::Value> dimValues;
     for (int64_t i = start; i < end; ++i) {

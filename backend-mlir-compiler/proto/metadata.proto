@@ -13,11 +13,14 @@ message Metadata {
 }
 
 // Tracks which input tensor dimension provides a dynamic output dimension's
-// runtime value. For static dims, input_idx and dim_idx are both 0 (default)
-// and ignored — the static value in Output.shape is used instead.
+// runtime value. `resolved` disambiguates the {input_idx=0, dim_idx=0}
+// default — a real (input 0, dim 0) source has resolved=true; an
+// unresolved dim (or a static dim with no source needed) has resolved=false.
+// Consumers MUST treat resolved=false as "do not use input_idx/dim_idx".
 message DimSource {
   int32 input_idx = 1;
   int32 dim_idx = 2;
+  bool resolved = 3;
 }
 
 message Input {
