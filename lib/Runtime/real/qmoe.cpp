@@ -171,9 +171,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
+    static thread_local int64_t s_qmoe_call_seq = 0;
+    int64_t call_seq = s_qmoe_call_seq++;
     fprintf(stderr,
-            "[ZP_DEBUG_QMOE] active=%lld/%lld invalid=%lld/%lld tokens=%lld "
-            "k=%lld\n",
+            "[ZP_DEBUG_QMOE] seq=%lld active=%lld/%lld invalid=%lld/%lld "
+            "tokens=%lld k=%lld\n",
+            (long long)call_seq,
             (long long)active_experts, (long long)num_experts,
             (long long)num_invalid, (long long)(num_tokens * k),
             (long long)num_tokens, (long long)k);
