@@ -1441,11 +1441,100 @@ static int tuneWmmaConfig(
 
 static std::unordered_map<std::string, int> wmma_cache;
 static std::mutex wmma_tune_mutex;
+static std::once_flag wmma_cache_init_flag;
+// Rebuild invalidates cache: __DATE__/__TIME__ change on every recompilation.
+static constexpr const char kWmmaBuildTimestamp[] = __DATE__ " " __TIME__;
 
 static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp) {
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(gs) + "_" +
            (has_zp ? "1" : "0");
+}
+
+// Disk-persistent WMMA autotune cache: avoids re-tuning ~1500 kernel launches
+// on every process start. File is per-GPU-arch in %TEMP%.
+static const std::string& getWmmaCachePath() {
+    static std::string path = [] {
+        std::string tmp_dir;
+#ifdef _WIN32
+        char* v = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&v, &len, "TEMP") == 0 && v != nullptr) {
+            tmp_dir = v;
+            free(v);
+        }
+#else
+        const char* v = getenv("TEMP");
+        if (!v) v = getenv("TMPDIR");
+        if (!v) v = "/tmp";
+        tmp_dir = v;
+#endif
+        if (tmp_dir.empty()) return std::string();
+
+        hipDeviceProp_t prop;
+        if (hipGetDeviceProperties(&prop, 0) != hipSuccess || prop.gcnArchName[0] == '\0')
+            return std::string();
+
+        return tmp_dir + "/morphizen_wmma_cache_" + prop.gcnArchName + ".txt";
+    }();
+    return path;
+}
+
+static void loadWmmaCache() {
+    const std::string& path = getWmmaCachePath();
+    if (path.empty()) return;
+
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return;
+
+    // First line is the build timestamp — discard cache if binary was rebuilt.
+    char ts_line[64];
+    if (!fgets(ts_line, sizeof(ts_line), f)) { fclose(f); return; }
+    size_t ts_len = strlen(ts_line);
+    if (ts_len > 0 && ts_line[ts_len - 1] == '\n') ts_line[ts_len - 1] = '\0';
+    if (strcmp(ts_line, kWmmaBuildTimestamp) != 0) {
+        fclose(f);
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] WMMA cache: build mismatch (file=\"%s\", "
+            "binary=\"%s\"), will re-tune\n", ts_line, kWmmaBuildTimestamp);
+        return;
+    }
+
+    char key[128];
+    int config_id;
+    int loaded = 0;
+    while (fscanf(f, "%127s %d", key, &config_id) == 2) {
+        if (config_id >= 0 && config_id < kNumWmmaConfigs) {
+            wmma_cache[key] = config_id;
+            loaded++;
+        }
+    }
+    fclose(f);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] WMMA cache: loaded %d entries from %s\n",
+        loaded, path.c_str());
+}
+
+static void saveWmmaCache() {
+    const std::string& path = getWmmaCachePath();
+    if (path.empty()) return;
+
+    FILE* f = fopen(path.c_str(), "w");
+    if (!f) {
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] WMMA cache: failed to write %s\n", path.c_str());
+        return;
+    }
+
+    fprintf(f, "%s\n", kWmmaBuildTimestamp);
+    for (const auto& entry : wmma_cache)
+        fprintf(f, "%s %d\n", entry.first.c_str(), entry.second);
+    fclose(f);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] WMMA cache: saved %zu entries to %s\n",
+        wmma_cache.size(), path.c_str());
 }
 
 static int getOrTuneWmmaConfig(
@@ -1457,6 +1546,8 @@ static int getOrTuneWmmaConfig(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
+    std::call_once(wmma_cache_init_flag, loadWmmaCache);
+
     std::string key = wmmaCacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_tune_mutex);
@@ -1468,6 +1559,7 @@ static int getOrTuneWmmaConfig(
     int best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp);
     wmma_cache[key] = best;
+    saveWmmaCache();
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] WMMA cache: stored key=\"%s\" -> config[%d] "
