@@ -324,6 +324,31 @@ int hip_gqa_fused_prefill(
     void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
     float scale);
 
+/* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
+ * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
+ * across the 4 query heads of each KV group, then a second kernel
+ * merges K_SPLITS partial (m, l, O) per query head.
+ *
+ * Depth-gated alternative to hip_gqa_fused_decode for skv >= ~256 where
+ * Llama-3.x family shows large bandwidth headroom over the existing
+ * one-block-per-head fused decode.
+ *
+ * Workspace: float scratch sized B*H*K_SPLITS*(d+2)*sizeof(float) bytes.
+ * Caller is responsible for allocating and passing it in.
+ *
+ * K_SPLITS: only 8 supported in V1. Returns -1 on unsupported (HPG, d, K_SPLITS).
+ *
+ * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
+ * = seqlens_k[b]+1 is read on-device (no host sync). */
+int hip_gqa_flash_decode(
+    void* stream,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    float scale,
+    const void* seqlens_k);
+
 /* =========================================================================
  * Cast (Element Type Conversion)
  * =========================================================================

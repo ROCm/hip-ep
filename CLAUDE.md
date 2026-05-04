@@ -200,7 +200,7 @@ install\dist\bin\hip-onnx-runner.exe -m models\Llama-3.2-1B-Instruct\model_q4f16
 
 ## Python Performance Tests
 
-**Never run GPU benchmarks in parallel.** GPU contention between concurrent benchmarks produces unreliable numbers. Always run benchmark approaches (DML, ORT EP, OGA Python, model_benchmark) sequentially — one at a time.
+**Never run GPU benchmarks in parallel.** GPU contention between concurrent benchmarks produces unreliable numbers. Always run benchmark approaches (DML, ORT EP, OGA Python, model_benchmark) sequentially — one at a time. Practical rules when driving benchmarks from Claude Code: (1) **never** launch a benchmark with `run_in_background: true` — always foreground with a long enough timeout; (2) before starting any GPU benchmark, verify the GPU is idle: `tasklist | grep -i model_benchmark` (Windows) and kill stragglers with `taskkill //F //PID <pid>` if anything appears; (3) `TaskStop` on a backgrounded bash task does NOT free the GPU — it signals the bash wrapper but the child `model_benchmark.exe` keeps running on the GPU. Always kill the child process explicitly and re-verify `tasklist` is clean before launching the next benchmark.
 
 Two test files with identical coverage per model. **Prefer 1B tests when debugging or iterating on fixes** — they run significantly faster (~4 min vs ~15 min) due to the smaller model:
 
@@ -288,6 +288,24 @@ CPU time tracks host-side overhead — GPU ops should show near-zero CPU time (a
 | **TOTAL** | | **79.9** | **0.9** | |
 
 End-to-end: **~59 ms avg** (17.0 tok/s)
+
+### Llama 8B at L=1024 with GQA flash_decode (gfx1150, May 2026)
+
+Long-context decode previously suffered from the original `gqa_fused_decode` kernel scaling linearly with `skv` (each query head re-read the full K/V cache → 4× bandwidth waste at HPG=4). The new `gqa_flash_decode` kernel (`3rd-party/custom_kernels/hip/gqa_kernel.hip`) uses a GQA-aware split-K Flash Attention 2 design: one block per (batch, kv-head, K_SPLIT) loads K/V tiles into LDS once and reuses them across all HPG=4 query heads, then a small reduction kernel merges partials. Templated for `D ∈ {64, 128}` with `K_SPLITS=8`. Per-step result at L=1024:
+
+| Operator | Calls | GPU (ms) | GPU % |
+|----------|------:|---------:|------:|
+| matmul_nbits | 225 | 61.0 | 76.5% |
+| **gqa (b=1,sq=1,skv=1056,h=32,d=128)** | **32** | **5.0** | **6.3%** |
+| skip_layernorm (1x4096) | 64 | 4.7 | 5.9% |
+| rotary_emb | 64 | 4.0 | 5.0% |
+| elementwise (1x1x1x14336) | 64 | 2.6 | 3.3% |
+| activation (n=14336) | 32 | 2.1 | 2.6% |
+| **TOTAL** | | **79.7** | |
+
+End-to-end at L=1024: **75.7 ms/tok (13.21 tok/s)** — vs. pre-flash_decode baseline ~95 ms/tok (10.5 tok/s) → **+26% TPS**. GQA per-layer at depth 1056 dropped from ~720 µs (linear-scaling fused_decode) to **156 µs** (~4.6× faster). At L=2048 (skv≈2080) decode is 80.4 ms/tok — only 6% slower than L=1024, confirming flash_decode flattened the depth scaling. At L=128 (skv<256) the dispatcher correctly falls back to the original fused_decode (17.46 tok/s, no regression vs short-context baseline).
+
+**Dispatch gate** (`lib/Runtime/real/gqa.cpp::gqa_flash_decode_enabled`): flash_decode runs when `sq==1`, `d ∈ {64,128}`, `H == G * 4` (HPG=4), and `skv >= HIPDNN_EP_GQA_FLASH_DECODE_MIN_SKV` (default 256). At small skv the original fused_decode wins because the new kernel's K_SPLITS=8 reduction overhead exceeds its bandwidth savings. Disable entirely with `HIPDNN_EP_GQA_FLASH_DECODE=0`. Workspace partials for the reduction step share the GQA workspace (placed after rope temps) — `hipdnn_ep_state_ensure_workspace` is called once with the combined size, since growing the workspace does NOT preserve data.
 
 Profiling overhead (event pool): ~34 ms (+58%), from 972 `hipEventRecord` + 486 `hipEventElapsedTime` calls. This is the inherent cost of GPU timing instrumentation. With profiling on: ~93 ms avg (10.7 tok/s).
 

@@ -1188,3 +1188,309 @@ extern "C" int hip_gqa_fused_prefill(
       B, H, G, sq, skv, max_seq, past_len, scale);
   return hipGetLastError();
 }
+
+//===----------------------------------------------------------------------===//
+// FA-2 Split-K GQA Decode Kernel (Phase 1)
+//===----------------------------------------------------------------------===//
+// Goal: 4-15x speedup over hip_gqa_fused_decode at high KV depth (skv >= 256)
+// by exploiting:
+//   1. GQA-aware KV reuse: one block per (batch, head_kv) instead of per
+//      (batch, head_q). HPG=4 query heads share K/V loaded once into LDS,
+//      reducing global KV bandwidth by 4x.
+//   2. Split-K parallelism: K_SPLITS blocks per (batch, head_kv) cover
+//      different KV ranges, raising occupancy for long sequences.
+//   3. LDS-staged K/V tiles (BKV=64): K[t] is loaded once and reused HPG
+//      times for dot products across 4 query heads.
+//
+// Algorithm:
+//   Each block computes partial (m, l, O) for its slice [kv_start, kv_end)
+//   using online softmax in log2e space. Partials written to workspace
+//   [B, H, K_SPLITS, D+2] floats. A second kernel (gqa_flash_decode_reduce)
+//   merges the K_SPLITS partials per (batch, head_q) into the final output.
+//
+// Block geometry:
+//   Block = HPG=4 waves of 32 = 128 threads. Each wave handles ONE query
+//   head out of HPG. Thread `lane` in wave handles d-elements
+//   [lane * EPT, (lane+1) * EPT) where EPT = D / WAVE_SIZE.
+//
+// Grid:
+//   gridX = B * G        - one block per (batch, head_kv)
+//   gridY = K_SPLITS     - split-K dimension
+//
+// Constraints (asserted at launcher):
+//   - HPG must be 4 (Llama-3.x family).
+//   - D must be 64 or 128.
+//   - RDNA wave32 (uses __shfl_xor across 32 lanes).
+//===----------------------------------------------------------------------===//
+
+static constexpr int FLASH_DECODE_HPG     = 4;
+static constexpr int FLASH_DECODE_BKV     = 64;
+static constexpr int FLASH_DECODE_THREADS = 128;  // = HPG * WAVE_SIZE
+
+// Partial layout per (b, h_q, k_split): {m: float, l: float, O[D]: float}
+__device__ __forceinline__ size_t flash_decode_partial_offset(
+    int b, int h_q, int k_split, int H, int K_SPLITS, int D) {
+  return ((size_t)((b * H + h_q) * K_SPLITS + k_split)) * (size_t)(D + 2);
+}
+
+template <int D, int K_SPLITS>
+__global__ void __launch_bounds__(FLASH_DECODE_THREADS)
+gqa_flash_decode_kernel(
+    const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
+    const __half* __restrict__ Kcache,     // [B, G, max_seq, D] (BNSD)
+    const __half* __restrict__ Vcache,     // [B, G, max_seq, D]
+    float* __restrict__ partials,          // [B, H, K_SPLITS, D+2]
+    int H, int G, int max_seq,
+    float scale,
+    const int* __restrict__ seqlens_k) {
+  constexpr int HPG = FLASH_DECODE_HPG;
+  constexpr int BKV = FLASH_DECODE_BKV;
+  constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
+
+  static_assert(D % WAVE_SIZE == 0, "D must be a multiple of WAVE_SIZE");
+  static_assert(EPT >= 1 && EPT <= 4, "EPT must be 1..4");
+
+  const int batch     = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
+  const int head_kv   = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
+  const int split_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  const int tid       = threadIdx.x;
+  const int wave_id   = tid / WAVE_SIZE;       // [0, HPG)
+  const int lane_id   = tid % WAVE_SIZE;
+  const int head_q    = head_kv * HPG + wave_id;
+
+  // total_seq = seqlens_k[batch] + 1, clamped to [0, max_seq].
+  const int raw_skv = seqlens_k
+      ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1)
+      : max_seq;
+  const int eff_skv = (raw_skv > 0)
+      ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
+
+  // Partition KV range into K_SPLITS roughly-equal chunks.
+  const int chunk    = (eff_skv + K_SPLITS - 1) / K_SPLITS;
+  const int kv_start = chunk * split_idx;
+  int kv_end_tmp     = kv_start + chunk;
+  if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
+  const int kv_end   = kv_end_tmp;
+
+  // Output partials destination for THIS wave's query head.
+  float* partial_dst = partials +
+      flash_decode_partial_offset(batch, head_q, split_idx, H, K_SPLITS, D);
+
+  // Empty slice: write neutral identity so the merge ignores this split.
+  // exp2(-INFINITY - global_m) == 0, so l/O contributions vanish.
+  if (kv_start >= kv_end) {
+    if (lane_id == 0) {
+      partial_dst[0] = -INFINITY;  // m
+      partial_dst[1] = 0.0f;       // l
+    }
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e)
+      partial_dst[2 + lane_id * EPT + e] = 0.0f;
+    return;
+  }
+
+  // LDS tiles for K/V (shared across HPG=4 query heads for dedup).
+  __shared__ __half K_lds[BKV * D];
+  __shared__ __half V_lds[BKV * D];
+
+  // Load this wave's Q into registers (fp16, EPT elements per lane).
+  __half Q_reg[EPT];
+  {
+    const __half* Q_ptr = Q_roped + (size_t)(batch * H + head_q) * D;
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e)
+      Q_reg[e] = Q_ptr[lane_id * EPT + e];
+  }
+
+  // KV cache base offset for this (batch, head_kv).
+  const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
+      (unsigned)((batch * G + head_kv) * max_seq)) * (size_t)D;
+
+  const float scale_log2e = scale * LOG2E;
+
+  // Online softmax accumulators (per query head, in registers).
+  float m_acc = -INFINITY;
+  float l_acc = 0.0f;
+  float O_acc[EPT];
+  #pragma unroll
+  for (int e = 0; e < EPT; ++e) O_acc[e] = 0.0f;
+
+  // Iterate KV tiles within this block's split.
+  for (int tile_start = kv_start; tile_start < kv_end; tile_start += BKV) {
+    const int tile_n = (tile_start + BKV <= kv_end)
+        ? BKV : (kv_end - tile_start);
+
+    // Cooperative LDS load of K and V tiles. All 128 threads.
+    // Tile element count = tile_n * D, distributed round-robin.
+    for (int i = tid; i < tile_n * D; i += FLASH_DECODE_THREADS) {
+      const int t = i / D;
+      const int dd = i % D;
+      const size_t g_off = kv_base + (size_t)(tile_start + t) * D + dd;
+      K_lds[t * D + dd] = Kcache[g_off];
+      V_lds[t * D + dd] = Vcache[g_off];
+    }
+    __syncthreads();
+
+    // Each wave processes the tile against its own query head.
+    for (int t = 0; t < tile_n; ++t) {
+      // Per-lane partial dot: sum_e Q[lane*EPT+e] * K[t, lane*EPT+e]
+      float dot_partial = 0.0f;
+      #pragma unroll
+      for (int e = 0; e < EPT; ++e) {
+        dot_partial += __half2float(Q_reg[e]) *
+                       __half2float(K_lds[t * D + lane_id * EPT + e]);
+      }
+      // Warp reduce across 32 lanes -> all lanes hold the full dot.
+      dot_partial += __shfl_xor(dot_partial, 16);
+      dot_partial += __shfl_xor(dot_partial, 8);
+      dot_partial += __shfl_xor(dot_partial, 4);
+      dot_partial += __shfl_xor(dot_partial, 2);
+      dot_partial += __shfl_xor(dot_partial, 1);
+
+      const float score = dot_partial * scale_log2e;
+      const float m_new = fmaxf(m_acc, score);
+      const float correction = exp2f(m_acc - m_new);
+      const float p = exp2f(score - m_new);
+      l_acc = correction * l_acc + p;
+
+      #pragma unroll
+      for (int e = 0; e < EPT; ++e) {
+        const float V_val = __half2float(V_lds[t * D + lane_id * EPT + e]);
+        O_acc[e] = correction * O_acc[e] + p * V_val;
+      }
+      m_acc = m_new;
+    }
+    __syncthreads();
+  }
+
+  // Write partial (m, l, O) for this wave's query head.
+  if (lane_id == 0) {
+    partial_dst[0] = m_acc;
+    partial_dst[1] = l_acc;
+  }
+  #pragma unroll
+  for (int e = 0; e < EPT; ++e) {
+    partial_dst[2 + lane_id * EPT + e] = O_acc[e];
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// FA-2 Split-K Reduction
+//===----------------------------------------------------------------------===//
+// Combines K_SPLITS partial (m, l, O) into the final output per (B, head_q).
+//
+//   global_m = max_k m_k
+//   global_l = sum_k (exp2(m_k - global_m) * l_k)
+//   global_O = sum_k (exp2(m_k - global_m) * O_k) / global_l
+//
+// Empty splits write m=-INFINITY, l=0, O=0; exp2(-INF - global_m) = 0 so
+// those splits contribute nothing.
+//
+// Grid: (B * H, 1) - one block per query head.
+// Block: D threads. Each thread reduces one element of the d-dimension.
+//===----------------------------------------------------------------------===//
+
+template <int D, int K_SPLITS>
+__global__ void __launch_bounds__(D)
+gqa_flash_decode_reduce_kernel(
+    const float* __restrict__ partials,    // [B, H, K_SPLITS, D+2]
+    __half* __restrict__ O,                // [B, 1, H, D] (BSHD with sq=1)
+    int H) {
+  const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
+  const int batch  = __builtin_amdgcn_readfirstlane(linear / H);
+  const int head_q = __builtin_amdgcn_readfirstlane(linear % H);
+  const int tid    = threadIdx.x;
+
+  // Pass 1: find global_m. K_SPLITS is small (8) - serial per thread is fine.
+  float global_m = -INFINITY;
+  #pragma unroll
+  for (int k = 0; k < K_SPLITS; ++k) {
+    const float* p = partials +
+        flash_decode_partial_offset(batch, head_q, k, H, K_SPLITS, D);
+    const float m_k = p[0];
+    global_m = fmaxf(global_m, m_k);
+  }
+
+  // Empty (all splits -INF) - happens when eff_skv == 0. Write zero output.
+  if (!isfinite(global_m)) {
+    O[(batch * H + head_q) * D + tid] = __float2half(0.0f);
+    return;
+  }
+
+  // Pass 2: accumulate l and O contributions.
+  float l_sum = 0.0f;
+  float O_sum = 0.0f;
+  #pragma unroll
+  for (int k = 0; k < K_SPLITS; ++k) {
+    const float* p = partials +
+        flash_decode_partial_offset(batch, head_q, k, H, K_SPLITS, D);
+    const float m_k = p[0];
+    const float l_k = p[1];
+    const float scale_k = exp2f(m_k - global_m);
+    l_sum += scale_k * l_k;
+    O_sum += scale_k * p[2 + tid];
+  }
+
+  const float inv_l = 1.0f / fmaxf(l_sum, 1e-6f);
+  O[(batch * H + head_q) * D + tid] = __float2half(O_sum * inv_l);
+}
+
+// Launcher: dispatches FA-2 split-K decode + reduction.
+//   workspace: float scratch of size B*H*K_SPLITS*(D+2)*4 bytes.
+//   K_SPLITS: only 8 supported in V1.
+extern "C" int hip_gqa_flash_decode(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    float scale,
+    const void* seqlens_k) {
+  if (H != G * FLASH_DECODE_HPG) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: requires HPG=%d (got H=%d, G=%d)\n",
+            FLASH_DECODE_HPG, H, G);
+    return -1;
+  }
+  if (d != 64 && d != 128) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: unsupported d=%d (must be 64 or 128)\n", d);
+    return -1;
+  }
+  if (K_SPLITS != 8) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: only K_SPLITS=8 supported (got %d)\n",
+            K_SPLITS);
+    return -1;
+  }
+
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  const __half* hQ = static_cast<const __half*>(Q);
+  const __half* hK = static_cast<const __half*>(Kcache);
+  const __half* hV = static_cast<const __half*>(Vcache);
+  __half* hO = static_cast<__half*>(O);
+  float* hP = static_cast<float*>(partials_workspace);
+  const int* iSeq = static_cast<const int*>(seqlens_k);
+
+  dim3 grid_main(B * G, K_SPLITS);
+  if (d == 128) {
+    gqa_flash_decode_kernel<128, 8>
+        <<<grid_main, FLASH_DECODE_THREADS, 0, stream>>>(
+            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq);
+  } else { /* d == 64 */
+    gqa_flash_decode_kernel<64, 8>
+        <<<grid_main, FLASH_DECODE_THREADS, 0, stream>>>(
+            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq);
+  }
+
+  dim3 grid_reduce(B * H);
+  if (d == 128) {
+    gqa_flash_decode_reduce_kernel<128, 8>
+        <<<grid_reduce, 128, 0, stream>>>(hP, hO, H);
+  } else { /* d == 64 */
+    gqa_flash_decode_reduce_kernel<64, 8>
+        <<<grid_reduce, 64, 0, stream>>>(hP, hO, H);
+  }
+
+  return hipGetLastError();
+}
