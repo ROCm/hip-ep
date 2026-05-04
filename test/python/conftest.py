@@ -446,6 +446,211 @@ def ensure_fixed_model(model_dir, onnx_file, seq_len, kv_len):
     return str(dst)
 
 
+def ensure_pipeline_dir(
+    parent_dir,
+    pipeline_dir,
+    onnx_file,
+    data_file,
+    prefill_seq_len,
+    decode_seq_len,
+    kv_len,
+    tokenizer_files,
+    prefill_basename="model_prefill.onnx",
+    decode_basename="model_decode.onnx",
+):
+    """Materialize a self-contained OGA `decoder-pipeline` model dir.
+
+    Produces `pipeline_dir/{prefill_basename, decode_basename}` from the dynamic
+    parent ONNX via `fix_shapes`, hardlinks (or copies) external weights so the
+    rewritten ONNX files' external_data refs resolve, and copies tokenizer files.
+    Returns (prefill_path, decode_path).
+    """
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+    weights_dst = pipeline_dir / data_file
+    if not weights_dst.exists():
+        try:
+            os.link(parent_dir / data_file, weights_dst)
+        except OSError:
+            shutil.copy2(parent_dir / data_file, weights_dst)
+    for fname in tokenizer_files:
+        dst = pipeline_dir / fname
+        if not dst.exists():
+            shutil.copy2(parent_dir / fname, dst)
+    prefill = pipeline_dir / prefill_basename
+    decode = pipeline_dir / decode_basename
+    if not prefill.exists():
+        fix_shapes(
+            parent_dir / onnx_file, prefill, make_dim_map(prefill_seq_len, kv_len)
+        )
+    if not decode.exists():
+        fix_shapes(parent_dir / onnx_file, decode, make_dim_map(decode_seq_len, kv_len))
+    return str(prefill), str(decode)
+
+
+# ── OGA decoder-pipeline (sliding_window) helpers ───────────────────────────
+#
+# Filename convention: prefill basename depends on (window_size, kv_len);
+# decode basename depends only on kv_len (decode input is always [1, 1]).
+# This lets multiple sliding-window configs reuse the same decode DLL.
+
+
+def pipeline_sliding_prefill_filename(window_size, kv_len):
+    return f"prefill_p{window_size}m{kv_len}.onnx"
+
+
+def pipeline_sliding_decode_filename(kv_len):
+    return f"decode_m{kv_len}.onnx"
+
+
+def make_pipeline_sliding_genai_config(
+    *,
+    window_size,
+    kv_len,
+    num_layers,
+    num_kv_heads,
+    num_attention_heads,
+    head_dim,
+    hidden_size,
+    vocab_size,
+    bos_token_id,
+    eos_token_ids,
+    pad_token_id,
+    has_position_ids,
+):
+    """Build a decoder-pipeline genai_config that chunks prompts via sliding_window.
+
+    Object-style pipeline (keys → model_id), KV cache shared across sub-models
+    via past_present_share_buffer=True, slide_key_value_cache=False to keep the
+    static KV buffer. See CLAUDE.md "OGA decoder-pipeline" entry for details.
+    """
+    sub_inputs = [
+        "input_ids",
+        "attention_mask",
+        *(("position_ids",) if has_position_ids else ()),
+        *(
+            name
+            for i in range(num_layers)
+            for name in (
+                f"past_key_values.{i}.key",
+                f"past_key_values.{i}.value",
+            )
+        ),
+    ]
+    sub_outputs = [
+        "logits",
+        *(
+            name
+            for i in range(num_layers)
+            for name in (f"present.{i}.key", f"present.{i}.value")
+        ),
+    ]
+    inputs_block = {
+        "input_ids": "input_ids",
+        "attention_mask": "attention_mask",
+        "past_key_names": "past_key_values.%d.key",
+        "past_value_names": "past_key_values.%d.value",
+    }
+    if has_position_ids:
+        inputs_block["position_ids"] = "position_ids"
+    return {
+        "model": {
+            "bos_token_id": bos_token_id,
+            "eos_token_id": list(eos_token_ids),
+            "pad_token_id": pad_token_id,
+            "vocab_size": vocab_size,
+            "context_length": kv_len,
+            "type": "decoder-pipeline",
+            "decoder": {
+                "head_size": head_dim,
+                "hidden_size": hidden_size,
+                "num_attention_heads": num_attention_heads,
+                "num_key_value_heads": num_kv_heads,
+                "num_hidden_layers": num_layers,
+                "sliding_window": {
+                    "window_size": window_size,
+                    "alignment": "left",
+                    "slide_inputs": True,
+                    "slide_key_value_cache": False,
+                },
+                "session_options": {
+                    "session.disable_cpu_ep_fallback": "1",
+                    "provider_options": [{"MorphiZenEP": {}}],
+                },
+                "inputs": inputs_block,
+                "outputs": {
+                    "logits": "logits",
+                    "present_key_names": "present.%d.key",
+                    "present_value_names": "present.%d.value",
+                },
+                "pipeline": {
+                    "prefill": {
+                        "filename": pipeline_sliding_prefill_filename(
+                            window_size, kv_len
+                        ),
+                        "run_on_prompt": True,
+                        "run_on_token_gen": False,
+                        "inputs": sub_inputs,
+                        "outputs": sub_outputs,
+                    },
+                    "decode": {
+                        "filename": pipeline_sliding_decode_filename(kv_len),
+                        "run_on_prompt": False,
+                        "run_on_token_gen": True,
+                        "inputs": sub_inputs,
+                        "outputs": sub_outputs,
+                    },
+                },
+            },
+        },
+        "search": {
+            "diversity_penalty": 0.0,
+            "do_sample": True,
+            "early_stopping": True,
+            "length_penalty": 1.0,
+            "max_length": kv_len,
+            "min_length": 0,
+            "no_repeat_ngram_size": 0,
+            "num_beams": 1,
+            "num_return_sequences": 1,
+            "past_present_share_buffer": True,
+            "repetition_penalty": 1.0,
+            "temperature": 0.6,
+            "top_k": 1,
+            "top_p": 0.9,
+        },
+    }
+
+
+def ensure_pipeline_sliding_oga_files(
+    *,
+    parent_dir,
+    pipeline_dir,
+    onnx_file,
+    data_file,
+    tokenizer_files,
+    window_size,
+    kv_len,
+    config_dict,
+):
+    """Materialize a sliding-window pipeline dir + write its genai_config.json."""
+    ensure_pipeline_dir(
+        parent_dir=parent_dir,
+        pipeline_dir=pipeline_dir,
+        onnx_file=onnx_file,
+        data_file=data_file,
+        prefill_seq_len=window_size,
+        decode_seq_len=1,
+        kv_len=kv_len,
+        tokenizer_files=tokenizer_files,
+        prefill_basename=pipeline_sliding_prefill_filename(window_size, kv_len),
+        decode_basename=pipeline_sliding_decode_filename(kv_len),
+    )
+    cfg_path = pipeline_dir / "genai_config.json"
+    with open(cfg_path, "w") as f:
+        json.dump(config_dict, f, indent=4)
+    return pipeline_dir
+
+
 # ── Generation loop helpers ─────────────────────────────────────────────────
 
 
@@ -569,6 +774,19 @@ def patch_genai_config_for_morphizen(model_dir, ep_dll):
     config["model"]["decoder"]["session_options"]["provider_options"] = [
         {"MorphiZenEP": {}}
     ]
+    # Pareto-optimal chunk_size for dynamic-shape Llama on MorphiZenEP/gfx1150
+    # (1B sweep at -l 3072 -g 1024: -21% TTFT, -52% peak WS vs unchunked).
+    # Skip for fixed-shape configs — decoder-pipeline / sliding_window /
+    # fixed_prompt_length already chunk via their own mechanisms, and injecting
+    # search.chunk_size on top would either be ignored or fight them.
+    decoder = config["model"].get("decoder", {})
+    is_fixed_shape = (
+        config["model"].get("type") == "decoder-pipeline"
+        or "sliding_window" in decoder
+        or "fixed_prompt_length" in decoder
+    )
+    if not is_fixed_shape:
+        config.setdefault("search", {})["chunk_size"] = 512
     with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
 
@@ -648,6 +866,82 @@ def oga_generate_timed(og, model, tokenizer, prompt_tokens, max_new=128):
 
     del generator
     return generated, ttft_ms, tps
+
+
+def run_cpu_reference_generation(
+    model_path, cfg, prompt_tokens, max_new, max_seq_len=None
+):
+    """CPU prefill + (max_new-1) decode steps via sess.run(). Returns token list.
+
+    Used as accuracy reference for OGA-based generation tests. The session is
+    created and torn down inside this helper to keep CPU memory transient.
+    """
+    if max_seq_len is None:
+        max_seq_len = len(prompt_tokens) + max_new
+    cpu_sess = create_cpu_session(model_path)
+    output_names = [o.name for o in cpu_sess.get_outputs()]
+    logits_idx = output_names.index("logits")
+
+    cpu_inputs = make_prefill_inputs(cfg, prompt_tokens, max_seq_len)
+    cpu_out = cpu_sess.run(None, cpu_inputs)
+    cpu_token = get_next_token(cpu_out[logits_idx])
+    cpu_kv = extract_kv_cache(cpu_out, output_names)
+    generated = [cpu_token]
+
+    for step in range(max_new - 1):
+        position = len(prompt_tokens) + step
+        cpu_inputs = make_decode_inputs(cfg, cpu_token, position, cpu_kv, max_seq_len)
+        cpu_out = cpu_sess.run(None, cpu_inputs)
+        cpu_token = get_next_token(cpu_out[logits_idx])
+        cpu_kv = extract_kv_cache(cpu_out, output_names)
+        generated.append(cpu_token)
+
+    cleanup(cpu_sess)
+    return generated
+
+
+def run_oga_static_kv_pipeline(og, pipeline_dir, prompt_tokens, kv_len, max_new):
+    """Run an OGA decoder-pipeline model with a static KV buffer of `kv_len`.
+
+    For fixed-shape pipelines, `max_length` MUST equal the model's static
+    `total_sequence_length` (= kv_len) — see CLAUDE.md "OGA static-mask sizing".
+    Generation length is bounded via `min_length`. Returns (tokens, ttft_ms).
+    """
+    try:
+        model = og.Model(str(pipeline_dir))
+    except RuntimeError as e:
+        if "Unknown provider name" in str(e):
+            pytest.skip("OGA does not recognize MorphiZen EP")
+        raise
+
+    try:
+        params = og.GeneratorParams(model)
+        params.set_search_options(
+            max_length=kv_len,
+            min_length=len(prompt_tokens) + max_new,
+            do_sample=False,
+        )
+        generator = og.Generator(model, params)
+        generator.append_tokens(np.array(prompt_tokens, dtype=np.int32))
+
+        # First generate_next_token triggers all prefill chunk dispatches
+        # inside one Generator::Run() (sliding_window path) plus emits the
+        # first sampled token.
+        t0 = time.perf_counter()
+        generator.generate_next_token()
+        ttft_ms = (time.perf_counter() - t0) * 1000
+
+        generated = [int(generator.get_next_tokens()[0])]
+        while not generator.is_done() and len(generated) < max_new:
+            generator.generate_next_token()
+            generated.append(int(generator.get_next_tokens()[0]))
+
+        del generator
+    finally:
+        del model
+        gc.collect()
+
+    return generated, ttft_ms
 
 
 # ── Shared fixtures ──────────────────────────────────────────────────────────
