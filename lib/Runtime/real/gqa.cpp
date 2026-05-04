@@ -72,6 +72,36 @@ static bool gqa_no_expand_prefill_enabled() {
   return enabled;
 }
 
+// Env-var gates for the FA-2 split-K flash_decode path (Phase 1).
+// HIPDNN_EP_GQA_FLASH_DECODE=0 disables it (falls back to
+// hip_gqa_fused_decode). HIPDNN_EP_GQA_FLASH_DECODE_MIN_SKV overrides the depth
+// threshold (default 256). flash_decode wins at high KV depth where the
+// existing one-block-per-head kernel is bandwidth-bound; below the threshold
+// its 2-kernel overhead may not pay back, so we keep the existing fused_decode
+// for short sequences.
+static bool gqa_flash_decode_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_FLASH_DECODE");
+    return !v || std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
+
+static int gqa_flash_decode_min_skv() {
+  static const int threshold = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_FLASH_DECODE_MIN_SKV");
+    if (!v || !*v)
+      return 256;
+    int n = std::atoi(v);
+    return n > 0 ? n : 256;
+  }();
+  return threshold;
+}
+
+// FA-2 split-K geometry (must match hip_gqa_flash_decode launcher).
+static constexpr int kFlashDecodeKSplits = 8;
+static constexpr int kFlashDecodeHPG = 4;
+
 //===----------------------------------------------------------------------===//
 // hipBLASLt layout helper
 //===----------------------------------------------------------------------===//
@@ -400,11 +430,39 @@ static int gqa_forward_hipblaslt(
     if (past_len < 0)
       past_len = 0;
 
-    if (need_rope) {
-      size_t Q_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
-      size_t K_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
-      if (hipdnn_ep_state_ensure_workspace(state, Q_bytes + K_bytes) != 0)
+    // Flash-decode path is taken when:
+    //   - depth threshold met (default skv >= 256)
+    //   - geometry matches the kernel template (HPG=4, d in {64,128})
+    //   - not disabled via env var
+    // Below threshold the existing one-block-per-head fused_decode is faster
+    // because its single-kernel cost amortizes better than flash_decode's
+    // (split + reduce) launches and per-call workspace setup.
+    const bool use_flash_decode =
+        gqa_flash_decode_enabled() && (d == 64 || d == 128) &&
+        H == G * kFlashDecodeHPG && skv >= gqa_flash_decode_min_skv();
+
+    // Sum rope-temp + flash-partials in a single ensure_workspace call.
+    // ensure_workspace does NOT preserve data on grow (free + malloc), so
+    // the rope output written into workspace[0..rope_temp_bytes) would be
+    // lost if the partials request triggered a regrowth between rope and
+    // flash_decode. One combined request avoids that hazard.
+    const size_t Q_bytes =
+        need_rope ? static_cast<size_t>(B) * sq * H * d * elem_sz : 0;
+    const size_t K_bytes =
+        need_rope ? static_cast<size_t>(B) * sq * G * d * elem_sz : 0;
+    const size_t rope_temp_bytes = Q_bytes + K_bytes;
+    const size_t flash_partials_bytes =
+        use_flash_decode ? static_cast<size_t>(B) * H * kFlashDecodeKSplits *
+                               (d + 2) * sizeof(float)
+                         : 0;
+    const size_t total_ws_bytes = rope_temp_bytes + flash_partials_bytes;
+
+    if (total_ws_bytes > 0) {
+      if (hipdnn_ep_state_ensure_workspace(state, total_ws_bytes) != 0)
         return -1;
+    }
+
+    if (need_rope) {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *d_Qroped = ws;
       void *d_Kroped = ws + Q_bytes;
@@ -433,20 +491,36 @@ static int gqa_forward_hipblaslt(
                         static_cast<int>(present_seq), seqlens_k_ptr) != 0)
       return -1;
 
-    // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when available
-    if (hip_gqa_fused_decode(
-            stream, qSrc, present_key, present_value, output,
-            static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
-            static_cast<int>(d), static_cast<int>(skv),
-            static_cast<int>(present_seq), scale, seqlens_k_ptr) != 0)
-      return -1;
-
-    RUNTIME_DEBUG_LOG(
-        "[REAL] fused GQA decode: B=%lld sq=%lld skv=%lld H=%lld G=%lld "
-        "d=%lld zero_d2h=%d\n",
-        (long long)B, (long long)sq, (long long)skv, (long long)H, (long long)G,
-        (long long)d,
-        static_cast<int>(seqlens_k_ptr != nullptr && !need_host_past_len));
+    if (use_flash_decode) {
+      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+      void *partials = ws + rope_temp_bytes;
+      if (hip_gqa_flash_decode(
+              stream, qSrc, present_key, present_value, output, partials,
+              static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
+              static_cast<int>(d), static_cast<int>(present_seq),
+              kFlashDecodeKSplits, scale, seqlens_k_ptr) != 0)
+        return -1;
+      RUNTIME_DEBUG_LOG(
+          "[REAL] flash GQA decode: B=%lld sq=%lld skv=%lld H=%lld G=%lld "
+          "d=%lld K_SPLITS=%d zero_d2h=%d\n",
+          (long long)B, (long long)sq, (long long)skv, (long long)H,
+          (long long)G, (long long)d, kFlashDecodeKSplits,
+          static_cast<int>(seqlens_k_ptr != nullptr && !need_host_past_len));
+    } else {
+      // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when available
+      if (hip_gqa_fused_decode(
+              stream, qSrc, present_key, present_value, output,
+              static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
+              static_cast<int>(d), static_cast<int>(skv),
+              static_cast<int>(present_seq), scale, seqlens_k_ptr) != 0)
+        return -1;
+      RUNTIME_DEBUG_LOG(
+          "[REAL] fused GQA decode: B=%lld sq=%lld skv=%lld H=%lld G=%lld "
+          "d=%lld zero_d2h=%d\n",
+          (long long)B, (long long)sq, (long long)skv, (long long)H,
+          (long long)G, (long long)d,
+          static_cast<int>(seqlens_k_ptr != nullptr && !need_host_past_len));
+    }
     return 0;
   }
 
