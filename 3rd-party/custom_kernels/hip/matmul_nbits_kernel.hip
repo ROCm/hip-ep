@@ -11,19 +11,25 @@
  *        zeros  : FP16 [N, num_groups_k]  (or NULL, default zp=8)
  *        output : FP16 row-major [batch, M, N]
  *
- * Internally auto-dispatched to one of three execution paths:
+ * Internally auto-dispatched to one of four execution paths:
  *
  *   1. RDNA3 WMMA fast path (batch==1, K%32==0, M>=16):
  *      Transposes A/C to col-major internally, then uses WMMA intrinsics
  *      with double-buffered shared memory, grid swizzling, and inline-asm
  *      batched dequant. Requires gfx11xx/gfx12xx.
  *
- *   2. GEMV col-major path (batch==1, K%32==0, M<16):
- *      Transposes A/C internally (skipped for M=1). K-parallel reduction
- *      GEMV with COL_MAJOR=true, autotuned (BLOCK_SIZE, TILE_N).
+ *   2. GEMV col-major path (batch==1, K%32==0, 1 < M < 16):
+ *      Transposes A/C internally. K-parallel reduction GEMV with
+ *      COL_MAJOR=true, autotuned (BLOCK_SIZE, TILE_N).
  *
- *   3. Naive fallback (arbitrary alignment, batched):
- *      Row-major kernels, uint8 zero points.
+ *   3. GEMV row-major path (batch==1, K%32==0, M=1 or fallthrough):
+ *      Direct row-major GEMV with uint8 zero points (no ZP conversion).
+ *      M=1 decode skips path #2 entirely — row/col layouts are identical
+ *      for a single row, avoiding 225 unnecessary ZP conversion kernels
+ *      per Llama 8B inference.
+ *
+ *   4. Naive fallback (arbitrary alignment, batched):
+ *      Per-element row-major kernel, uint8 zero points.
  *
  * When zero_points is NULL, dequantization uses the ONNX MatMulNBits
  * default zp = 2^(bits-1) (= 8 for bits=4) to match the CPU EP (MLAS).
@@ -105,23 +111,31 @@ __global__ void matmul_nbits_kernel(
  *
  * Template parameters:
  *   BLOCK_SIZE - threads per block (K-reduction parallelism)
- *   TILE_N     - N columns per block (1/2/4/8/16, amortizes A loads)
+ *   TILE_N     - N columns per block (1..64, amortizes A loads)
  *
  * When M is small (e.g. M=1 decode token), each threadblock computes
  * TILE_N output elements sharing the same A row load, with BLOCK_SIZE
  * threads cooperating on the K reduction via warp shuffle + shared mem.
  *
  * Key optimizations:
- *   - 16-nibble main loop: uint2 (64-bit) B load → 16 nibbles per txn
+ *   - 32-nibble main loop: uint4 (128-bit) B load → 32 nibbles per txn,
+ *     with uint2 (16-nibble) and uint32 (8-nibble) remainder phases
  *   - Load-compute separation: all B loads issued before FMA compute
- *   - Factored dequant:  dot*scale - a_sum*zp*scale  (saves ~40% FLOPs)
+ *   - Explicit __fmaf_rn intrinsics for dot product accumulation
+ *   - Factored dequant:  (dot - a_sum*zp) * scale  (saves ~40% FLOPs)
  *   - Bit-shift group index (block_size is always power-of-2)
- *   - TILE_N up to 16 for large-N shapes (e.g. N=200k)
+ *   - TILE_N up to 64 for large-N shapes (N>=2048)
+ *   - Compile-time WARP_SIZE=32 for RDNA 3 dead-code elimination
+ *     (runtime __builtin_amdgcn_wavefrontsize() caused 13% regression)
+ *   - Single-warp fast path: BLOCK_SIZE=32 uses shuffle-only reduction
+ *     (no LDS sync needed)
  *
- * At runtime, an autotune pass benchmarks all 28 (BLOCK_SIZE, TILE_N)
+ * At runtime, an autotune pass benchmarks all 35 (BLOCK_SIZE, TILE_N)
  * combinations on the first call for each problem shape and caches the
  * fastest configuration for subsequent calls.
- * TILE_N=32 configs are only tested when N >= 1024.
+ * BLOCK_SIZE ∈ {32,64,128,256,512,1024}, TILE_N ∈ {1,2,4,8,16,32,64}.
+ * BS=32 configs use single-warp shuffle-only reduction (no LDS).
+ * TILE_N=32 tested only when N>=1024; TILE_N=64 only when N>=2048.
  *
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
@@ -193,28 +207,34 @@ __global__ void matmul_nbits_gemv_kernel(
         return static_cast<float>(a_base[k_off * a_stride]);
     };
 
-    // ---- Phase 1: 16-nibble (64-bit) vectorized main loop ----
-    const int64_t num_u64 = K / 16;
-    for (int64_t idx = static_cast<int64_t>(tid); idx < num_u64;
-         idx += static_cast<int64_t>(BLOCK_SIZE)) {
-        const int64_t k16 = idx * 16;
+    // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
+    // Use int for loop vars — K <= 32768, idx <= K/32 = 1024, fits 32-bit.
+    // uint4 (128-bit) loads process 32 nibbles (one full block_size=32 group).
+    //
+    // NOTE: K-loop unroll x2 was tried (processing two K-groups per iteration
+    // to overlap B loads) but regressed performance by ~5% due to doubled
+    // register pressure causing spilling on RDNA 3. Reverted to single-group.
+    const int num_u128 = static_cast<int>(K / 32);
+    for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+        const int k32 = idx * 32;
 
-        float a_vals[16];
+        float a_vals[32];
         float a_sum = 0.0f;
 #pragma unroll
-        for (int i = 0; i < 16; i++) {
-            a_vals[i] = read_a(k16 + i);
+        for (int i = 0; i < 32; i++) {
+            a_vals[i] = read_a(k32 + i);
             a_sum += a_vals[i];
         }
 
-        const int64_t grp = k16 >> bs_shift;
+        const int grp = k32 >> bs_shift;
+        const float a_sum_x_default_zp = a_sum * 8.0f;
 
-        uint2   b_pk[TILE_N];
+        uint4   b_pk[TILE_N];
         float   sv[TILE_N];
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
-            b_pk[tn] = *reinterpret_cast<const uint2*>(
-                            &b_base_arr[tn][idx * 8]);
+            b_pk[tn] = *reinterpret_cast<const uint4*>(
+                            &b_base_arr[tn][idx * 16]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
         }
 
@@ -223,29 +243,85 @@ __global__ void matmul_nbits_gemv_kernel(
             float dot = 0.0f;
 #pragma unroll
             for (int i = 0; i < 8; i++)
-                dot += a_vals[i] *
-                       static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF);
+                dot = __fmaf_rn(a_vals[i],
+                       static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF), dot);
 #pragma unroll
             for (int i = 0; i < 8; i++)
-                dot += a_vals[8 + i] *
-                       static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
+                dot = __fmaf_rn(a_vals[8 + i],
+                       static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF), dot);
+#pragma unroll
+            for (int i = 0; i < 8; i++)
+                dot = __fmaf_rn(a_vals[16 + i],
+                       static_cast<float>((b_pk[tn].z >> (i * 4)) & 0xF), dot);
+#pragma unroll
+            for (int i = 0; i < 8; i++)
+                dot = __fmaf_rn(a_vals[24 + i],
+                       static_cast<float>((b_pk[tn].w >> (i * 4)) & 0xF), dot);
 
             if (has_zp) {
                 float zv = read_zp(n_idx[tn], grp);
-                partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
+                partial[tn] += (dot - a_sum * zv) * sv[tn];
             } else {
-                partial[tn] += dot * sv[tn] - a_sum * 8.0f * sv[tn];
+                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
             }
         }
     }
 
-    // ---- Phase 2: 8-nibble (32-bit) middle (K%16 remainder) ----
+    // ---- Phase 1b: 16-nibble (64-bit) remainder (K%32 ≥ 16) ----
     {
-        const int64_t k8_base   = num_u64 * 16;
-        const int64_t num_u32_m = (K - k8_base) / 8;
-        for (int64_t idx2 = static_cast<int64_t>(tid); idx2 < num_u32_m;
-             idx2 += static_cast<int64_t>(BLOCK_SIZE)) {
-            const int64_t k8 = k8_base + idx2 * 8;
+        const int k16_base = num_u128 * 32;
+        const int num_u64 = (static_cast<int>(K) - k16_base) / 16;
+        for (int idx = tid; idx < num_u64; idx += BLOCK_SIZE) {
+            const int k16 = k16_base + idx * 16;
+
+            float a_vals[16];
+            float a_sum = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 16; i++) {
+                a_vals[i] = read_a(k16 + i);
+                a_sum += a_vals[i];
+            }
+
+            const int grp = k16 >> bs_shift;
+            const float a_sum_x_default_zp = a_sum * 8.0f;
+
+            uint2   b_pk[TILE_N];
+            float   sv[TILE_N];
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                b_pk[tn] = *reinterpret_cast<const uint2*>(
+                                &b_base_arr[tn][(k16_base / 2) + idx * 8]);
+                sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+            }
+
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                float dot = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot = __fmaf_rn(a_vals[i],
+                           static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF), dot);
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot = __fmaf_rn(a_vals[8 + i],
+                           static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF), dot);
+
+                if (has_zp) {
+                    float zv = read_zp(n_idx[tn], grp);
+                    partial[tn] += (dot - a_sum * zv) * sv[tn];
+                } else {
+                    partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
+                }
+            }
+        }
+    }
+
+    // ---- Phase 2: 8-nibble (32-bit) middle (K%8 remainder after uint4+uint2) ----
+    {
+        const int k8_base   = (static_cast<int>(K) / 16) * 16;
+        const int num_u32_m = (static_cast<int>(K) - k8_base) / 8;
+        for (int idx2 = tid; idx2 < num_u32_m; idx2 += BLOCK_SIZE) {
+            const int k8 = k8_base + idx2 * 8;
 
             float a_vals[8];
             float a_sum = 0.0f;
@@ -255,7 +331,8 @@ __global__ void matmul_nbits_gemv_kernel(
                 a_sum += a_vals[i];
             }
 
-            const int64_t grp = k8 >> bs_shift;
+            const int grp = k8 >> bs_shift;
+            const float a_sum_x_default_zp = a_sum * 8.0f;
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
@@ -266,14 +343,14 @@ __global__ void matmul_nbits_gemv_kernel(
                 float dot = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 8; i++)
-                    dot += a_vals[i] *
-                           static_cast<float>((packed >> (i * 4)) & 0xF);
+                    dot = __fmaf_rn(a_vals[i],
+                           static_cast<float>((packed >> (i * 4)) & 0xF), dot);
 
                 if (has_zp) {
                     float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += dot * sv - a_sum * zv * sv;
+                    partial[tn] += (dot - a_sum * zv) * sv;
                 } else {
-                    partial[tn] += dot * sv - a_sum * 8.0f * sv;
+                    partial[tn] += (dot - a_sum_x_default_zp) * sv;
                 }
             }
         }
@@ -281,12 +358,12 @@ __global__ void matmul_nbits_gemv_kernel(
 
     // ---- Phase 3: scalar tail (K%8 remainder) ----
     {
-        const int64_t k_tail = (K / 8) * 8;
-        for (int64_t k = k_tail + static_cast<int64_t>(tid);
-             k < K; k += static_cast<int64_t>(BLOCK_SIZE)) {
-            const float   a_val  = read_a(k);
-            const int64_t grp    = k >> bs_shift;
-            const int     nibble = static_cast<int>(k & 1);
+        const int k_tail = (static_cast<int>(K) / 8) * 8;
+        for (int k = k_tail + tid; k < static_cast<int>(K);
+             k += BLOCK_SIZE) {
+            const float a_val  = read_a(k);
+            const int   grp    = k >> bs_shift;
+            const int   nibble = k & 1;
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
@@ -302,45 +379,70 @@ __global__ void matmul_nbits_gemv_kernel(
     }
 
     // --- Reduction: warp shuffle then shared memory ---
-    const int wave_size = __builtin_amdgcn_wavefrontsize();
-    const int warp_id   = tid / wave_size;
-    const int lane_id   = tid % wave_size;
-    const int num_warps = BLOCK_SIZE / wave_size;
+    // RDNA 3/3.5 (gfx11xx) runs wave32 by default. Compile-time constant
+    // for warp_size allows the compiler to dead-strip unused branches.
+    constexpr int WARP_SIZE = 32;
+    const int warp_id   = tid / WARP_SIZE;
+    const int lane_id   = tid % WARP_SIZE;
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
 
 #pragma unroll
     for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = wave_size >> 1; offset > 0; offset >>= 1)
+        for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
             partial[tn] += __shfl_down(partial[tn], offset);
     }
 
-    constexpr int MAX_WARPS = BLOCK_SIZE / 32;
-    __shared__ float warp_sums[TILE_N * MAX_WARPS];
-
-    if (lane_id == 0) {
+    // Single warp (BLOCK_SIZE==32 in wave32): shuffle has the final result.
+    if constexpr (BLOCK_SIZE <= WARP_SIZE) {
+        if (lane_id == 0) {
 #pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++)
-            warp_sums[tn * MAX_WARPS + warp_id] = partial[tn];
-    }
-    __syncthreads();
-
-    if (warp_id == 0) {
-#pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++) {
-            float val = (lane_id < num_warps)
-                            ? warp_sums[tn * MAX_WARPS + lane_id] : 0.0f;
-            for (int offset = wave_size >> 1; offset > 0; offset >>= 1)
-                val += __shfl_down(val, offset);
-
-            if (lane_id == 0) {
+            for (int tn = 0; tn < TILE_N; tn++) {
                 int64_t n = n_base + tn;
                 if (n < N) {
+                    float val = partial[tn];
                     if (bias)
                         val += static_cast<float>(bias[n]);
+                    // NOTE: nontemporal stores were tried here but regressed
+                    // perf by ~3% on gfx1150 LPDDR5X — the output is too small
+                    // (28KB) to pollute cache, and NT writes compete with read
+                    // traffic on the shared memory bus.
                     if constexpr (COL_MAJOR)
                         output[n * M + m] = static_cast<__half>(val);
                     else
                         output[batch * M * N + m * N + n] =
                             static_cast<__half>(val);
+                }
+            }
+        }
+    } else {
+        __shared__ float warp_sums[TILE_N * NUM_WARPS];
+
+        if (lane_id == 0) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                warp_sums[tn * NUM_WARPS + warp_id] = partial[tn];
+        }
+        __syncthreads();
+
+        if (warp_id == 0) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                float val = (lane_id < NUM_WARPS)
+                                ? warp_sums[tn * NUM_WARPS + lane_id] : 0.0f;
+                for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+                    val += __shfl_down(val, offset);
+
+                if (lane_id == 0) {
+                    int64_t n = n_base + tn;
+                    if (n < N) {
+                        if (bias)
+                            val += static_cast<float>(bias[n]);
+                        if constexpr (COL_MAJOR)
+                            output[n * M + m] = static_cast<__half>(val);
+                        else
+                            output[batch * M * N + m * N + n] =
+                                static_cast<__half>(val);
+                    }
                 }
             }
         }
@@ -357,12 +459,15 @@ struct GemvConfig {
 };
 
 static constexpr GemvConfig kGemvConfigs[] = {
+    // BLOCK_SIZE=32: single warp (wave32) — shuffle-only reduction, no LDS
+    { 32, 1}, { 32, 2}, { 32, 4}, { 32, 8},
     { 64, 1}, { 64, 2}, { 64, 4}, { 64, 8}, { 64, 16},
     {128, 1}, {128, 2}, {128, 4}, {128, 8}, {128, 16},
     {256, 1}, {256, 2}, {256, 4}, {256, 8}, {256, 16},
     {512, 1}, {512, 2}, {512, 4}, {512, 8}, {512, 16},
     {1024, 1}, {1024, 2}, {1024, 4}, {1024, 8}, {1024, 16},
     { 64, 32}, {128, 32}, {256, 32},
+    { 64, 64}, {128, 64}, {256, 64},
 };
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
@@ -395,23 +500,27 @@ static void launchGemvConfig(
         break
 
     switch (config_id) {
-        GEMV_CASE( 0,  64,  1);  GEMV_CASE( 1,  64,  2);
-        GEMV_CASE( 2,  64,  4);  GEMV_CASE( 3,  64,  8);
-        GEMV_CASE( 4,  64, 16);
-        GEMV_CASE( 5, 128,  1);  GEMV_CASE( 6, 128,  2);
-        GEMV_CASE( 7, 128,  4);  GEMV_CASE( 8, 128,  8);
-        GEMV_CASE( 9, 128, 16);
-        GEMV_CASE(10, 256,  1);  GEMV_CASE(11, 256,  2);
-        GEMV_CASE(12, 256,  4);  GEMV_CASE(13, 256,  8);
-        GEMV_CASE(14, 256, 16);
-        GEMV_CASE(15, 512,  1);  GEMV_CASE(16, 512,  2);
-        GEMV_CASE(17, 512,  4);  GEMV_CASE(18, 512,  8);
-        GEMV_CASE(19, 512, 16);
-        GEMV_CASE(20, 1024,  1); GEMV_CASE(21, 1024,  2);
-        GEMV_CASE(22, 1024,  4); GEMV_CASE(23, 1024,  8);
-        GEMV_CASE(24, 1024, 16);
-        GEMV_CASE(25,  64, 32);  GEMV_CASE(26, 128, 32);
-        GEMV_CASE(27, 256, 32);
+        GEMV_CASE( 0,  32,  1);  GEMV_CASE( 1,  32,  2);
+        GEMV_CASE( 2,  32,  4);  GEMV_CASE( 3,  32,  8);
+        GEMV_CASE( 4,  64,  1);  GEMV_CASE( 5,  64,  2);
+        GEMV_CASE( 6,  64,  4);  GEMV_CASE( 7,  64,  8);
+        GEMV_CASE( 8,  64, 16);
+        GEMV_CASE( 9, 128,  1);  GEMV_CASE(10, 128,  2);
+        GEMV_CASE(11, 128,  4);  GEMV_CASE(12, 128,  8);
+        GEMV_CASE(13, 128, 16);
+        GEMV_CASE(14, 256,  1);  GEMV_CASE(15, 256,  2);
+        GEMV_CASE(16, 256,  4);  GEMV_CASE(17, 256,  8);
+        GEMV_CASE(18, 256, 16);
+        GEMV_CASE(19, 512,  1);  GEMV_CASE(20, 512,  2);
+        GEMV_CASE(21, 512,  4);  GEMV_CASE(22, 512,  8);
+        GEMV_CASE(23, 512, 16);
+        GEMV_CASE(24, 1024,  1); GEMV_CASE(25, 1024,  2);
+        GEMV_CASE(26, 1024,  4); GEMV_CASE(27, 1024,  8);
+        GEMV_CASE(28, 1024, 16);
+        GEMV_CASE(29,  64, 32);  GEMV_CASE(30, 128, 32);
+        GEMV_CASE(31, 256, 32);
+        GEMV_CASE(32,  64, 64);  GEMV_CASE(33, 128, 64);
+        GEMV_CASE(34, 256, 64);
         default: break;
     }
 #undef GEMV_CASE
@@ -437,7 +546,8 @@ static int tuneGemvConfig(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 32 && N < 1024) continue;
+        if (cfg.tile_n >= 64 && N < 2048) continue;
+        if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
 
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
@@ -496,7 +606,10 @@ static int getOrTuneGemvConfig(
     int64_t batch, int64_t bs,
     bool col_major = false)
 {
-    std::string key = gemvCacheKey(M, N, K, bs, col_major);
+    // M=1: col_major and row_major layouts are identical (single row) —
+    // reuse the row_major autotune result to avoid a redundant tuning pass.
+    bool effective_col_major = (M == 1) ? false : col_major;
+    std::string key = gemvCacheKey(M, N, K, bs, effective_col_major);
 
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
@@ -515,6 +628,7 @@ static int getOrTuneGemvConfig(
 
     return best;
 }
+
 
 /* =======================================================================
  * Section 2: RDNA3 WMMA Fused GEMM + Dequantization Kernel
@@ -1413,6 +1527,56 @@ __global__ void unpack_zp_u8_to_fp16_kernel(
         zp_fp16[n * groups_k + g_hi] = static_cast<_Float16>(packed >> 4);
 }
 
+/* Unpack packed nibble ZPs [N, ceil(k_blocks/2)] → [N, k_blocks] uint8,
+ * one byte per zero_point (0-15). Needed because the GEMV row-major and
+ * naive kernels index zp[n * k_blocks + grp], expecting one value per byte. */
+__global__ void unpack_zp_nibbles_to_u8_kernel(
+    const uint8_t* __restrict__ packed,
+    uint8_t* __restrict__ out,
+    int N, int k_blocks, int packed_cols)
+{
+    int n  = static_cast<int>(blockIdx.y);
+    int g2 = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (n >= N || g2 >= packed_cols) return;
+
+    uint8_t p = packed[n * packed_cols + g2];
+    int g_lo = g2 * 2;
+    out[n * k_blocks + g_lo] = p & 0xF;
+    if (g_lo + 1 < k_blocks)
+        out[n * k_blocks + g_lo + 1] = p >> 4;
+}
+
+static uint8_t*  g_zp_u8_buf = nullptr;
+static size_t    g_zp_u8_buf_elems = 0;
+
+static uint8_t* ensureZpU8Buffer(size_t need) {
+    if (g_zp_u8_buf && g_zp_u8_buf_elems >= need) return g_zp_u8_buf;
+    if (g_zp_u8_buf) hipFree(g_zp_u8_buf);
+    hipMalloc(&g_zp_u8_buf, need);
+    g_zp_u8_buf_elems = need;
+    return g_zp_u8_buf;
+}
+
+static const uint8_t* unpackZpNibblesToU8(
+    hipStream_t stream,
+    const void* zp_packed_ptr,
+    int N, int groups_k)
+{
+    int packed_cols = (groups_k + 1) / 2;
+    size_t out_elems = static_cast<size_t>(N) * groups_k;
+    uint8_t* out = ensureZpU8Buffer(out_elems);
+
+    constexpr int THR = 256;
+    dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
+              static_cast<unsigned>(N));
+    dim3 block(THR);
+    hipLaunchKernelGGL(unpack_zp_nibbles_to_u8_kernel,
+                       grid, block, 0, stream,
+                       static_cast<const uint8_t*>(zp_packed_ptr),
+                       out, N, groups_k, packed_cols);
+    return out;
+}
+
 static _Float16* g_zp_fp16_buf = nullptr;
 static size_t    g_zp_fp16_buf_elems = 0;
 
@@ -1478,15 +1642,21 @@ extern "C" int hip_matmul_nbits(
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-  // Convert uint8 packed nibble zero_points to FP16 for WMMA/GEMV-col-major
-  // paths which require FP16 zero_points. Row-major GEMV and naive fallback
-  // read uint8 directly and don't need this conversion.
+  // Packed nibble ZPs [N, ceil(k_blocks/2)] must be unpacked before use:
+  //   - FP16 for WMMA and col-major GEMV paths (only when M > 1)
+  //   - Individual uint8 for row-major GEMV and naive fallback paths
+  // When zp_elem_size == 2 (FP16) or ZPs are NULL, no conversion needed.
   const void* zp_for_fp16_paths = zero_points;
+  const void* zp_for_u8_paths = zero_points;
   bool wmma_data_format_pre = (batch_count == 1) && (K % 32 == 0);
-  if (zero_points && zp_elem_size == 1 && wmma_data_format_pre) {
+  if (zero_points && zp_elem_size == 1) {
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
-    zp_for_fp16_paths = convertZpToFp16(
+    zp_for_u8_paths = unpackZpNibblesToU8(
         hip_stream, zero_points, static_cast<int>(N), ngk);
+    if (wmma_data_format_pre && M > 1) {
+      zp_for_fp16_paths = convertZpToFp16(
+          hip_stream, zero_points, static_cast<int>(N), ngk);
+    }
   }
 
   /* -------------------------------------------------------------------
@@ -1566,13 +1736,16 @@ extern "C" int hip_matmul_nbits(
   }
 
   /* -------------------------------------------------------------------
-   * GEMV path with col-major data — small M, WMMA data format
+   * GEMV path with col-major data — small M (>1), WMMA data format
    *
-   * When batch==1, K%32==0, but M < kBlockDim: internally transpose
+   * When batch==1, K%32==0, but 1 < M < kBlockDim: internally transpose
    * A row->col and output col->row so the caller sees row-major I/O.
    * GEMV kernel runs with COL_MAJOR=true for K-parallel reduction.
+   *
+   * M=1 skips this path entirely — row/col layouts are identical for a
+   * single row, and the row-major GEMV avoids the ZP conversion kernel.
    * ------------------------------------------------------------------- */
-  if (wmma_data_format && M < kBlockDim) {
+  if (wmma_data_format && M > 1 && M < kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
@@ -1656,7 +1829,7 @@ extern "C" int hip_matmul_nbits(
     const auto* a_h = static_cast<const __half*>(A);
     const auto* b_u = static_cast<const uint8_t*>(B);
     const auto* s_h = static_cast<const __half*>(scales);
-    const auto* z_u = static_cast<const uint8_t*>(zero_points);
+    const auto* z_u = static_cast<const uint8_t*>(zp_for_u8_paths);
     const auto* b_h = static_cast<const __half*>(bias);
     auto*       o_h = static_cast<__half*>(output);
 
@@ -1696,7 +1869,7 @@ extern "C" int hip_matmul_nbits(
       matmul_nbits_kernel, grd, blk, 0, hip_stream,
       static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
       static_cast<const __half*>(scales),
-      static_cast<const uint8_t*>(zero_points),
+      static_cast<const uint8_t*>(zp_for_u8_paths),
       static_cast<const __half*>(bias), static_cast<__half*>(output),
       M, N, K, block_size);
 
