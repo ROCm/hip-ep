@@ -127,8 +127,11 @@ Implements GQA as a multi-step operation:
 
 - **KV cache update**: Concatenate current K/V with past K/V into present K/V
 - **Optional RoPE**: If `do_rotary`, apply RoPE to Q and K (reuse rope logic)
-- **Attention**: Q * K^T (scaled), softmax, attention * V
-- Can start with a straightforward implementation and optimize later (or swap in CK)
+- **Attention** (single-token decode): two co-resident kernel families dispatched by `lib/Runtime/real/gqa.cpp`:
+  - `gqa_fused_decode` — original short-context kernel (one block per query head); preferred at small `skv` where reduction overhead would dominate.
+  - `gqa_flash_decode<D, K_SPLITS>` + `gqa_flash_decode_reduce_kernel<D, K_SPLITS>` — GQA-aware split-K Flash Attention 2 for long contexts. One block per (batch, kv-head, K_SPLIT); each block stages K/V tiles into LDS once and reuses them across all HPG=4 query heads (eliminating the 4× KV bandwidth waste of per-query-head loops). Online softmax in log2e space writes `{m, l, O[D]}` partials to a workspace; the reduction kernel merges them across splits. Templated for `D ∈ {64, 128}`, `K_SPLITS=8`.
+- **Prefill**: `gqa_fused_prefill` (multi-token) computes Q·K^T, softmax, and `attn·V` against the assembled KV cache.
+- Can start with a straightforward implementation and optimize later (or swap in CK).
 
 ### 5. `custom_kernels/CMakeLists.txt`
 
