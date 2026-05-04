@@ -34,11 +34,13 @@ from conftest import (
     download,
     ensure_fixed_model,
     ensure_model,
+    ensure_pipeline_sliding_oga_files,
     extract_kv_cache,
     get_next_token,
     make_decode_inputs,
     make_dim_map,
     make_llama_inputs,
+    make_pipeline_sliding_genai_config,
     make_prefill_inputs,
     make_prompt_tokens,
     oga_generate,
@@ -46,7 +48,9 @@ from conftest import (
     patch_genai_config_for_morphizen,
     report,
     restore_genai_config,
+    run_cpu_reference_generation,
     run_iobinding_once,
+    run_oga_static_kv_pipeline,
     run_timed,
     run_timed_iobinding,
     setup_oga_ep,
@@ -117,6 +121,7 @@ _GENAI_CONFIG = {
         "vocab_size": 128256,
     },
     "search": {
+        "chunk_size": 512,
         "diversity_penalty": 0.0,
         "do_sample": True,
         "early_stopping": True,
@@ -173,6 +178,16 @@ def _ensure_oga_files():
         with open(config_path, "w") as f:
             json.dump(_GENAI_CONFIG, f, indent=4)
         print(f"  Generated {config_path.name}")
+    else:
+        # Migrate stale on-disk config: ensure chunk_size=512 is set for the
+        # dynamic-shape model (Pareto-optimal default for MorphiZenEP/gfx1150).
+        with open(config_path) as f:
+            existing = json.load(f)
+        if existing.get("search", {}).get("chunk_size") != 512:
+            existing.setdefault("search", {})["chunk_size"] = 512
+            with open(config_path, "w") as f:
+                json.dump(existing, f, indent=4)
+            print(f"  Migrated {config_path.name}: search.chunk_size=512")
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -576,29 +591,9 @@ class TestLlama1BOGA:
         prompt_tokens = _make_prompt_tokens(prompt_len)
         max_seq_len = prompt_len + max_new
 
-        # ── CPU reference: prefill + decode via sess.run() ──
-        cpu_sess = create_cpu_session(dynamic_model_path)
-        output_names = [o.name for o in cpu_sess.get_outputs()]
-        logits_idx = output_names.index("logits")
-
-        cfg = _make_cfg(max_seq_len)
-        cpu_inputs = make_prefill_inputs(cfg, prompt_tokens, max_seq_len)
-        cpu_out = cpu_sess.run(None, cpu_inputs)
-        cpu_token = get_next_token(cpu_out[logits_idx])
-        cpu_kv = extract_kv_cache(cpu_out, output_names)
-        cpu_generated = [cpu_token]
-
-        for step in range(max_new - 1):
-            position = prompt_len + step
-            cpu_inputs = make_decode_inputs(
-                cfg, cpu_token, position, cpu_kv, max_seq_len
-            )
-            cpu_out = cpu_sess.run(None, cpu_inputs)
-            cpu_token = get_next_token(cpu_out[logits_idx])
-            cpu_kv = extract_kv_cache(cpu_out, output_names)
-            cpu_generated.append(cpu_token)
-
-        cleanup(cpu_sess)
+        cpu_generated = run_cpu_reference_generation(
+            dynamic_model_path, _make_cfg(max_seq_len), prompt_tokens, max_new
+        )
 
         # ── OGA+EP with chunked prefill ──
         patch_genai_config_for_morphizen(_MODEL_DIR, ep_dll)
@@ -645,3 +640,123 @@ class TestLlama1BOGA:
             f"Token match rate {match_rate:.0%} too low — chunked prefill "
             f"may be producing incorrect results"
         )
+
+    def test_oga_pipeline_sliding_window_160tok(self, dynamic_model_path):
+        """OGA decoder-pipeline with sliding_window: chunked prefill via fixed [1,128].
+
+        Builds a static-shape pipeline (prefill=[1,128], decode=[1,1], KV=4096)
+        and uses OGA's `decoder.sliding_window` block (window_size=128) to chunk
+        a 160-token prompt. OGA's decoder_only_pipeline.cpp:382-394 dispatches
+        the prefill sub-model `ceil(prompt_len / window_size)` times within a
+        SINGLE Generator::Run(), so a 160-token prompt produces exactly 2
+        prefill executions (chunk 0: tokens 0..127, chunk 1: tokens 128..159
+        right-padded to 128 with pad_token_id by WindowedInputIDs).
+
+        WindowedInputIDs requires `p_device_inputs_->GetType()` ∈ {QNN, CPU}.
+        MorphiZenEP is not in OGA's GPU-input-device list (model.cpp:592-597),
+        so it falls through to CPU input device — sliding_window works.
+
+        `slide_key_value_cache: false` keeps the KV buffer at the static
+        `total_sequence_length=4096`, preserving the past_present_share_buffer
+        fast path.
+
+        Verification:
+          1. Token validity — generated tokens compared to a CPU reference of
+             the same 160-token prompt (≥50% match, mirroring
+             test_oga_ep_chunked_prefill).
+          2. Implicit prefill-call-count — the test only succeeds if OGA pushes
+             all 160 prompt tokens through the static [1,128] prefill, which
+             can ONLY happen via the 2-chunk sliding-window path. To see the
+             individual MlirCustomOp::Compute() calls on stderr, run with
+             `MORPHIZEN_DEBUG_MLIR_BACKEND=2 GLOG_logtostderr=1`.
+        """
+        og, _ = setup_oga_ep(REPO_ROOT)
+
+        window_size = 128
+        kv_len = _PIPELINE_KV_LEN
+        prompt_len = 160
+        max_new = 10
+        num_chunks_expected = (prompt_len + window_size - 1) // window_size
+        assert num_chunks_expected == 2, (
+            "test premise: 160 tokens / window 128 = 2 chunks"
+        )
+
+        prompt_tokens = _make_prompt_tokens(prompt_len)
+        max_seq_len = prompt_len + max_new
+
+        cpu_generated = run_cpu_reference_generation(
+            dynamic_model_path, _make_cfg(max_seq_len), prompt_tokens, max_new
+        )
+
+        pipeline_dir = _ensure_pipeline_sliding_oga_files(window_size, kv_len)
+        oga_generated, ttft_ms = run_oga_static_kv_pipeline(
+            og, pipeline_dir, prompt_tokens, kv_len, max_new
+        )
+
+        # ── Compare ──
+        n = min(len(cpu_generated), len(oga_generated))
+        cpu_trimmed = cpu_generated[:n]
+        oga_trimmed = oga_generated[:n]
+        matches = sum(1 for a, b in zip(cpu_trimmed, oga_trimmed) if a == b)
+        match_rate = matches / n if n > 0 else 0.0
+
+        print(f"\n{'=' * 60}")
+        print(
+            f"OGA pipeline sliding_window (window={window_size}, kv={kv_len}, "
+            f"prompt={prompt_len}, generate={max_new})"
+        )
+        print(
+            f"  expected prefill chunks: {num_chunks_expected} "
+            f"(ceil({prompt_len}/{window_size}))"
+        )
+        print(f"  ttft (incl. {num_chunks_expected} prefill chunks): {ttft_ms:7.1f}ms")
+        print(f"  CPU  tokens: {cpu_trimmed}")
+        print(f"  OGA  tokens: {oga_trimmed}")
+        print(f"  Match rate:  {match_rate:.0%} ({matches}/{n})")
+        print(f"{'=' * 60}")
+
+        assert len(oga_generated) > 0, "OGA generated no tokens"
+        assert match_rate >= 0.5, (
+            f"Token match rate {match_rate:.0%} too low — sliding_window "
+            f"chunked prefill may be producing incorrect results"
+        )
+
+
+# ── OGA bi-model sliding-window pipeline config ────────────────────────────
+# 1B-specific wiring around `make_pipeline_sliding_genai_config` /
+# `ensure_pipeline_sliding_oga_files` from conftest.py — see those for the
+# decoder-pipeline + sliding_window design notes.
+_PIPELINE_KV_LEN = 4096
+
+
+def _ensure_pipeline_sliding_oga_files(window_size, kv_len):
+    """Materialize a 1B sliding-window pipeline directory for (window_size, kv_len)."""
+    _ensure_model()
+    _ensure_oga_files()
+    pipeline_dir = (
+        REPO_ROOT / "models" / f"Llama-3.2-1B-Instruct-Pipeline-p{window_size}m{kv_len}"
+    )
+    config_dict = make_pipeline_sliding_genai_config(
+        window_size=window_size,
+        kv_len=kv_len,
+        num_layers=NUM_LAYERS,
+        num_kv_heads=NUM_KV_HEADS,
+        num_attention_heads=32,
+        head_dim=HEAD_DIM,
+        hidden_size=2048,
+        vocab_size=VOCAB_SIZE,
+        bos_token_id=BOS_TOKEN,
+        eos_token_ids=[128001, 128008, 128009],
+        pad_token_id=128001,
+        has_position_ids=False,
+    )
+    return ensure_pipeline_sliding_oga_files(
+        parent_dir=_MODEL_DIR,
+        pipeline_dir=pipeline_dir,
+        onnx_file=_ONNX_FILE,
+        data_file=_DATA_FILE,
+        tokenizer_files=_OGA_TOKENIZER_FILES,
+        window_size=window_size,
+        kv_len=kv_len,
+        config_dict=config_dict,
+    )
