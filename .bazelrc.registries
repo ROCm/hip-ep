@@ -1,8 +1,2 @@
-# Local registry overrides (gitignored)
-# Use local clone of ROCm bazel-registry for faster, offline access
 common --registry=file:///C:/Develop/m/source/bazel-registry-1
-
-# Local module overrides for development
-common --override_module=bazel_cpp_toolchain=../../bazel-cpp-toolchain/bazel-cpp-toolchain-1
-common --override_module=morphizen=../../MorphiZen-1
-common --override_module=llvm-project-overlay=../../bazel-registry-1/modules/llvm-project-overlay/22.1.3
+common --registry=file:///C:/Develop/m/source/xmc-registry
