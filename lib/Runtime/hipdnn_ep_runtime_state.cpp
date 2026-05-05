@@ -215,6 +215,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->host_scratch_base = nullptr;
+  state->host_scratch_size = 0;
   state->gqa_gemm_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
@@ -844,6 +846,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
   }
 
+  // Free host-mapped scratch buffer (if allocated)
+  if (state->host_scratch_base) {
+    HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+  }
+
   // Free memory pool (if allocated)
   if (state->pool_base) {
     HIP_CLEANUP(hipFree(state->pool_base));
@@ -1039,9 +1046,11 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
               "hipdnn_ep_get_pool_base: growing pool %zu -> %zu bytes "
               "(rare; first time this large input shape was seen)\n",
               state->pool_size, needed_size);
+      fflush(stderr);
       hipFree(state->pool_base);
     }
-    if (hipMalloc(&state->pool_base, needed_size) != hipSuccess) {
+    void *new_base = nullptr;
+    if (hipMalloc(&new_base, needed_size) != hipSuccess) {
       fprintf(stderr,
               "hipdnn_ep_get_pool_base: hipMalloc failed for pool grow "
               "(%zu -> %zu bytes)\n",
@@ -1050,9 +1059,55 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
       state->pool_size = 0;
       return nullptr;
     }
+    state->pool_base = new_base;
     state->pool_size = needed_size;
   }
+  fprintf(stderr, "[DIAG] returning pool_base=%p pool_size=%zu\n",
+          state->pool_base, state->pool_size);
+  fflush(stderr);
   return state->pool_base;
+}
+
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
+  if (!state) {
+    fprintf(stderr,
+            "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");
+    return nullptr;
+  }
+  // Mirrors hipdnn_ep_get_pool_base growth semantics for the host-mapped
+  // scratch buffer that backs hip.get_host_scratch. One allocation per
+  // function for all tiny host-fed scalars routed away from the GPU pool by
+  // hip-materialize-host-scalars; grown only when shape changes increase the
+  // total demand; never shrinks. hipHostMalloc(hipHostMallocMapped) memory is
+  // host-writable AND GPU-readable via the device pointer mapping, so the
+  // same pointer can be stored into from host code and then read by
+  // subsequent GPU kernels.
+  if (needed_size > state->host_scratch_size) {
+    if (state->host_scratch_base) {
+      if (state->stream)
+        hipStreamSynchronize(state->stream);
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: growing host scratch "
+              "%zu -> %zu bytes (rare; first time this large)\n",
+              state->host_scratch_size, needed_size);
+      fflush(stderr);
+      hipHostFree(state->host_scratch_base);
+    }
+    void *new_base = nullptr;
+    if (hipHostMalloc(&new_base, needed_size, hipHostMallocMapped) !=
+        hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: hipHostMalloc failed "
+              "(%zu -> %zu bytes)\n",
+              state->host_scratch_size, needed_size);
+      state->host_scratch_base = nullptr;
+      state->host_scratch_size = 0;
+      return nullptr;
+    }
+    state->host_scratch_base = new_base;
+    state->host_scratch_size = needed_size;
+  }
+  return state->host_scratch_base;
 }
 
 //===----------------------------------------------------------------------===//

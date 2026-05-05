@@ -665,6 +665,14 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
+    // Fold Gather(Shape(x), const_idx) -> tensor.dim BEFORE constants are
+    // externalized; once the index constant is moved into the constants blob
+    // we can no longer see its value at compile time. This collapses the
+    // dynseqlen runtime-shape arithmetic chain to a single 0-D / 1-element
+    // result, narrowing the host-store-into-pool footprint that the late
+    // hip.scalar_to_gpu_buf rewrite must clean up.
+    if (mlir::failed(foldGatherShapeBeforeLowering(funcOp)))
+      return signalPassFailure();
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();

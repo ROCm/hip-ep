@@ -172,6 +172,31 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def MaterializeHostScalarsPass
+    : Pass<"hip-materialize-host-scalars", "mlir::func::FuncOp"> {
+  let summary = "Redirect tiny host-fed memref.alloc ops to a host-mapped "
+                "scratch buffer";
+  let description = [{
+    Walks `memref.alloc` ops in the function and redirects ones that look like
+    host-fed scalar staging (small static shape, integer/index element type,
+    only memref.store/load/dim/dealloc users — no hip dialect ops as users)
+    away from the GPU pool. They are replaced with `memref.view` ops over a
+    single per-function `hip.get_host_scratch(%ctx, %total_size)` buffer.
+
+    Why: on gfx1151 the GPU pool is real device memory; the bufferized
+    `tensor.from_elements` lowering emits `memref.alloc + memref.store` which,
+    once absorbed by `hip-pool-allocs`, becomes a host store into device
+    memory and SEGVs. (gfx1150 silently worked because hipMalloc returned
+    UMA-mapped host memory there.) This pass runs BEFORE `hip-pool-allocs`
+    so the candidates never enter the GPU pool.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   let summary = "Lower memref.alloc to hip.alloc and insert hip.free";
   let description = [{

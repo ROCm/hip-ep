@@ -153,6 +153,13 @@ void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
+/// Pre-lowering walk: fold the Gather(Shape(x), const_idx) idiom into
+/// tensor.from_elements over a tensor.dim of x. Must run BEFORE
+/// lowerOnnxConstants so the index value is still inline in the
+/// onnx.Constant `value` attribute. See GatherShapeFold.cpp for the
+/// dynseqlen-regression rationale.
+mlir::LogicalResult foldGatherShapeBeforeLowering(mlir::func::FuncOp funcOp);
+
 } // namespace hip
 } // namespace mlir
 
