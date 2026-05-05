@@ -538,6 +538,11 @@ def build_oga():
 
     # -- build --
     log("  Building OGA ...")
+    # Force the OGA cmake to use the same Python interpreter that's running
+    # build.py (the conda env's python). cmake otherwise auto-picks the first
+    # python on PATH (e.g. miniforge base, system Python), producing a .pyd
+    # whose ABI tag (cp312/cp313) doesn't match the install target's cp314.
+    py_for_cmake = sys.executable.replace("\\", "/")
     build_cmd = [
         sys.executable,
         str(OGA_SOURCE / "build.py"),
@@ -555,8 +560,26 @@ def build_oga():
         str(OGA_BUILD),
         "--cmake_extra_defines",
         "CMAKE_CXX_FLAGS=/EHsc",
+        # pybind11 v2.13.6 (vendored by OGA) uses the removed
+        # distutils.sysconfig under Python 3.12+; PYBIND11_FINDPYTHON=ON
+        # routes through modern CMake FindPython3 instead.
+        "--cmake_extra_defines",
+        "PYBIND11_FINDPYTHON=ON",
+        # PYBIND11_FINDPYTHON routes through CMake FindPython, which keys off
+        # `Python_EXECUTABLE` (no `3` suffix) — passing `Python3_EXECUTABLE`
+        # alone gets ignored with a "Manually-specified variables were not used"
+        # warning, and cmake then auto-detects the wrong python on PATH.
+        "--cmake_extra_defines",
+        f"Python_EXECUTABLE={py_for_cmake}",
     ]
-    subprocess.run(build_cmd, check=True)
+    # OGA's terminal `PyPackageBuild` ninja target invokes `cmd /C "... && -m pip
+    # wheel --no-deps ."` — note the missing `python` before `-m pip`. The C/C++
+    # artifacts (DLL, EXE, .pyd) are already built before this step fails, so
+    # tolerate non-zero exit and finish the wheel ourselves below.
+    rc = subprocess.run(build_cmd).returncode
+    if rc != 0:
+        log(f"  OGA build.py exited {rc} (PyPackageBuild step likely failed; "
+            "binaries should still be present).")
 
     # -- install binaries --
     bin_dir = DIST / "bin"
@@ -570,10 +593,41 @@ def build_oga():
         if src.exists():
             shutil.copy2(src, bin_dir / name)
             log(f"  Installed {name}")
+        else:
+            log(f"  ERROR: missing OGA artifact {src}")
+            sys.exit(1)
 
-    # -- install wheel --
+    # Required by model_benchmark.exe: the freshly-built ORT must shadow any
+    # System32 onnxruntime.dll (often v1.17 = API 17) so the EP-built-against
+    # ORT 1.24 (API 24) can load.
+    for ort_dll in ("onnxruntime.dll", "onnxruntime_providers_shared.dll"):
+        src = ORT / "lib" / ort_dll
+        if src.exists():
+            shutil.copy2(src, bin_dir / ort_dll)
+
+    # -- build wheel (workaround for OGA PyPackageBuild bug) --
+    # OGA stages the wheel layout under <build>/wheel/ before invoking pip.
+    # If the broken target left no .whl, run pip wheel manually from there.
     wheel_dir = oga_bin / "wheel"
-    wheels = list(wheel_dir.glob("onnxruntime_genai_directml-*.whl"))
+    wheels = list(wheel_dir.glob("onnxruntime_genai_directml-*.whl")) if wheel_dir.exists() else []
+    if not wheels and wheel_dir.exists() and (wheel_dir / "setup.py").exists():
+        log("  PyPackageBuild produced no wheel — running pip wheel manually.")
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "wheel",
+                "--no-deps",
+                "--wheel-dir",
+                str(wheel_dir),
+                str(wheel_dir),
+            ],
+            check=True,
+            cwd=str(wheel_dir),
+        )
+        wheels = list(wheel_dir.glob("onnxruntime_genai_directml-*.whl"))
+
     if wheels:
         log(f"  Installing wheel: {wheels[0].name}")
         subprocess.run(
@@ -589,7 +643,8 @@ def build_oga():
             check=True,
         )
     else:
-        log("  WARNING: No OGA wheel found.")
+        log("  ERROR: No OGA wheel produced; cannot install onnxruntime_genai.")
+        sys.exit(1)
 
     log("  OGA build complete.")
 
