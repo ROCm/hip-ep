@@ -1062,9 +1062,6 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
     state->pool_base = new_base;
     state->pool_size = needed_size;
   }
-  fprintf(stderr, "[DIAG] returning pool_base=%p pool_size=%zu\n",
-          state->pool_base, state->pool_size);
-  fflush(stderr);
   return state->pool_base;
 }
 
