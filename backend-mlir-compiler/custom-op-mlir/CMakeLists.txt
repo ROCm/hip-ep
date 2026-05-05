@@ -9,6 +9,12 @@ message(STATUS "Configuring MLIR Custom Op")
 # Find dependencies
 find_package(glog CONFIG REQUIRED)
 
+# HIP runtime headers + amdhip64 import library are needed by
+# MlirCustomOp.cpp's HIPDNN_EP_PERF instrumentation (hipEvent*, hipStream_t,
+# hipDeviceSynchronize). THEROCK_DIST is on CMAKE_PREFIX_PATH, so hip::host
+# resolves without reordering the parent add_subdirectory sequence.
+find_package(hip CONFIG REQUIRED)
+
 # Create custom op library
 set(LIB_NAME morphizen-custom-op-mlir)
 add_library(${LIB_NAME} STATIC
@@ -25,6 +31,7 @@ target_link_libraries(${LIB_NAME} PRIVATE
   morphizen::morphizen-core-static
   glog::glog
   mlir_compilation_proto  # Shared protobuf metadata library
+  hip::host               # hipEvent_t, hipStream_t, hipDeviceSynchronize (PERF)
 )
 
 # Include directories

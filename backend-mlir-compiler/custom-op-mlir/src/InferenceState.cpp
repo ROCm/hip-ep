@@ -10,6 +10,7 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -41,7 +42,35 @@ namespace mlir_compilation::customop {
 InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<morphizen::Plugin> plugin,
                                const std::string &temp_dll_path)
-    : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path) {
+    : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path),
+      begin_compute_fn_(nullptr) {
+  // F-A: Cache the begin_compute symbol so the per-Compute() invocation is a
+  // single indirect call. Older model.dlls do not export this symbol; in that
+  // case we leave begin_compute_fn_ null and begin_compute() becomes a no-op.
+  if (plugin_) {
+    begin_compute_fn_ =
+        plugin_->get_method<void, void *>("hipdnn_ep_runtime_begin_compute");
+    MY_LOG(2) << "F-A begin_compute symbol "
+              << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
+  }
+  // F-A safety net: warn loudly if the user enabled the seqlens_k cache but
+  // the model.dll predates the patch. Without an invalidation hook the cache
+  // would survive across forward passes and the gqa.cpp readback would
+  // return token-1 values for tokens 2..N, producing silently wrong logits.
+  // Detected once at session creation so the user gets an actionable signal
+  // before observing decode output corruption.
+  if (!begin_compute_fn_) {
+    const char *env = std::getenv("HIPDNN_EP_GQA_CACHE_SEQLENS");
+    if (env && env[0] != '0') {
+      LOG(WARNING)
+          << "HIPDNN_EP_GQA_CACHE_SEQLENS=" << env
+          << " is set, but the loaded model.dll does not export "
+             "hipdnn_ep_runtime_begin_compute. Per-Compute() cache "
+             "invalidation will not happen and decode output will be "
+             "incorrect from token 2 onward. Either unset the env var or "
+             "rebuild the model.dll with the F-A runtime patch.";
+    }
+  }
 }
 
 std::unique_ptr<InferenceState>
@@ -145,6 +174,41 @@ int InferenceState::compute(span_t *inputs, span_t *outputs) const {
     return -1;
   }
   return compute_fn(state_, inputs, outputs);
+}
+
+void InferenceState::begin_compute() const {
+  if (begin_compute_fn_ && state_) {
+    begin_compute_fn_(state_);
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Diagnostic-only stream accessor.
+//
+// state_ is the opaque handle returned by inference_init() in the JIT-compiled
+// model.dll.  That DLL's implementation of inference_init allocates a
+// RuntimeState (see lib/Runtime/runtime_state_internal.h) and returns it as
+// void*.  RuntimeState's first field is `hipStream_t stream`, so a first-field
+// cast gives us the stream without a codegen change or a DLL export.
+//
+// The EP DLL and the JIT model.dll's linked-in runtime bitcode are built from
+// the same commit of the same tree, so layout is consistent by construction.
+// If RuntimeState ever gains a field before `stream`, this returns garbage
+// silently; we'd notice via absurd hipEventElapsedTime readings.  Acceptable
+// for a diagnostic (HIPDNN_EP_PERF) instrumentation.
+// ----------------------------------------------------------------------------
+namespace {
+struct RuntimeStateHead {
+  void *stream; // mirrors RuntimeState::stream (hipStream_t is pointer-sized)
+};
+static_assert(sizeof(void *) == 8, "expected 64-bit target");
+static_assert(offsetof(RuntimeStateHead, stream) == 0,
+              "RuntimeState layout invariant: stream must be first field");
+} // namespace
+
+void *InferenceState::get_stream_raw() const {
+  return state_ ? reinterpret_cast<RuntimeStateHead *>(state_)->stream
+                : nullptr;
 }
 
 } // namespace mlir_compilation::customop

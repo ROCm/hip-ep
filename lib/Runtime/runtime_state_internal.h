@@ -69,6 +69,24 @@ struct RuntimeState {
   // cleaned up here)
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
+
+  // F-A: Per-Compute() cache for seqlens_k_val (decode hot path).
+  //
+  // Decode runs 32 GQA layers per token, all reading the same seqlens_k
+  // from device memory. The decomposed-path readback in gqa.cpp issues a
+  // hipMemcpyAsync(D2H) + hipStreamSynchronize per layer (31 redundant
+  // pipeline stalls, ~30-45 ms/token on Strix Halo with the asym Llama
+  // sliding-window path). With HIPDNN_EP_GQA_CACHE_SEQLENS=1 the first
+  // GQA in a forward pass populates the cache and the remaining 31
+  // layers reuse it.
+  //
+  // Invalidated by hipdnn_ep_runtime_begin_compute() at the start of each
+  // Compute(), called from the EP-side MlirCustomOp::Compute() entry.
+  // If the symbol is not exported (older model.dll), invalidation does
+  // not happen and the cache is unsafe -- the env var must remain unset.
+  bool seqlens_k_cached_valid;
+  int32_t seqlens_k_cached_val;
+  const void *seqlens_k_cached_ptr;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
