@@ -8,6 +8,7 @@ add_library(HipDialectTransforms STATIC
   BufferUtils.cpp
   GenerateInterface.cpp
   LowerAllocs.cpp
+  MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp

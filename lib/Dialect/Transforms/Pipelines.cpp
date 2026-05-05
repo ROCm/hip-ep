@@ -69,6 +69,14 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     not trigger extra hipMalloc calls per inference).
   pm.addNestedPass<func::FuncOp>(hip::createPromoteStridedHipOperandsPass());
 
+  // 6b. Redirect tiny host-fed memref.alloc ops (bufferized
+  //     `tensor.from_elements` for shape arithmetic — rank-0 / 1xi64) away
+  //     from the GPU pool to a runtime-owned host-mapped scratch buffer.
+  //     Must run BEFORE PoolAllocs so candidates are removed from its input
+  //     set.  Without this, the pool absorbs the alloc and the subsequent
+  //     host store SEGVs on gfx1151 (real device memory).
+  pm.addNestedPass<func::FuncOp>(hip::createMaterializeHostScalarsPass());
+
   pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
 
   // 7. Lower remaining bufferization ops to memref

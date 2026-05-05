@@ -226,7 +226,10 @@ bool CompilerDriver::runMLIRPasses(
   mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
 
   std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;
-  if (const char *dumpPath = std::getenv("HIPDNN_EP_IR_DUMP_PATH")) {
+  // hip_get_env, not std::getenv: this code may be linked into the static-CRT
+  // EP DLL where std::getenv cannot see host-process env vars.
+  std::string dumpPath = hip_get_env("HIPDNN_EP_IR_DUMP_PATH");
+  if (!dumpPath.empty()) {
     std::error_code ec;
     irDumpStream = std::make_unique<llvm::raw_fd_ostream>(dumpPath, ec);
     if (!ec) {
@@ -329,11 +332,14 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
 void CompilerDriver::discoverLibraries(
     std::vector<std::string> &libraries,
     std::vector<std::string> &library_paths) {
-  const char *therock = std::getenv("THEROCK_DIST");
-  if (!therock)
+  // hip_get_env, not std::getenv: this code runs inside the static-CRT EP DLL
+  // when invoked from the EP. std::getenv there has its own (empty) CRT env
+  // table and silently returned NULL, leaving library_paths empty — lld then
+  // failed with "could not open 'amdhip64.lib'" and the EP fell back to CPU.
+  std::string dist = hip_get_env("THEROCK_DIST");
+  if (dist.empty())
     return;
 
-  std::string dist(therock);
   std::string lib_dir = dist + "/lib";
   library_paths.push_back(lib_dir);
   COMPILER_DEBUG_LOG("THEROCK_DIST detected: " << dist << "\n");
@@ -368,9 +374,9 @@ void CompilerDriver::discoverLibraries(
   {
     bool found = false;
 
-    const char *custom_dir_env = std::getenv("HIP_CUSTOM_KERNELS_DIR");
-    if (custom_dir_env && custom_dir_env[0] != '\0') {
-      std::string custom_dir(custom_dir_env);
+    // hip_get_env, not std::getenv: see THEROCK_DIST comment above.
+    std::string custom_dir = hip_get_env("HIP_CUSTOM_KERNELS_DIR");
+    if (!custom_dir.empty()) {
       library_paths.push_back(custom_dir);
       libraries.push_back("hip_custom_kernels");
       found = true;

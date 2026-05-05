@@ -205,6 +205,16 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // Returns: GPU base pointer (NULL on allocation failure)
 void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size);
 
+// Get the host-mapped scratch buffer base, growing it if needed. Called from
+// hip.get_host_scratch (emitted by hip-materialize-host-scalars) once per
+// inference for tiny host-fed scalar memrefs that would otherwise land in the
+// GPU pool. Memory is hipHostMalloc(hipHostMallocMapped) - host-writable AND
+// GPU-readable via the device pointer mapping. Grow semantics mirror
+// hipdnn_ep_get_pool_base: stream-synced hipHostFree + hipHostMalloc; never
+// shrinks.
+// Returns: host-mapped base pointer (NULL on allocation failure)
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
+
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
