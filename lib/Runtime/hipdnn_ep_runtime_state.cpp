@@ -219,6 +219,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
+  state->seqlens_k_cached_valid = false;
+  state->seqlens_k_cached_val = 0;
+  state->seqlens_k_cached_ptr = nullptr;
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -898,6 +901,27 @@ void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
 
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
+}
+
+// F-A: Per-Compute() cache invalidation hook. Today this only resets the
+// GQA seqlens_k cache; future per-forward-pass caches should be cleared
+// here as well so the EP-side hook stays a single call.
+//
+// __declspec(dllexport) matches the convention in real/test_hip_from_dll.cpp
+// (belt-and-suspenders with the .def export list in CompilerDriver.cpp) and
+// guarantees the symbol survives LLVM optimization in the compiled
+// model.dll, which dlsym/GetProcAddress resolves it from.
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        void
+        hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
+  if (!state) {
+    return;
+  }
+  state->seqlens_k_cached_valid = false;
+  state->seqlens_k_cached_ptr = nullptr;
 }
 
 //===----------------------------------------------------------------------===//
