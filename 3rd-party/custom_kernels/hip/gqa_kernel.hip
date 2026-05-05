@@ -819,6 +819,27 @@ typedef float    float8 __attribute__((ext_vector_type(8)));
 //     2. Online softmax in log2e space: score *= scale * LOG2E, then exp2f
 //     3. Accumulate weighted V: acc += softmax_weight * V[s,tid]
 //
+// Memory pipeline: launches B*H blocks of D threads -> only ~32 waves total
+// at typical inference shapes (B=1, H=32, D=128 -> 4 waves/block * 32 blocks
+// = 128 waves; for G=8 we still get 8 blocks effective on the kv-replication
+// path). Per-SIMD wave count is far below what is needed to hide ~400-cycle
+// global-load latency by switching waves. Streaming K/V one row at a time
+// stalls the wave on every iteration. To compensate we LDS-tile the K and
+// V cache reads: each outer iteration cooperatively prefetches TILE rows of
+// K and V (TILE*2 outstanding global loads per thread), then the inner loop
+// crunches TILE softmax steps from fast LDS. Memory-level parallelism is now
+// driven by TILE rather than by wave count.
+//
+// LDS use per block: 2 * TILE * D * sizeof(_Float16). For TILE=8, D=128 this
+// is 4 KB K + 4 KB V = 8 KB / block, well within RDNA3 LDS budget (64 KB/CU).
+//
+// Per-thread cooperative-load access pattern: thread `tid` writes
+// K_tile[i*D + tid] and reads K_tile[t_off*D + tid] -- own column only.
+// LDS writes from a thread are visible to subsequent reads from the same
+// thread without __syncthreads, so no barrier is needed between the prefetch
+// and the inner loop. The cross-wave reduction sync on `smem[]` inside the
+// inner loop is unchanged from the streaming version.
+//
 // Assumes RDNA wave32 (__shfl_xor with masks 16,8,4,2,1).
 // Reads Q in BSHD layout, KV cache in BNSD layout.
 
@@ -834,6 +855,14 @@ fused_gqa_decode_kernel(
     const int* __restrict__ seqlens_k)
 {
     constexpr int NUM_WAVES = D / WAVE_SIZE;
+    // TILE = number of KV rows prefetched per outer iteration.
+    // 8 chosen as the sweet spot from sweep: large enough to give the compiler
+    // 16 concurrent loads per thread to amortize ~400-cycle global-load
+    // latency, small enough to keep outer-loop overhead low. TILE=4 loses
+    // to outer-loop overhead at small skv; TILE=16 saturates the per-thread
+    // outstanding-load budget and loses at small skv too. LDS use:
+    // 2 * TILE * D * sizeof(_Float16) = 4 KB / block at D=128.
+    constexpr int TILE = 8;
 
     const int head_q  = __builtin_amdgcn_readfirstlane(blockIdx.x % H);
     const int batch   = __builtin_amdgcn_readfirstlane(blockIdx.x / H);
@@ -849,6 +878,8 @@ fused_gqa_decode_kernel(
     const int eff_skv = clamp_hi > 0 ? clamp_hi : 0;
 
     __shared__ float smem[NUM_WAVES];
+    __shared__ _Float16 K_tile[TILE * D];
+    __shared__ _Float16 V_tile[TILE * D];
 
     const float scale_log2e = scale * LOG2E;
 
@@ -861,34 +892,53 @@ fused_gqa_decode_kernel(
     float l = 0.0f;
     float O_acc = 0.0f;
 
-    for (int t = 0; t < eff_skv; ++t) {
-        float dot = Q_val * __half2float(Kcache[kv_base + (size_t)t * d + tid]);
+    for (int t_base = 0; t_base < eff_skv; t_base += TILE) {
+        const int tile_n = (t_base + TILE <= eff_skv) ? TILE : (eff_skv - t_base);
 
-        dot += __shfl_xor(dot, 16);
-        dot += __shfl_xor(dot, 8);
-        dot += __shfl_xor(dot, 4);
-        dot += __shfl_xor(dot, 2);
-        dot += __shfl_xor(dot, 1);
+        // Prefetch up to TILE rows of K and V into LDS. Compiler unrolls and
+        // issues TILE*2 global loads concurrently before any wait, so a
+        // single ~400-cycle memory wait covers the whole tile rather than
+        // one wait per row. The `i < tile_n` predicate handles the tail.
+        #pragma unroll
+        for (int i = 0; i < TILE; ++i) {
+            if (i < tile_n) {
+                K_tile[i * D + tid] = Kcache[kv_base + (size_t)(t_base + i) * d + tid];
+                V_tile[i * D + tid] = Vcache[kv_base + (size_t)(t_base + i) * d + tid];
+            }
+        }
+        // No __syncthreads needed: each thread reads only its own column
+        // (K_tile[t_off*D + tid] / V_tile[t_off*D + tid]) below, and same-
+        // thread LDS writes are program-ordered visible to subsequent reads.
 
-        if (lane_id == 0)
-            smem[wave_id] = dot;
-        __syncthreads();
+        for (int t_off = 0; t_off < tile_n; ++t_off) {
+            float dot = Q_val * __half2float(K_tile[t_off * D + tid]);
 
-        float score = 0.0f;
-        for (int w = 0; w < NUM_WAVES; ++w)
-            score += smem[w];
-        score *= scale_log2e;
+            dot += __shfl_xor(dot, 16);
+            dot += __shfl_xor(dot, 8);
+            dot += __shfl_xor(dot, 4);
+            dot += __shfl_xor(dot, 2);
+            dot += __shfl_xor(dot, 1);
 
-        __syncthreads();
+            if (lane_id == 0)
+                smem[wave_id] = dot;
+            __syncthreads();
 
-        float m_new = fmaxf(m, score);
-        float correction = exp2f(m - m_new);
-        float p = exp2f(score - m_new);
-        l = correction * l + p;
+            float score = 0.0f;
+            for (int w = 0; w < NUM_WAVES; ++w)
+                score += smem[w];
+            score *= scale_log2e;
 
-        float V_val = __half2float(Vcache[kv_base + (size_t)t * d + tid]);
-        O_acc = correction * O_acc + p * V_val;
-        m = m_new;
+            __syncthreads();
+
+            float m_new = fmaxf(m, score);
+            float correction = exp2f(m - m_new);
+            float p = exp2f(score - m_new);
+            l = correction * l + p;
+
+            float V_val = __half2float(V_tile[t_off * D + tid]);
+            O_acc = correction * O_acc + p * V_val;
+            m = m_new;
+        }
     }
 
     O_acc /= fmaxf(l, 1e-6f);
