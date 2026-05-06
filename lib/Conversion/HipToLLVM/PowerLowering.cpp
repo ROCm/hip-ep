@@ -51,8 +51,8 @@ struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     };
 
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractMemRefPtr(adaptor.getX(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getY(), rewriter, loc);
+    Value inputPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
+    Value outputPtr = extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc);
 
     auto outputType = dyn_cast<MemRefType>(op.getY().getType());
     if (!outputType)

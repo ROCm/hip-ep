@@ -105,7 +105,8 @@ struct HipDNNGraphOpLowering : public ConvertOpToLLVMPattern<HipDNNGraphOp> {
 
     // Store aligned_ptr from each memref descriptor
     for (int32_t i : llvm::seq<int32_t>(numInputs)) {
-      Value ptr = extractMemRefPtr(adaptor.getInputs()[i], rewriter, loc);
+      Value ptr =
+          extractContiguousMemRefPtr(adaptor.getInputs()[i], rewriter, loc);
       Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                               rewriter.getI32IntegerAttr(i));
       Value gepPtr =
@@ -113,7 +114,8 @@ struct HipDNNGraphOpLowering : public ConvertOpToLLVMPattern<HipDNNGraphOp> {
       LLVM::StoreOp::create(rewriter, loc, ptr, gepPtr);
     }
     for (int32_t i : llvm::seq<int32_t>(numOutputs)) {
-      Value ptr = extractMemRefPtr(adaptor.getOutputs()[i], rewriter, loc);
+      Value ptr =
+          extractContiguousMemRefPtr(adaptor.getOutputs()[i], rewriter, loc);
       Value idxVal = LLVM::ConstantOp::create(
           rewriter, loc, i32Type, rewriter.getI32IntegerAttr(numInputs + i));
       Value gepPtr =

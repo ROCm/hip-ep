@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "CrashHandler.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
@@ -119,6 +120,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SigmoidOp>>(*ctx);
     mlir::hip::SoftplusOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SoftplusOp>>(*ctx);
+    mlir::hip::GeluOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GeluOp>>(*ctx);
     mlir::hip::ReciprocalOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ReciprocalOp>>(*ctx);
     mlir::hip::SqrtOp::attachInterface<
@@ -143,6 +146,7 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
 } // namespace
 
 int main(int argc, char **argv) {
+  hip::install_crash_handlers("hip-mlir-opt");
   mlir::DialectRegistry registry;
   registry.insert<mlir::BuiltinDialect>();
   registry.insert<mlir::arith::ArithDialect>();

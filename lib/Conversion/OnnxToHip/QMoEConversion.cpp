@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -75,6 +77,8 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value fc1ZeroPoints = getOptionalInput(11);
   mlir::Value fc2ZeroPoints = getOptionalInput(12);
   mlir::Value fc3ZeroPoints = getOptionalInput(13);
+  mlir::Value routerWeights =
+      getOptionalInput(14); // ONNX v1.25+ router_weights
 
   auto expertWeightBitsIntAttr =
       op->getAttrOfType<mlir::IntegerAttr>("expert_weight_bits");
@@ -84,9 +88,38 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
   auto kIntAttr = op->getAttrOfType<mlir::IntegerAttr>("k");
   auto kAttr = rewriter.getI64IntegerAttr(kIntAttr ? kIntAttr.getSInt() : 1);
 
+  // ms.QMoE's `block_size` attribute is documented as optional (no spec
+  // default) and is omitted by some quantization tools (e.g. AWQ exports of
+  // gpt-oss-120b). Without it `wrap_qmoe` later divides by zero. When the
+  // attribute is absent or non-positive, derive block_size from the
+  // FC1 (gate_up_proj) scales tensor: scales has shape
+  //     [num_experts, output_features, k_blocks_fc1]
+  // with k_blocks_fc1 = ceil(hidden_size / block_size) and the activation
+  // input has shape [..., hidden_size]. So
+  //     block_size = ceil(hidden_size / k_blocks_fc1)
+  // which gives the exact value when the model uses an even split (the
+  // common case).
   auto blockSizeIntAttr = op->getAttrOfType<mlir::IntegerAttr>("block_size");
-  auto blockSizeAttr = rewriter.getI64IntegerAttr(
-      blockSizeIntAttr ? blockSizeIntAttr.getSInt() : 0);
+  int64_t blockSizeValue = blockSizeIntAttr ? blockSizeIntAttr.getSInt() : 0;
+  if (blockSizeValue <= 0) {
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    auto scalesType =
+        mlir::dyn_cast<mlir::RankedTensorType>(fc1Scales.getType());
+    if (inputType && scalesType && inputType.getRank() > 0 &&
+        scalesType.getRank() > 0) {
+      int64_t hiddenDim = inputType.getShape().back();
+      int64_t kBlocksDim = scalesType.getShape().back();
+      if (hiddenDim > 0 && kBlocksDim > 0) {
+        blockSizeValue = (hiddenDim + kBlocksDim - 1) / kBlocksDim;
+      }
+    }
+  }
+  if (blockSizeValue <= 0) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: missing `block_size` attribute and cannot infer it from "
+            "input/fc1_scales tensor shapes");
+  }
+  auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSizeValue);
 
   auto normIntAttr =
       op->getAttrOfType<mlir::IntegerAttr>("normalize_routing_weights");
@@ -104,15 +137,20 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
 
   auto alphaFloatAttr = op->getAttrOfType<mlir::FloatAttr>("activation_alpha");
   auto activationAlphaAttr =
-      alphaFloatAttr ? alphaFloatAttr : rewriter.getF32FloatAttr(0.0f);
+      alphaFloatAttr ? alphaFloatAttr
+                     : rewriter.getF32FloatAttr(1.0f); // ONNX spec default: 1.0
 
   auto betaFloatAttr = op->getAttrOfType<mlir::FloatAttr>("activation_beta");
   auto activationBetaAttr =
       betaFloatAttr ? betaFloatAttr : rewriter.getF32FloatAttr(0.0f);
 
   auto limitFloatAttr = op->getAttrOfType<mlir::FloatAttr>("swiglu_limit");
+  // ONNX spec: "It is infinite when limit is not provided"
+  // Match ONNX Runtime: std::numeric_limits<float>::infinity()
   auto swigluLimitAttr =
-      limitFloatAttr ? limitFloatAttr : rewriter.getF32FloatAttr(0.0f);
+      limitFloatAttr
+          ? limitFloatAttr
+          : rewriter.getF32FloatAttr(std::numeric_limits<float>::infinity());
 
   auto activationTypeStrAttr =
       op->getAttrOfType<mlir::StringAttr>("activation_type");
@@ -127,9 +165,10 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
       rewriter, loc, mlir::TypeRange{rt}, context, input, routerProbs,
       fc1Weights, fc1Scales, fc2Weights, fc2Scales, fc1Bias, fc2Bias,
       fc3Weights, fc3Scales, fc3Bias, fc1ZeroPoints, fc2ZeroPoints,
-      fc3ZeroPoints, init, expertWeightBitsAttr, kAttr, blockSizeAttr,
-      normalizeAttr, swigluFusionAttr, useSparseAttr, activationAlphaAttr,
-      activationBetaAttr, swigluLimitAttr, activationTypeAttr);
+      fc3ZeroPoints, routerWeights, init, expertWeightBitsAttr, kAttr,
+      blockSizeAttr, normalizeAttr, swigluFusionAttr, useSparseAttr,
+      activationAlphaAttr, activationBetaAttr, swigluLimitAttr,
+      activationTypeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }

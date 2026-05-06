@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 
@@ -15,7 +16,17 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       const void *scales, const void *zero_points,
                       const void *g_idx, const void *bias, void *output,
                       int64_t M, int64_t N, int64_t K, int64_t batch_count,
-                      int64_t bits, int64_t block_size, int64_t elem_size) {
+                      int64_t bits, int64_t block_size, int64_t elem_size,
+                      int64_t zp_elem_size) {
+  OP_PROFILE(
+      "matmul_nbits",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
+                 (long long)N, (long long)K);
+        return std::string(b);
+      },
+      state);
   if (!state || !A || !B || !scales || !output) {
     fprintf(stderr, "wrap_matmul_nbits: null argument\n");
     return -1;
@@ -23,12 +34,12 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_matmul_nbits(M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, bits=%lld, block_size=%lld, elem_size=%lld, "
-                    "zero_points=%s, g_idx=%s, bias=%s)\n",
+                    "zp_elem_size=%lld, zero_points=%s, g_idx=%s, bias=%s)\n",
                     (long long)M, (long long)N, (long long)K,
                     (long long)batch_count, (long long)bits,
                     (long long)block_size, (long long)elem_size,
-                    zero_points ? "yes" : "null", g_idx ? "yes" : "null",
-                    bias ? "yes" : "null");
+                    (long long)zp_elem_size, zero_points ? "yes" : "null",
+                    g_idx ? "yes" : "null", bias ? "yes" : "null");
 
   void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {
@@ -43,7 +54,8 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
 
   int result = 0;
   HIP_CHECK(hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
-                             N, K, batch_count, bits, block_size, elem_size));
+                             N, K, batch_count, bits, block_size, elem_size,
+                             zp_elem_size));
 
 cleanup:
   return result;
