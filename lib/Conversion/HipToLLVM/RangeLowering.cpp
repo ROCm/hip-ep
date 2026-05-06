@@ -49,10 +49,14 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
                                          "unsupported element type for range");
 
     Value statePtr = adaptor.getCtx();
-    Value startPtr = extractContiguousMemRefPtr(adaptor.getStart(), rewriter, loc);
-    Value limitPtr = extractContiguousMemRefPtr(adaptor.getLimit(), rewriter, loc);
-    Value deltaPtr = extractContiguousMemRefPtr(adaptor.getDelta(), rewriter, loc);
-    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value startPtr =
+        extractContiguousMemRefPtr(adaptor.getStart(), rewriter, loc);
+    Value limitPtr =
+        extractContiguousMemRefPtr(adaptor.getLimit(), rewriter, loc);
+    Value deltaPtr =
+        extractContiguousMemRefPtr(adaptor.getDelta(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value outputNumElems =
         computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
 
