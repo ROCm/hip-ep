@@ -47,7 +47,7 @@ OGA_SOURCE = INSTALL / "oga-source"
 OGA_BUILD = INSTALL / "oga-build"
 
 THEROCK_URL = (
-    "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1150-7.11.0.tar.gz"
+    "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1151-7.11.0.tar.gz"
 )
 
 # Prebuilt deps — keep in sync with scripts/setup-prebuilt.sh
@@ -165,7 +165,7 @@ def fetch_therock():
     if sentinel.exists():
         log("  Already installed.")
         return
-    archive = CACHE / "therock.tar.gz"
+    archive = CACHE / Path(THEROCK_URL).name
     download(THEROCK_URL, archive)
     if THEROCK.exists():
         shutil.rmtree(THEROCK)
