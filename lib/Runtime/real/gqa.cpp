@@ -167,14 +167,13 @@ static constexpr int32_t kSeqlensKNotRead = -2;
 // sentinel (callers map it to total_seq=sq, past_len=0); 0..max_seq is
 // the live (total_seq - 1).
 static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
-                                           const void *seqlens_k_ptr,
-                                           int64_t B, RuntimeState *state) {
+                                           const void *seqlens_k_ptr, int64_t B,
+                                           RuntimeState *state) {
   if (!seqlens_k_ptr || B != 1) {
     return kSeqlensKNotRead;
   }
 
-  if (gqa_cache_seqlens_enabled() && state &&
-      state->seqlens_k_cached_valid &&
+  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
       state->seqlens_k_cached_ptr == seqlens_k_ptr) {
     return state->seqlens_k_cached_val;
   }
@@ -486,9 +485,8 @@ static int gqa_forward_hipblaslt(
   if (seqlens_k_pre != kSeqlensKNotRead) {
     // -1 is ORT's prefill sentinel: total_seq=sq, past_len=0. Real values
     // are 0..max_seq; total_seq = seqlens_k_val + 1.
-    total_seq_pre = (seqlens_k_pre < 0)
-                        ? sq
-                        : static_cast<int64_t>(seqlens_k_pre) + 1;
+    total_seq_pre =
+        (seqlens_k_pre < 0) ? sq : static_cast<int64_t>(seqlens_k_pre) + 1;
   }
 
   bool fused_d = (d == 64 || d == 128 || d == 256);

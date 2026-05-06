@@ -18,7 +18,9 @@
 #include "InferenceState.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
+#ifndef BUILD_MOCK_RUNTIME
 #include <hip/hip_runtime_api.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -349,11 +351,15 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 namespace {
 
 bool perf_enabled() {
+#ifdef BUILD_MOCK_RUNTIME
+  return false;
+#else
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_PERF");
     return v && v[0] >= '1' && v[0] <= '9';
   }();
   return enabled;
+#endif
 }
 
 struct PerfSample {
@@ -493,6 +499,7 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     return;
   }
 
+#ifndef BUILD_MOCK_RUNTIME
   // --- HIPDNN_EP_PERF path: wall + per-phase + GPU timing. ---
   using clock = std::chrono::steady_clock;
   auto elapsed_ms = [](clock::time_point a, clock::time_point b) {
@@ -508,8 +515,7 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
 
   // Stream used by inference_compute (first field of RuntimeState).  May be
   // the default stream (hipStream_t(0)) — hipEvent APIs accept that fine.
-  auto stream =
-      static_cast<hipStream_t>(inference_state_->get_stream_raw());
+  auto stream = static_cast<hipStream_t>(inference_state_->get_stream_raw());
 
   // HIP error codes are intentionally discarded below: any failure here only
   // corrupts diagnostic numbers, never the inference result.  Casting to void
@@ -550,6 +556,7 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   perf_collector().record(s);
 
   MY_LOG(2) << "Compute completed successfully";
+#endif // BUILD_MOCK_RUNTIME
 }
 
 } // namespace mlir_compilation

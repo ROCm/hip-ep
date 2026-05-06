@@ -168,16 +168,14 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   //   inference_init/compute/cleanup       — runtime entry points
   //   inference_get_metadata_json          — model metadata query
   //   test_hip_from_dll                    — diagnostic hook for test-model-dll
-  //   hipdnn_ep_runtime_begin_compute      — F-A per-Compute() cache invalidation
+  //   hipdnn_ep_runtime_begin_compute      — F-A per-Compute() cache
+  //   invalidation
   //                                          hook (called from EP-side
   //                                          MlirCustomOp::Compute() entry)
   std::vector<std::string> export_symbols = {
-      "inference_init",
-      "inference_compute",
-      "inference_cleanup",
-      "inference_get_metadata_json",
-      "test_hip_from_dll",
-      "hipdnn_ep_runtime_begin_compute"};
+      "inference_init",    "inference_compute",
+      "inference_cleanup", "inference_get_metadata_json",
+      "test_hip_from_dll", "hipdnn_ep_runtime_begin_compute"};
   std::vector<std::string> libraries;
   std::vector<std::string> library_paths;
   discoverLibraries(libraries, library_paths);
