@@ -78,5 +78,55 @@ set(morphizen_OUTPUT_NAME "onnxruntime_morphizen_ep" CACHE STRING "Set output na
 set(MORPHIZEN_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
 
+# Cross-wire BUILD_MOCK_RUNTIME (this project) <-> morphizen's HIP GPU
+# allocator option so the same build invocation does the right thing on
+# both sides:
+#
+#   * Real build (BUILD_MOCK_RUNTIME=OFF): we want morphizen's HIP allocator,
+#     which means find_package(hip) needs HIP_PLATFORM seeded *before*
+#     add_subdirectory(3rd-party/morphizen) below; otherwise TheRock's
+#     hip-config.cmake errors out with "Unexpected HIP_PLATFORM:".
+#     (3rd-party/custom_kernels/cmake/hip_utils.cmake seeds it too, but
+#     that subdir is added later in the top-level CMakeLists.txt.)
+#     Morphizen's option default is already ON, so we don't have to FORCE
+#     it -- but we don't actively turn it off either.
+#
+#   * Mock build (BUILD_MOCK_RUNTIME=ON, the project default): the toolchain
+#     by definition has no ROCm SDK, so find_package(hip REQUIRED) inside
+#     morphizen's ort-bridge would fail at configure time. Force morphizen's
+#     allocator OFF so the EP DLL still compiles in mock mode (it just won't
+#     register a HIP-backed allocator -- which is fine, mock can't run on
+#     GPU anyway). Morphizen's own configure-time WARNING for ORT_BRIDGE +
+#     ALLOCATOR=OFF is the expected, advertised-behavior signal here.
+#
+# This deps.cmake is included from the top-level CMakeLists.txt before its
+# own `option(BUILD_MOCK_RUNTIME ...)` declaration, so we re-declare it
+# here (option() keeps the value if already set on the command line via
+# -DBUILD_MOCK_RUNTIME=...). Keep the default in sync with the top-level.
+option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+
+if(BUILD_MOCK_RUNTIME)
+  set(morphizen_ENABLE_HIP_GPU_ALLOCATOR OFF CACHE BOOL "disabled in mock builds (no ROCm SDK available)" FORCE)
+else()
+  if(NOT DEFINED HIP_PLATFORM)
+    set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
+  endif()
+endif()
+
+# cpptrace for crash backtraces
+set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
+if(WIN32)
+  set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
+  set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
+endif()
+FetchContent_Declare(
+  cpptrace
+  GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+  GIT_TAG v0.8.3
+)
+FetchContent_MakeAvailable(cpptrace)
+set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
+
 # Add morphizen subdirectory (after all options are set)
 add_subdirectory(3rd-party/morphizen)

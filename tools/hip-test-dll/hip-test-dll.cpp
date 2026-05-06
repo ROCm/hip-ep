@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "../common/DllLoader.h"
+#include "CrashHandler.h"
 #include "hip/Support/DiskFileSystem.h"
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -23,6 +24,7 @@
 #endif
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -39,13 +41,43 @@ typedef int (*InferenceComputeFunc)(void *state, void *inputs, void *outputs);
 typedef int (*InferenceCleanupFunc)(void *state);
 typedef const char *(*InferenceGetMetadataJsonFunc)(void);
 
-// Tensor structures matching hipdnn_ep_runtime.h
+// Local copy of the tensor_t wire-protocol ABI -- the three components
+// (compiler-emitted model.dll, EP runtime DLL, this hip-test-dll harness)
+// are intentionally kept decoupled, so we re-declare the struct here
+// instead of sharing a header. The static_assert block below catches
+// any layout drift between the three copies. Sibling copies live at:
+//   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
+//   * `lib/Runtime/hipdnn_ep_runtime.h`                             (EP
+//   runtime)
+enum {
+  TENSOR_MEMORY_CPU = 0,  // == OrtMemoryInfoDeviceType_CPU
+  TENSOR_MEMORY_GPU = 1,  // == OrtMemoryInfoDeviceType_GPU
+  TENSOR_MEMORY_FPGA = 2, // == OrtMemoryInfoDeviceType_FPGA
+  TENSOR_MEMORY_NPU = 3,  // == OrtMemoryInfoDeviceType_NPU
+};
+
 typedef struct {
-  void *data;          // Host data pointer
+  void *data;          // Data pointer (host or GPU-accessible per memory_type)
   int64_t *shape;      // Array of dimension sizes
   size_t rank;         // Number of dimensions
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
+  int memory_type;     // TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 } tensor_t;
+
+// Compile-time guard for the wire-protocol ABI described above. The same
+// three asserts live in each of the three sibling headers; if you reorder
+// / add / remove a field in one copy and forget to mirror it in the others,
+// at least one of them fails to build. Per-field offsets (not raw sizeof)
+// because trailing padding after `memory_type` is compiler-defined and not
+// part of what model.dll actually reads.
+static_assert(offsetof(tensor_t, data) == 0,
+              "tensor_t.data must remain the first field");
+static_assert(offsetof(tensor_t, shape) == sizeof(void *),
+              "tensor_t.shape moved -- update all three tensor_t copies");
+static_assert(offsetof(tensor_t, memory_type) ==
+                  offsetof(tensor_t, element_size) + sizeof(size_t),
+              "tensor_t.memory_type moved -- update all three tensor_t "
+              "copies");
 
 typedef struct {
   tensor_t *data; // Array of tensors
@@ -275,6 +307,7 @@ static bool parseMetadata(const char *json_str, std::vector<TensorMeta> &inputs,
 }
 
 int main(int argc, char **argv) {
+  hip::install_crash_handlers("hip-test-dll");
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
               << " <model.dll> [--input-shape INDEX=DIMS;...] [--iterations N] "
@@ -417,6 +450,7 @@ int main(int argc, char **argv) {
     tensor.shape = input_shape_storage.back().data();
     tensor.rank = input_shape_storage.back().size();
     tensor.element_size = input_elem_sizes[i];
+    tensor.memory_type = TENSOR_MEMORY_CPU; // host buffers, runtime does H2D
     input_tensors.push_back(tensor);
   }
 
@@ -440,6 +474,7 @@ int main(int argc, char **argv) {
     tensor.shape = output_shape_storage.back().data();
     tensor.rank = output_shape_storage.back().size();
     tensor.element_size = output_elem_sizes[i];
+    tensor.memory_type = TENSOR_MEMORY_CPU; // host buffers, runtime does D2H
     output_tensors.push_back(tensor);
   }
 

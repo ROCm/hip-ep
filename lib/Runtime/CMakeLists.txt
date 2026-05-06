@@ -196,6 +196,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
         DEPENDS ${SOURCE_FILE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
         COMMENT "Compiling ${SOURCE_FILE} to bitcode"
         VERBATIM
@@ -206,6 +208,7 @@ endmacro()
 # Compile shared implementation files
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
+compile_to_bitcode(op_profile.cpp runtime_op_profile.bc)
 
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
@@ -235,6 +238,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
@@ -266,6 +270,7 @@ else()
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc

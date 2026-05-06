@@ -4,6 +4,7 @@
 ##
 
 add_executable(hip-compiler hip-compiler.cpp)
+set_target_properties(hip-compiler PROPERTIES PDB_NAME "hip-compiler-cli")
 
 add_dependencies(hip-compiler
   HipDialectIncGen
@@ -15,6 +16,7 @@ add_dependencies(hip-compiler
 target_link_libraries(hip-compiler PRIVATE
   LibHipCompiler
   LLVMSupport
+  HipSupport
 )
 
 target_include_directories(hip-compiler PRIVATE

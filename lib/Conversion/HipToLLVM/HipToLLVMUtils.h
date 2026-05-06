@@ -52,7 +52,8 @@ inline constexpr const char *kHipTranspose = "hip_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kHipSilu = "hip_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
-    "wrap_miopenActivationForward"; // hip.sigmoid
+    "wrap_miopenActivationForward";                   // hip.sigmoid
+inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
 inline constexpr const char *kWrapMiopenOpTensor =
@@ -101,6 +102,8 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return 4; // HIPDNN_EP_DATATYPE_INT64
   if (elemType.isInteger(8))
     return 5; // HIPDNN_EP_DATATYPE_INT8
+  if (elemType.isF64())
+    return 6; // HIPDNN_EP_DATATYPE_DOUBLE
   return -1;
 }
 
@@ -114,12 +117,25 @@ enum class TensorOp : int64_t {
 
 // Helper: extract the aligned data pointer from a converted memref descriptor,
 // casting to address space 0 if needed.
+//
+// PRECONDITION: the source memref must have an identity layout (zero offset,
+// contiguous strides).  The returned pointer is alignedPtr only — offset and
+// strides are dropped on the floor.  Calling this on a strided/offset memref
+// (e.g., the result of memref.subview) silently produces a pointer to the
+// base of the parent buffer, not the slice.
+//
+// The --hip-promote-strided-operands pass enforces this precondition for
+// hip.* DPS-input operands by materializing contiguous temporaries upstream.
+// Direct callers (outside the standard hip.* lowering path) must guarantee
+// it themselves; if you need the descriptor's offset / strides, use
+// extractMemRefDescriptor below.
+//
 // Uses alignedPtr (not allocatedPtr) so that memref.view offsets into a memory
 // pool are respected -- each view has the same allocatedPtr but a distinct
 // alignedPtr.
-inline Value extractMemRefPtr(Value memrefDesc,
-                              ConversionPatternRewriter &rewriter,
-                              Location loc) {
+inline Value extractContiguousMemRefPtr(Value memrefDesc,
+                                        ConversionPatternRewriter &rewriter,
+                                        Location loc) {
   Value ptr = MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
   if (ptrTy.getAddressSpace() != 0)
@@ -131,17 +147,36 @@ inline Value extractMemRefPtr(Value memrefDesc,
 
 // Returns the aligned pointer for an optional memref operand, or a null
 // pointer if the operand is absent.
+//
+// Same identity-layout precondition as extractContiguousMemRefPtr.
 inline Value extractOptionalMemRefPtr(Value memrefDesc,
                                       ConversionPatternRewriter &rewriter,
                                       Location loc) {
   Value result;
   if (memrefDesc) {
-    result = extractMemRefPtr(memrefDesc, rewriter, loc);
+    result = extractContiguousMemRefPtr(memrefDesc, rewriter, loc);
   } else {
     result = LLVM::ZeroOp::create(
         rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0));
   }
   return result;
+}
+
+// Returns the full LLVM memref descriptor wrapper for \p memrefDesc, exposing
+// allocatedPtr / alignedPtr / offset / sizes / strides via MemRefDescriptor's
+// accessors.  Use this when a runtime call needs to honor the slice (offset,
+// per-dim strides) instead of treating the operand as contiguous.
+//
+// Reserved for future per-op zero-copy lowerings (hot ops where the upstream
+// promote-then-copy materialization in --hip-promote-strided-operands is
+// measurably expensive and the underlying library natively accepts strides).
+// No in-tree callers today.
+inline MemRefDescriptor
+extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter &rewriter,
+                        Location loc) {
+  (void)rewriter;
+  (void)loc;
+  return MemRefDescriptor(memrefDesc);
 }
 
 // Helper: get a single memref dimension as an i64 Value, using a compile-time

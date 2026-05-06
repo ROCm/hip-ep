@@ -1,16 +1,16 @@
 // ============================================================
-// custom_kernels MatMulNBits (WMMA Fused GEMM + Dequantization) Verification
+// custom_kernels MatMulNBits Verification
 //
 // Tests the hip_matmul_nbits() API which performs:
 //   C[M×N] = A[M×K] × dequant(B_packed[N×K/2])^T
 //
-// When the WMMA fast path is active (M%128==0, N%128==0, K%32==0):
-//   A:        FP16 col-major (M × K), stride lda = M
-//   B_packed: uint4 packed (N × K/2), each byte = 2 values (low nibble first)
-//   scales:   FP16 (N × num_groups_k), per-column per-group
-//   zeros:    FP16 (N × num_groups_k), per-column per-group zero point
+// Public API — all tensors are ROW-MAJOR per ONNX convention:
+//   A:        FP16 row-major [batch, M, K]
+//   B_packed: uint4 packed [N, K/2], each byte = 2 values (low nibble first)
+//   scales:   FP16 [N, num_groups_k], per-column per-group
+//   zeros:    FP16 [N, num_groups_k], per-column per-group zero point
 //             (optional, nullptr to skip)
-//   C:        FP16 col-major (M × N), stride ldc = M
+//   C:        FP16 row-major [batch, M, N]
 //
 // Workflow:
 //   1) python gen_matmul_nbits_data.py MxKxN --group-size GS --dir data
@@ -145,7 +145,6 @@ struct TestFiles {
     std::string s     = "matmul_nbits_scales.bin";
     std::string z     = "matmul_nbits_zeros.bin";
     std::string c_ref = "matmul_nbits_C_ref.bin";
-    bool row_major_io = false;
 };
 
 struct ShapeConfig {
@@ -273,7 +272,6 @@ static ShapeConfig parseShapeJson(const std::string& path)
     cfg.files.s     = jsonNestedStr(json, "scales_disc", "file_name");
     cfg.files.c_ref = jsonNestedStr(json, "output_disc", "file_name");
     cfg.files.z     = "";
-    cfg.files.row_major_io = true;
 
     std::cout << "  Parsed shape.json: M=" << cfg.M << " K=" << cfg.K
               << " N=" << cfg.N << " block_size=" << cfg.block_size
@@ -333,10 +331,9 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
 {
     int num_groups_k = (K + group_size - 1) / group_size;
 
-    std::cout << "\n=== Test MatMulNBits (WMMA) M=" << M << " N=" << N << " K=" << K
+    std::cout << "\n=== Test MatMulNBits M=" << M << " N=" << N << " K=" << K
               << " group_size=" << group_size
-              << (use_zeros ? "" : " (no zeros)")
-              << (tf.row_major_io ? " [true-data]" : "") << " ===" << std::endl;
+              << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
 
     std::string fA = data_dir + "/" + tf.a;
     std::string fB = data_dir + "/" + tf.b;
@@ -373,32 +370,10 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
     }
     std::cout << "  Loaded input data from " << data_dir << "/" << std::endl;
 
-    if(tf.row_major_io && M > 1)
-    {
-        std::cout << "  Transposing A from row-major [M,K] to col-major..." << std::flush;
-        std::vector<__half> tmp(countA);
-        for(int m = 0; m < M; m++)
-            for(int k = 0; k < K; k++)
-                tmp[static_cast<size_t>(k) * M + m] = h_A[static_cast<size_t>(m) * K + k];
-        h_A = std::move(tmp);
-        std::cout << " done" << std::endl;
-    }
-
     std::vector<__half> h_C_ref;
     bool has_ref = readBin(fC, h_C_ref, countC);
     if(!has_ref)
         std::cout << "  WARNING: No reference file (" << fC << "), skipping verification." << std::endl;
-
-    if(has_ref && tf.row_major_io && M > 1)
-    {
-        std::cout << "  Transposing C_ref from row-major [M,N] to col-major..." << std::flush;
-        std::vector<__half> tmp(countC);
-        for(int m = 0; m < M; m++)
-            for(int n = 0; n < N; n++)
-                tmp[static_cast<size_t>(n) * M + m] = h_C_ref[static_cast<size_t>(m) * N + n];
-        h_C_ref = std::move(tmp);
-        std::cout << " done" << std::endl;
-    }
 
     __half*  d_A        = nullptr;
     uint8_t* d_B_packed = nullptr;
