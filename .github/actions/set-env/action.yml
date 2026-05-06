@@ -2,15 +2,3 @@
 ## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 ## Licensed under the MIT License.
 ##
-runs:
-  using: "composite"
-  steps:
-    - name: Set env var (Linux/macOS)
-      if: runner.os != 'Windows'
-      run: echo "Z1AIEBUILD_GHE_PAT=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" >> $GITHUB_ENV
-      shell: bash
-
-    - name: Set env var (Windows)
-      if: runner.os == 'Windows'
-      run: echo "Z1AIEBUILD_GHE_PAT=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" >> $env:GITHUB_ENV
-      shell: powershell
