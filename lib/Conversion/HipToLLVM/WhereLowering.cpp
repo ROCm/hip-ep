@@ -175,10 +175,10 @@ struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
 
     SmallVector<Value, 14> args = {
         adaptor.getCtx(),
-        extractMemRefPtr(adaptor.getCondition(), rewriter, loc),
-        extractMemRefPtr(adaptor.getX(), rewriter, loc),
-        extractMemRefPtr(adaptor.getY(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getCondition(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
         condShape,
         condRank,
         xShape,
