@@ -903,9 +903,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
 }
 
-// F-A: Per-Compute() cache invalidation hook. Today this only resets the
-// GQA seqlens_k cache; future per-forward-pass caches should be cleared
-// here as well so the EP-side hook stays a single call.
+// Per-Compute() cache invalidation hook. Today this only resets the GQA
+// seqlens_k cache; future per-forward-pass caches should be cleared here
+// as well so the EP-side hook stays a single call.
 //
 // __declspec(dllexport) matches the convention in real/test_hip_from_dll.cpp
 // (belt-and-suspenders with the .def export list in CompilerDriver.cpp) and

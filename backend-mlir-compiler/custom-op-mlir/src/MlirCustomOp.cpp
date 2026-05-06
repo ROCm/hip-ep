@@ -475,12 +475,14 @@ MlirCustomOp::MlirCustomOp(
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   MY_LOG(2) << "MlirCustomOp::Compute() called";
 
-  // F-A: Tell the runtime that a new forward pass is starting so per-Compute()
-  // caches (currently the GQA seqlens_k cache) are invalidated. No-op if the
-  // model.dll predates the F-A export -- but in that case
-  // HIPDNN_EP_GQA_CACHE_SEQLENS=1 must not be set, otherwise stale values
-  // would survive across forward passes. The call is a single cached indirect
-  // dispatch, so leaving it on the fast path costs ~1 ns.
+  // Tell the runtime that a new forward pass is starting so per-Compute()
+  // caches (currently the GQA seqlens_k cache) are invalidated. No-op if
+  // the model.dll predates the begin_compute export -- but in that case
+  // the cache must be disabled via HIPDNN_EP_GQA_CACHE_SEQLENS=0
+  // (default-on), otherwise stale values would survive across forward
+  // passes. The mismatch is detected at session creation and produces a
+  // LOG(WARNING). The call is a single cached indirect dispatch, so
+  // leaving it on the fast path costs ~1 ns.
   inference_state_->begin_compute();
 
   if (!perf_enabled()) {

@@ -44,31 +44,37 @@ InferenceState::InferenceState(PrivateTag, void *state,
                                const std::string &temp_dll_path)
     : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path),
       begin_compute_fn_(nullptr) {
-  // F-A: Cache the begin_compute symbol so the per-Compute() invocation is a
-  // single indirect call. Older model.dlls do not export this symbol; in that
-  // case we leave begin_compute_fn_ null and begin_compute() becomes a no-op.
+  // Cache the begin_compute symbol so the per-Compute() invocation is a
+  // single indirect call. Older model.dlls do not export this symbol; in
+  // that case we leave begin_compute_fn_ null and begin_compute() becomes
+  // a no-op.
   if (plugin_) {
     begin_compute_fn_ =
         plugin_->get_method<void, void *>("hipdnn_ep_runtime_begin_compute");
-    MY_LOG(2) << "F-A begin_compute symbol "
+    MY_LOG(2) << "begin_compute symbol "
               << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
   }
-  // F-A safety net: warn loudly if the user enabled the seqlens_k cache but
-  // the model.dll predates the patch. Without an invalidation hook the cache
-  // would survive across forward passes and the gqa.cpp readback would
-  // return token-1 values for tokens 2..N, producing silently wrong logits.
-  // Detected once at session creation so the user gets an actionable signal
-  // before observing decode output corruption.
+  // Safety net: warn loudly when the seqlens_k cache is effectively on
+  // but the model.dll predates the begin_compute export. Without the
+  // invalidation hook the cache would survive across forward passes and
+  // the gqa.cpp readback would return token-1 values for tokens 2..N,
+  // producing silently wrong logits. The cache defaults to on, so this
+  // fires unless the user has explicitly set HIPDNN_EP_GQA_CACHE_SEQLENS=0.
+  // Detected once at session creation so the user gets an actionable
+  // signal before observing decode output corruption.
   if (!begin_compute_fn_) {
     const char *env = std::getenv("HIPDNN_EP_GQA_CACHE_SEQLENS");
-    if (env && env[0] != '0') {
-      LOG(WARNING)
-          << "HIPDNN_EP_GQA_CACHE_SEQLENS=" << env
-          << " is set, but the loaded model.dll does not export "
-             "hipdnn_ep_runtime_begin_compute. Per-Compute() cache "
-             "invalidation will not happen and decode output will be "
-             "incorrect from token 2 onward. Either unset the env var or "
-             "rebuild the model.dll with the F-A runtime patch.";
+    const bool cache_enabled = !env || env[0] != '0';
+    if (cache_enabled) {
+      LOG(WARNING) << "GQA seqlens_k cache is enabled "
+                   << "(HIPDNN_EP_GQA_CACHE_SEQLENS="
+                   << (env ? env : "<unset, default 1>")
+                   << "), but the loaded model.dll does not export "
+                      "hipdnn_ep_runtime_begin_compute. Per-Compute() cache "
+                      "invalidation will not happen and decode output will be "
+                      "incorrect from token 2 onward. Either set "
+                      "HIPDNN_EP_GQA_CACHE_SEQLENS=0 or rebuild the model.dll "
+                      "with a runtime that exports the hook.";
     }
   }
 }
