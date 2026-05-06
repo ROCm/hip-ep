@@ -41,13 +41,13 @@ public:
   // Execute inference computation
   int compute(span_t *inputs, span_t *outputs) const;
 
-  // F-A: Mark the start of a new forward pass before inference_compute. If
-  // the model.dll exports hipdnn_ep_runtime_begin_compute (resolved once in
-  // create()) it is invoked to invalidate per-Compute() runtime caches such
-  // as the GQA seqlens_k cache. On older model.dlls the symbol is absent
-  // and this call is a no-op -- callers must therefore not enable
-  // HIPDNN_EP_GQA_CACHE_SEQLENS=1 against such a DLL (the cache would
-  // survive across forward passes and return stale total_seq values).
+  // Mark the start of a new forward pass before inference_compute. If the
+  // model.dll exports hipdnn_ep_runtime_begin_compute (resolved once in
+  // create()) it is invoked to invalidate per-Compute() runtime caches
+  // such as the GQA seqlens_k cache. On older model.dlls the symbol is
+  // absent and this call is a no-op -- such DLLs must be paired with
+  // HIPDNN_EP_GQA_CACHE_SEQLENS=0 (the cache is on by default; create()
+  // logs a LOG(WARNING) when it detects the mismatch).
   void begin_compute() const;
 
   // Diagnostic-only accessor: returns the hipStream_t used by
@@ -81,10 +81,10 @@ private:
   // Temporary DLL file path (deleted in destructor)
   std::string temp_dll_path_;
 
-  // F-A: cached function pointer for hipdnn_ep_runtime_begin_compute.
-  // Resolved once in create() so begin_compute() avoids a per-call
-  // GetProcAddress / dlsym round-trip on the decode hot path. Null when the
-  // model.dll predates the F-A export.
+  // Cached function pointer for hipdnn_ep_runtime_begin_compute. Resolved
+  // once in create() so begin_compute() avoids a per-call GetProcAddress /
+  // dlsym round-trip on the decode hot path. Null when the model.dll
+  // predates the export.
   using BeginComputeFn = void (*)(void *);
   BeginComputeFn begin_compute_fn_;
 };
