@@ -128,17 +128,17 @@ def _ensure_oga_files():
         if not dest.exists():
             download(f"{_HF_BASE}/{fname}", dest)
     # The HF-downloaded genai_config.json has no chunk_size. Migrate it once to
-    # include chunk_size=512 (Pareto-optimal default for dynamic-shape Llama on
-    # MorphiZenEP/gfx1150 — see CLAUDE.md "OGA chunked prefill" entry).
+    # include chunk_size=1024 (Pareto-optimal default for dynamic-shape Llama on
+    # MorphiZenEP — see CLAUDE.md "OGA chunked prefill" entry).
     config_path = _MODEL_DIR / "genai_config.json"
     if config_path.exists():
         with open(config_path) as f:
             existing = json.load(f)
-        if existing.get("search", {}).get("chunk_size") != 512:
-            existing.setdefault("search", {})["chunk_size"] = 512
+        if existing.get("search", {}).get("chunk_size") != 1024:
+            existing.setdefault("search", {})["chunk_size"] = 1024
             with open(config_path, "w") as f:
                 json.dump(existing, f, indent=4)
-            print(f"  Migrated {config_path.name}: search.chunk_size=512")
+            print(f"  Migrated {config_path.name}: search.chunk_size=1024")
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
