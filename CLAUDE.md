@@ -73,6 +73,12 @@ For manual builds without `build.py`, see the cmake invocations in `build.py`'s 
 | `BUILD_EP` | Build MorphiZen Execution Provider |
 | `BUILD_MOCK_RUNTIME` | Use CPU stubs instead of GPU runtime |
 
+## Remote development
+
+This project's authoritative build + GPU test loop runs on a **gfx1151 Windows host** driven over SSH. Local-machine LIT/pytest passes on a non-gfx1151 box are not authoritative — the dynamic-sequence-length runtime path SEGVs only on gfx1151 (other arches' `hipMalloc` accidentally returns UMA-mapped host-accessible memory and silently masks the bug — see "gfx1151 dynseqlen host-scalar SEGV" gotcha below for the fix detail).
+
+See **[docs/remote-dev-workflow.md](docs/remote-dev-workflow.md)** for: SSH+`cmd.exe` quoting/chaining gotchas, the SMB-share + SSH split (edit through the share, run through SSH), the cygwin `git` contamination warning, conda env Python disambiguation, and the OGA build-defense reference table (what each `build_oga()` flag protects against).
+
 ## Critical Build Gotchas
 
 - **Conda env is a prerequisite.** `build.py` expects tools (cmake, ninja, sccache, lit) from the `hipdnn-ep` conda env to be on PATH.
