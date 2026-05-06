@@ -43,15 +43,18 @@ struct LinearAttentionOpLowering
     // === Extract all inputs ===
     Value statePtr = adaptor.getCtx();
 
-    Value queryPtr = extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
+    Value queryPtr =
+        extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
     Value keyPtr = extractContiguousMemRefPtr(adaptor.getKey(), rewriter, loc);
-    Value valuePtr = extractContiguousMemRefPtr(adaptor.getValue(), rewriter, loc);
+    Value valuePtr =
+        extractContiguousMemRefPtr(adaptor.getValue(), rewriter, loc);
 
     Value pastStatePtr = getMemRefPtrOrNull(adaptor.getPastState());
     Value decayPtr = getMemRefPtrOrNull(adaptor.getDecay());
     Value betaPtr = getMemRefPtrOrNull(adaptor.getBeta());
 
-    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value presentStatePtr =
         extractContiguousMemRefPtr(adaptor.getPresentState(), rewriter, loc);
 
