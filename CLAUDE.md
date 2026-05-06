@@ -267,7 +267,22 @@ HIPDNN_EP_PERF=1 pytest test/python/test_llama8b.py -v -s
 
 When disabled (default), profiling is zero-overhead: `hipdnn_ep_perf_enabled()` is a `static const bool` checked once, and `std::optional` guards prevent any GPU event or string operations.
 
-**NEVER measure TPS / TTFT with `HIPDNN_EP_PERF=1` set.** The event pool adds ~58% wall-clock overhead per inference (~34 ms per Compute call on 8B) AND CPU-saturates per-op recording, which compresses the gap between fast and slow configurations and can even invert it. Concrete observed inversion (8B, L=128, May 2026): under HIPDNN_EP_PERF=1 the fixed-pipeline EP looked *faster* per Compute (37 ms) than the dynamic EP (42 ms); without profiling the truth was the opposite (FIX 39.2 ms/tok vs DYN 24.4 ms/tok), because OGA's per-step orchestration cost (decoder-pipeline + 16384 static mask) lives *between* Compute calls and is invisible to per-op profiling. Use HIPDNN_EP_PERF only for (a) per-op GPU-time breakdown, and (b) checking that the CPU column is near zero on GPU ops (non-zero CPU on a GPU op flags an unintended `hipStreamSynchronize`). For TPS/TTFT/E2E numbers, profile must be OFF.
+**NEVER measure TPS / TTFT with `HIPDNN_EP_PERF=1` set.** The event pool adds ~58% wall-clock overhead per inference (~34 ms per Compute call on 8B) AND CPU-saturates per-op recording, which compresses the gap between fast and slow configurations and can even invert it. The inversion is reproduced at every prompt length, not just L=128 — under HIPDNN_EP_PERF the fixed-pipeline EP looks ~1-3 ms/Compute *faster* than dynamic; with profile OFF the dynamic EP is ~13 ms/tok faster. Use HIPDNN_EP_PERF only for (a) per-op GPU-time breakdown, and (b) checking that the CPU column is near zero on GPU ops (non-zero CPU on a GPU op flags an unintended `hipStreamSynchronize`). For TPS/TTFT/E2E numbers, profile must be OFF.
+
+**Before chasing a "DYN slower than FIX" hypothesis with new instrumentation, RE-MEASURE without `HIPDNN_EP_PERF` first.** A full session was once spent adding phase markers, alignment dumps, per-layer GPU markers, and accessor counters to localize a 1-3 ms/Compute "DYN penalty" — the penalty was the profiler itself, and DYN was actually 50% faster than FIX once profiling was off. The clean re-measure takes ~25 minutes; the diagnostic chase takes days. If a perf gap is small (≤ 5% of per-Compute total) and points the wrong way, do the clean re-measure before writing one line of instrumentation.
+
+### 8B Llama dynamic vs fixed-pipeline baseline (gfx1151, 2026-05-06)
+
+`model_benchmark.exe -i <model> -l L -g 16 -ml 16384 -r 5 -w 1`, 3 trial invocations per cell, **no `HIPDNN_EP_PERF`**. DYN = `models/Meta-Llama-3.1-8B-Instruct` (single dynamic-shape DLL). FIX = `models/Meta-Llama-3.1-8B-Instruct-Pipeline-p512m16384` (sliding-window prefill p=512, KV=16384, decoder-pipeline of two static-shape DLLs).
+
+| L | DYN TPS | FIX TPS | Δ TPS | DYN ms/tok | FIX ms/tok | Δ ms/tok (σ) | DYN TTFT ms | FIX TTFT ms | DYN peak GB | FIX peak GB |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 128 | **41.74** ± 0.64 | 26.29 ± 0.13 | +15.45 | 23.96 | 38.04 | −14.07 (0.41) | 211.9 | 442.6 | 2.46 | 2.69 |
+| 256 | **40.35** ± 0.08 | 26.19 ± 0.07 | +14.16 | 24.78 | 38.18 | −13.40 (0.11) | 271.8 | 444.5 | 2.52 | 2.68 |
+| 512 | **39.90** ± 0.41 | 25.91 ± 0.06 | +13.99 | 25.06 | 38.59 | −13.53 (0.27) | 434.6 | 446.6 | 2.64 | 2.69 |
+| 1024 | **37.52** ± 0.86 | 25.15 ± 0.22 | +12.37 | 26.66 | 39.77 | −13.10 (0.69) | 962.2 | 929.1 | 2.64 | 2.69 |
+
+**DYN wins decode by 12-15 tok/s (~50%) at every L** with tight σ (≤0.7 ms). DYN also wins peak working set by 0.05-0.23 GB. TTFT favors DYN below L≈1024 because FIX is locked to a full 512-token static prefill regardless of input length (constant ~443 ms TTFT for L≤512); FIX edges DYN at L=1024 by 33 ms because two 512-token sliding chunks beat one 1024-token dynamic prefill. **The fixed-pipeline path is only worth using when (a) prompt length is exactly the static prefill width, or (b) OGA's decoder-pipeline orchestration is required for some other reason** — there is currently no perf reason to prefer it.
 
 ### Architecture
 
