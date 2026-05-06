@@ -8,6 +8,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
@@ -139,6 +140,18 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
                                   float epsilon, int64_t stash_type) {
+  OP_PROFILE(
+      "layernorm",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lld",
+                 (long long)(scale_num_elements > 0
+                                 ? input_num_elements / scale_num_elements
+                                 : 0),
+                 (long long)scale_num_elements);
+        return std::string(b);
+      },
+      state);
   if (!state || !input || !scale || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenT5LayerNormForward\n");
     return -1;

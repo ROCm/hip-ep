@@ -35,6 +35,8 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
 #define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
 #define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
+#define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
+#define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
 
 //===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
@@ -76,6 +78,10 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 4;
   case HIPDNN_EP_DATATYPE_INT64:
     return 8;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return 1;
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return 8;
   default:
     return -1;
   }
@@ -93,6 +99,10 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "i32";
   case HIPDNN_EP_DATATYPE_INT64:
     return "i64";
+  case HIPDNN_EP_DATATYPE_INT8:
+    return "i8";
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return "f64";
   default:
     return "unknown";
   }
@@ -213,13 +223,64 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 // Inference API Types (for generated interface)
 //===----------------------------------------------------------------------===//
 
-// Represents a tensor with host data and shape information
+// Memory placement of a tensor's `data` pointer. Values are 1:1 with ORT's
+// OrtMemoryInfoDeviceType (onnxruntime_c_api.h) so MlirCustomOp can write
+// the ORT value straight into tensor_t.memory_type with no remapping.
+//
+// Today the runtime only special-cases TENSOR_MEMORY_GPU (alias path,
+// avoids the per-inference H2D / D2H copy on AMD APU iGPU mapped-pinned
+// memory). CPU / FPGA / NPU all fall through to the legacy host H2D / D2H
+// path, preserving existing behaviour for hip-test-dll, hip-onnx-runner,
+// and any other host-input caller.
+//
+// Must match the matching enum in
+// `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp`.
+enum {
+  TENSOR_MEMORY_CPU = 0, // == OrtMemoryInfoDeviceType_CPU
+  TENSOR_MEMORY_GPU = 1, // == OrtMemoryInfoDeviceType_GPU  (alias path; only
+                         // mode optimized today)
+  TENSOR_MEMORY_FPGA =
+      2, // == OrtMemoryInfoDeviceType_FPGA (treated as host today)
+  TENSOR_MEMORY_NPU =
+      3, // == OrtMemoryInfoDeviceType_NPU  (treated as host today)
+};
+
+// Represents a tensor with data pointer and shape information.
+//
+// Memory ownership: caller-owned. `memory_type` selects the data pointer's
+// placement (see the enum above) and tells prepare_input/finalize_output
+// whether to copy H2D/D2H or alias the caller's GPU-accessible buffer.
+//
+// tensor_t is the wire-protocol ABI between three components that are
+// intentionally kept decoupled (compiler-emitted model.dll, EP runtime
+// DLL, hip-test-dll harness), so we re-declare it here instead of
+// sharing a header. The static_assert block below catches any layout
+// drift at compile time. Sibling copies live at:
+//   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
+//   * `tools/hip-test-dll/hip-test-dll.cpp`                         (test
+//   driver)
 typedef struct {
-  void *data;          // Host data pointer
+  void *data;          // Data pointer (host or GPU-accessible per memory_type)
   int64_t *shape;      // Array of dimension sizes
   size_t rank;         // Number of dimensions
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
+  int memory_type;     // One of TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 } tensor_t;
+
+// Compile-time guard for the wire-protocol ABI described above. The same
+// three asserts live in each of the three sibling headers; if you reorder
+// / add / remove a field in one copy and forget to mirror it in the others,
+// at least one of them fails to build. Per-field offsets (not raw sizeof)
+// because trailing padding after `memory_type` is compiler-defined and not
+// part of what model.dll actually reads.
+static_assert(offsetof(tensor_t, data) == 0,
+              "tensor_t.data must remain the first field");
+static_assert(offsetof(tensor_t, shape) == sizeof(void *),
+              "tensor_t.shape moved -- update all three tensor_t copies");
+static_assert(offsetof(tensor_t, memory_type) ==
+                  offsetof(tensor_t, element_size) + sizeof(size_t),
+              "tensor_t.memory_type moved -- update all three tensor_t "
+              "copies");
 
 // Represents a span of tensors (inputs or outputs)
 typedef struct {
@@ -230,12 +291,17 @@ typedef struct {
 // Represents a prepared tensor with GPU buffer and metadata
 // Used internally by tensor preparation helpers
 typedef struct {
-  void *gpu_ptr;      // GPU memory (allocated or from pool)
+  void *gpu_ptr;      // GPU memory (allocated, from pool, or aliased)
   void *host_ptr;     // Host memory (from tensor_t.data)
   int64_t *shape_ptr; // Shape array (from tensor_t.shape) for memref building
   size_t rank;        // Tensor rank (for validation)
   size_t size_bytes;  // Buffer size
   bool is_pooled;     // Internal: true if from pool, false if allocated
+  // Internal: true if gpu_ptr aliases caller's GPU-accessible memory
+  // (tensor_t.memory_type == TENSOR_MEMORY_GPU). When set, finalize_output
+  // skips the D2H copy and free_input skips pool_release/hipFree because
+  // the memory is owned by the caller, not by us.
+  bool is_aliased;
 } TensorBuffer;
 
 //===----------------------------------------------------------------------===//
@@ -302,6 +368,17 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state, TensorBuffer *buffer);
 //   state: Runtime state
 //   buffer: TensorBuffer from prepare_input
 void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer);
+
+// Synchronize the GPU stream and print PERF/profile timing (if enabled).
+// Called by generated code after finalize_output, before free_input.
+int hipdnn_ep_stream_sync(RuntimeState *state);
+
+// Per-operator profiling state accessor (OpProfileState*, gated on
+// HIPDNN_EP_PERF)
+void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
+
+// GQA GEMM cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
 
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
@@ -516,6 +593,13 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode);
 
+// GELU activation wrapper (uses custom HIP kernel)
+// Applies GELU element-wise with support for exact or approximate mode
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
+// approximate: 0 = exact (erf), 1 = tanh approximation
+int wrap_gelu(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type, int64_t approximate);
+
 // Rotary embedding operation wrapper
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
@@ -562,7 +646,8 @@ int wrap_matmul_nbits(
     int64_t batch_count,     // number of batches
     int64_t bits,            // quantization bits (e.g. 4)
     int64_t block_size,      // quantization block size
-    int64_t elem_size);      // element size in bytes
+    int64_t elem_size,       // element size in bytes
+    int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
@@ -572,6 +657,7 @@ int wrap_qmoe(
     RuntimeState *state,
     const void *input,           // [num_tokens, hidden_size]
     const void *router_probs,    // [num_tokens, num_experts]
+    const void *router_weights,  // (nullable) ONNX v1.25+ routing weights
     const void *fc1_weights,     // [num_experts, fusion*inter, hidden/pack]
     const void *fc1_scales,      // [num_experts, fusion*inter, hidden/bs]
     const void *fc1_bias,        // (nullable) [num_experts, fusion*inter]

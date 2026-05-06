@@ -25,7 +25,8 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass();
 /// instead of a DiskFileSystem rooted at the output directory.
 std::unique_ptr<Pass> createConvertOnnxToHipPass(
     morphizen::FileSystem *fs,
-    int64_t minNumElements = kDefaultExternalizeMinNumElements);
+    int64_t minNumElements = kDefaultExternalizeMinNumElements,
+    bool skipConstantData = false);
 
 } // namespace hip
 } // namespace mlir

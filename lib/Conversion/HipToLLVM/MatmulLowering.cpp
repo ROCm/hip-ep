@@ -34,9 +34,10 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value APtr = extractMemRefPtr(adaptor.getA(), rewriter, loc);
-    Value BPtr = extractMemRefPtr(adaptor.getB(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
+    Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     // Get memref types and shapes
     auto AType = cast<MemRefType>(op.getA().getType());

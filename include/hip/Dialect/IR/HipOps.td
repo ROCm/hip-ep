@@ -293,7 +293,8 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits", [AttrSizedOperandSegments]> {
     I64Attr:$N,
     I64Attr:$bits,
     I64Attr:$block_size,
-    I64Attr:$accuracy_level
+    I64Attr:$accuracy_level,
+    I64Attr:$zp_elem_size  // zero_points element size: 1=uint8 packed, 2=fp16
   );
 
   let assemblyFormat = [{
@@ -310,7 +311,7 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits", [AttrSizedOperandSegments]> {
 def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
   let summary = "Quantized Mixture-of-Experts (com.microsoft QMoE)";
   let description = [{
-    Implements the com.microsoft QMoE operator (inputs 7-14): quantized
+    Implements the com.microsoft QMoE operator (ONNX v1.25+ compatible): quantized
     Mixture-of-Experts with top-k expert routing and optional SwiGLU activation.
 
     Routes each token to its top-k experts, performs quantized linear
@@ -330,6 +331,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
       fc1_experts_bias, fc2_experts_bias: bias vectors (optional)
       fc3_*: unfused SwiGLU second GEMM weights/scales/bias (optional)
       fc1/fc2/fc3_zero_points: per-block zero points (optional)
+      router_weights: alternative aggregation weights (optional, ONNX v1.25+, takes precedence over router_probs)
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -363,6 +365,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
     Optional<Hip_TensorOrMemRef>:$fc1_zero_points,        // fc1 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
+    Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -393,6 +396,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
     (`fc1_zero_points` `(` $fc1_zero_points^ `:` type($fc1_zero_points) `)`)?
     (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
     (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
+    (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -758,6 +762,42 @@ def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
     `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_GeluOp : Hip_DpsOp<"gelu"> {
+  let summary = "GELU activation (Gaussian Error Linear Unit)";
+  let description = [{
+    Applies the GELU activation function element-wise.
+    Implements the ONNX Gelu operator with support for both exact and approximate modes.
+
+    Approximate mode (approximate="tanh"):
+      Y ≈ 0.5 * X * (1 + tanh(sqrt(2/π) * (X + 0.044715 * X³)))
+
+    Exact mode (approximate="none", default):
+      Y = X * 0.5 * (1.0 + erf(X / sqrt(2.0)))
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.gelu(%ctx) ins(%x : memref<1x128x768xf16, 1>)
+                   outs(%y : memref<1x128x768xf16, 1>)
+                   {approximate = "tanh"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$approximate
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

@@ -55,6 +55,20 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
 
   // 6. HIP-specific buffer optimizations
   pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
+
+  // 6a. Promote strided memref operands of hip.* ops to contiguous
+  //     temporaries.  Required because the HIP runtime call ABI (used by
+  //     --convert-hip-to-llvm) only forwards a bare alignedPtr per memref
+  //     operand and has no channel for offset / per-dim strides; without
+  //     this pass, hip.* ops that consume memref.subview results read the
+  //     base of the parent buffer rather than the slice.
+  //
+  //     Placement: after OptimizeMemRefs (so we don't fight its
+  //     subview-folding) and before PoolAllocs (so the new transient
+  //     memref.alloc / memref.dealloc pairs flow through pool views and do
+  //     not trigger extra hipMalloc calls per inference).
+  pm.addNestedPass<func::FuncOp>(hip::createPromoteStridedHipOperandsPass());
+
   pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
 
   // 7. Lower remaining bufferization ops to memref
@@ -82,7 +96,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements));
+        fs, options.externalizeMinNumElements, options.skipConstantData));
   } else {
     ConvertOnnxToHipPassOptions onnxToHipOpts;
     onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
@@ -107,7 +121,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements));
+        fs, options.externalizeMinNumElements, options.skipConstantData));
   } else {
     ConvertOnnxToHipPassOptions onnxToHipOpts;
     onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;

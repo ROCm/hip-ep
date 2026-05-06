@@ -13,6 +13,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "hip/Conversion/OnnxToHip/ConstantsIO.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/timing.h"
 #include "morphizen-foundation/file_io.hpp"
@@ -31,6 +32,9 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <chrono>
+#include <cstring>
+#include <fstream>
+#include <vector>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -76,31 +80,50 @@ static int64_t alignTo(int64_t value, int64_t alignment) {
 }
 
 /// Mutable state shared across calls to lowerOnnxConstants when
-/// externalization is enabled.
+/// externalization is enabled. Constants are collected here during the
+/// walk; the finalize step in runOnOperation emits either constants.bin
+/// (skipDataWrite=false) via the shared ConstantsIO helper, or per-entry
+/// source descriptors as module attrs (skipDataWrite=true) that
+/// GenerateInterface bakes into __metadata_blob.ConstantInfo.source.
 struct ExternalizationState {
-  std::unique_ptr<morphizen::FileWriter,
-                  morphizen::FileSystem::Deleter<morphizen::FileWriter>>
-      writer;
   llvm::json::Array manifestEntries;
   int64_t currentOffset = 0;
   int64_t constantIndex = 0;
   std::string binFileName;
   llvm::SmallVector<int64_t> constantSizes;
   llvm::SmallVector<int64_t> constantOffsets;
+  bool skipDataWrite = false;
+  llvm::SmallVector<std::string> constantNames;
+
+  // One descriptor per constant, in emission order. The descriptor encodes
+  // one of three sources:
+  //   * mem-addr / inline: `ptr` points at data owned elsewhere
+  //     (DenseElementsAttr rawData held by MLIRContext) and stays valid
+  //     through runOnOperation's end.
+  //   * splat: `splatElemSize > 0` and `ptr` points at the single element
+  //     bytes; the finalize emitter tile-expands on the fly.
+  //   * file-ref: `filePath` is non-empty; `fileOffset` is the byte offset
+  //     within that file. The runtime is expected to fread the data on
+  //     demand into a small staging buffer instead of mmap'ing the whole
+  //     external-data file. This is the path that avoids ORT mmap for
+  //     multi-GB models.
+  struct HostEntry {
+    const void *ptr = nullptr;
+    int64_t splatElemSize = 0;
+    std::string filePath; // empty unless file-ref
+    int64_t fileOffset = 0;
+  };
+  llvm::SmallVector<HostEntry> constantHostPtrs;
 };
 
-/// Write alignment padding to constants.bin and return the aligned byte
-/// offset where the next constant's data should begin.
+/// Advance `currentOffset` to the next aligned boundary. The actual
+/// padding bytes are emitted by the finalize step (writeConstantsBin*);
+/// in transfer-file mode padding is implicit in the recorded offsets.
 static int64_t writeAlignmentPadding(ExternalizationState *extState,
                                      int64_t alignment = 64) {
   int64_t aligned = llvm::alignTo(extState->currentOffset, alignment);
-  int64_t padding = aligned - extState->currentOffset;
-  if (padding > 0) {
-    llvm::SmallVector<char> zeros(padding, 0);
-    extState->writer->fwrite(zeros.data(), padding);
-    extState->currentOffset += padding;
-  }
-  return extState->currentOffset;
+  extState->currentOffset = aligned;
+  return aligned;
 }
 
 /// Shared bookkeeping after constant data has been written to constants.bin.
@@ -117,16 +140,31 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
       mlir::MemRefType::get(tensorType.getShape(), tensorType.getElementType());
 
   std::string name = "hip_ext_constant_";
+  std::string onnxName;
   if (auto nodeNameAttr =
           constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name")) {
+    onnxName = nodeNameAttr.getValue().str();
     std::string fragment = sanitizeForMlirIdentifier(nodeNameAttr.getValue());
     if (!fragment.empty())
       name += fragment + "_";
+  }
+  // Initializers have their tensor name in "node.outputs" (the output NodeArg
+  // name), not in "onnx_node_name" (the NodeProto.name which may be empty).
+  if (onnxName.empty()) {
+    if (auto outputsAttr =
+            constOp->getAttrOfType<mlir::ArrayAttr>("node.outputs")) {
+      if (outputsAttr.size() > 0) {
+        if (auto strAttr =
+                mlir::dyn_cast<mlir::StringAttr>(outputsAttr.getValue()[0]))
+          onnxName = strAttr.getValue().str();
+      }
+    }
   }
   name += std::to_string(extState->constantIndex);
 
   extState->constantSizes.push_back(byteSize);
   extState->constantOffsets.push_back(entryOffset);
+  extState->constantNames.push_back(onnxName);
 
   llvm::json::Array shapeArray;
   for (int64_t dim : tensorType.getShape())
@@ -178,7 +216,34 @@ static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
                                 const void *rawPtr, int64_t byteSize,
                                 ExternalizationState *extState) {
   int64_t entryOffset = writeAlignmentPadding(extState);
-  extState->writer->fwrite(rawPtr, byteSize);
+  // Always collect layout + host pointer. The finalize step decides whether
+  // to emit constants.bin (skipDataWrite=false) or module attrs encoding
+  // the per-constant source (skipDataWrite=true). DenseElementsAttr raw
+  // data / ORT mmap addresses
+  // remain valid through runOnOperation, so recording the pointer here is
+  // safe for both consumers.
+  ExternalizationState::HostEntry entry;
+  entry.ptr = rawPtr;
+  extState->constantHostPtrs.push_back(std::move(entry));
+  extState->currentOffset += byteSize;
+  finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
+                               entryOffset, extState);
+}
+
+/// Record a file-ref entry: data lives on disk at (filePath, fileOffset)
+/// and must be fread by the runtime into a staging buffer at upload time.
+/// Avoids holding any of the data in host memory during compilation.
+static void externalizeFileRefConstant(mlir::ModuleOp module,
+                                       mlir::Operation *constOp,
+                                       mlir::RankedTensorType tensorType,
+                                       const std::string &filePath,
+                                       int64_t fileOffset, int64_t byteSize,
+                                       ExternalizationState *extState) {
+  int64_t entryOffset = writeAlignmentPadding(extState);
+  ExternalizationState::HostEntry entry;
+  entry.filePath = filePath;
+  entry.fileOffset = fileOffset;
+  extState->constantHostPtrs.push_back(std::move(entry));
   extState->currentOffset += byteSize;
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
                                entryOffset, extState);
@@ -194,8 +259,11 @@ static void replaceWithArithConstant(mlir::Operation *constOp,
   constOp->erase();
 }
 
-/// Externalize a splat constant: expand the single element via chunked
-/// writes to avoid allocating the full tensor in memory.
+/// Externalize a splat constant: record only the single element bytes.
+/// The finalize step (constants.bin emit OR transfer-file emit) tiles the
+/// element value on the fly, so we never allocate a full-size buffer here.
+/// DenseElementsAttr's raw data is owned by the MLIRContext and stays
+/// valid through runOnOperation.
 static void externalizeSplatConstant(mlir::ModuleOp module,
                                      mlir::Operation *constOp,
                                      mlir::RankedTensorType tensorType,
@@ -203,86 +271,120 @@ static void externalizeSplatConstant(mlir::ModuleOp module,
                                      int64_t byteSize,
                                      ExternalizationState *extState) {
   auto rawData = valueAttr.getRawData();
-  constexpr size_t kSplatChunk = 1024 * 1024;
-  size_t elemSize = rawData.size();
-  size_t bufSize =
-      (std::min(static_cast<size_t>(byteSize), kSplatChunk) / elemSize) *
-      elemSize;
-  std::vector<char> buf(bufSize);
-  for (size_t i = 0; i < bufSize; i += elemSize)
-    std::memcpy(buf.data() + i, rawData.data(), elemSize);
-
   int64_t entryOffset = writeAlignmentPadding(extState);
-  size_t remaining = static_cast<size_t>(byteSize);
-  while (remaining > 0) {
-    size_t toWrite = std::min(remaining, bufSize);
-    extState->writer->fwrite(buf.data(), toWrite);
-    remaining -= toWrite;
-  }
+  ExternalizationState::HostEntry entry;
+  entry.ptr = rawData.data();
+  entry.splatElemSize = static_cast<int64_t>(rawData.size());
+  extState->constantHostPtrs.push_back(std::move(entry));
   extState->currentOffset += byteSize;
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
                                entryOffset, extState);
 }
 
-/// Resolve an onnx.Constant that carries a `location` attribute
-/// (zero-copy external data emitted by the ORT bridge).
-/// The `offset` attribute holds a raw memory address (ORT tensor pointer
-/// cast to i64) and `size` holds the byte count.
+/// Resolve an onnx.Constant that carries a `location` attribute (zero-copy
+/// external data emitted by the ORT bridge). The `location` string selects
+/// one of two semantics:
 ///
-/// Input IR (produced by ir-converter-imp.cpp):
+///   * "*/_ORT_MEM_ADDR_/*"  -> `offset` is a raw memory address (ORT tensor
+///     pointer cast to i64) that the data lives at right now. Used for
+///     inline raw_data and (legacy) ORT mmap-resolved tensors.
+///   * <other string>        -> `offset` is a byte offset within the file
+///     at the given absolute path. Data is NOT in memory; the runtime is
+///     expected to fread it on demand. This is the path that avoids ORT
+///     mmap'ing multi-GB external-data files into the system page cache.
+///
+/// Input IR (produced by ir-converter-imp.cpp), mem-addr form:
 ///
 ///   %cst = "onnx.Constant"()
 ///       {location = "*/_ORT_MEM_ADDR_/*",
 ///        offset = 140695085056000 : i64,
 ///        size = 32 : i64} : () -> tensor<2x4xf32>
 ///
-/// Output IR when externalization is enabled (extState != nullptr):
+/// File-ref form:
 ///
-///   memref.global "private" @hip_ext_constant_0 : memref<2x4xf32>
-///       {alignment = 64 : i64,
-///        hip.external_data = {index = 0 : i64, offset = 0 : i64,
-///                             size = 32 : i64}}
-///   ...
-///   %0 = memref.get_global @hip_ext_constant_0 : memref<2x4xf32>
-///   %1 = bufferization.to_tensor %0 restrict
-///       : memref<2x4xf32> to tensor<2x4xf32>
+///   %cst = "onnx.Constant"()
+///       {location = "C:/.../weights.data",
+///        offset = 1048576 : i64,
+///        size = 33554432 : i64} : () -> tensor<...>
+///
+/// Output IR when externalization is enabled (extState != nullptr) is the
+/// same memref.global + bufferization.to_tensor bridge as in
+/// externalizeConstant; the only difference is what the transfer-file
+/// finalize step writes for this entry.
 ///
 /// Output IR when externalization is disabled (extState == nullptr):
 ///
 ///   %cst = arith.constant dense<[[1.0, 2.0, 3.0, 4.0], ...]>
 ///       : tensor<2x4xf32>
+static constexpr llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
+
 static mlir::LogicalResult
 resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
                                 ExternalizationState *extState) {
+  auto locAttr = constOp->getAttrOfType<mlir::StringAttr>("location");
   auto offsetAttr = constOp->getAttrOfType<mlir::IntegerAttr>("offset");
   auto sizeAttr = constOp->getAttrOfType<mlir::IntegerAttr>("size");
-  if (!offsetAttr || !sizeAttr)
+  if (!locAttr || !offsetAttr || !sizeAttr)
     return constOp->emitError(
-        "onnx.Constant with location attribute missing offset or size");
+        "onnx.Constant with location attribute missing location/offset/size");
 
-  int64_t addr = offsetAttr.getInt();
+  int64_t offsetVal = offsetAttr.getInt();
   int64_t dataSize = sizeAttr.getInt();
-  if (addr == 0 || dataSize <= 0)
-    return constOp->emitError("onnx.Constant has invalid address/size");
-
-  const void *dataPtr =
-      reinterpret_cast<const void *>(static_cast<uintptr_t>(addr));
+  if (dataSize <= 0)
+    return constOp->emitError("onnx.Constant has invalid size");
 
   auto tensorType =
       mlir::dyn_cast<mlir::RankedTensorType>(constOp->getResult(0).getType());
   if (!tensorType)
     return constOp->emitError("external constant has non-ranked result type");
 
-  if (extState) {
-    externalizeConstant(module, constOp, tensorType, dataPtr, dataSize,
-                        extState);
-  } else {
-    auto rawData =
-        llvm::ArrayRef<char>(static_cast<const char *>(dataPtr), dataSize);
-    auto denseAttr =
-        mlir::DenseElementsAttr::getFromRawBuffer(tensorType, rawData);
-    replaceWithArithConstant(constOp, denseAttr);
+  llvm::StringRef location = locAttr.getValue();
+  bool isMemAddr = (location == kOrtMemAddrTag);
+
+  if (isMemAddr) {
+    if (offsetVal == 0)
+      return constOp->emitError("onnx.Constant mem-addr has null address");
+    const void *dataPtr =
+        reinterpret_cast<const void *>(static_cast<uintptr_t>(offsetVal));
+
+    if (extState) {
+      externalizeConstant(module, constOp, tensorType, dataPtr, dataSize,
+                          extState);
+    } else {
+      auto rawData =
+          llvm::ArrayRef<char>(static_cast<const char *>(dataPtr), dataSize);
+      auto denseAttr =
+          mlir::DenseElementsAttr::getFromRawBuffer(tensorType, rawData);
+      replaceWithArithConstant(constOp, denseAttr);
+    }
+    return mlir::success();
   }
+
+  // File-reference path: location is an absolute file path, offset is the
+  // byte offset within that file. Without externalization (offline / inline
+  // arith.constant test path) we still have to materialize the bytes; do a
+  // one-shot fread and feed them to DenseElementsAttr. The full streaming
+  // benefit only kicks in along the externalize path where a downstream
+  // consumer can stream tensor-by-tensor.
+  if (extState) {
+    externalizeFileRefConstant(module, constOp, tensorType, location.str(),
+                               offsetVal, dataSize, extState);
+    return mlir::success();
+  }
+
+  std::vector<char> buf(static_cast<size_t>(dataSize));
+  std::ifstream ifs(location.str(), std::ios::binary);
+  if (!ifs)
+    return constOp->emitError("failed to open external data file: ")
+           << location;
+  ifs.seekg(offsetVal);
+  ifs.read(buf.data(), dataSize);
+  if (!ifs)
+    return constOp->emitError("short read from external data file: ")
+           << location;
+  auto denseAttr = mlir::DenseElementsAttr::getFromRawBuffer(
+      tensorType, llvm::ArrayRef<char>(buf.data(), buf.size()));
+  replaceWithArithConstant(constOp, denseAttr);
   return mlir::success();
 }
 
@@ -489,13 +591,16 @@ struct ConvertOnnxToHipPass
     : public impl::ConvertOnnxToHipPassBase<ConvertOnnxToHipPass> {
   using ConvertOnnxToHipPassBase::ConvertOnnxToHipPassBase;
 
-  ConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements)
-      : fileSystem_(fs), fsMinNumElements_(minNumElements) {}
+  ConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements,
+                       bool skipConstantData = false)
+      : fileSystem_(fs), fsMinNumElements_(minNumElements),
+        skipConstantData_(skipConstantData) {}
 
   void runOnOperation() override;
 
   morphizen::FileSystem *fileSystem_ = nullptr;
   int64_t fsMinNumElements_ = 0;
+  bool skipConstantData_ = false;
 };
 
 void ConvertOnnxToHipPass::runOnOperation() {
@@ -537,20 +642,16 @@ void ConvertOnnxToHipPass::runOnOperation() {
 
   if (minElems > 0) {
     extState = std::make_unique<ExternalizationState>();
+    extState->skipDataWrite = skipConstantData_;
 
     std::string baseName = "model";
     if (auto sym = module->getAttrOfType<mlir::StringAttr>(
             mlir::SymbolTable::getSymbolAttrName()))
       baseName = sym.getValue().str();
     extState->binFileName = baseName + ".constants.bin";
-
-    extState->writer =
-        fs->create_writer_template(extState->binFileName.c_str());
-    if (!extState->writer) {
-      module.emitError("failed to open constants binary file via FileSystem: " +
-                       extState->binFileName);
-      return signalPassFailure();
-    }
+    // constants.bin is written in one streaming pass in finalize() via
+    // writeConstantsBinToFileSystem, after all offsets are known; no
+    // writer is opened here.
   }
 
   // Capture original function signatures as module metadata before lowering.
@@ -607,53 +708,206 @@ void ConvertOnnxToHipPass::runOnOperation() {
     }
   });
 
-  // Finalize externalization: release writer, write JSON manifest, set module
-  // attributes.
+  // Finalize externalization: emit the constants.bin sidecar or per-entry
+  // source descriptors (or both, in hybrid mode), write the JSON manifest
+  // when a full sidecar is produced, and stamp module attributes.
+  //
+  // Three emit modes:
+  //   * skipDataWrite=false  — full sidecar (Workflow A: EPContext export
+  //     + offline hip-compiler). All ConstantInfo.source remain NONE; the
+  //     runtime bulk-loads model.constants.bin and hipMemcpy's it once.
+  //   * skipDataWrite=true, no mem-addr entries — pure streaming. Per-entry
+  //     descriptors only (Splat / FileRef); no sidecar written.
+  //   * skipDataWrite=true, has mem-addr entries — hybrid. Mem-addr bytes
+  //     are packed into a *partial* sidecar at compact 64B-aligned offsets;
+  //     the descriptor for each mem-addr entry becomes SidecarSource with
+  //     its sidecar offset. file-ref / splat entries keep their streaming
+  //     descriptors. The runtime per-entry path uploads from a single
+  //     reusable staging buffer regardless of source mix, bounding host
+  //     peak to the largest single tensor instead of total constants size.
   if (extState && extState->constantIndex > 0) {
-    extState->writer.reset();
-
-    // Set hip.constants_file on the module so downstream passes/tools know
-    // where the sidecar lives.
+    // Module attributes shared across all emit modes.
     module->setAttr("hip.constants_file",
                     mlir::StringAttr::get(ctx, extState->binFileName));
-
-    // Emit hipdnn.constant_sizes and hipdnn.constant_offsets for the runtime.
     module->setAttr("hipdnn.constant_sizes",
                     mlir::DenseI64ArrayAttr::get(ctx, extState->constantSizes));
     module->setAttr(
         "hipdnn.constant_offsets",
         mlir::DenseI64ArrayAttr::get(ctx, extState->constantOffsets));
 
-    // Derive base name again for JSON path.
-    std::string baseName = "model";
-    if (auto sym = module->getAttrOfType<mlir::StringAttr>(
-            mlir::SymbolTable::getSymbolAttrName()))
-      baseName = sym.getValue().str();
-    std::string jsonPath = baseName + ".constants.json";
+    if (!extState->skipDataWrite) {
+      // Stream constants.bin via the shared helper (preserves the 1 MB
+      // tile pattern for splats so peak host memory is bounded; file-ref
+      // entries stream from disk into the writer with no in-memory copy).
+      llvm::SmallVector<mlir::hip::ConstantEntry> entries;
+      entries.reserve(extState->constantHostPtrs.size());
+      for (size_t i = 0; i < extState->constantHostPtrs.size(); ++i) {
+        const auto &h = extState->constantHostPtrs[i];
+        mlir::hip::ConstantEntry e;
+        e.name = extState->constantNames[i];
+        e.offset = extState->constantOffsets[i];
+        e.size = extState->constantSizes[i];
+        e.data = h.ptr;
+        e.splat_elem_size = h.splatElemSize;
+        e.file_path = h.filePath;
+        e.file_offset = h.fileOffset;
+        entries.push_back(std::move(e));
+      }
+      if (!mlir::hip::writeConstantsBinToFileSystem(
+              fs, extState->binFileName,
+              std::vector<mlir::hip::ConstantEntry>(entries.begin(),
+                                                    entries.end()),
+              extState->currentOffset)) {
+        module.emitError(
+            "failed to write constants binary file via FileSystem: " +
+            extState->binFileName);
+        return signalPassFailure();
+      }
 
-    llvm::json::Object manifest;
-    manifest["version"] = 1;
-    manifest["binary_file"] = extState->binFileName;
-    manifest["num_constants"] = extState->constantIndex;
-    manifest["total_bytes"] = extState->currentOffset;
-    manifest["constants"] = std::move(extState->manifestEntries);
+      // JSON manifest (only meaningful when constants.bin is produced).
+      std::string baseName = "model";
+      if (auto sym = module->getAttrOfType<mlir::StringAttr>(
+              mlir::SymbolTable::getSymbolAttrName()))
+        baseName = sym.getValue().str();
+      std::string jsonPath = baseName + ".constants.json";
 
-    auto jsonWriter = fs->create_writer_template(jsonPath.c_str());
-    if (!jsonWriter) {
-      module.emitError("failed to open constants manifest via FileSystem: " +
-                       jsonPath);
-      return signalPassFailure();
+      llvm::json::Object manifest;
+      manifest["version"] = 1;
+      manifest["binary_file"] = extState->binFileName;
+      manifest["num_constants"] = extState->constantIndex;
+      manifest["total_bytes"] = extState->currentOffset;
+      manifest["constants"] = std::move(extState->manifestEntries);
+
+      auto jsonWriter = fs->create_writer_template(jsonPath.c_str());
+      if (!jsonWriter) {
+        module.emitError("failed to open constants manifest via FileSystem: " +
+                         jsonPath);
+        return signalPassFailure();
+      }
+      std::string jsonStr;
+      llvm::raw_string_ostream jsonOs(jsonStr);
+      jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
+      jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
+    } else if (!extState->constantHostPtrs.empty()) {
+      // skipDataWrite=true: per-entry descriptors with optional partial
+      // sidecar for mem-addr entries (hybrid).
+      //
+      // Six parallel arrays, all indexed by constantIndex:
+      //   constant_source_kinds:        0=NONE, 1=Splat, 2=FileRef, 3=Sidecar
+      //   constant_splat_elem_values:   elem bytes packed into i64 (0 unless
+      //   splat) constant_splat_elem_sizes:    elem byte count 1/2/4/8 (0
+      //   unless splat) constant_file_paths:          absolute OS path (empty
+      //   unless file-ref) constant_file_offsets:        byte offset within
+      //   file (0 unless file-ref) constant_sidecar_offsets:     byte offset
+      //   within partial sidecar
+      //                                 (0 unless mem-addr / Sidecar)
+      int64_t count = static_cast<int64_t>(extState->constantHostPtrs.size());
+      llvm::SmallVector<int32_t> kinds(count, 0);
+      llvm::SmallVector<int64_t> splatValues(count, 0);
+      llvm::SmallVector<int64_t> splatElemSizes(count, 0);
+      llvm::SmallVector<mlir::Attribute> filePaths;
+      filePaths.reserve(count);
+      llvm::SmallVector<int64_t> fileOffsets(count, 0);
+      llvm::SmallVector<int64_t> sidecarOffsets(count, 0);
+
+      // Pass 1: collect mem-addr entries into a compact partial sidecar
+      // layout. Each entry is 64B-aligned within the sidecar (matches the
+      // GPU blob alignment used elsewhere, so writeConstantsBinToFileSystem
+      // emits identical zero padding logic).
+      constexpr int64_t kSidecarAlign = 64;
+      llvm::SmallVector<mlir::hip::ConstantEntry> partialEntries;
+      int64_t sidecarPos = 0;
+      int64_t memAddrCount = 0, fileRefCount = 0, splatCount = 0;
+      for (int64_t i = 0; i < count; ++i) {
+        const auto &h = extState->constantHostPtrs[i];
+        if (!h.filePath.empty()) {
+          ++fileRefCount;
+        } else if (h.splatElemSize > 0) {
+          ++splatCount;
+        } else {
+          ++memAddrCount;
+          int64_t off = llvm::alignTo(sidecarPos, kSidecarAlign);
+          sidecarOffsets[i] = off;
+          mlir::hip::ConstantEntry e;
+          e.name = extState->constantNames[i];
+          e.offset = off;
+          e.size = extState->constantSizes[i];
+          e.data = h.ptr;
+          partialEntries.push_back(std::move(e));
+          sidecarPos = off + extState->constantSizes[i];
+        }
+      }
+
+      // Pass 2: write the partial sidecar (mem-addr bytes only). When
+      // there are no mem-addr entries the sidecar is omitted entirely
+      // (pure streaming model — runtime never opens constants_filename).
+      if (!partialEntries.empty()) {
+        if (!mlir::hip::writeConstantsBinToFileSystem(
+                fs, extState->binFileName,
+                std::vector<mlir::hip::ConstantEntry>(partialEntries.begin(),
+                                                      partialEntries.end()),
+                sidecarPos)) {
+          module.emitError(
+              "failed to write partial mem-addr sidecar via FileSystem: " +
+              extState->binFileName);
+          return signalPassFailure();
+        }
+        llvm::errs() << "[ConvertOnnxToHipPass] hybrid: " << memAddrCount
+                     << " mem-addr -> partial sidecar ("
+                     << llvm::format("%.1f", sidecarPos / (1024.0 * 1024.0))
+                     << " MB), " << fileRefCount << " file-ref + " << splatCount
+                     << " splat -> streaming\n";
+      } else {
+        llvm::errs() << "[ConvertOnnxToHipPass] streaming: " << fileRefCount
+                     << " file-ref + " << splatCount
+                     << " splat -> per-entry descriptors\n";
+      }
+
+      // Pass 3: stamp per-entry source descriptors. mem-addr entries get
+      // their sidecarOffsets[i] from pass 1; the rest stay at 0 in that
+      // slot which is fine because GenerateInterface only reads it for
+      // kind==3 (Sidecar).
+      for (int64_t i = 0; i < count; ++i) {
+        const auto &entry = extState->constantHostPtrs[i];
+        std::string path;
+        if (!entry.filePath.empty()) {
+          kinds[i] = 2; // FileRef
+          path = entry.filePath;
+          fileOffsets[i] = entry.fileOffset;
+        } else if (entry.splatElemSize > 0) {
+          kinds[i] = 1; // Splat
+          splatElemSizes[i] = entry.splatElemSize;
+          // Left-pack up to 8 bytes of element data into a uint64 carrier
+          // so we can ship it through a DenseI64ArrayAttr.
+          size_t n =
+              static_cast<size_t>(std::min<int64_t>(splatElemSizes[i], 8));
+          std::memcpy(&splatValues[i], entry.ptr, n);
+        } else {
+          kinds[i] = 3; // Sidecar (mem-addr packed into partial sidecar)
+        }
+        filePaths.push_back(mlir::StringAttr::get(ctx, path));
+      }
+
+      module->setAttr("hipdnn.constant_source_kinds",
+                      mlir::DenseI32ArrayAttr::get(ctx, kinds));
+      module->setAttr("hipdnn.constant_splat_elem_values",
+                      mlir::DenseI64ArrayAttr::get(ctx, splatValues));
+      module->setAttr("hipdnn.constant_splat_elem_sizes",
+                      mlir::DenseI64ArrayAttr::get(ctx, splatElemSizes));
+      module->setAttr("hipdnn.constant_file_paths",
+                      mlir::ArrayAttr::get(ctx, filePaths));
+      module->setAttr("hipdnn.constant_file_offsets",
+                      mlir::DenseI64ArrayAttr::get(ctx, fileOffsets));
+      module->setAttr("hipdnn.constant_sidecar_offsets",
+                      mlir::DenseI64ArrayAttr::get(ctx, sidecarOffsets));
     }
-    std::string jsonStr;
-    llvm::raw_string_ostream jsonOs(jsonStr);
-    jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
-    jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
 
-    LLVM_DEBUG(llvm::dbgs() << "externalized " << extState->constantIndex
-                            << " constants (" << extState->currentOffset
-                            << " bytes) to " << extState->binFileName << "\n");
-  } else if (extState) {
-    extState->writer.reset();
+    LLVM_DEBUG(llvm::dbgs()
+               << "externalized " << extState->constantIndex << " constants ("
+               << extState->currentOffset << " bytes) to "
+               << extState->binFileName
+               << (extState->skipDataWrite ? " (per-entry descriptors)" : "")
+               << "\n");
   }
   logSubpass("finalize");
 
@@ -666,8 +920,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
 } // namespace
 
 std::unique_ptr<mlir::Pass>
-createConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements) {
-  return std::make_unique<ConvertOnnxToHipPass>(fs, minNumElements);
+createConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements,
+                           bool skipConstantData) {
+  return std::make_unique<ConvertOnnxToHipPass>(fs, minNumElements,
+                                                skipConstantData);
 }
 
 } // namespace hip

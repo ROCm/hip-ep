@@ -4,8 +4,10 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -150,6 +152,14 @@ cache_done:
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
+  OP_PROFILE(
+      "activation",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
   if (!state || !input || !output) {
     fprintf(stderr, "wrap_miopenActivationForward: null argument\n");
     return -1;
@@ -193,5 +203,80 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: completed successfully\n");
+  return 0;
+}
+
+//===----------------------------------------------------------------------===//
+// GELU Activation (Custom HIP Kernel)
+//===----------------------------------------------------------------------===//
+//
+// Applies GELU activation using custom HIP kernel (hip_elementwise_gelu).
+// Supports two modes (per ONNX Gelu spec):
+//   - Exact (erf):  GELU(x) = x * 0.5 * (1.0 + erf(x / sqrt(2.0)))
+//   - Tanh approx:  GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 *
+//   x³)))
+// Supports data types: f32, f16, bf16, f64.
+// MIOpen does not support GELU activation, so we use a custom kernel.
+//===----------------------------------------------------------------------===//
+
+static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return HIP_DTYPE_BFLOAT16;
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return HIP_DTYPE_FLOAT64;
+  default:
+    return -1;
+  }
+}
+
+int wrap_gelu(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type, int64_t approximate) {
+  OP_PROFILE(
+      "gelu",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] wrap_gelu: null argument\n");
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+
+  if (hip_dtype < 0) {
+    fprintf(stderr, "[REAL] wrap_gelu: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  const char *type_name = hipdnn_ep_datatype_name(data_type);
+  int64_t elem_size = hipdnn_ep_datatype_size(data_type);
+  const char *mode_name = (approximate == 1) ? "tanh" : "erf";
+  RUNTIME_DEBUG_LOG("[REAL] wrap_gelu: num_elements=%lld, data_type=%s(%lld), "
+                    "approximate=%s(%lld), element_size=%lld bytes, "
+                    "total_size=%lld bytes\n",
+                    (long long)num_elements, type_name, (long long)data_type,
+                    mode_name, (long long)approximate, (long long)elem_size,
+                    (long long)(num_elements * elem_size));
+
+  // Call custom HIP kernel with approximate mode
+  int result = hip_elementwise_gelu(stream, input, output, num_elements,
+                                    hip_dtype, approximate);
+
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_gelu: kernel launch failed (%d)\n", result);
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_gelu: completed successfully\n");
   return 0;
 }

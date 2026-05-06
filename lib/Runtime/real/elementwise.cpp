@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -181,6 +182,15 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t rhs_h, int64_t rhs_w, int64_t out_n,
                         int64_t out_c, int64_t out_h, int64_t out_w,
                         int64_t data_type, int64_t tensor_op) {
+  OP_PROFILE(
+      "elementwise",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld", (long long)out_n,
+                 (long long)out_c, (long long)out_h, (long long)out_w);
+        return std::string(b);
+      },
+      state);
   if (!state || !lhs || !rhs || !output) {
     fprintf(stderr, "wrap_miopenOpTensor: null argument\n");
     return -1;
@@ -252,6 +262,14 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes) {
+  OP_PROFILE(
+      "sub",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
   if (!state || !lhs || !rhs || !output) {
     fprintf(stderr, "wrap_elementwise_sub: null argument\n");
     return -1;
