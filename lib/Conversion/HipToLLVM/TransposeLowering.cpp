@@ -53,8 +53,8 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
 
     SmallVector<Value> args = {
         adaptor.getCtx(),
-        extractMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
         rankVal,
         adaptor.getDim0(),
         adaptor.getDim1(),

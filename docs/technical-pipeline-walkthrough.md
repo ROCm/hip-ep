@@ -571,8 +571,7 @@ struct RuntimeState {
   miopenHandle_t miopen_handle;    // MIOpen library handle (conv, activation, norm)
   hipblasLtHandle_t hipblas_handle;// hipBLASLt handle (matmul/GEMM)
 
-  void *gpu_constants_blob;        // Model weights on GPU (single allocation)
-  bool constants_blob_is_host;     // true = iGPU pinned memory, false = dGPU VRAM
+  void *gpu_constants_blob;        // Model weights on GPU (single allocation, VRAM)
   void **gpu_constants;            // Per-constant pointers into the blob
   size_t num_constants;
 

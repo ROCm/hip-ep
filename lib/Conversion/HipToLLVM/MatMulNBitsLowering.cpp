@@ -31,14 +31,16 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     };
 
     Value statePtr = adaptor.getHandle();
-    Value APtr = extractMemRefPtr(adaptor.getA(), rewriter, loc);
-    Value BPtr = extractMemRefPtr(adaptor.getB(), rewriter, loc);
-    Value scalesPtr = extractMemRefPtr(adaptor.getScales(), rewriter, loc);
+    Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
+    Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
+    Value scalesPtr =
+        extractContiguousMemRefPtr(adaptor.getScales(), rewriter, loc);
     Value zeroPointsPtr =
         extractOptionalMemRefPtr(adaptor.getZeroPoints(), rewriter, loc);
     Value gIdxPtr = extractOptionalMemRefPtr(adaptor.getGIdx(), rewriter, loc);
     Value biasPtr = extractOptionalMemRefPtr(adaptor.getBias(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto AType = cast<MemRefType>(op.getA().getType());
     int64_t ARank = AType.getRank();
@@ -61,8 +63,9 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     Value bits = createI64Const(op.getBits());
     Value blockSize = createI64Const(op.getBlockSize());
     Value elemSizeVal = createI64Const(elemSize);
+    Value zpElemSizeVal = createI64Const(op.getZpElemSize());
 
-    SmallVector<Type, 15> paramTypes = {
+    SmallVector<Type, 16> paramTypes = {
         ptrType, // state
         ptrType, // A
         ptrType, // B
@@ -77,7 +80,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
         i64Type, // batch_count
         i64Type, // bits
         i64Type, // block_size
-        i64Type  // elem_size
+        i64Type, // elem_size
+        i64Type  // zp_elem_size
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -86,10 +90,22 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
       return failure();
     }
 
-    SmallVector<Value, 15> args = {
-        statePtr, APtr,    BPtr,      scalesPtr, zeroPointsPtr,
-        gIdxPtr,  biasPtr, outputPtr, m,         n,
-        k,        batch,   bits,      blockSize, elemSizeVal};
+    SmallVector<Value, 16> args = {statePtr,
+                                   APtr,
+                                   BPtr,
+                                   scalesPtr,
+                                   zeroPointsPtr,
+                                   gIdxPtr,
+                                   biasPtr,
+                                   outputPtr,
+                                   m,
+                                   n,
+                                   k,
+                                   batch,
+                                   bits,
+                                   blockSize,
+                                   elemSizeVal,
+                                   zpElemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

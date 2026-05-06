@@ -11,6 +11,7 @@ add_library(HipDialectTransforms STATIC
   OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp
+  PromoteStridedHipOperands.cpp
   ResolveExternConstants.cpp
 )
 

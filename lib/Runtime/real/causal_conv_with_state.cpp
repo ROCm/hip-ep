@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "runtime_types.h"
 
 #include <cassert>
@@ -41,6 +42,16 @@ int wrap_causal_conv_with_state(
     const void *bias, const void *past_state, void *output, void *present_state,
     int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
     int64_t ndim, int64_t activation, int64_t element_size_bytes) {
+  OP_PROFILE(
+      "causal_conv",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lldx%lld,k=%lld", (long long)batch_size,
+                 (long long)channels, (long long)seq_len,
+                 (long long)kernel_size);
+        return std::string(b);
+      },
+      state);
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr, "wrap_causal_conv_with_state: null required argument\n");
     return -1;
