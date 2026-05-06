@@ -50,11 +50,12 @@ public:
   // survive across forward passes and return stale total_seq values).
   void begin_compute() const;
 
-  // Diagnostic-only accessor: returns the hipStream_t used by inference_compute,
-  // as a void*.  Relies on RuntimeState (lib/Runtime/runtime_state_internal.h)
-  // keeping hipStream_t as its first field; the cast is encapsulated in
-  // InferenceState.cpp with a static_assert on pointer size.  Returning void*
-  // keeps hip headers out of this public header.
+  // Diagnostic-only accessor: returns the hipStream_t used by
+  // inference_compute, as a void*.  Relies on RuntimeState
+  // (lib/Runtime/runtime_state_internal.h) keeping hipStream_t as its first
+  // field; the cast is encapsulated in InferenceState.cpp with a static_assert
+  // on pointer size.  Returning void* keeps hip headers out of this public
+  // header.
   //
   // Intended for HIPDNN_EP_PERF instrumentation in MlirCustomOp::Compute().
   // Callers reinterpret_cast to hipStream_t (itself a void* on amdhip64).
