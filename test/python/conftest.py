@@ -774,8 +774,10 @@ def patch_genai_config_for_morphizen(model_dir, ep_dll):
     config["model"]["decoder"]["session_options"]["provider_options"] = [
         {"MorphiZenEP": {}}
     ]
-    # Pareto-optimal chunk_size for dynamic-shape Llama on MorphiZenEP/gfx1150
-    # (1B sweep at -l 3072 -g 1024: -21% TTFT, -52% peak WS vs unchunked).
+    # Pareto-optimal chunk_size for dynamic-shape Llama on MorphiZenEP.
+    # 8B sweep on gfx1151 (2026-05-06): chunk=1024 beats chunk=512 on long
+    # prompts (-1.4% TTFT at L=2048, -3.6% at L=4096) at +0.16 GB peak WS at
+    # the worst L. At L<=1024 it's a no-op (single chunk). Decode is invariant.
     # Skip for fixed-shape configs — decoder-pipeline / sliding_window /
     # fixed_prompt_length already chunk via their own mechanisms, and injecting
     # search.chunk_size on top would either be ignored or fight them.
@@ -786,7 +788,7 @@ def patch_genai_config_for_morphizen(model_dir, ep_dll):
         or "fixed_prompt_length" in decoder
     )
     if not is_fixed_shape:
-        config.setdefault("search", {})["chunk_size"] = 512
+        config.setdefault("search", {})["chunk_size"] = 1024
     with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
 

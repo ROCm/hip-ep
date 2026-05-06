@@ -121,7 +121,7 @@ _GENAI_CONFIG = {
         "vocab_size": 128256,
     },
     "search": {
-        "chunk_size": 512,
+        "chunk_size": 1024,
         "diversity_penalty": 0.0,
         "do_sample": True,
         "early_stopping": True,
@@ -179,15 +179,16 @@ def _ensure_oga_files():
             json.dump(_GENAI_CONFIG, f, indent=4)
         print(f"  Generated {config_path.name}")
     else:
-        # Migrate stale on-disk config: ensure chunk_size=512 is set for the
-        # dynamic-shape model (Pareto-optimal default for MorphiZenEP/gfx1150).
+        # Migrate stale on-disk config: ensure chunk_size=1024 is set for the
+        # dynamic-shape model (Pareto-optimal default for MorphiZenEP, see
+        # CLAUDE.md "OGA chunked prefill" gotcha).
         with open(config_path) as f:
             existing = json.load(f)
-        if existing.get("search", {}).get("chunk_size") != 512:
-            existing.setdefault("search", {})["chunk_size"] = 512
+        if existing.get("search", {}).get("chunk_size") != 1024:
+            existing.setdefault("search", {})["chunk_size"] = 1024
             with open(config_path, "w") as f:
                 json.dump(existing, f, indent=4)
-            print(f"  Migrated {config_path.name}: search.chunk_size=512")
+            print(f"  Migrated {config_path.name}: search.chunk_size=1024")
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
