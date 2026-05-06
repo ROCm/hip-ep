@@ -37,23 +37,23 @@ struct LinearAttentionOpLowering
     auto getMemRefPtrOrNull = [&](Value memref) -> Value {
       if (!memref)
         return nullPtr;
-      return extractMemRefPtr(memref, rewriter, loc);
+      return extractContiguousMemRefPtr(memref, rewriter, loc);
     };
 
     // === Extract all inputs ===
     Value statePtr = adaptor.getCtx();
 
-    Value queryPtr = extractMemRefPtr(adaptor.getQuery(), rewriter, loc);
-    Value keyPtr = extractMemRefPtr(adaptor.getKey(), rewriter, loc);
-    Value valuePtr = extractMemRefPtr(adaptor.getValue(), rewriter, loc);
+    Value queryPtr = extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
+    Value keyPtr = extractContiguousMemRefPtr(adaptor.getKey(), rewriter, loc);
+    Value valuePtr = extractContiguousMemRefPtr(adaptor.getValue(), rewriter, loc);
 
     Value pastStatePtr = getMemRefPtrOrNull(adaptor.getPastState());
     Value decayPtr = getMemRefPtrOrNull(adaptor.getDecay());
     Value betaPtr = getMemRefPtrOrNull(adaptor.getBeta());
 
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr = extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value presentStatePtr =
-        extractMemRefPtr(adaptor.getPresentState(), rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getPresentState(), rewriter, loc);
 
     // === Extract attributes ===
     Value qNumHeads = createI64Const(op.getQNumHeads());
