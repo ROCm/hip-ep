@@ -45,11 +45,14 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     Value typeCodeVal = createI64Const(typeCode);
 
     Value statePtr = adaptor.getCtx();
-    Value input_A_ptr = extractMemRefPtr(adaptor.getInputA(), rewriter, loc);
-    Value input_B_ptr = extractMemRefPtr(adaptor.getInputB(), rewriter, loc);
+    Value input_A_ptr =
+        extractContiguousMemRefPtr(adaptor.getInputA(), rewriter, loc);
+    Value input_B_ptr =
+        extractContiguousMemRefPtr(adaptor.getInputB(), rewriter, loc);
     Value input_C_ptr =
         extractOptionalMemRefPtr(adaptor.getInputC(), rewriter, loc);
-    Value output_ptr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value output_ptr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     Value alpha = LLVM::ConstantOp::create(
         rewriter, loc, f32Type,

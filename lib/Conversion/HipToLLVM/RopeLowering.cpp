@@ -24,11 +24,16 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value posIdsPtr = extractMemRefPtr(adaptor.getPositionIds(), rewriter, loc);
-    Value cosCachePtr = extractMemRefPtr(adaptor.getCosCache(), rewriter, loc);
-    Value sinCachePtr = extractMemRefPtr(adaptor.getSinCache(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value posIdsPtr =
+        extractContiguousMemRefPtr(adaptor.getPositionIds(), rewriter, loc);
+    Value cosCachePtr =
+        extractContiguousMemRefPtr(adaptor.getCosCache(), rewriter, loc);
+    Value sinCachePtr =
+        extractContiguousMemRefPtr(adaptor.getSinCache(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     // Extract attributes as constants
     Value interleaved = LLVM::ConstantOp::create(
