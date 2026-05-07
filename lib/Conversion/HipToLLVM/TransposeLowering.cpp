@@ -41,12 +41,11 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     // element_size_bytes
     Type elemType = inputType.getElementType();
     if (!elemType.isIntOrFloat())
-      return rewriter.notifyMatchFailure(op,
-                                         "unsupported element type for transpose");
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element type for transpose");
     int64_t elemSizeBytes = elemType.getIntOrFloatBitWidth() / 8;
     if (elemSizeBytes <= 0)
-      return rewriter.notifyMatchFailure(op,
-                                         "unsupported element bit width");
+      return rewriter.notifyMatchFailure(op, "unsupported element bit width");
 
     Value statePtr = adaptor.getCtx();
     Value inputPtr =
@@ -73,11 +72,10 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     // Populate input_shape via per-dim load from the memref descriptor (static
     // dims fold to constants; dynamic dims hit the descriptor sizes array).
     for (int64_t i = 0; i < rank; ++i) {
-      Value dimVal =
-          getMemRefDimSize(inputType, static_cast<unsigned>(i),
-                           adaptor.getInput(), rewriter, loc);
-      Value idxVal = LLVM::ConstantOp::create(
-          rewriter, loc, i32Type, rewriter.getI32IntegerAttr(i));
+      Value dimVal = getMemRefDimSize(inputType, static_cast<unsigned>(i),
+                                      adaptor.getInput(), rewriter, loc);
+      Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                              rewriter.getI32IntegerAttr(i));
       Value gep = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
                                       shapeAlloca, idxVal);
       LLVM::StoreOp::create(rewriter, loc, dimVal, gep);
@@ -89,8 +87,8 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
           cast<IntegerAttr>(permAttr[i]).getValue().getSExtValue();
       Value permConst = LLVM::ConstantOp::create(
           rewriter, loc, i64Type, rewriter.getI64IntegerAttr(permVal));
-      Value idxVal = LLVM::ConstantOp::create(
-          rewriter, loc, i32Type, rewriter.getI32IntegerAttr(i));
+      Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                              rewriter.getI32IntegerAttr(i));
       Value gep = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
                                       permAlloca, idxVal);
       LLVM::StoreOp::create(rewriter, loc, permConst, gep);
@@ -110,9 +108,9 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 8> args = {statePtr,    inputPtr,    outputPtr,
-                                  rankVal,     shapeAlloca, permAlloca,
-                                  numElems,    elemSizeVal};
+    SmallVector<Value, 8> args = {statePtr, inputPtr,    outputPtr,
+                                  rankVal,  shapeAlloca, permAlloca,
+                                  numElems, elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
