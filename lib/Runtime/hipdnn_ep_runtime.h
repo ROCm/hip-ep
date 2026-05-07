@@ -424,7 +424,7 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 // Memory Operations
 //===----------------------------------------------------------------------===//
 
-// HIP memory copy wrapper (GPU-to-GPU using hipMemcpyAsync)
+// GPU D2D memcpy (hipMemcpyAsync); called from generated LLVM IR.
 // Follows opaque RuntimeState pattern - extracts stream internally
 //
 // Parameters:
@@ -438,6 +438,12 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 //   -1 = copy failed
 int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes);
+
+/// 2D pitched device copy (e.g. strided memref → dense output). Width is in
+/// bytes; pitches are row pitches (hipMemcpy2DAsync semantics).
+int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
+                          const void *src_ptr, size_t src_pitch, size_t width,
+                          size_t height);
 
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)

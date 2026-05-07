@@ -57,6 +57,7 @@ These operations are handled through standard MLIR transformations without requi
 | Reshape | tensor.expand_shape / tensor.collapse_shape | Zero-cost metadata operation, no data movement |
 | Unsqueeze | tensor.expand_shape | Inserts size-1 axes; shape/stride reinterpretation only |
 | Squeeze | tensor.collapse_shape | Removes size-1 axes; shape/stride reinterpretation only |
+| Split | tensor.extract_slice | Zero-copy tensor partitioning; creates views without data movement |
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 
 ---
