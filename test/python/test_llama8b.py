@@ -387,6 +387,101 @@ class TestLlama8BORT:
         assert all_ok, "Per-step logits accuracy check failed"
 
 
+# ── Asymmetric AWQ (with zero_points) — kernel correctness check ───────────
+
+
+class TestLlama8BAsym:
+    """Asymmetric AWQ Llama-3.1-8B-int4 (with zero_points): EP correctness vs CPU.
+
+    The standard 8B model used by the other tests is symmetric (no zero_points),
+    so the MatMulNBits kernel's `has_zp` code path (per-group uint8 zp read +
+    extra fp32 mul per K-tile) is otherwise unverified at the logit level. This
+    class loads the dynamic-shape asym model and runs the same prefill→decode
+    per-step CPU-vs-EP comparison as `test_ort_per_step_logits`. Skipped if the
+    model dir is absent (download from
+    huggingface.co/amd/Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml).
+    """
+
+    _ASYM_MODEL_DIR = REPO_ROOT / "models" / "Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+    _ASYM_ONNX_FILE = "model.onnx"
+
+    def test_asym_dynamic_per_step_logits(self, repo_root):
+        model_path = self._ASYM_MODEL_DIR / self._ASYM_ONNX_FILE
+        if not model_path.exists():
+            pytest.skip(f"asym dynamic model not found at {model_path}")
+
+        cpu_sess = create_cpu_session(str(model_path))
+        ep_sess = create_ep_session(str(model_path), REPO_ROOT)
+        output_names = [o.name for o in cpu_sess.get_outputs()]
+        logits_idx = output_names.index("logits")
+
+        print(f"\n{'=' * 60}")
+        print(
+            f"ASYM EP vs CPU per-step logits: prompt={len(PROMPT_TOKENS)}, "
+            f"generate={NUM_GENERATE_TOKENS}"
+        )
+        print(f"{'=' * 60}")
+
+        all_ok = True
+
+        cfg = _make_cfg(MAX_SEQ_LEN)
+        inputs = make_prefill_inputs(cfg, PROMPT_TOKENS, MAX_SEQ_LEN)
+        cpu_out = cpu_sess.run(None, inputs)
+        ep_out = ep_sess.run(None, inputs)
+
+        print(f"\n  Prefill (seq_len={len(PROMPT_TOKENS)}):")
+        ok = compare_logits(cpu_out[logits_idx], ep_out[logits_idx], "prefill")
+        all_ok = all_ok and ok
+
+        cpu_token = get_next_token(cpu_out[logits_idx])
+        ep_token = get_next_token(ep_out[logits_idx])
+        cpu_kv = extract_kv_cache(cpu_out, output_names)
+        ep_kv = extract_kv_cache(ep_out, output_names)
+
+        match = "MATCH" if cpu_token == ep_token else "DIFFER"
+        print(f"  CPU: {cpu_token}, EP: {ep_token}  [{match}]")
+
+        cpu_generated = [cpu_token]
+        ep_generated = [ep_token]
+
+        for step in range(NUM_GENERATE_TOKENS - 1):
+            position = len(PROMPT_TOKENS) + step
+            cpu_inputs = make_decode_inputs(
+                cfg, cpu_token, position, cpu_kv, MAX_SEQ_LEN
+            )
+            ep_inputs = make_decode_inputs(cfg, ep_token, position, ep_kv, MAX_SEQ_LEN)
+
+            cpu_out = cpu_sess.run(None, cpu_inputs)
+            ep_out = ep_sess.run(None, ep_inputs)
+
+            ok = compare_logits(
+                cpu_out[logits_idx], ep_out[logits_idx], f"decode[{step + 1}]"
+            )
+            all_ok = all_ok and ok
+
+            cpu_token = get_next_token(cpu_out[logits_idx])
+            ep_token = get_next_token(ep_out[logits_idx])
+            cpu_kv = extract_kv_cache(cpu_out, output_names)
+            ep_kv = extract_kv_cache(ep_out, output_names)
+
+            cpu_generated.append(cpu_token)
+            ep_generated.append(ep_token)
+
+            match = "MATCH" if cpu_token == ep_token else "DIFFER"
+            print(f"  CPU: {cpu_token}, EP: {ep_token}  [{match}]")
+
+        token_match_rate = sum(
+            1 for a, b in zip(cpu_generated, ep_generated) if a == b
+        ) / len(cpu_generated)
+        print(f"\n  CPU  generated: {cpu_generated}")
+        print(f"  EP   generated: {ep_generated}")
+        print(f"  Token match rate: {token_match_rate:.0%}")
+        print(f"{'=' * 60}")
+
+        cleanup(cpu_sess, ep_sess)
+        assert all_ok, "asym per-step logits accuracy check failed (has_zp kernel path)"
+
+
 # ── OGA EP tests ────────────────────────────────────────────────────────────
 
 

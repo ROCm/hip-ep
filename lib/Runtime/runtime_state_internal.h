@@ -67,6 +67,19 @@ struct RuntimeState {
   // Caches hipBLASLt descriptors + algorithms by GEMM shape.
   void *gqa_gemm_cache;
 
+  // MatMulNBits asym-path zero_points unpack cache (ZpUnpackCache*).
+  //
+  // The asym AWQ path stores zero_points as packed nibbles [N, ceil(K/bs/2)].
+  // Two unpacked layouts are needed (u8 [N, K/bs] for GEMV/naive, fp16 for
+  // WMMA/col-major GEMV M>1), and naively the unpack kernel is launched on
+  // every wrap_matmul_nbits call. For 8B asym decode this is ~225 redundant
+  // launches per Compute(). Since zero_points points into the model constants
+  // blob (stable for the session lifetime), we cache the unpacked buffer per
+  // input pointer. Lazily created on first asym call. Owned by
+  // lib/Runtime/real/matmul_nbits.cpp; freed in hipdnn_ep_state_cleanup via
+  // hipdnn_ep_zp_unpack_cache_destroy.
+  void *zp_unpack_cache;
+
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.
   void *op_profile;

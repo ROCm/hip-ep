@@ -8,6 +8,7 @@
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
+#include "zp_unpack_cache.h"
 
 #include <cstdio>
 #include <cstring>
@@ -220,6 +221,32 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                            e * fusion_inter * elem_size
                                      : nullptr;
 
+      // hip_matmul_nbits no longer unpacks zp internally — pre-unpack via the
+      // per-state pointer-keyed cache (same path as wrap_matmul_nbits). Each
+      // expert's fc1_zp_e is a distinct pointer into the constants blob, so
+      // each expert gets its own cache entry; the cost is paid once per
+      // expert across the lifetime of the session.
+      const void *fc1_pre_zp_u8 = nullptr;
+      const void *fc1_pre_zp_fp16 = nullptr;
+      if (fc1_zp_e && expert_weight_bits == 4 && block_size > 0) {
+        int ngk = static_cast<int>(k_blocks_fc1);
+        fc1_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
+            state, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
+        if (!fc1_pre_zp_u8) {
+          result = -1;
+          goto cleanup;
+        }
+        bool wmma_data_format = (hidden_size % 32 == 0);
+        if (wmma_data_format && count > 1) {
+          fc1_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
+              state, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
+          if (!fc1_pre_zp_fp16) {
+            result = -1;
+            goto cleanup;
+          }
+        }
+      }
+
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc1 matmul_nbits "
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)hidden_size,
@@ -228,7 +255,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                  fc1_zp_e, fc1_b_e, d_fc1_buf, count,
                                  fusion_inter, hidden_size, 1,
                                  expert_weight_bits, block_size, elem_size,
-                                 /*zp_elem_size=*/1));
+                                 /*zp_elem_size=*/1, fc1_pre_zp_u8,
+                                 fc1_pre_zp_fp16));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
@@ -251,6 +279,28 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                            e * hidden_size * elem_size
                                      : nullptr;
 
+      // Same pre-unpack as fc1; per-expert distinct pointer.
+      const void *fc2_pre_zp_u8 = nullptr;
+      const void *fc2_pre_zp_fp16 = nullptr;
+      if (fc2_zp_e && expert_weight_bits == 4 && block_size > 0) {
+        int ngk = static_cast<int>(k_blocks_fc2);
+        fc2_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
+            state, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
+        if (!fc2_pre_zp_u8) {
+          result = -1;
+          goto cleanup;
+        }
+        bool wmma_data_format = (inter_size % 32 == 0);
+        if (wmma_data_format && count > 1) {
+          fc2_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
+              state, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
+          if (!fc2_pre_zp_fp16) {
+            result = -1;
+            goto cleanup;
+          }
+        }
+      }
+
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc2 matmul_nbits "
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)inter_size,
@@ -258,7 +308,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       HIP_CHECK(hip_matmul_nbits(stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e,
                                  fc2_b_e, d_fc2_buf, count, hidden_size,
                                  inter_size, 1, expert_weight_bits, block_size,
-                                 elem_size, /*zp_elem_size=*/1));
+                                 elem_size, /*zp_elem_size=*/1, fc2_pre_zp_u8,
+                                 fc2_pre_zp_fp16));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
