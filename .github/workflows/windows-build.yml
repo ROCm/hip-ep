@@ -35,14 +35,8 @@ jobs:
       GTEST_VERSION: "1.15.0"
       THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       SCCACHE_GHA_ENABLED: "true"
-      # OGA fork carrying the IoBinding decode optimization that routes
-      # session.Run through OrtIoBinding -- required for the asym
-      # Llama-3.1-8B AWQ p=2048 9.66 -> 28.77 tok/s number reported in the
-      # PR body. Once the IoBinding change lands upstream
-      # (microsoft/onnxruntime-genai), revert OGA_REPO to AMDmoore (or the
-      # canonical AMD fork) and OGA_REF to the merged commit.
-      OGA_REPO: fhanuman/onnxruntime-genai
-      OGA_REF: 36acb4a9afd76273c180a6b45f3029e3ed419d54
+      OGA_REPO: AMDmoore/onnxruntime-genai
+      OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
