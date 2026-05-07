@@ -8,6 +8,7 @@
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -148,6 +149,13 @@ void mlir::hip::buildHipToLLVMPipeline(
   // does not include patterns for these ops; expand-strided-metadata rewrites
   // them into ops that it can lower.
   pm.addPass(memref::createExpandStridedMetadataPass());
+
+  // ExpandStridedMetadata can emit affine.apply for collapse-shape stride
+  // products (e.g. flattening an MoE expert-major 3D memref to 2D). The
+  // ConvertHipToLLVM lowering does not include affine→arith patterns, so any
+  // surviving affine.apply leaves builtin.unrealized_conversion_cast in the
+  // final LLVM IR and "Failed to translate MLIR to LLVM IR" aborts compile.
+  pm.addPass(createLowerAffinePass());
 
   pm.addPass(createConvertHipToLLVMPass());
 

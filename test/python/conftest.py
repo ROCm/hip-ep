@@ -427,13 +427,21 @@ def make_dim_map(seq_len, kv_len):
 
 
 def ensure_model(model_dir, onnx_file, data_file, hf_base):
+    """Download ONNX + external data files into `model_dir` if missing.
+
+    `data_file` may be a single filename (str) for models with one external
+    data blob (Llama 1B/8B), or an iterable of filenames for models split
+    across multiple blobs (e.g. gpt-oss-20b — 7 `*.onnx_data*` files).
+    """
     model_dir.mkdir(parents=True, exist_ok=True)
     onnx_path = model_dir / onnx_file
-    data_path = model_dir / data_file
     if not onnx_path.exists():
         download(f"{hf_base}/{onnx_file}", onnx_path)
-    if not data_path.exists():
-        download(f"{hf_base}/{data_file}", data_path)
+    data_files = [data_file] if isinstance(data_file, str) else list(data_file)
+    for d in data_files:
+        data_path = model_dir / d
+        if not data_path.exists():
+            download(f"{hf_base}/{d}", data_path)
     return str(onnx_path)
 
 
@@ -443,16 +451,19 @@ def ensure_fixed_model(model_dir, onnx_file, data_file, seq_len, kv_len):
     External weights are hardlinked (or copied as fallback) into the sibling
     `<model_dir>-fixed/` so the rewritten ONNX's external_data refs resolve.
     Keeping the dynamic model dir free of test-derived `model_fixed_kv*_sq*.onnx`
-    leftovers — same hygiene as `ensure_pipeline_dir`.
+    leftovers — same hygiene as `ensure_pipeline_dir`. `data_file` accepts the
+    same str-or-iterable forms as `ensure_model`.
     """
     fixed_dir = model_dir.parent / f"{model_dir.name}-fixed"
     fixed_dir.mkdir(parents=True, exist_ok=True)
-    weights_dst = fixed_dir / data_file
-    if not weights_dst.exists():
-        try:
-            os.link(model_dir / data_file, weights_dst)
-        except OSError:
-            shutil.copy2(model_dir / data_file, weights_dst)
+    data_files = [data_file] if isinstance(data_file, str) else list(data_file)
+    for d in data_files:
+        weights_dst = fixed_dir / d
+        if not weights_dst.exists():
+            try:
+                os.link(model_dir / d, weights_dst)
+            except OSError:
+                shutil.copy2(model_dir / d, weights_dst)
     name = f"{onnx_file.rsplit('.', 1)[0]}_fixed_kv{kv_len}_sq{seq_len}.onnx"
     dst = fixed_dir / name
     if not dst.exists():
