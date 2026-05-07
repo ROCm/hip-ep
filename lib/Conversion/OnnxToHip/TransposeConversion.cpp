@@ -83,8 +83,8 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<mlir::Value> dynSizes;
   for (auto [outDimIdx, srcDim] : llvm::enumerate(perm)) {
     if (resultType.isDynamicDim(outDimIdx))
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data,
-                                                     static_cast<int64_t>(srcDim)));
+      dynSizes.push_back(mlir::tensor::DimOp::create(
+          rewriter, loc, data, static_cast<int64_t>(srcDim)));
   }
 
   mlir::Value init =
@@ -92,8 +92,8 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
                                     resultType.getElementType(), dynSizes);
 
   mlir::ArrayAttr permArrayAttr = rewriter.getI64ArrayAttr(perm);
-  auto hipOp = mlir::hip::TransposeOp::create(rewriter, loc, resultType,
-                                              context, data, init, permArrayAttr);
+  auto hipOp = mlir::hip::TransposeOp::create(
+      rewriter, loc, resultType, context, data, init, permArrayAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
