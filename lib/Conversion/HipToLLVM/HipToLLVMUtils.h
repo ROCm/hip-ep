@@ -25,6 +25,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -37,6 +38,9 @@ namespace hip {
 inline constexpr const char *kHipMalloc = "hip_device_malloc";
 inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
+
+inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
+inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
@@ -143,6 +147,36 @@ inline Value extractContiguousMemRefPtr(Value memrefDesc,
         rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0),
         ptr);
   return ptr;
+}
+
+// First logical element: alignedPtr + offset (elements), then cast to AS 0.
+// Use for HIP/MIOpen entry points when the memref may be a subview with a
+// non-zero descriptor offset (same base alignedPtr as parent, distinct offset).
+inline Value extractMemRefDataPtr(Value memrefDesc, MemRefType memrefType,
+                                  const TypeConverter *typeConverter,
+                                  ConversionPatternRewriter &rewriter,
+                                  Location loc) {
+  SmallVector<Type, 1> llvmElemTypes;
+  if (failed(typeConverter->convertType(memrefType.getElementType(),
+                                        llvmElemTypes)) ||
+      llvmElemTypes.empty())
+    return Value();
+  Type llvmElemTy = llvmElemTypes.front();
+
+  MemRefDescriptor desc(memrefDesc);
+  Value aligned = desc.alignedPtr(rewriter, loc);
+  Value offset = desc.offset(rewriter, loc);
+  Type ptrTy = aligned.getType();
+  Value dataPtr =
+      LLVM::GEPOp::create(rewriter, loc, ptrTy, llvmElemTy, aligned,
+                          ValueRange{offset}, LLVM::GEPNoWrapFlags::inbounds)
+          .getResult();
+
+  if (cast<LLVM::LLVMPointerType>(dataPtr.getType()).getAddressSpace() != 0)
+    dataPtr = LLVM::AddrSpaceCastOp::create(
+        rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0),
+        dataPtr);
+  return dataPtr;
 }
 
 // Returns the aligned pointer for an optional memref operand, or a null

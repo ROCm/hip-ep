@@ -214,6 +214,14 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
+// Mark the start of a new Compute() call. Invalidates per-forward-pass
+// caches such as the GQA seqlens_k cache (see runtime_state_internal.h).
+// Called by the EP-side MlirCustomOp::Compute() entry once per inference;
+// safe to call unconditionally (cheap: writes a single bool). Required for
+// the GQA seqlens_k cache (default on, set HIPDNN_EP_GQA_CACHE_SEQLENS=0
+// to disable) to be correct -- without this hook the cache would persist
+// across forward passes and return stale values.
+void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
@@ -422,7 +430,7 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 // Memory Operations
 //===----------------------------------------------------------------------===//
 
-// HIP memory copy wrapper (GPU-to-GPU using hipMemcpyAsync)
+// GPU D2D memcpy (hipMemcpyAsync); called from generated LLVM IR.
 // Follows opaque RuntimeState pattern - extracts stream internally
 //
 // Parameters:
@@ -436,6 +444,12 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 //   -1 = copy failed
 int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes);
+
+/// 2D pitched device copy (e.g. strided memref → dense output). Width is in
+/// bytes; pitches are row pitches (hipMemcpy2DAsync semantics).
+int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
+                          const void *src_ptr, size_t src_pitch, size_t width,
+                          size_t height);
 
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
