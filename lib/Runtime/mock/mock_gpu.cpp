@@ -932,6 +932,47 @@ int wrap_power(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+// ONNX Where: output[i] = condition[i] ? x[i] : y[i] with multidirectional
+// broadcasting. Mirrors the validation in real/where.cpp so the same bad
+// inputs are rejected in both builds.
+int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
+               void *output, const int64_t *cond_shape, int64_t cond_rank,
+               const int64_t *x_shape, int64_t x_rank, const int64_t *y_shape,
+               int64_t y_rank, const int64_t *out_shape, int64_t out_rank,
+               int64_t data_type) {
+  if (!state || !condition || !x || !y || !output) {
+    fprintf(stderr, "wrap_where: null tensor argument\n");
+    return -1;
+  }
+  if ((cond_rank > 0 && !cond_shape) || (x_rank > 0 && !x_shape) ||
+      (y_rank > 0 && !y_shape) || (out_rank > 0 && !out_shape)) {
+    fprintf(stderr, "wrap_where: null shape argument with non-zero rank\n");
+    return -1;
+  }
+
+  auto dump_shape = [](const char *name, const int64_t *shape, int64_t rank) {
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), "[MOCK]   %s rank=%lld shape=[", name,
+                     (long long)rank);
+    for (int64_t i = 0; i < rank && n < (int)sizeof(buf); ++i) {
+      n += snprintf(buf + n, sizeof(buf) - n, "%s%lld", i ? "," : "",
+                    (long long)shape[i]);
+    }
+    if (n < (int)sizeof(buf))
+      snprintf(buf + n, sizeof(buf) - n, "]\n");
+    MOCK_PRINT("%s", buf);
+  };
+
+  MOCK_PRINT("[MOCK] wrap_where(data_type=%s(%lld))\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type);
+  dump_shape("condition", cond_shape, cond_rank);
+  dump_shape("x", x_shape, x_rank);
+  dump_shape("y", y_shape, y_rank);
+  dump_shape("output", out_shape, out_rank);
+
+  return 0;
+}
+
 int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyDeviceToHost,
                            static_cast<hipStream_t>(stream)));
