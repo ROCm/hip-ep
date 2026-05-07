@@ -710,6 +710,35 @@ void GemmOp::getEffects(
 //        total_seq_len,
 //            [cos_cache, sin_cache, position_ids, attention_bias, head_sink,
 //             k_scale, v_scale])
+//        outs(output, present_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LinearAttentionOp::getDpsInitsMutable() {
+  // Operand segments:
+  //   ctx(1), query(1), key(1), value(1),
+  //   past_state(0|1), decay(0|1), beta(0|1),
+  //   output(1), present_state(1)
+  unsigned numInputs = 4; // ctx, query, key, value
+  if (getPastState())
+    ++numInputs;
+  if (getDecay())
+    ++numInputs;
+  if (getBeta())
+    ++numInputs;
+
+  // DPS inits: output, present_state (always 2)
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+}
+
+void LinearAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GqaOp: ins(query, [key, value, past_key, past_value,]
+//             seqlens_k, total_seq_len, [cos_cache, ...])
 //        outs(output, present_key, present_value, [output_qk])
 //===----------------------------------------------------------------------===//
 
