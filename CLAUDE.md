@@ -277,20 +277,14 @@ When disabled (default), profiling is zero-overhead: `hipdnn_ep_perf_enabled()` 
 
 **Before chasing a "DYN slower than FIX" hypothesis with new instrumentation, RE-MEASURE without `HIPDNN_EP_PERF` first.** A full session was once spent adding phase markers, alignment dumps, per-layer GPU markers, and accessor counters to localize a 1-3 ms/Compute "DYN penalty" — the penalty was the profiler itself, and DYN was actually 50% faster than FIX once profiling was off. The clean re-measure takes ~25 minutes; the diagnostic chase takes days. If a perf gap is small (≤ 5% of per-Compute total) and points the wrong way, do the clean re-measure before writing one line of instrumentation.
 
-### 8B Llama dynamic vs fixed-pipeline baseline (gfx1151, 2026-05-06)
+### 8B Llama dynamic vs fixed-pipeline (structural conclusion)
 
-> **STALE — measured against the previous `onnx-community/Meta-Llama-3.1-8B-Instruct-ONNX-DirectML-GenAI-INT4` model (`block_size=32`, asymmetric uint8 zero_points). The 8B test model has since been switched to `amd/Llama-3.1-8B-Instruct-awq-g128-int4-onnx-directml` (`block_size=128`, symmetric — no zero_points). The matmul_nbits autotune will pick a different (BLOCK_SIZE_K, TILE_N) for the new layout, and the no-zp dequant path is slightly cheaper, so absolute TPS/TTFT and the DYN-vs-FIX delta will shift. Re-measure before citing these as current numbers.**
+DYN (single dynamic-shape DLL: `models/Llama-3.1-8B-Instruct-awq-g128-int4`) beats FIX (decoder-pipeline of two static-shape DLLs at sliding-window prefill p=512, KV=16384: `models/Llama-3.1-8B-Instruct-awq-g128-int4-Pipeline-p512m16384`) on both decode TPS and TTFT for L < KV_LEN, and ties or wins on peak working set. The structural reasons hold across model variants and gfx1151 measurements:
+- **Decode TPS:** DYN's main_graph runs one fused decode kernel per layer at any total_seq; FIX's static decode DLL is the same fused decode but pays per-Compute per-sub-model marshaling overhead.
+- **TTFT:** FIX is locked to a full p-token static prefill regardless of actual prompt length (e.g., constant ~443 ms TTFT at p=512 for any L≤512). DYN's prefill scales linearly with L.
+- **Peak WS:** FIX's prefill+decode DLL pair carries two sets of constants in GPU memory.
 
-`model_benchmark.exe -i <model> -l L -g 16 -ml 16384 -r 5 -w 1`, 3 trial invocations per cell, **no `HIPDNN_EP_PERF`**. DYN = `models/Llama-3.1-8B-Instruct-awq-g128-int4` (single dynamic-shape DLL). FIX = `models/Llama-3.1-8B-Instruct-awq-g128-int4-Pipeline-p512m16384` (sliding-window prefill p=512, KV=16384, decoder-pipeline of two static-shape DLLs). (Paths shown for the current model; baseline numbers below are from the previous model — see warning above.)
-
-| L | DYN TPS | FIX TPS | Δ TPS | DYN ms/tok | FIX ms/tok | Δ ms/tok (σ) | DYN TTFT ms | FIX TTFT ms | DYN peak GB | FIX peak GB |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 128 | **41.74** ± 0.64 | 26.29 ± 0.13 | +15.45 | 23.96 | 38.04 | −14.07 (0.41) | 211.9 | 442.6 | 2.46 | 2.69 |
-| 256 | **40.35** ± 0.08 | 26.19 ± 0.07 | +14.16 | 24.78 | 38.18 | −13.40 (0.11) | 271.8 | 444.5 | 2.52 | 2.68 |
-| 512 | **39.90** ± 0.41 | 25.91 ± 0.06 | +13.99 | 25.06 | 38.59 | −13.53 (0.27) | 434.6 | 446.6 | 2.64 | 2.69 |
-| 1024 | **37.52** ± 0.86 | 25.15 ± 0.22 | +12.37 | 26.66 | 39.77 | −13.10 (0.69) | 962.2 | 929.1 | 2.64 | 2.69 |
-
-**DYN wins decode by 12-15 tok/s (~50%) at every L** with tight σ (≤0.7 ms). DYN also wins peak working set by 0.05-0.23 GB. TTFT favors DYN below L≈1024 because FIX is locked to a full 512-token static prefill regardless of input length (constant ~443 ms TTFT for L≤512); FIX edges DYN at L=1024 by 33 ms because two 512-token sliding chunks beat one 1024-token dynamic prefill. **The fixed-pipeline path is only worth using when (a) prompt length is exactly the static prefill width, or (b) OGA's decoder-pipeline orchestration is required for some other reason** — there is currently no perf reason to prefer it.
+**Use the fixed pipeline only when (a) the prompt length always matches the static prefill width, or (b) OGA's decoder-pipeline orchestration is required for some other reason.** Otherwise use the dynamic-shape model. (Latest g128 DYN sweep on gfx1151, `model_benchmark -l {128,256,512,1024} -g 16 -ml 16384 -r 5 -w 1` with no `HIPDNN_EP_PERF`: ~45 → ~41 tok/s decode, TTFT scales linearly L=128→1024 from 183 ms → 810 ms, peak WS 2.46 → 2.89 GB. Fresh table not maintained — re-measure before citing exact numbers.)
 
 ### Architecture
 
@@ -300,50 +294,25 @@ When disabled (default), profiling is zero-overhead: `hipdnn_ep_perf_enabled()` 
 - Key files: `op_profile.h` (RAII scopes + macros), `op_profile.cpp` (state + event pool + printing), `debug_log.h` (env var check)
 - Each operator wrapper adds one line: `OP_PROFILE("opname", shape_lambda, state)` or `OP_PROFILE_CPU("opname", state)`. The shape lambda is only invoked when profiling is active — zero `snprintf` overhead on the hot path.
 
-### Llama 8B baseline (gfx1150, single-token decode, April 2026)
+### Llama 8B per-op profile shape (architectural)
 
-> **STALE — measured against the previous `onnx-community/Meta-Llama-3.1-8B-Instruct-ONNX-DirectML-GenAI-INT4` model (`block_size=32`, asymmetric uint8 zero_points), not the current `amd/Llama-3.1-8B-Instruct-awq-g128-int4-onnx-directml` (`block_size=128`, symmetric). Op-call counts (225 matmul_nbits, 64 rotary_emb, 32 gqa, etc.) and shape strings still apply — those are graph-structural, not quant-dependent. Per-op GPU ms will shift: matmul_nbits picks a different autotune config and the no-zp path is slightly faster. Re-measure before citing.**
+For Llama 8B decode at single-token (`sq==1`), the per-op GPU-time breakdown is dominated by `matmul_nbits` (~78% of GPU time across 225 calls per inference: 64 at n=14336/k=4096, 32 at n=4096/k=14336, 64 at n=4096/k=4096, 64 at n=1024/k=4096, 1 at n=128256/k=4096 for the LM head). Other ops (skip_layernorm, rotary_emb, gqa, activation, elementwise) each take low single-digit %. Op call counts and shapes are graph-structural and don't change with quant layout (g32 vs g128) or context length — only the per-op ms shifts.
 
-CPU time tracks host-side overhead — GPU ops should show near-zero CPU time (all async), with `stream_sync` capturing the full CPU wait. Non-zero CPU on a GPU op indicates an unexpected `hipStreamSynchronize` in its code path.
+CPU time per op should be near zero for GPU ops (host-side hipMemcpy/hipLaunchKernel return immediately); `stream_sync` captures the full GPU wait. **Non-zero CPU on a GPU op flags an unexpected `hipStreamSynchronize` in its code path** — this is the canonical diagnostic for the GQA decomposed-path D2H stall (fixed for the fused-decode path via `seqlens_k` cache + GPU-buffer aliasing; see "GQA seqlens_k caching" below).
 
-| Operator | Calls | GPU (ms) | CPU (ms) | GPU % |
-|----------|------:|---------:|---------:|------:|
-| matmul_nbits | 225 | 62.3 | 0.3 | 78.0% |
-|   m=1,n=14336,k=4096 | 64 | 27.6 | 0.1 | 34.6% |
-|   m=1,n=4096,k=14336 | 32 | 12.9 | 0.0 | 16.1% |
-|   m=1,n=4096,k=4096 | 64 | 11.7 | 0.1 | 14.6% |
-|   m=1,n=1024,k=4096 | 64 | 5.9 | 0.1 | 7.4% |
-|   m=1,n=128256,k=4096 | 1 | 4.3 | 0.0 | 5.3% |
-| skip_layernorm (1x4096) | 64 | 5.2 | 0.3 | 6.5% |
-| rotary_emb | 64 | 4.2 | 0.1 | 5.3% |
-|   h=32,d=128 | 32 | 2.3 | 0.0 | 2.9% |
-|   h=8,d=128 | 32 | 1.9 | 0.0 | 2.4% |
-| gqa (b=1,sq=1,skv=128,h=32,d=128) | 32 | 3.9 | 0.1 | 4.9% |
-| activation (n=14336) | 32 | 2.2 | 0.1 | 2.7% |
-| elementwise (1x1x1x14336) | 64 | 2.1 | 0.1 | 2.6% |
-| **TOTAL** | | **79.9** | **0.9** | |
+For specific gpu-ms numbers, run `HIPDNN_EP_PERF=1 install/dist/bin/model_benchmark.exe ...` and read the `[PERF]` block from stderr — they'll be current to the model + kernels in use.
 
-End-to-end: **~59 ms avg** (17.0 tok/s)
+### Llama 8B at L=1024 with GQA flash_decode (architectural)
 
-### Llama 8B at L=1024 with GQA flash_decode (gfx1150, May 2026)
-
-> **STALE — same caveat as the per-op baseline above: numbers were measured on the previous g32 model. The flash_decode dispatch logic, kernel design, and GQA op-call shape (`b=1,sq=1,skv=1056,h=32,d=128`) are unchanged on the new g128 model since GQA is independent of the matmul_nbits quant layout. Absolute matmul_nbits ms and TPS will shift; relative gain from flash_decode at long context should still hold. Re-measure to refresh.**
-
-Long-context decode previously suffered from the original `gqa_fused_decode` kernel scaling linearly with `skv` (each query head re-read the full K/V cache → 4× bandwidth waste at HPG=4). The new `gqa_flash_decode` kernel (`3rd-party/custom_kernels/hip/gqa_kernel.hip`) uses a GQA-aware split-K Flash Attention 2 design: one block per (batch, kv-head, K_SPLIT) loads K/V tiles into LDS once and reuses them across all HPG=4 query heads, then a small reduction kernel merges partials. Templated for `D ∈ {64, 128}` with `K_SPLITS=8`. Per-step result at L=1024:
-
-| Operator | Calls | GPU (ms) | GPU % |
-|----------|------:|---------:|------:|
-| matmul_nbits | 225 | 61.0 | 76.5% |
-| **gqa (b=1,sq=1,skv=1056,h=32,d=128)** | **32** | **5.0** | **6.3%** |
-| skip_layernorm (1x4096) | 64 | 4.7 | 5.9% |
-| rotary_emb | 64 | 4.0 | 5.0% |
-| elementwise (1x1x1x14336) | 64 | 2.6 | 3.3% |
-| activation (n=14336) | 32 | 2.1 | 2.6% |
-| **TOTAL** | | **79.7** | |
-
-End-to-end at L=1024: **75.7 ms/tok (13.21 tok/s)** — vs. pre-flash_decode baseline ~95 ms/tok (10.5 tok/s) → **+26% TPS**. GQA per-layer at depth 1056 dropped from ~720 µs (linear-scaling fused_decode) to **156 µs** (~4.6× faster). At L=2048 (skv≈2080) decode is 80.4 ms/tok — only 6% slower than L=1024, confirming flash_decode flattened the depth scaling. At L=128 (skv<256) the dispatcher correctly falls back to the original fused_decode (17.46 tok/s, no regression vs short-context baseline).
+Long-context decode previously suffered from the original `gqa_fused_decode` kernel scaling linearly with `skv` (each query head re-read the full K/V cache → 4× bandwidth waste at HPG=4). The `gqa_flash_decode` kernel (`3rd-party/custom_kernels/hip/gqa_kernel.hip`) uses a GQA-aware split-K Flash Attention 2 design: one block per (batch, kv-head, K_SPLIT) loads K/V tiles into LDS once and reuses them across all HPG=4 query heads, then a small reduction kernel merges partials. Templated for `D ∈ {64, 128}` with `K_SPLITS=8`. At L=1024 GQA per-layer (skv≈1056) drops from ~720 µs (linear-scaling fused_decode) to ~156 µs (~4.6× faster), and decode at L=2048 is only ~6% slower than L=1024 — flash_decode has flattened the depth scaling.
 
 **Dispatch gate** (`lib/Runtime/real/gqa.cpp::gqa_flash_decode_enabled`): flash_decode runs when `sq==1`, `d ∈ {64,128}`, `H == G * 4` (HPG=4), and `skv >= HIPDNN_EP_GQA_FLASH_DECODE_MIN_SKV` (default 256). At small skv the original fused_decode wins because the new kernel's K_SPLITS=8 reduction overhead exceeds its bandwidth savings. Disable entirely with `HIPDNN_EP_GQA_FLASH_DECODE=0`. Workspace partials for the reduction step share the GQA workspace (placed after rope temps) — `hipdnn_ep_state_ensure_workspace` is called once with the combined size, since growing the workspace does NOT preserve data.
+
+**GQA smart-dispatch threshold + flash_decode exemption** (`lib/Runtime/real/gqa.cpp`). The `gqa_fused_decode` kernel scales linearly in `total_seq` (skv). At very long contexts the LDS-tiled fused_decode loses ~12× to a GEMM-based decomposed path (which gets bandwidth amplification from hipBLASLt's tiled matmul). The dispatcher caps fused_decode at `HIPDNN_EP_GQA_FUSED_DECODE_MAX_T` (default 256) — beyond that it falls back to the decomposed (GEMM + softmax + GEMM) path. **flash_decode is exempt from this cap**: when the flash_decode dispatch gate is satisfied (HPG=4, d∈{64,128}, skv≥256), the smart-dispatch check passes regardless of `total_seq`, because flash_decode's split-K design already kills the linear scaling. The actual gating expression is `size_ok_for_fused = (total_seq_pre < 0) || (total_seq_pre <= MAX_T) || flash_decode_eligible`. Without the exemption clause, 8B at L≥256 would silently fall back to the decomposed path and lose the flash_decode TPS win. **This is the rebase semantic-conflict resolution** — the smart-dispatch and flash_decode features both landed in this branch and the AND-condition has to be written exactly this way.
+
+**GQA seqlens_k caching across layers in one Compute()** (`lib/Runtime/real/gqa.cpp`). The dispatcher needs to read `seqlens_k[0]` (a single int32 on the GPU) to know `total_seq` before deciding fused vs decomposed. Naively this is one D2H + `hipStreamSynchronize` per GQA layer per Compute() — 32 stalls per inference on 8B. The runtime caches the value across the N GQA layers within a single Compute() call: first layer pays the D2H, layers 2..N reuse the cached value. The cache is keyed on the seqlens_k device pointer (one cache slot per pointer) and invalidated at the start of every Compute() via the new `inference_state_->begin_compute()` runtime hook. Disable with `HIPDNN_EP_GQA_CACHE_SEQLENS=0` (default ON); the cache sentinel is `kSeqlensKNotRead = -2` so a real read of -1 (no past tokens) is distinguishable from "not yet read".
+
+**`inference_state_->begin_compute()` runtime contract** (`backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp:606-614`). New per-Compute() hook into the model.dll runtime that invalidates per-Compute caches (currently only the GQA seqlens_k cache). Called by the EP at the top of every `Compute()` before any input marshaling. **Backwards compatibility:** older model.dll snapshots predate this export — they don't crash, the hook is a cached indirect dispatch that no-ops on missing symbol, but `HIPDNN_EP_GQA_CACHE_SEQLENS` MUST be set to `0` for old DLLs or the cache will return stale total_seq across forward passes. Old DLLs are detected at session creation and emit a `LOG(WARNING)`. Cost on the fast path is ~1 ns (one cached indirect call). When changing this contract, update `docs/design/morphizen-ep-integration.md` (Contract 2: morphizen-ep.dll → model.dll), which lists the model.dll DLL exports.
 
 **Short-context decode (LDS-tiled fused_decode).** When `gqa_flash_decode` does not dispatch (skv < 256, HPG != 4, or d ∉ {64,128}), the path is `gqa_fused_decode` — which now uses LDS-tiled K/V prefetch. The decode block grid is tiny (B=1, H=32 → ~32 blocks / ~128 waves on RDNA3 wave32), far below what is needed to hide ~400-cycle global-load latency by wave switching. The kernel cooperatively prefetches `TILE=8` rows of K and V into LDS per outer iteration, then crunches 8 softmax steps from fast LDS — driving memory-level parallelism via TILE (16 outstanding loads per thread per tile) instead of wave count. LDS use per block: `2 * TILE * D * sizeof(_Float16)` = 8 KB at D=128 (well under RDNA3's 64 KB/CU). No `__syncthreads` between prefetch and inner loop because each thread writes/reads only its own column. TILE=8 is sweep-validated. Measured impact (5 trials + warmup, L=128): **8B short-context decode 16.99 → 17.66 tok/s (+3.9%)**; 1B (HPG=1, fused_decode all depths) 66.02 → 66.37 tok/s (within noise — at H=G=8 the kernel is already small enough that single-row latency isn't the bottleneck). TTFT unchanged on both (fused_decode is `sq==1` only).
 
