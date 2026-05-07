@@ -446,7 +446,8 @@ private:
         {"hipdnn_ep_tensor_buffer_get_rank", i64, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_size_bytes", i64, {ptr}},
         {"hipdnn_ep_state_init_with_fs", i32, {ptr, ptr, ptr, i64}},
-        {"hipdnn_ep_stream_sync", i32, {ptr}},
+        {"hipdnn_ep_state_reset_error_flag", i32, {ptr}},
+        {"hipdnn_ep_state_read_and_clear_error_flag", i32, {ptr}},
     };
   }
 
@@ -710,12 +711,14 @@ private:
     auto freeInputFunc =
         module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_tensor_free_input");
 
-    auto streamSyncFunc =
-        module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_stream_sync");
     auto getGpuPtrFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
         "hipdnn_ep_tensor_buffer_get_gpu_ptr");
     auto getShapePtrFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
         "hipdnn_ep_tensor_buffer_get_shape_ptr");
+    auto resetErrorFlagFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        "hipdnn_ep_state_reset_error_flag");
+    auto readErrorFlagFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        "hipdnn_ep_state_read_and_clear_error_flag");
 
     Value errorCodePtr =
         LLVM::AllocaOp::create(builder, loc, ptrType, i32Type, c1_i64, 0);
@@ -845,6 +848,10 @@ private:
       LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
     }
 
+    // Reset kernel-side runtime error flag before graph execution.
+    emitErrorCheckedCall(builder, loc, resetErrorFlagFunc, ValueRange{state},
+                         errorCodePtr, errorCleanupBlock, funcOp);
+
     // Call @main_graph with arrays of pointers
     Block *mainSuccessBlock;
 
@@ -873,8 +880,9 @@ private:
                            errorCleanupBlock, funcOp);
     }
 
-    // Synchronize GPU stream (prints PERF timing + per-op profile when enabled)
-    emitErrorCheckedCall(builder, loc, streamSyncFunc, ValueRange{state},
+    // Read aggregated device-side runtime error flag (no extra hot-path sync in
+    // operator wrappers; check occurs at interface boundary).
+    emitErrorCheckedCall(builder, loc, readErrorFlagFunc, ValueRange{state},
                          errorCodePtr, errorCleanupBlock, funcOp);
 
     // Free input tensors

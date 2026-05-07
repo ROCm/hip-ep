@@ -217,8 +217,12 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->workspace_size = 0;
   state->gqa_gemm_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
+  state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
+  state->seqlens_k_cached_valid = false;
+  state->seqlens_k_cached_val = 0;
+  state->seqlens_k_cached_ptr = nullptr;
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -273,6 +277,31 @@ static int initialize_state_handles(RuntimeState **out_state) {
   }
 
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
+
+  // Allocate device-side error flag used by kernels for runtime error
+  // propagation (e.g., Range delta==0).
+  if (hipMalloc((void **)&state->device_error_flag, sizeof(int)) !=
+      hipSuccess) {
+    fprintf(stderr, "Failed to allocate device error flag\n");
+    hipblasLtDestroy(state->hipblas_handle);
+    miopenDestroy(state->miopen_handle);
+    if (state->stream)
+      HIP_CLEANUP(hipStreamDestroy(state->stream));
+    free(state);
+    return 10;
+  }
+  if (hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream) !=
+      hipSuccess) {
+    fprintf(stderr, "Failed to initialize device error flag\n");
+    HIP_CLEANUP(hipFree(state->device_error_flag));
+    state->device_error_flag = nullptr;
+    hipblasLtDestroy(state->hipblas_handle);
+    miopenDestroy(state->miopen_handle);
+    if (state->stream)
+      HIP_CLEANUP(hipStreamDestroy(state->stream));
+    free(state);
+    return 11;
+  }
 
   *out_state = state;
   return 0;
@@ -811,6 +840,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->workspace));
   }
 
+  if (state->device_error_flag) {
+    HIP_CLEANUP(hipFree(state->device_error_flag));
+  }
+
   // Free memory pool (if allocated)
   if (state->pool_base) {
     HIP_CLEANUP(hipFree(state->pool_base));
@@ -898,6 +931,26 @@ void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
 
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
+}
+
+// Per-Compute() cache invalidation hook. Today this only resets the GQA
+// seqlens_k cache; future per-forward-pass caches should be cleared here
+// as well so the EP-side hook stays a single call.
+//
+// __declspec(dllexport) matches the convention in real/test_hip_from_dll.cpp
+// (belt-and-suspenders with the .def export list in CompilerDriver.cpp) and
+// guarantees the symbol survives LLVM optimization in the compiled
+// model.dll, which dlsym/GetProcAddress resolves it from.
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        void hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
+  if (!state) {
+    return;
+  }
+  state->seqlens_k_cached_valid = false;
+  state->seqlens_k_cached_ptr = nullptr;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1034,6 +1087,43 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
       "[workspace] Allocated shared workspace: %zu bytes (requested %zu)\n",
       alloc_size, needed_size);
   return 0;
+}
+
+void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
+  return state ? static_cast<void *>(state->device_error_flag) : nullptr;
+}
+
+int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
+  if (!state || !state->device_error_flag || !state->stream) {
+    fprintf(stderr, "hipdnn_ep_state_reset_error_flag: invalid state\n");
+    return -1;
+  }
+  hipError_t err =
+      hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
+  return (err == hipSuccess) ? 0 : -1;
+}
+
+int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
+  if (!state || !state->device_error_flag || !state->stream) {
+    fprintf(stderr,
+            "hipdnn_ep_state_read_and_clear_error_flag: invalid state\n");
+    return -1;
+  }
+
+  int host_error = 0;
+  hipError_t err =
+      hipMemcpyAsync(&host_error, state->device_error_flag, sizeof(int),
+                     hipMemcpyDeviceToHost, state->stream);
+  if (err != hipSuccess)
+    return -1;
+  err = hipStreamSynchronize(state->stream);
+  if (err != hipSuccess)
+    return -1;
+  if (host_error != 0)
+    return host_error;
+
+  err = hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
+  return (err == hipSuccess) ? 0 : -1;
 }
 
 } // extern "C"
