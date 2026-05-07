@@ -109,23 +109,45 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
 
-  void *d_expert_indices = nullptr;
-  void *d_expert_weights = nullptr;
-  void *d_gather_buf = nullptr;
-  void *d_fc1_buf = nullptr;
-  void *d_act_buf = nullptr;
-  void *d_fc2_buf = nullptr;
-  void *d_token_ids = nullptr;
-  void *d_token_wts = nullptr;
+  // Per-state grow-on-demand scratch in place of 8 hipMalloc/8 hipFree per call.
+  // Sub-buffers are 64-byte aligned (matches GPU pool alignment, gives each
+  // sub-buffer its own cache line). The buffer grows when num_tokens / sizes
+  // exceed the cached capacity, never shrinks; freed in state cleanup.
+  auto align_up_64 = [](size_t s) -> size_t { return (s + 63) & ~size_t(63); };
+  size_t sz_expert_indices = align_up_64(num_tokens * k * sizeof(int32_t));
+  size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
+  size_t sz_gather_buf = align_up_64(num_tokens * hidden_size * elem_size);
+  size_t sz_fc1_buf = align_up_64(num_tokens * fusion_inter * elem_size);
+  size_t sz_act_buf = align_up_64(num_tokens * inter_size * elem_size);
+  size_t sz_fc2_buf = align_up_64(num_tokens * hidden_size * elem_size);
+  size_t sz_token_ids = align_up_64(num_tokens * sizeof(int32_t));
+  size_t sz_token_wts = align_up_64(num_tokens * elem_size);
 
-  HIP_CHECK(hipMalloc(&d_expert_indices, num_tokens * k * sizeof(int32_t)));
-  HIP_CHECK(hipMalloc(&d_expert_weights, num_tokens * k * elem_size));
-  HIP_CHECK(hipMalloc(&d_gather_buf, num_tokens * hidden_size * elem_size));
-  HIP_CHECK(hipMalloc(&d_fc1_buf, num_tokens * fusion_inter * elem_size));
-  HIP_CHECK(hipMalloc(&d_act_buf, num_tokens * inter_size * elem_size));
-  HIP_CHECK(hipMalloc(&d_fc2_buf, num_tokens * hidden_size * elem_size));
-  HIP_CHECK(hipMalloc(&d_token_ids, num_tokens * sizeof(int32_t)));
-  HIP_CHECK(hipMalloc(&d_token_wts, num_tokens * elem_size));
+  size_t off_expert_indices = 0;
+  size_t off_expert_weights = off_expert_indices + sz_expert_indices;
+  size_t off_gather_buf = off_expert_weights + sz_expert_weights;
+  size_t off_fc1_buf = off_gather_buf + sz_gather_buf;
+  size_t off_act_buf = off_fc1_buf + sz_fc1_buf;
+  size_t off_fc2_buf = off_act_buf + sz_act_buf;
+  size_t off_token_ids = off_fc2_buf + sz_fc2_buf;
+  size_t off_token_wts = off_token_ids + sz_token_ids;
+  size_t total_scratch = off_token_wts + sz_token_wts;
+
+  if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
+    fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
+            total_scratch);
+    return -1;
+  }
+  char *scratch_base =
+      static_cast<char *>(hipdnn_ep_state_get_qmoe_scratch(state));
+  void *d_expert_indices = scratch_base + off_expert_indices;
+  void *d_expert_weights = scratch_base + off_expert_weights;
+  void *d_gather_buf = scratch_base + off_gather_buf;
+  void *d_fc1_buf = scratch_base + off_fc1_buf;
+  void *d_act_buf = scratch_base + off_act_buf;
+  void *d_fc2_buf = scratch_base + off_fc2_buf;
+  void *d_token_ids = scratch_base + off_token_ids;
+  void *d_token_wts = scratch_base + off_token_wts;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -136,13 +158,45 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                   normalize_routing_weights, elem_size));
 
   {
-    std::vector<int32_t> h_indices(num_tokens * k);
-    std::vector<char> h_weights(num_tokens * k * elem_size);
+    // Pinned host scratch holds the D2H readback of expert routing decisions
+    // and the per-expert (ids, weights) staging for H2D back to the GPU. Sized
+    // for one Compute(); reused across calls. Layout (64-byte aligned):
+    //   [h_indices : num_tokens*k * int32]
+    //   [h_weights : num_tokens*k * elem_size]
+    //   [h_ids     : num_tokens*k * int32]    (worst-case: all tokens to one expert)
+    //   [h_wts_e   : num_tokens*k * elem_size]
+    // hipMemcpyAsync into pageable memory silently falls back to a synchronous
+    // staging copy on Windows; pinned (hipHostMalloc) memory enables the true
+    // async DMA path that can overlap with prior in-flight kernel work.
+    auto align_up_64h = [](size_t s) -> size_t {
+      return (s + 63) & ~size_t(63);
+    };
+    size_t hsz_indices = align_up_64h(num_tokens * k * sizeof(int32_t));
+    size_t hsz_weights = align_up_64h(num_tokens * k * elem_size);
+    size_t hsz_ids = align_up_64h(num_tokens * k * sizeof(int32_t));
+    size_t hsz_wts_e = align_up_64h(num_tokens * k * elem_size);
+    size_t hoff_indices = 0;
+    size_t hoff_weights = hoff_indices + hsz_indices;
+    size_t hoff_ids = hoff_weights + hsz_weights;
+    size_t hoff_wts_e = hoff_ids + hsz_ids;
+    size_t total_host = hoff_wts_e + hsz_wts_e;
 
-    HIP_CHECK(hipMemcpyAsync(h_indices.data(), d_expert_indices,
+    if (hipdnn_ep_state_ensure_qmoe_host_scratch(state, total_host) != 0) {
+      fprintf(stderr, "wrap_qmoe: ensure_qmoe_host_scratch(%zu) failed\n",
+              total_host);
+      return -1;
+    }
+    char *host_base =
+        static_cast<char *>(hipdnn_ep_state_get_qmoe_host_scratch(state));
+    int32_t *h_indices = reinterpret_cast<int32_t *>(host_base + hoff_indices);
+    char *h_weights = host_base + hoff_weights;
+    int32_t *h_ids_base = reinterpret_cast<int32_t *>(host_base + hoff_ids);
+    char *h_wts_e_base = host_base + hoff_wts_e;
+
+    HIP_CHECK(hipMemcpyAsync(h_indices, d_expert_indices,
                              num_tokens * k * sizeof(int32_t),
                              hipMemcpyDeviceToHost, hip_stream));
-    HIP_CHECK(hipMemcpyAsync(h_weights.data(), d_expert_weights,
+    HIP_CHECK(hipMemcpyAsync(h_weights, d_expert_weights,
                              num_tokens * k * elem_size, hipMemcpyDeviceToHost,
                              hip_stream));
     HIP_CHECK(hipStreamSynchronize(hip_stream));
@@ -176,20 +230,20 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         continue;
       }
 
-      std::vector<int32_t> h_ids(count);
-      std::vector<char> h_wts_e(count * elem_size);
+      // Reuse pinned host scratch sub-buffers from above (sized for the
+      // worst-case num_tokens*k entries; per-expert count <= num_tokens*k).
+      int32_t *h_ids = h_ids_base;
+      char *h_wts_e = h_wts_e_base;
       for (int64_t i = 0; i < count; i++) {
         h_ids[i] = expert_tokens[e][i].token_id;
         int32_t slot = expert_tokens[e][i].slot;
         int64_t src_off = (h_ids[i] * k + slot) * elem_size;
-        memcpy(h_wts_e.data() + i * elem_size, h_weights.data() + src_off,
-               elem_size);
+        memcpy(h_wts_e + i * elem_size, h_weights + src_off, elem_size);
       }
 
-      HIP_CHECK(hipMemcpyAsync(d_token_ids, h_ids.data(),
-                               count * sizeof(int32_t), hipMemcpyHostToDevice,
-                               hip_stream));
-      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e.data(), count * elem_size,
+      HIP_CHECK(hipMemcpyAsync(d_token_ids, h_ids, count * sizeof(int32_t),
+                               hipMemcpyHostToDevice, hip_stream));
+      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e, count * elem_size,
                                hipMemcpyHostToDevice, hip_stream));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
@@ -320,57 +374,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   }
 
 cleanup:
-  if (d_expert_indices) {
-    hipError_t err = hipFree(d_expert_indices);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_expert_indices: %d\n",
-              err);
-    }
-  }
-  if (d_expert_weights) {
-    hipError_t err = hipFree(d_expert_weights);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_expert_weights: %d\n",
-              err);
-    }
-  }
-  if (d_gather_buf) {
-    hipError_t err = hipFree(d_gather_buf);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_gather_buf: %d\n", err);
-    }
-  }
-  if (d_fc1_buf) {
-    hipError_t err = hipFree(d_fc1_buf);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_fc1_buf: %d\n", err);
-    }
-  }
-  if (d_act_buf) {
-    hipError_t err = hipFree(d_act_buf);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_act_buf: %d\n", err);
-    }
-  }
-  if (d_fc2_buf) {
-    hipError_t err = hipFree(d_fc2_buf);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_fc2_buf: %d\n", err);
-    }
-  }
-  if (d_token_ids) {
-    hipError_t err = hipFree(d_token_ids);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_token_ids: %d\n", err);
-    }
-  }
-  if (d_token_wts) {
-    hipError_t err = hipFree(d_token_wts);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_token_wts: %d\n", err);
-    }
-  }
-
+  // Sub-buffers above (d_expert_indices ... d_token_wts) are views into
+  // RuntimeState->qmoe_scratch -- owned by the runtime state, freed in
+  // hipdnn_ep_state_cleanup. Do NOT hipFree them here.
   if (result == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: completed successfully\n");
   }
