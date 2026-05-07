@@ -31,7 +31,7 @@ jobs:
       LLVM_TAG: llvm-22.1.0-release
       FLATBUFFERS_TAG: flatbuffers-25.12.19-release
       PROTO_TAG: protobuf-34.0-release
-      ONNXRUNTIME_VERSION: "1.24.3"
+      ONNXRUNTIME_VERSION: "1.25.1"
       GTEST_VERSION: "1.15.0"
       THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       SCCACHE_GHA_ENABLED: "true"
@@ -196,7 +196,7 @@ jobs:
           cp "$DML_DLL" "${{ runner.workspace }}/prebuilt-local/bin/"
           # Cache the cp314 ORT Python wheel inside prebuilt-local so it
           # rides the same cache key as the rest of the ORT artifacts.
-          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.24.3-cp314-cp314-win_amd64.whl
+          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
           ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
             -name "onnxruntime_directml-*.whl" -type f | head -1)
           if [ -z "$ORT_WHEEL" ]; then
