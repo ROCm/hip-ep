@@ -149,7 +149,7 @@ def _ensure_model():
 
 def _ensure_fixed_model(seq_len, kv_len):
     _ensure_model()
-    return ensure_fixed_model(_MODEL_DIR, _ONNX_FILE, seq_len, kv_len)
+    return ensure_fixed_model(_MODEL_DIR, _ONNX_FILE, _DATA_FILE, seq_len, kv_len)
 
 
 def _make_cfg(max_seq_len):

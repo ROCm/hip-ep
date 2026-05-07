@@ -8,7 +8,9 @@ Covers:
 - ORT-only: fixed/dynamic shapes, prefill/decode, latency + accuracy vs CPU
 - OGA: generation latency, accuracy, share_buffer modes, shape switching
 
-Model: Meta-Llama-3.1-8B-Instruct (INT4, 32 layers, 8 KV heads, head_dim=128).
+Model: amd/Llama-3.1-8B-Instruct-awq-g128-int4-onnx-directml
+(AWQ INT4, MatMulNBits block_size=128, symmetric — no zero_points,
+32 layers, 8 KV heads, head_dim=128).
 All MorphiZen EP tests use IOBinding with device memory.
 
 Test order matters: DML tests run first (before EP registration), then EP tests,
@@ -60,12 +62,12 @@ from conftest import (
 
 # ── Model config ────────────────────────────────────────────────────────────
 
-_MODEL_DIR = REPO_ROOT / "models" / "Meta-Llama-3.1-8B-Instruct"
+_MODEL_DIR = REPO_ROOT / "models" / "Llama-3.1-8B-Instruct-awq-g128-int4"
 _ONNX_FILE = "model.onnx"
 _DATA_FILE = "model.onnx.data"
 _HF_BASE = (
-    "https://huggingface.co/onnx-community/"
-    "Meta-Llama-3.1-8B-Instruct-ONNX-DirectML-GenAI-INT4/resolve/main"
+    "https://huggingface.co/amd/"
+    "Llama-3.1-8B-Instruct-awq-g128-int4-onnx-directml/resolve/main"
 )
 
 NUM_LAYERS = 32
@@ -105,7 +107,7 @@ def _ensure_model():
 
 def _ensure_fixed_model(seq_len, kv_len):
     _ensure_model()
-    return ensure_fixed_model(_MODEL_DIR, _ONNX_FILE, seq_len, kv_len)
+    return ensure_fixed_model(_MODEL_DIR, _ONNX_FILE, _DATA_FILE, seq_len, kv_len)
 
 
 def _make_cfg(max_seq_len):
@@ -684,7 +686,7 @@ def _ensure_pipeline_sliding_oga_files(window_size, kv_len):
     pipeline_dir = (
         REPO_ROOT
         / "models"
-        / f"Meta-Llama-3.1-8B-Instruct-Pipeline-p{window_size}m{kv_len}"
+        / f"Llama-3.1-8B-Instruct-awq-g128-int4-Pipeline-p{window_size}m{kv_len}"
     )
     config_dict = make_pipeline_sliding_genai_config(
         window_size=window_size,

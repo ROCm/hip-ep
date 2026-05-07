@@ -437,9 +437,24 @@ def ensure_model(model_dir, onnx_file, data_file, hf_base):
     return str(onnx_path)
 
 
-def ensure_fixed_model(model_dir, onnx_file, seq_len, kv_len):
+def ensure_fixed_model(model_dir, onnx_file, data_file, seq_len, kv_len):
+    """Materialize a fixed-shape ONNX next to (not inside) the dynamic model dir.
+
+    External weights are hardlinked (or copied as fallback) into the sibling
+    `<model_dir>-fixed/` so the rewritten ONNX's external_data refs resolve.
+    Keeping the dynamic model dir free of test-derived `model_fixed_kv*_sq*.onnx`
+    leftovers — same hygiene as `ensure_pipeline_dir`.
+    """
+    fixed_dir = model_dir.parent / f"{model_dir.name}-fixed"
+    fixed_dir.mkdir(parents=True, exist_ok=True)
+    weights_dst = fixed_dir / data_file
+    if not weights_dst.exists():
+        try:
+            os.link(model_dir / data_file, weights_dst)
+        except OSError:
+            shutil.copy2(model_dir / data_file, weights_dst)
     name = f"{onnx_file.rsplit('.', 1)[0]}_fixed_kv{kv_len}_sq{seq_len}.onnx"
-    dst = model_dir / name
+    dst = fixed_dir / name
     if not dst.exists():
         dim_map = make_dim_map(seq_len, kv_len)
         fix_shapes(model_dir / onnx_file, dst, dim_map)
