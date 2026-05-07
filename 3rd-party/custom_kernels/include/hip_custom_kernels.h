@@ -447,6 +447,42 @@ int hip_range(
     void* device_error_flag);
 
 /* =========================================================================
+ * Transpose (Generic N-D Permutation)
+ * =========================================================================
+ *
+ * Permutes the dimensions of `input` according to `perm` and writes the
+ * result to `output`.  Implements full ONNX Transpose semantics: any valid
+ * permutation of [0, rank) is supported.  For each output linear index i:
+ *   - decompose i into output coordinates using output shape derived from
+ *     input_shape[perm[k]];
+ *   - map to input coordinates via the supplied `perm`;
+ *   - linearize using the row-major strides of input_shape and copy.
+ *
+ * Parameters:
+ *   stream             - hipStream_t cast to void*
+ *   input              - GPU pointer to source tensor (contiguous, row-major)
+ *   output             - GPU pointer to destination tensor (contiguous,
+ *                        row-major after permutation)
+ *   rank               - number of dimensions (must be in [1, 8])
+ *   input_shape        - host pointer to int64_t[rank] with the input shape
+ *   perm               - host pointer to int64_t[rank] permutation; output
+ *                        dim i corresponds to input dim perm[i]
+ *   num_elements       - total elements in the tensor (product of input_shape)
+ *   element_size_bytes - 1, 2, 4, or 8 (selects the typed memcpy kernel)
+ *
+ * Returns: 0 on success, non-zero hipError_t / -1 on failure.
+ */
+int hip_transpose(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t rank,
+    const int64_t* input_shape,
+    const int64_t* perm,
+    int64_t num_elements,
+    int element_size_bytes);
+
+/* =========================================================================
  * MatMulNBits (Fused Dequant + MatMul)
  * =========================================================================
  *
