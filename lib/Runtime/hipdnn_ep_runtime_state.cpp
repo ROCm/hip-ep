@@ -218,6 +218,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->host_scratch_base = nullptr;
   state->host_scratch_size = 0;
   state->gqa_gemm_cache = nullptr;
+  state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
@@ -886,6 +887,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->gqa_gemm_cache) {
     hipdnn_ep_gqa_gemm_cache_destroy(state->gqa_gemm_cache);
     state->gqa_gemm_cache = nullptr;
+  }
+
+  // Free MatMulNBits asym zero_points unpack cache
+  if (state->zp_unpack_cache) {
+    hipdnn_ep_zp_unpack_cache_destroy(state->zp_unpack_cache);
+    state->zp_unpack_cache = nullptr;
   }
 
   // Free op profiling state

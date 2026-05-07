@@ -512,7 +512,27 @@ int hip_matmul_nbits(
     int64_t bits,
     int64_t block_size,
     int64_t element_size_bytes,
-    int64_t zp_elem_size);  // 1=uint8 packed nibbles, 2=fp16
+    int64_t zp_elem_size,    // 1=uint8 packed nibbles, 2=fp16
+    // Optional pre-unpacked zero_points buffers (matmul_nbits.cpp pointer-keyed
+    // cache). When non-null, the kernel skips its own unpack/convert kernel
+    // launches and reads from these directly. zp_u8 must be valid whenever
+    // zero_points is non-null and zp_elem_size==1; zp_fp16 is only consumed
+    // by the WMMA / col-major-GEMV (M>1) paths and may be null otherwise.
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16);
+
+/* Stand-alone launchers for the zero_points unpack/convert kernels, used by
+ * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
+ *
+ *   zp_packed: GPU [N, ceil(K/block_size/2)] packed nibbles
+ *   dst_*:     GPU output buffer, caller-allocated
+ *   N:         output rows
+ *   groups_k:  K / block_size (round-up)
+ */
+void hip_matmul_nbits_unpack_zp_u8(
+    void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
+void hip_matmul_nbits_convert_zp_fp16(
+    void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
 
 /* =========================================================================
  * QMoE Sub-Kernels

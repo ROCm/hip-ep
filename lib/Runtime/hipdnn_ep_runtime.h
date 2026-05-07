@@ -407,6 +407,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 // GQA GEMM cache lifecycle (managed by RuntimeState)
 void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
 
+// MatMulNBits asym zero_points unpack cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
+
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
 //

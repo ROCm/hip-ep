@@ -591,10 +591,15 @@ static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 
 static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
-                                bool col_major = false) {
+                                bool col_major, bool has_zp) {
+    // has_zp must be in the key: the asym path executes one extra read_zp +
+    // fp32 mul per K-tile per N-tile, so its optimal (threads, tile_n) can
+    // differ from the sym tune. Without it, a process that loads both sym and
+    // asym variants would silently reuse the wrong autotune result for one of
+    // them. (WMMA path's autotune key already includes has_zp — keep parity.)
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (col_major ? "1" : "0");
+           (col_major ? "1" : "0") + "_" + (has_zp ? "1" : "0");
 }
 
 static int getOrTuneGemvConfig(
@@ -609,7 +614,8 @@ static int getOrTuneGemvConfig(
     // M=1: col_major and row_major layouts are identical (single row) —
     // reuse the row_major autotune result to avoid a redundant tuning pass.
     bool effective_col_major = (M == 1) ? false : col_major;
-    std::string key = gemvCacheKey(M, N, K, bs, effective_col_major);
+    std::string key = gemvCacheKey(M, N, K, bs, effective_col_major,
+                                   /*has_zp=*/zp != nullptr);
 
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
@@ -1638,66 +1644,39 @@ __global__ void unpack_zp_nibbles_to_u8_kernel(
         out[n * k_blocks + g_lo + 1] = p >> 4;
 }
 
-static uint8_t*  g_zp_u8_buf = nullptr;
-static size_t    g_zp_u8_buf_elems = 0;
-
-static uint8_t* ensureZpU8Buffer(size_t need) {
-    if (g_zp_u8_buf && g_zp_u8_buf_elems >= need) return g_zp_u8_buf;
-    if (g_zp_u8_buf) hipFree(g_zp_u8_buf);
-    hipMalloc(&g_zp_u8_buf, need);
-    g_zp_u8_buf_elems = need;
-    return g_zp_u8_buf;
-}
-
-static const uint8_t* unpackZpNibblesToU8(
-    hipStream_t stream,
-    const void* zp_packed_ptr,
-    int N, int groups_k)
+// Stand-alone launchers (declared in hip_custom_kernels.h). Used by the
+// pointer-keyed cache in lib/Runtime/real/matmul_nbits.cpp so that the
+// unpack/convert kernels run at most once per (zero_points pointer) over
+// the lifetime of a RuntimeState — instead of once per matmul_nbits call,
+// which on 8B asym decode is ~225 redundant launches per Compute().
+extern "C" void hip_matmul_nbits_unpack_zp_u8(
+    void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k)
 {
     int packed_cols = (groups_k + 1) / 2;
-    size_t out_elems = static_cast<size_t>(N) * groups_k;
-    uint8_t* out = ensureZpU8Buffer(out_elems);
-
     constexpr int THR = 256;
     dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
               static_cast<unsigned>(N));
     dim3 block(THR);
     hipLaunchKernelGGL(unpack_zp_nibbles_to_u8_kernel,
-                       grid, block, 0, stream,
-                       static_cast<const uint8_t*>(zp_packed_ptr),
-                       out, N, groups_k, packed_cols);
-    return out;
+                       grid, block, 0, static_cast<hipStream_t>(stream),
+                       static_cast<const uint8_t*>(zp_packed),
+                       static_cast<uint8_t*>(dst_u8),
+                       N, groups_k, packed_cols);
 }
 
-static _Float16* g_zp_fp16_buf = nullptr;
-static size_t    g_zp_fp16_buf_elems = 0;
-
-static _Float16* ensureZpFp16Buffer(size_t need) {
-    if (g_zp_fp16_buf && g_zp_fp16_buf_elems >= need) return g_zp_fp16_buf;
-    if (g_zp_fp16_buf) hipFree(g_zp_fp16_buf);
-    hipMalloc(&g_zp_fp16_buf, need * sizeof(_Float16));
-    g_zp_fp16_buf_elems = need;
-    return g_zp_fp16_buf;
-}
-
-static const _Float16* convertZpToFp16(
-    hipStream_t stream,
-    const void* zp_packed_ptr,
-    int N, int groups_k)
+extern "C" void hip_matmul_nbits_convert_zp_fp16(
+    void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k)
 {
     int packed_cols = (groups_k + 1) / 2;
-    size_t fp16_elems = static_cast<size_t>(N) * groups_k;
-    _Float16* zp_fp16 = ensureZpFp16Buffer(fp16_elems);
-
     constexpr int THR = 256;
     dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
               static_cast<unsigned>(N));
     dim3 block(THR);
     hipLaunchKernelGGL(unpack_zp_u8_to_fp16_kernel,
-                       grid, block, 0, stream,
-                       static_cast<const unsigned char*>(zp_packed_ptr),
-                       zp_fp16, N, groups_k, packed_cols);
-    return zp_fp16;
+                       grid, block, 0, static_cast<hipStream_t>(stream),
+                       static_cast<const unsigned char*>(zp_packed),
+                       static_cast<_Float16*>(dst_fp16),
+                       N, groups_k, packed_cols);
 }
 
 extern "C" int hip_matmul_nbits(
@@ -1713,7 +1692,9 @@ extern "C" int hip_matmul_nbits(
     int64_t bits,
     int64_t block_size,
     int64_t element_size_bytes,
-    int64_t zp_elem_size) {
+    int64_t zp_elem_size,
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16) {
   if (bits != 4) {
     fprintf(stderr,
             "[custom_kernels] hip_matmul_nbits: only bits=4 supported, "
@@ -1738,17 +1719,24 @@ extern "C" int hip_matmul_nbits(
   //   - FP16 for WMMA and col-major GEMV paths (only when M > 1)
   //   - Individual uint8 for row-major GEMV and naive fallback paths
   // When zp_elem_size == 2 (FP16) or ZPs are NULL, no conversion needed.
+  // The runtime wrapper (lib/Runtime/real/matmul_nbits.cpp) caches the
+  // unpacked buffers per zero_points pointer and passes them via
+  // pre_unpacked_zp_{u8,fp16} so we skip the kernel launches here.
   const void* zp_for_fp16_paths = zero_points;
   const void* zp_for_u8_paths = zero_points;
-  bool wmma_data_format_pre = (batch_count == 1) && (K % 32 == 0);
   if (zero_points && zp_elem_size == 1) {
-    int ngk = static_cast<int>((K + block_size - 1) / block_size);
-    zp_for_u8_paths = unpackZpNibblesToU8(
-        hip_stream, zero_points, static_cast<int>(N), ngk);
-    if (wmma_data_format_pre && M > 1) {
-      zp_for_fp16_paths = convertZpToFp16(
-          hip_stream, zero_points, static_cast<int>(N), ngk);
+    if (!pre_unpacked_zp_u8) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits: pre_unpacked_zp_u8 is "
+              "required for asym (zp_elem_size==1) path\n");
+      return -1;
     }
+    zp_for_u8_paths = pre_unpacked_zp_u8;
+    // pre_unpacked_zp_fp16 may legitimately be null (the wrapper only fills
+    // it for the WMMA / col-major-GEMV-with-M>1 paths). The dispatch below
+    // only consumes zp_for_fp16_paths in those branches.
+    if (pre_unpacked_zp_fp16)
+      zp_for_fp16_paths = pre_unpacked_zp_fp16;
   }
 
   /* -------------------------------------------------------------------
