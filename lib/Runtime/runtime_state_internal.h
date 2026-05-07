@@ -62,6 +62,10 @@ struct RuntimeState {
   // Allocated in state_init, freed in state_cleanup.
   void *op_profile;
 
+  // Device-side error flag used by kernels to report runtime-invalid inputs.
+  // 0 = no error, non-zero = error code (currently -1).
+  int *device_error_flag;
+
   // hipDNN graph execution support.
   // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
   // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up

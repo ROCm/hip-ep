@@ -77,6 +77,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     TransposeOp::attachInterface<HipDstBufferizableModel<TransposeOp>>(*ctx);
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
+    RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);

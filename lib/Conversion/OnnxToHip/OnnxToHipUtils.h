@@ -146,6 +146,8 @@ void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateRangeConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir
