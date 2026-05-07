@@ -13,23 +13,20 @@ namespace {
 // Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
 //===----------------------------------------------------------------------===//
 
-/// True when \p axes is known at compile time (no per-inference axis values).
+/// True when the defining op of the axes value is compile-time known.
 ///
 /// After constant externalization, small onnx.Constant / arith.constant tensors
-/// become memref.get_global + bufferization.to_tensor (see OnnxToHip.cpp); those
-/// must still count as constant axes. Arbitrary ToTensor(alloc) is not.
-static bool axesValueIsCompileTimeKnown(mlir::Value axes) {
-  mlir::Operation *def = axes.getDefiningOp();
-  if (!def)
-    return false;
-  if (mlir::isa<mlir::arith::ConstantOp>(def) || def->hasAttr("value"))
+/// become memref.get_global + bufferization.to_tensor (see OnnxToHip.cpp);
+/// those must still count as constant axes. Arbitrary ToTensor(alloc) is not.
+static bool axesDefOpIsCompileTimeKnown(mlir::Operation *axesDefOp) {
+  if (mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
+      axesDefOp->hasAttr("value"))
     return true;
-  auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(def);
+  auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(axesDefOp);
   if (!toTensor)
     return false;
-  mlir::Value mem = toTensor.getMemref();
-  mlir::Operation *memDef = mem.getDefiningOp();
-  return memDef && mlir::isa<mlir::memref::GetGlobalOp>(memDef);
+  mlir::Operation *bufDef = toTensor.getBuffer().getDefiningOp();
+  return bufDef && mlir::isa<mlir::memref::GetGlobalOp>(bufDef);
 }
 
 /// Validate common requirements for Unsqueeze/Squeeze operations.
@@ -64,7 +61,7 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
     return rewriter.notifyMatchFailure(op, msg);
   }
 
-  if (!axesValueIsCompileTimeKnown(axes)) {
+  if (!axesDefOpIsCompileTimeKnown(axesDefOp)) {
     std::string msg =
         "axes must be compile-time constant (arith.constant, onnx.Constant, or "
         "memref.get_global + bufferization.to_tensor from constant "
