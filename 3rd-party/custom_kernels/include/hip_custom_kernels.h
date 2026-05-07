@@ -608,6 +608,117 @@ int hip_qmoe_scatter_add(
     int64_t element_size_bytes);
 
 /* =========================================================================
+ * Linear Attention Decode (Single-Token Recurrence, Prefill-Friendly)
+ * =========================================================================
+ *
+ * Performs one step of the linear attention recurrence for a single query
+ * token. Updates state in-place and writes the attention output for that
+ * token. The caller is expected to invoke this once per time step for
+ * prefill (seq_len > 1); no batching across the time dimension is
+ * performed inside the kernel.
+ *
+ * For each (batch, kv_head) pair, the recurrence is:
+ *   linear:       S = S + k (x) v
+ *   gated:        S = diag(exp(g)) * S + k (x) v
+ *   delta:        S = S + beta * k (x) (v - S^T k)
+ *   gated_delta:  S = diag(exp(g)) * S + beta * k (x) (v - diag(exp(g)) * S^T k)
+ *   output_h = scale * S^T q_h   (for each query head h mapped to this KV head)
+ *
+ * Input tensors are views into the packed [B, T, H*D] layout of the full
+ * sequence: query/key/value/output/decay/beta pointers must already point
+ * at the start of the current time step (i.e. the caller has pre-advanced
+ * the pointer by t * token_bytes). seq_len is the original T dimension
+ * of the packed layout and is used by the kernel to compute the per-batch
+ * stride (seq_len * H*D). Pass seq_len = 1 in the pure decode case where
+ * the tensors are already shaped [B, 1, H*D].
+ *
+ * Head counts are three-way and subject to the following divisibility
+ * constraints:
+ *   - n_k_heads | kv_num_heads
+ *       When n_k_heads < kv_num_heads multiple KV heads share the same key
+ *       head (mapping: h_k = h_kv * n_k_heads / kv_num_heads).
+ *   - Either q_num_heads % kv_num_heads == 0  (standard GQA, H_q >= H_kv)
+ *       or   kv_num_heads % q_num_heads == 0  (inverse GQA, H_q < H_kv)
+ *
+ * Parameters:
+ *   stream             - hipStream_t cast to void*
+ *   query              - GPU [batch, T, q_num_heads * head_dim_k]
+ *                        pointing at time step t
+ *   key                - GPU [batch, T, n_k_heads * head_dim_k]
+ *                        pointing at time step t
+ *                        n_k_heads may differ from kv_num_heads; it must
+ *                        divide kv_num_heads.
+ *   value              - GPU [batch, T, kv_num_heads * head_dim_v]
+ *                        pointing at time step t
+ *   decay              - GPU decay tensor in log-space, or nullptr.
+ *                        Layout is selected by decay_per_key_dim:
+ *                          1 -> [batch, T, kv_num_heads * head_dim_k]
+ *                               per-key-dimension decay (GLA / RWKV-6)
+ *                          0 -> [batch, T, kv_num_heads]
+ *                               per-head scalar decay (DeltaNet / RetNet),
+ *                               broadcast across the head_dim_k axis.
+ *                        Pointer must already be advanced to time step t.
+ *                        Required for gated and gated_delta modes.
+ *   beta               - GPU update-rate tensor, or nullptr.
+ *                        Layout is selected by beta_per_head:
+ *                          1 -> [batch, T, kv_num_heads]
+ *                               per-head update rate.
+ *                          0 -> [batch, T, 1]
+ *                               single scalar update rate per (batch, T),
+ *                               broadcast across all kv heads.
+ *                        Pointer must already be advanced to time step t.
+ *                        Required for delta and gated_delta modes.
+ *   state              - GPU [batch, kv_num_heads, head_dim_k, head_dim_v]
+ *                        Read/write. Must be pre-initialized (from past_state
+ *                        or zeros) before the first time step.
+ *   output             - GPU [batch, T, max(q_num_heads, kv_num_heads) *
+ *                             head_dim_v], pointing at time step t.
+ *                        Standard GQA: heads packed in Q-head order.
+ *                        Inverse GQA: heads packed in KV-head order.
+ *   B                  - batch dimension
+ *   seq_len            - length of the T dimension in the packed layout;
+ *                        used to compute per-batch stride. Use 1 when the
+ *                        tensors are already shaped [B, 1, H*D].
+ *   Hq                 - number of query heads
+ *   Hkv                - number of key/value state heads
+ *   Nk                 - number of key heads packed in the key tensor;
+ *                        must divide Hkv
+ *   dk                 - key dimension per head
+ *   dv                 - value dimension per head
+ *   scale              - output scaling factor (typically 1/sqrt(d_k))
+ *   update_rule        - 0=linear, 1=gated, 2=delta, 3=gated_delta
+ *   decay_per_key_dim  - decay layout flag (see `decay` above). Ignored when
+ *                        decay == nullptr. Any non-zero value is treated as 1.
+ *   beta_per_head      - beta  layout flag (see `beta`  above). Ignored when
+ *                        beta  == nullptr. Any non-zero value is treated as 1.
+ *   type               - element type enum: 0=float, 1=float16, 2=bfloat16
+ *                        (HIPDNN_EP_DATATYPE_* in hipdnn_ep_runtime.h)
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_linear_attention_decode(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    void* state,
+    void* output,
+    int64_t B,
+    int64_t seq_len,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
+    float scale,
+    int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
+    int64_t type);
+
+/* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
  *
