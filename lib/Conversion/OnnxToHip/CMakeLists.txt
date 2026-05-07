@@ -23,6 +23,7 @@ add_library(OnnxToHip STATIC
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
+  LinearAttentionConversion.cpp
   RangeConversion.cpp
 )
 
