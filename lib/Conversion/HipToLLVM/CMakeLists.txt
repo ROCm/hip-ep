@@ -25,6 +25,7 @@ add_library(HipToLLVM STATIC
   CausalConvWithStateLowering.cpp
   GemmLowering.cpp
   LinearAttentionLowering.cpp
+  WhereLowering.cpp
 )
 
 add_dependencies(HipToLLVM
