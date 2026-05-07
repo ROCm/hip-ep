@@ -465,7 +465,7 @@ void MiopenSoftmaxOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
-// TransposeOp: ins(input), outs(output), extra scalars: dim0, dim1
+// TransposeOp: ins(input), outs(output), attrs: perm
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange TransposeOp::getDpsInitsMutable() {
@@ -479,17 +479,37 @@ void TransposeOp::getEffects(
 }
 
 LogicalResult TransposeOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
-}
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
 
-ParseResult TransposeOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/1,
-                              /*extraScalars=*/2);
-}
+  // Determine input rank when available (ranked tensor or memref).
+  int64_t rank = -1;
+  if (auto t = dyn_cast<RankedTensorType>(getInput().getType()))
+    rank = t.getRank();
+  else if (auto m = dyn_cast<MemRefType>(getInput().getType()))
+    rank = m.getRank();
 
-void TransposeOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), {getDim0(), getDim1()}, {getInput()},
-                       {getOutput()});
+  ArrayAttr permAttr = getPerm();
+  if (rank >= 0 && static_cast<int64_t>(permAttr.size()) != rank)
+    return emitOpError("perm length (")
+           << permAttr.size() << ") must match input rank (" << rank << ")";
+
+  // perm must be a permutation of [0, rank).
+  llvm::SmallVector<bool> seen(permAttr.size(), false);
+  for (Attribute a : permAttr) {
+    auto intAttr = dyn_cast<IntegerAttr>(a);
+    if (!intAttr)
+      return emitOpError("perm must be a list of integers");
+    int64_t v = intAttr.getValue().getSExtValue();
+    if (v < 0 || v >= static_cast<int64_t>(permAttr.size()))
+      return emitOpError("perm value ") << v << " is out of range";
+    if (seen[v])
+      return emitOpError("perm must be a permutation (duplicate value ")
+             << v << ")";
+    seen[v] = true;
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

@@ -581,6 +581,16 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype);
 
+// Transpose operation wrapper (ONNX Transpose).
+// Permutes the dimensions of `input` according to `perm` and writes the
+// result to `output`.  `input_shape` and `perm` are host-side arrays of
+// length `rank`; `num_elements` is the product of `input_shape`.
+// `element_size_bytes` selects the kernel datapath (1/2/4/8 currently).
+int wrap_transpose(RuntimeState *state, const void *input, void *output,
+                   int64_t rank, const int64_t *input_shape,
+                   const int64_t *perm, int64_t num_elements,
+                   int64_t element_size_bytes);
+
 // ReduceSum operation wrapper
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,

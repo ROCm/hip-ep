@@ -36,9 +36,6 @@ func.func @attention_pipeline(
     %Wk: tensor<64x64xf32>,
     %Wv: tensor<64x64xf32>,
     %scale: tensor<f32>) -> tensor<2x64x64xf32> {
-  %c1 = arith.constant 1 : index
-  %c2 = arith.constant 2 : index
-
   // Q = X @ Wq  [B,S,D] @ [D,D] -> [B,S,D]
   %e0 = tensor.empty() : tensor<2x64x64xf32>
   %Q = hip.matmul(%ctx) ins(%X, %Wq : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e0 : tensor<2x64x64xf32>) : tensor<2x64x64xf32>
@@ -51,9 +48,9 @@ func.func @attention_pipeline(
   %e2 = tensor.empty() : tensor<2x64x64xf32>
   %V = hip.matmul(%ctx) ins(%X, %Wv : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e2 : tensor<2x64x64xf32>) : tensor<2x64x64xf32>
 
-  // KT = transpose(K, 1, 2)  [B,S,D] -> [B,D,S]
+  // KT = transpose(K, perm=[0,2,1])  [B,S,D] -> [B,D,S]
   %e3 = tensor.empty() : tensor<2x64x64xf32>
-  %KT = hip.transpose(%ctx, %c1, %c2) ins(%K : tensor<2x64x64xf32>) outs(%e3 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
+  %KT = hip.transpose(%ctx) ins(%K : tensor<2x64x64xf32>) outs(%e3 : tensor<2x64x64xf32>) {perm = [0, 2, 1]} : tensor<2x64x64xf32>
 
   // scores = Q @ KT  [B,S,D] @ [B,D,S] -> [B,S,S]
   %e4 = tensor.empty() : tensor<2x64x64xf32>
