@@ -13,6 +13,25 @@ namespace {
 // Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
 //===----------------------------------------------------------------------===//
 
+/// True when \p axes is known at compile time (no per-inference axis values).
+///
+/// After constant externalization, small onnx.Constant / arith.constant tensors
+/// become memref.get_global + bufferization.to_tensor (see OnnxToHip.cpp); those
+/// must still count as constant axes. Arbitrary ToTensor(alloc) is not.
+static bool axesValueIsCompileTimeKnown(mlir::Value axes) {
+  mlir::Operation *def = axes.getDefiningOp();
+  if (!def)
+    return false;
+  if (mlir::isa<mlir::arith::ConstantOp>(def) || def->hasAttr("value"))
+    return true;
+  auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(def);
+  if (!toTensor)
+    return false;
+  mlir::Value mem = toTensor.getMemref();
+  mlir::Operation *memDef = mem.getDefiningOp();
+  return memDef && mlir::isa<mlir::memref::GetGlobalOp>(memDef);
+}
+
 /// Validate common requirements for Unsqueeze/Squeeze operations.
 /// Requires: 2 operands (data, axes), ranked tensors, matching element types,
 /// and constant axes (dynamic axes would require runtime shape computation).
@@ -45,12 +64,11 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
     return rewriter.notifyMatchFailure(op, msg);
   }
 
-  bool isConstant = mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
-                    axesDefOp->hasAttr("value");
-  if (!isConstant) {
+  if (!axesValueIsCompileTimeKnown(axes)) {
     std::string msg =
-        "axes must be constant (arith.constant or onnx.Constant). "
-        "Dynamic axes would require runtime shape computation and "
+        "axes must be compile-time constant (arith.constant, onnx.Constant, or "
+        "memref.get_global + bufferization.to_tensor from constant "
+        "externalization). Dynamic axes need runtime shape computation and "
         "cannot use zero-cost tensor.";
     msg += tensorOpName;
     msg += " approach";
