@@ -275,12 +275,266 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
   }
 };
 
+//===----------------------------------------------------------------------===//
+// Split -> standard tensor ops (zero-cost slice views)
+//===----------------------------------------------------------------------===//
+
+/// onnx.Split -> tensor.extract_slice operations (zero-cost metadata
+/// operation).
+///
+/// Split divides a tensor into multiple chunks along a specified axis.
+/// This is a zero-cost operation: it creates views into the input tensor
+/// without copying data. We lower to standard MLIR tensor.extract_slice ops
+/// which bufferize to memref.subview (zero-copy alias) and then to LLVM
+/// pointer arithmetic. No HIP kernel is needed.
+struct SplitToStdTensor : public mlir::RewritePattern {
+  SplitToStdTensor(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Split", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    mlir::Value input = op->getOperand(0);
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    if (!inputType)
+      return rewriter.notifyMatchFailure(op, "expected ranked tensor type");
+
+    mlir::Location loc = op->getLoc();
+    int64_t inputRank = inputType.getRank();
+    unsigned numOutputs = op->getNumResults();
+
+    // Edge case: single output is identity operation
+    if (numOutputs == 1) {
+      rewriter.replaceOp(op, input);
+      return mlir::success();
+    }
+
+    // Extract axis attribute (default 0)
+    int64_t axis = 0;
+    if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+      axis = axisAttr.getSInt();
+
+    // Normalize negative axis
+    if (axis < 0)
+      axis += inputRank;
+    if (axis < 0 || axis >= inputRank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+
+    // Determine split mode: equal splits or custom splits
+    llvm::SmallVector<mlir::OpFoldResult> splitLengths;
+    bool isEqualSplit = true;
+
+    if (op->getNumOperands() == 2) {
+      // Check if second operand is onnx.NoValue (representing none/optional)
+      mlir::Value splitInput = op->getOperand(1);
+      auto splitDefOp = splitInput.getDefiningOp();
+
+      // Handle onnx.NoValue: treat as equal split
+      if (splitDefOp &&
+          splitDefOp->getName().getStringRef() == "onnx.NoValue") {
+        isEqualSplit = true;
+      } else {
+        // Custom splits: prefer compile-time constants when available, but
+        // also support runtime split-length tensors (e.g. externalized
+        // constants loaded via globals).
+        mlir::DenseElementsAttr splitAttr;
+        if (splitDefOp && mlir::isa<mlir::arith::ConstantOp>(splitDefOp))
+          if (auto constOp =
+                  mlir::dyn_cast<mlir::arith::ConstantOp>(splitDefOp))
+            splitAttr =
+                mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
+        if (!splitAttr && splitDefOp && splitDefOp->hasAttr("value"))
+          splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(
+              splitDefOp->getAttr("value"));
+
+        if (splitAttr) {
+          // Extract split lengths as index attributes
+          for (auto val : splitAttr.getValues<mlir::APInt>())
+            splitLengths.push_back(rewriter.getIndexAttr(val.getSExtValue()));
+
+          if (splitLengths.size() != numOutputs)
+            return rewriter.notifyMatchFailure(
+                op, "split lengths count must match number of outputs");
+
+          // Validate sum of splits equals axis dimension (if axis is static)
+          if (!inputType.isDynamicDim(axis)) {
+            int64_t axisDimSize = inputType.getDimSize(axis);
+            int64_t splitSum = 0;
+            for (const auto &length : splitLengths) {
+              if (auto attr =
+                      llvm::dyn_cast_if_present<mlir::Attribute>(length)) {
+                auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
+                if (intAttr) {
+                  splitSum += intAttr.getInt();
+                } else {
+                  splitSum = -1;
+                  break;
+                }
+              } else {
+                splitSum = -1;
+                break;
+              }
+            }
+            if (splitSum >= 0 && splitSum != axisDimSize) {
+              return rewriter.notifyMatchFailure(
+                  op, "sum of split lengths must equal axis dimension size");
+            }
+          }
+        } else {
+          // Runtime path: read split lengths element-by-element.
+          auto splitType =
+              mlir::dyn_cast<mlir::RankedTensorType>(splitInput.getType());
+          if (!splitType || splitType.getRank() != 1)
+            return rewriter.notifyMatchFailure(
+                op, "split input must be a rank-1 tensor");
+          if (!splitType.getElementType().isIntOrIndex())
+            return rewriter.notifyMatchFailure(
+                op, "split input element type must be integer or index");
+          if (!splitType.isDynamicDim(0) &&
+              splitType.getDimSize(0) != static_cast<int64_t>(numOutputs))
+            return rewriter.notifyMatchFailure(
+                op, "split lengths count must match number of outputs");
+
+          auto indexType = rewriter.getIndexType();
+          for (unsigned i = 0; i < numOutputs; ++i) {
+            mlir::Value idx =
+                rewriter.create<mlir::arith::ConstantIndexOp>(loc, i);
+            mlir::Value len = rewriter.create<mlir::tensor::ExtractOp>(
+                loc, splitInput, mlir::ValueRange{idx});
+            if (len.getType() != indexType)
+              len = rewriter.create<mlir::arith::IndexCastOp>(loc, indexType,
+                                                              len);
+            splitLengths.push_back(len);
+          }
+        }
+
+        isEqualSplit = false;
+      }
+    }
+
+    // Handle equal splits
+    if (isEqualSplit) {
+      mlir::Value axisDim =
+          rewriter.create<mlir::tensor::DimOp>(loc, input, axis);
+      mlir::Value numOutputsVal =
+          rewriter.create<mlir::arith::ConstantIndexOp>(loc, numOutputs);
+      mlir::Value chunkSize =
+          rewriter.create<mlir::arith::DivUIOp>(loc, axisDim, numOutputsVal);
+
+      // For equal splits: all outputs except possibly the last have size
+      // chunkSize The last output gets the remainder: axis_size -
+      // (num_outputs-1) * chunkSize
+      for (unsigned i = 0; i < numOutputs - 1; ++i)
+        splitLengths.push_back(chunkSize);
+
+      // Last chunk size = axis_size - sum(previous chunks)
+      // = axis_size - (num_outputs - 1) * chunkSize
+      // Note: numOutputs is always >= 2 here (single output case returns early)
+      mlir::Value numPrevChunks =
+          rewriter.create<mlir::arith::ConstantIndexOp>(loc, numOutputs - 1);
+      mlir::Value prevTotal =
+          rewriter.create<mlir::arith::MulIOp>(loc, chunkSize, numPrevChunks);
+      mlir::Value lastChunkSize =
+          rewriter.create<mlir::arith::SubIOp>(loc, axisDim, prevTotal);
+      splitLengths.push_back(lastChunkSize);
+    }
+
+    // Generate extract_slice for each output
+    llvm::SmallVector<mlir::Value> replacements;
+    mlir::OpFoldResult currentOffset = rewriter.getIndexAttr(0);
+
+    for (unsigned i = 0; i < numOutputs; ++i) {
+      auto outputType =
+          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(i).getType());
+      if (!outputType)
+        return rewriter.notifyMatchFailure(op, "expected ranked output type");
+
+      // Track the actual slice size used for this output (for offset
+      // calculation)
+      mlir::OpFoldResult actualSliceSize;
+
+      // Build offsets, sizes, strides arrays
+      llvm::SmallVector<mlir::OpFoldResult> offsets, sizes, strides;
+      for (int64_t dim = 0; dim < inputRank; ++dim) {
+        if (dim == axis) {
+          // Axis dimension: use computed offset and split length
+          offsets.push_back(currentOffset);
+
+          // For the size: if the output dimension is static, use static attr;
+          // otherwise use the dynamic value
+          if (!outputType.isDynamicDim(dim)) {
+            int64_t staticSize = outputType.getDimSize(dim);
+            sizes.push_back(rewriter.getIndexAttr(staticSize));
+            actualSliceSize = rewriter.getIndexAttr(staticSize);
+
+            // Validate consistency: static output size must match split length
+            if (!isEqualSplit) {
+              // For custom splits, verify the split length matches
+              if (auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(
+                      splitLengths[i])) {
+                if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr)) {
+                  if (intAttr.getInt() != staticSize) {
+                    return rewriter.notifyMatchFailure(
+                        op, "custom split length does not match static output "
+                            "dimension");
+                  }
+                }
+              }
+            }
+          } else {
+            sizes.push_back(splitLengths[i]);
+            actualSliceSize = splitLengths[i];
+          }
+        } else {
+          // Other dimensions: identity (offset=0, size=dim_size, stride=1)
+          offsets.push_back(rewriter.getIndexAttr(0));
+          if (outputType.isDynamicDim(dim)) {
+            mlir::Value dimSize =
+                rewriter.create<mlir::tensor::DimOp>(loc, input, dim);
+            sizes.push_back(dimSize);
+          } else {
+            sizes.push_back(rewriter.getIndexAttr(outputType.getDimSize(dim)));
+          }
+        }
+        strides.push_back(rewriter.getIndexAttr(1));
+      }
+
+      // Create extract_slice operation using OpBuilder
+      // This will properly decompose OpFoldResults into static attrs and
+      // dynamic operands
+      mlir::OperationState state(
+          loc, mlir::tensor::ExtractSliceOp::getOperationName());
+      mlir::tensor::ExtractSliceOp::build(rewriter, state, outputType, input,
+                                          offsets, sizes, strides);
+      auto sliceOp = rewriter.create(state);
+      replacements.push_back(sliceOp->getResult(0));
+
+      // Update offset for next slice
+      if (i < numOutputs - 1) {
+        // IMPORTANT: Use the actual slice size (which may differ from
+        // splitLengths[i] when output type has static dimension). This ensures
+        // correct offset calculation.
+        mlir::Value offsetVal =
+            mlir::getValueOrCreateConstantIndexOp(rewriter, loc, currentOffset);
+        mlir::Value lengthVal = mlir::getValueOrCreateConstantIndexOp(
+            rewriter, loc, actualSliceSize);
+        mlir::Value newOffsetVal =
+            rewriter.create<mlir::arith::AddIOp>(loc, offsetVal, lengthVal);
+        currentOffset = newOffsetVal;
+      }
+    }
+
+    rewriter.replaceOp(op, replacements);
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void mlir::hip::populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx) {
-  patterns.add<ReshapeToStdTensor, UnsqueezeToStdTensor, SqueezeToStdTensor>(
-      ctx);
+  patterns.add<ReshapeToStdTensor, UnsqueezeToStdTensor, SqueezeToStdTensor,
+               SplitToStdTensor>(ctx);
 }
 
 } // namespace hip
