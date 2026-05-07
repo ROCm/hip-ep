@@ -616,6 +616,36 @@ int hip_qmoe_scatter_add(
     int64_t count,
     int64_t element_size_bytes);
 
+/* GPU-side expert bucketing (Phase 2 foundation).
+ *
+ * Reorders (expert_indices, expert_weights) into per-expert contiguous slices
+ * on the device, eliminating the D2H + hipStreamSynchronize that the host
+ * bucket loop would otherwise need. Outputs the per-expert count and exclusive
+ * prefix-sum offsets; downstream per-expert dispatch can read these directly
+ * via device pointers (or as a tiny D2H of just the counts when needed).
+ *
+ *   expert_indices   - GPU [num_tokens * k] int32 (input from topk_routing)
+ *   expert_weights   - GPU [num_tokens * k] fp16  (input from topk_routing)
+ *   expert_counts    - GPU [num_experts]      int32 (output)
+ *   expert_offsets   - GPU [num_experts + 1]  int32 (output, exclusive scan)
+ *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid)
+ *   sorted_weights   - GPU [num_tokens * k]   fp16  (output, aligned w/ ids)
+ *
+ * Constraints: fp16 only; num_experts <= 1024.
+ */
+int hip_qmoe_bucket_tokens(
+    void* stream,
+    const void* expert_indices,
+    const void* expert_weights,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t element_size_bytes);
+
 /* =========================================================================
  * Linear Attention Decode (Single-Token Recurrence, Prefill-Friendly)
  * =========================================================================
