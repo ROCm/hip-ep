@@ -196,6 +196,82 @@ __global__ void scatter_add_kernel(
   output[dst_row * width + col] = static_cast<__half>(out + w * val);
 }
 
+// ---------------------------------------------------------------------------
+// GPU-side expert bucketing (Phase 2 foundation).
+//
+// Replaces the host-side bucket loop in wrap_qmoe that today requires a D2H
+// readback of expert_indices + expert_weights followed by hipStreamSynchronize
+// (24 stalls/inference for gpt-oss-20b). With this kernel, the data is
+// reorganized on the device into per-expert contiguous slices that downstream
+// expert dispatch can consume directly via expert_counts / expert_offsets.
+//
+// Inputs:
+//   expert_indices [num_tokens * k] int32 (output of topk_routing)
+//   expert_weights [num_tokens * k] fp16
+// Outputs:
+//   expert_counts    [num_experts]      int32 — count per expert
+//   expert_offsets   [num_experts + 1]  int32 — exclusive prefix sum
+//   sorted_token_ids [num_tokens * k]   int32 — token ids grouped by expert
+//   sorted_weights   [num_tokens * k]   fp16  — weights aligned with sorted ids
+//
+// One block, one thread per expert. num_experts is small in practice (32 for
+// gpt-oss-20b); each thread does num_tokens*k cheap comparisons. Two passes
+// (count + scatter) guarantee deterministic in-expert ordering identical to
+// the host version (token-major), which keeps numerical reproducibility for
+// the downstream weighted scatter_add.
+// ---------------------------------------------------------------------------
+__global__ void bucket_tokens_kernel(
+    const int32_t* __restrict__ expert_indices,
+    const __half* __restrict__ expert_weights,
+    int32_t* __restrict__ expert_counts,
+    int32_t* __restrict__ expert_offsets,
+    int32_t* __restrict__ sorted_token_ids,
+    __half* __restrict__ sorted_weights,
+    int num_tokens,
+    int k,
+    int num_experts) {
+  int eid = static_cast<int>(threadIdx.x);
+  if (eid >= num_experts) return;
+
+  // Pass 1: count occurrences of this eid across all (token, slot) pairs.
+  int local_count = 0;
+  int total_pairs = num_tokens * k;
+  for (int i = 0; i < total_pairs; i++) {
+    if (expert_indices[i] == eid) local_count++;
+  }
+  expert_counts[eid] = local_count;
+
+  __syncthreads();
+
+  // Pass 2: serial prefix sum on a single thread. num_experts is small (~32)
+  // so a parallel scan would cost more in __syncthreads + LDS than it saves.
+  if (eid == 0) {
+    int sum = 0;
+    expert_offsets[0] = 0;
+    for (int e = 0; e < num_experts; e++) {
+      sum += expert_counts[e];
+      expert_offsets[e + 1] = sum;
+    }
+  }
+
+  __syncthreads();
+
+  // Pass 3: scatter (token_id, weight) pairs into the sorted layout.
+  // Iterate (t, s) in the same order as the host loop being replaced so the
+  // per-expert ordering is bit-identical (matters for scatter_add reductions).
+  int write_pos = expert_offsets[eid];
+  for (int t = 0; t < num_tokens; t++) {
+    for (int s = 0; s < k; s++) {
+      int idx = t * k + s;
+      if (expert_indices[idx] == eid) {
+        sorted_token_ids[write_pos] = t;
+        sorted_weights[write_pos] = expert_weights[idx];
+        write_pos++;
+      }
+    }
+  }
+}
+
 // ===== Host launchers (extern "C") — pure kernel launches, no alloc/sync ====
 
 extern "C" int hip_qmoe_topk_routing(
@@ -375,6 +451,59 @@ extern "C" int hip_qmoe_scatter_add(
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
     fprintf(stderr, "[custom_kernels] hip_qmoe_scatter_add failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_qmoe_bucket_tokens(
+    void* stream,
+    const void* expert_indices,
+    const void* expert_weights,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t element_size_bytes) {
+  if (num_tokens <= 0 || num_experts <= 0 || k <= 0) return 0;
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+
+  // fp16 only — see hip_qmoe_topk_routing for rationale.
+  if (element_size_bytes != 2) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_bucket_tokens: only fp16 supported, "
+            "got element_size %lld\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+
+  // One block, one thread per expert. Block dim must be a multiple of the
+  // wave size (32 on RDNA3) and <= 1024 (max block size). gpt-oss-20b has 32.
+  if (num_experts > 1024) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_bucket_tokens: num_experts=%lld > 1024 "
+            "not supported (would exceed max block size)\n",
+            (long long)num_experts);
+    return -1;
+  }
+  int block_dim = static_cast<int>(((num_experts + 31) / 32) * 32);
+
+  hipLaunchKernelGGL(bucket_tokens_kernel, dim3(1), dim3(block_dim), 0, s,
+                     static_cast<const int32_t*>(expert_indices),
+                     static_cast<const __half*>(expert_weights),
+                     static_cast<int32_t*>(expert_counts),
+                     static_cast<int32_t*>(expert_offsets),
+                     static_cast<int32_t*>(sorted_token_ids),
+                     static_cast<__half*>(sorted_weights),
+                     static_cast<int>(num_tokens), static_cast<int>(k),
+                     static_cast<int>(num_experts));
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_qmoe_bucket_tokens failed: %s\n",
             hipGetErrorString(err));
   return static_cast<int>(err);
 }
