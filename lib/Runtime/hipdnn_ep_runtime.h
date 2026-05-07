@@ -169,7 +169,7 @@ typedef struct RuntimeState RuntimeState;
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
 //   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
-// Return codes: 0=success, 1=alloc/read error, 2-9=GPU handle init error
+// Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size);
 
@@ -207,6 +207,21 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state);
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
+
+// Device-side runtime error flag (set by kernels, observed by wrappers).
+// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
+// delta==0) and need to propagate an error code back through main_graph.
+void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
+int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
+// Mark the start of a new Compute() call. Invalidates per-forward-pass
+// caches such as the GQA seqlens_k cache (see runtime_state_internal.h).
+// Called by the EP-side MlirCustomOp::Compute() entry once per inference;
+// safe to call unconditionally (cheap: writes a single bool). Required for
+// the GQA seqlens_k cache (default on, set HIPDNN_EP_GQA_CACHE_SEQLENS=0
+// to disable) to be correct -- without this hook the cache would persist
+// across forward passes and return stale values.
+void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
@@ -415,7 +430,7 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 // Memory Operations
 //===----------------------------------------------------------------------===//
 
-// HIP memory copy wrapper (GPU-to-GPU using hipMemcpyAsync)
+// GPU D2D memcpy (hipMemcpyAsync); called from generated LLVM IR.
 // Follows opaque RuntimeState pattern - extracts stream internally
 //
 // Parameters:
@@ -429,6 +444,12 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 //   -1 = copy failed
 int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes);
+
+/// 2D pitched device copy (e.g. strided memref → dense output). Width is in
+/// bytes; pitches are row pitches (hipMemcpy2DAsync semantics).
+int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
+                          const void *src_ptr, size_t src_pitch, size_t width,
+                          size_t height);
 
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
@@ -555,6 +576,10 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
                 int64_t element_size_bytes);
+
+// Range operation wrapper
+int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
+               void *output, int64_t output_num_elements, int64_t hip_dtype);
 
 // ReduceSum operation wrapper
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,

@@ -155,6 +155,14 @@ extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
   return hipSuccess;
 }
 
+extern "C" hipError_t hipMemsetAsync(void *dst, int value, size_t size,
+                                     hipStream_t stream) {
+  MOCK_PRINT("[MOCK] hipMemsetAsync(dst=%p, value=%d, size=%zu, stream=%p)\n",
+             dst, value, size, stream);
+  memset(dst, value, size);
+  return hipSuccess;
+}
+
 // Mock MIOpen types and constants
 typedef void *miopenTensorDescriptor_t;
 typedef void *miopenConvolutionDescriptor_t;
@@ -695,6 +703,18 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
              (long long)indices_num_elements, (long long)output_num_elements,
              (long long)element_size_bytes);
 
+  return 0;
+}
+
+int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
+               void *output, int64_t output_num_elements, int64_t hip_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_range\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_range(output_num_elements=%lld, hip_dtype=%lld)\n",
+             (long long)output_num_elements, (long long)hip_dtype);
   return 0;
 }
 
