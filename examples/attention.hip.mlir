@@ -22,7 +22,7 @@ module attributes {llvm.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i6
     %view_1 = memref.view %5[%c65536][] : memref<131072xi8> to memref<2x64x64xf32>
     hip.hipblaslt.matmul(%ctx) ins(%arg0, %1 : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32>) outs(%view_1 : memref<2x64x64xf32>)
     %view_2 = memref.view %5[%c98304][] : memref<131072xi8> to memref<2x64x64xf32>
-    hip.transpose(%ctx, %c1, %c2) ins(%view_0 : memref<2x64x64xf32>) outs(%view_2 : memref<2x64x64xf32>)
+    hip.transpose(%ctx) ins(%view_0 : memref<2x64x64xf32>) outs(%view_2 : memref<2x64x64xf32>) {perm = [0, 2, 1]}
     hip.hipblaslt.matmul(%ctx) ins(%view, %view_2 : memref<2x64x64xf32>, memref<2x64x64xf32>) outs(%view_0 : memref<2x64x64xf32>)
     hip.miopen.mul(%ctx) ins(%view_0, %0 : memref<2x64x64xf32>, memref<f32>) outs(%view : memref<2x64x64xf32>)
     hip.miopen.softmax(%ctx) ins(%view : memref<2x64x64xf32>) outs(%view_0 : memref<2x64x64xf32>)
