@@ -13,6 +13,22 @@ namespace {
 // Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
 //===----------------------------------------------------------------------===//
 
+/// True when the defining op of the axes value is compile-time known.
+///
+/// After constant externalization, small onnx.Constant / arith.constant tensors
+/// become memref.get_global + bufferization.to_tensor (see OnnxToHip.cpp);
+/// those must still count as constant axes. Arbitrary ToTensor(alloc) is not.
+static bool axesDefOpIsCompileTimeKnown(mlir::Operation *axesDefOp) {
+  if (mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
+      axesDefOp->hasAttr("value"))
+    return true;
+  auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(axesDefOp);
+  if (!toTensor)
+    return false;
+  mlir::Operation *bufDef = toTensor.getBuffer().getDefiningOp();
+  return bufDef && mlir::isa<mlir::memref::GetGlobalOp>(bufDef);
+}
+
 /// Validate common requirements for Unsqueeze/Squeeze operations.
 /// Requires: 2 operands (data, axes), ranked tensors, matching element types,
 /// and constant axes (dynamic axes would require runtime shape computation).
@@ -45,12 +61,11 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
     return rewriter.notifyMatchFailure(op, msg);
   }
 
-  bool isConstant = mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
-                    axesDefOp->hasAttr("value");
-  if (!isConstant) {
+  if (!axesDefOpIsCompileTimeKnown(axesDefOp)) {
     std::string msg =
-        "axes must be constant (arith.constant or onnx.Constant). "
-        "Dynamic axes would require runtime shape computation and "
+        "axes must be compile-time constant (arith.constant, onnx.Constant, or "
+        "memref.get_global + bufferization.to_tensor from constant "
+        "externalization). Dynamic axes need runtime shape computation and "
         "cannot use zero-cost tensor.";
     msg += tensorOpName;
     msg += " approach";
