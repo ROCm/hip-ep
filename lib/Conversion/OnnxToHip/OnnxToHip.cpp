@@ -483,6 +483,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateReshapeConversionPatterns(patterns, ctx);
   populateCausalConvWithStateConversionPatterns(patterns, ctx);
   populateGemmConversionPatterns(patterns, ctx);
+  populateLinearAttentionConversionPatterns(patterns, ctx);
   populateRangeConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
