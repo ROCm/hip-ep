@@ -697,6 +697,32 @@ def Hip_GatherOp : Hip_DpsOp<"gather"> {
   }];
 }
 
+def Hip_RangeOp : Hip_DpsOp<"range"> {
+  let summary = "Generate 1-D range tensor";
+  let description = [{
+    Implements ONNX Range semantics:
+      output[i] = start + i * delta, limit is exclusive.
+
+    start/limit/delta are scalar tensors (rank-0), output is rank-1.
+    Uses destination-passing style: output buffer is provided as argument.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$start,
+    Hip_TensorOrMemRef:$limit,
+    Hip_TensorOrMemRef:$delta,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $start `,` $limit `,` $delta `:`
+    type($start) `,` type($limit) `,` type($delta) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SiluOp : Hip_DpsOp<"silu"> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins
