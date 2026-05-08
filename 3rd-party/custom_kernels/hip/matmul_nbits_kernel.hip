@@ -101,6 +101,67 @@ __global__ void matmul_nbits_kernel(
 }
 
 /* =======================================================================
+ * Section 1a: Naive int8 fallback kernel (row-major, any alignment, batched)
+ *
+ * ONNX MatMulNBits with bits=8 layout (no nibble packing):
+ *   B      : uint8 [N, K]                     (1 byte per weight)
+ *   scales : fp16  [N, num_groups_k]
+ *   zeros  : uint8 [N, num_groups_k]          (or NULL, default zp=128)
+ *
+ * Dequant per element:
+ *   w_fp = (uint8_w - zp) * scale
+ *
+ * Each thread computes one C[m, n] across all batches via blockIdx.z.
+ * Mirrors matmul_nbits_kernel (int4) so behaviour and debug shape are
+ * symmetric; chosen as the first int8 path because it has no alignment
+ * or shape constraints and immediately unblocks Qwen3.5-style models
+ * that mix bits=4 and bits=8 in the same graph.
+ * ======================================================================= */
+
+__global__ void matmul_nbits_kernel_i8(
+    const __half* __restrict__ A,
+    const uint8_t* __restrict__ B,
+    const __half* __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half* __restrict__ bias,
+    __half* __restrict__ output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t block_size) {
+  int64_t n = static_cast<int64_t>(blockIdx.x) * kBlockDim + threadIdx.x;
+  int64_t m = static_cast<int64_t>(blockIdx.y) * kBlockDim + threadIdx.y;
+  int64_t batch = blockIdx.z;
+
+  if (m >= M || n >= N) return;
+
+  int64_t k_blocks = (K + block_size - 1) / block_size;
+
+  float acc = 0.0f;
+  const __half*  a_row = A + batch * M * K + m * K;
+  const uint8_t* b_row = B + n * K;
+  const __half*  s_row = scales + n * k_blocks;
+
+  for (int64_t blk = 0; blk < k_blocks; blk++) {
+    float scale_val = static_cast<float>(s_row[blk]);
+    float zp_val    = (zp != nullptr)
+                          ? static_cast<float>(zp[n * k_blocks + blk])
+                          : 128.0f;
+
+    int64_t k_start = blk * block_size;
+    int64_t k_end   = k_start + block_size;
+    if (k_end > K) k_end = K;
+    const uint8_t* b_block = b_row + k_start;
+
+    for (int64_t k = k_start; k < k_end; k++) {
+      float qval = static_cast<float>(b_block[k - k_start]);
+      acc += static_cast<float>(a_row[k]) * (qval - zp_val) * scale_val;
+    }
+  }
+
+  if (bias) acc += static_cast<float>(bias[n]);
+  output[batch * M * N + m * N + n] = static_cast<__half>(acc);
+}
+
+/* =======================================================================
  * Section 1b: GEMV-style kernel for small M (autotuned, vectorized)
  *
  * Template parameters:
@@ -1458,10 +1519,10 @@ extern "C" int hip_matmul_nbits(
     int64_t block_size,
     int64_t element_size_bytes,
     int64_t zp_elem_size) {
-  if (bits != 4) {
+  if (bits != 4 && bits != 8) {
     fprintf(stderr,
-            "[custom_kernels] hip_matmul_nbits: only bits=4 supported, "
-            "got %lld\n",
+            "[custom_kernels] hip_matmul_nbits: only bits=4 or bits=8 "
+            "supported, got %lld\n",
             (long long)bits);
     return -1;
   }
@@ -1477,6 +1538,52 @@ extern "C" int hip_matmul_nbits(
   }
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+  /* -------------------------------------------------------------------
+   * bits=8 path: ONNX MatMulNBits with int8 weights uses an unpacked
+   * [N, K] uint8 layout (no nibble packing) and default zp=128. None of
+   * the bit-twiddling int4 fast paths apply, so dispatch directly to
+   * the dedicated int8 naive kernel. Models that mix bits=4 and bits=8
+   * in the same graph (e.g. Qwen3.5-MoE int8 lm_head with int4 expert
+   * weights) hit this branch only for the int8 ops; the int4 ops
+   * continue through the WMMA / GEMV fast paths below.
+   * ------------------------------------------------------------------- */
+  if (bits == 8) {
+    if (zero_points && zp_elem_size != 1) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits bits=8: zero_points must "
+              "be uint8 (zp_elem_size=1), got zp_elem_size=%lld\n",
+              (long long)zp_elem_size);
+      return -1;
+    }
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: int8 naive M=%lld N=%lld K=%lld "
+        "batch=%lld bs=%lld zp=%s bias=%s\n",
+        (long long)M, (long long)N, (long long)K, (long long)batch_count,
+        (long long)block_size, zero_points ? "yes" : "null",
+        bias ? "yes" : "null");
+
+    dim3 blk(kBlockDim, kBlockDim);
+    dim3 grd(static_cast<unsigned>((N + kBlockDim - 1) / kBlockDim),
+             static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
+             static_cast<unsigned>(batch_count));
+
+    hipLaunchKernelGGL(
+        matmul_nbits_kernel_i8, grd, blk, 0, hip_stream,
+        static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+        static_cast<const __half*>(scales),
+        static_cast<const uint8_t*>(zero_points),
+        static_cast<const __half*>(bias), static_cast<__half*>(output),
+        M, N, K, block_size);
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits int8 launch failed: %s\n",
+              hipGetErrorString(err));
+    }
+    return static_cast<int>(err);
+  }
 
   // Convert uint8 packed nibble zero_points to FP16 for WMMA/GEMV-col-major
   // paths which require FP16 zero_points. Row-major GEMV and naive fallback
