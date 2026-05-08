@@ -65,8 +65,8 @@ system-wide installations of those.
 If your Windows 10 SDK version is something other than `10.0.26100.0` (check
 the contents of `C:\Program Files (x86)\Windows Kits\10\Include\` -- each
 sub-directory is one installed SDK version), edit the `$sdkVer` line in
-[setup_and_configure.ps1:38](../setup_and_configure.ps1) and
-[build_and_install.ps1:24](../build_and_install.ps1) to match. The version
+[setup_and_configure.ps1:96](../setup_and_configure.ps1) and
+[build_and_install.ps1:75](../build_and_install.ps1) to match. The version
 must include the trailing `.0` patch number, e.g. `10.0.22621.0`.
 
 ## Workspace layout
@@ -119,8 +119,8 @@ You can also edit the variable defaults at the top of
 
 ## One-time setup
 
-The seven sub-steps below run once per machine. After this you only need
-[Section 5: Incremental dev loop](#incremental-dev-loop).
+The six sub-steps below run once per machine. After this you only need the
+[Incremental dev loop](#incremental-dev-loop) section.
 
 ### 4.1 Clone the repo and submodules
 
@@ -141,7 +141,7 @@ nested submodules.
 
 The [setup_and_configure.ps1](../setup_and_configure.ps1) script auto-activates
 `<repo>\.venv\Scripts\Activate.ps1` if `$env:VIRTUAL_ENV` is not set (see
-[setup_and_configure.ps1:19-23](../setup_and_configure.ps1)), so the venv must
+[setup_and_configure.ps1:55-58](../setup_and_configure.ps1)), so the venv must
 exist at exactly that location.
 
 ```powershell
@@ -159,7 +159,7 @@ What each package is for:
 | `onnx` | Required by [`examples\quickstart\gen_conv_only.py`](../examples/quickstart/gen_conv_only.py) to construct the toy ONNX graph. |
 | `numpy` | Required by the same script for weight tensor generation. |
 | `lit` | Required by the LIT test suite (`ctest -R MorphizenMLIRLitTests`); without it ctest reports a spurious instant pass. |
-| `ninja` | Build generator that [setup_and_configure.ps1:61](../setup_and_configure.ps1) selects via `-G Ninja`. |
+| `ninja` | Build generator that [setup_and_configure.ps1:123](../setup_and_configure.ps1) selects via `-G Ninja`. |
 
 If `Activate.ps1` fails with "running scripts is disabled on this system",
 loosen the execution policy for your user once:
@@ -199,9 +199,9 @@ source once. The build is required for two artifacts:
 1. **`onnxruntime.dll`** and CMake configs in `prebuilt-local\lib\cmake\onnxruntime\`,
    which `setup_and_configure.ps1` consumes during configure.
 2. **`onnxruntime_perf_test.exe`**, copied to `prebuilt-local\bin\` by
-   [build_and_install.ps1:84-91](../build_and_install.ps1) (silently skipped
+   [build_and_install.ps1:140-165](../build_and_install.ps1) (silently skipped
    if the ORT build is missing -- everything else still works, but the
-   end-to-end demo in [Section 6](#end-to-end-toy-model-walkthrough) cannot
+   [end-to-end demo](#end-to-end-toy-model-walkthrough) cannot
    run without it).
 
 Do this build once; rebuild only when you need a newer ONNX Runtime version.
@@ -251,7 +251,7 @@ cd ..\..\onnx-hipdnn-ep
 ```
 
 (The `build_and_install.ps1` script you run later will also re-copy
-`onnxruntime_perf_test.exe` automatically -- see Section 5 step 4 -- so the
+`onnxruntime_perf_test.exe` automatically -- see step 4 of the [incremental dev loop](#incremental-dev-loop) -- so the
 manual copy above is only required if you want it available before your
 first invocation of that script.)
 
@@ -273,8 +273,8 @@ C:\Users\<you>\ROCmEP\OnnxHipDNN\therock\
 ```
 
 The shipped scripts default to a directory named `therock-7.11.0-clean\`
-(see [setup_and_configure.ps1:15](../setup_and_configure.ps1) and
-[build_and_install.ps1:8](../build_and_install.ps1)). Two ways to bridge:
+(see [setup_and_configure.ps1:49](../setup_and_configure.ps1) and
+[build_and_install.ps1:39](../build_and_install.ps1)). Two ways to bridge:
 
 - Recommended: rename your extraction to `therock\` to match this guide,
   and edit the `$therock` variable in both scripts to point at it.
@@ -351,7 +351,7 @@ After step 4.5 succeeds, the only command you need for day-to-day work is:
 
 What [build_and_install.ps1](../build_and_install.ps1) does:
 
-1. Re-applies the env setup defensively (lines 13-31; idempotent so it is
+1. Re-applies the env setup defensively (lines 47-100; idempotent so it is
    safe to run multiple times in the same shell).
 2. `cmake --build <buildDir> --config Release` followed by
    `cmake --install <buildDir> --config Release`.
@@ -740,7 +740,7 @@ was not found` when launching `hip-onnx-runner.exe` or
    ls C:\Users\<you>\ROCmEP\OnnxHipDNN\therock\bin\amdhip64_7.dll
    ```
 
-2. Re-run `build_and_install.ps1`. The DLL-sync logic at lines 66-78
+2. Re-run `build_and_install.ps1`. The DLL-sync logic at lines 117-128
    force-copies the SDK DLLs into `prebuilt-local\bin` if sizes differ.
 
 3. Confirm `<therock>\bin` is on `PATH` (the script prepends it; check
