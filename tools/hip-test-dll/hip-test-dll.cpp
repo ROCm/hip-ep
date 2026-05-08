@@ -156,12 +156,12 @@ void generateTestData(void *data, size_t sizeBytes, size_t elemSize) {
     auto *fdata = static_cast<float *>(data);
     size_t count = sizeBytes / 4;
     for (size_t i = 0; i < count; i++)
-      fdata[i] = static_cast<float>(i % 1000) * 0.001f;
+      fdata[i] = static_cast<float>(i % 100 + 1) * 0.0001f;
   } else if (elemSize == 2) {
     auto *hdata = static_cast<uint16_t *>(data);
     size_t count = sizeBytes / 2;
     for (size_t i = 0; i < count; i++)
-      hdata[i] = floatToHalf(static_cast<float>(i % 1000) * 0.001f);
+      hdata[i] = floatToHalf(static_cast<float>(i % 100 + 1) * 0.0001f);
   } else {
     auto *bytes = static_cast<uint8_t *>(data);
     for (size_t i = 0; i < sizeBytes; i++)
