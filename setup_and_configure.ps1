@@ -1,3 +1,8 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # Full environment setup + CMake configure for onnx-hipdnn-ep.
 # Run this after a reboot or new terminal session. Only needed once per session;
 # after this, use build_and_install.ps1 for incremental builds.
