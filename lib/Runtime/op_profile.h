@@ -94,6 +94,32 @@ struct OpProfileScope {
     }                                                                          \
   }
 
+// Sub-op profiling: call OP_PROFILE_INIT once at function top to extract
+// profiling state, then wrap each phase in a { OP_PROFILE_PHASE(...); ... }
+// block.  Each phase appears as a separate row in the profiling output.
+// Use block scopes so the same variable name can be reused across phases.
+#define OP_PROFILE_INIT(state_arg)                                             \
+  OpProfileState *_opProfPs = nullptr;                                         \
+  hipStream_t _opProfStream = nullptr;                                         \
+  do {                                                                         \
+    if (hipdnn_ep_perf_enabled()) {                                            \
+      _opProfPs = static_cast<OpProfileState *>(                               \
+          hipdnn_ep_state_get_op_profile(state_arg));                          \
+      _opProfStream =                                                          \
+          static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state_arg));     \
+      if (!(_opProfPs && _opProfStream && op_profile_is_active(_opProfPs)))    \
+        _opProfPs = nullptr;                                                   \
+    }                                                                          \
+  } while (0)
+
+#define OP_PROFILE_PHASE(opname, shape_fn)                                     \
+  std::optional<OpProfileScope> _opProfPhase;                                  \
+  if (_opProfPs) {                                                             \
+    int _evIdx = op_profile_acquire_event_pair(_opProfPs);                     \
+    _opProfPhase.emplace(_opProfPs, opname, (shape_fn)(), _opProfStream,       \
+                         _evIdx);                                              \
+  }
+
 #define OP_PROFILE_CPU(opname, state_arg)                                      \
   std::optional<OpProfileCpuScope> _opProfCpu;                                 \
   if (hipdnn_ep_perf_enabled()) {                                              \
