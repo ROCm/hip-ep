@@ -42,6 +42,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRArithToLLVM
   MLIRMemRefToLLVM
   MLIRFuncToLLVM
+  MLIRAffineToStandard
   MLIRReconcileUnrealizedCasts
   flatbuffers::flatbuffers
 )
