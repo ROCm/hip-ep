@@ -487,7 +487,8 @@ int hip_matmul_nbits(
     int64_t bits,
     int64_t block_size,
     int64_t element_size_bytes,
-    int64_t zp_elem_size);  // 1=uint8 packed nibbles, 2=fp16
+    int64_t zp_elem_size,            // 1=uint8 packed nibbles, 2=fp16
+    int64_t skip_autotune);          // 0=autotune (default), 1=use heuristic
 
 /* =========================================================================
  * QMoE Sub-Kernels

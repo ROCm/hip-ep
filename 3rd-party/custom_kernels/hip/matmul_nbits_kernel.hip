@@ -477,6 +477,11 @@ static int tuneGemvConfig(
     return best_id;
 }
 
+// Heuristic GEMV config: config 0 is the simplest safe default.
+static int pickDefaultGemvConfig() {
+    return 0;
+}
+
 static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 
@@ -494,7 +499,8 @@ static int getOrTuneGemvConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs,
-    bool col_major = false)
+    bool col_major = false,
+    bool skip_autotune = false)
 {
     std::string key = gemvCacheKey(M, N, K, bs, col_major);
 
@@ -504,14 +510,22 @@ static int getOrTuneGemvConfig(
     if (it != gemv_cache.end())
         return it->second;
 
-    int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
+    int best;
+    if (skip_autotune) {
+        best = pickDefaultGemvConfig();
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] GEMV heuristic: key=\"%s\" -> config[%d] "
+            "(skipped autotune)\n",
+            key.c_str(), best);
+    } else {
+        best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs, col_major);
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] GEMV cache: stored key=\"%s\" -> config[%d] "
+            "(cache size=%zu)\n",
+            key.c_str(), best, gemv_cache.size());
+    }
     gemv_cache[key] = best;
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] GEMV cache: stored key=\"%s\" -> config[%d] "
-        "(cache size=%zu)\n",
-        key.c_str(), best, gemv_cache.size());
 
     return best;
 }
@@ -1334,6 +1348,15 @@ static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp) {
            (has_zp ? "1" : "0");
 }
 
+// Heuristic WMMA config selection: fused 128x128 swizzle_n=8 is a
+// reasonable middle-ground for most QMoE shapes (M~16-512, N=5760, K=2880).
+static int pickDefaultWmmaConfig(int M, int N) {
+    // Config 14 = {128, 128, 8, fused} — good balance for medium M
+    // Config 6  = { 64, 128, 8, fused} — better for smaller M
+    if (M <= 64) return 6;
+    return 14;
+}
+
 static int getOrTuneWmmaConfig(
     hipStream_t stream,
     int M, int N, int K,
@@ -1341,7 +1364,8 @@ static int getOrTuneWmmaConfig(
     const unsigned char* B,
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp)
+    _Float16* C, int ldc, bool has_zp,
+    bool skip_autotune = false)
 {
     std::string key = wmmaCacheKey(M, N, K, gs, has_zp);
 
@@ -1351,14 +1375,22 @@ static int getOrTuneWmmaConfig(
     if (it != wmma_cache.end())
         return it->second;
 
-    int best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
+    int best;
+    if (skip_autotune) {
+        best = pickDefaultWmmaConfig(M, N);
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] WMMA heuristic: key=\"%s\" -> config[%d] "
+            "(skipped autotune)\n",
+            key.c_str(), best);
+    } else {
+        best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp);
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] WMMA cache: stored key=\"%s\" -> config[%d] "
+            "(cache size=%zu)\n",
+            key.c_str(), best, wmma_cache.size());
+    }
     wmma_cache[key] = best;
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] WMMA cache: stored key=\"%s\" -> config[%d] "
-        "(cache size=%zu)\n",
-        key.c_str(), best, wmma_cache.size());
 
     return best;
 }
@@ -1457,7 +1489,8 @@ extern "C" int hip_matmul_nbits(
     int64_t bits,
     int64_t block_size,
     int64_t element_size_bytes,
-    int64_t zp_elem_size) {
+    int64_t zp_elem_size,
+    int64_t skip_autotune) {
   if (bits != 4) {
     fprintf(stderr,
             "[custom_kernels] hip_matmul_nbits: only bits=4 supported, "
@@ -1501,6 +1534,7 @@ extern "C" int hip_matmul_nbits(
    * When M <  kBlockDim:      GEMV kernel with COL_MAJOR=true
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
+  bool skip_at = (skip_autotune != 0);
 
   if (wmma_data_format && M >= kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
@@ -1527,8 +1561,8 @@ extern "C" int hip_matmul_nbits(
 
     bool has_zp = (z_ptr != nullptr);
     int wmma_cfg = getOrTuneWmmaConfig(
-        hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-        s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp);
+              hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
+              s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, skip_at);
 
     _Float16* dq_buf = kWmmaConfigs[wmma_cfg].fused
                            ? nullptr : ensureDqBuffer(iN, iK);
@@ -1608,8 +1642,8 @@ extern "C" int hip_matmul_nbits(
     const auto* b_h = static_cast<const __half*>(bias);
 
     int config_id = getOrTuneGemvConfig(
-        hip_stream, a_col, b_u, s_h, z_u, b_h, o_col,
-        M, N, K, 1, block_size, /*col_major=*/true);
+              hip_stream, a_col, b_u, s_h, z_u, b_h, o_col,
+              M, N, K, 1, block_size, /*col_major=*/true, skip_at);
 
     launchGemvConfig(config_id, hip_stream,
                      a_col, b_u, s_h, z_u, b_h, o_col,
@@ -1661,8 +1695,9 @@ extern "C" int hip_matmul_nbits(
     auto*       o_h = static_cast<__half*>(output);
 
     int config_id = getOrTuneGemvConfig(
-        hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
-        M, N, K, batch_count, block_size);
+              hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
+              M, N, K, batch_count, block_size,
+              /*col_major=*/false, skip_at);
 
     launchGemvConfig(config_id, hip_stream,
                      a_h, b_u, s_h, z_u, b_h, o_h,
