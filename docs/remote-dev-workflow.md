@@ -47,12 +47,18 @@ ssh user@host "python -c \"import os; print(os.path.join('C:/foo', 'bar'))\""
 
 **`cmd` swallows trailing whitespace inside a chained `set X=value && next` literally** — the value becomes `value ` (with a trailing space). Always quote: `set "X=value" && next`. This trap has caused silent CPU-fallback regressions in this project (`THEROCK_DIST` ending with a space → lld-link can't find `amdhip64.lib` → EP falls back to CPU and tests still pass cosine=1.0 because they compare CPU-vs-CPU). PowerShell does not have this issue.
 
-## SMB-share + SSH split: what to do where
+## One clone, two views: SMB share + SSH
 
-If your laptop maps the remote home directory as a network drive (e.g. via SMB), you get the best of both worlds:
+Map the remote user's home directory as a network drive on your laptop (e.g. SMB → `Z:\`). There is **one clone of the repo** — it lives on the remote — and you access it two ways:
 
-- **Through the share** (e.g. `Z:\`): use your local editor, `Read`/`Edit`/`Write` tools, `git diff`, etc. Zero SSH per file. Fast.
-- **Through SSH**: use only for things that **must execute on the remote**: build, run tests, run `model_benchmark.exe`, `tasklist`, etc.
+| View | Path shape | Use for |
+|---|---|---|
+| Local share | `Z:\<repo>\...` (whatever drive letter you mapped) | All file ops: editor session, `Read`/`Edit`/`Write` tools, `Glob`/`Grep`, `git diff`/`git status` from your laptop |
+| Remote (over SSH) | `C:\Users\<remote-user>\<repo>\...` (the remote-side absolute path) | Anything that must execute on the GPU host: build, tests, `model_benchmark.exe`, `tasklist`/`taskkill`, `git` operations that consult the remote's index/working tree |
+
+You can (and should) run your editor — including a Claude Code session — directly inside `Z:\<repo>`. There is no separate local clone to keep in sync; edits made through the share are immediately visible to SSH commands because they hit the same files. (Earlier versions of this workflow used two clones — one local on `C:\` and one remote — with sync via git or copy. That convention is dead; do not reintroduce it.)
+
+**Critical: the share mapping does NOT exist inside the SSH session.** A mapped network drive on Windows is a per-login attachment, and the OpenSSH server runs in a session that doesn't inherit it. `ssh host "cd /d Z:\\..."` fails with `The system cannot find the drive specified.` SSH commands must use the remote-side absolute path under the remote user's home (e.g. `C:\Users\<remote-user>\<repo>`).
 
 This split is the single biggest workflow speed-up. SSH per command is slow; share-mounted file ops are not.
 
