@@ -161,16 +161,6 @@ What each package is for:
 | `lit` | Required by the LIT test suite (`ctest -R MorphizenMLIRLitTests`); without it ctest reports a spurious instant pass. |
 | `ninja` | Build generator that [setup_and_configure.ps1:61](../setup_and_configure.ps1) selects via `-G Ninja`. |
 
-If you also plan to do LLM model splitting for OGA benchmarks, the
-[tools/onnx-model-splitter/requirements.txt](../tools/onnx-model-splitter/requirements.txt)
-file covers `onnx + onnxruntime + onnxoptimizer + numpy` in one shot and can
-be used as an alternative:
-
-```powershell
-pip install -r tools\onnx-model-splitter\requirements.txt
-pip install cmake lit ninja
-```
-
 If `Activate.ps1` fails with "running scripts is disabled on this system",
 loosen the execution policy for your user once:
 
@@ -478,9 +468,7 @@ processes pay the JIT cost again unless you have caching configured.
 
 The plugin EP name is registered in the EP DLL as
 `MorphiZenExecutionProvider`
-([hip-onnx-runner.cpp:872](../tools/hip-onnx-runner/hip-onnx-runner.cpp))
-and used as such in
-[run_full_model_perf_test.ps1:69-71](../run_full_model_perf_test.ps1).
+([hip-onnx-runner.cpp:872](../tools/hip-onnx-runner/hip-onnx-runner.cpp)).
 Earlier versions of this guide used the short form `MorphiZenEP`; with
 current EP DLLs that name is not registered, so ORT falls back to the CPU
 EP without an explicit error. Use the full name `MorphiZenExecutionProvider`
@@ -564,40 +552,6 @@ Runner flags (verified against [hip-onnx-runner.cpp:800-828](../tools/hip-onnx-r
 | `-o, --graph-opt-level` | Calls `session_options.SetGraphOptimizationLevel(level)` with the given level: `0=ORT_DISABLE_ALL`, `1=ORT_ENABLE_BASIC`, `2=ORT_ENABLE_EXTENDED`, `99=ORT_ENABLE_ALL`, `-1=do not call (default)`. Note: `-o` is **not** an output-directory flag; output dump dirs are auto-named based on the model stem. |
 | `-p, --positive-only` | Boolean flag. Generate positive-only random inputs in `[0.1, 256.0]` (for `Sqrt` / `Reciprocal` testing where negative inputs would NaN). |
 
-### LLM-scale benchmarks with run_full_model_perf_test.ps1
-
-To benchmark one or more LLM ONNX splits using the same plugin EP workflow
-demonstrated in [Section 6](#end-to-end-toy-model-walkthrough), the repo
-ships [run_full_model_perf_test.ps1](../run_full_model_perf_test.ps1) as a
-ready-made wrapper:
-
-```powershell
-.\run_full_model_perf_test.ps1                       # default: seq128
-.\run_full_model_perf_test.ps1 -Seq 1                # decode-style (seq=1)
-.\run_full_model_perf_test.ps1 -Seq all              # sweep all 7 seq variants
-.\run_full_model_perf_test.ps1 -DurationSec 10 -Concurrency 1
-```
-
-The script expects fixed-shape `full_model_seqN.onnx` files in `full_model\`
-next to the repo. To generate those, see [tools/onnx-model-splitter/README.md](../tools/onnx-model-splitter/README.md):
-
-```powershell
-pip install -r tools\onnx-model-splitter\requirements.txt
-
-python tools\onnx-model-splitter\genai_config_pipeline_from_folder.py `
-  C:\path\to\hf_model_folder --max-length 16384
-
-python tools\onnx-model-splitter\export_chunk_model.py `
-  --model C:\path\to\hf_model_folder\model.onnx `
-  --output C:\path\to\split_output `
-  -T C:\path\to\hf_model_folder\genai_config_pipeline.json
-```
-
-This produces `prefill_p512m16384.onnx`, `decode_p512m16384.onnx`, the
-shared external weights, and `genai_config_p512m16384.json`. Pass any of
-these `.onnx` files to `onnxruntime_perf_test.exe` directly with the same
-flags as in [Section 6](#end-to-end-toy-model-walkthrough).
-
 ### DML EP comparison
 
 The same `onnxruntime_perf_test.exe` can run any model through the
@@ -614,46 +568,6 @@ for a head-to-head latency comparison:
 
 `disable_graph_fusion|1` keeps the DML EP from re-fusing the graph, which
 is closer to what the MorphiZen EP sees and makes the comparison fairer.
-
-### OGA end-to-end with model_benchmark
-
-[`model_benchmark.exe`](https://github.com/microsoft/onnxruntime-genai)
-(part of ONNX Runtime GenAI) benchmarks the full prefill + decode pipeline:
-
-```powershell
-& "$bin\model_benchmark.exe" `
-    -i C:\path\to\split_output `
-    --ep_library MorphiZenExecutionProvider $bin\onnxruntime_morphizen_ep.dll `
-    -l 512 -g 128 `
-    -r 5 -w 1
-```
-
-A note on the `--ep_library <name>` argument. The `<name>` is a tag OGA
-uses internally and should match the `provider_options` key in the model's
-`genai_config.json`. Two name conventions appear in current sources:
-
-- `MorphiZenExecutionProvider` (full canonical name) -- matches the EP
-  factory registered by the EP DLL
-  ([hip-onnx-runner.cpp:872](../tools/hip-onnx-runner/hip-onnx-runner.cpp))
-  and the GitHub Actions CI default
-  ([.github/workflows/windows-build.yml:720](../.github/workflows/windows-build.yml)).
-- `MorphiZenEP` (short) -- an older convention still used by
-  [run_oga_bench.ps1:465](../run_oga_bench.ps1).
-
-If `model_benchmark.exe` reports "EP not registered" or runs on CPU
-without using the GPU, try the alternate name. The most reliable choice
-is to read the model's `genai_config.json` and use whatever name appears
-under `model.decoder.session_options.provider_options[0]`.
-
-| Flag | Description |
-|------|-------------|
-| `-i <path>` | Path to OGA model directory (must contain `genai_config.json`). |
-| `--ep_library <name> <path>` | Register a custom EP library (here: MorphiZen). See note above on `<name>`. |
-| `-l <n>` | Number of auto-generated prompt tokens (mutually exclusive with `--prompt_file`). |
-| `--prompt_file <path>` | Load prompt text from a file. |
-| `-g <n>` | Maximum number of tokens to generate. |
-| `-r <n>` | Number of benchmark repetitions. |
-| `-w <n>` | Number of warmup runs. |
 
 ### Custom-kernel docs
 
