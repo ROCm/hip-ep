@@ -7,8 +7,13 @@
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+
+// =============================================================================
+// INT64 reductions
+// =============================================================================
 
 // Parallel sum reduction for i64. Each block reduces one output element
 // by summing reduce_size consecutive input elements using shared memory.
@@ -129,6 +134,90 @@ __global__ void reduce_sum_i64_shfl_kernel(
   }
 }
 
+// =============================================================================
+// INT32 reduction
+// =============================================================================
+
+// Parallel sum reduction for i32. Accumulates in int64 to avoid overflow when
+// reducing large slices, then narrows to int32 for the final write. Matches
+// ONNX ReduceSum semantics where the output type equals the input type but
+// intermediate accumulation should not silently wrap.
+__global__ void reduce_sum_i32_kernel(
+    const int32_t* __restrict__ data,
+    int32_t* __restrict__ output,
+    int64_t reduce_size,
+    int64_t num_output_elements) {
+  extern __shared__ int64_t sdata_i32[];
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+
+  const int32_t* slice = data + out_idx * reduce_size;
+  int tid = threadIdx.x;
+
+  int64_t sum = 0;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
+    sum += static_cast<int64_t>(slice[i]);
+  }
+  sdata_i32[tid] = sum;
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (static_cast<unsigned int>(tid) < s) {
+      sdata_i32[tid] += sdata_i32[tid + s];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[out_idx] = static_cast<int32_t>(sdata_i32[0]);
+  }
+}
+
+// =============================================================================
+// FP16 reduction
+// =============================================================================
+
+// Parallel sum reduction for fp16. Accumulates in float to avoid the precision
+// loss / overflow that would occur with a half accumulator over long slices,
+// then narrows back to half for the final write. This mirrors how cuDNN/MIOpen
+// implement fp16 reductions.
+__global__ void reduce_sum_f16_kernel(
+    const __half* __restrict__ data,
+    __half* __restrict__ output,
+    int64_t reduce_size,
+    int64_t num_output_elements) {
+  extern __shared__ float sdata_f16[];
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+
+  const __half* slice = data + out_idx * reduce_size;
+  int tid = threadIdx.x;
+
+  float sum = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
+    sum += __half2float(slice[i]);
+  }
+  sdata_f16[tid] = sum;
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (static_cast<unsigned int>(tid) < s) {
+      sdata_f16[tid] += sdata_f16[tid + s];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[out_idx] = __float2half(sdata_f16[0]);
+  }
+}
+
+// =============================================================================
+// Host launcher
+// =============================================================================
+
 extern "C" int hip_reduce_sum(
     void* stream,
     const void* data,
@@ -150,14 +239,22 @@ extern "C" int hip_reduce_sum(
 
   int64_t reduce_size = num_input_elements / num_output_elements;
 
+  // Block size derivation shared by all dtype branches: cap at 256, then round
+  // down to the next power of two when reduce_size is small so the in-kernel
+  // tree reduction has a power-of-two range.
+  auto pick_block_size = [reduce_size]() {
+    int block_size = 256;
+    if (reduce_size < 256) {
+      block_size = 1;
+      while (block_size < reduce_size) block_size <<= 1;
+      if (block_size < 1) block_size = 1;
+    }
+    return block_size;
+  };
+
   switch (hip_dtype) {
     case HIP_DTYPE_INT64: {
-      int block_size = 256;
-      if (reduce_size < 256) {
-        block_size = 1;
-        while (block_size < reduce_size) block_size <<= 1;
-        if (block_size < 1) block_size = 1;
-      }
+      int block_size = pick_block_size();
       size_t shared_mem = block_size * sizeof(int64_t);
 
       CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_sum: dtype=INT64, "
@@ -185,6 +282,50 @@ extern "C" int hip_reduce_sum(
                          static_cast<int64_t*>(output),
                          reduce_size, num_output_elements);
       }
+      break;
+    }
+    case HIP_DTYPE_INT32: {
+      int block_size = pick_block_size();
+      // Shared mem holds int64 accumulators (one per thread) for overflow-safe
+      // accumulation; output is narrowed to int32 by the kernel.
+      size_t shared_mem = block_size * sizeof(int64_t);
+
+      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_sum: dtype=INT32, "
+              "input=%lld, output=%lld, reduce_size=%lld, "
+              "grid=%lld, block=%d, smem=%zu\n",
+              (long long)num_input_elements, (long long)num_output_elements,
+              (long long)reduce_size, (long long)num_output_elements,
+              block_size, shared_mem);
+
+      hipLaunchKernelGGL(reduce_sum_i32_kernel,
+                       dim3(static_cast<unsigned>(num_output_elements)),
+                       dim3(block_size),
+                       shared_mem, hip_stream,
+                       static_cast<const int32_t*>(data),
+                       static_cast<int32_t*>(output),
+                       reduce_size, num_output_elements);
+      break;
+    }
+    case HIP_DTYPE_FLOAT16: {
+      int block_size = pick_block_size();
+      // Shared mem holds float accumulators (one per thread) to avoid fp16
+      // precision loss; output is narrowed to half by the kernel.
+      size_t shared_mem = block_size * sizeof(float);
+
+      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_sum: dtype=FLOAT16, "
+              "input=%lld, output=%lld, reduce_size=%lld, "
+              "grid=%lld, block=%d, smem=%zu\n",
+              (long long)num_input_elements, (long long)num_output_elements,
+              (long long)reduce_size, (long long)num_output_elements,
+              block_size, shared_mem);
+
+      hipLaunchKernelGGL(reduce_sum_f16_kernel,
+                       dim3(static_cast<unsigned>(num_output_elements)),
+                       dim3(block_size),
+                       shared_mem, hip_stream,
+                       static_cast<const __half*>(data),
+                       static_cast<__half*>(output),
+                       reduce_size, num_output_elements);
       break;
     }
     default:
