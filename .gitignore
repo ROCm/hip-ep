@@ -107,20 +107,5 @@ backend-mlir-compiler/test/ir_dumps/
 model.constants.bin
 model.constants.json
 
-# Large model files (keep models out of git)
-full_model/
-
-# Local analysis/benchmark artifacts
-Llama_Sliced/
-perf_seq*.txt
-dump_log.txt
-
-# Local build scripts (contain machine-specific paths)
-setup_and_configure.ps1
-build_and_install.ps1
-
 # build.py install directory
 install/
-
-# ONNX model files (large, downloaded on demand)
-models/
