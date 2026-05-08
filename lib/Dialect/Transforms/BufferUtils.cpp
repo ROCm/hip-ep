@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- BufferUtils.cpp - Shared buffer analysis utilities -----------------===//
 //
 // Implements the utilities declared in BufferUtils.h.
@@ -10,10 +6,9 @@
 
 #include "hip/Dialect/Transforms/BufferUtils.h"
 
+#include "llvm/Support/MathExtras.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-
-#include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
 
@@ -24,7 +19,7 @@ int64_t mlir::hip::getStaticByteSize(MemRefType type) {
   return static_cast<int64_t>(llvm::divideCeil(totalBits, 8));
 }
 
-Value mlir::hip::emitAlignUp(OpBuilder &builder, Location loc, Value value,
+Value mlir::hip::emitAlignUp(OpBuilder& builder, Location loc, Value value,
                              int64_t alignment) {
   if (alignment <= 1)
     return value;
@@ -36,8 +31,8 @@ Value mlir::hip::emitAlignUp(OpBuilder &builder, Location loc, Value value,
 }
 
 unsigned mlir::hip::findLastAliasedUseIndex(
-    Value allocResult, const BufferViewFlowAnalysis &aliasAnalysis,
-    Block &block, const DenseMap<Operation *, unsigned> &opIndex,
+    Value allocResult, const BufferViewFlowAnalysis& aliasAnalysis,
+    Block& block, const DenseMap<Operation*, unsigned>& opIndex,
     unsigned blockSize) {
   unsigned lastIdx = 0;
   // resolve() returns all *forward* (downstream) aliases: the allocResult
@@ -45,7 +40,7 @@ unsigned mlir::hip::findLastAliasedUseIndex(
   // memref.subview, memref.cast, etc.).  We must consider users of ALL
   // aliases to get the true last-use index.
   for (Value alias : aliasAnalysis.resolve(allocResult)) {
-    for (Operation *user : alias.getUsers()) {
+    for (Operation* user : alias.getUsers()) {
       if (isa<memref::DeallocOp>(user))
         continue;
 
@@ -54,7 +49,7 @@ unsigned mlir::hip::findLastAliasedUseIndex(
       if (it != opIndex.end()) {
         // User is directly in the entry block.
         userIdx = it->second;
-      } else if (auto *ancestor = block.findAncestorOpInBlock(*user)) {
+      } else if (auto* ancestor = block.findAncestorOpInBlock(*user)) {
         // User is inside a nested region (e.g. scf.for body); attribute
         // its index to the enclosing op in the entry block.
         userIdx = opIndex.lookup(ancestor);
@@ -68,17 +63,17 @@ unsigned mlir::hip::findLastAliasedUseIndex(
   return lastIdx;
 }
 
-Operation *
+Operation*
 mlir::hip::findLastAliasedUser(Value allocResult,
-                               const BufferViewFlowAnalysis &aliasAnalysis,
-                               Block &entryBlock) {
+                               const BufferViewFlowAnalysis& aliasAnalysis,
+                               Block& entryBlock) {
   // Start from the defining op so we always have a valid baseline, even if
   // the alloc has no users at all (e.g., dead code not yet cleaned up).
-  Operation *lastUser = allocResult.getDefiningOp();
+  Operation* lastUser = allocResult.getDefiningOp();
   // resolve() returns all forward aliases -- see findLastAliasedUseIndex.
   for (Value alias : aliasAnalysis.resolve(allocResult)) {
-    for (Operation *user : alias.getUsers()) {
-      Operation *resolved = user;
+    for (Operation* user : alias.getUsers()) {
+      Operation* resolved = user;
       if (resolved->getBlock() != &entryBlock) {
         resolved = entryBlock.findAncestorOpInBlock(*resolved);
         if (!resolved)
@@ -92,8 +87,8 @@ mlir::hip::findLastAliasedUser(Value allocResult,
 }
 
 bool mlir::hip::isAliasInSet(Value root,
-                             const BufferViewFlowAnalysis &aliasAnalysis,
-                             const DenseSet<Value> &valueSet) {
+                             const BufferViewFlowAnalysis& aliasAnalysis,
+                             const DenseSet<Value>& valueSet) {
   // Check whether root or any of its forward aliases (views, casts, etc.)
   // appears in valueSet.  Used by LowerAllocs to skip hip.free for returned
   // buffers even when a derived view (not the alloc itself) is returned.

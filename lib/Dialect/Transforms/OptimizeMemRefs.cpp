@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- OptimizeMemRefs.cpp - Buffer reuse via liveness analysis -----------===//
 //
 // Greedy best-fit buffer reuse for single-block functions.  Replaces
@@ -44,14 +40,13 @@
 #include "hip/Dialect/Transforms/BufferUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/Statistic.h"
-#include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "hip-optimize-memrefs"
 
@@ -100,7 +95,7 @@ static SmallVector<int64_t> getContiguousStrides(MemRefType type) {
 
 /// Returns true if \p slot can serve an allocation of \p neededType with
 /// the given dynamic-size operands.
-static bool canReuse(const Slot &slot, MemRefType neededType,
+static bool canReuse(const Slot& slot, MemRefType neededType,
                      OperandRange neededDynSizes) {
   if (slot.type.getElementType() != neededType.getElementType())
     return false;
@@ -133,7 +128,7 @@ static bool canReuse(const Slot &slot, MemRefType neededType,
 struct OptimizeMemRefsPass
     : public impl::OptimizeMemRefsPassBase<OptimizeMemRefsPass> {
 
-  void getDependentDialects(DialectRegistry &registry) const override {
+  void getDependentDialects(DialectRegistry& registry) const override {
     registry.insert<memref::MemRefDialect>();
     arith::registerBufferViewFlowOpInterfaceExternalModels(registry);
   }
@@ -147,8 +142,13 @@ void OptimizeMemRefsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
-  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
-  // instead of sequential op indices.
+  // Limitation: single-block functions only.  Same caveat as
+  // hip-pool-allocs -- liveness here uses sequential op indices, which only
+  // make sense within a single block.  Multi-block support would mean
+  // switching to `mlir::Liveness`; not done because every function
+  // post-onnx-mlir+bufferization in this pipeline is single-block.  An
+  // error fires here so any future change introducing control flow shows
+  // up loudly instead of silently producing wrong reuse decisions.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-optimize-memrefs requires single-block functions; "
                      "liveness analysis uses sequential op indices that do "
@@ -156,20 +156,20 @@ void OptimizeMemRefsPass::runOnOperation() {
     return signalPassFailure();
   }
 
-  Block &block = funcOp.getBody().front();
+  Block& block = funcOp.getBody().front();
 
   BufferViewFlowAnalysis aliasAnalysis(funcOp);
 
   // Assign each op a sequential index for interval ordering.
-  DenseMap<Operation *, unsigned> opIndex;
+  DenseMap<Operation*, unsigned> opIndex;
   unsigned idx = 0;
-  for (Operation &op : block)
+  for (Operation& op : block)
     opIndex[&op] = idx++;
   unsigned blockSize = idx;
 
   // Collect alloc ops and compute their live intervals.
   SmallVector<AllocInterval> intervals;
-  for (Operation &op : block) {
+  for (Operation& op : block) {
     auto allocOp = dyn_cast<memref::AllocOp>(op);
     if (!allocOp)
       continue;
@@ -192,13 +192,13 @@ void OptimizeMemRefsPass::runOnOperation() {
   SmallVector<Slot> slots;
   SmallVector<std::pair<Value, Value>> replacements;
 
-  for (auto &interval : intervals) {
+  for (auto& interval : intervals) {
     MemRefType neededType = interval.allocOp.getType();
     auto neededDynSizes = interval.allocOp.getDynamicSizes();
 
-    Slot *bestSlot = nullptr;
+    Slot* bestSlot = nullptr;
     int64_t bestWaste = INT64_MAX;
-    for (auto &slot : slots) {
+    for (auto& slot : slots) {
       if (slot.lastUseIndex >= interval.defIndex)
         continue;
       if (!canReuse(slot, neededType, neededDynSizes))
@@ -242,7 +242,7 @@ void OptimizeMemRefsPass::runOnOperation() {
   // Map each alloc to its memref.dealloc (if any) so we can erase the
   // dealloc when the alloc it targets is replaced.
   DenseMap<Value, memref::DeallocOp> allocToDealloc;
-  for (Operation &op : block) {
+  for (Operation& op : block) {
     if (auto deallocOp = dyn_cast<memref::DeallocOp>(op))
       allocToDealloc[deallocOp.getMemref()] = deallocOp;
   }
@@ -256,7 +256,7 @@ void OptimizeMemRefsPass::runOnOperation() {
 
     // When a returned alloc (no dealloc) is merged into a slot that has a
     // dealloc, the slot becomes the returned buffer and must not be freed.
-    bool oldIsReturned = llvm::any_of(oldVal.getUsers(), [](Operation *user) {
+    bool oldIsReturned = llvm::any_of(oldVal.getUsers(), [](Operation* user) {
       return isa<func::ReturnOp>(user);
     });
     if (oldIsReturned) {

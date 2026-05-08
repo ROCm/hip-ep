@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CastLowering.cpp - HIP-to-LLVM Cast lowering ----------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -18,7 +20,7 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
 
   LogicalResult
   matchAndRewrite(CastOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -88,8 +90,8 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
 
 } // namespace
 
-void mlir::hip::populateCastLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void mlir::hip::populateCastLoweringPatterns(const LLVMTypeConverter& converter,
+                                             RewritePatternSet& patterns) {
   patterns.add<CastOpLowering>(converter);
 }
 

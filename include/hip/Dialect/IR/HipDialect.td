@@ -1,10 +1,12 @@
+//===- HipDialect.td - HIP dialect TableGen definition ----*- tablegen -*-===//
 //
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
 // Licensed under the MIT License.
 //
+//===----------------------------------------------------------------------===//
 
-#ifndef HIP_DIALECT
-#define HIP_DIALECT
+#ifndef HIP_DIALECT_IR_HIPDIALECT
+#define HIP_DIALECT_IR_HIPDIALECT
 
 include "mlir/IR/OpBase.td"
 include "mlir/IR/DialectBase.td"
@@ -20,4 +22,4 @@ def Hip_Dialect : Dialect {
   let useDefaultTypePrinterParser = 1;
 }
 
-#endif // HIP_DIALECT
+#endif // HIP_DIALECT_IR_HIPDIALECT

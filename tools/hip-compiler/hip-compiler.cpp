@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
 
   mlir::hip::CompilationOptionsT options;
   std::string errorMessage;
-  hip::compiler::CompilerDriver driver;
+  mlir::hip::CompilerDriver driver;
 
   if (!driver.compile((*bufOrErr)->getBuffer(), outputDll, options,
                       errorMessage)) {

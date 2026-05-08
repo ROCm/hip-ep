@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- PowerLowering.cpp - HIP-to-LLVM Power lowering --------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -23,16 +25,16 @@ template <typename OpTy>
 struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
   double alpha, beta, gamma;
-  const char *opName;
+  const char* opName;
 
-  PowerOpLowering(const LLVMTypeConverter &converter, double a, double b,
-                  double g, const char *op)
+  PowerOpLowering(const LLVMTypeConverter& converter, double a, double b,
+                  double g, const char* op)
       : ConvertOpToLLVMPattern<OpTy>(converter), alpha(a), beta(b), gamma(g),
         opName(op) {}
 
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->template getParentOfType<ModuleOp>();
     Type ptrType = this->getPtrType();
@@ -109,7 +111,7 @@ struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 } // namespace
 
 void mlir::hip::populatePowerLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   // Reciprocal: (0 + 1*x)^(-1) = 1/x; Sqrt: (0 + 1*x)^(0.5) = √x
   // Same LLVM callee @wrap_power; reciprocal/sqrt use HIP kernels in power.cpp.
   patterns.insert<PowerOpLowering<ReciprocalOp>>(converter, 0.0, 1.0, -1.0,

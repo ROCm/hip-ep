@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- RangeLowering.cpp - HIP-to-LLVM Range lowering --------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -35,7 +37,7 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
 
   LogicalResult
   matchAndRewrite(RangeOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -85,7 +87,7 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
 } // namespace
 
 void mlir::hip::populateRangeLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<RangeOpLowering>(converter);
 }
 

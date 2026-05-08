@@ -4,6 +4,7 @@
  */
 
 #include "CrashHandler.h"
+#include "hip/Conversion/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
@@ -160,7 +161,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
-  registry.insert<hip::compiler::detail::OnnxStubDialect>();
+  registry.insert<mlir::hip::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
@@ -171,10 +172,8 @@ int main(int argc, char **argv) {
   registerHipBufferizableOpInterfaceModels(registry);
 
   mlir::hip::registerHipPasses();
+  mlir::hip::registerHipConversionPasses();
   mlir::hip::registerHipPipelines();
-  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-    return mlir::hip::createOutlineOnnxToHipDNNPass();
-  });
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();
   mlir::registerConvertBufferizationToMemRefPass();

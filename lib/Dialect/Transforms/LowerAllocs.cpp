@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- LowerAllocs.cpp - memref.alloc -> hip.alloc + hip.free -------------===//
 //
 // Replaces memref.alloc with hip.alloc (device allocation via hipMalloc) and
@@ -18,14 +14,13 @@
 #include "hip/Dialect/Transforms/BufferUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
-
-#include "llvm/ADT/Statistic.h"
-#include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "hip-lower-allocs"
 
@@ -58,7 +53,7 @@ static AllocOp traceToHipAlloc(Value val) {
 
 struct LowerAllocsPass : public impl::LowerAllocsPassBase<LowerAllocsPass> {
 
-  void getDependentDialects(DialectRegistry &registry) const override {
+  void getDependentDialects(DialectRegistry& registry) const override {
     registry.insert<hip::HipDialect, memref::MemRefDialect>();
     arith::registerBufferViewFlowOpInterfaceExternalModels(registry);
   }
@@ -71,7 +66,13 @@ void LowerAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
-  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis.
+
+  // Limitation: single-block functions only.  `findLastAliasedUser` calls
+  // `Operation::isBeforeInBlock` to place `hip.free` after every aliasing
+  // user; the API is undefined across blocks.  Multi-block support would
+  // require an MLIR `Liveness` pass and a rewrite of the placement logic
+  // to use program-point sets.  Not done because every function in this
+  // pipeline post-onnx-mlir+bufferization is single-block.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-lower-allocs requires single-block functions; "
                      "findLastAliasedUser uses isBeforeInBlock which does "
@@ -138,7 +139,7 @@ void LowerAllocsPass::runOnOperation() {
       returnedValues.insert(v);
   });
 
-  Block &entry = funcOp.getBody().front();
+  Block& entry = funcOp.getBody().front();
 
   // ---- Phase 3: Convert memref.dealloc -> hip.free ----------------------
   //
@@ -172,7 +173,7 @@ void LowerAllocsPass::runOnOperation() {
     if (deallocated.contains(hipAlloc.getResult()))
       continue;
 
-    Operation *lastUser =
+    Operation* lastUser =
         findLastAliasedUser(hipAlloc.getResult(), aliasAnalysis, entry);
     builder.setInsertionPointAfter(lastUser);
     FreeOp::create(builder, hipAlloc.getLoc(), ctx, hipAlloc.getResult());

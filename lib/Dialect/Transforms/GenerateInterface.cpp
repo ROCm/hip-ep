@@ -1,33 +1,35 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-
+//===- GenerateInterface.cpp - C-ABI inference interface ------*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
 //===----------------------------------------------------------------------===//
-// Generate Interface Pass - Create C-compatible interface functions
-//===----------------------------------------------------------------------===//
+//
 // This pass generates four C-ABI compatible functions that wrap the internal
 // @main_graph function:
 // - inference_init: Allocate context, create handles, upload constants
 // - inference_compute: Parse inputs/outputs, call @main_graph
 // - inference_cleanup: Free resources
 // - inference_get_metadata_json: Return JSON metadata (input/output shapes)
+//
 //===----------------------------------------------------------------------===//
 
-#include "compilation_options_generated.h"
-#include "flatbuffers/flatbuffers.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
 #include "hip/flatbuffers_json.h"
+
+#include "llvm/ADT/Sequence.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+
+#include "compilation_options_generated.h"
+#include "flatbuffers/flatbuffers.h"
 #include "model_metadata_generated.h"
 #include "model_metadata_schema.h"
-#include "llvm/ADT/Sequence.h"
 
 using namespace mlir;
 
@@ -55,7 +57,7 @@ buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
 /// Each ConstantInfo carries both size and a running byte offset, enabling
 /// future non-sequential or grouped constant layouts.
 mlir::hip::HipModelMetaInfoT
-buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
+buildMetadataNative(ModuleOp module, const std::string& constantsFile) {
   auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
   auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
   auto inputElementSizes =
@@ -119,7 +121,7 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
         auto splat = std::make_unique<mlir::hip::SplatSourceT>();
         int64_t elemSize = (i < splatElemSizes.size()) ? splatElemSizes[i] : 0;
         size_t n = static_cast<size_t>(std::min<int64_t>(elemSize, 8));
-        const auto *base = reinterpret_cast<const uint8_t *>(&splatValues[i]);
+        const auto* base = reinterpret_cast<const uint8_t*>(&splatValues[i]);
         splat->elem_bytes.assign(base, base + n);
         ci->source.Set(std::move(*splat));
       } else if (kind == 2) {
@@ -168,12 +170,12 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
 /// Uses generated HipModelMetaInfoT native struct (--gen-object-api) so the
 /// code tracks schema changes automatically.
 std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
-                                       const std::string &constantsFile) {
+                                       const std::string& constantsFile) {
   mlir::hip::HipModelMetaInfoT meta =
       buildMetadataNative(module, constantsFile);
   flatbuffers::FlatBufferBuilder fbb;
   fbb.Finish(mlir::hip::HipModelMetaInfo::Pack(fbb, &meta));
-  const uint8_t *buf = fbb.GetBufferPointer();
+  const uint8_t* buf = fbb.GetBufferPointer();
   return std::vector<uint8_t>(buf, buf + fbb.GetSize());
 }
 
@@ -181,7 +183,7 @@ std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
 /// Uses the embedded model_metadata schema so the output is always consistent
 /// with the binary blob — no manual field mapping needed.
 std::string buildMetadataJson(ModuleOp module,
-                              const std::string &constantsFile) {
+                              const std::string& constantsFile) {
   mlir::hip::HipModelMetaInfoT meta =
       buildMetadataNative(module, constantsFile);
   std::string json, error;
@@ -198,7 +200,7 @@ std::string buildMetadataJson(ModuleOp module,
 /// Generated IR (1 input / 1 output, shape [8], element_size 4):
 ///   llvm.mlir.global internal constant @__metadata_json(
 ///       "{\0A  \22constants_filename\22: ...}\0A\00") {addr_space = 0 : i32}
-void generateMetadataGlobal(ModuleOp module, const std::string &jsonStr) {
+void generateMetadataGlobal(ModuleOp module, const std::string& jsonStr) {
   OpBuilder builder(module.getContext());
   auto i8Type = builder.getI8Type();
   auto arrayType = LLVM::LLVMArrayType::get(i8Type, jsonStr.size() + 1);
@@ -216,13 +218,13 @@ void generateMetadataGlobal(ModuleOp module, const std::string &jsonStr) {
 ///   llvm.mlir.global internal constant @__metadata_blob(
 ///       "\18\00\00\00...") {addr_space = 0 : i32}
 void generateMetadataBlobGlobal(ModuleOp module,
-                                const std::vector<uint8_t> &blob) {
+                                const std::vector<uint8_t>& blob) {
   OpBuilder builder(module.getContext());
   auto i8Type = builder.getI8Type();
   auto arrayType = LLVM::LLVMArrayType::get(i8Type, blob.size());
 
   builder.setInsertionPoint(&module.getBody()->front());
-  llvm::StringRef blobRef(reinterpret_cast<const char *>(blob.data()),
+  llvm::StringRef blobRef(reinterpret_cast<const char*>(blob.data()),
                           blob.size());
   LLVM::GlobalOp::create(builder, module.getLoc(), arrayType,
                          /*isConstant=*/true, LLVM::Linkage::Internal,
@@ -251,7 +253,7 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
   funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
   funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
-  Block *entry = funcOp.addEntryBlock(builder);
+  Block* entry = funcOp.addEntryBlock(builder);
   builder.setInsertionPointToStart(entry);
 
   Value addr =
@@ -261,7 +263,7 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
 
 /// Build an LLVM memref descriptor struct {ptr, ptr, offset, sizes, strides}
 /// from a TensorBuffer's GPU pointer and shape pointer.
-static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
+static Value buildMemrefDescriptor(OpBuilder& builder, Location loc,
                                    Value gpuPtrRaw, Value shapePtr,
                                    int64_t rank, Type ptrType, Type i64Type) {
   Type gpuPtrType = LLVM::LLVMPointerType::get(builder.getContext(), 1);
@@ -320,18 +322,18 @@ static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
 /// Emit a call to a runtime function and branch to errorBlock if it
 /// returns non-zero.  Leaves the builder at the start of a new
 /// continuation block.
-static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
+static void emitErrorCheckedCall(OpBuilder& builder, Location loc,
                                  LLVM::LLVMFuncOp func, ValueRange args,
-                                 Value errorCodePtr, Block *errorBlock,
-                                 LLVM::LLVMFuncOp &parentFunc) {
+                                 Value errorCodePtr, Block* errorBlock,
+                                 LLVM::LLVMFuncOp& parentFunc) {
   Value ret = LLVM::CallOp::create(builder, loc, func, args).getResult();
   Value zero = LLVM::ConstantOp::create(builder, loc, builder.getI32Type(),
                                         builder.getI32IntegerAttr(0));
   Value failed =
       LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne, ret, zero);
 
-  Block *continueBlock = parentFunc.addBlock();
-  Block *storeErrorBlock = parentFunc.addBlock();
+  Block* continueBlock = parentFunc.addBlock();
+  Block* storeErrorBlock = parentFunc.addBlock();
   LLVM::CondBrOp::create(builder, loc, failed, storeErrorBlock, continueBlock);
 
   builder.setInsertionPointToStart(storeErrorBlock);
@@ -347,10 +349,10 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateInterfacePass)
 
   explicit GenerateInterfacePass(
-      const mlir::hip::CompilationOptionsT &compilationOptions)
+      const mlir::hip::CompilationOptionsT& compilationOptions)
       : compilationOptions_(compilationOptions) {}
   explicit GenerateInterfacePass(
-      mlir::hip::CompilationOptionsT &&compilationOptions)
+      mlir::hip::CompilationOptionsT&& compilationOptions)
       : compilationOptions_(std::move(compilationOptions)) {}
 
   StringRef getArgument() const final { return "generate-interface"; }
@@ -359,7 +361,7 @@ public:
            "inference_compute, inference_cleanup, inference_get_metadata_json)";
   }
 
-  void getDependentDialects(DialectRegistry &registry) const override {
+  void getDependentDialects(DialectRegistry& registry) const override {
     registry.insert<LLVM::LLVMDialect>();
     registry.insert<func::FuncDialect>();
     registry.insert<arith::ArithDialect>();
@@ -411,7 +413,7 @@ private:
     SmallVector<Type, 4> paramTypes;
   };
 
-  SmallVector<RuntimeFuncSpec> getRuntimeFuncSpecs(OpBuilder &builder) {
+  SmallVector<RuntimeFuncSpec> getRuntimeFuncSpecs(OpBuilder& builder) {
     Type ptr = LLVM::LLVMPointerType::get(builder.getContext(), 0);
     Type i32 = builder.getI32Type();
     Type i64 = builder.getI64Type();
@@ -456,7 +458,7 @@ private:
     OpBuilder builder(module.getContext());
     builder.setInsertionPoint(&module.getBody()->front());
     Location loc = module.getLoc();
-    for (auto &spec : getRuntimeFuncSpecs(builder)) {
+    for (auto& spec : getRuntimeFuncSpecs(builder)) {
       if (!module.lookupSymbol<LLVM::LLVMFuncOp>(spec.name)) {
         auto func = LLVM::LLVMFuncOp::create(
             builder, loc, spec.name,
@@ -467,7 +469,7 @@ private:
   }
 
   LogicalResult verifyPrerequisites(ModuleOp module) {
-    MLIRContext *ctx = module.getContext();
+    MLIRContext* ctx = module.getContext();
     Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type i32Type = IntegerType::get(ctx, 32);
     Type i64Type = IntegerType::get(ctx, 64);
@@ -570,7 +572,7 @@ private:
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
-    Block *entryBlock = funcOp.addEntryBlock(builder);
+    Block* entryBlock = funcOp.addEntryBlock(builder);
     builder.setInsertionPointToStart(entryBlock);
 
     Value outStatePtr = entryBlock->getArgument(0);
@@ -610,8 +612,8 @@ private:
           LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne,
                                initCall.getResult(), zero_i32);
 
-      Block *poolInitBlock = funcOp.addBlock();
-      Block *returnErrorBlock = funcOp.addBlock();
+      Block* poolInitBlock = funcOp.addBlock();
+      Block* returnErrorBlock = funcOp.addBlock();
 
       LLVM::CondBrOp::create(builder, loc, initFailed, returnErrorBlock,
                              poolInitBlock);
@@ -690,7 +692,7 @@ private:
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
-    Block *entryBlock = funcOp.addEntryBlock(builder);
+    Block* entryBlock = funcOp.addEntryBlock(builder);
     builder.setInsertionPointToStart(entryBlock);
 
     Value state = entryBlock->getArgument(0);
@@ -732,8 +734,14 @@ private:
     SmallVector<Value> outputBuffers;
 
     // sizeof(TensorBuffer) in the runtime (6 fields, 48 bytes on 64-bit).
-    // TODO: Replace with sizeof(TensorBuffer) or a runtime query once the
-    // runtime is ported into this repo.
+    //
+    // Hard-coded mirror of `struct TensorBuffer` defined in
+    // `lib/Runtime/hipdnn_ep_runtime_tensor.cpp`.  We do not introspect the
+    // runtime header here because the compiler is built independently of the
+    // runtime and may target a different bitness; both projects ship from
+    // this repo, and a static_assert in the runtime guarantees the size
+    // stays at 48 bytes.  Update the constant if and only if the runtime
+    // struct is changed.
     constexpr int64_t kTensorBufferSizeBytes = 48;
 
     Type i8Type = builder.getI8Type();
@@ -754,7 +762,7 @@ private:
       outputBuffers.push_back(bufferPtr);
     }
 
-    Block *errorCleanupBlock = funcOp.addBlock();
+    Block* errorCleanupBlock = funcOp.addBlock();
 
     for (auto i : llvm::seq<size_t>(0, numInputs)) {
       Value bufferPtr = inputBuffers[i];
@@ -858,7 +866,7 @@ private:
                          errorCodePtr, errorCleanupBlock, funcOp);
 
     // Call @main_graph with arrays of pointers
-    Block *mainSuccessBlock;
+    Block* mainSuccessBlock;
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc) {
@@ -939,7 +947,7 @@ private:
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
-    Block *entryBlock = funcOp.addEntryBlock(builder);
+    Block* entryBlock = funcOp.addEntryBlock(builder);
     builder.setInsertionPointToStart(entryBlock);
 
     Value state = entryBlock->getArgument(0);
@@ -959,7 +967,7 @@ namespace mlir {
 namespace hip {
 
 std::unique_ptr<mlir::Pass> createGenerateInterfacePass(
-    const mlir::hip::CompilationOptionsT &compilationOptions) {
+    const mlir::hip::CompilationOptionsT& compilationOptions) {
   return std::make_unique<GenerateInterfacePass>(compilationOptions);
 }
 

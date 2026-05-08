@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CastConversion.cpp - ONNX-to-HIP Cast conversion ------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -10,31 +12,28 @@ namespace hip {
 namespace {
 
 /// onnx.Cast -> hip.cast
-struct CastToHip : public mlir::RewritePattern {
-  CastToHip(mlir::MLIRContext *ctx)
+struct CastToHip : public RewritePattern {
+  CastToHip(MLIRContext* ctx)
       : RewritePattern("onnx.Cast", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override;
 };
 
-mlir::LogicalResult
-CastToHip::matchAndRewrite(mlir::Operation *op,
-                           mlir::PatternRewriter &rewriter) const {
+LogicalResult CastToHip::matchAndRewrite(Operation* op,
+                                         PatternRewriter& rewriter) const {
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
-  mlir::Value context = *ctxOrFailure;
+  if (failed(ctxOrFailure))
+    return failure();
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
-  mlir::Value input = op->getOperand(0);
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  Location loc = op->getLoc();
+  Value input = op->getOperand(0);
+  auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+  Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
   // Map MLIR element type to ONNX DataType enum
-  mlir::Type targetType = resultType.getElementType();
+  Type targetType = resultType.getElementType();
   int64_t onnxDataType = 0;
   if (targetType.isF16())
     onnxDataType = 10;
@@ -64,13 +63,13 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   auto hipOp = mlir::hip::CastOp::create(rewriter, loc, resultType, context,
                                          input, init, toAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return success();
 }
 
 } // namespace
 
-void mlir::hip::populateCastConversionPatterns(RewritePatternSet &patterns,
-                                               MLIRContext *ctx) {
+void mlir::hip::populateCastConversionPatterns(RewritePatternSet& patterns,
+                                               MLIRContext* ctx) {
   patterns.add<CastToHip>(ctx);
 }
 

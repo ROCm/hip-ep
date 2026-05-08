@@ -1,13 +1,25 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-//===-- HipPasses.td - HIP pass definitions ----------------*- tablegen -*-===//
+//===-- Passes.td - HIP dialect transform pass definitions -*- tablegen -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// TableGen definitions for HIP-dialect *transform* passes (passes that
+// rewrite HIP IR in place rather than convert across dialects).  Conversion
+// passes (ONNX -> HIP, HIP -> LLVM, ONNX -> HipDNN graph outliner) live in
+// the sibling umbrella `include/hip/Conversion/Passes.td`, mirroring the
+// upstream `mlir/Conversion/Passes.td` / `mlir/Dialect/<X>/Transforms/
+// Passes.td` split.
+//
+// `GenerateInterfacePass` is intentionally hand-rolled in
+// `Dialect/Transforms/Passes.h` because it takes a non-TableGen-expressible
+// `CompilationOptionsT` constructor argument.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef HIP_PASSES
-#define HIP_PASSES
+#ifndef HIP_DIALECT_TRANSFORMS_PASSES
+#define HIP_DIALECT_TRANSFORMS_PASSES
 
 include "mlir/Pass/PassBase.td"
 
@@ -23,61 +35,6 @@ def HipAddContextArgPass : Pass<"hip-add-context-arg", "mlir::ModuleOp"> {
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::func::FuncDialect"
-  ];
-}
-
-def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
-  let summary = "Convert ONNX dialect to HIP dialect (tensor DPS)";
-  let description = [{
-    Converts ONNX dialect IR (from onnx-mlir) into HIP dialect IR using
-    destination-passing style (DPS) with tensor types.
-
-    Transformations:
-      1. Constants: onnx.Constant -> arith.constant (small/inline) or
-         memref.global extern + memref.get_global + bufferization.to_tensor
-         (large/externalized to sidecar .constants.bin + .constants.json)
-      2. Op mapping: onnx.{MatMul,Transpose,Mul,Softmax} -> hip.* (tensor DPS)
-      3. Cleanup: erase onnx.EntryPoint
-
-    Requires hip-add-context-arg to have run first so that !hip.context is
-    available as function argument 0.
-
-    Constant externalization (opt-in via --externalize-min-num-elements):
-      Large constants above the threshold are written to a binary sidecar file
-      and replaced with extern memref.global ops carrying a hip.external_data
-      attribute (offset + size).  The filename is recorded as a
-      hip.constants_file attribute on the module.  This follows the onnx-mlir
-      pattern (krnl.global + omMMapBinaryFile) adapted to standard MLIR ops.
-      Splat constants are always kept inline regardless of size.
-  }];
-  let options = [
-    Option<"externalizeOutputDir", "externalize-output-dir", "std::string",
-           /*default=*/"\"\"",
-           "Directory for sidecar .constants.bin/.json files (empty = cwd)">,
-    Option<"externalizeMinNumElements", "externalize-min-num-elements",
-           "int64_t", /*default=*/"0",
-           "Minimum number of tensor elements to externalize (0 = disabled)">
-  ];
-  let dependentDialects = [
-    "mlir::hip::HipDialect",
-    "mlir::arith::ArithDialect",
-    "mlir::func::FuncDialect",
-    "mlir::tensor::TensorDialect",
-    "mlir::memref::MemRefDialect",
-    "mlir::bufferization::BufferizationDialect"
-  ];
-}
-
-def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
-  let summary = "Convert HIP dialect to LLVM dialect";
-  let description = [{
-    Lowers HIP dialect operations to LLVM dialect by converting each HIP op
-    into calls to the HIP runtime C API (hipCreateHandle, hipblasltMatmul,
-    etc.). MemRef operands are unpacked into bare pointers for the C calls.
-  }];
-  let dependentDialects = [
-    "mlir::LLVM::LLVMDialect",
-    "mlir::memref::MemRefDialect"
   ];
 }
 
@@ -216,4 +173,4 @@ def ResolveExternConstantsPass
   ];
 }
 
-#endif // HIP_PASSES
+#endif // HIP_DIALECT_TRANSFORMS_PASSES

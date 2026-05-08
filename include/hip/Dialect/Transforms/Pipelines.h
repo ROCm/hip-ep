@@ -1,16 +1,19 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- Pipelines.h - HIP pass pipeline declarations ----------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 #ifndef HIP_DIALECT_TRANSFORMS_PIPELINES_H
 #define HIP_DIALECT_TRANSFORMS_PIPELINES_H
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
+
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
 
 struct hipdnnHandle;
-typedef hipdnnHandle *hipdnnHandle_t;
+typedef hipdnnHandle* hipdnnHandle_t;
 
 namespace morphizen {
 class FileSystem;
@@ -65,22 +68,23 @@ struct HipToLLVMPipelineOptions
 /// Converts ONNX-level tensor IR into fully bufferized HIP memref IR with
 /// pooled allocations and resolved extern constants.
 ///
-/// \p fs -- when non-null, externalized constants are written through this
-///   FileSystem (EPContext archive). When null, a DiskFileSystem is used.
-void buildOnnxToHipPipeline(OpPassManager &pm,
-                            const OnnxToHipPipelineOptions &options,
-                            morphizen::FileSystem *fs = nullptr);
-
-/// Build the ONNX-to-HIP pipeline with hipDNN graph compilation support.
-///
-/// Same as the FileSystem overload, but additionally inserts the
-/// ConvertOnnxToHipDNN pass when handle is non-null. Supported ONNX ops
-/// are compiled into hipDNN graphs at pass time; unsupported ops pass
-/// through to ConvertOnnxToHip.
-void buildOnnxToHipPipeline(OpPassManager &pm,
-                            const OnnxToHipPipelineOptions &options,
-                            morphizen::FileSystem *fs, hipdnnHandle_t handle,
-                            CompiledGraphMap output_graphs);
+/// \p fs            When non-null, externalized constants are written through
+///                  this FileSystem (e.g. an EPContext archive).  When null,
+///                  a DiskFileSystem rooted at `options.externalizeOutputDir`
+///                  is used.
+/// \p handle        Optional live `hipdnnHandle_t`.  When non-null, the
+///                  pipeline prepends the OutlineOnnxToHipDNN +
+///                  CompileHipDNNGraphs passes so that supported ONNX ops are
+///                  compiled into hipDNN graphs ahead of `--convert-onnx-to-
+///                  hip`.  When null, those passes are skipped and the entire
+///                  graph flows through the standard ONNX-to-HIP path.
+/// \p output_graphs Out-parameter for the compiled graph table; required when
+///                  \p handle is non-null and ignored otherwise.
+void buildOnnxToHipPipeline(OpPassManager& pm,
+                            const OnnxToHipPipelineOptions& options,
+                            morphizen::FileSystem* fs = nullptr,
+                            hipdnnHandle_t handle = nullptr,
+                            CompiledGraphMap output_graphs = {});
 
 /// Build the HIP-to-LLVM lowering pipeline. This is a separate pipeline
 /// (not part of buildOnnxToHipPipeline) because the LLVM lowering is only
@@ -91,8 +95,8 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
 /// GenerateInterface pass that creates four C-ABI wrapper functions
 /// (inference_init, inference_compute, inference_cleanup,
 /// inference_get_metadata_json).
-void buildHipToLLVMPipeline(OpPassManager &pm,
-                            const HipToLLVMPipelineOptions &options);
+void buildHipToLLVMPipeline(OpPassManager& pm,
+                            const HipToLLVMPipelineOptions& options);
 
 /// Combined pipeline options for the full ONNX→HIP→LLVM→Interface flow.
 /// Used by hip-mlir-opt --hipdnn-pipeline and the compiler driver.
@@ -116,8 +120,8 @@ struct HipdnnPipelineOptions
 
 /// Build the complete HIPDNN pipeline: ONNX→HIP→LLVM→Interface.
 /// Chains buildOnnxToHipPipeline and buildHipToLLVMPipeline.
-void buildHipdnnPipeline(OpPassManager &pm,
-                         const HipdnnPipelineOptions &options);
+void buildHipdnnPipeline(OpPassManager& pm,
+                         const HipdnnPipelineOptions& options);
 
 /// Register all pipelines with MLIR's global pass registry so they appear
 /// in hip-mlir-opt --help and are usable as single-flag invocations.

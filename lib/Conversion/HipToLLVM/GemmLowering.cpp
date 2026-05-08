@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- GemmLowering.cpp - HIP-to-LLVM Gemm lowering ----------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -16,7 +18,7 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
 
   LogicalResult
   matchAndRewrite(GemmOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -140,8 +142,8 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
 
 } // namespace
 
-void mlir::hip::populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void mlir::hip::populateGemmLoweringPatterns(const LLVMTypeConverter& converter,
+                                             RewritePatternSet& patterns) {
   patterns.add<GemmOpLowering>(converter);
 }
 

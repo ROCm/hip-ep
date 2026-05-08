@@ -1,7 +1,14 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- ReshapeConversion.cpp - ONNX-to-HIP Reshape conversion - *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 
 #include "OnnxToHipUtils.h"
 
@@ -18,34 +25,33 @@ namespace {
 /// After constant externalization, small onnx.Constant / arith.constant tensors
 /// become memref.get_global + bufferization.to_tensor (see OnnxToHip.cpp);
 /// those must still count as constant axes. Arbitrary ToTensor(alloc) is not.
-static bool axesDefOpIsCompileTimeKnown(mlir::Operation *axesDefOp) {
-  if (mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
-      axesDefOp->hasAttr("value"))
+static bool axesDefOpIsCompileTimeKnown(Operation* axesDefOp) {
+  if (isa<arith::ConstantOp>(axesDefOp) || axesDefOp->hasAttr("value"))
     return true;
-  auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(axesDefOp);
+  auto toTensor = dyn_cast<bufferization::ToTensorOp>(axesDefOp);
   if (!toTensor)
     return false;
-  mlir::Operation *bufDef = toTensor.getBuffer().getDefiningOp();
-  return bufDef && mlir::isa<mlir::memref::GetGlobalOp>(bufDef);
+  Operation* bufDef = toTensor.getBuffer().getDefiningOp();
+  return bufDef && isa<memref::GetGlobalOp>(bufDef);
 }
 
 /// Validate common requirements for Unsqueeze/Squeeze operations.
 /// Requires: 2 operands (data, axes), ranked tensors, matching element types,
 /// and constant axes (dynamic axes would require runtime shape computation).
-mlir::LogicalResult
-validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
-                           const char *tensorOpName, mlir::Value &data,
-                           mlir::Value &axes, mlir::RankedTensorType &inputType,
-                           mlir::RankedTensorType &outputType) {
+LogicalResult validateSqueezeUnsqueezeOp(Operation* op,
+                                         PatternRewriter& rewriter,
+                                         const char* tensorOpName, Value& data,
+                                         Value& axes,
+                                         RankedTensorType& inputType,
+                                         RankedTensorType& outputType) {
   if (op->getNumOperands() != 2)
     return rewriter.notifyMatchFailure(op, "expected 2 operands (data, axes)");
 
   data = op->getOperand(0);
   axes = op->getOperand(1);
 
-  inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  outputType =
-      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  inputType = dyn_cast<RankedTensorType>(data.getType());
+  outputType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
   if (!inputType || !outputType)
     return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
   if (inputType.getElementType() != outputType.getElementType())
@@ -72,7 +78,7 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
     return rewriter.notifyMatchFailure(op, msg);
   }
 
-  return mlir::success();
+  return success();
 }
 
 /// Build output shape for expand_shape operations.
@@ -81,10 +87,10 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
 /// For static dimensions: use compile-time size from outputType.
 /// For dynamic dimensions: extract from input via DimOp, dividing out any
 /// static dimensions in the same reassociation group.
-llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
-    mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Value data,
-    mlir::RankedTensorType outputType,
-    llvm::ArrayRef<mlir::ReassociationIndices> reassoc) {
+llvm::SmallVector<OpFoldResult>
+buildExpandShapeOutputShape(PatternRewriter& rewriter, Location loc, Value data,
+                            RankedTensorType outputType,
+                            llvm::ArrayRef<ReassociationIndices> reassoc) {
   int64_t outputRank = outputType.getRank();
 
   llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
@@ -92,7 +98,7 @@ llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
     for (int64_t idx : group)
       outDimToInDim[idx] = g;
 
-  llvm::SmallVector<mlir::OpFoldResult> outputShape;
+  llvm::SmallVector<OpFoldResult> outputShape;
   for (int64_t i : llvm::seq<int64_t>(outputRank)) {
     if (!outputType.isDynamicDim(i)) {
       outputShape.push_back(rewriter.getIndexAttr(outputType.getDimSize(i)));
@@ -100,22 +106,20 @@ llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
     }
 
     int64_t srcDim = outDimToInDim[i];
-    const auto &group = reassoc[srcDim];
+    const auto& group = reassoc[srcDim];
 
     int64_t staticProduct = 1;
     for (int64_t idx : group)
       if (!outputType.isDynamicDim(idx))
         staticProduct *= outputType.getDimSize(idx);
 
-    mlir::Value inputSize =
-        mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
+    Value inputSize = tensor::DimOp::create(rewriter, loc, data, srcDim);
     if (staticProduct == 1) {
       outputShape.push_back(inputSize);
     } else {
-      mlir::Value divisor =
-          mlir::arith::ConstantIndexOp::create(rewriter, loc, staticProduct);
-      mlir::Value dynSize =
-          mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
+      Value divisor =
+          arith::ConstantIndexOp::create(rewriter, loc, staticProduct);
+      Value dynSize = arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
       outputShape.push_back(dynSize);
     }
   }
@@ -134,36 +138,34 @@ llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
 /// bufferize to memref.expand_shape / memref.collapse_shape (zero-copy
 /// alias) and then to LLVM struct manipulation (same data pointer, new
 /// sizes/strides).  No HIP kernel is needed.
-struct ReshapeToStdTensor : public mlir::RewritePattern {
-  ReshapeToStdTensor(mlir::MLIRContext *ctx)
+struct ReshapeToStdTensor : public RewritePattern {
+  ReshapeToStdTensor(MLIRContext* ctx)
       : RewritePattern("onnx.Reshape", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    mlir::Value data = op->getOperand(0);
-    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    auto outputType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override {
+    Value data = op->getOperand(0);
+    auto inputType = dyn_cast<RankedTensorType>(data.getType());
+    auto outputType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
     if (!inputType || !outputType)
       return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
     if (inputType.getElementType() != outputType.getElementType())
       return rewriter.notifyMatchFailure(op, "element type mismatch");
 
-    mlir::Location loc = op->getLoc();
+    Location loc = op->getLoc();
     int64_t inputRank = inputType.getRank();
     int64_t outputRank = outputType.getRank();
 
     // No-op: same type
     if (inputType == outputType) {
       rewriter.replaceOp(op, data);
-      return mlir::success();
+      return success();
     }
 
     // Different rank: expand or collapse
     if (outputRank != inputRank) {
       auto reassocOpt =
-          mlir::getReassociationIndicesForReshape(inputType, outputType);
+          getReassociationIndicesForReshape(inputType, outputType);
       if (!reassocOpt)
         return rewriter.notifyMatchFailure(
             op, "cannot compute reshape reassociation");
@@ -172,16 +174,16 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // Expand: use shared helper to build output shape
         auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
                                                        outputType, *reassocOpt);
-        auto expandOp = mlir::tensor::ExpandShapeOp::create(
+        auto expandOp = tensor::ExpandShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt, outputShape);
         rewriter.replaceOp(op, expandOp.getResult());
       } else {
         // Collapse: no dynamic shape computation needed
-        auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+        auto collapseOp = tensor::CollapseShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt);
         rewriter.replaceOp(op, collapseOp.getResult());
       }
-      return mlir::success();
+      return success();
     }
 
     // Same rank, different shape: collapse to 1-D then expand.
@@ -194,31 +196,29 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "element count mismatch");
 
     auto flatType =
-        mlir::RankedTensorType::get({numElems}, inputType.getElementType());
+        RankedTensorType::get({numElems}, inputType.getElementType());
 
-    mlir::ReassociationIndices allInputDims;
+    ReassociationIndices allInputDims;
     for (int64_t i : llvm::seq<int64_t>(inputRank))
       allInputDims.push_back(i);
-    llvm::SmallVector<mlir::ReassociationIndices> collapseReassoc = {
-        allInputDims};
-    auto collapsed = mlir::tensor::CollapseShapeOp::create(
-        rewriter, loc, flatType, data, collapseReassoc);
+    llvm::SmallVector<ReassociationIndices> collapseReassoc = {allInputDims};
+    auto collapsed = tensor::CollapseShapeOp::create(rewriter, loc, flatType,
+                                                     data, collapseReassoc);
 
-    mlir::ReassociationIndices allOutputDims;
+    ReassociationIndices allOutputDims;
     for (int64_t i : llvm::seq<int64_t>(outputRank))
       allOutputDims.push_back(i);
-    llvm::SmallVector<mlir::ReassociationIndices> expandReassoc = {
-        allOutputDims};
-    llvm::SmallVector<mlir::OpFoldResult> flatOutputShape;
+    llvm::SmallVector<ReassociationIndices> expandReassoc = {allOutputDims};
+    llvm::SmallVector<OpFoldResult> flatOutputShape;
     for (int64_t i : llvm::seq<int64_t>(outputRank))
       flatOutputShape.push_back(
           rewriter.getIndexAttr(outputType.getDimSize(i)));
-    auto expanded = mlir::tensor::ExpandShapeOp::create(
+    auto expanded = tensor::ExpandShapeOp::create(
         rewriter, loc, outputType, collapsed.getResult(), expandReassoc,
         flatOutputShape);
 
     rewriter.replaceOp(op, expanded.getResult());
-    return mlir::success();
+    return success();
   }
 };
 
@@ -227,33 +227,31 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 //===----------------------------------------------------------------------===//
 
 /// onnx.Unsqueeze -> tensor.expand_shape (zero-cost metadata operation).
-struct UnsqueezeToStdTensor : public mlir::RewritePattern {
-  UnsqueezeToStdTensor(mlir::MLIRContext *ctx)
+struct UnsqueezeToStdTensor : public RewritePattern {
+  UnsqueezeToStdTensor(MLIRContext* ctx)
       : RewritePattern("onnx.Unsqueeze", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    mlir::Value data, axes;
-    mlir::RankedTensorType inputType, outputType;
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override {
+    Value data, axes;
+    RankedTensorType inputType, outputType;
     if (auto result = validateSqueezeUnsqueezeOp(
             op, rewriter, "expand_shape", data, axes, inputType, outputType);
         failed(result))
       return result;
 
-    auto reassocOpt =
-        mlir::getReassociationIndicesForReshape(inputType, outputType);
+    auto reassocOpt = getReassociationIndicesForReshape(inputType, outputType);
     if (!reassocOpt)
       return rewriter.notifyMatchFailure(
           op, "cannot compute unsqueeze reassociation");
 
-    mlir::Location loc = op->getLoc();
+    Location loc = op->getLoc();
     auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
                                                    outputType, *reassocOpt);
-    auto expandOp = mlir::tensor::ExpandShapeOp::create(
+    auto expandOp = tensor::ExpandShapeOp::create(
         rewriter, loc, outputType, data, *reassocOpt, outputShape);
     rewriter.replaceOp(op, expandOp.getResult());
-    return mlir::success();
+    return success();
   }
 };
 
@@ -262,31 +260,29 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
 //===----------------------------------------------------------------------===//
 
 /// onnx.Squeeze -> tensor.collapse_shape (zero-cost metadata operation).
-struct SqueezeToStdTensor : public mlir::RewritePattern {
-  SqueezeToStdTensor(mlir::MLIRContext *ctx)
+struct SqueezeToStdTensor : public RewritePattern {
+  SqueezeToStdTensor(MLIRContext* ctx)
       : RewritePattern("onnx.Squeeze", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    mlir::Value data, axes;
-    mlir::RankedTensorType inputType, outputType;
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override {
+    Value data, axes;
+    RankedTensorType inputType, outputType;
     if (auto result = validateSqueezeUnsqueezeOp(
             op, rewriter, "collapse_shape", data, axes, inputType, outputType);
         failed(result))
       return result;
 
-    auto reassocOpt =
-        mlir::getReassociationIndicesForReshape(inputType, outputType);
+    auto reassocOpt = getReassociationIndicesForReshape(inputType, outputType);
     if (!reassocOpt)
       return rewriter.notifyMatchFailure(
           op, "cannot compute squeeze reassociation");
 
-    mlir::Location loc = op->getLoc();
-    auto collapseOp = mlir::tensor::CollapseShapeOp::create(
-        rewriter, loc, outputType, data, *reassocOpt);
+    Location loc = op->getLoc();
+    auto collapseOp = tensor::CollapseShapeOp::create(rewriter, loc, outputType,
+                                                      data, *reassocOpt);
     rewriter.replaceOp(op, collapseOp.getResult());
-    return mlir::success();
+    return success();
   }
 };
 
@@ -302,31 +298,30 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
 /// without copying data. We lower to standard MLIR tensor.extract_slice ops
 /// which bufferize to memref.subview (zero-copy alias) and then to LLVM
 /// pointer arithmetic. No HIP kernel is needed.
-struct SplitToStdTensor : public mlir::RewritePattern {
-  SplitToStdTensor(mlir::MLIRContext *ctx)
+struct SplitToStdTensor : public RewritePattern {
+  SplitToStdTensor(MLIRContext* ctx)
       : RewritePattern("onnx.Split", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    mlir::Value input = op->getOperand(0);
-    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override {
+    Value input = op->getOperand(0);
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
     if (!inputType)
       return rewriter.notifyMatchFailure(op, "expected ranked tensor type");
 
-    mlir::Location loc = op->getLoc();
+    Location loc = op->getLoc();
     int64_t inputRank = inputType.getRank();
     unsigned numOutputs = op->getNumResults();
 
     // Edge case: single output is identity operation
     if (numOutputs == 1) {
       rewriter.replaceOp(op, input);
-      return mlir::success();
+      return success();
     }
 
     // Extract axis attribute (default 0)
     int64_t axis = 0;
-    if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+    if (auto axisAttr = op->getAttrOfType<IntegerAttr>("axis"))
       axis = axisAttr.getSInt();
 
     // Normalize negative axis
@@ -336,12 +331,12 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "axis out of range");
 
     // Determine split mode: equal splits or custom splits
-    llvm::SmallVector<mlir::OpFoldResult> splitLengths;
+    llvm::SmallVector<OpFoldResult> splitLengths;
     bool isEqualSplit = true;
 
     if (op->getNumOperands() == 2) {
       // Check if second operand is onnx.NoValue (representing none/optional)
-      mlir::Value splitInput = op->getOperand(1);
+      Value splitInput = op->getOperand(1);
       auto splitDefOp = splitInput.getDefiningOp();
 
       // Handle onnx.NoValue: treat as equal split
@@ -352,19 +347,16 @@ struct SplitToStdTensor : public mlir::RewritePattern {
         // Custom splits: prefer compile-time constants when available, but
         // also support runtime split-length tensors (e.g. externalized
         // constants loaded via globals).
-        mlir::DenseElementsAttr splitAttr;
-        if (splitDefOp && mlir::isa<mlir::arith::ConstantOp>(splitDefOp))
-          if (auto constOp =
-                  mlir::dyn_cast<mlir::arith::ConstantOp>(splitDefOp))
-            splitAttr =
-                mlir::dyn_cast<mlir::DenseElementsAttr>(constOp.getValue());
+        DenseElementsAttr splitAttr;
+        if (splitDefOp && isa<arith::ConstantOp>(splitDefOp))
+          if (auto constOp = dyn_cast<arith::ConstantOp>(splitDefOp))
+            splitAttr = dyn_cast<DenseElementsAttr>(constOp.getValue());
         if (!splitAttr && splitDefOp && splitDefOp->hasAttr("value"))
-          splitAttr = mlir::dyn_cast<mlir::DenseElementsAttr>(
-              splitDefOp->getAttr("value"));
+          splitAttr = dyn_cast<DenseElementsAttr>(splitDefOp->getAttr("value"));
 
         if (splitAttr) {
           // Extract split lengths as index attributes
-          for (auto val : splitAttr.getValues<mlir::APInt>())
+          for (auto val : splitAttr.getValues<APInt>())
             splitLengths.push_back(rewriter.getIndexAttr(val.getSExtValue()));
 
           if (splitLengths.size() != numOutputs)
@@ -375,10 +367,9 @@ struct SplitToStdTensor : public mlir::RewritePattern {
           if (!inputType.isDynamicDim(axis)) {
             int64_t axisDimSize = inputType.getDimSize(axis);
             int64_t splitSum = 0;
-            for (const auto &length : splitLengths) {
-              if (auto attr =
-                      llvm::dyn_cast_if_present<mlir::Attribute>(length)) {
-                auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
+            for (const auto& length : splitLengths) {
+              if (auto attr = llvm::dyn_cast_if_present<Attribute>(length)) {
+                auto intAttr = dyn_cast<IntegerAttr>(attr);
                 if (intAttr) {
                   splitSum += intAttr.getInt();
                 } else {
@@ -397,8 +388,7 @@ struct SplitToStdTensor : public mlir::RewritePattern {
           }
         } else {
           // Runtime path: read split lengths element-by-element.
-          auto splitType =
-              mlir::dyn_cast<mlir::RankedTensorType>(splitInput.getType());
+          auto splitType = dyn_cast<RankedTensorType>(splitInput.getType());
           if (!splitType || splitType.getRank() != 1)
             return rewriter.notifyMatchFailure(
                 op, "split input must be a rank-1 tensor");
@@ -412,13 +402,11 @@ struct SplitToStdTensor : public mlir::RewritePattern {
 
           auto indexType = rewriter.getIndexType();
           for (unsigned i = 0; i < numOutputs; ++i) {
-            mlir::Value idx =
-                rewriter.create<mlir::arith::ConstantIndexOp>(loc, i);
-            mlir::Value len = rewriter.create<mlir::tensor::ExtractOp>(
-                loc, splitInput, mlir::ValueRange{idx});
+            Value idx = rewriter.create<arith::ConstantIndexOp>(loc, i);
+            Value len = rewriter.create<tensor::ExtractOp>(loc, splitInput,
+                                                           ValueRange{idx});
             if (len.getType() != indexType)
-              len = rewriter.create<mlir::arith::IndexCastOp>(loc, indexType,
-                                                              len);
+              len = rewriter.create<arith::IndexCastOp>(loc, indexType, len);
             splitLengths.push_back(len);
           }
         }
@@ -429,12 +417,11 @@ struct SplitToStdTensor : public mlir::RewritePattern {
 
     // Handle equal splits
     if (isEqualSplit) {
-      mlir::Value axisDim =
-          rewriter.create<mlir::tensor::DimOp>(loc, input, axis);
-      mlir::Value numOutputsVal =
-          rewriter.create<mlir::arith::ConstantIndexOp>(loc, numOutputs);
-      mlir::Value chunkSize =
-          rewriter.create<mlir::arith::DivUIOp>(loc, axisDim, numOutputsVal);
+      Value axisDim = rewriter.create<tensor::DimOp>(loc, input, axis);
+      Value numOutputsVal =
+          rewriter.create<arith::ConstantIndexOp>(loc, numOutputs);
+      Value chunkSize =
+          rewriter.create<arith::DivUIOp>(loc, axisDim, numOutputsVal);
 
       // For equal splits: all outputs except possibly the last have size
       // chunkSize The last output gets the remainder: axis_size -
@@ -445,31 +432,30 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       // Last chunk size = axis_size - sum(previous chunks)
       // = axis_size - (num_outputs - 1) * chunkSize
       // Note: numOutputs is always >= 2 here (single output case returns early)
-      mlir::Value numPrevChunks =
-          rewriter.create<mlir::arith::ConstantIndexOp>(loc, numOutputs - 1);
-      mlir::Value prevTotal =
-          rewriter.create<mlir::arith::MulIOp>(loc, chunkSize, numPrevChunks);
-      mlir::Value lastChunkSize =
-          rewriter.create<mlir::arith::SubIOp>(loc, axisDim, prevTotal);
+      Value numPrevChunks =
+          rewriter.create<arith::ConstantIndexOp>(loc, numOutputs - 1);
+      Value prevTotal =
+          rewriter.create<arith::MulIOp>(loc, chunkSize, numPrevChunks);
+      Value lastChunkSize =
+          rewriter.create<arith::SubIOp>(loc, axisDim, prevTotal);
       splitLengths.push_back(lastChunkSize);
     }
 
     // Generate extract_slice for each output
-    llvm::SmallVector<mlir::Value> replacements;
-    mlir::OpFoldResult currentOffset = rewriter.getIndexAttr(0);
+    llvm::SmallVector<Value> replacements;
+    OpFoldResult currentOffset = rewriter.getIndexAttr(0);
 
     for (unsigned i = 0; i < numOutputs; ++i) {
-      auto outputType =
-          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(i).getType());
+      auto outputType = dyn_cast<RankedTensorType>(op->getResult(i).getType());
       if (!outputType)
         return rewriter.notifyMatchFailure(op, "expected ranked output type");
 
       // Track the actual slice size used for this output (for offset
       // calculation)
-      mlir::OpFoldResult actualSliceSize;
+      OpFoldResult actualSliceSize;
 
       // Build offsets, sizes, strides arrays
-      llvm::SmallVector<mlir::OpFoldResult> offsets, sizes, strides;
+      llvm::SmallVector<OpFoldResult> offsets, sizes, strides;
       for (int64_t dim = 0; dim < inputRank; ++dim) {
         if (dim == axis) {
           // Axis dimension: use computed offset and split length
@@ -485,9 +471,9 @@ struct SplitToStdTensor : public mlir::RewritePattern {
             // Validate consistency: static output size must match split length
             if (!isEqualSplit) {
               // For custom splits, verify the split length matches
-              if (auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(
-                      splitLengths[i])) {
-                if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr)) {
+              if (auto attr =
+                      llvm::dyn_cast_if_present<Attribute>(splitLengths[i])) {
+                if (auto intAttr = dyn_cast<IntegerAttr>(attr)) {
                   if (intAttr.getInt() != staticSize) {
                     return rewriter.notifyMatchFailure(
                         op, "custom split length does not match static output "
@@ -504,8 +490,7 @@ struct SplitToStdTensor : public mlir::RewritePattern {
           // Other dimensions: identity (offset=0, size=dim_size, stride=1)
           offsets.push_back(rewriter.getIndexAttr(0));
           if (outputType.isDynamicDim(dim)) {
-            mlir::Value dimSize =
-                rewriter.create<mlir::tensor::DimOp>(loc, input, dim);
+            Value dimSize = rewriter.create<tensor::DimOp>(loc, input, dim);
             sizes.push_back(dimSize);
           } else {
             sizes.push_back(rewriter.getIndexAttr(outputType.getDimSize(dim)));
@@ -517,10 +502,9 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       // Create extract_slice operation using OpBuilder
       // This will properly decompose OpFoldResults into static attrs and
       // dynamic operands
-      mlir::OperationState state(
-          loc, mlir::tensor::ExtractSliceOp::getOperationName());
-      mlir::tensor::ExtractSliceOp::build(rewriter, state, outputType, input,
-                                          offsets, sizes, strides);
+      OperationState state(loc, tensor::ExtractSliceOp::getOperationName());
+      tensor::ExtractSliceOp::build(rewriter, state, outputType, input, offsets,
+                                    sizes, strides);
       auto sliceOp = rewriter.create(state);
       replacements.push_back(sliceOp->getResult(0));
 
@@ -529,25 +513,25 @@ struct SplitToStdTensor : public mlir::RewritePattern {
         // IMPORTANT: Use the actual slice size (which may differ from
         // splitLengths[i] when output type has static dimension). This ensures
         // correct offset calculation.
-        mlir::Value offsetVal =
-            mlir::getValueOrCreateConstantIndexOp(rewriter, loc, currentOffset);
-        mlir::Value lengthVal = mlir::getValueOrCreateConstantIndexOp(
-            rewriter, loc, actualSliceSize);
-        mlir::Value newOffsetVal =
-            rewriter.create<mlir::arith::AddIOp>(loc, offsetVal, lengthVal);
+        Value offsetVal =
+            getValueOrCreateConstantIndexOp(rewriter, loc, currentOffset);
+        Value lengthVal =
+            getValueOrCreateConstantIndexOp(rewriter, loc, actualSliceSize);
+        Value newOffsetVal =
+            rewriter.create<arith::AddIOp>(loc, offsetVal, lengthVal);
         currentOffset = newOffsetVal;
       }
     }
 
     rewriter.replaceOp(op, replacements);
-    return mlir::success();
+    return success();
   }
 };
 
 } // namespace
 
-void mlir::hip::populateReshapeConversionPatterns(RewritePatternSet &patterns,
-                                                  MLIRContext *ctx) {
+void mlir::hip::populateReshapeConversionPatterns(RewritePatternSet& patterns,
+                                                  MLIRContext* ctx) {
   patterns.add<ReshapeToStdTensor, UnsqueezeToStdTensor, SqueezeToStdTensor,
                SplitToStdTensor>(ctx);
 }

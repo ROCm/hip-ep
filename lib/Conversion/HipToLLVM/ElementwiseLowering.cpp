@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- ElementwiseLowering.cpp - HIP-to-LLVM Elementwise lowering - *- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -17,13 +20,13 @@ namespace {
 template <typename OpTy>
 struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
-  const char *funcName;
+  const char* funcName;
 
-  MiopenBinaryOpLowering(const LLVMTypeConverter &converter, const char *name)
+  MiopenBinaryOpLowering(const LLVMTypeConverter& converter, const char* name)
       : ConvertOpToLLVMPattern<OpTy>(converter), funcName(name) {}
 
   Value computeNumElements(MemRefType type, Value descriptor,
-                           ConversionPatternRewriter &rewriter,
+                           ConversionPatternRewriter& rewriter,
                            Location loc) const {
     Type indexType = this->getIndexType();
     int rank = type.getRank();
@@ -38,7 +41,7 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->template getParentOfType<ModuleOp>();
     Type voidType = this->getVoidType();
@@ -92,7 +95,7 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->template getParentOfType<ModuleOp>();
     Type ptrType = this->getPtrType();
@@ -160,7 +163,7 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
 
   LogicalResult
   matchAndRewrite(SubOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -225,7 +228,7 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
 } // namespace
 
 void mlir::hip::populateElementwiseLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<ElementwiseOpLowering<MulOp, kTensorOpMul>,
                ElementwiseOpLowering<AddOp, kTensorOpAdd>, SubOpLowering>(
       converter);

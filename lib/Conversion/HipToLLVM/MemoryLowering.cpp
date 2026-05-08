@@ -1,13 +1,16 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- MemoryLowering.cpp - HIP-to-LLVM Memory lowering ------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
-#include "HipToLLVMUtils.h"
-
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
+
+#include "HipToLLVMUtils.h"
 
 namespace mlir {
 namespace hip {
@@ -19,7 +22,7 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
 
   LogicalResult
   matchAndRewrite(AllocOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     MemRefType memRefType = op.getMemref().getType();
@@ -74,7 +77,7 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
 
   LogicalResult
   matchAndRewrite(FreeOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -107,7 +110,7 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
 
   LogicalResult
   matchAndRewrite(GetPoolOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -156,7 +159,7 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
 
   LogicalResult
   matchAndRewrite(GetConstantOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
@@ -220,7 +223,7 @@ struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
 
   LogicalResult
   matchAndRewrite(memref::AllocOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     MemRefType memRefType = op.getType();
@@ -258,7 +261,7 @@ struct MemRefDeallocOpLowering
 
   LogicalResult
   matchAndRewrite(memref::DeallocOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
@@ -353,12 +356,12 @@ static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
 /// wrap_hipMemcpy2DAsync when strides are statically known. Otherwise leaves
 /// conversion to the default MemRef→LLVM copy lowering (benefit 1).
 struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
-  MemRefCopyOpLowering(const LLVMTypeConverter &converter)
+  MemRefCopyOpLowering(const LLVMTypeConverter& converter)
       : ConvertOpToLLVMPattern(converter, PatternBenefit(10)) {}
 
   LogicalResult
   matchAndRewrite(memref::CopyOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
 
     auto llvmFn = op->getParentOfType<LLVM::LLVMFuncOp>();
@@ -484,7 +487,7 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 } // namespace
 
 void mlir::hip::populateMemoryLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
                GetConstantOpLowering, MemRefAllocOpLowering,
                MemRefDeallocOpLowering>(converter);
