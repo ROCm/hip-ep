@@ -678,7 +678,8 @@ static int gqa_forward_hipblaslt(
     const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
     const size_t split_bytes =
         fused_packed_qkv ? (Q_full_bytes + K_full_bytes + K_full_bytes) : 0;
-    const size_t rope_temp_bytes = need_rope ? (Q_full_bytes + K_full_bytes) : 0;
+    const size_t rope_temp_bytes =
+        need_rope ? (Q_full_bytes + K_full_bytes) : 0;
     const size_t flash_partials_bytes =
         use_flash_decode ? static_cast<size_t>(B) * H * kFlashDecodeKSplits *
                                (d + 2) * sizeof(float)

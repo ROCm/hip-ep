@@ -110,10 +110,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
 
-  // Per-state grow-on-demand scratch in place of 8 hipMalloc/8 hipFree per call.
-  // Sub-buffers are 64-byte aligned (matches GPU pool alignment, gives each
-  // sub-buffer its own cache line). The buffer grows when num_tokens / sizes
-  // exceed the cached capacity, never shrinks; freed in state cleanup.
+  // Per-state grow-on-demand scratch in place of 8 hipMalloc/8 hipFree per
+  // call. Sub-buffers are 64-byte aligned (matches GPU pool alignment, gives
+  // each sub-buffer its own cache line). The buffer grows when num_tokens /
+  // sizes exceed the cached capacity, never shrinks; freed in state cleanup.
   auto align_up_64 = [](size_t s) -> size_t { return (s + 63) & ~size_t(63); };
   size_t sz_expert_indices = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
@@ -189,12 +189,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode path (k=%lld)\n",
                       (long long)k);
     HIP_CHECK(hip_qmoe_decode_fused(
-        stream, input, d_expert_indices, d_expert_weights,
-        fc1_weights, fc1_scales, fc1_zero_points, fc1_bias,
-        fc2_weights, fc2_scales, fc2_zero_points, fc2_bias,
-        d_fc2_buf, d_act_buf, output,
-        hidden_size, inter_size, k, block_size,
-        activation_alpha, activation_beta, swiglu_limit, elem_size));
+        stream, input, d_expert_indices, d_expert_weights, fc1_weights,
+        fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
+        fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, hidden_size,
+        inter_size, k, block_size, activation_alpha, activation_beta,
+        swiglu_limit, elem_size));
     return 0;
   }
 
@@ -228,10 +227,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     // Bucket tokens on the device: count per expert (atomicAdd), exclusive
     // prefix sum into d_expert_offsets, scatter (token_id, weight) pairs
     // into d_sorted_token_ids / d_sorted_weights ordered by expert.
-    HIP_CHECK(hip_qmoe_bucket_tokens(
-        stream, d_expert_indices, d_expert_weights, d_expert_counts,
-        d_expert_offsets, d_sorted_token_ids, d_sorted_weights, num_tokens,
-        num_experts, k, elem_size));
+    HIP_CHECK(hip_qmoe_bucket_tokens(stream, d_expert_indices, d_expert_weights,
+                                     d_expert_counts, d_expert_offsets,
+                                     d_sorted_token_ids, d_sorted_weights,
+                                     num_tokens, num_experts, k, elem_size));
 
     // Only readback the counts (num_experts * int32, e.g. 32*4 = 128 bytes)
     // to drive the host-side per-expert dispatch loop. Offsets are computed
@@ -332,12 +331,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)hidden_size,
                         (long long)count, (long long)fusion_inter);
-      HIP_CHECK(hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e,
-                                 fc1_zp_e, fc1_b_e, d_fc1_buf, count,
-                                 fusion_inter, hidden_size, 1,
-                                 expert_weight_bits, block_size, elem_size,
-                                 /*zp_elem_size=*/1, fc1_pre_zp_u8,
-                                 fc1_pre_zp_fp16));
+      HIP_CHECK(
+          hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e,
+                           fc1_b_e, d_fc1_buf, count, fusion_inter, hidden_size,
+                           1, expert_weight_bits, block_size, elem_size,
+                           /*zp_elem_size=*/1, fc1_pre_zp_u8, fc1_pre_zp_fp16));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
@@ -386,11 +384,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)inter_size,
                         (long long)count, (long long)hidden_size);
-      HIP_CHECK(hip_matmul_nbits(stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e,
-                                 fc2_b_e, d_fc2_buf, count, hidden_size,
-                                 inter_size, 1, expert_weight_bits, block_size,
-                                 elem_size, /*zp_elem_size=*/1, fc2_pre_zp_u8,
-                                 fc2_pre_zp_fp16));
+      HIP_CHECK(hip_matmul_nbits(
+          stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e, fc2_b_e, d_fc2_buf,
+          count, hidden_size, inter_size, 1, expert_weight_bits, block_size,
+          elem_size, /*zp_elem_size=*/1, fc2_pre_zp_u8, fc2_pre_zp_fp16));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
