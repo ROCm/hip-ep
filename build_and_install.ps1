@@ -1,3 +1,8 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # Build, install, and switch to prebuilt-local\bin for benchmarking.
 # Ensures MSVC environment, HIP_PATH, and THEROCK_DIST are set
 # (safe to re-run after reboot).

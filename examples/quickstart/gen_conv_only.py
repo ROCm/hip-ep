@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-# Copyright (c) 2025, hipDNN EP Authors. All rights reserved.
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 
 """Generate a single-Conv ONNX model for testing.
 
@@ -43,30 +45,32 @@ def create_conv_model(
     pad_w=1,
     stride_h=1,
     stride_w=1,
-    output_file="conv_yolov8x_backbone.onnx"
+    output_file="conv_yolov8x_backbone.onnx",
 ):
     """Create a simple Conv model."""
 
     # Input
-    X = helper.make_tensor_value_info('X', TensorProto.FLOAT,
-                                       [batch, in_channels, height, width])
+    X = helper.make_tensor_value_info(
+        "X", TensorProto.FLOAT, [batch, in_channels, height, width]
+    )
 
     # Weight (as initializer with random values)
     W_shape = [out_channels, in_channels, kernel_h, kernel_w]
     W_data = np.random.randn(*W_shape).astype(np.float32)
-    W = helper.make_tensor('W', TensorProto.FLOAT, W_shape, W_data.flatten().tolist())
+    W = helper.make_tensor("W", TensorProto.FLOAT, W_shape, W_data.flatten().tolist())
 
     # Output shape
     out_h = (height + 2 * pad_h - kernel_h) // stride_h + 1
     out_w = (width + 2 * pad_w - kernel_w) // stride_w + 1
-    Y = helper.make_tensor_value_info('Y', TensorProto.FLOAT,
-                                       [batch, out_channels, out_h, out_w])
+    Y = helper.make_tensor_value_info(
+        "Y", TensorProto.FLOAT, [batch, out_channels, out_h, out_w]
+    )
 
     # Conv node
     conv_node = helper.make_node(
-        'Conv',
-        inputs=['X', 'W'],
-        outputs=['Y'],
+        "Conv",
+        inputs=["X", "W"],
+        outputs=["Y"],
         kernel_shape=[kernel_h, kernel_w],
         pads=[pad_h, pad_w, pad_h, pad_w],
         strides=[stride_h, stride_w],
@@ -75,14 +79,14 @@ def create_conv_model(
     # Graph
     graph = helper.make_graph(
         [conv_node],
-        'conv_test',
+        "conv_test",
         [X],  # inputs
         [Y],  # outputs
         [W],  # initializers
     )
 
     # Model
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid('', 13)])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 8
 
     # Validate and save
@@ -94,7 +98,7 @@ def create_conv_model(
     print(f"  Output shape: [{batch}, {out_channels}, {out_h}, {out_w}]")
 
     # Also save weights for reference comparison
-    np.save(output_file.replace('.onnx', '_weights.npy'), W_data)
+    np.save(output_file.replace(".onnx", "_weights.npy"), W_data)
     print(f"Saved weights to {output_file.replace('.onnx', '_weights.npy')}")
 
     return model, W_data
@@ -102,9 +106,10 @@ def create_conv_model(
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(
         description="Generate a single-Conv ONNX model. "
-                    "Defaults = YOLOv8x backbone 3x3 stage-4 (512->1024, 40x40)."
+        "Defaults = YOLOv8x backbone 3x3 stage-4 (512->1024, 40x40)."
     )
     parser.add_argument("--output", "-o", default="conv_yolov8x_backbone.onnx")
     parser.add_argument("--batch", type=int, default=1)
@@ -129,5 +134,5 @@ if __name__ == "__main__":
         pad_w=args.pad,
         stride_h=args.stride,
         stride_w=args.stride,
-        output_file=args.output
+        output_file=args.output,
     )
