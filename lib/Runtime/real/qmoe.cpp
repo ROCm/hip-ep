@@ -10,6 +10,7 @@
 #include "runtime_types.h"
 #include "zp_unpack_cache.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <utility>
@@ -118,8 +119,15 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
   size_t sz_gather_buf = align_up_64(num_tokens * hidden_size * elem_size);
   size_t sz_fc1_buf = align_up_64(num_tokens * fusion_inter * elem_size);
-  size_t sz_act_buf = align_up_64(num_tokens * inter_size * elem_size);
-  size_t sz_fc2_buf = align_up_64(num_tokens * hidden_size * elem_size);
+  // Fused decode (num_tokens == 1) reuses act_buf and fc2_buf as the [k,
+  // inter] activation slots and [k, hidden] per-expert output slots needed
+  // by hip_qmoe_decode_fused (gather/scatter happen inline inside the
+  // kernel, indexed by expert_indices). For num_tokens > 1 the multi-pass
+  // path uses [num_tokens, ...] sizing. Take the max so the per-state
+  // scratch is never under-sized regardless of which path runs.
+  int64_t act_slots = std::max<int64_t>(num_tokens, k);
+  size_t sz_act_buf = align_up_64(act_slots * inter_size * elem_size);
+  size_t sz_fc2_buf = align_up_64(act_slots * hidden_size * elem_size);
   // bucket_tokens outputs (Phase 2): per-expert counts + exclusive prefix sum
   // offsets, plus tokens/weights re-grouped on-device into per-expert
   // contiguous slices. Replaces the old per-expert host h_ids/h_wts_e build +
@@ -169,6 +177,26 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
                                   d_expert_weights, num_tokens, num_experts, k,
                                   normalize_routing_weights, elem_size));
+
+  // Fused decode fast path: single-token MoE collapses to three back-to-back
+  // kernel launches (FC1+SwiGLU, FC2, weighted reduce) with zero D2H,
+  // hipStreamSynchronize, or host-side bucketing. Replaces the multi-pass
+  // bucket -> sync -> per-active-expert (gather, fc1, swiglu, fc2,
+  // scatter_add) sequence below. d_act_buf is reused as the [k, inter]
+  // activation slots, d_fc2_buf as the [k, hidden] per-expert output slots
+  // (gather/scatter happen inline via expert_indices).
+  if (num_tokens == 1) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode path (k=%lld)\n",
+                      (long long)k);
+    HIP_CHECK(hip_qmoe_decode_fused(
+        stream, input, d_expert_indices, d_expert_weights,
+        fc1_weights, fc1_scales, fc1_zero_points, fc1_bias,
+        fc2_weights, fc2_scales, fc2_zero_points, fc2_bias,
+        d_fc2_buf, d_act_buf, output,
+        hidden_size, inter_size, k, block_size,
+        activation_alpha, activation_beta, swiglu_limit, elem_size));
+    return 0;
+  }
 
   {
     // Phase 2: GPU-side bucketing eliminates the per-expert host build +

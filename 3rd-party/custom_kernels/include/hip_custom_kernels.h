@@ -646,6 +646,51 @@ int hip_qmoe_bucket_tokens(
     int64_t k,
     int64_t element_size_bytes);
 
+/* -------------------------------------------------------------------------
+ * Fully fused MoE decode (num_tokens == 1).
+ *
+ * Replaces the multi-pass topk -> bucket -> per-expert (gather, FC1, SwiGLU,
+ * FC2, scatter_add) sequence with three back-to-back kernel launches and
+ * zero hipStreamSynchronize calls per layer. Caller still issues the topk
+ * (hip_qmoe_topk_routing) before invoking this; the fused launcher reads
+ * expert_indices/expert_weights and dispatches all k experts inline.
+ *
+ * Layout (single token):
+ *   input            - GPU [hidden]              fp16
+ *   expert_indices   - GPU [k]                   int32 (from topk_routing)
+ *   expert_weights   - GPU [k]                   fp16  (from topk_routing)
+ *   fc1_weights      - GPU [E, 2*inter, K_pack]  uint8 (per-expert nibbles)
+ *   fc1_scales       - GPU [E, 2*inter, n_blk]   fp16
+ *   fc1_zero_points  - GPU [E, 2*inter, ceil(n_blk/2)] uint8 (packed nibbles)
+ *   fc1_bias         - GPU [E, 2*inter] or null  fp16
+ *   fc2_weights      - GPU [E, hidden, K_pack]   uint8
+ *   fc2_scales       - GPU [E, hidden, n_blk]    fp16
+ *   fc2_zero_points  - GPU [E, hidden, ceil(n_blk/2)] uint8
+ *   fc2_bias         - GPU [E, hidden] or null   fp16
+ *   slot_buf         - GPU [k, hidden]           fp16  (transient scratch)
+ *   act_out          - GPU [k, inter]            fp16  (transient scratch)
+ *   output           - GPU [hidden]              fp16  (final, weighted sum)
+ *
+ * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
+ * inter_size both multiples of 32; block_size > 0 and even.
+ */
+int hip_qmoe_decode_fused(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
 /* =========================================================================
  * Linear Attention Decode (Single-Token Recurrence, Prefill-Friendly)
  * =========================================================================
