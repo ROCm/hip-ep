@@ -132,13 +132,16 @@ if (Test-Path "$therock\bin\hipdnn_plugins") {
 }
 
 # 7. Copy onnxruntime_perf_test.exe (not installed by ORT's cmake --install).
-#    Search well-known locations: first the doc's layout (OnnxRuntime under
-#    OnnxHipDNN), then one level up (OnnxRuntime as a sibling of the
-#    workspace root). Set $env:ORT_PERF_TEST_PATH to override.
+#    Search well-known locations in order: first the path produced by the
+#    --build_dir flag documented in docs/quick_start.md (Section 4.3), then
+#    ORT's default build sub-directory under OnnxHipDNN, then the same
+#    default one level up (OnnxRuntime as a sibling of the workspace root).
+#    Set $env:ORT_PERF_TEST_PATH to override the search.
 $ortPerfTest = if ($env:ORT_PERF_TEST_PATH) {
     $env:ORT_PERF_TEST_PATH
 } else {
     $candidates = @(
+        (Join-Path $workspaceRoot "build\onnxruntime\Release\Release\onnxruntime_perf_test.exe"),
         (Join-Path $workspaceRoot "OnnxRuntime\onnxruntime\build\Windows\Release\Release\onnxruntime_perf_test.exe"),
         (Join-Path (Split-Path -Parent $workspaceRoot) "OnnxRuntime\onnxruntime\build\Windows\Release\Release\onnxruntime_perf_test.exe")
     )
@@ -146,10 +149,17 @@ $ortPerfTest = if ($env:ORT_PERF_TEST_PATH) {
     if ($found) { $found } else { $candidates[0] }
 }
 $destPerfTest = Join-Path $binDir "onnxruntime_perf_test.exe"
-if ((Test-Path $ortPerfTest) -and -not (Test-Path $destPerfTest)) {
-    Write-Host "=== Copying onnxruntime_perf_test.exe ===" -ForegroundColor Yellow
-    Copy-Item $ortPerfTest $destPerfTest
-} elseif (-not (Test-Path $ortPerfTest)) {
+# Force-copy when sizes differ so ORT upgrades (e.g. rel-1.25.1 -> rel-1.26)
+# refresh the staged perf_test instead of leaving the stale copy in place,
+# matching the SDK DLL-sync pattern above.
+if (Test-Path $ortPerfTest) {
+    $srcLen = (Get-Item $ortPerfTest).Length
+    $dstLen = if (Test-Path $destPerfTest) { (Get-Item $destPerfTest).Length } else { -1 }
+    if ($srcLen -ne $dstLen) {
+        Write-Host "=== Refreshing onnxruntime_perf_test.exe ($dstLen -> $srcLen bytes) ===" -ForegroundColor Yellow
+        Copy-Item $ortPerfTest $destPerfTest -Force
+    }
+} else {
     Write-Host "WARNING: onnxruntime_perf_test.exe not found at $ortPerfTest -- skipping copy" -ForegroundColor DarkYellow
     Write-Host "         (Set `$env:ORT_PERF_TEST_PATH if your ORT build is elsewhere.)" -ForegroundColor DarkYellow
 }
