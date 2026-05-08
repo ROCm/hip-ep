@@ -1,10 +1,12 @@
+//===- HipTypes.td - HIP dialect type definitions ---------*- tablegen -*-===//
 //
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
 // Licensed under the MIT License.
 //
+//===----------------------------------------------------------------------===//
 
-#ifndef HIP_TYPES
-#define HIP_TYPES
+#ifndef HIP_DIALECT_IR_HIPTYPES
+#define HIP_DIALECT_IR_HIPTYPES
 
 include "hip/Dialect/IR/HipDialect.td"
 include "mlir/IR/AttrTypeBase.td"
@@ -21,4 +23,4 @@ def Hip_ContextType : Hip_Type<"Context", "context"> {
   }];
 }
 
-#endif // HIP_TYPES
+#endif // HIP_DIALECT_IR_HIPTYPES

@@ -1,7 +1,33 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- QMoELowering.cpp - HIP-to-LLVM QMoE lowering ----------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Why this lowering exists
+// ------------------------
+// `hip.qmoe` represents a quantized mixture-of-experts block: input hidden
+// states, per-expert quantized weights / scales / zero-points (typically
+// int4 per-group), router logits, and the routing top-k count.  All
+// experts share the same packed weight layout, so the runtime entry
+// `wrap_qmoe` only needs base pointers + per-expert strides instead of an
+// expert-indexed pointer-array-of-pointers.
+//
+// Non-obvious choices
+// -------------------
+// * Expert weights / scales / zero-points are flattened into single
+//   contiguous tensors (one extra leading "expert" dimension).  This is
+//   handled at the conversion-from-ONNX layer via tensor.collapse_shape,
+//   which means at lowering time we can treat each operand as a plain
+//   memref and call `extractContiguousMemRefPtr` exactly once per array
+//   instead of allocating a temporary pointer array on the stack.
+// * `top_k` is forwarded as an i32 constant; the runtime selects the
+//   per-token routing kernel based on its value.
+// * Optional `bias` is handled the same way as in GQA: a null pointer
+//   means "no bias", saving an extra Boolean argument.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -18,7 +44,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
 
   LogicalResult
   matchAndRewrite(QMoEOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -205,8 +231,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
 
 } // namespace
 
-void mlir::hip::populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void mlir::hip::populateQMoELoweringPatterns(const LLVMTypeConverter& converter,
+                                             RewritePatternSet& patterns) {
   patterns.add<QMoEOpLowering>(converter);
 }
 

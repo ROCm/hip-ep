@@ -1,11 +1,15 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-#ifndef HIP_BUFFERIZE_H
-#define HIP_BUFFERIZE_H
+//===- HipBufferize.h - HIP dialect bufferization interface registration - *-
+// C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+#ifndef HIP_DIALECT_IR_HIPBUFFERIZE_H
+#define HIP_DIALECT_IR_HIPBUFFERIZE_H
 
 #include "hip/Dialect/IR/HipDialect.h"
+
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
 #include "mlir/IR/DialectRegistry.h"
@@ -18,13 +22,13 @@ template <typename OpTy>
 struct HipDstBufferizableModel
     : public bufferization::DstBufferizableOpInterfaceExternalModel<
           HipDstBufferizableModel<OpTy>, OpTy> {
-  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
-                          const bufferization::BufferizationOptions &options,
-                          bufferization::BufferizationState &state) const {
+  LogicalResult bufferize(Operation* op, RewriterBase& rewriter,
+                          const bufferization::BufferizationOptions& options,
+                          bufferization::BufferizationState& state) const {
     auto dstOp = cast<DestinationStyleOpInterface>(op);
 
     SmallVector<Value> newOperands;
-    for (OpOperand &operand : op->getOpOperands()) {
+    for (OpOperand& operand : op->getOpOperands()) {
       if (isa<TensorType>(operand.get().getType())) {
         FailureOr<Value> buffer =
             getBuffer(rewriter, operand.get(), options, state);
@@ -48,7 +52,7 @@ struct HipDstBufferizableModel
         replacements.push_back(result);
         continue;
       }
-      OpOperand *initOperand = dstOp.getTiedOpOperand(result);
+      OpOperand* initOperand = dstOp.getTiedOpOperand(result);
       FailureOr<Value> initBuffer =
           getBuffer(rewriter, initOperand->get(), options, state);
       if (failed(initBuffer))
@@ -62,8 +66,8 @@ struct HipDstBufferizableModel
 };
 
 inline void
-registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
-  registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
+registerHipBufferizableOpInterfaceModels(DialectRegistry& registry) {
+  registry.addExtension(+[](MLIRContext* ctx, HipDialect*) {
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
@@ -104,4 +108,4 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
 } // namespace hip
 } // namespace mlir
 
-#endif // HIP_BUFFERIZE_H
+#endif // HIP_DIALECT_IR_HIPBUFFERIZE_H

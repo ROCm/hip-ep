@@ -88,7 +88,6 @@ coverage/
 
 # Static analysis
 .clang-tidy
-.clang-format
 .cache/
 
 # Security - don't commit credentials

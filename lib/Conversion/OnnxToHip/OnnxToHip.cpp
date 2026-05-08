@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- OnnxToHip.cpp - Convert ONNX dialect to HIP dialect (tensor DPS) ---===//
 //
 // Converts ONNX dialect IR into HIP dialect IR using destination-passing style
@@ -11,15 +7,22 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "OnnxToHipUtils.h"
-
 #include "hip/Conversion/OnnxToHip/ConstantsIO.h"
+#include "hip/Conversion/OnnxToHip/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/timing.h"
 #include "morphizen-foundation/file_io.hpp"
 
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+
+#include "OnnxToHipUtils.h"
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4244) // Conversion warnings in LLVM JSON.h
@@ -42,7 +45,7 @@ namespace mlir {
 namespace hip {
 
 #define GEN_PASS_DEF_CONVERTONNXTOHIPPASS
-#include "hip/Dialect/Transforms/Passes.h.inc"
+#include "hip/Conversion/Passes.h.inc"
 
 namespace {
 
@@ -50,7 +53,7 @@ namespace {
 // Constant externalization helpers
 //===----------------------------------------------------------------------===//
 
-static std::string elementTypeToString(mlir::Type elemType) {
+static std::string elementTypeToString(Type elemType) {
   if (elemType.isF16())
     return "f16";
   else if (elemType.isBF16())
@@ -108,7 +111,7 @@ struct ExternalizationState {
   //     external-data file. This is the path that avoids ORT mmap for
   //     multi-GB models.
   struct HostEntry {
-    const void *ptr = nullptr;
+    const void* ptr = nullptr;
     int64_t splatElemSize = 0;
     std::string filePath; // empty unless file-ref
     int64_t fileOffset = 0;
@@ -119,7 +122,7 @@ struct ExternalizationState {
 /// Advance `currentOffset` to the next aligned boundary. The actual
 /// padding bytes are emitted by the finalize step (writeConstantsBin*);
 /// in transfer-file mode padding is implicit in the recorded offsets.
-static int64_t writeAlignmentPadding(ExternalizationState *extState,
+static int64_t writeAlignmentPadding(ExternalizationState* extState,
                                      int64_t alignment = 64) {
   int64_t aligned = llvm::alignTo(extState->currentOffset, alignment);
   extState->currentOffset = aligned;
@@ -130,19 +133,18 @@ static int64_t writeAlignmentPadding(ExternalizationState *extState,
 /// Updates ExternalizationState counters, emits the JSON manifest entry,
 /// creates the extern memref.global with hip.external_data, and replaces
 /// the original op with memref.get_global + bufferization.to_tensor.
-static void finalizeExternalizedConstant(mlir::ModuleOp module,
-                                         mlir::Operation *constOp,
-                                         mlir::RankedTensorType tensorType,
+static void finalizeExternalizedConstant(ModuleOp module, Operation* constOp,
+                                         RankedTensorType tensorType,
                                          int64_t byteSize, int64_t entryOffset,
-                                         ExternalizationState *extState) {
+                                         ExternalizationState* extState) {
   constexpr int64_t kAlignment = 64;
   auto memrefType =
-      mlir::MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+      MemRefType::get(tensorType.getShape(), tensorType.getElementType());
 
   std::string name = "hip_ext_constant_";
   std::string onnxName;
   if (auto nodeNameAttr =
-          constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name")) {
+          constOp->getAttrOfType<StringAttr>("onnx_node_name")) {
     onnxName = nodeNameAttr.getValue().str();
     std::string fragment = sanitizeForMlirIdentifier(nodeNameAttr.getValue());
     if (!fragment.empty())
@@ -151,11 +153,9 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
   // Initializers have their tensor name in "node.outputs" (the output NodeArg
   // name), not in "onnx_node_name" (the NodeProto.name which may be empty).
   if (onnxName.empty()) {
-    if (auto outputsAttr =
-            constOp->getAttrOfType<mlir::ArrayAttr>("node.outputs")) {
+    if (auto outputsAttr = constOp->getAttrOfType<ArrayAttr>("node.outputs")) {
       if (outputsAttr.size() > 0) {
-        if (auto strAttr =
-                mlir::dyn_cast<mlir::StringAttr>(outputsAttr.getValue()[0]))
+        if (auto strAttr = dyn_cast<StringAttr>(outputsAttr.getValue()[0]))
           onnxName = strAttr.getValue().str();
       }
     }
@@ -178,7 +178,7 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
   entry["alignment"] = kAlignment;
   extState->manifestEntries.push_back(std::move(entry));
 
-  mlir::OpBuilder moduleBuilder(module.getBody(), module.getBody()->begin());
+  OpBuilder moduleBuilder(module.getBody(), module.getBody()->begin());
   auto externalDataAttr = moduleBuilder.getDictionaryAttr({
       moduleBuilder.getNamedAttr(
           "index", moduleBuilder.getI64IntegerAttr(extState->constantIndex)),
@@ -187,7 +187,7 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
       moduleBuilder.getNamedAttr("size",
                                  moduleBuilder.getI64IntegerAttr(byteSize)),
   });
-  auto globalOp = mlir::memref::GlobalOp::create(
+  auto globalOp = memref::GlobalOp::create(
       moduleBuilder, constOp->getLoc(), name,
       /*sym_visibility=*/moduleBuilder.getStringAttr("private"),
       /*type=*/memrefType,
@@ -196,10 +196,10 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
       /*alignment=*/moduleBuilder.getI64IntegerAttr(kAlignment));
   globalOp->setAttr("hip.external_data", externalDataAttr);
 
-  mlir::OpBuilder builder(constOp);
-  auto getGlobal = mlir::memref::GetGlobalOp::create(builder, constOp->getLoc(),
-                                                     memrefType, name);
-  auto toTensor = mlir::bufferization::ToTensorOp::create(
+  OpBuilder builder(constOp);
+  auto getGlobal =
+      memref::GetGlobalOp::create(builder, constOp->getLoc(), memrefType, name);
+  auto toTensor = bufferization::ToTensorOp::create(
       builder, constOp->getLoc(), tensorType, getGlobal.getResult(),
       /*restrict=*/builder.getUnitAttr(),
       /*writable=*/nullptr);
@@ -211,10 +211,10 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
 
 /// Write one constant's raw data to constants.bin and replace the op with
 /// an extern memref.global + bufferization.to_tensor bridge.
-static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
-                                mlir::RankedTensorType tensorType,
-                                const void *rawPtr, int64_t byteSize,
-                                ExternalizationState *extState) {
+static void externalizeConstant(ModuleOp module, Operation* constOp,
+                                RankedTensorType tensorType, const void* rawPtr,
+                                int64_t byteSize,
+                                ExternalizationState* extState) {
   int64_t entryOffset = writeAlignmentPadding(extState);
   // Always collect layout + host pointer. The finalize step decides whether
   // to emit constants.bin (skipDataWrite=false) or module attrs encoding
@@ -233,12 +233,11 @@ static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
 /// Record a file-ref entry: data lives on disk at (filePath, fileOffset)
 /// and must be fread by the runtime into a staging buffer at upload time.
 /// Avoids holding any of the data in host memory during compilation.
-static void externalizeFileRefConstant(mlir::ModuleOp module,
-                                       mlir::Operation *constOp,
-                                       mlir::RankedTensorType tensorType,
-                                       const std::string &filePath,
+static void externalizeFileRefConstant(ModuleOp module, Operation* constOp,
+                                       RankedTensorType tensorType,
+                                       const std::string& filePath,
                                        int64_t fileOffset, int64_t byteSize,
-                                       ExternalizationState *extState) {
+                                       ExternalizationState* extState) {
   int64_t entryOffset = writeAlignmentPadding(extState);
   ExternalizationState::HostEntry entry;
   entry.filePath = filePath;
@@ -250,11 +249,11 @@ static void externalizeFileRefConstant(mlir::ModuleOp module,
 }
 
 /// Replace an onnx.Constant op with an inline arith.constant.
-static void replaceWithArithConstant(mlir::Operation *constOp,
-                                     mlir::DenseElementsAttr valueAttr) {
-  mlir::OpBuilder builder(constOp);
+static void replaceWithArithConstant(Operation* constOp,
+                                     DenseElementsAttr valueAttr) {
+  OpBuilder builder(constOp);
   auto arithConst =
-      mlir::arith::ConstantOp::create(builder, constOp->getLoc(), valueAttr);
+      arith::ConstantOp::create(builder, constOp->getLoc(), valueAttr);
   constOp->getResult(0).replaceAllUsesWith(arithConst.getResult());
   constOp->erase();
 }
@@ -264,12 +263,11 @@ static void replaceWithArithConstant(mlir::Operation *constOp,
 /// element value on the fly, so we never allocate a full-size buffer here.
 /// DenseElementsAttr's raw data is owned by the MLIRContext and stays
 /// valid through runOnOperation.
-static void externalizeSplatConstant(mlir::ModuleOp module,
-                                     mlir::Operation *constOp,
-                                     mlir::RankedTensorType tensorType,
-                                     mlir::DenseElementsAttr valueAttr,
+static void externalizeSplatConstant(ModuleOp module, Operation* constOp,
+                                     RankedTensorType tensorType,
+                                     DenseElementsAttr valueAttr,
                                      int64_t byteSize,
-                                     ExternalizationState *extState) {
+                                     ExternalizationState* extState) {
   auto rawData = valueAttr.getRawData();
   int64_t entryOffset = writeAlignmentPadding(extState);
   ExternalizationState::HostEntry entry;
@@ -319,8 +317,8 @@ static void externalizeSplatConstant(mlir::ModuleOp module,
 static constexpr llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
 
 static mlir::LogicalResult
-resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
-                                ExternalizationState *extState) {
+resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation* constOp,
+                                ExternalizationState* extState) {
   auto locAttr = constOp->getAttrOfType<mlir::StringAttr>("location");
   auto offsetAttr = constOp->getAttrOfType<mlir::IntegerAttr>("offset");
   auto sizeAttr = constOp->getAttrOfType<mlir::IntegerAttr>("size");
@@ -344,15 +342,15 @@ resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
   if (isMemAddr) {
     if (offsetVal == 0)
       return constOp->emitError("onnx.Constant mem-addr has null address");
-    const void *dataPtr =
-        reinterpret_cast<const void *>(static_cast<uintptr_t>(offsetVal));
+    const void* dataPtr =
+        reinterpret_cast<const void*>(static_cast<uintptr_t>(offsetVal));
 
     if (extState) {
       externalizeConstant(module, constOp, tensorType, dataPtr, dataSize,
                           extState);
     } else {
       auto rawData =
-          llvm::ArrayRef<char>(static_cast<const char *>(dataPtr), dataSize);
+          llvm::ArrayRef<char>(static_cast<const char*>(dataPtr), dataSize);
       auto denseAttr =
           mlir::DenseElementsAttr::getFromRawBuffer(tensorType, rawData);
       replaceWithArithConstant(constOp, denseAttr);
@@ -393,15 +391,15 @@ resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
 static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                                               mlir::func::FuncOp funcOp,
                                               int64_t minNumElements,
-                                              ExternalizationState *extState) {
+                                              ExternalizationState* extState) {
 
-  llvm::SmallVector<mlir::Operation *> constants;
-  funcOp.walk([&](mlir::Operation *op) {
+  llvm::SmallVector<mlir::Operation*> constants;
+  funcOp.walk([&](mlir::Operation* op) {
     if (op->getName().getStringRef() == "onnx.Constant")
       constants.push_back(op);
   });
 
-  for (mlir::Operation *constOp : constants) {
+  for (mlir::Operation* constOp : constants) {
     auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
         constOp->getAttrOfType<mlir::ElementsAttr>("value"));
 
@@ -445,13 +443,13 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
 /// this before lowering.  Since we bypass that pipeline we must do it
 /// ourselves.
 static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
-  llvm::SmallVector<mlir::Operation *> returns;
-  funcOp.walk([&](mlir::Operation *op) {
+  llvm::SmallVector<mlir::Operation*> returns;
+  funcOp.walk([&](mlir::Operation* op) {
     if (op->getName().getStringRef() == "onnx.Return")
       returns.push_back(op);
   });
 
-  for (mlir::Operation *returnOp : returns) {
+  for (mlir::Operation* returnOp : returns) {
     mlir::OpBuilder builder(returnOp);
     mlir::func::ReturnOp::create(builder, returnOp->getLoc(),
                                  returnOp->getOperands());
@@ -464,27 +462,9 @@ static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
 //===----------------------------------------------------------------------===//
 
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
-                                             mlir::MLIRContext *ctx) {
+                                             mlir::MLIRContext* ctx) {
   mlir::RewritePatternSet patterns(ctx);
-  populateMatMulConversionPatterns(patterns, ctx);
-  populateTransposeConversionPatterns(patterns, ctx);
-  populateElementwiseConversionPatterns(patterns, ctx);
-  populatePowerConversionPatterns(patterns, ctx);
-  populateActivationConversionPatterns(patterns, ctx);
-  populateCastConversionPatterns(patterns, ctx);
-  populateReduceSumConversionPatterns(patterns, ctx);
-  populateGatherConversionPatterns(patterns, ctx);
-  populateConvConversionPatterns(patterns, ctx);
-  populateNormConversionPatterns(patterns, ctx);
-  populateRotaryEmbeddingConversionPatterns(patterns, ctx);
-  populateGqaConversionPatterns(patterns, ctx);
-  populateMatMulNBitsConversionPatterns(patterns, ctx);
-  populateQMoEConversionPatterns(patterns, ctx);
-  populateReshapeConversionPatterns(patterns, ctx);
-  populateCausalConvWithStateConversionPatterns(patterns, ctx);
-  populateGemmConversionPatterns(patterns, ctx);
-  populateLinearAttentionConversionPatterns(patterns, ctx);
-  populateRangeConversionPatterns(patterns, ctx);
+  mlir::hip::populateConvertOnnxToHipPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -592,27 +572,27 @@ struct ConvertOnnxToHipPass
     : public impl::ConvertOnnxToHipPassBase<ConvertOnnxToHipPass> {
   using ConvertOnnxToHipPassBase::ConvertOnnxToHipPassBase;
 
-  ConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements,
+  ConvertOnnxToHipPass(morphizen::FileSystem* fs, int64_t minNumElements,
                        bool skipConstantData = false)
       : fileSystem_(fs), fsMinNumElements_(minNumElements),
         skipConstantData_(skipConstantData) {}
 
   void runOnOperation() override;
 
-  morphizen::FileSystem *fileSystem_ = nullptr;
+  morphizen::FileSystem* fileSystem_ = nullptr;
   int64_t fsMinNumElements_ = 0;
   bool skipConstantData_ = false;
 };
 
 void ConvertOnnxToHipPass::runOnOperation() {
   mlir::ModuleOp module = getOperation();
-  mlir::MLIRContext *ctx = module.getContext();
+  mlir::MLIRContext* ctx = module.getContext();
   const bool timing = hipdnn_ep_timing_enabled();
 
   auto passStart = timing_now();
   auto phaseStart = passStart;
 
-  auto logSubpass = [&](const char *name, const char *extra = nullptr) {
+  auto logSubpass = [&](const char* name, const char* extra = nullptr) {
     if (!timing)
       return;
     double sec = record_elapsed(phaseStart);
@@ -629,7 +609,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // Otherwise fall back to DiskFileSystem rooted at externalizeOutputDir.
   std::unique_ptr<ExternalizationState> extState;
   std::unique_ptr<mlir::hip::DiskFileSystem> fallbackFs;
-  morphizen::FileSystem *fs = fileSystem_;
+  morphizen::FileSystem* fs = fileSystem_;
 
   int64_t minElems =
       fileSystem_ ? fsMinNumElements_ : externalizeMinNumElements.getValue();
@@ -684,15 +664,15 @@ void ConvertOnnxToHipPass::runOnOperation() {
   }
 
   // Clean up onnx.NoValue and onnx.EntryPoint ops
-  llvm::SmallVector<mlir::Operation *> toErase;
-  module.walk([&](mlir::Operation *op) {
+  llvm::SmallVector<mlir::Operation*> toErase;
+  module.walk([&](mlir::Operation* op) {
     llvm::StringRef name = op->getName().getStringRef();
     if (name == "onnx.NoValue" && op->use_empty())
       toErase.push_back(op);
     else if (name == "onnx.EntryPoint")
       toErase.push_back(op);
   });
-  for (auto *op : toErase)
+  for (auto* op : toErase)
     op->erase();
 
   // ONNX-MLIR attaches per-result attributes (e.g. "onnx_node_name") to
@@ -743,7 +723,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       llvm::SmallVector<mlir::hip::ConstantEntry> entries;
       entries.reserve(extState->constantHostPtrs.size());
       for (size_t i = 0; i < extState->constantHostPtrs.size(); ++i) {
-        const auto &h = extState->constantHostPtrs[i];
+        const auto& h = extState->constantHostPtrs[i];
         mlir::hip::ConstantEntry e;
         e.name = extState->constantNames[i];
         e.offset = extState->constantOffsets[i];
@@ -820,7 +800,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       int64_t sidecarPos = 0;
       int64_t memAddrCount = 0, fileRefCount = 0, splatCount = 0;
       for (int64_t i = 0; i < count; ++i) {
-        const auto &h = extState->constantHostPtrs[i];
+        const auto& h = extState->constantHostPtrs[i];
         if (!h.filePath.empty()) {
           ++fileRefCount;
         } else if (h.splatElemSize > 0) {
@@ -869,7 +849,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       // slot which is fine because GenerateInterface only reads it for
       // kind==3 (Sidecar).
       for (int64_t i = 0; i < count; ++i) {
-        const auto &entry = extState->constantHostPtrs[i];
+        const auto& entry = extState->constantHostPtrs[i];
         std::string path;
         if (!entry.filePath.empty()) {
           kinds[i] = 2; // FileRef
@@ -920,8 +900,31 @@ void ConvertOnnxToHipPass::runOnOperation() {
 
 } // namespace
 
+void populateConvertOnnxToHipPatterns(RewritePatternSet& patterns,
+                                      MLIRContext* ctx) {
+  populateMatMulConversionPatterns(patterns, ctx);
+  populateTransposeConversionPatterns(patterns, ctx);
+  populateElementwiseConversionPatterns(patterns, ctx);
+  populatePowerConversionPatterns(patterns, ctx);
+  populateActivationConversionPatterns(patterns, ctx);
+  populateCastConversionPatterns(patterns, ctx);
+  populateReduceSumConversionPatterns(patterns, ctx);
+  populateGatherConversionPatterns(patterns, ctx);
+  populateConvConversionPatterns(patterns, ctx);
+  populateNormConversionPatterns(patterns, ctx);
+  populateRotaryEmbeddingConversionPatterns(patterns, ctx);
+  populateGqaConversionPatterns(patterns, ctx);
+  populateMatMulNBitsConversionPatterns(patterns, ctx);
+  populateQMoEConversionPatterns(patterns, ctx);
+  populateReshapeConversionPatterns(patterns, ctx);
+  populateCausalConvWithStateConversionPatterns(patterns, ctx);
+  populateGemmConversionPatterns(patterns, ctx);
+  populateLinearAttentionConversionPatterns(patterns, ctx);
+  populateRangeConversionPatterns(patterns, ctx);
+}
+
 std::unique_ptr<mlir::Pass>
-createConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements,
+createConvertOnnxToHipPass(morphizen::FileSystem* fs, int64_t minNumElements,
                            bool skipConstantData) {
   return std::make_unique<ConvertOnnxToHipPass>(fs, minNumElements,
                                                 skipConstantData);

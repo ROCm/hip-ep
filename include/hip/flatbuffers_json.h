@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- flatbuffers_json.h - FlatBuffers <-> JSON helpers for the HIP compiler -
+//*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #pragma once
 
@@ -23,8 +26,8 @@ namespace mlir {
 namespace hip {
 
 template <typename NativeT>
-bool toJson(const NativeT &native, const char *schema, std::string &result,
-            std::string &error) {
+bool toJson(const NativeT& native, const char* schema, std::string& result,
+            std::string& error) {
   using FlatT = typename NativeT::TableType;
 
   flatbuffers::FlatBufferBuilder fbb;
@@ -45,8 +48,8 @@ bool toJson(const NativeT &native, const char *schema, std::string &result,
 }
 
 template <typename NativeT>
-bool fromJson(const std::string &json, const char *schema, NativeT &result,
-              std::string &error) {
+bool fromJson(const std::string& json, const char* schema, NativeT& result,
+              std::string& error) {
   flatbuffers::Parser parser;
   if (!parser.Parse(schema)) {
     error = "Schema parse error: " + std::string(parser.error_);

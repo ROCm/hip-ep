@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- GatherLowering.cpp - HIP-to-LLVM Gather lowering ------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -15,7 +17,7 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 
   LogicalResult
   matchAndRewrite(GatherOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -87,7 +89,7 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 } // namespace
 
 void mlir::hip::populateGatherLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<GatherOpLowering>(converter);
 }
 

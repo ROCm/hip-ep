@@ -1,16 +1,23 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CompilerDriver.cpp - End-to-end HIP compilation driver - *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Compiler/CompilerDriver.h"
+
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
-
 #include "hip/Target/LLVM/DLLLinker.h"
 #include "hip/Target/LLVM/LLVMBackend.h"
+#include "hip/debug_log.h"
 
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -20,21 +27,15 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
 
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/raw_ostream.h"
-
-#include "hip/debug_log.h"
-
 #include <chrono>
 #include <cstdlib>
 #include <sstream>
 
-namespace hip::compiler {
+namespace mlir {
+namespace hip {
 
 namespace {
-bool fileExists(const std::string &path) {
+bool fileExists(const std::string& path) {
   llvm::sys::fs::file_status status;
   std::error_code EC = llvm::sys::fs::status(path, status);
   return !EC && llvm::sys::fs::exists(status);
@@ -42,13 +43,13 @@ bool fileExists(const std::string &path) {
 } // namespace
 
 bool CompilerDriver::compile(llvm::StringRef input_mlir,
-                             const std::string &output_path,
-                             const mlir::hip::CompilationOptionsT &options,
-                             std::string &error_message) {
-  hip::compiler::registerAllPasses();
+                             const std::string& output_path,
+                             const mlir::hip::CompilationOptionsT& options,
+                             std::string& error_message) {
+  registerAllPasses();
 
   mlir::MLIRContext context;
-  hip::compiler::loadAllDialects(context);
+  loadAllDialects(context);
   mlir::registerLLVMDialectTranslation(context);
 
   COMPILER_DEBUG_LOG("[CompilerDriver::compile] Input size: "
@@ -80,16 +81,16 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
 }
 
 bool CompilerDriver::compileFromModule(
-    mlir::ModuleOp module, const std::string &output_path,
-    const mlir::hip::CompilationOptionsT &options, std::string &error_message) {
-  hip::compiler::registerAllPasses();
+    mlir::ModuleOp module, const std::string& output_path,
+    const mlir::hip::CompilationOptionsT& options, std::string& error_message) {
+  registerAllPasses();
   return compileImpl(module, output_path, options, error_message);
 }
 
 bool CompilerDriver::validate(llvm::StringRef input_mlir,
-                              std::string &error_message) {
+                              std::string& error_message) {
   mlir::MLIRContext context;
-  hip::compiler::loadAllDialects(context);
+  loadAllDialects(context);
 
   auto memBuffer = llvm::MemoryBuffer::getMemBuffer(input_mlir, "", false);
   llvm::SourceMgr sourceMgr;
@@ -107,14 +108,14 @@ bool CompilerDriver::validate(llvm::StringRef input_mlir,
 }
 
 bool CompilerDriver::compileImpl(mlir::ModuleOp module,
-                                 const std::string &output_path,
-                                 const mlir::hip::CompilationOptionsT &options,
-                                 std::string &error_message) {
+                                 const std::string& output_path,
+                                 const mlir::hip::CompilationOptionsT& options,
+                                 std::string& error_message) {
   const bool timing = hipdnn_ep_timing_enabled();
   auto phaseStart = timing_now();
   auto totalStart = phaseStart;
 
-  auto logPhase = [&](const char *name) {
+  auto logPhase = [&](const char* name) {
     if (!timing)
       return;
     llvm::errs() << "[CompilerDriver] " << name << ": "
@@ -195,8 +196,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
 }
 
 bool CompilerDriver::runMLIRPasses(
-    mlir::ModuleOp module, const mlir::hip::CompilationOptionsT &options,
-    std::string &error_message) {
+    mlir::ModuleOp module, const mlir::hip::CompilationOptionsT& options,
+    std::string& error_message) {
   mlir::PassManager pm(module.getContext());
 
   if (hipdnn_ep_timing_enabled())
@@ -226,13 +227,13 @@ bool CompilerDriver::runMLIRPasses(
   mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
 
   std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;
-  if (const char *dumpPath = std::getenv("HIPDNN_EP_IR_DUMP_PATH")) {
+  if (const char* dumpPath = std::getenv("HIPDNN_EP_IR_DUMP_PATH")) {
     std::error_code ec;
     irDumpStream = std::make_unique<llvm::raw_fd_ostream>(dumpPath, ec);
     if (!ec) {
       module.getContext()->disableMultithreading();
-      pm.enableIRPrinting([](mlir::Pass *, mlir::Operation *) { return true; },
-                          [](mlir::Pass *, mlir::Operation *) { return true; },
+      pm.enableIRPrinting([](mlir::Pass*, mlir::Operation*) { return true; },
+                          [](mlir::Pass*, mlir::Operation*) { return true; },
                           /*printModuleScope=*/true,
                           /*printAfterOnlyOnChange=*/true,
                           /*printAfterOnlyOnFailure=*/false, *irDumpStream);
@@ -260,8 +261,8 @@ bool CompilerDriver::runMLIRPasses(
 
 std::unique_ptr<llvm::Module>
 CompilerDriver::translateToLLVMIR(mlir::ModuleOp module,
-                                  llvm::LLVMContext &llvmContext,
-                                  std::string &error_message) {
+                                  llvm::LLVMContext& llvmContext,
+                                  std::string& error_message) {
   hipdnn::LLVMBackend backend;
   auto llvmModule = backend.translateMLIRtoLLVMIR(module, llvmContext);
 
@@ -272,8 +273,8 @@ CompilerDriver::translateToLLVMIR(mlir::ModuleOp module,
   return llvmModule;
 }
 
-bool CompilerDriver::linkRuntime(llvm::Module *llvmModule,
-                                 std::string &error_message) {
+bool CompilerDriver::linkRuntime(llvm::Module* llvmModule,
+                                 std::string& error_message) {
   hipdnn::LLVMBackend backend;
   if (!backend.linkRuntimeModule(llvmModule)) {
     error_message = "Failed to link runtime module";
@@ -282,14 +283,14 @@ bool CompilerDriver::linkRuntime(llvm::Module *llvmModule,
   return true;
 }
 
-void CompilerDriver::optimizeLLVMIR(llvm::Module *llvmModule, int optLevel) {
+void CompilerDriver::optimizeLLVMIR(llvm::Module* llvmModule, int optLevel) {
   hipdnn::LLVMBackend backend;
   backend.optimizeLLVMIR(llvmModule, optLevel);
 }
 
-bool CompilerDriver::emitLLVMIR(llvm::Module *llvmModule,
-                                const std::string &outputPath,
-                                std::string &error_message) {
+bool CompilerDriver::emitLLVMIR(llvm::Module* llvmModule,
+                                const std::string& outputPath,
+                                std::string& error_message) {
   hipdnn::LLVMBackend backend;
   if (!backend.emitLLVMIR(llvmModule, outputPath)) {
     error_message = "Failed to emit LLVM IR";
@@ -298,9 +299,9 @@ bool CompilerDriver::emitLLVMIR(llvm::Module *llvmModule,
   return true;
 }
 
-bool CompilerDriver::compileToObject(llvm::Module *llvmModule,
-                                     const std::string &outputPath,
-                                     std::string &error_message) {
+bool CompilerDriver::compileToObject(llvm::Module* llvmModule,
+                                     const std::string& outputPath,
+                                     std::string& error_message) {
   hipdnn::LLVMBackend backend;
   if (!backend.compileToObjectFile(llvmModule, outputPath)) {
     error_message = "Failed to compile to object file";
@@ -309,12 +310,12 @@ bool CompilerDriver::compileToObject(llvm::Module *llvmModule,
   return true;
 }
 
-bool CompilerDriver::linkToDLL(const std::string &objPath,
-                               const std::string &dllPath,
-                               const std::vector<std::string> &libraries,
-                               const std::vector<std::string> &library_paths,
-                               const std::vector<std::string> &export_symbols,
-                               std::string &error_message) {
+bool CompilerDriver::linkToDLL(const std::string& objPath,
+                               const std::string& dllPath,
+                               const std::vector<std::string>& libraries,
+                               const std::vector<std::string>& library_paths,
+                               const std::vector<std::string>& export_symbols,
+                               std::string& error_message) {
   hipdnn::DLLLinker linker;
 
   if (!linker.linkDLL(objPath, dllPath, libraries, library_paths,
@@ -327,9 +328,9 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
 }
 
 void CompilerDriver::discoverLibraries(
-    std::vector<std::string> &libraries,
-    std::vector<std::string> &library_paths) {
-  const char *therock = std::getenv("THEROCK_DIST");
+    std::vector<std::string>& libraries,
+    std::vector<std::string>& library_paths) {
+  const char* therock = std::getenv("THEROCK_DIST");
   if (!therock)
     return;
 
@@ -368,7 +369,7 @@ void CompilerDriver::discoverLibraries(
   {
     bool found = false;
 
-    const char *custom_dir_env = std::getenv("HIP_CUSTOM_KERNELS_DIR");
+    const char* custom_dir_env = std::getenv("HIP_CUSTOM_KERNELS_DIR");
     if (custom_dir_env && custom_dir_env[0] != '\0') {
       std::string custom_dir(custom_dir_env);
       library_paths.push_back(custom_dir);
@@ -425,12 +426,12 @@ void CompilerDriver::discoverLibraries(
 #endif
   }
 
-  for (const auto &lib : libraries) {
+  for (const auto& lib : libraries) {
     COMPILER_DEBUG_LOG("  Linking library: " << lib << "\n");
   }
 }
 
-void CompilerDriver::cleanupIntermediates(const std::string &basePath) {
+void CompilerDriver::cleanupIntermediates(const std::string& basePath) {
   std::string ll_path = basePath + ".ll";
   std::string obj_path = basePath + ".obj";
 
@@ -443,4 +444,5 @@ void CompilerDriver::cleanupIntermediates(const std::string &basePath) {
   }
 }
 
-} // namespace hip::compiler
+} // namespace hip
+} // namespace mlir

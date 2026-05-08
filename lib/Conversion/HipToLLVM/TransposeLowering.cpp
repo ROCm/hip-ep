@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- TransposeLowering.cpp - HIP-to-LLVM Transpose lowering - *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -19,7 +21,7 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
 
   LogicalResult
   matchAndRewrite(TransposeOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -71,7 +73,7 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
 } // namespace
 
 void mlir::hip::populateTransposeLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<TransposeOpLowering>(converter);
 }
 

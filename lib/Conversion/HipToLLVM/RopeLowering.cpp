@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- RopeLowering.cpp - HIP-to-LLVM Rope lowering ----------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -15,7 +17,7 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
 
   LogicalResult
   matchAndRewrite(RopeOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -90,8 +92,8 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
 
 } // namespace
 
-void mlir::hip::populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void mlir::hip::populateRopeLoweringPatterns(const LLVMTypeConverter& converter,
+                                             RewritePatternSet& patterns) {
   patterns.add<RopeOpLowering>(converter);
 }
 

@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- AddHipContextArg.cpp - Insert !hip.context as function arg 0 ------===//
 //
 // Inserts !hip.context as the first argument of every func.func in the
@@ -17,12 +13,11 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
-
-#include "llvm/ADT/Statistic.h"
-#include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "hip-add-context-arg"
 

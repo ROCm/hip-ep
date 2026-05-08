@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- LinearAttentionLowering.cpp - HIP-to-LLVM LinearAttention lowering - *-
+// C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -15,7 +18,7 @@ struct LinearAttentionOpLowering
 
   LogicalResult
   matchAndRewrite(LinearAttentionOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -218,7 +221,7 @@ struct LinearAttentionOpLowering
 } // namespace
 
 void mlir::hip::populateLinearAttentionLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<LinearAttentionOpLowering>(converter);
 }
 

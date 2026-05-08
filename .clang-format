@@ -1,0 +1,44 @@
+---
+# LLVM coding style for the in-tree HIP MLIR compiler sources.
+#
+# Scope:
+#   - include/hip/**, lib/**, tools/**.
+#   - 3rd-party/** is owned by upstream projects and uses its own
+#     .clang-format (e.g. 3rd-party/morphizen/.clang-format).  Do not run
+#     clang-format from this config against those trees.
+#
+# Mirrors the LLVM project style so that headers picked up from
+# `3rd-party/llvm-project/...` and project-local headers look uniform when
+# read side by side.
+Language:        Cpp
+BasedOnStyle:    LLVM
+ColumnLimit:     80
+PointerAlignment: Left
+ReflowComments:  true
+SortIncludes:    true
+
+# Group includes the same way upstream MLIR / LLVM do:
+#   1. Project headers ("hip/...", "morphizen/...", relative "...")
+#   2. LLVM / MLIR / Clang headers
+#   3. System and third-party headers
+IncludeBlocks:   Regroup
+IncludeCategories:
+  - Regex:           '^"(hip|morphizen)[-/]'
+    Priority:        1
+  - Regex:           '^"(mlir|llvm|clang)/'
+    Priority:        2
+  - Regex:           '^<.*\.h>$'
+    Priority:        4
+  - Regex:           '^<[^/]*>$'
+    Priority:        5
+  - Regex:           '.*'
+    Priority:        3
+
+# Treat MLIR/LLVM TableGen-generated `.inc` includes as raw drop-in fragments,
+# not headers — their relative position to the surrounding code is meaningful.
+IncludeIsMainRegex: '$'
+
+DerivePointerAlignment: false
+FixNamespaceComments: true
+NamespaceIndentation: None
+...
