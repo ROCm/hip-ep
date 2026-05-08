@@ -507,3 +507,531 @@ extern "C" int hip_qmoe_bucket_tokens(
             hipGetErrorString(err));
   return static_cast<int>(err);
 }
+
+// ===========================================================================
+// Fused decode QMoE: 4 kernels per layer (fc1, swiglu, fc2, reduce).
+// Eliminates the bucket_tokens + D2H + hipStreamSynchronize + host expert
+// loop that the multi-pass path needs. Decode-only (num_tokens == 1).
+//
+// Inner GEMV ported from matmul_nbits_gemv_kernel:
+//   - Cooperative LDS preload of input/activation vector (one global read
+//     per element, then BLOCK_SIZE threads share access)
+//   - uint4 (128-bit) vectorized loads of packed-int4 B = 32 nibbles/load
+//   - Factored dequant: (dot - a_sum * zp) * scale  saves ~40% FLOPs
+//   - Warp shuffle reduction across BLOCK_SIZE threads
+//
+// Grid: (N/TILE_N, k). Each block computes TILE_N output elements for one
+// (slot) -- looking up the expert id from expert_indices[slot]. This gives
+// (5760/8) * 4 = 2880 blocks for FC1 at gpt-oss decode -- 720x more
+// parallelism than the per-(token, slot) layout my first attempt used.
+//
+// FP16 only. INT4 (bits=4) packed nibbles, packed-zp layout matching
+// matmul_nbits convention. Requires hidden % 32 == 0 (uint4 main loop).
+// ===========================================================================
+
+// FC1 + SwiGLU fused: input [hidden] -> act_out [k, inter]. Per (slot,
+// output-tile). Each block computes TILE_N gate/linear matmul outputs
+// (TILE_N must be even), then pair-wise SwiGLU into TILE_N/2 act_out
+// elements at indices [n_base/2 .. n_base/2 + TILE_N/2). Skips the
+// separate qmoe_decode_swiglu_kernel launch and the [k, fusion_inter]
+// fc1_out scratch round-trip.
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void qmoe_decode_fc1_kernel(
+    const __half*  __restrict__ input,           // [hidden]
+    const int32_t* __restrict__ expert_indices,  // [k]
+    const uint8_t* __restrict__ fc1_w,           // [E, fusion_inter, hidden/2]
+    const __half*  __restrict__ fc1_s,           // [E, fusion_inter, n_blk_in]
+    const uint8_t* __restrict__ fc1_zp_packed,   // [E, fusion_inter, ceil(n_blk_in/2)] or null
+    const __half*  __restrict__ fc1_b,           // [E, fusion_inter] or null
+    __half*        __restrict__ act_out,         // [k, inter]
+    int hidden,
+    int fusion_inter,
+    int n_blk_in,
+    int block_size,
+    float swiglu_alpha,
+    float swiglu_beta,
+    float swiglu_limit) {
+  const int n_base = blockIdx.x * TILE_N;
+  const int slot   = blockIdx.y;
+  const int tid    = threadIdx.x;
+  const int E      = expert_indices[slot];
+
+  // No LDS preload of the input vector: each input element is read exactly
+  // once per block (threads stride through K-tiles uniquely), so an LDS
+  // copy just adds a __syncthreads + duplicated traffic without
+  // amortization. The 5760-byte input is shared across all 720 blocks of
+  // this slot via L2/MALL cache instead.
+
+  // Per-expert weight slice.
+  const size_t  W_row_bytes = static_cast<size_t>(hidden) / 2;
+  const uint8_t* W = fc1_w + static_cast<size_t>(E) * fusion_inter * W_row_bytes;
+  const __half*  S = fc1_s + static_cast<size_t>(E) * fusion_inter * n_blk_in;
+  const int      packed_zp_stride = (n_blk_in + 1) / 2;
+  const uint8_t* Z = fc1_zp_packed
+                       ? fc1_zp_packed + static_cast<size_t>(E) * fusion_inter * packed_zp_stride
+                       : nullptr;
+  const __half*  Bv = fc1_b ? fc1_b + static_cast<size_t>(E) * fusion_inter : nullptr;
+
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+
+  float partial[TILE_N];
+  #pragma unroll
+  for (int t = 0; t < TILE_N; t++) partial[t] = 0.0f;
+
+  // Pre-cache row pointers / scale rows for each output column in tile.
+  const uint8_t* W_rows[TILE_N];
+  const __half*  S_rows[TILE_N];
+  const uint8_t* Z_rows[TILE_N];
+  int            n_idx[TILE_N];
+  #pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    int n = n_base + t;
+    int sn = (n < fusion_inter) ? n : 0;
+    n_idx[t]  = sn;
+    W_rows[t] = W + static_cast<size_t>(sn) * W_row_bytes;
+    S_rows[t] = S + static_cast<size_t>(sn) * n_blk_in;
+    Z_rows[t] = Z ? Z + static_cast<size_t>(sn) * packed_zp_stride : nullptr;
+  }
+  const bool has_zp = (Z != nullptr);
+
+  // ---- Phase 1: 32-nibble (uint4 = 128-bit) main loop ----
+  const int num_u128 = hidden / 32;
+  for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+    const int k32 = idx * 32;
+
+    float a_vals[32];
+    float a_sum = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+      a_vals[i] = static_cast<float>(input[k32 + i]);
+      a_sum += a_vals[i];
+    }
+    const int   grp = k32 >> bs_shift;
+    const float a_sum_x_default_zp = a_sum * 8.0f;
+
+    uint4 b_pk[TILE_N];
+    float sv[TILE_N];
+    #pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      b_pk[t] = *reinterpret_cast<const uint4*>(&W_rows[t][idx * 16]);
+      sv[t]   = static_cast<float>(S_rows[t][grp]);
+    }
+
+    #pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      float dot = 0.0f;
+      #pragma unroll
+      for (int i = 0; i < 8; i++)
+        dot = __fmaf_rn(a_vals[i],
+                        static_cast<float>((b_pk[t].x >> (i * 4)) & 0xF), dot);
+      #pragma unroll
+      for (int i = 0; i < 8; i++)
+        dot = __fmaf_rn(a_vals[8 + i],
+                        static_cast<float>((b_pk[t].y >> (i * 4)) & 0xF), dot);
+      #pragma unroll
+      for (int i = 0; i < 8; i++)
+        dot = __fmaf_rn(a_vals[16 + i],
+                        static_cast<float>((b_pk[t].z >> (i * 4)) & 0xF), dot);
+      #pragma unroll
+      for (int i = 0; i < 8; i++)
+        dot = __fmaf_rn(a_vals[24 + i],
+                        static_cast<float>((b_pk[t].w >> (i * 4)) & 0xF), dot);
+
+      if (has_zp) {
+        uint8_t zp_byte = Z_rows[t][grp >> 1];
+        float   zp = static_cast<float>(
+                       (grp & 1) ? (zp_byte >> 4) : (zp_byte & 0x0F));
+        partial[t] += (dot - a_sum * zp) * sv[t];
+      } else {
+        partial[t] += (dot - a_sum_x_default_zp) * sv[t];
+      }
+    }
+  }
+
+  // ---- Reduction: warp shuffle then LDS for cross-warp ----
+  // After reduction we pair (gate, linear) outputs at indices (2*i, 2*i+1)
+  // within the TILE_N matmul outputs and write the SwiGLU result directly to
+  // act_out[slot, sw_base+i] where sw_base = n_base/2. This eliminates the
+  // separate qmoe_decode_swiglu_kernel launch (saves 1 launch per layer).
+  // Requires TILE_N to be even and n_base to be even (callers ensure both).
+  constexpr int WARP_SIZE = 32;
+  const int warp_id = tid / WARP_SIZE;
+  const int lane    = tid % WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+  static_assert((TILE_N & 1) == 0, "TILE_N must be even for SwiGLU pairing");
+  constexpr int TILE_OUT = TILE_N / 2;
+  const int sw_base = n_base / 2;
+  const int inter   = fusion_inter / 2;
+
+  #pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+      partial[t] += __shfl_down(partial[t], off);
+  }
+
+  if constexpr (BLOCK_SIZE <= WARP_SIZE) {
+    if (lane == 0) {
+      #pragma unroll
+      for (int p = 0; p < TILE_OUT; p++) {
+        int n_g = n_base + 2 * p;
+        int n_l = n_g + 1;
+        if (n_g < fusion_inter && n_l < fusion_inter) {
+          float g = partial[2 * p];
+          float l = partial[2 * p + 1];
+          if (Bv) {
+            g += static_cast<float>(Bv[n_g]);
+            l += static_cast<float>(Bv[n_l]);
+          }
+          float G = fminf(g, swiglu_limit);
+          float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
+          float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
+          act_out[slot * inter + sw_base + p] =
+              static_cast<__half>(G * sig * (L + swiglu_beta));
+        }
+      }
+    }
+  } else {
+    __shared__ float warp_sums[TILE_N * NUM_WARPS];
+    if (lane == 0) {
+      #pragma unroll
+      for (int t = 0; t < TILE_N; t++)
+        warp_sums[t * NUM_WARPS + warp_id] = partial[t];
+    }
+    __syncthreads();
+    if (warp_id == 0) {
+      float reduced[TILE_N];
+      #pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        float v = (lane < NUM_WARPS) ? warp_sums[t * NUM_WARPS + lane] : 0.0f;
+        for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+          v += __shfl_down(v, off);
+        reduced[t] = v;
+      }
+      if (lane == 0) {
+        #pragma unroll
+        for (int p = 0; p < TILE_OUT; p++) {
+          int n_g = n_base + 2 * p;
+          int n_l = n_g + 1;
+          if (n_g < fusion_inter && n_l < fusion_inter) {
+            float g = reduced[2 * p];
+            float l = reduced[2 * p + 1];
+            if (Bv) {
+              g += static_cast<float>(Bv[n_g]);
+              l += static_cast<float>(Bv[n_l]);
+            }
+            float G = fminf(g, swiglu_limit);
+            float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
+            float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
+            act_out[slot * inter + sw_base + p] =
+                static_cast<__half>(G * sig * (L + swiglu_beta));
+          }
+        }
+      }
+    }
+  }
+}
+
+// FC2: act_out [k, inter] -> slot_buf [k, hidden] (pre-multiplied by routing
+// weight so the reduce kernel is a pure sum). Per (slot, output-tile).
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void qmoe_decode_fc2_kernel(
+    const __half*  __restrict__ act_out,         // [k, inter]
+    const int32_t* __restrict__ expert_indices,  // [k]
+    const __half*  __restrict__ expert_weights,  // [k]
+    const uint8_t* __restrict__ fc2_w,           // [E, hidden, inter/2]
+    const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
+    const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ceil(n_blk_mid/2)] or null
+    const __half*  __restrict__ fc2_b,           // [E, hidden] or null
+    __half*        __restrict__ slot_buf,        // [k, hidden]
+    int inter,
+    int hidden,
+    int n_blk_mid,
+    int block_size) {
+  const int n_base = blockIdx.x * TILE_N;
+  const int slot   = blockIdx.y;
+  const int tid    = threadIdx.x;
+  const int E      = expert_indices[slot];
+  const float wt   = static_cast<float>(expert_weights[slot]);
+
+  // No LDS preload of the activation vector: each element is read once per
+  // block (threads stride uniquely through K-tiles); LDS would just add a
+  // __syncthreads + duplicated traffic. The 5760-byte slot activation is
+  // shared across the (hidden/TILE_N) blocks of this slot via L2/MALL cache.
+  const __half* a_in = act_out + slot * inter;
+
+  const size_t  W_row_bytes = static_cast<size_t>(inter) / 2;
+  const uint8_t* W = fc2_w + static_cast<size_t>(E) * hidden * W_row_bytes;
+  const __half*  S = fc2_s + static_cast<size_t>(E) * hidden * n_blk_mid;
+  const int      packed_zp_stride = (n_blk_mid + 1) / 2;
+  const uint8_t* Z = fc2_zp_packed
+                       ? fc2_zp_packed + static_cast<size_t>(E) * hidden * packed_zp_stride
+                       : nullptr;
+  const __half*  Bv = fc2_b ? fc2_b + static_cast<size_t>(E) * hidden : nullptr;
+
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+
+  float partial[TILE_N];
+  #pragma unroll
+  for (int t = 0; t < TILE_N; t++) partial[t] = 0.0f;
+
+  const uint8_t* W_rows[TILE_N];
+  const __half*  S_rows[TILE_N];
+  const uint8_t* Z_rows[TILE_N];
+  int            n_idx[TILE_N];
+  #pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    int n = n_base + t;
+    int sn = (n < hidden) ? n : 0;
+    n_idx[t]  = sn;
+    W_rows[t] = W + static_cast<size_t>(sn) * W_row_bytes;
+    S_rows[t] = S + static_cast<size_t>(sn) * n_blk_mid;
+    Z_rows[t] = Z ? Z + static_cast<size_t>(sn) * packed_zp_stride : nullptr;
+  }
+  const bool has_zp = (Z != nullptr);
+
+  const int num_u128 = inter / 32;
+  for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+    const int k32 = idx * 32;
+
+    float a_vals[32];
+    float a_sum = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+      a_vals[i] = static_cast<float>(a_in[k32 + i]);
+      a_sum += a_vals[i];
+    }
+    const int   grp = k32 >> bs_shift;
+    const float a_sum_x_default_zp = a_sum * 8.0f;
+
+    uint4 b_pk[TILE_N];
+    float sv[TILE_N];
+    #pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      b_pk[t] = *reinterpret_cast<const uint4*>(&W_rows[t][idx * 16]);
+      sv[t]   = static_cast<float>(S_rows[t][grp]);
+    }
+
+    #pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      float dot = 0.0f;
+      #pragma unroll
+      for (int i = 0; i < 8; i++)
+        dot = __fmaf_rn(a_vals[i],
+                        static_cast<float>((b_pk[t].x >> (i * 4)) & 0xF), dot);
+      #pragma unroll
+      for (int i = 0; i < 8; i++)
+        dot = __fmaf_rn(a_vals[8 + i],
+                        static_cast<float>((b_pk[t].y >> (i * 4)) & 0xF), dot);
+      #pragma unroll
+      for (int i = 0; i < 8; i++)
+        dot = __fmaf_rn(a_vals[16 + i],
+                        static_cast<float>((b_pk[t].z >> (i * 4)) & 0xF), dot);
+      #pragma unroll
+      for (int i = 0; i < 8; i++)
+        dot = __fmaf_rn(a_vals[24 + i],
+                        static_cast<float>((b_pk[t].w >> (i * 4)) & 0xF), dot);
+
+      if (has_zp) {
+        uint8_t zp_byte = Z_rows[t][grp >> 1];
+        float   zp = static_cast<float>(
+                       (grp & 1) ? (zp_byte >> 4) : (zp_byte & 0x0F));
+        partial[t] += (dot - a_sum * zp) * sv[t];
+      } else {
+        partial[t] += (dot - a_sum_x_default_zp) * sv[t];
+      }
+    }
+  }
+
+  constexpr int WARP_SIZE = 32;
+  const int warp_id = tid / WARP_SIZE;
+  const int lane    = tid % WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+
+  #pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+      partial[t] += __shfl_down(partial[t], off);
+  }
+
+  if constexpr (BLOCK_SIZE <= WARP_SIZE) {
+    if (lane == 0) {
+      #pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        int n = n_base + t;
+        if (n < hidden) {
+          float v = partial[t];
+          if (Bv) v += static_cast<float>(Bv[n]);
+          slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+        }
+      }
+    }
+  } else {
+    __shared__ float warp_sums[TILE_N * NUM_WARPS];
+    if (lane == 0) {
+      #pragma unroll
+      for (int t = 0; t < TILE_N; t++)
+        warp_sums[t * NUM_WARPS + warp_id] = partial[t];
+    }
+    __syncthreads();
+    if (warp_id == 0) {
+      #pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        float v = (lane < NUM_WARPS) ? warp_sums[t * NUM_WARPS + lane] : 0.0f;
+        for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+          v += __shfl_down(v, off);
+        if (lane == 0) {
+          int n = n_base + t;
+          if (n < hidden) {
+            if (Bv) v += static_cast<float>(Bv[n]);
+            slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+          }
+        }
+      }
+    }
+  }
+}
+
+// Reduce: output[n] = sum over slot of slot_buf[slot, n]. Pure sum.
+__global__ void qmoe_decode_reduce_kernel(
+    const __half* __restrict__ slot_buf,  // [k, hidden]
+    __half*       __restrict__ output,    // [hidden]
+    int hidden,
+    int k) {
+  int n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n >= hidden) return;
+  float acc = 0.0f;
+  #pragma unroll 4
+  for (int s = 0; s < k; s++) {
+    acc += static_cast<float>(slot_buf[s * hidden + n]);
+  }
+  output[n] = static_cast<__half>(acc);
+}
+
+// ---------------------------------------------------------------------------
+// Decode launchers. Hand-picked BLOCK_SIZE=256, TILE_N=8 (a strong default
+// for matmul_nbits autotune at gpt-oss-20b shapes; can later wrap in a
+// tiny per-shape autotune like matmul_nbits if needed).
+// ---------------------------------------------------------------------------
+
+extern "C" int hip_qmoe_decode_fused(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes) {
+  if (element_size_bytes != 2) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused: only fp16 "
+                    "supported (got element_size %lld)\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+  if (block_size <= 0 || (block_size & 1) != 0) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused: invalid "
+                    "block_size=%lld\n",
+            (long long)block_size);
+    return -1;
+  }
+  if (hidden_size <= 0 || inter_size <= 0 || k <= 0) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused: invalid sizes\n");
+    return -1;
+  }
+  if ((hidden_size % 32) != 0 || (inter_size % 32) != 0) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused: requires "
+                    "hidden_size %% 32 == 0 and inter_size %% 32 == 0 "
+                    "(got %lld, %lld)\n",
+            (long long)hidden_size, (long long)inter_size);
+    return -1;
+  }
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  // BS=64 is the sweet spot here: K-tile count num_u128 = hidden/32 = 90
+  // for gpt-oss-20b. With BS=256 ~65% of threads do zero iterations of the
+  // main loop (only tid<90 enters the loop). BS=64 gives every thread 1-2
+  // iterations and fits 2 wave32 per block (no LDS preload needed; the
+  // cross-warp warp_sums array is only TILE_N*NUM_WARPS = 16 floats).
+  constexpr int BS = 64;
+  // TILE_N must be even for FC1 (gate/linear paired into SwiGLU). 8 keeps
+  // register pressure modest while computing 4 SwiGLU outputs/block.
+  constexpr int TN = 8;
+  const int fusion_inter = static_cast<int>(2 * inter_size);
+  const int n_blk_in  = static_cast<int>((hidden_size + block_size - 1) / block_size);
+  const int n_blk_mid = static_cast<int>((inter_size  + block_size - 1) / block_size);
+
+  // FC1 + SwiGLU fused: grid (fusion_inter/TN, k). Each block produces TN
+  // matmul outputs internally and pair-wise SwiGLUs them down to TN/2
+  // act_out elements. No dynamic LDS (input read straight from L2/MALL).
+  {
+    dim3 grid(static_cast<unsigned>((fusion_inter + TN - 1) / TN),
+              static_cast<unsigned>(k));
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc1_kernel<BS, TN>),
+                       grid, dim3(BS), 0, s,
+                       static_cast<const __half*>(input),
+                       static_cast<const int32_t*>(expert_indices),
+                       static_cast<const uint8_t*>(fc1_weights),
+                       static_cast<const __half*>(fc1_scales),
+                       static_cast<const uint8_t*>(fc1_zero_points),
+                       static_cast<const __half*>(fc1_bias),
+                       static_cast<__half*>(act_out),
+                       static_cast<int>(hidden_size), fusion_inter,
+                       n_blk_in, static_cast<int>(block_size),
+                       swiglu_alpha, swiglu_beta, swiglu_limit);
+    hipError_t e = hipGetLastError();
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe_decode_fc1 failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+  }
+
+  // FC2 + weighted write to slot_buf: grid (hidden/TN, k). No LDS preload.
+  {
+    dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN),
+              static_cast<unsigned>(k));
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc2_kernel<BS, TN>),
+                       grid, dim3(BS), 0, s,
+                       static_cast<const __half*>(act_out),
+                       static_cast<const int32_t*>(expert_indices),
+                       static_cast<const __half*>(expert_weights),
+                       static_cast<const uint8_t*>(fc2_weights),
+                       static_cast<const __half*>(fc2_scales),
+                       static_cast<const uint8_t*>(fc2_zero_points),
+                       static_cast<const __half*>(fc2_bias),
+                       static_cast<__half*>(slot_buf),
+                       static_cast<int>(inter_size),
+                       static_cast<int>(hidden_size),
+                       n_blk_mid, static_cast<int>(block_size));
+    hipError_t e = hipGetLastError();
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe_decode_fc2 failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+  }
+
+  // Reduce: grid (hidden/kBlock).
+  {
+    int grid = static_cast<int>((hidden_size + kBlock - 1) / kBlock);
+    hipLaunchKernelGGL(qmoe_decode_reduce_kernel, dim3(grid), dim3(kBlock), 0, s,
+                       static_cast<const __half*>(slot_buf),
+                       static_cast<__half*>(output),
+                       static_cast<int>(hidden_size), static_cast<int>(k));
+    hipError_t e = hipGetLastError();
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe_decode_reduce failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+  }
+
+  return 0;
+}
