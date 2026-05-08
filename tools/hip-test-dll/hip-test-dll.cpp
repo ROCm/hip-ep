@@ -112,10 +112,14 @@ parseShapeOverrides(const std::string &arg) {
   return result;
 }
 
-// Resolve dynamic dimensions (-1) to concrete values
+// Resolve dynamic dimensions to concrete values. Standard ONNX uses -1 for
+// unknown dims; Range emits INT64_MIN because its output size is computed
+// at runtime from scalar inputs and has no static value in the metadata.
+// Clamp any negative dim to default_batch (1) so the test harness can
+// allocate a valid non-null buffer regardless of the dynamic shape.
 void resolveShape(std::vector<int64_t> &shape, int64_t default_batch = 1) {
   for (auto &dim : shape) {
-    if (dim == -1) {
+    if (dim < 0) {
       dim = default_batch;
     }
   }
