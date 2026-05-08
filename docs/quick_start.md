@@ -76,8 +76,8 @@ FlatBuffers version conflicts (ORT bundles its own FlatBuffers).
 
 ```bash
 cd ..  # Go to workspace directory (parent of project root)
-# recommand use release branch, such as rel-1.24.3
-git clone -b rel-1.24.3 https://github.com/Microsoft/onnxruntime.git
+# recommand use release branch, such as rel-1.25.1
+git clone -b rel-1.25.1 https://github.com/Microsoft/onnxruntime.git
 cd onnxruntime
 ```
 
