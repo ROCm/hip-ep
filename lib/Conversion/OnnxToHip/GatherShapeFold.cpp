@@ -141,11 +141,11 @@ mlir::LogicalResult foldGatherShapeBeforeLowering(mlir::func::FuncOp funcOp) {
     if (inputType.isDynamicDim(absDim)) {
       mlir::Value dimVal =
           mlir::tensor::DimOp::create(builder, loc, shapeInput, absDim);
-      dimI64 =
-          mlir::arith::IndexCastOp::create(builder, loc, i64Type, dimVal);
+      dimI64 = mlir::arith::IndexCastOp::create(builder, loc, i64Type, dimVal);
     } else {
       dimI64 = mlir::arith::ConstantOp::create(
-          builder, loc, builder.getI64IntegerAttr(inputType.getDimSize(absDim)));
+          builder, loc,
+          builder.getI64IntegerAttr(inputType.getDimSize(absDim)));
     }
 
     mlir::Value newResult = mlir::tensor::FromElementsOp::create(

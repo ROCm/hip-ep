@@ -85,8 +85,7 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
       continue;
     // Hip dialect users (e.g. hip.cast that consumes a host-stored scalar to
     // produce a GPU i32 for GQA) are fine — see comment above.
-    if (user->getDialect() &&
-        user->getDialect()->getNamespace() == "hip")
+    if (user->getDialect() && user->getDialect()->getNamespace() == "hip")
       continue;
     // Anything else (view-likes, casts that escape the function, unknown
     // dialects) — bail out: we can't reason about its memory expectations.
@@ -177,8 +176,8 @@ void MaterializeHostScalarsPass::runOnOperation() {
     allocOp.replaceAllUsesWith(view.getResult());
     allocOp.erase();
     ++NumAllocsMaterialized;
-    LLVM_DEBUG(llvm::dbgs() << "  Materialized " << view << " at offset "
-                            << offset << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "  Materialized " << view << " at offset " << offset << "\n");
   }
 }
 

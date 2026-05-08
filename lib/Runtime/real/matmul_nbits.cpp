@@ -71,8 +71,8 @@ const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
   // pointer — shouldn't happen for stable model constants, but guard it).
   void *dst = nullptr;
   if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr,
-            "matmul_nbits: hipMalloc(%zu) for zp_u8 cache failed\n", need);
+    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_u8 cache failed\n",
+            need);
     return nullptr;
   }
   hip_matmul_nbits_unpack_zp_u8(stream, zp_packed, dst, N, groups_k);
@@ -91,8 +91,8 @@ const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
                                       const void *zp_packed, int N,
                                       int groups_k) {
   ZpUnpackCache *cache = get_or_create_zp_cache(state);
-  const size_t need = static_cast<size_t>(N) * static_cast<size_t>(groups_k) *
-                      sizeof(__fp16);
+  const size_t need =
+      static_cast<size_t>(N) * static_cast<size_t>(groups_k) * sizeof(__fp16);
 
   std::lock_guard<std::mutex> lock(cache->mu);
   auto it = cache->fp16.find(zp_packed);
@@ -101,8 +101,8 @@ const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
 
   void *dst = nullptr;
   if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr,
-            "matmul_nbits: hipMalloc(%zu) for zp_fp16 cache failed\n", need);
+    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_fp16 cache failed\n",
+            need);
     return nullptr;
   }
   hip_matmul_nbits_convert_zp_fp16(stream, zp_packed, dst, N, groups_k);
@@ -119,8 +119,7 @@ const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
 } // namespace hipdnn_ep_real
 
 extern "C" void hipdnn_ep_zp_unpack_cache_destroy(void *cache_ptr) {
-  auto *cache =
-      static_cast<hipdnn_ep_real::ZpUnpackCache *>(cache_ptr);
+  auto *cache = static_cast<hipdnn_ep_real::ZpUnpackCache *>(cache_ptr);
   if (!cache)
     return;
   for (auto &[k, v] : cache->u8)

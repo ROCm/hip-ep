@@ -21,8 +21,7 @@ namespace hipdnn_ep_real {
 // Returns the cached uint8 zero_points buffer for `zp_packed`, allocating +
 // unpacking on miss. Returns nullptr only on hipMalloc failure.
 const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
-                                   const void *zp_packed, int N,
-                                   int groups_k);
+                                   const void *zp_packed, int N, int groups_k);
 
 // Returns the cached fp16 zero_points buffer for `zp_packed`, allocating +
 // converting on miss. Returns nullptr only on hipMalloc failure.

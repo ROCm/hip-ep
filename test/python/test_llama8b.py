@@ -402,7 +402,9 @@ class TestLlama8BAsym:
     huggingface.co/amd/Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml).
     """
 
-    _ASYM_MODEL_DIR = REPO_ROOT / "models" / "Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+    _ASYM_MODEL_DIR = (
+        REPO_ROOT / "models" / "Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+    )
     _ASYM_ONNX_FILE = "model.onnx"
 
     def test_asym_dynamic_per_step_logits(self, repo_root):

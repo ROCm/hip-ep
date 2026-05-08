@@ -578,8 +578,10 @@ def build_oga():
     # tolerate non-zero exit and finish the wheel ourselves below.
     rc = subprocess.run(build_cmd).returncode
     if rc != 0:
-        log(f"  OGA build.py exited {rc} (PyPackageBuild step likely failed; "
-            "binaries should still be present).")
+        log(
+            f"  OGA build.py exited {rc} (PyPackageBuild step likely failed; "
+            "binaries should still be present)."
+        )
 
     # -- install binaries --
     bin_dir = DIST / "bin"
@@ -609,7 +611,11 @@ def build_oga():
     # OGA stages the wheel layout under <build>/wheel/ before invoking pip.
     # If the broken target left no .whl, run pip wheel manually from there.
     wheel_dir = oga_bin / "wheel"
-    wheels = list(wheel_dir.glob("onnxruntime_genai_directml-*.whl")) if wheel_dir.exists() else []
+    wheels = (
+        list(wheel_dir.glob("onnxruntime_genai_directml-*.whl"))
+        if wheel_dir.exists()
+        else []
+    )
     if not wheels and wheel_dir.exists() and (wheel_dir / "setup.py").exists():
         log("  PyPackageBuild produced no wheel — running pip wheel manually.")
         subprocess.run(
