@@ -1259,7 +1259,7 @@ extern "C" int hip_gqa_fused_prefill(
 //   merges the K_SPLITS partials per (batch, head_q) into the final output.
 //
 // Block geometry:
-//   Block = HPG=4 waves of 32 = 128 threads. Each wave handles ONE query
+//   Block = HPG waves of 32 = HPG * 32 threads. Each wave handles ONE query
 //   head out of HPG. Thread `lane` in wave handles d-elements
 //   [lane * EPT, (lane+1) * EPT) where EPT = D / WAVE_SIZE.
 //
@@ -1267,15 +1267,16 @@ extern "C" int hip_gqa_fused_prefill(
 //   gridX = B * G        - one block per (batch, head_kv)
 //   gridY = K_SPLITS     - split-K dimension
 //
+// Supported HPG specializations (template param):
+//   - HPG=4  (Llama-3.x family at d=64 and d=128)
+//   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
+//
 // Constraints (asserted at launcher):
-//   - HPG must be 4 (Llama-3.x family).
 //   - D must be 64 or 128.
 //   - RDNA wave32 (uses __shfl_xor across 32 lanes).
 //===----------------------------------------------------------------------===//
 
-static constexpr int FLASH_DECODE_HPG     = 4;
 static constexpr int FLASH_DECODE_BKV     = 64;
-static constexpr int FLASH_DECODE_THREADS = 128;  // = HPG * WAVE_SIZE
 
 // Partial layout per (b, h_q, k_split): {m: float, l: float, O[D]: float}
 __device__ __forceinline__ size_t flash_decode_partial_offset(
@@ -1283,8 +1284,8 @@ __device__ __forceinline__ size_t flash_decode_partial_offset(
   return ((size_t)((b * H + h_q) * K_SPLITS + k_split)) * (size_t)(D + 2);
 }
 
-template <int D, int K_SPLITS>
-__global__ void __launch_bounds__(FLASH_DECODE_THREADS)
+template <int D, int K_SPLITS, int HPG>
+__global__ void __launch_bounds__(HPG * WAVE_SIZE)
 gqa_flash_decode_kernel(
     const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
     const __half* __restrict__ Kcache,     // [B, G, max_seq, D] (BNSD)
@@ -1292,9 +1293,10 @@ gqa_flash_decode_kernel(
     float* __restrict__ partials,          // [B, H, K_SPLITS, D+2]
     int H, int G, int max_seq,
     float scale,
-    const int* __restrict__ seqlens_k) {
-  constexpr int HPG = FLASH_DECODE_HPG;
+    const int* __restrict__ seqlens_k,
+    int local_window_size) {  // <=0 disables; > 0 = sliding-window length
   constexpr int BKV = FLASH_DECODE_BKV;
+  constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
   constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
 
   static_assert(D % WAVE_SIZE == 0, "D must be a multiple of WAVE_SIZE");
@@ -1315,9 +1317,20 @@ gqa_flash_decode_kernel(
   const int eff_skv = (raw_skv > 0)
       ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
 
+  // Sliding-window: at decode (sq==1) the query position is total_seq-1, so
+  // it attends to KV positions [max(0, total_seq - window), total_seq). When
+  // window <= 0 the attention is full (kv_lo = 0). gpt-oss-20b alternates
+  // sliding (local_window_size=128) and full layers; clamping kv_lo here lets
+  // sliding layers skip the full KV cache scan and process only ~window slots.
+  int kv_lo = 0;
+  if (local_window_size > 0 && eff_skv > local_window_size) {
+    kv_lo = eff_skv - local_window_size;
+  }
+  const int kv_range = eff_skv - kv_lo;
+
   // Partition KV range into K_SPLITS roughly-equal chunks.
-  const int chunk    = (eff_skv + K_SPLITS - 1) / K_SPLITS;
-  const int kv_start = chunk * split_idx;
+  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
+  const int kv_start = kv_lo + chunk * split_idx;
   int kv_end_tmp     = kv_start + chunk;
   if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
   const int kv_end   = kv_end_tmp;
@@ -1370,9 +1383,11 @@ gqa_flash_decode_kernel(
     const int tile_n = (tile_start + BKV <= kv_end)
         ? BKV : (kv_end - tile_start);
 
-    // Cooperative LDS load of K and V tiles. All 128 threads.
-    // Tile element count = tile_n * D, distributed round-robin.
-    for (int i = tid; i < tile_n * D; i += FLASH_DECODE_THREADS) {
+    // Cooperative LDS load of K and V tiles. All THREADS = HPG*WAVE_SIZE
+    // threads. Tile element count = tile_n * D, distributed round-robin.
+    // HPG=8 doubles thread count (256 vs 128) so the load also doubles its
+    // parallelism, partially offsetting the larger Q working set per block.
+    for (int i = tid; i < tile_n * D; i += THREADS) {
       const int t = i / D;
       const int dd = i % D;
       const size_t g_off = kv_base + (size_t)(tile_start + t) * D + dd;
@@ -1436,6 +1451,15 @@ gqa_flash_decode_kernel(
 // Empty splits write m=-INFINITY, l=0, O=0; exp2(-INF - global_m) = 0 so
 // those splits contribute nothing.
 //
+// Smooth softmax (attention sink): when head_sink is non-null OR
+// use_smooth_softmax is set, an extra term is added to the denominator only:
+//   global_l += exp(s - global_m_natural)
+// where s is in natural (qk*scale) units. The partials are in log2-scaled
+// space (m and l use exp2/LOG2E), so the natural identity becomes
+//   exp(s - m_nat) = exp2((s - m_nat) * LOG2E) = exp2(s*LOG2E - global_m).
+// The sink contributes to L only — there is no V term for it (gpt-oss-20b /
+// Mistral-style attention sink).
+//
 // Grid: (B * H, 1) - one block per query head.
 // Block: D threads. Each thread reduces one element of the d-dimension.
 //===----------------------------------------------------------------------===//
@@ -1445,7 +1469,10 @@ __global__ void __launch_bounds__(D)
 gqa_flash_decode_reduce_kernel(
     const float* __restrict__ partials,    // [B, H, K_SPLITS, D+2]
     __half* __restrict__ O,                // [B, 1, H, D] (BSHD with sq=1)
-    int H) {
+    int H,
+    const __half* __restrict__ head_sink,  // [num_heads] or null
+    int num_heads,
+    int use_smooth_softmax) {
   const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
   const int batch  = __builtin_amdgcn_readfirstlane(linear / H);
   const int head_q = __builtin_amdgcn_readfirstlane(linear % H);
@@ -1461,7 +1488,10 @@ gqa_flash_decode_reduce_kernel(
     global_m = fmaxf(global_m, m_k);
   }
 
-  // Empty (all splits -INF) - happens when eff_skv == 0. Write zero output.
+  // When all splits are -INF (eff_skv == 0) but a sink is configured, the
+  // sink term still defines a valid (zero) output: softmax over empty +
+  // sink ⇒ all weight on the sink, which contributes 0 to V. We therefore
+  // write a zero output here either way.
   if (!isfinite(global_m)) {
     O[(batch * H + head_q) * D + tid] = __float2half(0.0f);
     return;
@@ -1481,6 +1511,18 @@ gqa_flash_decode_reduce_kernel(
     O_sum += scale_k * p[2 + tid];
   }
 
+  // Smooth softmax: add the sink term to the denominator only. global_m is
+  // in log2-scaled units (it's the max of dot*scale*LOG2E across splits), so
+  // the natural-space exp(s - m_nat) becomes exp2(s*LOG2E - global_m).
+  if (head_sink != nullptr) {
+    const int actual_head = head_q % num_heads;
+    const float s = __half2float(head_sink[actual_head]);
+    l_sum += exp2f(s * (float)LOG2E - global_m);
+  } else if (use_smooth_softmax) {
+    // s = 0 in natural units; exp2(0*LOG2E - global_m) = exp2(-global_m).
+    l_sum += exp2f(-global_m);
+  }
+
   const float inv_l = 1.0f / fmaxf(l_sum, 1e-6f);
   O[(batch * H + head_q) * D + tid] = __float2half(O_sum * inv_l);
 }
@@ -1495,16 +1537,34 @@ extern "C" int hip_gqa_flash_decode(
     void* partials_workspace,
     int B, int H, int G, int d, int max_seq, int K_SPLITS,
     float scale,
-    const void* seqlens_k) {
-  if (H != G * FLASH_DECODE_HPG) {
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax) {
+  // HPG = heads-per-group (Q heads sharing one KV head). The kernel is
+  // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128) and HPG=8
+  // (gpt-oss-20b at d=64). HPG=8 with d=128 is rejected to keep template
+  // bloat bounded; no current model needs it.
+  if (G <= 0 || H % G != 0) {
+    fprintf(stderr, "hip_gqa_flash_decode: H=%d not divisible by G=%d\n", H, G);
+    return -1;
+  }
+  const int hpg = H / G;
+  if (hpg != 4 && hpg != 8) {
     fprintf(stderr,
-            "hip_gqa_flash_decode: requires HPG=%d (got H=%d, G=%d)\n",
-            FLASH_DECODE_HPG, H, G);
+            "hip_gqa_flash_decode: unsupported HPG=%d (must be 4 or 8; H=%d, G=%d)\n",
+            hpg, H, G);
     return -1;
   }
   if (d != 64 && d != 128) {
     fprintf(stderr,
             "hip_gqa_flash_decode: unsupported d=%d (must be 64 or 128)\n", d);
+    return -1;
+  }
+  if (hpg == 8 && d != 64) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: HPG=8 currently requires d=64 (got d=%d)\n",
+            d);
     return -1;
   }
   if (K_SPLITS != 8) {
@@ -1523,23 +1583,36 @@ extern "C" int hip_gqa_flash_decode(
   const int* iSeq = static_cast<const int*>(seqlens_k);
 
   dim3 grid_main(B * G, K_SPLITS);
-  if (d == 128) {
-    gqa_flash_decode_kernel<128, 8>
-        <<<grid_main, FLASH_DECODE_THREADS, 0, stream>>>(
-            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq);
-  } else { /* d == 64 */
-    gqa_flash_decode_kernel<64, 8>
-        <<<grid_main, FLASH_DECODE_THREADS, 0, stream>>>(
-            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq);
+  if (hpg == 4) {
+    if (d == 128) {
+      gqa_flash_decode_kernel<128, 8, 4>
+          <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+    } else { /* d == 64 */
+      gqa_flash_decode_kernel<64, 8, 4>
+          <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+    }
+  } else { /* hpg == 8, d == 64 (asserted above) */
+    gqa_flash_decode_kernel<64, 8, 8>
+        <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
+            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
   }
 
+  // Reduce kernel does not depend on HPG; it walks the K_SPLITS partials
+  // per (b, h_q) and merges. Grid is one block per query head, block dim D.
+  // The smooth-softmax / head_sink path is folded into the denominator here
+  // (not the partials), since the sink only affects the final L term.
   dim3 grid_reduce(B * H);
+  const __half* hSink = static_cast<const __half*>(head_sink);
   if (d == 128) {
     gqa_flash_decode_reduce_kernel<128, 8>
-        <<<grid_reduce, 128, 0, stream>>>(hP, hO, H);
+        <<<grid_reduce, 128, 0, stream>>>(hP, hO, H, hSink, H,
+                                          use_smooth_softmax);
   } else { /* d == 64 */
     gqa_flash_decode_reduce_kernel<64, 8>
-        <<<grid_reduce, 64, 0, stream>>>(hP, hO, H);
+        <<<grid_reduce, 64, 0, stream>>>(hP, hO, H, hSink, H,
+                                         use_smooth_softmax);
   }
 
   return hipGetLastError();

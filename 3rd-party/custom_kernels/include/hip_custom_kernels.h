@@ -339,7 +339,19 @@ int hip_gqa_fused_prefill(
  * K_SPLITS: only 8 supported in V1. Returns -1 on unsupported (HPG, d, K_SPLITS).
  *
  * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
- * = seqlens_k[b]+1 is read on-device (no host sync). */
+ * = seqlens_k[b]+1 is read on-device (no host sync).
+ *
+ * local_window_size: when > 0, restricts each query to attend only to the
+ * last `local_window_size` KV positions (sliding-window attention, e.g.
+ * gpt-oss-20b's 128-token sliding layers). When <= 0, full attention.
+ *
+ * head_sink: optional device pointer [num_heads] fp16, attention-sink
+ * (smooth-softmax) per-head bias. When non-null, the final softmax
+ * denominator gains an exp(s_h - global_m) term per head (no V contribution
+ * for the sink). When null and use_smooth_softmax != 0, behaves as if
+ * s_h = 0 for all heads. This is the gpt-oss-20b / Mistral-style attention
+ * sink. The partials are unaffected; the term is folded in by the reduce
+ * kernel. */
 int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
@@ -347,7 +359,10 @@ int hip_gqa_flash_decode(
     void* partials_workspace,
     int B, int H, int G, int d, int max_seq, int K_SPLITS,
     float scale,
-    const void* seqlens_k);
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
