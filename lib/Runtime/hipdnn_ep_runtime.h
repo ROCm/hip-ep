@@ -582,9 +582,12 @@ int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype);
 
 // ReduceSum operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_INT32,
+//                  HIPDNN_EP_DATATYPE_INT64.
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t axes_num_elements, int64_t element_size_bytes,
+                    int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes);
 
 // Cast operation wrapper (element type conversion)
