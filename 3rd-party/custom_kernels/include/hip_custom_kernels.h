@@ -450,18 +450,25 @@ int hip_range(
  * MatMulNBits (Fused Dequant + MatMul)
  * =========================================================================
  *
- * Computes Y = A @ dequant(B)^T + bias, where B holds packed int4 weights.
+ * Computes Y = A @ dequant(B)^T + bias, where B holds packed quantized
+ * weights.  Supports bits=4 (packed nibbles) and bits=8 (1 byte per
+ * weight); other widths return an error.
  *
  * Dequantization (per-block): dequant = (quant_val - zero_point) * scale
  * For 4-bit: lower nibble = first value, upper nibble = second.
- * Default zero_point = 8 (when zero_points is NULL).
+ *            Default zero_point = 8 (when zero_points is NULL).
+ * For 8-bit: B is unpacked uint8 of shape [N, K]; zero_points (when
+ *            provided) is uint8 [N, k_blocks]; default zero_point = 128.
  *
  * Parameters:
  *   stream             - hipStream_t cast to void*
  *   A                  - GPU [batch, M, K]
- *   B                  - GPU [N, k_blocks, blob_size] uint8 packed int4
+ *   B                  - GPU packed weights:
+ *                          bits=4: [N, k_blocks, blob_size] uint8 packed int4
+ *                          bits=8: [N, K] uint8 (no packing)
  *   scales             - GPU [N, k_blocks] (same type as A)
- *   zero_points        - GPU [N, k_blocks] uint8 (nullable, default zp=8)
+ *   zero_points        - GPU [N, k_blocks] uint8 (nullable; default zp=8
+ *                        for bits=4, zp=128 for bits=8)
  *   bias               - GPU [N] (nullable, same type as A)
  *   output             - GPU [batch, M, N]
  *   M                  - rows per batch
