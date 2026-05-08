@@ -120,8 +120,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_fc1_buf = align_up_64(num_tokens * fusion_inter * elem_size);
   size_t sz_act_buf = align_up_64(num_tokens * inter_size * elem_size);
   size_t sz_fc2_buf = align_up_64(num_tokens * hidden_size * elem_size);
-  size_t sz_token_ids = align_up_64(num_tokens * sizeof(int32_t));
-  size_t sz_token_wts = align_up_64(num_tokens * elem_size);
+  // bucket_tokens outputs (Phase 2): per-expert counts + exclusive prefix sum
+  // offsets, plus tokens/weights re-grouped on-device into per-expert
+  // contiguous slices. Replaces the old per-expert host h_ids/h_wts_e build +
+  // H2D round-trip (2 hipMemcpyAsync per active expert per layer).
+  size_t sz_expert_counts = align_up_64(num_experts * sizeof(int32_t));
+  size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
+  size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
+  size_t sz_sorted_weights = align_up_64(num_tokens * k * elem_size);
 
   size_t off_expert_indices = 0;
   size_t off_expert_weights = off_expert_indices + sz_expert_indices;
@@ -129,9 +135,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_fc1_buf = off_gather_buf + sz_gather_buf;
   size_t off_act_buf = off_fc1_buf + sz_fc1_buf;
   size_t off_fc2_buf = off_act_buf + sz_act_buf;
-  size_t off_token_ids = off_fc2_buf + sz_fc2_buf;
-  size_t off_token_wts = off_token_ids + sz_token_ids;
-  size_t total_scratch = off_token_wts + sz_token_wts;
+  size_t off_expert_counts = off_fc2_buf + sz_fc2_buf;
+  size_t off_expert_offsets = off_expert_counts + sz_expert_counts;
+  size_t off_sorted_token_ids = off_expert_offsets + sz_expert_offsets;
+  size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
+  size_t total_scratch = off_sorted_weights + sz_sorted_weights;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -146,8 +154,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_fc1_buf = scratch_base + off_fc1_buf;
   void *d_act_buf = scratch_base + off_act_buf;
   void *d_fc2_buf = scratch_base + off_fc2_buf;
-  void *d_token_ids = scratch_base + off_token_ids;
-  void *d_token_wts = scratch_base + off_token_wts;
+  int32_t *d_expert_counts =
+      reinterpret_cast<int32_t *>(scratch_base + off_expert_counts);
+  int32_t *d_expert_offsets =
+      reinterpret_cast<int32_t *>(scratch_base + off_expert_offsets);
+  int32_t *d_sorted_token_ids =
+      reinterpret_cast<int32_t *>(scratch_base + off_sorted_token_ids);
+  char *d_sorted_weights = scratch_base + off_sorted_weights;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -158,28 +171,22 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                   normalize_routing_weights, elem_size));
 
   {
-    // Pinned host scratch holds the D2H readback of expert routing decisions
-    // and the per-expert (ids, weights) staging for H2D back to the GPU. Sized
-    // for one Compute(); reused across calls. Layout (64-byte aligned):
-    //   [h_indices : num_tokens*k * int32]
-    //   [h_weights : num_tokens*k * elem_size]
-    //   [h_ids     : num_tokens*k * int32]    (worst-case: all tokens to one expert)
-    //   [h_wts_e   : num_tokens*k * elem_size]
-    // hipMemcpyAsync into pageable memory silently falls back to a synchronous
-    // staging copy on Windows; pinned (hipHostMalloc) memory enables the true
-    // async DMA path that can overlap with prior in-flight kernel work.
+    // Phase 2: GPU-side bucketing eliminates the per-expert host build +
+    // 2 H2D round-trips per active expert per layer. Old flow was:
+    //   D2H expert_indices + expert_weights -> sync -> host bucket loop ->
+    //   per active expert: build h_ids/h_wts_e -> 2x H2D -> launch chain.
+    // New flow:
+    //   hip_qmoe_bucket_tokens (counts + prefix-sum + scatter on device) ->
+    //   D2H of just num_experts int32 counts -> sync -> compute host offsets
+    //   -> per active expert: gather/matmul/scatter from d_sorted_*[offset]
+    //   directly. No per-expert H2D; the active-expert loop uses pointer
+    //   arithmetic into the on-device sorted buffers populated by
+    //   bucket_tokens.
     auto align_up_64h = [](size_t s) -> size_t {
       return (s + 63) & ~size_t(63);
     };
-    size_t hsz_indices = align_up_64h(num_tokens * k * sizeof(int32_t));
-    size_t hsz_weights = align_up_64h(num_tokens * k * elem_size);
-    size_t hsz_ids = align_up_64h(num_tokens * k * sizeof(int32_t));
-    size_t hsz_wts_e = align_up_64h(num_tokens * k * elem_size);
-    size_t hoff_indices = 0;
-    size_t hoff_weights = hoff_indices + hsz_indices;
-    size_t hoff_ids = hoff_weights + hsz_weights;
-    size_t hoff_wts_e = hoff_ids + hsz_ids;
-    size_t total_host = hoff_wts_e + hsz_wts_e;
+    size_t hsz_counts = align_up_64h(num_experts * sizeof(int32_t));
+    size_t total_host = hsz_counts;
 
     if (hipdnn_ep_state_ensure_qmoe_host_scratch(state, total_host) != 0) {
       fprintf(stderr, "wrap_qmoe: ensure_qmoe_host_scratch(%zu) failed\n",
@@ -188,28 +195,29 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     }
     char *host_base =
         static_cast<char *>(hipdnn_ep_state_get_qmoe_host_scratch(state));
-    int32_t *h_indices = reinterpret_cast<int32_t *>(host_base + hoff_indices);
-    char *h_weights = host_base + hoff_weights;
-    int32_t *h_ids_base = reinterpret_cast<int32_t *>(host_base + hoff_ids);
-    char *h_wts_e_base = host_base + hoff_wts_e;
+    int32_t *h_counts = reinterpret_cast<int32_t *>(host_base);
 
-    HIP_CHECK(hipMemcpyAsync(h_indices, d_expert_indices,
-                             num_tokens * k * sizeof(int32_t),
+    // Bucket tokens on the device: count per expert (atomicAdd), exclusive
+    // prefix sum into d_expert_offsets, scatter (token_id, weight) pairs
+    // into d_sorted_token_ids / d_sorted_weights ordered by expert.
+    HIP_CHECK(hip_qmoe_bucket_tokens(
+        stream, d_expert_indices, d_expert_weights, d_expert_counts,
+        d_expert_offsets, d_sorted_token_ids, d_sorted_weights, num_tokens,
+        num_experts, k, elem_size));
+
+    // Only readback the counts (num_experts * int32, e.g. 32*4 = 128 bytes)
+    // to drive the host-side per-expert dispatch loop. Offsets are computed
+    // on the host from the prefix sum of counts (cheap, avoids a second D2H).
+    HIP_CHECK(hipMemcpyAsync(h_counts, d_expert_counts,
+                             num_experts * sizeof(int32_t),
                              hipMemcpyDeviceToHost, hip_stream));
-    HIP_CHECK(hipMemcpyAsync(h_weights, d_expert_weights,
-                             num_tokens * k * elem_size, hipMemcpyDeviceToHost,
-                             hip_stream));
     HIP_CHECK(hipStreamSynchronize(hip_stream));
 
-    std::vector<std::vector<TokenEntry>> expert_tokens(num_experts);
-    for (int64_t t = 0; t < num_tokens; t++) {
-      for (int64_t s = 0; s < k; s++) {
-        int32_t eid = h_indices[t * k + s];
-        if (eid >= 0 && eid < num_experts) {
-          expert_tokens[eid].push_back(
-              {static_cast<int32_t>(t), static_cast<int32_t>(s)});
-        }
-      }
+    // Recompute offsets on the host (mirrors the on-device prefix sum); used
+    // for pointer arithmetic into the sorted device buffers below.
+    std::vector<int64_t> h_offsets(num_experts + 1, 0);
+    for (int64_t e = 0; e < num_experts; e++) {
+      h_offsets[e + 1] = h_offsets[e] + static_cast<int64_t>(h_counts[e]);
     }
 
     HIP_CHECK(hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size,
@@ -217,7 +225,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
     int64_t active_experts = 0;
     for (int64_t e = 0; e < num_experts; e++) {
-      if (!expert_tokens[e].empty()) {
+      if (h_counts[e] > 0) {
         active_experts++;
       }
     }
@@ -225,30 +233,21 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                       (long long)active_experts, (long long)num_experts);
 
     for (int64_t e = 0; e < num_experts; e++) {
-      int64_t count = static_cast<int64_t>(expert_tokens[e].size());
+      int64_t count = static_cast<int64_t>(h_counts[e]);
       if (count == 0) {
         continue;
       }
 
-      // Reuse pinned host scratch sub-buffers from above (sized for the
-      // worst-case num_tokens*k entries; per-expert count <= num_tokens*k).
-      int32_t *h_ids = h_ids_base;
-      char *h_wts_e = h_wts_e_base;
-      for (int64_t i = 0; i < count; i++) {
-        h_ids[i] = expert_tokens[e][i].token_id;
-        int32_t slot = expert_tokens[e][i].slot;
-        int64_t src_off = (h_ids[i] * k + slot) * elem_size;
-        memcpy(h_wts_e + i * elem_size, h_weights + src_off, elem_size);
-      }
-
-      HIP_CHECK(hipMemcpyAsync(d_token_ids, h_ids, count * sizeof(int32_t),
-                               hipMemcpyHostToDevice, hip_stream));
-      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e, count * elem_size,
-                               hipMemcpyHostToDevice, hip_stream));
+      // Slices into the on-device sorted buffers populated by bucket_tokens.
+      // No per-expert H2D needed: the gather/scatter kernels read these
+      // directly via pointer arithmetic.
+      int64_t off_e = h_offsets[e];
+      int32_t *d_ids_e = d_sorted_token_ids + off_e;
+      char *d_wts_e = d_sorted_weights + off_e * elem_size;
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
                         (long long)e, (long long)count);
-      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf, d_token_ids,
+      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf, d_ids_e,
                                        hidden_size, count, elem_size));
 
       const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
@@ -367,14 +366,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
-      HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_token_ids,
-                                     d_token_wts, hidden_size, count,
-                                     elem_size));
+      HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_ids_e,
+                                     d_wts_e, hidden_size, count, elem_size));
     }
   }
 
 cleanup:
-  // Sub-buffers above (d_expert_indices ... d_token_wts) are views into
+  // Sub-buffers above (d_expert_indices ... d_sorted_weights) are views into
   // RuntimeState->qmoe_scratch -- owned by the runtime state, freed in
   // hipdnn_ep_state_cleanup. Do NOT hipFree them here.
   if (result == 0) {
