@@ -401,7 +401,10 @@ int hip_gather(
  *   num_output_elements - total output elements
  *   hip_dtype           - data type (hip_dtype_t value cast to int)
  *
- * Currently supported types: HIP_DTYPE_INT64
+ * Currently supported types: HIP_DTYPE_INT64, HIP_DTYPE_INT32, HIP_DTYPE_FLOAT16
+ *   - INT32 accumulates in int64 internally to avoid overflow on large slices.
+ *   - FLOAT16 accumulates in float internally to preserve precision; the
+ *     final result is narrowed back to half.
  * Returns: 0 on success, non-zero on failure
  */
 int hip_reduce_sum(
