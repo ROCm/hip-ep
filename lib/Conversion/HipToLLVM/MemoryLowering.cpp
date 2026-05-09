@@ -449,19 +449,69 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       return rewriter.notifyMatchFailure(op,
                                          "last dimension must be contiguous");
 
-    int64_t height = 1;
-    for (int64_t i = 0; i < rank - 1; ++i) {
+    // To express this copy as a single hipMemcpy2DAsync we need to split the
+    // dims into two groups:
+    //   * a "width" group: a contiguous suffix [splitDim..rank-1] whose total
+    //     size equals one row, requires
+    //         stride[i] == stride[i+1] * shape[i+1]   for i in [splitDim..rank-2)
+    //     (and stride[rank-1] == 1, already verified above);
+    //   * a "height" group: the prefix [0..splitDim) whose dim sizes multiply
+    //     into `height`. Because hipMemcpy2DAsync only takes ONE srcPitch /
+    //     dstPitch, these prefix dims must themselves be collapsible, i.e.
+    //         stride[i] == stride[i+1] * shape[i+1]   for i in [0..splitDim-1).
+    // If neither condition holds we cannot lower with a single 2D pitched
+    // copy and must bail out (a future ND/loop lowering can pick this up).
+    for (int64_t i = 0; i < rank; ++i) {
       if (ShapedType::isDynamic(shape[static_cast<unsigned>(i)]))
         return rewriter.notifyMatchFailure(op, "need static shape");
-      height *= shape[static_cast<unsigned>(i)];
     }
 
-    if (ShapedType::isDynamic(shape[static_cast<unsigned>(rank - 1)]))
-      return rewriter.notifyMatchFailure(op, "need static shape");
-    int64_t widthBytes = shape[static_cast<unsigned>(rank - 1)] * elemBytes;
+    // Find the longest contiguous suffix that holds on BOTH src and dst.
+    int64_t splitDim = rank - 1;
+    for (int64_t i = rank - 2; i >= 0; --i) {
+      int64_t expectSrc =
+          srcStrides[static_cast<unsigned>(i + 1)] *
+          shape[static_cast<unsigned>(i + 1)];
+      int64_t expectDst =
+          dstStrides[static_cast<unsigned>(i + 1)] *
+          shape[static_cast<unsigned>(i + 1)];
+      if (srcStrides[static_cast<unsigned>(i)] != expectSrc ||
+          dstStrides[static_cast<unsigned>(i)] != expectDst)
+        break;
+      splitDim = i;
+    }
 
-    int64_t srcPitchElems = srcStrides[static_cast<unsigned>(rank - 2)];
-    int64_t dstPitchElems = dstStrides[static_cast<unsigned>(rank - 2)];
+    // splitDim == 0 means the whole thing is dense; that case is already
+    // handled by the d2d memcpy path above, so we should never reach here.
+    if (splitDim == 0)
+      return rewriter.notifyMatchFailure(
+          op, "fully dense copy should use plain memcpy");
+
+    // Outer dims [0..splitDim) must also collapse into a single height pitch.
+    for (int64_t i = 0; i + 1 < splitDim; ++i) {
+      int64_t expectSrc =
+          srcStrides[static_cast<unsigned>(i + 1)] *
+          shape[static_cast<unsigned>(i + 1)];
+      int64_t expectDst =
+          dstStrides[static_cast<unsigned>(i + 1)] *
+          shape[static_cast<unsigned>(i + 1)];
+      if (srcStrides[static_cast<unsigned>(i)] != expectSrc ||
+          dstStrides[static_cast<unsigned>(i)] != expectDst)
+        return rewriter.notifyMatchFailure(
+            op, "non-collapsible outer strides; needs ND copy lowering");
+    }
+
+    int64_t widthElems = 1;
+    for (int64_t i = splitDim; i < rank; ++i)
+      widthElems *= shape[static_cast<unsigned>(i)];
+    int64_t widthBytes = widthElems * elemBytes;
+
+    int64_t height = 1;
+    for (int64_t i = 0; i < splitDim; ++i)
+      height *= shape[static_cast<unsigned>(i)];
+
+    int64_t srcPitchElems = srcStrides[static_cast<unsigned>(splitDim - 1)];
+    int64_t dstPitchElems = dstStrides[static_cast<unsigned>(splitDim - 1)];
     int64_t srcPitchBytes = srcPitchElems * elemBytes;
     int64_t dstPitchBytes = dstPitchElems * elemBytes;
 
