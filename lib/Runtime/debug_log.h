@@ -39,18 +39,42 @@ inline bool hipdnn_ep_debug_enabled() {
   return enabled;
 }
 
+// Sync-isolated profiling mode (HIPDNN_EP_PERF_ISOLATE=1). Inserts a
+// hipStreamSynchronize at every OP_PROFILE scope boundary so each op's
+// reported GPU time is its true standalone runtime, with no carry-over from
+// prior queued work. Implies HIPDNN_EP_PERF=1. Kills concurrency by design;
+// only useful as a diagnostic to find ops whose real cost is being masked by
+// stream-queue depth in normal profiling.
+inline bool hipdnn_ep_perf_isolate_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_PERF_ISOLATE");
+#else
+    const char *v = std::getenv("HIPDNN_EP_PERF_ISOLATE");
+    return v && v[0] >= '1';
+#endif
+  }();
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
   // can sample the H2D / Compute / D2H phases), which serializes the GPU
   // pipeline and skews measurements. Users who only want the per-call
   // [Runtime DEBUG] traces should not pay that cost.
+  // ISOLATE implies PERF.
   static const bool enabled = [] {
 #ifdef _WIN32
-    return detail::check_env("HIPDNN_EP_PERF");
+    if (detail::check_env("HIPDNN_EP_PERF"))
+      return true;
+    return detail::check_env("HIPDNN_EP_PERF_ISOLATE");
 #else
     const char *v = std::getenv("HIPDNN_EP_PERF");
-    return v && v[0] >= '1';
+    if (v && v[0] >= '1')
+      return true;
+    const char *v2 = std::getenv("HIPDNN_EP_PERF_ISOLATE");
+    return v2 && v2[0] >= '1';
 #endif
   }();
   return enabled;

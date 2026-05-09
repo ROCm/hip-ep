@@ -5,6 +5,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -32,6 +33,17 @@ extern "C" int wrap_linear_attention(
     int64_t decay_per_key_dim, int64_t beta_per_head, float scale,
     int64_t chunk_size, int64_t update_rule, int64_t B, int64_t seq_len,
     int64_t dk, int64_t dv, int64_t type) {
+  OP_PROFILE(
+      "linear_attention",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b),
+                 "b=%lld,sq=%lld,hq=%lld,hkv=%lld,dk=%lld,dv=%lld",
+                 (long long)B, (long long)seq_len, (long long)Hq,
+                 (long long)Hkv, (long long)dk, (long long)dv);
+        return std::string(b);
+      },
+      state);
 
   RUNTIME_DEBUG_LOG("[linear_attention] enter: B=%lld seq_len=%lld "
                     "q_heads=%lld kv_heads=%lld n_k=%lld d_k=%lld d_v=%lld "

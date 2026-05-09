@@ -782,6 +782,58 @@ int hip_linear_attention_decode(
     int64_t type);
 
 /* =========================================================================
+ * Causal Depthwise 1D Conv -- single-step "decode" path
+ * =========================================================================
+ *
+ * Fused fast path for the seq_len == 1 case of CausalConvWithState used by
+ * Mamba / Gated DeltaNet decoders. Replaces the MIOpen virtual-buffer +
+ * convolution + bias + activation chain with one compute kernel that:
+ *   - reads past_state[b,c,0..k-2] (or zero if past_state==nullptr),
+ *   - reads input[b,c,0],
+ *   - computes the depthwise convolution dot product:
+ *       output[b,c,0] = sum_{j=0..k-2} weight[c,0,j] * past_state[b,c,j]
+ *                     + weight[c,0,k-1] * input[b,c,0]
+ *                     + (bias ? bias[c] : 0)
+ *   - applies optional SiLU (activation == 1):
+ *       output[b,c,0] *= 1 / (1 + exp(-output[b,c,0]))
+ *   - writes the new state by shifting forward by one step:
+ *       present_state[b,c,0..k-3] = past_state[b,c,1..k-2]
+ *       present_state[b,c,k-2]    = input[b,c,0]
+ *
+ * Bypasses hipMemcpy2DAsync entirely: at decode-shape (rows=B*C, width=k-1
+ * elements) the 2D copy has thousands of pathologically thin rows and is
+ * massively slower than a single launch with the same arithmetic.
+ *
+ * Shapes (matching wrap_causal_conv_with_state layout):
+ *   input         [B, C, 1]           (past_state is [B, C, k-1])
+ *   weight        [C, 1, k]           (depthwise: one k-tap filter per channel)
+ *   bias          [C] or nullptr
+ *   output        [B, C, 1]
+ *   past_state    [B, C, k-1] or nullptr (treated as zeros)
+ *   present_state [B, C, k-1]
+ *
+ * Constraints:
+ *   - kernel_size in [1, 8]   (k-1 fits in a small register array)
+ *   - element_size_bytes in {2, 4} (fp16 or fp32; matches wrapper validation)
+ *   - activation in {0, 1}   (0=none, 1=SiLU)
+ *
+ * Returns: 0 on success, non-zero on failure.
+ */
+int hip_causal_conv_step_decode(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes);
+
+/* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
  *
