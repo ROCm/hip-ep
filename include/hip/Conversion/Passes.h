@@ -13,6 +13,9 @@
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassRegistry.h"
+
 namespace mlir {
 namespace hip {
 
