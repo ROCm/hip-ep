@@ -14,7 +14,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/TypeID.h"
+#include "mlir/Support/TypeID.h"
 
 namespace mlir {
 class DialectRegistry;
