@@ -638,13 +638,21 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
 
-// Rotary embedding operation wrapper
+// Rotary embedding operation wrapper.
+//
+// Supports M-RoPE / partial rotary embedding (rotary_dim < head_dim) and the
+// two standard input layouts:
+//   is_bnsh == 0 : BSNH [batch, seq_len, num_heads, head_dim]
+//                  (also covers 3D [batch, seq_len, num_heads*head_dim])
+//   is_bnsh != 0 : BNSH [batch, num_heads, seq_len, head_dim]
+//                  (ONNX com.microsoft.RotaryEmbedding 4D default; GQA K/V)
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
-                          int64_t interleaved, int64_t num_heads,
-                          int64_t rotary_dim, int64_t input_num_elements,
+                          int64_t interleaved, int64_t batch_size,
+                          int64_t seq_len, int64_t num_heads,
+                          int64_t head_dim, int64_t rotary_dim,
                           int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes);
+                          int64_t element_size_bytes, int64_t is_bnsh);
 
 // SimplifiedLayerNormalization operation wrapper
 int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,

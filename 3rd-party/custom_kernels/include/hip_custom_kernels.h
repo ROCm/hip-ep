@@ -212,21 +212,29 @@ int hip_elementwise_gelu(
  *     output[..., 2*d]   = x0 * cos_val - x1 * sin_val
  *     output[..., 2*d+1] = x0 * sin_val + x1 * cos_val
  *
+ * When rotary_dim < head_dim, dimensions [rotary_dim, head_dim) are passed
+ * through unchanged (the half-rotated kernel writes them in the d>=rotary_dim
+ * branch; the interleaved path uses a separate copy kernel).
+ *
  * Parameters:
  *   stream             - hipStream_t cast to void*
- *   input              - GPU pointer [batch, seq_len, num_heads * head_dim]
- *   position_ids       - GPU pointer [batch, seq_len] (int64 or int32)
+ *   input              - GPU pointer; layout depends on is_bnsh:
+ *                          is_bnsh=0 -> BSNH [batch, seq_len, num_heads, head_dim]
+ *                                       (also the 3D [B, S, num_heads*head_dim])
+ *                          is_bnsh=1 -> BNSH [batch, num_heads, seq_len, head_dim]
+ *   position_ids       - GPU pointer [batch, seq_len] (int64)
  *   cos_cache          - GPU pointer [max_seq, rotary_dim/2]
  *   sin_cache          - GPU pointer [max_seq, rotary_dim/2]
- *   output             - GPU pointer (same shape as input)
+ *   output             - GPU pointer (same shape/layout as input)
  *   batch_size         - batch dimension
  *   seq_len            - sequence length
  *   num_heads          - number of attention heads
- *   head_dim           - dimension per head
- *   rotary_dim         - number of dimensions to rotate (<=head_dim)
+ *   head_dim           - dimension per head (>= rotary_dim)
+ *   rotary_dim         - number of dimensions to rotate (<= head_dim)
  *   max_seq_len        - max sequence length in cos/sin cache (for bounds clamping)
  *   interleaved        - 0 = half-rotated, 1 = interleaved
  *   element_size_bytes - 2 for fp16, 4 for fp32
+ *   is_bnsh            - layout flag, see input above (0 = BSNH/3D, 1 = BNSH)
  *
  * Returns: 0 on success, non-zero on error
  */
@@ -244,7 +252,8 @@ int hip_rope_forward(
     int64_t rotary_dim,
     int64_t max_seq_len,
     int64_t interleaved,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes,
+    int64_t is_bnsh);
 
 /* =========================================================================
  * GQA Device Kernel Launchers

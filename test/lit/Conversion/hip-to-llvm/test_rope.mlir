@@ -22,7 +22,9 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @test_rope_lowering
-// CHECK: llvm.call @wrap_rotary_embedding({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
-// Verify 12 parameters:
+// CHECK: llvm.call @wrap_rotary_embedding({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// Verify 15 parameters:
 // - 6 pointers: state, input, position_ids, cos_cache, sin_cache, output
-// - 6 i64: interleaved=0, num_heads=32, rotary_dim=128, input_num_elements=524288, cos_cache_num_elements=8388608, element_size_bytes=2
+// - 9 i64: interleaved=0, batch=1, seq_len=128, num_heads=32, head_dim=128,
+//   rotary_dim=128, cos_cache_num_elements=8388608, element_size_bytes=2,
+//   is_bnsh=0 (3D BSH input)
