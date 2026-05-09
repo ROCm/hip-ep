@@ -21,6 +21,8 @@
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 
+#include "mlir/Pass/Pass.h"
+
 namespace mlir {
 namespace hip {
 
