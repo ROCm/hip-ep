@@ -329,6 +329,10 @@ python -c "import onnxruntime_genai as og; print(og.__version__)"
 
 ## Model Preparation
 
+Please See
+[tools/onnx-model-splitter/README.md](../tools/onnx-model-splitter/README.md) for full details of this step. 
+In this document, there is a step by step guide which use Llama-3.1-8B as example.
+
 Use `tools/onnx-model-splitter` to export prefill/decode ONNX models for
 benchmarking with ONNX Runtime GenAI. Install Python dependencies first:
 
@@ -358,9 +362,7 @@ python tools/onnx-model-splitter/export_chunk_model.py \
 
 This exports `prefill_p512m16384.onnx`, `decode_p512m16384.onnx`,
 `genai_config_p512m16384.json`, and shared external weights into the output
-directory. See
-[tools/onnx-model-splitter/README.md](../tools/onnx-model-splitter/README.md)
-for full details.
+directory.
 
 ## Testing & Benchmarking
 
@@ -370,17 +372,25 @@ for full details.
 timing. It is built automatically when `BUILD_HIP_TOOLS=ON`.
 
 ```bash
+# first cd to your onnx-hipdnn-ep directory
 export THEROCK_DIST=$(cd ../therock && pwd)
-export PATH="$THEROCK_DIST/bin:$PATH"
+export PATH="$THEROCK_DIST/bin:$PREBUILT_DIR/bin:$PATH"
+
+> **Note**: hip-onnx-runner.exe run onnx model with random data as input.
+>  But for llm model, the input_ids should be in valid scope (< voab size) and not be random. 
+>  So for below test, it is necessary to produce valid data file as input.
+>  Please run :
+>  # python tools/hip-onnx-runner/gen_hip_onnx_runner_inputs.py -o gen_inputs /path/to/your_test_model.onnx
+>  to produce dir holding test data and use "-i" option to let hip-onnx-runner.exe use this dir as input
 
 # Run with MorphiZen EP (default), using a fixed-shape model from Model Preparation
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs 
 
 # Run with CPU only (no EP)
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -n
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -n -i gen_inputs 
 
 # Dump outputs for comparison
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -d 2
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs -d 2
 
 # L2-norm compare EP vs CPU outputs
 $PREBUILT_DIR/bin/hip-onnx-runner.exe -L ep_o_dump,cpu_o_dump
