@@ -264,6 +264,13 @@ git submodule update --init --recursive
 
 #### 4c. Build OGA
 
+> **Note**: when executing below python command, 
+> you may meet error of "ModuleNotFoundError: No module named ..."
+> in this case, you need manually install the missing module such as:
+```bash
+pip install util requests
+```
+
 ```bash
 python build.py \
   --config Release \
@@ -310,6 +317,8 @@ pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
   ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
 ```
+> **Note**: the first whl file may be in  ../build/onnxruntime/Release/Release/dist/ 
+>  Try this path if you meet error "the file does not exist"
 
 Verify:
 
