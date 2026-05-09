@@ -1,4 +1,4 @@
-// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
 #pragma once
@@ -7,17 +7,19 @@
 #include <cstdio>
 #include <cstdlib>
 
+#ifdef _WIN32
+// Static CRT (/MT) DLLs have their own CRT env — _dupenv_s can't see env vars
+// set by the host process. Use Win32 API to read the real process environment.
+extern "C" __declspec(dllimport) unsigned long __stdcall
+    GetEnvironmentVariableA(const char*, char*, unsigned long);
+#endif
+
 inline bool custom_kernels_debug_enabled() {
     static const bool enabled = [] {
 #ifdef _WIN32
-        char* v = nullptr;
-        size_t len = 0;
-        bool result = false;
-        if (_dupenv_s(&v, &len, "HIPDNN_EP_DEBUG") == 0 && v != nullptr) {
-            result = v[0] >= '1';
-            free(v);
-        }
-        return result;
+        char buf[8];
+        unsigned long n = GetEnvironmentVariableA("HIPDNN_EP_DEBUG", buf, sizeof(buf));
+        return n > 0 && buf[0] >= '1';
 #else
         const char* v = getenv("HIPDNN_EP_DEBUG");
         return v && v[0] >= '1';

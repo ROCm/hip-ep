@@ -24,7 +24,9 @@ Usage:
 """
 
 import argparse
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,9 +43,11 @@ DEPS = INSTALL / "deps"
 ORT = INSTALL / "onnxruntime"
 BUILD = INSTALL / "build"
 DIST = INSTALL / "dist"
+OGA_SOURCE = INSTALL / "oga-source"
+OGA_BUILD = INSTALL / "oga-build"
 
 THEROCK_URL = (
-    "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1150-7.11.0.tar.gz"
+    "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1151-7.11.0.tar.gz"
 )
 
 # Prebuilt deps — keep in sync with scripts/setup-prebuilt.sh
@@ -137,6 +141,19 @@ def _zip_extract(archive, dest, *, strip=0):
                 shutil.copyfileobj(src, dst)
 
 
+def _read_ci_env(*keys):
+    """Read env var values from .github/workflows/windows-build.yml (single source of truth)."""
+    ci_yaml = ROOT / ".github" / "workflows" / "windows-build.yml"
+    text = ci_yaml.read_text()
+    result = {}
+    for key in keys:
+        m = re.search(rf"^\s+{re.escape(key)}:\s*(.+?)\s*$", text, re.MULTILINE)
+        if not m:
+            raise RuntimeError(f"{key} not found in {ci_yaml}")
+        result[key] = m.group(1).strip().strip('"').strip("'")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # TheRock ROCm SDK
 # ---------------------------------------------------------------------------
@@ -148,7 +165,7 @@ def fetch_therock():
     if sentinel.exists():
         log("  Already installed.")
         return
-    archive = CACHE / "therock.tar.gz"
+    archive = CACHE / Path(THEROCK_URL).name
     download(THEROCK_URL, archive)
     if THEROCK.exists():
         shutil.rmtree(THEROCK)
@@ -448,6 +465,197 @@ def configure_and_build():
 
 
 # ---------------------------------------------------------------------------
+# OGA (onnxruntime-genai) fork
+# ---------------------------------------------------------------------------
+
+
+def _ensure_dml_header():
+    """Fetch dml_provider_factory.h from ORT DirectML NuGet if missing."""
+    header = ORT / "include" / "dml_provider_factory.h"
+    if header.exists():
+        return
+    log("  Fetching dml_provider_factory.h from ORT DirectML NuGet ...")
+    url = (
+        "https://www.nuget.org/api/v2/package/"
+        f"Microsoft.ML.OnnxRuntime.DirectML/{ORT_VERSION}"
+    )
+    data = urllib.request.urlopen(url).read()
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for name in z.namelist():
+            if name.endswith("dml_provider_factory.h"):
+                header.write_bytes(z.read(name))
+                return
+    raise RuntimeError("dml_provider_factory.h not found in NuGet package")
+
+
+def build_oga():
+    """Build the onnxruntime-genai fork with MorphiZen EP device support."""
+    ci = _read_ci_env("OGA_REPO", "OGA_REF")
+    oga_repo = f"https://github.com/{ci['OGA_REPO']}.git"
+    oga_ref = ci["OGA_REF"]
+    log(f"Building OGA fork ({ci['OGA_REPO']} @ {oga_ref[:10]}) ...")
+
+    if not (ORT / ".ok").exists():
+        log(
+            "  ERROR: ONNX Runtime not installed. Run build.py without --skip-build first."
+        )
+        sys.exit(1)
+
+    _ensure_msvc_env()
+
+    # -- clone --
+    sentinel = OGA_SOURCE / ".ok"
+    if not sentinel.exists():
+        if OGA_SOURCE.exists():
+            shutil.rmtree(OGA_SOURCE)
+        log("  Cloning OGA fork ...")
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--branch",
+                "feat/oga_hipdnn_experiment",
+                oga_repo,
+                str(OGA_SOURCE),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "checkout", oga_ref],
+            check=True,
+            cwd=str(OGA_SOURCE),
+        )
+        subprocess.run(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            check=True,
+            cwd=str(OGA_SOURCE),
+        )
+        sentinel.touch()
+    else:
+        log("  OGA source already cloned.")
+
+    _ensure_dml_header()
+
+    # -- build --
+    log("  Building OGA ...")
+    # Force the OGA cmake to use the same Python interpreter that's running
+    # build.py (the conda env's python). cmake otherwise auto-picks the first
+    # python on PATH (e.g. miniforge base, system Python), producing a .pyd
+    # whose ABI tag (cp312/cp313) doesn't match the install target's cp314.
+    py_for_cmake = sys.executable.replace("\\", "/")
+    build_cmd = [
+        sys.executable,
+        str(OGA_SOURCE / "build.py"),
+        "--config",
+        "RelWithDebInfo",
+        "--cmake_generator",
+        "Ninja",
+        "--use_dml",
+        "--ort_home",
+        str(ORT),
+        "--skip_tests",
+        "--skip_examples",
+        "--parallel",
+        "--build_dir",
+        str(OGA_BUILD),
+        "--cmake_extra_defines",
+        "CMAKE_CXX_FLAGS=/EHsc",
+        # pybind11 v2.13.6 (vendored by OGA) uses the removed
+        # distutils.sysconfig under Python 3.12+; PYBIND11_FINDPYTHON=ON
+        # routes through modern CMake FindPython3 instead.
+        "--cmake_extra_defines",
+        "PYBIND11_FINDPYTHON=ON",
+        # PYBIND11_FINDPYTHON routes through CMake FindPython, which keys off
+        # `Python_EXECUTABLE` (no `3` suffix) — passing `Python3_EXECUTABLE`
+        # alone gets ignored with a "Manually-specified variables were not used"
+        # warning, and cmake then auto-detects the wrong python on PATH.
+        "--cmake_extra_defines",
+        f"Python_EXECUTABLE={py_for_cmake}",
+    ]
+    # OGA's terminal `PyPackageBuild` ninja target invokes `cmd /C "... && -m pip
+    # wheel --no-deps ."` — note the missing `python` before `-m pip`. The C/C++
+    # artifacts (DLL, EXE, .pyd) are already built before this step fails, so
+    # tolerate non-zero exit and finish the wheel ourselves below.
+    rc = subprocess.run(build_cmd).returncode
+    if rc != 0:
+        log(
+            f"  OGA build.py exited {rc} (PyPackageBuild step likely failed; "
+            "binaries should still be present)."
+        )
+
+    # -- install binaries --
+    bin_dir = DIST / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    oga_bin = OGA_BUILD / "RelWithDebInfo"
+    oga_files = {
+        "onnxruntime-genai.dll": oga_bin / "onnxruntime-genai.dll",
+        "model_benchmark.exe": oga_bin / "benchmark" / "c" / "model_benchmark.exe",
+    }
+    for name, src in oga_files.items():
+        if src.exists():
+            shutil.copy2(src, bin_dir / name)
+            log(f"  Installed {name}")
+        else:
+            log(f"  ERROR: missing OGA artifact {src}")
+            sys.exit(1)
+
+    # Required by model_benchmark.exe: the freshly-built ORT must shadow any
+    # System32 onnxruntime.dll (often v1.17 = API 17) so the EP-built-against
+    # ORT 1.24 (API 24) can load.
+    for ort_dll in ("onnxruntime.dll", "onnxruntime_providers_shared.dll"):
+        src = ORT / "lib" / ort_dll
+        if src.exists():
+            shutil.copy2(src, bin_dir / ort_dll)
+
+    # -- build wheel (workaround for OGA PyPackageBuild bug) --
+    # OGA stages the wheel layout under <build>/wheel/ before invoking pip.
+    # If the broken target left no .whl, run pip wheel manually from there.
+    wheel_dir = oga_bin / "wheel"
+    wheels = (
+        list(wheel_dir.glob("onnxruntime_genai_directml-*.whl"))
+        if wheel_dir.exists()
+        else []
+    )
+    if not wheels and wheel_dir.exists() and (wheel_dir / "setup.py").exists():
+        log("  PyPackageBuild produced no wheel — running pip wheel manually.")
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "wheel",
+                "--no-deps",
+                "--wheel-dir",
+                str(wheel_dir),
+                str(wheel_dir),
+            ],
+            check=True,
+            cwd=str(wheel_dir),
+        )
+        wheels = list(wheel_dir.glob("onnxruntime_genai_directml-*.whl"))
+
+    if wheels:
+        log(f"  Installing wheel: {wheels[0].name}")
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--force-reinstall",
+                "--no-deps",
+                str(wheels[0]),
+            ],
+            check=True,
+        )
+    else:
+        log("  ERROR: No OGA wheel produced; cannot install onnxruntime_genai.")
+        sys.exit(1)
+
+    log("  OGA build complete.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -465,6 +673,11 @@ def main():
         "--skip-build",
         action="store_true",
         help="Only download dependencies, do not build",
+    )
+    parser.add_argument(
+        "--build-oga",
+        action="store_true",
+        help="Build and install onnxruntime-genai fork with MorphiZen EP device support",
     )
     args = parser.parse_args()
 
@@ -487,12 +700,18 @@ def main():
         log("")
         log("Setup + build complete!")
 
+    if args.build_oga:
+        build_oga()
+
     log(f"  TheRock SDK:    {THEROCK}")
     log(f"  Dependencies:   {DEPS}")
     log(f"  ONNX Runtime:   {ORT}")
     if not args.skip_build:
         log(f"  Build output:   {BUILD}")
         log(f"  Install dir:    {DIST}")
+    if args.build_oga:
+        log(f"  OGA source:     {OGA_SOURCE}")
+        log(f"  OGA build:      {OGA_BUILD}")
 
 
 if __name__ == "__main__":

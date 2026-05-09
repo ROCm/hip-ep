@@ -208,6 +208,18 @@ void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
 
+// Per-state scratch for wrap_qmoe transient buffers (device + pinned-host
+// mirror for routing readback). Replaces the per-call hipMalloc/hipFree storm
+// (8 buffers x N MoE layers per inference). Same grow-on-demand policy as
+// the shared workspace; never shrinks. See runtime_state_internal.h for
+// rationale.
+void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
+                                        size_t needed_size);
+void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
+                                             size_t needed_size);
+
 // Device-side runtime error flag (set by kernels, observed by wrappers).
 // Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
 // delta==0) and need to propagate an error code back through main_graph.
@@ -394,6 +406,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 
 // GQA GEMM cache lifecycle (managed by RuntimeState)
 void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
+
+// MatMulNBits asym zero_points unpack cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
 
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
