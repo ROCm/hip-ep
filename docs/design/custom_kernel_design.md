@@ -127,8 +127,11 @@ Implements GQA as a multi-step operation:
 
 - **KV cache update**: Concatenate current K/V with past K/V into present K/V
 - **Optional RoPE**: If `do_rotary`, apply RoPE to Q and K (reuse rope logic)
-- **Attention**: Q * K^T (scaled), softmax, attention * V
-- Can start with a straightforward implementation and optimize later (or swap in CK)
+- **Attention** (single-token decode): two co-resident kernel families dispatched by `lib/Runtime/real/gqa.cpp`:
+  - `gqa_fused_decode` — short-context kernel (one block per query head); preferred at small `skv` where the split-K reduction overhead would dominate. Uses LDS-tiled K/V prefetch: each outer iteration cooperatively stages `TILE=8` rows of K and V into shared memory, then the inner loop crunches 8 softmax steps from LDS. This drives memory-level parallelism via TILE (16 outstanding loads per thread per tile) rather than wave count, since the decode grid (B=1, H=32 → ~32 blocks / ~128 waves on RDNA3 wave32) is too small to hide ~400-cycle global-load latency by wave switching. LDS use per block: `2 * TILE * D * sizeof(_Float16)` = 8 KB at D=128. No `__syncthreads` is needed between prefetch and inner loop because each thread writes only its own column (`K_tile[i*D + tid]`) and reads only its own column. TILE=8 chosen by sweep: TILE=4 loses to outer-loop overhead at small skv; TILE=16 saturates the per-thread outstanding-load budget.
+  - `gqa_flash_decode<D, K_SPLITS>` + `gqa_flash_decode_reduce_kernel<D, K_SPLITS>` — GQA-aware split-K Flash Attention 2 for long contexts. One block per (batch, kv-head, K_SPLIT); each block stages K/V tiles into LDS once and reuses them across all HPG=4 query heads (eliminating the 4× KV bandwidth waste of per-query-head loops). Online softmax in log2e space writes `{m, l, O[D]}` partials to a workspace; the reduction kernel merges them across splits. Templated for `D ∈ {64, 128}`, `K_SPLITS=8`.
+- **Prefill**: `gqa_fused_prefill` (multi-token) computes Q·K^T, softmax, and `attn·V` against the assembled KV cache.
+- Can start with a straightforward implementation and optimize later (or swap in CK).
 
 ### 5. `custom_kernels/CMakeLists.txt`
 
@@ -226,6 +229,35 @@ The `custom_kernels/CMakeLists.txt` install rules ensure that after `cmake --ins
 - `<prefix>/include/hip_custom_kernels.h` -- pure C header for the kernel API
 
 CompilerDriver discovers the `.lib` at model-compile time via the configured install prefix path, and passes it to DLLLinker alongside MIOpen/hipBLASLt import libs.
+
+### 10. `custom_kernels/hip/matmul_nbits_kernel.hip`
+
+Implements MatMulNBits — fused dequant + matmul for INT4 packed weights (FP16 activations). This is the dominant operator in INT4 LLM decode (~78% of GPU time for Llama 8B).
+
+Four execution paths, auto-dispatched by shape:
+
+| Path | Condition | Strategy |
+|------|-----------|----------|
+| WMMA | batch==1, K%32==0, M≥16 | RDNA3 wave matrix multiply with double-buffered shared memory, grid swizzling |
+| GEMV col-major | batch==1, K%32==0, 1<M<16 | K-parallel GEMV with internal row→col transpose, FP16 zero points, autotuned |
+| GEMV row-major | batch==1, K%32==0, M=1 | K-parallel GEMV, uint8 zero points (nibble-unpacked if packed), autotuned |
+| Naive | fallback | Per-element row-major, uint8 zero points (nibble-unpacked if packed) |
+
+**Single-token decode (M=1) uses the GEMV row-major path.** Key design choices:
+
+- **K-parallel reduction**: Each threadblock cooperates on the K dimension for TILE_N output columns. This gives sequential per-row B access that is prefetcher-friendly on LPDDR5X (APU shared memory). An N-parallel approach (each thread reads all K/2 bytes) was tried and abandoned — scattered reads across hundreds of loads defeated the LPDDR5X prefetcher. A tiled B layout variant `[K/32, N, 16]` was also tried (28% regression).
+- **Factored dequant**: Computes `(dot(A,B) - a_sum*zp) * scale`, saving ~40% FLOPs vs the naive `sum(a[k] * (b[k]-zp) * scale)`. Single multiply per group instead of per-element.
+- **Vectorized B loads**: 128-bit (uint4) main loop processes 32 nibbles per transaction, with uint2 (16-nibble) and uint32 (8-nibble) remainder phases. Load-compute separation issues all B loads before FMA compute. Explicit `__fmaf_rn` intrinsics for dot product accumulation.
+- **Runtime autotune**: First call for each (M,N,K,block_size) benchmarks all 35 (BLOCK_SIZE, TILE_N) configurations and caches the fastest. BLOCK_SIZE ∈ {32,64,128,256,512,1024}, TILE_N ∈ {1,2,4,8,16,32,64}. BS=32 configs use single-warp shuffle-only reduction (no LDS). TILE_N=32 tested only when N≥1024; TILE_N=64 only when N≥2048.
+- **Compile-time warp size**: RDNA 3 (gfx11xx) runs wave32 by default. The reduction uses `constexpr int WARP_SIZE = 32` for dead-code elimination — a runtime `__builtin_amdgcn_wavefrontsize()` check caused 13% regression due to both branches being compiled for every template instantiation.
+- **Single-warp fast path**: For BLOCK_SIZE=32 (one wave on RDNA 3), `if constexpr (BLOCK_SIZE <= WARP_SIZE)` eliminates the shared memory reduction entirely — warp shuffle result is final, no `__syncthreads` or LDS write/read needed.
+- **M=1 col-major bypass**: For M=1 decode, the GEMV path skips the col-major GEMV route (which requires FP16 zero-point conversion via `convertZpToFp16`) and falls through to the row-major GEMV path which reads uint8 zero_points natively. Saves 225 kernel launches per Llama 8B inference. The M=1 autotune cache key also deduplicates row/col entries since the layouts are identical for a single row.
+- **Packed nibble ZP unpacking**: ONNX MatMulNBits stores zero_points as packed nibbles when `zp_elem_size==1`: shape `[N, ceil(k_blocks/2)]` with two 4-bit ZPs per byte (low nibble = even group, high nibble = odd group). The GEMV row-major and naive paths index ZPs as `zp[n * k_blocks + grp]` expecting one byte per group. A `unpack_zp_nibbles_to_u8_kernel` unpacks to `[N, k_blocks]` uint8 (one ZP per byte) into a persistent grow-on-demand GPU buffer before dispatch. Without this, block_size=128 models (e.g. Qwen2.5-14B) cause 2x out-of-bounds GPU memory reads and crash. The WMMA/col-major paths use `convertZpToFp16` which already handles packed nibbles correctly.
+- **Optimization attempts that regressed**: K-loop unroll x2 (+5% register spilling), nontemporal stores (+3%, output too small to pollute cache), N-parallel tiled GEMV (+28%, prefetcher defeated). All reverted with comments documenting the regression.
+
+**Weight layout**: B is stored as `[N, K/2]` with pairs of 4-bit values packed into bytes (low nibble first). Scales are per quantization group: `[N, ceil(K/block_size)]`. Zero-points may be individual uint8 `[N, k_blocks]` or packed nibbles `[N, ceil(k_blocks/2)]` — determined by `zp_elem_size` (1 = packed nibbles, 2 = individual uint8/uint16). block_size is always power-of-2 (typically 32 or 128), enabling bit-shift group index calculation.
+
+**WMMA path** (prefill, M≥16): Transposes A/C to column-major internally, converts uint8 zero-points to FP16, then uses `__builtin_amdgcn_wmma_f16_16x16x16_f16` intrinsics with double-buffered shared memory for A tiles and grid swizzling (Morton-order blocks) for L2 cache locality.
 
 ## Key Design Decisions
 

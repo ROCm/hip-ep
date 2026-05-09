@@ -215,7 +215,12 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->qmoe_scratch = nullptr;
+  state->qmoe_scratch_size = 0;
+  state->qmoe_host_scratch = nullptr;
+  state->qmoe_host_scratch_size = 0;
   state->gqa_gemm_cache = nullptr;
+  state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
@@ -840,6 +845,14 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->workspace));
   }
 
+  // Free qmoe device scratch + pinned host mirror (if allocated)
+  if (state->qmoe_scratch) {
+    HIP_CLEANUP(hipFree(state->qmoe_scratch));
+  }
+  if (state->qmoe_host_scratch) {
+    HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
+  }
+
   if (state->device_error_flag) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
   }
@@ -879,6 +892,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->gqa_gemm_cache) {
     hipdnn_ep_gqa_gemm_cache_destroy(state->gqa_gemm_cache);
     state->gqa_gemm_cache = nullptr;
+  }
+
+  // Free MatMulNBits asym zero_points unpack cache
+  if (state->zp_unpack_cache) {
+    hipdnn_ep_zp_unpack_cache_destroy(state->zp_unpack_cache);
+    state->zp_unpack_cache = nullptr;
   }
 
   // Free op profiling state
@@ -1086,6 +1105,100 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   RUNTIME_DEBUG_LOG(
       "[workspace] Allocated shared workspace: %zu bytes (requested %zu)\n",
       alloc_size, needed_size);
+  return 0;
+}
+
+// qmoe device scratch (single contiguous buffer, sub-buffer offsets computed
+// per-call by wrap_qmoe). Same grow-on-demand policy as workspace; never
+// shrinks. Caller is responsible for ensuring no in-flight kernel still reads
+// the old buffer when growing -- we sync the stream before hipFree+hipMalloc.
+void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state) {
+  return state ? state->qmoe_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
+                                        size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->qmoe_scratch_size >= needed_size)
+    return 0;
+
+  // Same 1.5x growth amortization as the shared workspace -- prefill->decode
+  // shape transitions and any future autotune retries grow monotonically.
+  size_t alloc_size = needed_size;
+  if (state->qmoe_scratch_size > 0) {
+    size_t grown = state->qmoe_scratch_size + state->qmoe_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->qmoe_scratch) {
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->qmoe_scratch));
+    state->qmoe_scratch = nullptr;
+    state->qmoe_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->qmoe_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_qmoe_scratch: hipMalloc failed for %zu "
+            "bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->qmoe_scratch_size = alloc_size;
+  return 0;
+}
+
+// Pinned host mirror used for the small (k * sizeof(int32_t) + k * elem_size)
+// readback of expert routing decisions per qmoe call. hipHostMalloc'd once,
+// reused; no sync on grow because grow only fires when a larger num_tokens*k
+// is seen and growth is rare relative to call frequency.
+void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state) {
+  return state ? state->qmoe_host_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
+                                             size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->qmoe_host_scratch_size >= needed_size)
+    return 0;
+
+  size_t alloc_size = needed_size;
+  if (state->qmoe_host_scratch_size > 0) {
+    size_t grown =
+        state->qmoe_host_scratch_size + state->qmoe_host_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->qmoe_host_scratch) {
+    // Sync first: any in-flight hipMemcpyAsync(D2H) targeting this pinned
+    // buffer must complete before we free it. Cheap relative to alloc.
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
+    state->qmoe_host_scratch = nullptr;
+    state->qmoe_host_scratch_size = 0;
+  }
+
+  if (hipHostMalloc(&state->qmoe_host_scratch, alloc_size,
+                    hipHostMallocDefault) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_qmoe_host_scratch: hipHostMalloc failed "
+            "for %zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->qmoe_host_scratch_size = alloc_size;
   return 0;
 }
 
