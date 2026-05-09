@@ -21,8 +21,16 @@ SortIncludes:    true
 #   1. Project headers ("hip/...", "morphizen/...", relative "...")
 #   2. LLVM / MLIR / Clang headers
 #   3. System and third-party headers
+#   6. TableGen-generated drop-ins ("*.h.inc")
+#
+# `.h.inc` files are deliberately last in priority so that hand-written
+# headers (which the TableGen output references — `mlir::Dialect`,
+# `mlir::MLIRContext`, etc.) are textually included first.  See
+# include/hip/Dialect/IR/HipDialect.h for the canonical case.
 IncludeBlocks:   Regroup
 IncludeCategories:
+  - Regex:           '^"[^"]+\.h\.inc"$'
+    Priority:        6
   - Regex:           '^"(hip|morphizen)[-/]'
     Priority:        1
   - Regex:           '^"(mlir|llvm|clang)/'

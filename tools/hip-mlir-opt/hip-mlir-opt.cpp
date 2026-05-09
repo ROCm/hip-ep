@@ -3,11 +3,12 @@
  * Licensed under the MIT License.
  */
 
-#include "CrashHandler.h"
+#include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
+#include "hip/InitAllPasses.h"
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -31,8 +32,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
-#include "hip/Conversion/OnnxToHipDNN/Passes.h"
-#include "hip/InitAllPasses.h"
+#include "CrashHandler.h"
 
 namespace {
 
@@ -44,13 +44,13 @@ struct HipDstBufferizableModel
     : public mlir::bufferization::DstBufferizableOpInterfaceExternalModel<
           HipDstBufferizableModel<OpTy>, OpTy> {
   mlir::LogicalResult
-  bufferize(mlir::Operation *op, mlir::RewriterBase &rewriter,
-            const mlir::bufferization::BufferizationOptions &options,
-            mlir::bufferization::BufferizationState &state) const {
+  bufferize(mlir::Operation* op, mlir::RewriterBase& rewriter,
+            const mlir::bufferization::BufferizationOptions& options,
+            mlir::bufferization::BufferizationState& state) const {
     auto dstOp = mlir::cast<mlir::DestinationStyleOpInterface>(op);
 
     llvm::SmallVector<mlir::Value> newOperands;
-    for (mlir::OpOperand &operand : op->getOpOperands()) {
+    for (mlir::OpOperand& operand : op->getOpOperands()) {
       if (mlir::isa<mlir::TensorType>(operand.get().getType())) {
         mlir::FailureOr<mlir::Value> buffer =
             getBuffer(rewriter, operand.get(), options, state);
@@ -73,7 +73,7 @@ struct HipDstBufferizableModel
         replacements.push_back(result);
         continue;
       }
-      mlir::OpOperand *initOperand = dstOp.getTiedOpOperand(result);
+      mlir::OpOperand* initOperand = dstOp.getTiedOpOperand(result);
       mlir::FailureOr<mlir::Value> initBuffer =
           getBuffer(rewriter, initOperand->get(), options, state);
       if (mlir::failed(initBuffer))
@@ -87,8 +87,8 @@ struct HipDstBufferizableModel
   }
 };
 
-void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
-  registry.addExtension(+[](mlir::MLIRContext *ctx, mlir::hip::HipDialect *) {
+void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry& registry) {
+  registry.addExtension(+[](mlir::MLIRContext* ctx, mlir::hip::HipDialect*) {
     mlir::hip::ConvOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ConvOp>>(*ctx);
     mlir::hip::MatmulOp::attachInterface<
@@ -148,7 +148,7 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
 
 } // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   hip::install_crash_handlers("hip-mlir-opt");
   mlir::DialectRegistry registry;
   registry.insert<mlir::BuiltinDialect>();
