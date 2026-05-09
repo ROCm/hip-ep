@@ -32,20 +32,40 @@ environment.
 echo $INCLUDE  # Should contain paths under "Microsoft Visual Studio"
 ```
 
-**sccache installation:**
-```bash
-# Windows (winget)
+**Install prerequisites (PowerShell or cmd):**
+
+```powershell
+# 1. Visual Studio 2022 Build Tools — provides MSVC (cl.exe / link.exe), the
+#    Windows SDK, and CMake (bundled in the "Desktop development with C++"
+#    workload). Skip this step if you already have a full VS 2022 IDE.
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.CMake.Project --includeRecommended"
+
+# 2. Ninja, Python 3, sccache, GitHub CLI, Git (provides Git Bash + unzip)
+winget install Ninja-build.Ninja
+winget install Python.Python.3.12
 winget install Mozilla.sccache
-# or via cargo
-cargo install sccache
+winget install GitHub.cli
+winget install Git.Git
+
+# 3. Authenticate gh (needed to download pre-built LLVM/MLIR/Protobuf/FlatBuffers
+#    archives from wcy123/llvm-mlir-prebuilt releases)
+gh auth login
 ```
 
-**Ninja installation:**
+> **Note**: `winget` is included in Windows 10 1809+ and Windows 11. If it is not
+> available, install [App Installer from the Microsoft Store](https://apps.microsoft.com/detail/9NBLGGH4NNS1).
+
+**Verify the install** (run inside Git Bash launched from "x64 Native Tools Command
+Prompt for VS 2022"; see "MSVC Environment Setup" above):
+
 ```bash
-# Windows (winget)
-winget install Ninja-build.Ninja
-# or via pip
-pip install ninja
+cl.exe 2>&1 | head -1     # Microsoft (R) C/C++ Optimizing Compiler ...
+cmake --version           # cmake version 3.20+
+ninja --version
+python --version
+sccache --version
+gh --version
+unzip -v | head -1        # provided by Git for Windows
 ```
 
 ## Directory Layout
@@ -85,8 +105,11 @@ cd onnxruntime
 
 ```bash
 # Build ONNX Runtime using build.bat (do NOT set CMAKE_INSTALL_PREFIX during build)
-# This ensures ONNX Runtime uses its own FlatBuffers version, avoiding conflicts with prebuilt FlatBuffers
-./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker --use_dml
+# This ensures ONNX Runtime uses its own FlatBuffers version, avoiding conflicts with prebuilt FlatBuffers.
+# --build_wheel additionally produces a Python wheel under
+# ../build/onnxruntime/Release/dist/, which is needed for the OGA build below
+# and lets you `pip install` ONNX Runtime later (see "Install Python Wheels").
+./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker --use_dml --build_wheel
 
 # Install to prebuilt-local (set prefix at install time, not during configuration)
 mkdir -p ../prebuilt-local
@@ -99,6 +122,10 @@ cmake --install ../build/onnxruntime/Release --prefix "$PREBUILT_DIR"
 ```bash
 ls $PREBUILT_DIR/lib/cmake/onnxruntime/
 # Should see onnxruntime-config.cmake and related files
+
+ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
+# Should see one wheel matching your Python version, e.g.
+# onnxruntime_directml-1.25.1-cp312-cp312-win_amd64.whl
 ```
 
 ### 2. Download Pre-built Dependencies
@@ -178,6 +205,102 @@ cmake -S . -B ../build/$(basename $PWD) \
 ```bash
 cmake --build ../build/$(basename $PWD) --config Release --parallel
 cmake --install ../build/$(basename $PWD) --config Release
+```
+
+### 4. Build OGA (onnxruntime-genai)
+
+OGA (ONNX Runtime GenAI) provides the generative-pipeline runtime used by
+`model_benchmark.exe` (and the Python `onnxruntime_genai` module) to drive
+prefill + decode token generation against models prepared via the [ONNX
+Model Splitter](../tools/onnx-model-splitter/README.md). Build it after
+step 1 (ORT) so it links against the same ORT version.
+
+**Prerequisites**: step 1 (ORT built with `--build_wheel`). Step 3 is only
+needed later to *run* `model_benchmark` against MorphiZen EP, not to build
+OGA itself.
+
+Run all commands below from the `onnx-hipdnn-ep/` project root.
+
+#### 4a. Prepare ORT_HOME
+
+OGA's CMake expects an `ORT_HOME/` directory layout with `include/` and `lib/`
+subdirectories. Stage one from the ORT install under `$PREBUILT_DIR`:
+
+```bash
+mkdir -p ../build/oga-ort-home/include ../build/oga-ort-home/lib
+ORT_HOME=$(cd ../build/oga-ort-home && pwd)
+cp -r "$PREBUILT_DIR/include/onnxruntime/"* "$ORT_HOME/include/"
+cp "$PREBUILT_DIR/lib/"onnxruntime*.lib "$ORT_HOME/lib/"
+cp "$PREBUILT_DIR/bin/onnxruntime.dll" "$ORT_HOME/lib/"
+cp "$PREBUILT_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
+```
+
+#### 4b. Clone OGA
+
+```bash
+cd ..  # Go to workspace directory (sibling of onnx-hipdnn-ep)
+git clone -b feat/oga_hipdnn_experiment https://github.com/AMDmoore/onnxruntime-genai.git
+cd onnxruntime-genai
+git submodule update --init --recursive
+```
+
+> **Note**: CI pins a specific commit (see `OGA_REF` in
+> [`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml)).
+> If you want byte-for-byte reproducibility, check out that commit instead of
+> the branch tip.
+
+#### 4c. Build OGA
+
+```bash
+python build.py \
+  --config Release \
+  --cmake_generator Ninja \
+  --use_dml \
+  --ort_home "$ORT_HOME" \
+  --skip_tests --skip_examples \
+  --parallel \
+  --build_dir ../build/onnxruntime-genai \
+  --cmake_extra_defines \
+    CMAKE_C_COMPILER_LAUNCHER=sccache \
+    CMAKE_CXX_COMPILER_LAUNCHER=sccache
+```
+
+This produces three artifacts under `../build/onnxruntime-genai/Release/`:
+
+| Artifact | Path | Purpose |
+|----------|------|---------|
+| `model_benchmark.exe` | `benchmark/c/model_benchmark.exe` | End-to-end LLM benchmark (used in [OGA End-to-End Benchmarking](#oga-end-to-end-benchmarking-with-model_benchmark)) |
+| `onnxruntime-genai.dll` | `onnxruntime-genai.dll` | Runtime DLL (loaded by `model_benchmark.exe` and the Python module) |
+| `onnxruntime_genai_directml-*.whl` | `wheel/onnxruntime_genai_directml-*.whl` | Python wheel (see [Install Python Wheels](#5-install-python-wheels-optional)) |
+
+#### 4d. Install OGA artifacts into prebuilt-local
+
+```bash
+cp ../build/onnxruntime-genai/Release/benchmark/c/model_benchmark.exe "$PREBUILT_DIR/bin/"
+cp ../build/onnxruntime-genai/Release/onnxruntime-genai.dll "$PREBUILT_DIR/bin/"
+```
+
+After this, `$PREBUILT_DIR/bin/` contains everything needed to run the
+benchmarks in the next sections.
+
+### 5. Install Python Wheels (Optional)
+
+If you also want to drive ORT / OGA from Python (e.g. to write your own
+generation script instead of using `model_benchmark.exe`), install the two
+wheels produced by steps 1 and 4:
+
+```bash
+cd onnx-hipdnn-ep  # Back to the project root
+pip install \
+  ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
+  ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
+```
+
+Verify:
+
+```bash
+python -c "import onnxruntime as ort; print(ort.__version__)"
+python -c "import onnxruntime_genai as og; print(og.__version__)"
 ```
 
 ## Model Preparation
@@ -300,7 +423,8 @@ cd $PREBUILT_DIR/bin
 ### OGA End-to-End Benchmarking with model_benchmark
 
 `model_benchmark` benchmarks the full generative pipeline (prefill + decode
-token generation). It is included in the release package under `bin/`.
+token generation). It was built and installed into `$PREBUILT_DIR/bin/` in
+[step 4](#4-build-oga-onnxruntime-genai).
 
 ```bash
 # Auto-generated prompt (512 tokens)
