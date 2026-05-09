@@ -7,6 +7,7 @@
 
 #include "hip/Dialect/Transforms/Pipelines.h"
 
+#include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
