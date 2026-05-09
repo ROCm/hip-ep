@@ -42,7 +42,7 @@ winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait
 
 # 2. Ninja, Python 3, sccache, GitHub CLI, Git (provides Git Bash + unzip)
 winget install Ninja-build.Ninja
-winget install Python.Python.3.12
+winget install Python.Python.3.14
 winget install Mozilla.sccache
 winget install GitHub.cli
 winget install Git.Git
@@ -87,6 +87,21 @@ prebuilt-local directories are siblings:
 
 ## One-Time Setup
 
+### 0. Clone the repository
+
+Pick a workspace directory and clone the project so all later commands can
+use `..` to reference sibling directories:
+
+```bash
+cd <workspace>
+git clone https://github.com/ROCm/onnx-hipdnn-ep.git
+cd onnx-hipdnn-ep
+git submodule update --init --recursive
+```
+
+All subsequent commands run from the `onnx-hipdnn-ep/` project root unless
+explicitly noted.
+
 ### 1. Build ONNX Runtime (Required for BUILD_EP=ON)
 
 Build ONNX Runtime **before** downloading pre-built dependencies to avoid
@@ -96,7 +111,7 @@ FlatBuffers version conflicts (ORT bundles its own FlatBuffers).
 
 ```bash
 cd ..  # Go to workspace directory (parent of project root)
-# recommand use release branch, such as rel-1.25.1
+# Recommend a release branch such as rel-1.25.1
 git clone -b rel-1.25.1 https://github.com/Microsoft/onnxruntime.git
 cd onnxruntime
 ```
@@ -125,18 +140,16 @@ ls $PREBUILT_DIR/lib/cmake/onnxruntime/
 
 ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # Should see one wheel matching your Python version, e.g.
-# onnxruntime_directml-1.25.1-cp312-cp312-win_amd64.whl
+# onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
 ```
 
 ### 2. Download Pre-built Dependencies
 
-Run from the project root (inside Git Bash / MSYS2):
+Step 1 leaves you inside `<workspace>/onnxruntime/`. Switch back to the
+project root and run the bundled setup script (uses Git Bash / MSYS2):
 
 ```bash
-cd ..
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
-cd onnx-hipdnn-ep/
-git submodule update --init --recursive
+cd ../onnx-hipdnn-ep
 bash scripts/setup-prebuilt.sh
 ```
 
@@ -200,7 +213,7 @@ cmake -S . -B ../build/$(basename $PWD) \
 | `HIP_ARCHITECTURES` | GPU architecture (e.g., `gfx1151`) | Required |
 | `BUILD_EP` | `ON` | Build MorphiZen Execution Provider |
 
-### Build
+#### Build
 
 ```bash
 cmake --build ../build/$(basename $PWD) --config Release --parallel
@@ -280,8 +293,10 @@ cp ../build/onnxruntime-genai/Release/benchmark/c/model_benchmark.exe "$PREBUILT
 cp ../build/onnxruntime-genai/Release/onnxruntime-genai.dll "$PREBUILT_DIR/bin/"
 ```
 
-After this, `$PREBUILT_DIR/bin/` contains everything needed to run the
-benchmarks in the next sections.
+After this, `$PREBUILT_DIR/bin/` has the OGA artifacts (`model_benchmark.exe`
+and `onnxruntime-genai.dll`) used by [OGA End-to-End Benchmarking](#oga-end-to-end-benchmarking-with-model_benchmark)
+below. `onnxruntime_perf_test.exe` is staged separately in
+[Latency Benchmarking](#latency-benchmarking-with-onnxruntime_perf_test).
 
 ### 5. Install Python Wheels (Optional)
 
@@ -290,7 +305,7 @@ generation script instead of using `model_benchmark.exe`), install the two
 wheels produced by steps 1 and 4:
 
 ```bash
-cd onnx-hipdnn-ep  # Back to the project root
+cd ../onnx-hipdnn-ep  # Back to the project root (sibling of onnxruntime-genai)
 pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
   ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
