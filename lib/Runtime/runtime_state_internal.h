@@ -58,6 +58,13 @@ struct RuntimeState {
   // Caches hipBLASLt descriptors + algorithms by GEMM shape.
   void *gqa_gemm_cache;
 
+  // CausalConvWithState MIOpen descriptor + algorithm cache
+  // (CausalConvCache*). Caches MIOpen tensor / convolution / bias / activation
+  // descriptors and the heuristic-selected forward algorithm by shape, so that
+  // miopenFindConvolutionForwardAlgorithm runs only once per shape rather than
+  // every layer × every token.
+  void *causal_conv_cache;
+
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.
   void *op_profile;

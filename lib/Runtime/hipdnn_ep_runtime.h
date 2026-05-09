@@ -395,6 +395,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 // GQA GEMM cache lifecycle (managed by RuntimeState)
 void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
 
+// CausalConvWithState descriptor/algo cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_causal_conv_cache_destroy(void *cache);
+
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
 //

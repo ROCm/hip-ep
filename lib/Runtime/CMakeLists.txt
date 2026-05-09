@@ -198,6 +198,10 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/runtime_types.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
+                ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
         COMMENT "Compiling ${SOURCE_FILE} to bitcode"
         VERBATIM
