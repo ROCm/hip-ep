@@ -458,7 +458,8 @@ cd $PREBUILT_DIR/bin
 
 `model_benchmark` benchmarks the full generative pipeline (prefill + decode
 token generation). It was built and installed into `$PREBUILT_DIR/bin/` in
-[step 4](#4-build-oga-onnxruntime-genai).
+[step 4](#4-build-oga-onnxruntime-genai).  Before running, please copy the 
+tokenizer related files from original model directory to /path/to/output
 
 ```bash
 # Auto-generated prompt (512 tokens)
