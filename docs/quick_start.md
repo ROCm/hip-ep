@@ -305,7 +305,7 @@ generation script instead of using `model_benchmark.exe`), install the two
 wheels produced by steps 1 and 4:
 
 ```bash
-cd ../onnx-hipdnn-ep  # Back to the project root (sibling of onnxruntime-genai)
+cd ../onnx-hipdnn-ep  # Back to the project root
 pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
   ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
