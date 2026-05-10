@@ -147,6 +147,7 @@ void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateWhereConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
