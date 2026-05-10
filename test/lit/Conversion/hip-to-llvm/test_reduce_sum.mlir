@@ -15,7 +15,8 @@
 //
 // Expected: wrap_reduce_sum(state, data, axes, output, data_num_elements,
 //                            output_num_elements, axes_num_elements,
-//                            element_size_bytes, keepdims, noop_with_empty_axes)
+//                            data_type, keepdims, noop_with_empty_axes)
+// data_type is a HIPDNN_EP_DATATYPE_* enum value.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s

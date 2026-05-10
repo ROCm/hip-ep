@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <functional>
 #include <unordered_map>
+#include <utility>
 
 // Explicit mapping from backend-independent HIPDNN_EP_DATATYPE_* enum to
 // MIOpen-specific miopenDataType_t. No static_cast -- our enum values are
@@ -222,6 +223,31 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     fprintf(stderr, "wrap_miopenOpTensor: unsupported tensor_op %lld\n",
             (long long)tensor_op);
     return -1;
+  }
+
+  // MIOpen's miopenOpTensor requires A.shape == C.shape; only B may broadcast
+  // (dim==1) into A. Caller-provided lhs/rhs ordering is dictated by the
+  // original ONNX graph and is not normalized by the lowering pass, so when
+  // the broadcast-source operand happens to be in lhs position MIOpen rejects
+  // with "A and C Tensors do not match". All ops routed here are commutative
+  // (MUL/ADD/MIN/MAX -- see hipdnn_ep_to_miopen_op), so we can safely swap
+  // lhs<->rhs to put the output-shaped tensor on the A side.
+  const bool lhs_eq_out =
+      (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w);
+  const bool rhs_eq_out =
+      (rhs_n == out_n && rhs_c == out_c && rhs_h == out_h && rhs_w == out_w);
+  if (!lhs_eq_out && rhs_eq_out) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_miopenOpTensor: swapping lhs<->rhs to satisfy MIOpen "
+        "A==C constraint (was lhs=[%lld,%lld,%lld,%lld] rhs=[%lld,%lld,%lld,"
+        "%lld])\n",
+        (long long)lhs_n, (long long)lhs_c, (long long)lhs_h, (long long)lhs_w,
+        (long long)rhs_n, (long long)rhs_c, (long long)rhs_h, (long long)rhs_w);
+    std::swap(lhs, rhs);
+    std::swap(lhs_n, rhs_n);
+    std::swap(lhs_c, rhs_c);
+    std::swap(lhs_h, rhs_h);
+    std::swap(lhs_w, rhs_w);
   }
 
   OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,    rhs_h,

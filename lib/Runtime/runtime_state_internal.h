@@ -82,6 +82,13 @@ struct RuntimeState {
   // Caches hipBLASLt descriptors + algorithms by GEMM shape.
   void *gqa_gemm_cache;
 
+  // CausalConvWithState MIOpen descriptor + algorithm cache
+  // (CausalConvCache*). Caches MIOpen tensor / convolution / bias / activation
+  // descriptors and the heuristic-selected forward algorithm by shape, so that
+  // miopenFindConvolutionForwardAlgorithm runs only once per shape rather than
+  // every layer × every token.
+  void *causal_conv_cache;
+
   // MatMulNBits asym-path zero_points unpack cache (ZpUnpackCache*).
   //
   // The asym AWQ path stores zero_points as packed nibbles [N, ceil(K/bs/2)].

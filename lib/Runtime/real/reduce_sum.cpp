@@ -22,9 +22,25 @@
     }                                                                          \
   } while (0)
 
+// Map HIPDNN_EP_DATATYPE_* -> hip_dtype_t for hip_reduce_sum.
+// The two enum systems use different orderings; only types implemented in
+// reduce_sum_kernel.hip are listed here.
+static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
+  switch (hipdnn_type) {
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_INT32:
+    return HIP_DTYPE_INT32;
+  case HIPDNN_EP_DATATYPE_INT64:
+    return HIP_DTYPE_INT64;
+  default:
+    return -1;
+  }
+}
+
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t axes_num_elements, int64_t element_size_bytes,
+                    int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes) {
   OP_PROFILE(
       "reduce_sum",
@@ -44,12 +60,19 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
   // 1, copy input to output without reduction
   if (axes_num_elements == 0 && noop_with_empty_axes == 1) {
     void *stream = hipdnn_ep_state_get_stream(state);
-    // Simple memcpy from data to output
+    int64_t element_size_bytes = hipdnn_ep_datatype_size(data_type);
+    if (element_size_bytes < 0) {
+      fprintf(stderr,
+              "[REAL] wrap_reduce_sum: unsupported data_type=%lld for noop "
+              "memcpy\n",
+              (long long)data_type);
+      return -1;
+    }
     int64_t total_bytes = data_num_elements * element_size_bytes;
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_reduce_sum: noop_with_empty_axes=1 with empty axes, "
-        "copying %lld bytes\n",
-        (long long)total_bytes);
+        "copying %lld bytes (data_type=%s)\n",
+        (long long)total_bytes, hipdnn_ep_datatype_name(data_type));
     HIP_CHECK(hipMemcpyAsync(output, data, total_bytes, hipMemcpyDeviceToDevice,
                              static_cast<hipStream_t>(stream)));
     return 0;
@@ -57,27 +80,23 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
 
   void *stream = hipdnn_ep_state_get_stream(state);
 
-  int hip_dtype;
-  switch (element_size_bytes) {
-  case 8:
-    hip_dtype = HIP_DTYPE_INT64;
-    break;
-  case 4:
-    hip_dtype = HIP_DTYPE_INT32;
-    break;
-  default:
-    RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: unsupported element_size=%lld\n",
-                      (long long)element_size_bytes);
+  int hip_dtype = hipdnn_to_hip_dtype(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr,
+            "[REAL] wrap_reduce_sum: unsupported data_type=%s(%lld) "
+            "(supported: f16, i32, i64)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_reduce_sum: data_num=%lld, output_num=%lld, "
-      "axes_num=%lld, elem_size=%lld, keepdims=%lld, "
-      "noop_with_empty_axes=%lld, dtype=%d -> calling hip_reduce_sum\n",
+      "axes_num=%lld, data_type=%s(%lld), keepdims=%lld, "
+      "noop_with_empty_axes=%lld, hip_dtype=%d -> calling hip_reduce_sum\n",
       (long long)data_num_elements, (long long)output_num_elements,
-      (long long)axes_num_elements, (long long)element_size_bytes,
-      (long long)keepdims, (long long)noop_with_empty_axes, hip_dtype);
+      (long long)axes_num_elements, hipdnn_ep_datatype_name(data_type),
+      (long long)data_type, (long long)keepdims,
+      (long long)noop_with_empty_axes, hip_dtype);
 
   return hip_reduce_sum(stream, data, output, data_num_elements,
                         output_num_elements, hip_dtype);
