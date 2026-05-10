@@ -697,6 +697,32 @@ def Hip_GatherOp : Hip_DpsOp<"gather"> {
   }];
 }
 
+def Hip_RangeOp : Hip_DpsOp<"range"> {
+  let summary = "Generate 1-D range tensor";
+  let description = [{
+    Implements ONNX Range semantics:
+      output[i] = start + i * delta, limit is exclusive.
+
+    start/limit/delta are scalar tensors (rank-0), output is rank-1.
+    Uses destination-passing style: output buffer is provided as argument.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$start,
+    Hip_TensorOrMemRef:$limit,
+    Hip_TensorOrMemRef:$delta,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $start `,` $limit `,` $delta `:`
+    type($start) `,` type($limit) `,` type($delta) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SiluOp : Hip_DpsOp<"silu"> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins
@@ -1314,6 +1340,105 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
     `(` $ctx `)` `graph_id` `(` $graph_id `)`
     `ins` `(` $inputs `:` type($inputs) `)`
     `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
+    [AttrSizedOperandSegments]> {
+  let summary = "Linear attention with recurrent state (com.microsoft.LinearAttention)";
+  let description = [{
+    Unified linear attention operator for autoregressive decoding (T=1) and
+    prefill (T>1).
+
+    All inputs use 3D packed format [B, T, H*D]; q_num_heads and kv_num_heads
+    are always required. The op internally unpacks to 4D for computation.
+
+    The update_rule attribute selects the recurrence type:
+      "linear":       S_t = S_{t-1} + k_t (x) v_t
+      "gated":        S_t = exp(g_t) * S_{t-1} + k_t (x) v_t
+      "delta":        S_t = S_{t-1} + b_t * k_t (x) (v_t - S_{t-1}^T k_t)
+      "gated_delta":  S_t = exp(g_t) * S_{t-1} + b_t * k_t (x) (v_t - exp(g_t) * S_{t-1}^T k_t)
+
+    Head counts are three-way (subject to divisibility constraints):
+      - H_q   = q_num_heads             (query heads, attribute)
+      - H_kv  = kv_num_heads            (KV state heads, attribute)
+      - n_k   = key.shape[-1] / d_k     (key heads, derived at runtime)
+    Constraints:
+      - n_k divides H_kv  (multiple KV heads may share one K head when n_k<H_kv)
+      - Either H_q % H_kv == 0  (standard GQA, H_q >= H_kv)
+        or     H_kv % H_q == 0  (inverse GQA,   H_q <  H_kv)
+
+    Output head count H_o = max(H_q, H_kv):
+      - Standard GQA (H_q >= H_kv): output packed in Q-head order.
+      - Inverse GQA  (H_q <  H_kv): output packed in KV-head order, i.e. each
+        KV state produces its own output slot.
+
+    Inputs (3-6):
+      1. query       (required, T) - [B, T, H_q * d_k]
+      2. key         (required, T) - [B, T, n_k * d_k], n_k | H_kv
+      3. value       (required, T) - [B, T, H_kv * d_v]
+      4. past_state  (optional, S) - [B, H_kv, d_k, d_v]
+      5. decay       (optional, T) - [B, T, H_kv * d_k] or [B, T, H_kv]
+      6. beta        (optional, T) - [B, T, H_kv] or [B, T, 1]
+
+    DPS output buffers:
+      output        (required, T) - [B, T, max(H_q, H_kv) * d_v]
+      present_state (required, S) - [B, H_kv, d_k, d_v]
+
+    Example:
+    ```mlir
+    hip.linear_attention(%ctx)
+        ins(%query, %key, %value :
+            memref<1x1x4096xf16, 1>, memref<1x1x1024xf16, 1>,
+            memref<1x1x1024xf16, 1>)
+        past_state(%past : memref<1x8x128x128xf16, 1>)
+        decay(%g : memref<1x1x1024xf16, 1>)
+        beta(%b : memref<1x1x8xf16, 1>)
+        outs(%output, %state : memref<1x1x4096xf16, 1>,
+                                memref<1x8x128x128xf16, 1>)
+        {q_num_heads = 32 : i64, kv_num_heads = 8 : i64,
+         scale = 0.0 : f32, update_rule = "gated_delta"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    // Required inputs (spec order 1-3)
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$key,
+    Hip_TensorOrMemRef:$value,
+
+    // Optional inputs (spec order 4-6)
+    Optional<Hip_TensorOrMemRef>:$past_state,
+    Optional<Hip_TensorOrMemRef>:$decay,
+    Optional<Hip_TensorOrMemRef>:$beta,
+
+    // DPS output buffers
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$present_state,
+
+    // Required attributes
+    I64Attr:$q_num_heads,
+    I64Attr:$kv_num_heads,
+
+    // Optional attributes (with defaults)
+    DefaultValuedAttr<F32Attr, "0.0">:$scale,
+    DefaultValuedAttr<I64Attr, "0">:$chunk_size,
+    DefaultValuedAttr<StrAttr, "\"gated_delta\"">:$update_rule
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $key `,` $value `:`
+        type($query) `,` type($key) `,` type($value)
+    `)`
+    (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
+    (`decay` `(` $decay^ `:` type($decay) `)`)?
+    (`beta` `(` $beta^ `:` type($beta) `)`)?
+    `outs` `(` $output `,` $present_state `:`
+              type($output) `,` type($present_state) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

@@ -110,6 +110,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::TransposeOp>>(*ctx);
     mlir::hip::GatherOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::GatherOp>>(*ctx);
+    mlir::hip::RangeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::RangeOp>>(*ctx);
     mlir::hip::SiluOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SiluOp>>(*ctx);
     mlir::hip::GqaOp::attachInterface<
@@ -134,6 +136,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::MatMulNBitsOp>>(*ctx);
     mlir::hip::QMoEOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::QMoEOp>>(*ctx);
+    mlir::hip::LinearAttentionOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LinearAttentionOp>>(*ctx);
     mlir::hip::CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::CausalConvWithStateOp>>(*ctx);
     mlir::hip::HipDNNGraphOp::attachInterface<

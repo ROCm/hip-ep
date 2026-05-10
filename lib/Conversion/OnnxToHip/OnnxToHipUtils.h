@@ -17,6 +17,7 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -146,6 +147,9 @@ void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateWhereConversionPatterns(RewritePatternSet &patterns,
+void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
 } // namespace hip

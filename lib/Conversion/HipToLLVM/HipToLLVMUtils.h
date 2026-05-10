@@ -25,6 +25,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -37,6 +38,9 @@ namespace hip {
 inline constexpr const char *kHipMalloc = "hip_device_malloc";
 inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
+
+inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
+inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
@@ -60,11 +64,13 @@ inline constexpr const char *kWrapMiopenOpTensor =
     "wrap_miopenOpTensor"; // hip.mul, hip.add (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
 inline constexpr const char *kWrapPower = "wrap_power";
+inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
+inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
@@ -143,6 +149,36 @@ inline Value extractContiguousMemRefPtr(Value memrefDesc,
         rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0),
         ptr);
   return ptr;
+}
+
+// First logical element: alignedPtr + offset (elements), then cast to AS 0.
+// Use for HIP/MIOpen entry points when the memref may be a subview with a
+// non-zero descriptor offset (same base alignedPtr as parent, distinct offset).
+inline Value extractMemRefDataPtr(Value memrefDesc, MemRefType memrefType,
+                                  const TypeConverter *typeConverter,
+                                  ConversionPatternRewriter &rewriter,
+                                  Location loc) {
+  SmallVector<Type, 1> llvmElemTypes;
+  if (failed(typeConverter->convertType(memrefType.getElementType(),
+                                        llvmElemTypes)) ||
+      llvmElemTypes.empty())
+    return Value();
+  Type llvmElemTy = llvmElemTypes.front();
+
+  MemRefDescriptor desc(memrefDesc);
+  Value aligned = desc.alignedPtr(rewriter, loc);
+  Value offset = desc.offset(rewriter, loc);
+  Type ptrTy = aligned.getType();
+  Value dataPtr =
+      LLVM::GEPOp::create(rewriter, loc, ptrTy, llvmElemTy, aligned,
+                          ValueRange{offset}, LLVM::GEPNoWrapFlags::inbounds)
+          .getResult();
+
+  if (cast<LLVM::LLVMPointerType>(dataPtr.getType()).getAddressSpace() != 0)
+    dataPtr = LLVM::AddrSpaceCastOp::create(
+        rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0),
+        dataPtr);
+  return dataPtr;
 }
 
 // Returns the aligned pointer for an optional memref operand, or a null
@@ -268,6 +304,8 @@ void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
+void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateReduceSumLoweringPatterns(const LLVMTypeConverter &converter,
@@ -290,6 +328,8 @@ void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

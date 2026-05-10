@@ -24,6 +24,8 @@ add_library(OnnxToHip STATIC
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
   WhereConversion.cpp
+  LinearAttentionConversion.cpp
+  RangeConversion.cpp
 )
 
 add_dependencies(OnnxToHip

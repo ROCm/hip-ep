@@ -169,7 +169,7 @@ typedef struct RuntimeState RuntimeState;
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
 //   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
-// Return codes: 0=success, 1=alloc/read error, 2-9=GPU handle init error
+// Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size);
 
@@ -207,6 +207,33 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state);
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
+
+// Per-state scratch for wrap_qmoe transient buffers (device + pinned-host
+// mirror for routing readback). Replaces the per-call hipMalloc/hipFree storm
+// (8 buffers x N MoE layers per inference). Same grow-on-demand policy as
+// the shared workspace; never shrinks. See runtime_state_internal.h for
+// rationale.
+void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
+                                        size_t needed_size);
+void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
+                                             size_t needed_size);
+
+// Device-side runtime error flag (set by kernels, observed by wrappers).
+// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
+// delta==0) and need to propagate an error code back through main_graph.
+void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
+int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
+// Mark the start of a new Compute() call. Invalidates per-forward-pass
+// caches such as the GQA seqlens_k cache (see runtime_state_internal.h).
+// Called by the EP-side MlirCustomOp::Compute() entry once per inference;
+// safe to call unconditionally (cheap: writes a single bool). Required for
+// the GQA seqlens_k cache (default on, set HIPDNN_EP_GQA_CACHE_SEQLENS=0
+// to disable) to be correct -- without this hook the cache would persist
+// across forward passes and return stale values.
+void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
@@ -380,6 +407,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 // GQA GEMM cache lifecycle (managed by RuntimeState)
 void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
 
+// MatMulNBits asym zero_points unpack cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
+
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
 //
@@ -415,7 +445,7 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 // Memory Operations
 //===----------------------------------------------------------------------===//
 
-// HIP memory copy wrapper (GPU-to-GPU using hipMemcpyAsync)
+// GPU D2D memcpy (hipMemcpyAsync); called from generated LLVM IR.
 // Follows opaque RuntimeState pattern - extracts stream internally
 //
 // Parameters:
@@ -429,6 +459,12 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 //   -1 = copy failed
 int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes);
+
+/// 2D pitched device copy (e.g. strided memref → dense output). Width is in
+/// bytes; pitches are row pitches (hipMemcpy2DAsync semantics).
+int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
+                          const void *src_ptr, size_t src_pitch, size_t width,
+                          size_t height);
 
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
@@ -574,6 +610,10 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t indices_num_elements, int64_t output_num_elements,
                 int64_t element_size_bytes);
 
+// Range operation wrapper
+int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
+               void *output, int64_t output_num_elements, int64_t hip_dtype);
+
 // ReduceSum operation wrapper
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
@@ -700,6 +740,53 @@ int wrap_causal_conv_with_state(
     int64_t ndim,
     int64_t activation, // 0=none, 1=silu/swish
     int64_t element_size_bytes);
+
+//==============================================================================
+// ONNX Gemm via hipBLASLt
+//==============================================================================
+// Y = alpha * op(A) * op(B) + beta * C
+// op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
+// LinearAttention operation wrapper (com.microsoft.LinearAttention)
+// Unified linear attention with recurrent state for autoregressive decoding
+// and prefill. Supports update rules: linear(0), gated(1), delta(2),
+// gated_delta(3).
+// All tensor inputs use packed 3D format [B, T, H*D] except past/present
+// state which is 4D [B, H_kv, d_k, d_v].
+// Head counts are three-way:
+//   - Hq : query heads
+//   - Hkv: KV state heads
+//   - Nk : number of key heads in the packed key tensor (Nk divides H_kv when
+//          multiple KV heads share a K head; Nk < Hkv).
+// Supports both standard GQA (Hq >= Hkv, Hq % Hkv == 0) and inverse GQA
+// (Hq < Hkv, Hkv % Hq == 0).  The output tensor's last dim is max(Hq, Hkv)*d_v,
+// packed in Q-head order for standard GQA and KV-head order for inverse GQA.
+// Optional pointer args: pass nullptr if the corresponding input is absent.
+// Last arg `type` is HIPDNN_EP_DATATYPE_FLOAT (0), HIPDNN_EP_DATATYPE_HALF (1),
+// or HIPDNN_EP_DATATYPE_BFLOAT16 (2).
+//
+// decay_per_key_dim / beta_per_head describe the layout of the optional
+// decay / beta tensors so the runtime can pick the correct stride. Values
+// are ignored when the corresponding pointer is nullptr; compilers should
+// pass 0 in that case.
+//   decay_per_key_dim = 1  -> decay is [B, T, H_kv * d_k] (GLA / RWKV-6)
+//                     = 0  -> decay is [B, T, H_kv]       (DeltaNet / RetNet)
+//   beta_per_head     = 1  -> beta  is [B, T, H_kv]
+//                     = 0  -> beta  is [B, T, 1]          (broadcast over
+//                     heads)
+int wrap_linear_attention(
+    RuntimeState *state,
+    const void *query,      // [B, T, Hq * dk]
+    const void *key,        // [B, T, Nk * dk]
+    const void *value,      // [B, T, H_kv * d_v]
+    const void *past_state, // [B, H_kv, d_k, d_v] (nullable)
+    const void *decay,      // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
+    const void *beta,       // [B, T, H_kv] or [B, T, 1] (nullable)
+    void *output,           // [B, T, max(H_q, H_kv) * d_v]
+    void *present_state,    // [B, H_kv, d_k, d_v]
+    int64_t Hq, int64_t Hkv, int64_t Nk, int64_t decay_per_key_dim,
+    int64_t beta_per_head, float scale, int64_t chunk_size,
+    int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
+    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

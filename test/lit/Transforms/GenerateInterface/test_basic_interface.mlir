@@ -35,6 +35,8 @@
 // CHECK:   llvm.call @hipdnn_ep_tensor_prepare_output
 // CHECK:   llvm.call @main_graph
 // CHECK:   llvm.call @hipdnn_ep_tensor_finalize_output
+// CHECK:   llvm.call @hipdnn_ep_stream_sync
+// CHECK:   llvm.call @hipdnn_ep_state_read_and_clear_error_flag
 
 // --- inference_cleanup calls state cleanup ---
 // CHECK-LABEL: llvm.func @inference_cleanup

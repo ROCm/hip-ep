@@ -155,6 +155,14 @@ extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
   return hipSuccess;
 }
 
+extern "C" hipError_t hipMemsetAsync(void *dst, int value, size_t size,
+                                     hipStream_t stream) {
+  MOCK_PRINT("[MOCK] hipMemsetAsync(dst=%p, value=%d, size=%zu, stream=%p)\n",
+             dst, value, size, stream);
+  memset(dst, value, size);
+  return hipSuccess;
+}
+
 // Mock MIOpen types and constants
 typedef void *miopenTensorDescriptor_t;
 typedef void *miopenConvolutionDescriptor_t;
@@ -587,6 +595,57 @@ int wrap_group_query_attention(
   return 0;
 }
 
+int wrap_linear_attention(RuntimeState *state, const void *query,
+                          const void *key, const void *value,
+                          const void *past_state, const void *decay,
+                          const void *beta, void *output, void *present_state,
+                          int64_t Hq, int64_t Hkv, int64_t Nk,
+                          int64_t decay_per_key_dim, int64_t beta_per_head,
+                          float scale, int64_t chunk_size, int64_t update_rule,
+                          int64_t B, int64_t seq_len, int64_t dk, int64_t dv,
+                          int64_t type) {
+  if (!state || !query || !key || !value || !output || !present_state) {
+    fprintf(stderr, "Invalid required argument in wrap_linear_attention\n");
+    return -1;
+  }
+
+  // LinearAttention update_rule enum: 0=linear, 1=gated, 2=delta,
+  // 3=gated_delta. Kept inline here because it is op-specific and does not
+  // belong to the generic hipdnn_ep_* enum helpers.
+  const char *rule_name = "unknown";
+  switch (update_rule) {
+  case 0:
+    rule_name = "linear";
+    break;
+  case 1:
+    rule_name = "gated";
+    break;
+  case 2:
+    rule_name = "delta";
+    break;
+  case 3:
+    rule_name = "gated_delta";
+    break;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_linear_attention(\n");
+  MOCK_PRINT("[MOCK]   B=%lld, seq_len=%lld, dk=%lld, dv=%lld,\n", (long long)B,
+             (long long)seq_len, (long long)dk, (long long)dv);
+  MOCK_PRINT("[MOCK]   Hq=%lld, Hkv=%lld, Nk=%lld,\n", (long long)Hq,
+             (long long)Hkv, (long long)Nk);
+  MOCK_PRINT("[MOCK]   decay_per_key_dim=%lld, beta_per_head=%lld,\n",
+             (long long)decay_per_key_dim, (long long)beta_per_head);
+  MOCK_PRINT("[MOCK]   scale=%f, chunk_size=%lld, update_rule=%s(%lld),\n",
+             (double)scale, (long long)chunk_size, rule_name,
+             (long long)update_rule);
+  MOCK_PRINT("[MOCK]   type=%lld,\n", (long long)type);
+  MOCK_PRINT("[MOCK]   past_state=%s, decay=%s, beta=%s)\n",
+             past_state ? "yes" : "null", decay ? "yes" : "null",
+             beta ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
                         int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
@@ -644,6 +703,18 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
              (long long)indices_num_elements, (long long)output_num_elements,
              (long long)element_size_bytes);
 
+  return 0;
+}
+
+int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
+               void *output, int64_t output_num_elements, int64_t hip_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_range\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_range(output_num_elements=%lld, hip_dtype=%lld)\n",
+             (long long)output_num_elements, (long long)hip_dtype);
   return 0;
 }
 

@@ -37,10 +37,12 @@ hip_add_library(hip_custom_kernels STATIC
     hip/elementwise_gelu_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/cast_kernel.hip
+    hip/range_kernel.hip
     hip/gather_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
+    hip/linear_attention_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
