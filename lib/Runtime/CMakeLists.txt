@@ -163,7 +163,12 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         endforeach()
     endif()
 
-    # Add implementation directory
+    # Add implementation directory and collect impl-specific deps. Both
+    # `real/` and `mock/` ship their own `runtime_types.h` (resolved via the
+    # -I flag below), so the DEPENDS list must reference whichever copy the
+    # active build will actually compile against. `cache_utils.h` and the
+    # custom-kernels header only exist for the real GPU runtime.
+    set(IMPL_DEPS "")
     if(NOT BUILD_MOCK_RUNTIME)
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/real")
 
@@ -176,8 +181,15 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             list(APPEND COMPILE_FLAGS "-I" "${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-D__HIP_PLATFORM_AMD__")
         endif()
+
+        list(APPEND IMPL_DEPS
+            ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
+            ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
+        list(APPEND IMPL_DEPS
+            ${CMAKE_CURRENT_SOURCE_DIR}/mock/runtime_types.h)
     endif()
 
     add_custom_command(
@@ -198,6 +210,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
+                ${IMPL_DEPS}
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
         COMMENT "Compiling ${SOURCE_FILE} to bitcode"
         VERBATIM

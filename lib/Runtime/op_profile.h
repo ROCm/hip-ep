@@ -64,12 +64,21 @@ struct OpProfileScope {
   OpProfileScope(OpProfileState *p, std::string n, std::string sh,
                  hipStream_t s, int evIdx)
       : ps(p), name(std::move(n)), shape(std::move(sh)), eventIndex(evIdx),
-        stream(s), cpuStart(std::chrono::steady_clock::now()) {
+        stream(s) {
+    // Sync-isolated diagnostic mode: drain the stream BEFORE we start timing,
+    // so this op's reported GPU time excludes any work queued ahead of us.
+    // Pairs with the post-stop sync in the destructor to give standalone
+    // per-op timings (concurrency is killed by design -- diagnostic only).
+    if (hipdnn_ep_perf_isolate_enabled())
+      hipStreamSynchronize(stream);
+    cpuStart = std::chrono::steady_clock::now();
     hipEventRecord(op_profile_get_start_event(ps, eventIndex), stream);
   }
 
   ~OpProfileScope() {
     hipEventRecord(op_profile_get_stop_event(ps, eventIndex), stream);
+    if (hipdnn_ep_perf_isolate_enabled())
+      hipStreamSynchronize(stream);
     double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - cpuStart)
                     .count();
