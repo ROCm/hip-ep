@@ -776,9 +776,8 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t batch_size,
-                          int64_t seq_len, int64_t num_heads,
-                          int64_t head_dim, int64_t rotary_dim,
-                          int64_t cos_cache_num_elements,
+                          int64_t seq_len, int64_t num_heads, int64_t head_dim,
+                          int64_t rotary_dim, int64_t cos_cache_num_elements,
                           int64_t element_size_bytes, int64_t is_bnsh) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_rotary_embedding\n");

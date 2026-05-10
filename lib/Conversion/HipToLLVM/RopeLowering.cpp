@@ -141,9 +141,8 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
     //     int64_t cos_cache_num_elements, int64_t element_size_bytes,
     //     int64_t is_bnsh)
     SmallVector<Type, 15> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType,
-        i64Type, i64Type, i64Type, i64Type, i64Type, i64Type,
-        i64Type, i64Type, i64Type};
+        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, i64Type, i64Type,
+        i64Type, i64Type, i64Type, i64Type, i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapRotaryEmbedding, paramTypes, i32Type);
@@ -151,15 +150,10 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 15> args = {statePtr,    inputPtr,
-                                   posIdsPtr,   cosCachePtr,
-                                   sinCachePtr, outputPtr,
-                                   interleaved, batchSize,
-                                   seqLen,      numHeads,
-                                   headDim,     rotaryDim,
-                                   cosCacheNumElements,
-                                   elemSizeBytes,
-                                   isBnsh};
+    SmallVector<Value, 15> args = {
+        statePtr,  inputPtr,    posIdsPtr,           cosCachePtr,   sinCachePtr,
+        outputPtr, interleaved, batchSize,           seqLen,        numHeads,
+        headDim,   rotaryDim,   cosCacheNumElements, elemSizeBytes, isBnsh};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
