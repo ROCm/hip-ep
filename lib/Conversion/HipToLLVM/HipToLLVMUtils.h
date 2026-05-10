@@ -326,6 +326,8 @@ void populateCausalConvWithStateLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
