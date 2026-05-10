@@ -237,6 +237,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
+    compile_to_bitcode(real/where.cpp runtime_where.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
 
     set(RUNTIME_BC_MODULES
@@ -264,6 +265,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_where.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
     )
 else()
