@@ -264,7 +264,7 @@ git submodule update --init --recursive
 
 #### 4c. Build OGA
 
-> **Note**: when executing below python command, 
+> **Note**: when executing below python command,
 > you may meet error of "ModuleNotFoundError: No module named ..."
 > in this case, you need manually install the missing module such as:
 ```bash
@@ -317,7 +317,7 @@ pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
   ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
 ```
-> **Note**: the first whl file may be in  ../build/onnxruntime/Release/Release/dist/ 
+> **Note**: the first whl file may be in  ../build/onnxruntime/Release/Release/dist/
 >  Try this path if you meet error "the file does not exist"
 
 Verify:
@@ -330,7 +330,7 @@ python -c "import onnxruntime_genai as og; print(og.__version__)"
 ## Model Preparation
 
 Please See
-[tools/onnx-model-splitter/README.md](../tools/onnx-model-splitter/README.md) for full details of this step. 
+[tools/onnx-model-splitter/README.md](../tools/onnx-model-splitter/README.md) for full details of this step.
 In this document, there is a step by step guide which use Llama-3.1-8B as example.
 
 Use `tools/onnx-model-splitter` to export prefill/decode ONNX models for
@@ -377,17 +377,17 @@ export THEROCK_DIST=$(cd ../therock && pwd)
 export PATH="$THEROCK_DIST/bin:$PREBUILT_DIR/bin:$PATH"
 
 > **Note**: hip-onnx-runner.exe run onnx model with random data as input.
->  But for llm model, the input_ids should be in valid scope (< voab size) and not be random. 
+>  But for llm model, the input_ids should be in valid scope (< voab size) and not be random.
 >  So for below test, it is necessary to produce valid data file as input.
 >  Please run :
 >  # python tools/hip-onnx-runner/gen_hip_onnx_runner_inputs.py -o gen_inputs /path/to/your_test_model.onnx
 >  to produce dir holding test data and use "-i" option to let hip-onnx-runner.exe use this dir as input
 
 # Run with MorphiZen EP (default), using a fixed-shape model from Model Preparation
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs 
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs
 
 # Run with CPU only (no EP)
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -n -i gen_inputs 
+$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -n -i gen_inputs
 
 # Dump outputs for comparison
 $PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs -d 2
@@ -458,7 +458,7 @@ cd $PREBUILT_DIR/bin
 
 `model_benchmark` benchmarks the full generative pipeline (prefill + decode
 token generation). It was built and installed into `$PREBUILT_DIR/bin/` in
-[step 4](#4-build-oga-onnxruntime-genai).  Before running, please copy the 
+[step 4](#4-build-oga-onnxruntime-genai).  Before running, please copy the
 tokenizer related files from original model directory to /path/to/output
 
 ```bash
