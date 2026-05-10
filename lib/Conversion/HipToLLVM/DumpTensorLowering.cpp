@@ -49,7 +49,7 @@ struct DumpTensorOpLowering : public ConvertOpToLLVMPattern<hip::DumpTensorOp> {
     int64_t dataType = getHipdnnDataType(memrefType.getElementType());
 
     Value statePtr = adaptor.getCtx();
-    Value gpuPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value gpuPtr = extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
 
     // Build shape array on stack: alloca rank x i64, store each dim.
     Value rankVal = LLVM::ConstantOp::create(rewriter, loc, i64Type,
