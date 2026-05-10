@@ -377,6 +377,46 @@ int hip_gqa_fused_prefill(
     void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
     float scale);
 
+/* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
+ * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
+ * across the 4 query heads of each KV group, then a second kernel
+ * merges K_SPLITS partial (m, l, O) per query head.
+ *
+ * Depth-gated alternative to hip_gqa_fused_decode for skv >= ~256 where
+ * Llama-3.x family shows large bandwidth headroom over the existing
+ * one-block-per-head fused decode.
+ *
+ * Workspace: float scratch sized B*H*K_SPLITS*(d+2)*sizeof(float) bytes.
+ * Caller is responsible for allocating and passing it in.
+ *
+ * K_SPLITS: only 8 supported in V1. Returns -1 on unsupported (HPG, d, K_SPLITS).
+ *
+ * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
+ * = seqlens_k[b]+1 is read on-device (no host sync).
+ *
+ * local_window_size: when > 0, restricts each query to attend only to the
+ * last `local_window_size` KV positions (sliding-window attention, e.g.
+ * gpt-oss-20b's 128-token sliding layers). When <= 0, full attention.
+ *
+ * head_sink: optional device pointer [num_heads] fp16, attention-sink
+ * (smooth-softmax) per-head bias. When non-null, the final softmax
+ * denominator gains an exp(s_h - global_m) term per head (no V contribution
+ * for the sink). When null and use_smooth_softmax != 0, behaves as if
+ * s_h = 0 for all heads. This is the gpt-oss-20b / Mistral-style attention
+ * sink. The partials are unaffected; the term is folded in by the reduce
+ * kernel. */
+int hip_gqa_flash_decode(
+    void* stream,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax);
+
 /* =========================================================================
  * Cast (Element Type Conversion)
  * =========================================================================
@@ -586,7 +626,27 @@ int hip_matmul_nbits(
     int64_t bits,
     int64_t block_size,
     int64_t element_size_bytes,
-    int64_t zp_elem_size);  // 1=uint8 packed nibbles, 2=fp16
+    int64_t zp_elem_size,    // 1=uint8 packed nibbles, 2=fp16
+    // Optional pre-unpacked zero_points buffers (matmul_nbits.cpp pointer-keyed
+    // cache). When non-null, the kernel skips its own unpack/convert kernel
+    // launches and reads from these directly. zp_u8 must be valid whenever
+    // zero_points is non-null and zp_elem_size==1; zp_fp16 is only consumed
+    // by the WMMA / col-major-GEMV (M>1) paths and may be null otherwise.
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16);
+
+/* Stand-alone launchers for the zero_points unpack/convert kernels, used by
+ * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
+ *
+ *   zp_packed: GPU [N, ceil(K/block_size/2)] packed nibbles
+ *   dst_*:     GPU output buffer, caller-allocated
+ *   N:         output rows
+ *   groups_k:  K / block_size (round-up)
+ */
+void hip_matmul_nbits_unpack_zp_u8(
+    void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
+void hip_matmul_nbits_convert_zp_fp16(
+    void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
 
 /* =========================================================================
  * QMoE Sub-Kernels
@@ -668,6 +728,81 @@ int hip_qmoe_scatter_add(
     const void* weights,
     int64_t width,
     int64_t count,
+    int64_t element_size_bytes);
+
+/* GPU-side expert bucketing (Phase 2 foundation).
+ *
+ * Reorders (expert_indices, expert_weights) into per-expert contiguous slices
+ * on the device, eliminating the D2H + hipStreamSynchronize that the host
+ * bucket loop would otherwise need. Outputs the per-expert count and exclusive
+ * prefix-sum offsets; downstream per-expert dispatch can read these directly
+ * via device pointers (or as a tiny D2H of just the counts when needed).
+ *
+ *   expert_indices   - GPU [num_tokens * k] int32 (input from topk_routing)
+ *   expert_weights   - GPU [num_tokens * k] fp16  (input from topk_routing)
+ *   expert_counts    - GPU [num_experts]      int32 (output)
+ *   expert_offsets   - GPU [num_experts + 1]  int32 (output, exclusive scan)
+ *   sorted_token_ids - GPU [num_tokens * k]   int32 (output, grouped by eid)
+ *   sorted_weights   - GPU [num_tokens * k]   fp16  (output, aligned w/ ids)
+ *
+ * Constraints: fp16 only; num_experts <= 1024.
+ */
+int hip_qmoe_bucket_tokens(
+    void* stream,
+    const void* expert_indices,
+    const void* expert_weights,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t element_size_bytes);
+
+/* -------------------------------------------------------------------------
+ * Fully fused MoE decode (num_tokens == 1).
+ *
+ * Replaces the multi-pass topk -> bucket -> per-expert (gather, FC1, SwiGLU,
+ * FC2, scatter_add) sequence with three back-to-back kernel launches and
+ * zero hipStreamSynchronize calls per layer. Caller still issues the topk
+ * (hip_qmoe_topk_routing) before invoking this; the fused launcher reads
+ * expert_indices/expert_weights and dispatches all k experts inline.
+ *
+ * Layout (single token):
+ *   input            - GPU [hidden]              fp16
+ *   expert_indices   - GPU [k]                   int32 (from topk_routing)
+ *   expert_weights   - GPU [k]                   fp16  (from topk_routing)
+ *   fc1_weights      - GPU [E, 2*inter, K_pack]  uint8 (per-expert nibbles)
+ *   fc1_scales       - GPU [E, 2*inter, n_blk]   fp16
+ *   fc1_zero_points  - GPU [E, 2*inter, ceil(n_blk/2)] uint8 (packed nibbles)
+ *   fc1_bias         - GPU [E, 2*inter] or null  fp16
+ *   fc2_weights      - GPU [E, hidden, K_pack]   uint8
+ *   fc2_scales       - GPU [E, hidden, n_blk]    fp16
+ *   fc2_zero_points  - GPU [E, hidden, ceil(n_blk/2)] uint8
+ *   fc2_bias         - GPU [E, hidden] or null   fp16
+ *   slot_buf         - GPU [k, hidden]           fp16  (transient scratch)
+ *   act_out          - GPU [k, inter]            fp16  (transient scratch)
+ *   output           - GPU [hidden]              fp16  (final, weighted sum)
+ *
+ * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
+ * inter_size both multiples of 32; block_size > 0 and even.
+ */
+int hip_qmoe_decode_fused(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
 /* =========================================================================
