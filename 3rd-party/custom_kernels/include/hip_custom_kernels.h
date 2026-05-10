@@ -212,21 +212,29 @@ int hip_elementwise_gelu(
  *     output[..., 2*d]   = x0 * cos_val - x1 * sin_val
  *     output[..., 2*d+1] = x0 * sin_val + x1 * cos_val
  *
+ * When rotary_dim < head_dim, dimensions [rotary_dim, head_dim) are passed
+ * through unchanged (the half-rotated kernel writes them in the d>=rotary_dim
+ * branch; the interleaved path uses a separate copy kernel).
+ *
  * Parameters:
  *   stream             - hipStream_t cast to void*
- *   input              - GPU pointer [batch, seq_len, num_heads * head_dim]
- *   position_ids       - GPU pointer [batch, seq_len] (int64 or int32)
+ *   input              - GPU pointer; layout depends on is_bnsh:
+ *                          is_bnsh=0 -> BSNH [batch, seq_len, num_heads, head_dim]
+ *                                       (also the 3D [B, S, num_heads*head_dim])
+ *                          is_bnsh=1 -> BNSH [batch, num_heads, seq_len, head_dim]
+ *   position_ids       - GPU pointer [batch, seq_len] (int64)
  *   cos_cache          - GPU pointer [max_seq, rotary_dim/2]
  *   sin_cache          - GPU pointer [max_seq, rotary_dim/2]
- *   output             - GPU pointer (same shape as input)
+ *   output             - GPU pointer (same shape/layout as input)
  *   batch_size         - batch dimension
  *   seq_len            - sequence length
  *   num_heads          - number of attention heads
- *   head_dim           - dimension per head
- *   rotary_dim         - number of dimensions to rotate (<=head_dim)
+ *   head_dim           - dimension per head (>= rotary_dim)
+ *   rotary_dim         - number of dimensions to rotate (<= head_dim)
  *   max_seq_len        - max sequence length in cos/sin cache (for bounds clamping)
  *   interleaved        - 0 = half-rotated, 1 = interleaved
  *   element_size_bytes - 2 for fp16, 4 for fp32
+ *   is_bnsh            - layout flag, see input above (0 = BSNH/3D, 1 = BNSH)
  *
  * Returns: 0 on success, non-zero on error
  */
@@ -244,7 +252,8 @@ int hip_rope_forward(
     int64_t rotary_dim,
     int64_t max_seq_len,
     int64_t interleaved,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes,
+    int64_t is_bnsh);
 
 /* =========================================================================
  * GQA Device Kernel Launchers
@@ -485,7 +494,10 @@ int hip_gather(
  *   num_output_elements - total output elements
  *   hip_dtype           - data type (hip_dtype_t value cast to int)
  *
- * Currently supported types: HIP_DTYPE_INT64
+ * Currently supported types: HIP_DTYPE_INT64, HIP_DTYPE_INT32, HIP_DTYPE_FLOAT16
+ *   - INT32 accumulates in int64 internally to avoid overflow on large slices.
+ *   - FLOAT16 accumulates in float internally to preserve precision; the
+ *     final result is narrowed back to half.
  * Returns: 0 on success, non-zero on failure
  */
 int hip_reduce_sum(
@@ -531,21 +543,64 @@ int hip_range(
     void* device_error_flag);
 
 /* =========================================================================
+ * Transpose (Generic N-D Permutation)
+ * =========================================================================
+ *
+ * Permutes the dimensions of `input` according to `perm` and writes the
+ * result to `output`.  Implements full ONNX Transpose semantics: any valid
+ * permutation of [0, rank) is supported.  For each output linear index i:
+ *   - decompose i into output coordinates using output shape derived from
+ *     input_shape[perm[k]];
+ *   - map to input coordinates via the supplied `perm`;
+ *   - linearize using the row-major strides of input_shape and copy.
+ *
+ * Parameters:
+ *   stream             - hipStream_t cast to void*
+ *   input              - GPU pointer to source tensor (contiguous, row-major)
+ *   output             - GPU pointer to destination tensor (contiguous,
+ *                        row-major after permutation)
+ *   rank               - number of dimensions (must be in [1, 8])
+ *   input_shape        - host pointer to int64_t[rank] with the input shape
+ *   perm               - host pointer to int64_t[rank] permutation; output
+ *                        dim i corresponds to input dim perm[i]
+ *   num_elements       - total elements in the tensor (product of input_shape)
+ *   element_size_bytes - 1, 2, 4, or 8 (selects the typed memcpy kernel)
+ *
+ * Returns: 0 on success, non-zero hipError_t / -1 on failure.
+ */
+int hip_transpose(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t rank,
+    const int64_t* input_shape,
+    const int64_t* perm,
+    int64_t num_elements,
+    int element_size_bytes);
+
+/* =========================================================================
  * MatMulNBits (Fused Dequant + MatMul)
  * =========================================================================
  *
- * Computes Y = A @ dequant(B)^T + bias, where B holds packed int4 weights.
+ * Computes Y = A @ dequant(B)^T + bias, where B holds packed quantized
+ * weights.  Supports bits=4 (packed nibbles) and bits=8 (1 byte per
+ * weight); other widths return an error.
  *
  * Dequantization (per-block): dequant = (quant_val - zero_point) * scale
  * For 4-bit: lower nibble = first value, upper nibble = second.
- * Default zero_point = 8 (when zero_points is NULL).
+ *            Default zero_point = 8 (when zero_points is NULL).
+ * For 8-bit: B is unpacked uint8 of shape [N, K]; zero_points (when
+ *            provided) is uint8 [N, k_blocks]; default zero_point = 128.
  *
  * Parameters:
  *   stream             - hipStream_t cast to void*
  *   A                  - GPU [batch, M, K]
- *   B                  - GPU [N, k_blocks, blob_size] uint8 packed int4
+ *   B                  - GPU packed weights:
+ *                          bits=4: [N, k_blocks, blob_size] uint8 packed int4
+ *                          bits=8: [N, K] uint8 (no packing)
  *   scales             - GPU [N, k_blocks] (same type as A)
- *   zero_points        - GPU [N, k_blocks] uint8 (nullable, default zp=8)
+ *   zero_points        - GPU [N, k_blocks] uint8 (nullable; default zp=8
+ *                        for bits=4, zp=128 for bits=8)
  *   bias               - GPU [N] (nullable, same type as A)
  *   output             - GPU [batch, M, N]
  *   M                  - rows per batch
@@ -860,6 +915,58 @@ int hip_linear_attention_decode(
     int64_t decay_per_key_dim,
     int64_t beta_per_head,
     int64_t type);
+
+/* =========================================================================
+ * Causal Depthwise 1D Conv -- single-step "decode" path
+ * =========================================================================
+ *
+ * Fused fast path for the seq_len == 1 case of CausalConvWithState used by
+ * Mamba / Gated DeltaNet decoders. Replaces the MIOpen virtual-buffer +
+ * convolution + bias + activation chain with one compute kernel that:
+ *   - reads past_state[b,c,0..k-2] (or zero if past_state==nullptr),
+ *   - reads input[b,c,0],
+ *   - computes the depthwise convolution dot product:
+ *       output[b,c,0] = sum_{j=0..k-2} weight[c,0,j] * past_state[b,c,j]
+ *                     + weight[c,0,k-1] * input[b,c,0]
+ *                     + (bias ? bias[c] : 0)
+ *   - applies optional SiLU (activation == 1):
+ *       output[b,c,0] *= 1 / (1 + exp(-output[b,c,0]))
+ *   - writes the new state by shifting forward by one step:
+ *       present_state[b,c,0..k-3] = past_state[b,c,1..k-2]
+ *       present_state[b,c,k-2]    = input[b,c,0]
+ *
+ * Bypasses hipMemcpy2DAsync entirely: at decode-shape (rows=B*C, width=k-1
+ * elements) the 2D copy has thousands of pathologically thin rows and is
+ * massively slower than a single launch with the same arithmetic.
+ *
+ * Shapes (matching wrap_causal_conv_with_state layout):
+ *   input         [B, C, 1]           (past_state is [B, C, k-1])
+ *   weight        [C, 1, k]           (depthwise: one k-tap filter per channel)
+ *   bias          [C] or nullptr
+ *   output        [B, C, 1]
+ *   past_state    [B, C, k-1] or nullptr (treated as zeros)
+ *   present_state [B, C, k-1]
+ *
+ * Constraints:
+ *   - kernel_size in [1, 8]   (k-1 fits in a small register array)
+ *   - element_size_bytes in {2, 4} (fp16 or fp32; matches wrapper validation)
+ *   - activation in {0, 1}   (0=none, 1=SiLU)
+ *
+ * Returns: 0 on success, non-zero on failure.
+ */
+int hip_causal_conv_step_decode(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes);
 
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)

@@ -655,16 +655,38 @@ def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
 def Hip_TransposeOp : Hip_DpsOp<"transpose"> {
-  let summary = "N-D transpose swapping two specified dimensions";
+  let summary = "N-D transpose with arbitrary permutation (ONNX Transpose)";
+  let description = [{
+    Permutes the dimensions of the input tensor according to the `perm`
+    attribute. Output dim i corresponds to input dim perm[i]. Implements
+    the ONNX Transpose operator.
+
+    The `perm` attribute is a list of integers and must be a permutation of
+    [0, 1, ..., rank-1]. Its length must equal the rank of the input. When
+    the ONNX `perm` attribute is omitted, the converter materializes the
+    default reverse permutation `[rank-1, ..., 0]` here.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.transpose(%ctx) ins(%input : memref<1x2x3xf32, 1>)
+                        outs(%output : memref<2x3x1xf32, 1>)
+                        {perm = [1, 2, 0]}
+    ```
+  }];
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Index:$dim0,
-    Index:$dim1,
     Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$perm
   );
   // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
   let hasVerifier = 1;
 }
 
