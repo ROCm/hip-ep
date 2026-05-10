@@ -968,6 +968,18 @@ static void launchGemvConfigI8(
               static_cast<unsigned>(batch));
     dim3 block(c.threads);
 
+    // The (BS, TN) at every case ID below MUST match kGemvConfigs[ID].
+    // grid/block above are computed from kGemvConfigs[config_id], while the
+    // kernel template parameters BLOCK_SIZE/TILE_N are baked in here at
+    // compile time. If the two ever drift, the launched grid/block won't
+    // match the template the kernel was compiled for: cross-warp reduction
+    // reads uninitialized warp_sums slots (NaN/Inf in output), the K
+    // accumulation stride (BLOCK_SIZE) won't match the launched thread
+    // count, and only a fraction of the N outputs get written -- the rest
+    // keep whatever was in the (often reused) output buffer beforehand.
+    // This kept layers.0 in_proj_a inheriting in_proj_b's residual values
+    // and was masked for in_proj_b only because autotune's prior launches
+    // happened to leave the slot in a "looks correct" state.
 #define GEMV_I8_CASE(ID, BS, TN) \
     case ID: \
         hipLaunchKernelGGL( \
@@ -976,23 +988,27 @@ static void launchGemvConfigI8(
         break
 
     switch (config_id) {
-        GEMV_I8_CASE( 0,  64,  1);  GEMV_I8_CASE( 1,  64,  2);
-        GEMV_I8_CASE( 2,  64,  4);  GEMV_I8_CASE( 3,  64,  8);
-        GEMV_I8_CASE( 4,  64, 16);
-        GEMV_I8_CASE( 5, 128,  1);  GEMV_I8_CASE( 6, 128,  2);
-        GEMV_I8_CASE( 7, 128,  4);  GEMV_I8_CASE( 8, 128,  8);
-        GEMV_I8_CASE( 9, 128, 16);
-        GEMV_I8_CASE(10, 256,  1);  GEMV_I8_CASE(11, 256,  2);
-        GEMV_I8_CASE(12, 256,  4);  GEMV_I8_CASE(13, 256,  8);
-        GEMV_I8_CASE(14, 256, 16);
-        GEMV_I8_CASE(15, 512,  1);  GEMV_I8_CASE(16, 512,  2);
-        GEMV_I8_CASE(17, 512,  4);  GEMV_I8_CASE(18, 512,  8);
-        GEMV_I8_CASE(19, 512, 16);
-        GEMV_I8_CASE(20, 1024,  1); GEMV_I8_CASE(21, 1024,  2);
-        GEMV_I8_CASE(22, 1024,  4); GEMV_I8_CASE(23, 1024,  8);
-        GEMV_I8_CASE(24, 1024, 16);
-        GEMV_I8_CASE(25,  64, 32);  GEMV_I8_CASE(26, 128, 32);
-        GEMV_I8_CASE(27, 256, 32);
+        GEMV_I8_CASE( 0,  32,  1);  GEMV_I8_CASE( 1,  32,  2);
+        GEMV_I8_CASE( 2,  32,  4);  GEMV_I8_CASE( 3,  32,  8);
+        GEMV_I8_CASE( 4,  64,  1);  GEMV_I8_CASE( 5,  64,  2);
+        GEMV_I8_CASE( 6,  64,  4);  GEMV_I8_CASE( 7,  64,  8);
+        GEMV_I8_CASE( 8,  64, 16);
+        GEMV_I8_CASE( 9, 128,  1);  GEMV_I8_CASE(10, 128,  2);
+        GEMV_I8_CASE(11, 128,  4);  GEMV_I8_CASE(12, 128,  8);
+        GEMV_I8_CASE(13, 128, 16);
+        GEMV_I8_CASE(14, 256,  1);  GEMV_I8_CASE(15, 256,  2);
+        GEMV_I8_CASE(16, 256,  4);  GEMV_I8_CASE(17, 256,  8);
+        GEMV_I8_CASE(18, 256, 16);
+        GEMV_I8_CASE(19, 512,  1);  GEMV_I8_CASE(20, 512,  2);
+        GEMV_I8_CASE(21, 512,  4);  GEMV_I8_CASE(22, 512,  8);
+        GEMV_I8_CASE(23, 512, 16);
+        GEMV_I8_CASE(24, 1024,  1); GEMV_I8_CASE(25, 1024,  2);
+        GEMV_I8_CASE(26, 1024,  4); GEMV_I8_CASE(27, 1024,  8);
+        GEMV_I8_CASE(28, 1024, 16);
+        GEMV_I8_CASE(29,  64, 32);  GEMV_I8_CASE(30, 128, 32);
+        GEMV_I8_CASE(31, 256, 32);
+        GEMV_I8_CASE(32,  64, 64);  GEMV_I8_CASE(33, 128, 64);
+        GEMV_I8_CASE(34, 256, 64);
         default: break;
     }
 #undef GEMV_I8_CASE
