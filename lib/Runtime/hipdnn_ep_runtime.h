@@ -407,6 +407,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 // GQA GEMM cache lifecycle (managed by RuntimeState)
 void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
 
+// CausalConvWithState descriptor/algo cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_causal_conv_cache_destroy(void *cache);
+
 // MatMulNBits asym zero_points unpack cache lifecycle (managed by RuntimeState)
 void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
 
@@ -614,10 +617,23 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype);
 
+// Transpose operation wrapper (ONNX Transpose).
+// Permutes the dimensions of `input` according to `perm` and writes the
+// result to `output`.  `input_shape` and `perm` are host-side arrays of
+// length `rank`; `num_elements` is the product of `input_shape`.
+// `element_size_bytes` selects the kernel datapath (1/2/4/8 currently).
+int wrap_transpose(RuntimeState *state, const void *input, void *output,
+                   int64_t rank, const int64_t *input_shape,
+                   const int64_t *perm, int64_t num_elements,
+                   int64_t element_size_bytes);
+
 // ReduceSum operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_INT32,
+//                  HIPDNN_EP_DATATYPE_INT64.
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t axes_num_elements, int64_t element_size_bytes,
+                    int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes);
 
 // Cast operation wrapper (element type conversion)
@@ -640,13 +656,20 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
 
-// Rotary embedding operation wrapper
+// Rotary embedding operation wrapper.
+//
+// Supports M-RoPE / partial rotary embedding (rotary_dim < head_dim) and the
+// two standard input layouts:
+//   is_bnsh == 0 : BSNH [batch, seq_len, num_heads, head_dim]
+//                  (also covers 3D [batch, seq_len, num_heads*head_dim])
+//   is_bnsh != 0 : BNSH [batch, num_heads, seq_len, head_dim]
+//                  (ONNX com.microsoft.RotaryEmbedding 4D default; GQA K/V)
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
-                          int64_t interleaved, int64_t num_heads,
-                          int64_t rotary_dim, int64_t input_num_elements,
-                          int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes);
+                          int64_t interleaved, int64_t batch_size,
+                          int64_t seq_len, int64_t num_heads, int64_t head_dim,
+                          int64_t rotary_dim, int64_t cos_cache_num_elements,
+                          int64_t element_size_bytes, int64_t is_bnsh);
 
 // SimplifiedLayerNormalization operation wrapper
 int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
