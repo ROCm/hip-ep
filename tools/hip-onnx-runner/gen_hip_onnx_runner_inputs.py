@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Generate input_<idx>_<name>_<type>.bin files for hip-onnx-runner (-i).
 
@@ -20,6 +24,7 @@ Usage:
   python tools/gen_hip_onnx_runner_inputs.py model.onnx -o out_dir --seed 0
   python tools/gen_hip_onnx_runner_inputs.py model.onnx -D total_sequence_length=1
 """
+
 from __future__ import annotations
 
 import argparse
