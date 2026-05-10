@@ -96,6 +96,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
         *ctx);
     GemmOp::attachInterface<HipDstBufferizableModel<GemmOp>>(*ctx);
+    WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
   });
