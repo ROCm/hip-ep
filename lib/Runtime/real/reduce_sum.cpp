@@ -95,8 +95,8 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
       "noop_with_empty_axes=%lld, hip_dtype=%d -> calling hip_reduce_sum\n",
       (long long)data_num_elements, (long long)output_num_elements,
       (long long)axes_num_elements, hipdnn_ep_datatype_name(data_type),
-      (long long)data_type, (long long)keepdims, (long long)noop_with_empty_axes,
-      hip_dtype);
+      (long long)data_type, (long long)keepdims,
+      (long long)noop_with_empty_axes, hip_dtype);
 
   return hip_reduce_sum(stream, data, output, data_num_elements,
                         output_num_elements, hip_dtype);

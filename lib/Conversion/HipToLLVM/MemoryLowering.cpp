@@ -453,7 +453,8 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     // dims into two groups:
     //   * a "width" group: a contiguous suffix [splitDim..rank-1] whose total
     //     size equals one row, requires
-    //         stride[i] == stride[i+1] * shape[i+1]   for i in [splitDim..rank-2)
+    //         stride[i] == stride[i+1] * shape[i+1]   for i in
+    //         [splitDim..rank-2)
     //     (and stride[rank-1] == 1, already verified above);
     //   * a "height" group: the prefix [0..splitDim) whose dim sizes multiply
     //     into `height`. Because hipMemcpy2DAsync only takes ONE srcPitch /
@@ -469,12 +470,10 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     // Find the longest contiguous suffix that holds on BOTH src and dst.
     int64_t splitDim = rank - 1;
     for (int64_t i = rank - 2; i >= 0; --i) {
-      int64_t expectSrc =
-          srcStrides[static_cast<unsigned>(i + 1)] *
-          shape[static_cast<unsigned>(i + 1)];
-      int64_t expectDst =
-          dstStrides[static_cast<unsigned>(i + 1)] *
-          shape[static_cast<unsigned>(i + 1)];
+      int64_t expectSrc = srcStrides[static_cast<unsigned>(i + 1)] *
+                          shape[static_cast<unsigned>(i + 1)];
+      int64_t expectDst = dstStrides[static_cast<unsigned>(i + 1)] *
+                          shape[static_cast<unsigned>(i + 1)];
       if (srcStrides[static_cast<unsigned>(i)] != expectSrc ||
           dstStrides[static_cast<unsigned>(i)] != expectDst)
         break;
@@ -489,12 +488,10 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 
     // Outer dims [0..splitDim) must also collapse into a single height pitch.
     for (int64_t i = 0; i + 1 < splitDim; ++i) {
-      int64_t expectSrc =
-          srcStrides[static_cast<unsigned>(i + 1)] *
-          shape[static_cast<unsigned>(i + 1)];
-      int64_t expectDst =
-          dstStrides[static_cast<unsigned>(i + 1)] *
-          shape[static_cast<unsigned>(i + 1)];
+      int64_t expectSrc = srcStrides[static_cast<unsigned>(i + 1)] *
+                          shape[static_cast<unsigned>(i + 1)];
+      int64_t expectDst = dstStrides[static_cast<unsigned>(i + 1)] *
+                          shape[static_cast<unsigned>(i + 1)];
       if (srcStrides[static_cast<unsigned>(i)] != expectSrc ||
           dstStrides[static_cast<unsigned>(i)] != expectDst)
         return rewriter.notifyMatchFailure(
