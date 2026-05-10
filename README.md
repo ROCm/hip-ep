@@ -15,7 +15,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 - **MLIR Compiler Pipeline**: ONNX dialect → HIP dialect → LLVM IR → native DLL
 - **MIOpen Integration**: Conv, Softmax, RMS Norm, Mul, Sigmoid, Softplus, CausalConvWithState via MIOpen library
 - **hipBLASLt MatMul**: High-performance matrix multiplication
-- **Custom HIP Kernels**: GQA, RoPE, Cast, Sub, Gather, ReduceSum, Reciprocal, Sqrt, GELU
+- **Custom HIP Kernels**: GQA, RoPE, Cast, Sub, Gather, ReduceSum, Reciprocal, Sqrt, GELU, Range, LinearAttention
 - **Memory Pool Optimization**: `hip-pool-allocs` pass packs allocations into a single grow-on-demand buffer
 - **Constant Externalization**: Large model weights stored in sidecar `.constants.bin` files
 - **Mock Runtime**: GPU-free development and testing with `BUILD_MOCK_RUNTIME=ON`
@@ -39,6 +39,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | ReduceSum | Custom HIP Kernel |
+| Range | Custom HIP kernel |
 | Gather | Custom HIP Kernel |
 | SimplifiedLayerNormalization | MIOpen |
 | SkipSimplifiedLayerNormalization (com.microsoft) | MIOpen |
@@ -46,6 +47,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | GroupQueryAttention (com.microsoft) | Custom HIP Kernel |
 | MatMulNBits (com.microsoft) | Custom HIP Kernel |
 | QMoE (com.microsoft) | Custom HIP Kernel |
+| LinearAttention (com.microsoft) | Custom HIP Kernel |
 | CausalConvWithState (com.microsoft) | MIOpen |
 
 ### Compiler-Optimized Operations
@@ -57,6 +59,7 @@ These operations are handled through standard MLIR transformations without requi
 | Reshape | tensor.expand_shape / tensor.collapse_shape | Zero-cost metadata operation, no data movement |
 | Unsqueeze | tensor.expand_shape | Inserts size-1 axes; shape/stride reinterpretation only |
 | Squeeze | tensor.collapse_shape | Removes size-1 axes; shape/stride reinterpretation only |
+| Split | tensor.extract_slice | Zero-copy tensor partitioning; creates views without data movement |
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 
 ---

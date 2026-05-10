@@ -5,6 +5,10 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
+#include "mlir/IR/BuiltinTypes.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -280,6 +284,203 @@ struct MemRefDeallocOpLowering
   }
 };
 
+/// Static strides in elements for identity or strided memref types (no dynamic
+/// dims/strides).
+static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
+  ArrayRef<int64_t> shape = ty.getShape();
+  unsigned rank = ty.getRank();
+
+  MemRefLayoutAttrInterface layout = ty.getLayout();
+  if (layout.isIdentity()) {
+    SmallVector<int64_t> out(rank);
+    int64_t running = 1;
+    for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
+      out[static_cast<unsigned>(i)] = running;
+      if (ShapedType::isDynamic(shape[i]))
+        return failure();
+      running *= shape[i];
+    }
+    return out;
+  }
+
+  if (auto sl = dyn_cast<StridedLayoutAttr>(layout)) {
+    auto strides = llvm::to_vector(sl.getStrides());
+    if (strides.size() != rank)
+      return failure();
+    for (int64_t s : strides)
+      if (ShapedType::isDynamic(s))
+        return failure();
+    return strides;
+  }
+
+  return failure();
+}
+
+static FailureOr<SmallVector<int64_t>>
+computeRowMajorStridesElems(ArrayRef<int64_t> shape) {
+  unsigned rank = shape.size();
+  SmallVector<int64_t> out(rank);
+  int64_t running = 1;
+  for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
+    out[static_cast<unsigned>(i)] = running;
+    if (ShapedType::isDynamic(shape[static_cast<unsigned>(i)]))
+      return failure();
+    running *= shape[static_cast<unsigned>(i)];
+  }
+  return out;
+}
+
+static FailureOr<int64_t> tryElemSizeBytes(Type elemTy) {
+  if (!elemTy.isIntOrFloat())
+    return failure();
+  unsigned bits = elemTy.getIntOrFloatBitWidth();
+  if (bits % 8 != 0)
+    return failure();
+  return static_cast<int64_t>(bits / 8);
+}
+
+static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
+  if (a.size() != b.size())
+    return false;
+  for (size_t i = 0, e = a.size(); i != e; ++i) {
+    if (a[i] != b[i])
+      return false;
+  }
+  return true;
+}
+
+/// Lowers memref.copy on GPU memrefs to wrap_hipMemcpyAsync /
+/// wrap_hipMemcpy2DAsync when strides are statically known. Otherwise leaves
+/// conversion to the default MemRef→LLVM copy lowering (benefit 1).
+struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
+  MemRefCopyOpLowering(const LLVMTypeConverter &converter)
+      : ConvertOpToLLVMPattern(converter, PatternBenefit(10)) {}
+
+  LogicalResult
+  matchAndRewrite(memref::CopyOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+
+    auto llvmFn = op->getParentOfType<LLVM::LLVMFuncOp>();
+    if (!llvmFn)
+      return rewriter.notifyMatchFailure(op, "expected parent llvm.func");
+
+    auto srcTy = dyn_cast<MemRefType>(op.getSource().getType());
+    auto dstTy = dyn_cast<MemRefType>(op.getTarget().getType());
+    if (!srcTy || !dstTy)
+      return rewriter.notifyMatchFailure(op, "expected ranked memrefs");
+
+    if (srcTy.getShape() != dstTy.getShape())
+      return rewriter.notifyMatchFailure(op, "copy shape mismatch");
+
+    FailureOr<int64_t> elemBytesOr = tryElemSizeBytes(srcTy.getElementType());
+    if (failed(elemBytesOr))
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    int64_t elemBytes = *elemBytesOr;
+
+    FailureOr<SmallVector<int64_t>> srcStridesOr = tryStaticStridesElems(srcTy);
+    FailureOr<SmallVector<int64_t>> dstStridesOr = tryStaticStridesElems(dstTy);
+    if (failed(srcStridesOr) || failed(dstStridesOr))
+      return rewriter.notifyMatchFailure(op, "need static strides/layout");
+
+    ArrayRef<int64_t> srcStrides = *srcStridesOr;
+    ArrayRef<int64_t> dstStrides = *dstStridesOr;
+
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i64Type = rewriter.getI64Type();
+    Type i32Type = rewriter.getI32Type();
+
+    Value statePtr = llvmFn.getArgument(0);
+    Value srcPtr = extractMemRefDataPtr(adaptor.getSource(), srcTy,
+                                        getTypeConverter(), rewriter, loc);
+    Value dstPtr = extractMemRefDataPtr(adaptor.getTarget(), dstTy,
+                                        getTypeConverter(), rewriter, loc);
+    if (!srcPtr || !dstPtr)
+      return failure();
+
+    int64_t rank = srcTy.getRank();
+    ArrayRef<int64_t> shape = srcTy.getShape();
+
+    auto i64Const = [&](int64_t v) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    FailureOr<SmallVector<int64_t>> denseStridesOr =
+        computeRowMajorStridesElems(shape);
+    if (failed(denseStridesOr))
+      return rewriter.notifyMatchFailure(op, "need static shape");
+
+    // Single D2D memcpy only for dense row-major storage (no holes).
+    if (strideVectorsEqual(srcStrides, dstStrides) &&
+        strideVectorsEqual(srcStrides, ArrayRef<int64_t>(*denseStridesOr))) {
+      int64_t numElems = 1;
+      for (int64_t d : shape)
+        numElems *= d;
+      int64_t totalBytes = numElems * elemBytes;
+
+      FailureOr<LLVM::LLVMFuncOp> memcpyFn =
+          LLVM::lookupOrCreateFn(rewriter, module, kWrapHipMemcpyAsync,
+                                 {ptrType, ptrType, ptrType, i64Type}, i32Type);
+      if (failed(memcpyFn))
+        return failure();
+
+      LLVM::CallOp::create(
+          rewriter, loc, *memcpyFn,
+          ValueRange{statePtr, dstPtr, srcPtr, i64Const(totalBytes)});
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    // Pitched 2D copy: last dim contiguous (stride 1), collapse leading dims.
+    // Destination must be dense row-major (typical output buffer); source may
+    // be a strided view into a parent allocation.
+    if (rank < 2)
+      return rewriter.notifyMatchFailure(
+          op, "rank-1 non-uniform stride needs different lowering");
+
+    if (!strideVectorsEqual(dstStrides, ArrayRef<int64_t>(*denseStridesOr)))
+      return rewriter.notifyMatchFailure(
+          op, "expect dense row-major destination for pitched copy");
+
+    if (srcStrides[static_cast<unsigned>(rank - 1)] != 1 ||
+        dstStrides[static_cast<unsigned>(rank - 1)] != 1)
+      return rewriter.notifyMatchFailure(op,
+                                         "last dimension must be contiguous");
+
+    int64_t height = 1;
+    for (int64_t i = 0; i < rank - 1; ++i) {
+      if (ShapedType::isDynamic(shape[static_cast<unsigned>(i)]))
+        return rewriter.notifyMatchFailure(op, "need static shape");
+      height *= shape[static_cast<unsigned>(i)];
+    }
+
+    if (ShapedType::isDynamic(shape[static_cast<unsigned>(rank - 1)]))
+      return rewriter.notifyMatchFailure(op, "need static shape");
+    int64_t widthBytes = shape[static_cast<unsigned>(rank - 1)] * elemBytes;
+
+    int64_t srcPitchElems = srcStrides[static_cast<unsigned>(rank - 2)];
+    int64_t dstPitchElems = dstStrides[static_cast<unsigned>(rank - 2)];
+    int64_t srcPitchBytes = srcPitchElems * elemBytes;
+    int64_t dstPitchBytes = dstPitchElems * elemBytes;
+
+    FailureOr<LLVM::LLVMFuncOp> memcpy2dFn = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapHipMemcpy2DAsync,
+        {ptrType, ptrType, i64Type, ptrType, i64Type, i64Type, i64Type},
+        i32Type);
+    if (failed(memcpy2dFn))
+      return failure();
+
+    LLVM::CallOp::create(rewriter, loc, *memcpy2dFn,
+                         ValueRange{statePtr, dstPtr, i64Const(dstPitchBytes),
+                                    srcPtr, i64Const(srcPitchBytes),
+                                    i64Const(widthBytes), i64Const(height)});
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::hip::populateMemoryLoweringPatterns(
@@ -287,6 +488,7 @@ void mlir::hip::populateMemoryLoweringPatterns(
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
                GetConstantOpLowering, MemRefAllocOpLowering,
                MemRefDeallocOpLowering>(converter);
+  patterns.add<MemRefCopyOpLowering>(converter);
 }
 
 } // namespace hip

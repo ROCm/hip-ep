@@ -13,6 +13,7 @@ add_library(HipToLLVM STATIC
   ActivationLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
+  RangeLowering.cpp
   CastLowering.cpp
   ReduceSumLowering.cpp
   TransposeLowering.cpp
@@ -24,6 +25,7 @@ add_library(HipToLLVM STATIC
   CausalConvWithStateLowering.cpp
   GemmLowering.cpp
   WhereLowering.cpp
+  LinearAttentionLowering.cpp
 )
 
 add_dependencies(HipToLLVM

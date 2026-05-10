@@ -27,7 +27,7 @@ jobs:
       LLVM_TAG: llvm-22.1.0-release
       FLATBUFFERS_TAG: flatbuffers-25.12.19-release
       PROTO_TAG: protobuf-34.0-release
-      ONNXRUNTIME_VERSION: "1.24.3"
+      ONNXRUNTIME_VERSION: "1.25.1"
       GTEST_VERSION: "1.15.0"
       SCCACHE_GHA_ENABLED: "true"
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
