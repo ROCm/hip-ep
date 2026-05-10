@@ -26,7 +26,6 @@ add_library(OnnxToHip STATIC
   WhereConversion.cpp
   LinearAttentionConversion.cpp
   RangeConversion.cpp
-  WhereConversion.cpp
 )
 
 add_dependencies(OnnxToHip

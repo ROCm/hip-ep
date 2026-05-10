@@ -330,8 +330,6 @@ void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
-void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir
