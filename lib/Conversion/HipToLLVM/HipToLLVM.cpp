@@ -1,7 +1,21 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- HipToLLVM.cpp - HIP-to-LLVM conversion driver ---------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+
+#include "hip/Conversion/HipToLLVM/Passes.h"
+
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
+#include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Pass/Pass.h"
 
 #include "HipToLLVMUtils.h"
 
@@ -9,7 +23,7 @@ namespace mlir {
 namespace hip {
 
 #define GEN_PASS_DEF_CONVERTHIPTOLLVMPASS
-#include "hip/Dialect/Transforms/Passes.h.inc"
+#include "hip/Conversion/Passes.h.inc"
 
 namespace {
 
@@ -208,8 +222,35 @@ void ConvertHipToLLVMPass::runOnOperation() {
   });
 
   RewritePatternSet patterns(ctx);
+  populateConvertHipToLLVMPatterns(typeConverter, patterns);
 
-  // HIP dialect-specific lowerings
+  // Bundle standard dialect lowerings (func/memref/arith/cf) with the HIP
+  // lowerings to minimize unrealized casts at the memref/LLVM boundary.
+  // Running them as separate stages would require a reconcile-unrealized-casts
+  // cleanup pass.  External clients of `populateConvertHipToLLVMPatterns`
+  // are responsible for adding these themselves if they don't already.
+  populateFuncToLLVMConversionPatterns(typeConverter, patterns);
+  populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
+  arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
+  cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
+
+  LLVMConversionTarget target(*ctx);
+  target.addLegalDialect<LLVM::LLVMDialect>();
+  target.addIllegalDialect<HipDialect>();
+  target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
+  target.addLegalOp<ModuleOp>();
+
+  if (failed(applyPartialConversion(module, target, std::move(patterns))))
+    signalPassFailure();
+
+  if (failed(transformMainFunction(module)))
+    signalPassFailure();
+}
+
+} // namespace
+
+void populateConvertHipToLLVMPatterns(const LLVMTypeConverter &typeConverter,
+                                      RewritePatternSet &patterns) {
   populateMemoryLoweringPatterns(typeConverter, patterns);
   populateConvLoweringPatterns(typeConverter, patterns);
   populateMatmulLoweringPatterns(typeConverter, patterns);
@@ -231,30 +272,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGraphLoweringPatterns(typeConverter, patterns);
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
   populateWhereLoweringPatterns(typeConverter, patterns);
-
-  // Standard dialect lowerings
-  // Bundle func/memref/arith/cf lowering with HIP lowering to minimize
-  // unrealized casts at the memref/LLVM boundary. Running them as separate
-  // stages would require a reconcile-unrealized-casts cleanup pass.
-  populateFuncToLLVMConversionPatterns(typeConverter, patterns);
-  populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
-  arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
-  cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
-
-  LLVMConversionTarget target(*ctx);
-  target.addLegalDialect<LLVM::LLVMDialect>();
-  target.addIllegalDialect<HipDialect>();
-  target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
-  target.addLegalOp<ModuleOp>();
-
-  if (failed(applyPartialConversion(module, target, std::move(patterns))))
-    signalPassFailure();
-
-  if (failed(transformMainFunction(module)))
-    signalPassFailure();
 }
-
-} // namespace
 
 } // namespace hip
 } // namespace mlir

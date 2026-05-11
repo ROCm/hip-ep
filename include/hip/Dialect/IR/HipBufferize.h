@@ -1,11 +1,15 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-#ifndef HIP_BUFFERIZE_H
-#define HIP_BUFFERIZE_H
+//===- HipBufferize.h - HIP dialect bufferization interface registration - *-
+// C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+#ifndef HIP_DIALECT_IR_HIPBUFFERIZE_H
+#define HIP_DIALECT_IR_HIPBUFFERIZE_H
 
 #include "hip/Dialect/IR/HipDialect.h"
+
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
 #include "mlir/IR/DialectRegistry.h"
@@ -105,4 +109,4 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
 } // namespace hip
 } // namespace mlir
 
-#endif // HIP_BUFFERIZE_H
+#endif // HIP_DIALECT_IR_HIPBUFFERIZE_H

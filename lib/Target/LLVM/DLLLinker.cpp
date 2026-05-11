@@ -1,16 +1,18 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- DLLLinker.cpp - Native DLL linker for the HIP compiler - *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 #include "hip/Target/LLVM/DLLLinker.h"
+
+#include "hip/debug_log.h"
 
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/raw_ostream.h>
-
-#include "hip/debug_log.h"
 
 #include <fstream>
 #include <sstream>

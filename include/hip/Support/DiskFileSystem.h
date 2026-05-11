@@ -1,10 +1,14 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- DiskFileSystem.h - On-disk FileSystem helper for the HIP compiler - *-
+// C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 #pragma once
 
 #include "morphizen-foundation/file_io.hpp"
+
 #include <cstdio>
 #include <filesystem>
 #include <memory>

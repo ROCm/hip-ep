@@ -1,33 +1,35 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-
+//===- GenerateInterface.cpp - C-ABI inference interface ------*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
 //===----------------------------------------------------------------------===//
-// Generate Interface Pass - Create C-compatible interface functions
-//===----------------------------------------------------------------------===//
+//
 // This pass generates four C-ABI compatible functions that wrap the internal
 // @main_graph function:
 // - inference_init: Allocate context, create handles, upload constants
 // - inference_compute: Parse inputs/outputs, call @main_graph
 // - inference_cleanup: Free resources
 // - inference_get_metadata_json: Return JSON metadata (input/output shapes)
+//
 //===----------------------------------------------------------------------===//
 
-#include "compilation_options_generated.h"
-#include "flatbuffers/flatbuffers.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
 #include "hip/flatbuffers_json.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/Sequence.h"
+
+#include "compilation_options_generated.h"
+#include "flatbuffers/flatbuffers.h"
 #include "model_metadata_generated.h"
 #include "model_metadata_schema.h"
-#include "llvm/ADT/Sequence.h"
 
 using namespace mlir;
 
@@ -732,8 +734,14 @@ private:
     SmallVector<Value> outputBuffers;
 
     // sizeof(TensorBuffer) in the runtime (6 fields, 48 bytes on 64-bit).
-    // TODO: Replace with sizeof(TensorBuffer) or a runtime query once the
-    // runtime is ported into this repo.
+    //
+    // Hard-coded mirror of `struct TensorBuffer` defined in
+    // `lib/Runtime/hipdnn_ep_runtime_tensor.cpp`.  We do not introspect the
+    // runtime header here because the compiler is built independently of the
+    // runtime and may target a different bitness; both projects ship from
+    // this repo, and a static_assert in the runtime guarantees the size
+    // stays at 48 bytes.  Update the constant if and only if the runtime
+    // struct is changed.
     constexpr int64_t kTensorBufferSizeBytes = 48;
 
     Type i8Type = builder.getI8Type();

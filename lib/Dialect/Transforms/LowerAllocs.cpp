@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- LowerAllocs.cpp - memref.alloc -> hip.alloc + hip.free -------------===//
 //
 // Replaces memref.alloc with hip.alloc (device allocation via hipMalloc) and
@@ -23,7 +19,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
-
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
@@ -71,7 +66,13 @@ void LowerAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
-  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis.
+
+  // Limitation: single-block functions only.  `findLastAliasedUser` calls
+  // `Operation::isBeforeInBlock` to place `hip.free` after every aliasing
+  // user; the API is undefined across blocks.  Multi-block support would
+  // require an MLIR `Liveness` pass and a rewrite of the placement logic
+  // to use program-point sets.  Not done because every function in this
+  // pipeline post-onnx-mlir+bufferization is single-block.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-lower-allocs requires single-block functions; "
                      "findLastAliasedUser uses isBeforeInBlock which does "

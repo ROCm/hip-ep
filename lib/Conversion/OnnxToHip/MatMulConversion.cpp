@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- MatMulConversion.cpp - ONNX-to-HIP MatMul conversion --- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -10,52 +12,48 @@ namespace hip {
 namespace {
 
 /// onnx.MatMul -> hip.hipblaslt.matmul
-struct MatMulToHip : public mlir::RewritePattern {
-  MatMulToHip(mlir::MLIRContext *ctx)
+struct MatMulToHip : public RewritePattern {
+  MatMulToHip(MLIRContext *ctx)
       : RewritePattern("onnx.MatMul", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult
-MatMulToHip::matchAndRewrite(mlir::Operation *op,
-                             mlir::PatternRewriter &rewriter) const {
+LogicalResult MatMulToHip::matchAndRewrite(Operation *op,
+                                           PatternRewriter &rewriter) const {
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
-  mlir::Value context = *ctxOrFailure;
+  if (failed(ctxOrFailure))
+    return failure();
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
-  mlir::Value a = op->getOperand(0);
-  mlir::Value b = op->getOperand(1);
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  Location loc = op->getLoc();
+  Value a = op->getOperand(0);
+  Value b = op->getOperand(1);
+  auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
 
   // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
   // Batch and M dims come from A; N comes from B's last dim.
-  llvm::SmallVector<mlir::Value> dynSizes;
+  llvm::SmallVector<Value> dynSizes;
   const int64_t rank = resultType.getRank();
-  const auto bType = mlir::cast<mlir::RankedTensorType>(b.getType());
+  const auto bType = cast<RankedTensorType>(b.getType());
   for (int64_t dimIdx : llvm::seq<int64_t>(rank)) {
     if (!resultType.isDynamicDim(dimIdx))
       continue;
     if (dimIdx == rank - 1) {
       dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, b, bType.getRank() - 1));
+          tensor::DimOp::create(rewriter, loc, b, bType.getRank() - 1));
     } else {
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, a, dimIdx));
+      dynSizes.push_back(tensor::DimOp::create(rewriter, loc, a, dimIdx));
     }
   }
 
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
+  Value init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                       resultType.getElementType(), dynSizes);
   auto hipOp = mlir::hip::MatmulOp::create(rewriter, loc, resultType, context,
                                            a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return success();
 }
 
 } // namespace

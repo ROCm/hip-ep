@@ -1,34 +1,37 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- HipToLLVMUtils.h - Shared helpers for HIP-to-LLVM patterns -*- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #ifndef HIP_CONVERSION_HIPTOLLVM_UTILS_H
 #define HIP_CONVERSION_HIPTOLLVM_UTILS_H
 
+// Header for shared inline helpers (descriptor extraction, runtime symbol
+// names, dtype enums) used by the per-operator HIP -> LLVM lowering files.
+//
+// Include only what the inline helpers and the populator signatures need.
+// Heavy umbrella headers that are only used inside `HipToLLVM.cpp`'s
+// `runOnOperation` (e.g. `MemRefToLLVM.h`, `ArithToLLVM.h`,
+// `ControlFlowToLLVM.h`, `FuncToLLVM/ConvertFuncToLLVM.h`,
+// `LLVMCommon/ConversionTarget.h`) live in the `.cpp` to keep this header
+// cheap to include from each per-operator lowering file.
+
 #include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
-#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
-#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
-#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
-#include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
+
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
-#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/Sequence.h"
 

@@ -1,12 +1,34 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CompileHipDNNGraphs.cpp - hipDNN graph compilation -----*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Why this pass exists
+// --------------------
+// Pairs with `OutlineOnnxToHipDNNPass`.  Walks every
+// `hip.hipdnn_graph_outline` region produced by outlining, builds a hipDNN
+// graph from the contained ONNX ops, and asks the live `hipdnnHandle_t` to
+// compile it.  On success the outline is replaced by a `hip.hipdnn_graph` op
+// whose `graph_id` indexes into `compiledGraphs_`; CompilerDriver later hands
+// that map to the runtime so `hipdnn_graph_execute` can dispatch the
+// pre-compiled plan.  On failure the contained ops are inlined back into the
+// surrounding block (`unoutline`) so downstream passes see the original ONNX
+// IR exactly as if outlining had never happened.
+//
+// Why hand-rolled (not TableGen)
+// ------------------------------
+// The constructor takes a runtime `hipdnnHandle_t` and a `CompiledGraphMap`
+// out-parameter.  Neither can be expressed as a TableGen `Option`, so this
+// pass is registered manually via `createCompileHipDNNGraphsPass(...)` while
+// its handle-free sibling (`OutlineOnnxToHipDNNPass`) lives in
+// `include/hip/Conversion/Passes.td` and uses TableGen registration.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
-
-#include "../../HipDNNGraph/HipDNNGraph.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -16,6 +38,8 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include "../../HipDNNGraph/HipDNNGraph.h"
 
 namespace mlir {
 namespace hip {

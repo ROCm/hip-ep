@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- PowerConversion.cpp - ONNX-to-HIP Power conversion ----- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -12,75 +14,70 @@ namespace {
 /// onnx.Reciprocal -> hip.reciprocal
 /// Converts ONNX reciprocal (y = 1/x, full signed IEEE domain) to HIP.
 /// Runtime uses a HIP elementwise kernel (not MIOpen POWER activation).
-struct ReciprocalToHip : public mlir::RewritePattern {
-  ReciprocalToHip(mlir::MLIRContext *ctx)
+struct ReciprocalToHip : public RewritePattern {
+  ReciprocalToHip(MLIRContext *ctx)
       : RewritePattern("onnx.Reciprocal", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
 /// onnx.Sqrt -> hip.sqrt
 /// ONNX element-wise sqrt; lowered to @wrap_power(0, 1, 0.5) and executed
 /// with hip_elementwise_sqrt at runtime (not MIOpen POWER).
-struct SqrtToHip : public mlir::RewritePattern {
-  SqrtToHip(mlir::MLIRContext *ctx)
+struct SqrtToHip : public RewritePattern {
+  SqrtToHip(MLIRContext *ctx)
       : RewritePattern("onnx.Sqrt", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult
-ReciprocalToHip::matchAndRewrite(mlir::Operation *op,
-                                 mlir::PatternRewriter &rewriter) const {
+LogicalResult
+ReciprocalToHip::matchAndRewrite(Operation *op,
+                                 PatternRewriter &rewriter) const {
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
-  mlir::Value context = *ctxOrFailure;
+  if (failed(ctxOrFailure))
+    return failure();
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
-  mlir::Value input = op->getOperand(0);
-  if (!mlir::isa<mlir::RankedTensorType>(input.getType()))
+  Location loc = op->getLoc();
+  Value input = op->getOperand(0);
+  if (!isa<RankedTensorType>(input.getType()))
     return rewriter.notifyMatchFailure(
         op, "onnx.Reciprocal lowering expects a ranked tensor input");
-  if (!mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType()))
+  if (!isa<RankedTensorType>(op->getResult(0).getType()))
     return rewriter.notifyMatchFailure(
         op, "onnx.Reciprocal lowering expects a ranked tensor result");
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+  Value init = createEmptyTensor(rewriter, loc, resultType, input);
   auto hipOp = mlir::hip::ReciprocalOp::create(rewriter, loc, resultType,
                                                context, input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return success();
 }
 
-mlir::LogicalResult
-SqrtToHip::matchAndRewrite(mlir::Operation *op,
-                           mlir::PatternRewriter &rewriter) const {
+LogicalResult SqrtToHip::matchAndRewrite(Operation *op,
+                                         PatternRewriter &rewriter) const {
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
-  mlir::Value context = *ctxOrFailure;
+  if (failed(ctxOrFailure))
+    return failure();
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
-  mlir::Value input = op->getOperand(0);
-  if (!mlir::isa<mlir::RankedTensorType>(input.getType()))
+  Location loc = op->getLoc();
+  Value input = op->getOperand(0);
+  if (!isa<RankedTensorType>(input.getType()))
     return rewriter.notifyMatchFailure(
         op, "onnx.Sqrt lowering expects a ranked tensor input");
-  if (!mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType()))
+  if (!isa<RankedTensorType>(op->getResult(0).getType()))
     return rewriter.notifyMatchFailure(
         op, "onnx.Sqrt lowering expects a ranked tensor result");
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+  Value init = createEmptyTensor(rewriter, loc, resultType, input);
   auto hipOp = mlir::hip::SqrtOp::create(rewriter, loc, resultType, context,
                                          input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return success();
 }
 
 } // namespace

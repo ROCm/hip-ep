@@ -1,14 +1,17 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- Pipelines.cpp - HIP pass pipeline construction --------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Transforms/Pipelines.h"
+
+#include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
-#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -92,29 +95,15 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
 
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
-                                       morphizen::FileSystem *fs) {
-  pm.addPass(createHipAddContextArgPass());
-
-  if (fs) {
-    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData));
-  } else {
-    ConvertOnnxToHipPassOptions onnxToHipOpts;
-    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
-    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
-  }
-
-  buildOnnxToHipPipelineTail(pm);
-}
-
-void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
-                                       const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
   pm.addPass(createHipAddContextArgPass());
 
+  // Optional hipDNN graph compilation: outline supported ONNX ops into
+  // `hip.hipdnn_graph_outline` regions and ask the live handle to compile
+  // each one into a runnable hipDNN graph.  Skipped entirely when no handle
+  // is provided (CLI / lit-test path through hip-mlir-opt).
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());
     pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
@@ -141,13 +130,6 @@ void mlir::hip::buildHipToLLVMPipeline(
   // does not include patterns for these ops; expand-strided-metadata rewrites
   // them into ops that it can lower.
   pm.addPass(memref::createExpandStridedMetadataPass());
-
-  // ExpandStridedMetadata can emit affine.apply for collapse-shape stride
-  // products (e.g. flattening an MoE expert-major 3D memref to 2D). The
-  // ConvertHipToLLVM lowering does not include affine→arith patterns, so any
-  // surviving affine.apply leaves builtin.unrealized_conversion_cast in the
-  // final LLVM IR and "Failed to translate MLIR to LLVM IR" aborts compile.
-  pm.addPass(createLowerAffinePass());
 
   pm.addPass(createConvertHipToLLVMPass());
 

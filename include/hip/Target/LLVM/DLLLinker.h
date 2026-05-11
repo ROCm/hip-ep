@@ -1,9 +1,12 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-#ifndef DLL_LINKER_H
-#define DLL_LINKER_H
+//===- DLLLinker.h - Native DLL linker declarations for the HIP compiler - *-
+// C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+#ifndef HIP_TARGET_LLVM_DLLLINKER_H
+#define HIP_TARGET_LLVM_DLLLINKER_H
 
 #include <string>
 #include <vector>
@@ -80,4 +83,4 @@ private:
 
 } // namespace hipdnn
 
-#endif // DLL_LINKER_H
+#endif // HIP_TARGET_LLVM_DLLLINKER_H

@@ -33,6 +33,7 @@ add_dependencies(HipToLLVM
   HipTypesIncGen
   HipOpsIncGen
   HipPassesIncGen
+  HipConversionPassesIncGen
 )
 
 target_link_libraries(HipToLLVM PUBLIC

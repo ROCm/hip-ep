@@ -1,9 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-
-//===- ResolveExternConstants.cpp - Replace extern globals with hip.get_constant
+//===- ResolveExternConstants.cpp - Resolve extern constants ---*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 //
 // The --hip-resolve-extern-constants pass bridges the gap between compile-time
 // constant externalization (which produces memref.global ops with
@@ -34,7 +34,6 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
-
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 

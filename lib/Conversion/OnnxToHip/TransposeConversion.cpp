@@ -1,7 +1,12 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- TransposeConversion.cpp - ONNX-to-HIP Transpose conversion - *- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+
+#include "mlir/Dialect/Arith/IR/Arith.h"
 
 #include "OnnxToHipUtils.h"
 
@@ -19,9 +24,8 @@ struct TransposeToHip : public mlir::RewritePattern {
   TransposeToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Transpose", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
 mlir::LogicalResult
@@ -32,12 +36,12 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
                                        "expected single-input single-output");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
-  mlir::Value context = *ctxOrFailure;
+  if (failed(ctxOrFailure))
+    return failure();
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
-  mlir::Value data = op->getOperand(0);
+  Location loc = op->getLoc();
+  Value data = op->getOperand(0);
 
   auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
   if (!inputType)
@@ -87,15 +91,14 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
           rewriter, loc, data, static_cast<int64_t>(srcDim)));
   }
 
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
+  Value init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                       resultType.getElementType(), dynSizes);
 
   mlir::ArrayAttr permArrayAttr = rewriter.getI64ArrayAttr(perm);
   auto hipOp = mlir::hip::TransposeOp::create(
       rewriter, loc, resultType, context, data, init, permArrayAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return success();
 }
 
 } // namespace

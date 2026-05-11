@@ -19,6 +19,7 @@ add_dependencies(OnnxToHipDNN
   HipDialectIncGen
   HipTypesIncGen
   HipOpsIncGen
+  HipConversionPassesIncGen
 )
 
 target_include_directories(OnnxToHipDNN PRIVATE

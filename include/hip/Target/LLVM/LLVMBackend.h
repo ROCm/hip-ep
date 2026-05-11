@@ -1,9 +1,12 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-#ifndef LLVM_BACKEND_H
-#define LLVM_BACKEND_H
+//===- LLVMBackend.h - LLVM IR backend declarations for the HIP compiler - *-
+// C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+#ifndef HIP_TARGET_LLVM_LLVMBACKEND_H
+#define HIP_TARGET_LLVM_LLVMBACKEND_H
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -77,4 +80,4 @@ private:
 
 } // namespace hipdnn
 
-#endif // LLVM_BACKEND_H
+#endif // HIP_TARGET_LLVM_LLVMBACKEND_H

@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- MatMulNBitsConversion.cpp - ONNX-to-HIP MatMulNBits conversion - *- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -13,28 +16,27 @@ namespace {
 // ONNX MatMulNBits -> HIP MatMulNBits (com.microsoft custom op)
 //===----------------------------------------------------------------------===//
 
-struct MatMulNBitsToHip : public mlir::RewritePattern {
-  MatMulNBitsToHip(mlir::MLIRContext *ctx)
+struct MatMulNBitsToHip : public RewritePattern {
+  MatMulNBitsToHip(MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult
-MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
-                                  mlir::PatternRewriter &rewriter) const {
-  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+LogicalResult
+MatMulNBitsToHip::matchAndRewrite(Operation *op,
+                                  PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "MatMulNBits") {
     return rewriter.notifyMatchFailure(op, "not a MatMulNBits custom op");
   }
-  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  auto domainAttr = op->getAttrOfType<StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft") {
     return rewriter.notifyMatchFailure(op, "not a com.microsoft domain op");
   }
 
-  mlir::Location loc = op->getLoc();
+  Location loc = op->getLoc();
 
   if (op->getNumOperands() < 3) {
     return rewriter.notifyMatchFailure(
@@ -45,42 +47,42 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   }
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure)) {
+  if (failed(ctxOrFailure)) {
     return rewriter.notifyMatchFailure(op, "failed to get context argument");
   }
-  mlir::Value context = *ctxOrFailure;
+  Value context = *ctxOrFailure;
 
-  mlir::Value A = op->getOperand(0);
-  mlir::Value B = op->getOperand(1);
-  mlir::Value scales = op->getOperand(2);
+  Value A = op->getOperand(0);
+  Value B = op->getOperand(1);
+  Value scales = op->getOperand(2);
 
-  auto getOptionalInput = [&](unsigned idx) -> mlir::Value {
+  auto getOptionalInput = [&](unsigned idx) -> Value {
     if (idx >= op->getNumOperands()) {
-      return mlir::Value{};
+      return Value{};
     }
-    mlir::Value v = op->getOperand(idx);
-    if (!v || mlir::isa<mlir::NoneType>(v.getType())) {
-      return mlir::Value{};
+    Value v = op->getOperand(idx);
+    if (!v || isa<NoneType>(v.getType())) {
+      return Value{};
     }
     return v;
   };
-  mlir::Value zeroPoints = getOptionalInput(3);
-  mlir::Value gIdx = getOptionalInput(4);
-  mlir::Value bias = getOptionalInput(5);
+  Value zeroPoints = getOptionalInput(3);
+  Value gIdx = getOptionalInput(4);
+  Value bias = getOptionalInput(5);
 
-  auto KAttr = rewriter.getI64IntegerAttr(
-      op->getAttrOfType<mlir::IntegerAttr>("K").getSInt());
-  auto NAttr = rewriter.getI64IntegerAttr(
-      op->getAttrOfType<mlir::IntegerAttr>("N").getSInt());
+  auto KAttr =
+      rewriter.getI64IntegerAttr(op->getAttrOfType<IntegerAttr>("K").getSInt());
+  auto NAttr =
+      rewriter.getI64IntegerAttr(op->getAttrOfType<IntegerAttr>("N").getSInt());
 
-  auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
+  auto bitsIntAttr = op->getAttrOfType<IntegerAttr>("bits");
   auto bitsAttr =
       rewriter.getI64IntegerAttr(bitsIntAttr ? bitsIntAttr.getSInt() : 4);
 
   auto blockSizeAttr = rewriter.getI64IntegerAttr(
-      op->getAttrOfType<mlir::IntegerAttr>("block_size").getSInt());
+      op->getAttrOfType<IntegerAttr>("block_size").getSInt());
 
-  auto accuracyIntAttr = op->getAttrOfType<mlir::IntegerAttr>("accuracy_level");
+  auto accuracyIntAttr = op->getAttrOfType<IntegerAttr>("accuracy_level");
   auto accuracyLevelAttr = rewriter.getI64IntegerAttr(
       accuracyIntAttr ? accuracyIntAttr.getSInt() : 0);
 
@@ -91,8 +93,8 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   // Reject anything else at compile time to avoid silent precision bugs.
   int64_t zpElemSize = 2; // default: fp16 (when zeroPoints is absent)
   if (zeroPoints) {
-    auto zpTy = mlir::cast<mlir::ShapedType>(zeroPoints.getType());
-    mlir::Type elemTy = zpTy.getElementType();
+    auto zpTy = cast<ShapedType>(zeroPoints.getType());
+    Type elemTy = zpTy.getElementType();
     if (elemTy.isInteger(8)) {
       zpElemSize = 1; // uint8 container holding packed uint4 nibbles
     } else if (elemTy.isF16()) {
@@ -108,15 +110,15 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   }
   auto zpElemSizeAttr = rewriter.getI64IntegerAttr(zpElemSize);
 
-  auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
+  auto rt = cast<RankedTensorType>(op->getResult(0).getType());
+  Value init = createEmptyTensor(rewriter, loc, rt, A);
 
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
-      rewriter, loc, mlir::TypeRange{rt}, context, A, B, scales, zeroPoints,
-      gIdx, bias, init, KAttr, NAttr, bitsAttr, blockSizeAttr,
-      accuracyLevelAttr, zpElemSizeAttr);
+      rewriter, loc, TypeRange{rt}, context, A, B, scales, zeroPoints, gIdx,
+      bias, init, KAttr, NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr,
+      zpElemSizeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
-  return mlir::success();
+  return success();
 }
 
 } // namespace

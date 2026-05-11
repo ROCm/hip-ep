@@ -33,6 +33,7 @@ add_dependencies(OnnxToHip
   HipTypesIncGen
   HipOpsIncGen
   HipPassesIncGen
+  HipConversionPassesIncGen
 )
 
 target_link_libraries(OnnxToHip PUBLIC

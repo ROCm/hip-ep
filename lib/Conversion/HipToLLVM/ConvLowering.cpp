@@ -1,7 +1,38 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- ConvLowering.cpp - HIP-to-LLVM Conv lowering ----------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Why this lowering exists
+// ------------------------
+// `hip.conv` carries a tensor-DPS (memref-after-bufferization) view of an
+// ONNX convolution plus the convolution attributes (strides, pads,
+// dilations, groups, kernel shape).  At LLVM-dialect time those attributes
+// must be turned into a flat C-ABI call `wrap_miopenConvolutionForward(...)`
+// that the HIP runtime registers with MIOpen.
+//
+// Non-obvious choices
+// -------------------
+// * Pad pairs are passed as four scalars (top/left/bottom/right) instead of
+//   an i32 array because the runtime wrapper accepts plain ints; this keeps
+//   the LLVM dialect call IR free of extra `llvm.alloca` for tiny buffers.
+// * Operand pointers are extracted via `extractContiguousMemRefPtr`, which
+//   asserts identity layout.  PromoteStridedHipOperands guarantees that
+//   precondition for every consumer of `hip.conv`, so the lowering pattern
+//   never has to materialize a contiguous temporary itself.
+// * Output (DPS-init) operand follows the same pointer-extraction path as
+//   inputs; the wrapper writes through it in place.
+//
+// Pipeline placement
+// ------------------
+// Runs as part of `--convert-hip-to-llvm`, after `--hip-pool-allocs` has
+// rewritten allocs into `memref.view` ops.  The descriptor extracted here is
+// always backed by a single byte pool, so `alignedPtr` already includes the
+// view's offset.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
