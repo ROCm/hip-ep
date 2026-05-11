@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- BufferUtils.cpp - Shared buffer analysis utilities -----------------===//
 //
 // Implements the utilities declared in BufferUtils.h.
@@ -12,7 +8,6 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-
 #include "llvm/Support/MathExtras.h"
 
 using namespace mlir;

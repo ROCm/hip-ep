@@ -1,15 +1,18 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CompilerDriver.cpp - End-to-end HIP compilation driver - *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Compiler/CompilerDriver.h"
+
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
-
 #include "hip/Target/LLVM/DLLLinker.h"
 #include "hip/Target/LLVM/LLVMBackend.h"
+#include "hip/debug_log.h"
 
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -19,19 +22,17 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
-
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "hip/debug_log.h"
-
 #include <chrono>
 #include <cstdlib>
 #include <sstream>
 
-namespace hip::compiler {
+namespace mlir {
+namespace hip {
 
 namespace {
 bool fileExists(const std::string &path) {
@@ -45,10 +46,10 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
                              const std::string &output_path,
                              const mlir::hip::CompilationOptionsT &options,
                              std::string &error_message) {
-  hip::compiler::registerAllPasses();
+  registerAllPasses();
 
   mlir::MLIRContext context;
-  hip::compiler::loadAllDialects(context);
+  loadAllDialects(context);
   mlir::registerLLVMDialectTranslation(context);
 
   COMPILER_DEBUG_LOG("[CompilerDriver::compile] Input size: "
@@ -82,14 +83,14 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
 bool CompilerDriver::compileFromModule(
     mlir::ModuleOp module, const std::string &output_path,
     const mlir::hip::CompilationOptionsT &options, std::string &error_message) {
-  hip::compiler::registerAllPasses();
+  registerAllPasses();
   return compileImpl(module, output_path, options, error_message);
 }
 
 bool CompilerDriver::validate(llvm::StringRef input_mlir,
                               std::string &error_message) {
   mlir::MLIRContext context;
-  hip::compiler::loadAllDialects(context);
+  loadAllDialects(context);
 
   auto memBuffer = llvm::MemoryBuffer::getMemBuffer(input_mlir, "", false);
   llvm::SourceMgr sourceMgr;
@@ -443,4 +444,5 @@ void CompilerDriver::cleanupIntermediates(const std::string &basePath) {
   }
 }
 
-} // namespace hip::compiler
+} // namespace hip
+} // namespace mlir

@@ -1,18 +1,19 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CompilerAPI.cpp - C ABI for the HIP compiler driver ---- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Compiler/CompilerDriver.h"
 #include "hip/compiler_api.h"
 #include "hip/compiler_types.h"
 #include "hip/flatbuffers_json.h"
-
 #include "morphizen-foundation/file_io.hpp"
 
-#include "compilation_options_schema.h"
-
 #include "llvm/ADT/StringRef.h"
+
+#include "compilation_options_schema.h"
 
 #include <cstring>
 #include <string>
@@ -21,7 +22,7 @@
 #include "../HipDNNGraphRuntime/hipdnn_graph_runtime.h"
 #endif
 
-using namespace hip::compiler;
+using namespace mlir::hip;
 
 static const char *COMPILER_VERSION = "1.0.0";
 

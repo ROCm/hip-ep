@@ -1,11 +1,14 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-#ifndef HIP_PASSES_H
-#define HIP_PASSES_H
+//===- Passes.h - HIP dialect transform pass declarations ----- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+#ifndef HIP_DIALECT_TRANSFORMS_PASSES_H
+#define HIP_DIALECT_TRANSFORMS_PASSES_H
 
 #include "mlir/Pass/Pass.h"
+
 #include <memory>
 #include <string>
 
@@ -30,4 +33,4 @@ createGenerateInterfacePass(const CompilationOptionsT &options);
 } // namespace hip
 } // namespace mlir
 
-#endif // HIP_PASSES_H
+#endif // HIP_DIALECT_TRANSFORMS_PASSES_H

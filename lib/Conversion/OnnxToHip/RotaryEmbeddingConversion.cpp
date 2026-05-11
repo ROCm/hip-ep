@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- RotaryEmbeddingConversion.cpp - ONNX-to-HIP RotaryEmbedding conversion -
+//*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -10,54 +13,52 @@ namespace hip {
 namespace {
 
 /// onnx.Custom(RotaryEmbedding) -> hip.rope
-struct RotaryEmbeddingToHip : public mlir::RewritePattern {
-  RotaryEmbeddingToHip(mlir::MLIRContext *ctx)
+struct RotaryEmbeddingToHip : public RewritePattern {
+  RotaryEmbeddingToHip(MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult
-RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
-                                      mlir::PatternRewriter &rewriter) const {
+LogicalResult
+RotaryEmbeddingToHip::matchAndRewrite(Operation *op,
+                                      PatternRewriter &rewriter) const {
   // Check if this is RotaryEmbedding
-  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  auto funcNameAttr = op->getAttrOfType<StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "RotaryEmbedding")
     return rewriter.notifyMatchFailure(op, "not a RotaryEmbedding operation");
 
   // Check domain is "com.microsoft"
-  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  auto domainAttr = op->getAttrOfType<StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
     return rewriter.notifyMatchFailure(
         op, "domain must be com.microsoft for RotaryEmbedding");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
+  if (failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
+  Location loc = op->getLoc();
 
   // Check operands (should be 4: input, position_ids, cos_cache, sin_cache)
   if (op->getNumOperands() != 4)
     return rewriter.notifyMatchFailure(
         op, "expected 4 operands for RotaryEmbedding");
 
-  mlir::Value input = op->getOperand(0);
-  mlir::Value positionIds = op->getOperand(1);
-  mlir::Value cosCache = op->getOperand(2);
-  mlir::Value sinCache = op->getOperand(3);
+  Value input = op->getOperand(0);
+  Value positionIds = op->getOperand(1);
+  Value cosCache = op->getOperand(2);
+  Value sinCache = op->getOperand(3);
 
   // All attributes are optional per the ONNX com.microsoft.RotaryEmbedding
   // spec.  Defaults: interleaved=0, num_heads=0, rotary_embedding_dim=0.
   // A value of 0 for num_heads / rotary_embedding_dim means "infer from
   // tensor shapes".
-  auto interleavedAttr = op->getAttrOfType<mlir::IntegerAttr>("interleaved");
-  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
-  auto rotaryDimAttr =
-      op->getAttrOfType<mlir::IntegerAttr>("rotary_embedding_dim");
+  auto interleavedAttr = op->getAttrOfType<IntegerAttr>("interleaved");
+  auto numHeadsAttr = op->getAttrOfType<IntegerAttr>("num_heads");
+  auto rotaryDimAttr = op->getAttrOfType<IntegerAttr>("rotary_embedding_dim");
 
   int64_t interleavedVal = interleavedAttr ? interleavedAttr.getSInt() : 0;
   int64_t numHeadsVal = numHeadsAttr ? numHeadsAttr.getSInt() : 0;
@@ -84,8 +85,7 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
 
   if (rotaryDimVal == 0) {
-    auto cosCacheType =
-        mlir::dyn_cast<mlir::RankedTensorType>(cosCache.getType());
+    auto cosCacheType = dyn_cast<RankedTensorType>(cosCache.getType());
     if (cosCacheType && cosCacheType.hasStaticShape() &&
         cosCacheType.getRank() >= 2) {
       rotaryDimVal = cosCacheType.getShape().back() * 2;
@@ -131,11 +131,10 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(op,
                                        "expected 1 result for RotaryEmbedding");
 
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
 
   // Create init tensor
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
   // Create hip.rope operation
   auto hipOp = mlir::hip::RopeOp::create(
@@ -143,7 +142,7 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
       sinCache, init, interleavedI64Attr, numHeadsI64Attr, rotaryDimI64Attr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return success();
 }
 
 } // namespace

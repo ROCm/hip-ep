@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- timing.h - HIP compiler scoped timing helpers ---------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 // Lightweight CPU phase-timing utilities for session initialisation and
 // compilation diagnostics.  Pure C++ stdlib -- no LLVM, HIP, or external deps

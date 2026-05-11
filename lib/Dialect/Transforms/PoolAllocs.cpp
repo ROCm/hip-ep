@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- PoolAllocs.cpp - Pack memref.alloc into a single i8 pool -----------===//
 //
 // Packs all memref.alloc ops in a single-block function into one contiguous
@@ -36,7 +32,6 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
@@ -314,8 +309,17 @@ void PoolAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
-  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
-  // instead of sequential op indices.
+
+  // Limitation: single-block functions only.
+  //
+  // The greedy best-fit packer assigns each alloc a [defIdx, lastUseIdx]
+  // window using sequential op indices within a single block.  Generalizing
+  // to multi-block control flow would require switching to `mlir::Liveness`
+  // and rephrasing overlap as "intersecting program-point sets" rather than
+  // "intersecting [a, b] intervals".  Not done because every function
+  // produced by onnx-mlir + bufferization in this pipeline has exactly one
+  // block; if that ever changes (e.g., we adopt control flow for dynamic
+  // dispatch), a clear `emitError` here will surface the breakage early.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-pool-allocs requires single-block functions; "
                      "liveness analysis uses sequential op indices that do "

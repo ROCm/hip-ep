@@ -1,7 +1,36 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- GqaConversion.cpp - ONNX-to-HIP Gqa conversion --------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Why this conversion exists
+// --------------------------
+// Group Query Attention as exported by ONNX Runtime
+// (`com.microsoft.GroupQueryAttention`) is a single op that bundles
+// projections, KV-cache update, optional rotary embedding, and softmax
+// attention into one contraction.  Splitting it across primitive ONNX ops
+// would discard the structural information needed to dispatch an optimized
+// HIP kernel, so we rewrite directly to a single `hip.gqa` op that mirrors
+// the ONNX schema.
+//
+// Non-obvious choices
+// -------------------
+// * Optional `cos_cache` / `sin_cache` operands (rotary embedding tables)
+//   are forwarded as `OptionalValueRange` so that downstream lowering can
+//   distinguish "no rotary" from "rotary with these tables" without an
+//   extra attribute.
+// * `do_rotary` and `rotary_interleaved` attributes are passed through as
+//   integer attributes on `hip.gqa` rather than expanded into separate
+//   pre/post rotary ops -- the runtime kernel folds rotary into the
+//   attention prologue, so emitting two ops would just churn the IR.
+// * The KV-cache outputs (`present_key`, `present_value`) are *aliasing
+//   results*: they share storage with the in-place updated `past_key` /
+//   `past_value` operands.  We rely on bufferization + DPS to keep that
+//   aliasing observable; a copy here would defeat the cache.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -10,35 +39,35 @@ namespace hip {
 namespace {
 
 /// onnx.Custom(GroupQueryAttention) -> hip.gqa
-struct GroupQueryAttentionToHip : public mlir::RewritePattern {
-  GroupQueryAttentionToHip(mlir::MLIRContext *ctx)
+struct GroupQueryAttentionToHip : public RewritePattern {
+  GroupQueryAttentionToHip(MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+LogicalResult
+GroupQueryAttentionToHip::matchAndRewrite(Operation *op,
+                                          PatternRewriter &rewriter) const {
   // Check if this is GroupQueryAttention
-  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  auto funcNameAttr = op->getAttrOfType<StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "GroupQueryAttention")
     return rewriter.notifyMatchFailure(op,
                                        "not a GroupQueryAttention operation");
 
   // Check domain is "com.microsoft"
-  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  auto domainAttr = op->getAttrOfType<StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
     return rewriter.notifyMatchFailure(
         op, "domain must be com.microsoft for GroupQueryAttention");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
+  if (failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
+  Location loc = op->getLoc();
 
   // Support variable operand count (7-14 inputs as per MS spec)
   // Minimum 7: query, key, value, past_key, past_value, seqlens_k,
@@ -50,14 +79,14 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
         op, "GroupQueryAttention expects 7-14 operands");
 
   // Helper: get optional operand (check for NoneType)
-  auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
+  auto getOptionalOperand = [&](size_t idx) -> Value {
     if (idx >= numOps)
       return nullptr; // Operand not provided (trailing optionals omitted)
 
-    mlir::Value val = op->getOperand(idx);
+    Value val = op->getOperand(idx);
 
     // Check if it's ONNX NoneType (optional input marked as omitted)
-    if (mlir::isa<mlir::NoneType>(val.getType()))
+    if (isa<NoneType>(val.getType()))
       return nullptr;
 
     return val; // Valid operand
@@ -66,71 +95,68 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   // === Extract Inputs (MS GQA spec order 1-14) ===
 
   // Input 1: query (required)
-  mlir::Value query = op->getOperand(0);
+  Value query = op->getOperand(0);
 
   // Inputs 2-3: key/value (optional - packed QKV)
-  mlir::Value key = getOptionalOperand(1);
-  mlir::Value value = getOptionalOperand(2);
+  Value key = getOptionalOperand(1);
+  Value value = getOptionalOperand(2);
 
   // Inputs 4-5: past_key/past_value (optional - first inference)
-  mlir::Value pastKey = getOptionalOperand(3);
-  mlir::Value pastValue = getOptionalOperand(4);
+  Value pastKey = getOptionalOperand(3);
+  Value pastValue = getOptionalOperand(4);
 
   // Inputs 6-7: seqlens_k, total_seq_len (required)
   if (numOps < 7)
     return rewriter.notifyMatchFailure(op, "missing seqlens_k/total_seq_len");
-  mlir::Value seqlensK = op->getOperand(5);
-  mlir::Value totalSeqLen = op->getOperand(6);
+  Value seqlensK = op->getOperand(5);
+  Value totalSeqLen = op->getOperand(6);
 
   // Inputs 8-10: cos_cache, sin_cache, position_ids (optional - RoPE)
-  mlir::Value cosCache = getOptionalOperand(7);
-  mlir::Value sinCache = getOptionalOperand(8);
-  mlir::Value positionIds = getOptionalOperand(9);
+  Value cosCache = getOptionalOperand(7);
+  Value sinCache = getOptionalOperand(8);
+  Value positionIds = getOptionalOperand(9);
 
   // Input 11: attention_bias (optional - ALiBi etc.)
-  mlir::Value attentionBias = getOptionalOperand(10);
+  Value attentionBias = getOptionalOperand(10);
 
   // Input 12: head_sink (optional - smooth softmax)
-  mlir::Value headSink = getOptionalOperand(11);
+  Value headSink = getOptionalOperand(11);
 
   // Inputs 13-14: k_scale, v_scale (optional - quantization)
-  mlir::Value kScale = getOptionalOperand(12);
-  mlir::Value vScale = getOptionalOperand(13);
+  Value kScale = getOptionalOperand(12);
+  Value vScale = getOptionalOperand(13);
 
   // === Extract Attributes ===
 
   // Required attributes - extract value and recreate as signless i64
-  auto numHeadsAttrOnnx = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
+  auto numHeadsAttrOnnx = op->getAttrOfType<IntegerAttr>("num_heads");
   if (!numHeadsAttrOnnx)
     return rewriter.notifyMatchFailure(op, "missing num_heads attribute");
   auto numHeadsAttr =
       rewriter.getI64IntegerAttr(numHeadsAttrOnnx.getValue().getSExtValue());
 
-  auto kvNumHeadsAttrOnnx =
-      op->getAttrOfType<mlir::IntegerAttr>("kv_num_heads");
+  auto kvNumHeadsAttrOnnx = op->getAttrOfType<IntegerAttr>("kv_num_heads");
   if (!kvNumHeadsAttrOnnx)
     return rewriter.notifyMatchFailure(op, "missing kv_num_heads attribute");
   auto kvNumHeadsAttr =
       rewriter.getI64IntegerAttr(kvNumHeadsAttrOnnx.getValue().getSExtValue());
 
   // Optional attributes (with default values)
-  auto getFloatAttr = [&](const char *name,
-                          float defaultVal) -> mlir::FloatAttr {
-    auto attr = op->getAttrOfType<mlir::FloatAttr>(name);
+  auto getFloatAttr = [&](const char *name, float defaultVal) -> FloatAttr {
+    auto attr = op->getAttrOfType<FloatAttr>(name);
     return attr ? attr : rewriter.getF32FloatAttr(defaultVal);
   };
 
-  auto getI64Attr = [&](const char *name,
-                        int64_t defaultVal) -> mlir::IntegerAttr {
-    auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
+  auto getI64Attr = [&](const char *name, int64_t defaultVal) -> IntegerAttr {
+    auto attr = op->getAttrOfType<IntegerAttr>(name);
     // Convert ONNX signed integer to signless integer for HIP dialect
     return attr ? rewriter.getI64IntegerAttr(attr.getValue().getSExtValue())
                 : rewriter.getI64IntegerAttr(defaultVal);
   };
 
   auto getStrAttr = [&](const char *name,
-                        const char *defaultVal) -> mlir::StringAttr {
-    auto attr = op->getAttrOfType<mlir::StringAttr>(name);
+                        const char *defaultVal) -> StringAttr {
+    auto attr = op->getAttrOfType<StringAttr>(name);
     return attr ? attr : rewriter.getStringAttr(defaultVal);
   };
 
@@ -139,12 +165,12 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   // head_size = (num_heads * head_size) / num_heads = query_dim_2 / num_heads
   // Fallback 0.0 is the ORT sentinel meaning "auto-compute at runtime"
   // (gqa_attention_base.h: scale_ == 0.0f ? 1/sqrt(head_size) : scale_)
-  auto queryType = mlir::cast<mlir::RankedTensorType>(query.getType());
+  auto queryType = cast<RankedTensorType>(query.getType());
   int64_t numHeads = numHeadsAttrOnnx.getValue().getSExtValue();
   float defaultScale = 0.0f;
   if (queryType.hasRank() && queryType.getRank() >= 3) {
     int64_t hiddenSize = queryType.getDimSize(2); // num_heads * head_size
-    if (hiddenSize != mlir::ShapedType::kDynamic && numHeads > 0) {
+    if (hiddenSize != ShapedType::kDynamic && numHeads > 0) {
       int64_t headSize = hiddenSize / numHeads;
       defaultScale = 1.0f / std::sqrt(static_cast<float>(headSize));
     }
@@ -169,34 +195,30 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "GroupQueryAttention expects 3-4 results");
 
-  auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto presentKeyType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
-  auto presentValueType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+  auto outputType = cast<RankedTensorType>(op->getResult(0).getType());
+  auto presentKeyType = cast<RankedTensorType>(op->getResult(1).getType());
+  auto presentValueType = cast<RankedTensorType>(op->getResult(2).getType());
 
-  mlir::RankedTensorType outputQkType = nullptr;
+  RankedTensorType outputQkType = nullptr;
   if (numResults == 4)
-    outputQkType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(3).getType());
+    outputQkType = cast<RankedTensorType>(op->getResult(3).getType());
 
   // === Create DPS init tensors ===
 
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentKeyInit = createEmptyTensor(
+  Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
+  Value presentKeyInit = createEmptyTensor(
       rewriter, loc, presentKeyType, pastKey ? pastKey : (key ? key : query));
-  mlir::Value presentValueInit =
+  Value presentValueInit =
       createEmptyTensor(rewriter, loc, presentValueType,
                         pastValue ? pastValue : (value ? value : query));
 
-  mlir::Value outputQkInit = nullptr;
+  Value outputQkInit = nullptr;
   if (outputQkType)
     outputQkInit = createEmptyTensor(rewriter, loc, outputQkType, query);
 
   // === Create hip.gqa operation ===
 
-  mlir::SmallVector<mlir::Type> resultTypes;
+  SmallVector<Type> resultTypes;
   resultTypes.push_back(outputType);
   resultTypes.push_back(presentKeyType);
   resultTypes.push_back(presentValueType);
@@ -205,7 +227,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
 
   // Build operands: context + inputs + outputs
   // Note: Only add non-null operands (optional ones may be nullptr)
-  mlir::SmallVector<mlir::Value> operands;
+  SmallVector<Value> operands;
   operands.push_back(context);
   operands.push_back(query);
   if (key)
@@ -239,7 +261,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     operands.push_back(outputQkInit);
 
   // Build named attributes
-  mlir::SmallVector<mlir::NamedAttribute> attrs;
+  SmallVector<NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("num_heads", numHeadsAttr));
   attrs.push_back(rewriter.getNamedAttr("kv_num_heads", kvNumHeadsAttr));
   attrs.push_back(rewriter.getNamedAttr("scale", scaleAttr));
@@ -259,7 +281,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   // Create operation using builder
   // We need to compute the operand_segment_sizes attribute for
   // AttrSizedOperandSegments
-  auto state = mlir::OperationState(loc, "hip.gqa");
+  auto state = OperationState(loc, "hip.gqa");
   state.addOperands(operands);
   state.addAttributes(attrs);
   state.addTypes(resultTypes);
@@ -298,7 +320,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   auto hipOp = rewriter.create(state);
 
   rewriter.replaceOp(op, hipOp->getResults());
-  return mlir::success();
+  return success();
 }
 
 } // namespace

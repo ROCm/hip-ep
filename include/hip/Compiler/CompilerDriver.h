@@ -1,15 +1,20 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CompilerDriver.h - HIP compiler driver declarations ---- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
-#ifndef HIP_COMPILER_COMPILER_DRIVER_H
-#define HIP_COMPILER_COMPILER_DRIVER_H
+#ifndef HIP_COMPILER_COMPILERDRIVER_H
+#define HIP_COMPILER_COMPILERDRIVER_H
 
-#include "compilation_options_generated.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
+
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
+
+#include "compilation_options_generated.h"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,7 +33,8 @@ namespace morphizen {
 class FileSystem;
 } // namespace morphizen
 
-namespace hip::compiler {
+namespace mlir {
+namespace hip {
 
 /// End-to-end compilation driver for MLIR → DLL/Object/IR.
 ///
@@ -111,6 +117,7 @@ private:
   mlir::hip::CompiledGraphMap compiledGraphs_;
 };
 
-} // namespace hip::compiler
+} // namespace hip
+} // namespace mlir
 
-#endif // HIP_COMPILER_COMPILER_DRIVER_H
+#endif // HIP_COMPILER_COMPILERDRIVER_H

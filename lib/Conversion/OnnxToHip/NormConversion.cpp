@@ -1,7 +1,38 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- NormConversion.cpp - ONNX-to-HIP norm conversions ------ *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Why this conversion exists
+// --------------------------
+// LLM checkpoints use a small zoo of layer-norm variants:
+//
+//   * `onnx.LayerNormalization` (canonical) -- mean + variance + scale.
+//   * `com.microsoft.SimplifiedLayerNormalization` (RMSNorm) -- variance
+//     only.
+//   * `com.microsoft.SkipSimplifiedLayerNormalization` -- adds a residual
+//     before the norm and emits the residual sum as a side output.
+//
+// Each maps to a different MIOpen entry point and benefits from being a
+// distinct dialect op (`hip.layer_norm`, `hip.rmsnorm`,
+// `hip.skip_simplified_layer_norm`) so the lowering can pick the right
+// runtime call without re-decoding op-specific attributes at LLVM time.
+//
+// Non-obvious choices
+// -------------------
+// * The skip variant has *two* outputs: the normalized tensor and the
+//   residual-summed tensor.  We emit both as DPS-init operands so
+//   bufferization keeps them backed by distinct allocations -- callers
+//   downstream (e.g., the K-cache for the next attention block) consume
+//   only the residual sum, but other consumers want only the norm.
+// * `axes` from `onnx.LayerNormalization` is normalized to a single
+//   trailing-axis form here; multi-axis layer-norm is rejected with a
+//   clear error rather than silently lowered to something the runtime
+//   can't compute.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -10,49 +41,49 @@ namespace hip {
 namespace {
 
 /// onnx.Custom(SimplifiedLayerNormalization) -> hip.rms_norm
-struct SimplifiedLayerNormToHip : public mlir::RewritePattern {
-  SimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
+struct SimplifiedLayerNormToHip : public RewritePattern {
+  SimplifiedLayerNormToHip(MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+LogicalResult
+SimplifiedLayerNormToHip::matchAndRewrite(Operation *op,
+                                          PatternRewriter &rewriter) const {
   // Check if this is SimplifiedLayerNormalization
-  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  auto funcNameAttr = op->getAttrOfType<StringAttr>("function_name");
   if (!funcNameAttr ||
       funcNameAttr.getValue() != "SimplifiedLayerNormalization")
     return rewriter.notifyMatchFailure(
         op, "not a SimplifiedLayerNormalization operation");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
+  if (failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
+  Location loc = op->getLoc();
 
   // Check operands (should be 2: input and scale)
   if (op->getNumOperands() != 2)
     return rewriter.notifyMatchFailure(
         op, "expected 2 operands for SimplifiedLayerNormalization");
 
-  mlir::Value input = op->getOperand(0);
-  mlir::Value scale = op->getOperand(1);
+  Value input = op->getOperand(0);
+  Value scale = op->getOperand(1);
 
   // Extract attributes
-  auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
+  auto epsilonAttr = op->getAttrOfType<FloatAttr>("epsilon");
   if (!epsilonAttr)
     return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
 
-  auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
+  auto axisAttr = op->getAttrOfType<IntegerAttr>("axis");
   if (!axisAttr)
     return rewriter.notifyMatchFailure(op, "missing axis attribute");
 
-  auto stashTypeAttr = op->getAttrOfType<mlir::IntegerAttr>("stash_type");
+  auto stashTypeAttr = op->getAttrOfType<IntegerAttr>("stash_type");
   if (!stashTypeAttr)
     return rewriter.notifyMatchFailure(op, "missing stash_type attribute");
 
@@ -60,11 +91,10 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
   auto axisI64Attr = rewriter.getI64IntegerAttr(axisAttr.getSInt());
   auto stashTypeI64Attr = rewriter.getI64IntegerAttr(stashTypeAttr.getSInt());
 
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
 
   // Create init tensor
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
   // Create hip.rms_norm operation
   auto hipOp = mlir::hip::RmsNormOp::create(rewriter, loc, resultType, context,
@@ -72,41 +102,41 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
                                             epsilonAttr, stashTypeI64Attr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
-  return mlir::success();
+  return success();
 }
 
 /// onnx.Custom(SkipSimplifiedLayerNormalization) -> hip.skip_rms_norm
-struct SkipSimplifiedLayerNormToHip : public mlir::RewritePattern {
-  SkipSimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
+struct SkipSimplifiedLayerNormToHip : public RewritePattern {
+  SkipSimplifiedLayerNormToHip(MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+LogicalResult
+SkipSimplifiedLayerNormToHip::matchAndRewrite(Operation *op,
+                                              PatternRewriter &rewriter) const {
   // Check if this is SkipSimplifiedLayerNormalization
-  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  auto funcNameAttr = op->getAttrOfType<StringAttr>("function_name");
   if (!funcNameAttr ||
       funcNameAttr.getValue() != "SkipSimplifiedLayerNormalization")
     return rewriter.notifyMatchFailure(
         op, "not a SkipSimplifiedLayerNormalization operation");
 
   // Check domain is "com.microsoft"
-  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  auto domainAttr = op->getAttrOfType<StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
     return rewriter.notifyMatchFailure(
         op,
         "domain must be com.microsoft for SkipSimplifiedLayerNormalization");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
+  if (failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
+  Location loc = op->getLoc();
 
   // MS spec: 3-4 inputs (input, skip, gamma, [bias])
   size_t numOps = op->getNumOperands();
@@ -114,25 +144,25 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "SkipSimplifiedLayerNormalization expects 3-4 operands");
 
-  auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
+  auto getOptionalOperand = [&](size_t idx) -> Value {
     if (idx >= numOps)
       return nullptr;
-    mlir::Value val = op->getOperand(idx);
-    if (mlir::isa<mlir::NoneType>(val.getType()))
+    Value val = op->getOperand(idx);
+    if (isa<NoneType>(val.getType()))
       return nullptr;
     return val;
   };
 
   // Input 1-3: required
-  mlir::Value input = op->getOperand(0);
-  mlir::Value skip = op->getOperand(1);
-  mlir::Value gamma = op->getOperand(2);
+  Value input = op->getOperand(0);
+  Value skip = op->getOperand(1);
+  Value gamma = op->getOperand(2);
 
   // Input 4: bias (optional)
-  mlir::Value bias = getOptionalOperand(3);
+  Value bias = getOptionalOperand(3);
 
   // Extract epsilon attribute
-  auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
+  auto epsilonAttr = op->getAttrOfType<FloatAttr>("epsilon");
   if (!epsilonAttr)
     return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
 
@@ -140,9 +170,8 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   // mean and inv_std_var are training-only; not modeled in HIP op.
   unsigned numResults = op->getNumResults();
 
-  auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  auto outputType = cast<RankedTensorType>(op->getResult(0).getType());
+  Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
 
   // Find input_skip_bias_sum: it's the last non-None result (index 1 or 3)
   bool hasSkipOutput = numResults >= 2;
@@ -150,16 +179,16 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
 
   // Check if the last result is actually a real tensor (not None)
   bool skipOutputIsReal = false;
-  mlir::RankedTensorType skipOutputType;
+  RankedTensorType skipOutputType;
   if (hasSkipOutput) {
-    mlir::Type lastType = op->getResult(skipOutIdx).getType();
-    if (!mlir::isa<mlir::NoneType>(lastType)) {
+    Type lastType = op->getResult(skipOutIdx).getType();
+    if (!isa<NoneType>(lastType)) {
       skipOutputIsReal = true;
-      skipOutputType = mlir::cast<mlir::RankedTensorType>(lastType);
+      skipOutputType = cast<RankedTensorType>(lastType);
     }
   }
 
-  mlir::Value skipOutputInit = nullptr;
+  Value skipOutputInit = nullptr;
   if (skipOutputIsReal)
     skipOutputInit = createEmptyTensor(rewriter, loc, skipOutputType, input);
   constexpr int64_t kCtxSize = 1;
@@ -170,7 +199,7 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   // Variadic outputs: always output (1) + optional skip_output (0|1)
   int64_t kOutputsSize = 1 + (skipOutputIsReal ? 1 : 0);
   // Build operands list for hip.skip_rms_norm
-  mlir::SmallVector<mlir::Value> operands;
+  SmallVector<Value> operands;
   operands.push_back(context);
   operands.push_back(input);
   operands.push_back(skip);
@@ -183,13 +212,13 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
     operands.push_back(skipOutputInit);
 
   // Build result types
-  mlir::SmallVector<mlir::Type> resultTypes;
+  SmallVector<Type> resultTypes;
   resultTypes.push_back(outputType);
   if (skipOutputIsReal)
     resultTypes.push_back(skipOutputType);
 
   // Build attributes
-  mlir::SmallVector<mlir::NamedAttribute> attrs;
+  SmallVector<NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("epsilon", epsilonAttr));
 
   // operand_segment_sizes for AttrSizedOperandSegments
@@ -202,7 +231,7 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   segmentSizes.push_back(kBiasSize);
   segmentSizes.push_back(kOutputsSize);
 
-  auto state = mlir::OperationState(loc, "hip.skip_rms_norm");
+  auto state = OperationState(loc, "hip.skip_rms_norm");
   state.addOperands(operands);
   state.addAttributes(attrs);
   state.addTypes(resultTypes);
@@ -212,32 +241,32 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   auto hipOp = rewriter.create(state);
 
   // Map HIP results back to ONNX results
-  llvm::SmallVector<mlir::Value> replacements;
+  llvm::SmallVector<Value> replacements;
   replacements.push_back(hipOp->getResult(0)); // output
 
   if (hasSkipOutput) {
     // Fill intermediate None results (mean, inv_std_var) with empty tensors
     for (unsigned i = 1; i < skipOutIdx; ++i) {
-      mlir::Type origType = op->getResult(i).getType();
-      if (mlir::isa<mlir::NoneType>(origType)) {
-        replacements.push_back(mlir::Value{});
+      Type origType = op->getResult(i).getType();
+      if (isa<NoneType>(origType)) {
+        replacements.push_back(Value{});
         continue;
       }
-      auto dummyType = mlir::cast<mlir::RankedTensorType>(origType);
-      replacements.push_back(mlir::tensor::EmptyOp::create(
+      auto dummyType = cast<RankedTensorType>(origType);
+      replacements.push_back(tensor::EmptyOp::create(
           rewriter, loc, dummyType.getShape(), dummyType.getElementType()));
     }
     if (skipOutputIsReal)
       replacements.push_back(hipOp->getResult(1)); // input_skip_bias_sum
     else {
-      auto dummyType = mlir::RankedTensorType::get({}, rewriter.getF32Type());
-      replacements.push_back(mlir::tensor::EmptyOp::create(
+      auto dummyType = RankedTensorType::get({}, rewriter.getF32Type());
+      replacements.push_back(tensor::EmptyOp::create(
           rewriter, loc, dummyType.getShape(), dummyType.getElementType()));
     }
   }
 
   rewriter.replaceOp(op, replacements);
-  return mlir::success();
+  return success();
 }
 
 } // namespace

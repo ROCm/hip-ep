@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- OptimizeMemRefs.cpp - Buffer reuse via liveness analysis -----------===//
 //
 // Greedy best-fit buffer reuse for single-block functions.  Replaces
@@ -48,7 +44,6 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
@@ -147,8 +142,13 @@ void OptimizeMemRefsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
-  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
-  // instead of sequential op indices.
+  // Limitation: single-block functions only.  Same caveat as
+  // hip-pool-allocs -- liveness here uses sequential op indices, which only
+  // make sense within a single block.  Multi-block support would mean
+  // switching to `mlir::Liveness`; not done because every function
+  // post-onnx-mlir+bufferization in this pipeline is single-block.  An
+  // error fires here so any future change introducing control flow shows
+  // up loudly instead of silently producing wrong reuse decisions.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-optimize-memrefs requires single-block functions; "
                      "liveness analysis uses sequential op indices that do "

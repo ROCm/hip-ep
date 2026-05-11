@@ -1,7 +1,37 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- GraphLowering.cpp - HIP-to-LLVM Graph op lowerings ----- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Why this lowering exists
+// ------------------------
+// Three "graph" ops in the HIP dialect carry pre-compiled subgraph metadata:
+//
+//   * `hip.miopen_graph` / `hip.hipblaslt_graph` -- region ops produced by
+//     library-specific fusion patterns earlier in the pipeline.  Their body
+//     already contains the lowered HIP runtime calls; the op wrapper exists
+//     only to mark fusion boundaries and is no longer needed at LLVM time.
+//     `GraphRegionOpLowering` simply inlines the body and erases the op.
+//
+//   * `hip.hipdnn_graph` -- carries a `graph_id` (index into the
+//     `CompiledGraphMap` populated by `CompileHipDNNGraphsPass`) plus the
+//     I/O UID arrays that hipDNN expects.  This one needs a real call into
+//     `hipdnn_graph_execute(state, graph_id, num_io, uids[], ptrs[])`.
+//
+// Non-obvious choices
+// -------------------
+// * The UID and pointer arrays are materialized on the stack via
+//   `llvm.alloca` rather than as constants, because runtime pointers are
+//   only available at execute time.  Their length is `numInputs +
+//   numOutputs` and is known at compile time, so the alloca is a fixed
+//   size.
+// * UIDs come from op attributes set during outlining + compilation
+//   (`input_uids`, `output_uids`); we error out at lowering time if their
+//   lengths don't match the operand counts to catch dialect bugs early.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 

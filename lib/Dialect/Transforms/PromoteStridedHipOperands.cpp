@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- PromoteStridedHipOperands.cpp - Strided -> contiguous copy ---------===//
 //
 // Materializes a contiguous temporary buffer for any DPS-input memref operand
@@ -49,7 +45,6 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
-
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
