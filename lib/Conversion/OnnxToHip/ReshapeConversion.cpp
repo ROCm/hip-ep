@@ -291,6 +291,112 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Shape -> constant or tensor construction (zero-cost metadata extraction)
+//===----------------------------------------------------------------------===//
+
+/// onnx.Shape -> arith.constant or tensor.from_elements (zero-cost metadata
+/// operation).
+///
+/// Shape extracts the dimensions of a tensor as a 1-D int64 tensor.
+/// This is a zero-cost metadata operation: MLIR knows tensor shapes at
+/// compile time via the type system. For static shapes, we fold to
+/// arith.constant. For dynamic shapes, we extract dimensions using
+/// tensor.dim and build the result tensor using tensor.from_elements.
+/// No HIP kernel is needed.
+struct ShapeToTensor : public mlir::RewritePattern {
+  ShapeToTensor(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Shape", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 1)
+      return rewriter.notifyMatchFailure(op, "expected 1 operand");
+
+    mlir::Value input = op->getOperand(0);
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    if (!inputType)
+      return rewriter.notifyMatchFailure(op, "expected ranked tensor type");
+
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!outputType)
+      return rewriter.notifyMatchFailure(op, "expected ranked output type");
+
+    mlir::Location loc = op->getLoc();
+    int64_t inputRank = inputType.getRank();
+
+    // Extract start and end attributes (ONNX spec: start=0, end=rank by
+    // default)
+    int64_t start = 0;
+    int64_t end = inputRank;
+
+    if (auto startAttr = op->getAttrOfType<mlir::IntegerAttr>("start"))
+      start = startAttr.getSInt();
+    if (auto endAttr = op->getAttrOfType<mlir::IntegerAttr>("end"))
+      end = endAttr.getSInt();
+
+    // Handle negative indices (ONNX allows negative start/end)
+    if (start < 0)
+      start += inputRank;
+    if (end < 0)
+      end += inputRank;
+
+    // Clamp to valid range [0, rank]
+    start = std::max<int64_t>(0, std::min<int64_t>(start, inputRank));
+    end = std::max<int64_t>(start, std::min<int64_t>(end, inputRank));
+
+    int64_t outputSize = end - start;
+
+    // Validate output type matches expected shape
+    if (!outputType.isDynamicDim(0) && outputType.getDimSize(0) != outputSize)
+      return rewriter.notifyMatchFailure(
+          op, "output type dimension does not match (end - start)");
+
+    // Case 1: Input has fully static shape -> fold to arith.constant
+    if (inputType.hasStaticShape()) {
+      llvm::SmallVector<int64_t> shapeValues;
+      for (int64_t i = start; i < end; ++i)
+        shapeValues.push_back(inputType.getDimSize(i));
+
+      auto shapeAttr = mlir::DenseIntElementsAttr::get(
+          mlir::RankedTensorType::get({outputSize}, rewriter.getI64Type()),
+          shapeValues);
+      auto constantOp =
+          rewriter.create<mlir::arith::ConstantOp>(loc, shapeAttr);
+      rewriter.replaceOp(op, constantOp.getResult());
+      return mlir::success();
+    }
+
+    // Case 2: Input has dynamic dimensions -> extract dims and build tensor
+    llvm::SmallVector<mlir::Value> dims;
+    for (int64_t i = start; i < end; ++i) {
+      if (inputType.isDynamicDim(i)) {
+        // Runtime extraction via tensor.dim
+        mlir::Value dimIndex =
+            mlir::tensor::DimOp::create(rewriter, loc, input, i);
+        // Convert index to i64 (Shape output is always i64)
+        mlir::Value dimI64 = rewriter.create<mlir::arith::IndexCastOp>(
+            loc, rewriter.getI64Type(), dimIndex);
+        dims.push_back(dimI64);
+      } else {
+        // Compile-time constant for static dimension
+        int64_t staticSize = inputType.getDimSize(i);
+        mlir::Value dimI64 = rewriter.create<mlir::arith::ConstantOp>(
+            loc, rewriter.getI64IntegerAttr(staticSize));
+        dims.push_back(dimI64);
+      }
+    }
+
+    // Build output tensor using tensor.from_elements
+    auto fromElementsOp =
+        rewriter.create<mlir::tensor::FromElementsOp>(loc, dims);
+    rewriter.replaceOp(op, fromElementsOp.getResult());
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Split -> standard tensor ops (zero-cost slice views)
 //===----------------------------------------------------------------------===//
 
@@ -549,7 +655,7 @@ struct SplitToStdTensor : public mlir::RewritePattern {
 void mlir::hip::populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx) {
   patterns.add<ReshapeToStdTensor, UnsqueezeToStdTensor, SqueezeToStdTensor,
-               SplitToStdTensor>(ctx);
+               SplitToStdTensor, ShapeToTensor>(ctx);
 }
 
 } // namespace hip
