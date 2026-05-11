@@ -9,17 +9,15 @@ add_subdirectory(OnnxToHip)
 add_subdirectory(OnnxToHipDNN)
 add_subdirectory(HipToLLVM)
 
-# Umbrella conversion library
-add_library(HipConversion STATIC
-  Passes.cpp
-)
+## Umbrella aggregator: an INTERFACE target that re-exposes the per-subsystem
+## conversion libraries as a single dependency. The TableGen-generated
+## `mlir::hip::registerHipConversionPasses()` (defined in
+## `include/hip/Conversion/Passes.h.inc`) replaces the previous hand-written
+## lambda registrations that lived in `Passes.cpp`.
+add_library(HipConversion INTERFACE)
 
-target_link_libraries(HipConversion PUBLIC
+target_link_libraries(HipConversion INTERFACE
   OnnxToHip
   OnnxToHipDNN
   HipToLLVM
-  MLIRIR
-  MLIRPass
 )
-
-set_target_properties(HipConversion PROPERTIES FOLDER "mlir/Conversion")

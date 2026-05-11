@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- compiler_api.h - Public C API for the HIP compiler ----- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #ifndef HIP_COMPILER_API_H
 #define HIP_COMPILER_API_H
@@ -39,15 +41,15 @@ extern "C" {
  * @return                COMPILER_SUCCESS or error code
  */
 COMPILER_API CompilerErrorCode hip_compile_with_fs(
-    const void *input_mlir, size_t input_size, const char *output_path,
-    const char *options_json, CompilerError *error, void *fs);
+    const void* input_mlir, size_t input_size, const char* output_path,
+    const char* options_json, CompilerError* error, void* fs);
 
 /**
  * Get compiler version string.
  *
  * @return Static version string (e.g., "1.0.0")
  */
-COMPILER_API const char *hip_get_version(void);
+COMPILER_API const char* hip_get_version(void);
 
 #ifdef __cplusplus
 }

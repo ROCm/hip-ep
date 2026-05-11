@@ -1,18 +1,19 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- RangeConversion.cpp - ONNX-to-HIP Range conversion ----- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
-#include "OnnxToHipUtils.h"
-
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
-#include "llvm/ADT/APFloat.h"
-#include "llvm/ADT/APInt.h"
-#include "llvm/ADT/TypeSwitch.h"
+#include "OnnxToHipUtils.h"
 
 namespace mlir {
 namespace hip {
@@ -21,7 +22,7 @@ namespace {
 /// Empty-result condition for integer Range:
 /// - delta > 0 and limit <= start
 /// - delta < 0 and limit >= start
-static Value buildIntRangeEmptyCheck(PatternRewriter &rewriter, Location loc,
+static Value buildIntRangeEmptyCheck(PatternRewriter& rewriter, Location loc,
                                      Value start, Value limit, Value delta,
                                      Value zero) {
   Value cmpPos = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
@@ -40,7 +41,7 @@ static Value buildIntRangeEmptyCheck(PatternRewriter &rewriter, Location loc,
 /// Empty-result condition for float Range:
 /// - delta > 0 and limit <= start
 /// - delta < 0 and limit >= start
-static Value buildFloatRangeEmptyCheck(PatternRewriter &rewriter, Location loc,
+static Value buildFloatRangeEmptyCheck(PatternRewriter& rewriter, Location loc,
                                        Value start, Value limit, Value delta,
                                        Value zero) {
   Value cmpPos = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::OGT,
@@ -57,7 +58,7 @@ static Value buildFloatRangeEmptyCheck(PatternRewriter &rewriter, Location loc,
 }
 
 /// Dynamic length (index) for integer numpy.arange(start, limit, delta).
-static Value buildIntRangeCount(PatternRewriter &rewriter, Location loc,
+static Value buildIntRangeCount(PatternRewriter& rewriter, Location loc,
                                 Value start, Value limit, Value delta,
                                 IntegerType elemTy) {
   Value zero = arith::ConstantIntOp::create(rewriter, loc, elemTy, 0);
@@ -85,7 +86,7 @@ static Value buildIntRangeCount(PatternRewriter &rewriter, Location loc,
 }
 
 /// Ceil(\p q) for \p q >= 0 using arith only (avoids math.ceil / MathDialect).
-static Value buildArithCeilNonNegFloat(PatternRewriter &rewriter, Location loc,
+static Value buildArithCeilNonNegFloat(PatternRewriter& rewriter, Location loc,
                                        Value q, FloatType elemTy) {
   IntegerType i64 = rewriter.getI64Type();
   Value floorI = arith::FPToSIOp::create(rewriter, loc, i64, q);
@@ -103,7 +104,7 @@ static Value buildArithCeilNonNegFloat(PatternRewriter &rewriter, Location loc,
 
 /// Dynamic length for float ranges using ceil((limit-start)/delta) or
 /// ceil((start-limit)/(-delta)).
-static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
+static Value buildFloatRangeCount(PatternRewriter& rewriter, Location loc,
                                   Value start, Value limit, Value delta,
                                   FloatType elemTy) {
   Value zero = arith::ConstantFloatOp::create(
@@ -140,7 +141,7 @@ static Value buildFloatRangeCount(PatternRewriter &rewriter, Location loc,
 /// Fail conversion when delta is a compile-time constant equal to zero (ORT
 /// INVALID_ARGUMENT parity).
 static LogicalResult
-verifyConstantDeltaNonZero(Operation *op, Value deltaTensor, Type elemTy) {
+verifyConstantDeltaNonZero(Operation* op, Value deltaTensor, Type elemTy) {
   auto cst = deltaTensor.getDefiningOp<arith::ConstantOp>();
   if (!cst)
     return success();
@@ -172,10 +173,10 @@ verifyConstantDeltaNonZero(Operation *op, Value deltaTensor, Type elemTy) {
 }
 
 struct RangeToHip : public RewritePattern {
-  RangeToHip(MLIRContext *ctx) : RewritePattern("onnx.Range", 1, ctx) {}
+  RangeToHip(MLIRContext* ctx) : RewritePattern("onnx.Range", 1, ctx) {}
 
-  LogicalResult matchAndRewrite(Operation *op,
-                                PatternRewriter &rewriter) const override {
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override {
     if (op->getNumOperands() != 3 || op->getNumResults() != 1)
       return failure();
 
@@ -243,8 +244,8 @@ struct RangeToHip : public RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateRangeConversionPatterns(RewritePatternSet &patterns,
-                                                MLIRContext *ctx) {
+void mlir::hip::populateRangeConversionPatterns(RewritePatternSet& patterns,
+                                                MLIRContext* ctx) {
   patterns.add<RangeToHip>(ctx);
 }
 

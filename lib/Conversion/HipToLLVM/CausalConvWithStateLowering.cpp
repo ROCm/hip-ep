@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CausalConvWithStateLowering.cpp - HIP-to-LLVM CausalConvWithState
+// lowering - *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -24,7 +27,7 @@ struct CausalConvWithStateOpLowering
 
   LogicalResult
   matchAndRewrite(CausalConvWithStateOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -151,7 +154,7 @@ struct CausalConvWithStateOpLowering
 } // namespace
 
 void mlir::hip::populateCausalConvWithStateLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<CausalConvWithStateOpLowering>(converter);
 }
 

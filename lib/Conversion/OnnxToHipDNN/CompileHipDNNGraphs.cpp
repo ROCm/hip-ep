@@ -1,13 +1,36 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CompileHipDNNGraphs.cpp - hipDNN graph compilation -----*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Why this pass exists
+// --------------------
+// Pairs with `OutlineOnnxToHipDNNPass`.  Walks every
+// `hip.hipdnn_graph_outline` region produced by outlining, builds a hipDNN
+// graph from the contained ONNX ops, and asks the live `hipdnnHandle_t` to
+// compile it.  On success the outline is replaced by a `hip.hipdnn_graph` op
+// whose `graph_id` indexes into `compiledGraphs_`; CompilerDriver later hands
+// that map to the runtime so `hipdnn_graph_execute` can dispatch the
+// pre-compiled plan.  On failure the contained ops are inlined back into the
+// surrounding block (`unoutline`) so downstream passes see the original ONNX
+// IR exactly as if outlining had never happened.
+//
+// Why hand-rolled (not TableGen)
+// ------------------------------
+// The constructor takes a runtime `hipdnnHandle_t` and a `CompiledGraphMap`
+// out-parameter.  Neither can be expressed as a TableGen `Option`, so this
+// pass is registered manually via `createCompileHipDNNGraphsPass(...)` while
+// its handle-free sibling (`OutlineOnnxToHipDNNPass`) lives in
+// `include/hip/Conversion/Passes.td` and uses TableGen registration.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
-#include "../../HipDNNGraph/HipDNNGraph.h"
-
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
@@ -15,13 +38,14 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
-#include "llvm/Support/raw_ostream.h"
+
+#include "../../HipDNNGraph/HipDNNGraph.h"
 
 namespace mlir {
 namespace hip {
 
-void GraphDeleter::operator()(void *ptr) const {
-  delete static_cast<::hip::graph::HipDNNGraph *>(ptr);
+void GraphDeleter::operator()(void* ptr) const {
+  delete static_cast<::hip::graph::HipDNNGraph*>(ptr);
 }
 
 namespace {
@@ -29,7 +53,7 @@ namespace {
 /// Inline the outline region back into the parent block, restoring the
 /// original ONNX ops.  Used when hipDNN graph compilation fails.
 static void unoutline(HipDNNGraphOutlineOp outlineOp) {
-  Block &block = outlineOp.getBody().front();
+  Block& block = outlineOp.getBody().front();
 
   IRMapping mapping;
   for (auto [blockArg, input] :
@@ -37,10 +61,10 @@ static void unoutline(HipDNNGraphOutlineOp outlineOp) {
     mapping.map(blockArg, input);
 
   OpBuilder builder(outlineOp);
-  for (Operation &op : block.without_terminator())
+  for (Operation& op : block.without_terminator())
     builder.clone(op, mapping);
 
-  auto *terminator = block.getTerminator();
+  auto* terminator = block.getTerminator();
   for (auto [yieldVal, result] :
        llvm::zip(terminator->getOperands(), outlineOp.getResults()))
     result.replaceAllUsesWith(mapping.lookup(yieldVal));
@@ -66,7 +90,7 @@ struct CompileHipDNNGraphsPass
            "with hip.hipdnn_graph (un-outlines on failure)";
   }
 
-  void getDependentDialects(DialectRegistry &registry) const override {
+  void getDependentDialects(DialectRegistry& registry) const override {
     registry.insert<hip::HipDialect>();
     registry.insert<func::FuncDialect>();
     registry.insert<tensor::TensorDialect>();

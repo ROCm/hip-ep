@@ -1,38 +1,38 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-//===- OnnxToHipUtils.h - Shared helpers for ONNX-to-HIP patterns --------===//
+//===- OnnxToHipUtils.h - Shared helpers for ONNX-to-HIP patterns -*- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 //
 // Shared utility functions and forward declarations used by per-operator
-// conversion files.
+// ONNX-to-HIP conversion files.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef HIP_CONVERSION_ONNXTOHIP_UTILS_H
 #define HIP_CONVERSION_ONNXTOHIP_UTILS_H
 
-#include "hip/Conversion/OnnxToHip/Passes.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
+// Header for shared inline helpers and `populate*ConversionPatterns()`
+// declarations used by the per-operator ONNX -> HIP conversion files.
+//
+// Kept lean on purpose: heavy headers used only inside `.cpp` pattern
+// implementations (`GreedyPatternRewriteDriver.h`, `Bufferization.h`,
+// `ReshapeOpsUtils.h`, `Arith/Utils/Utils.h`, MemRef ops, etc.) live in the
+// individual `.cpp` files instead so that touching this header does not
+// rebuild every per-operator translation unit.
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Arith/Utils/Utils.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/Pass/Pass.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "hip/Dialect/IR/HipDialect.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
-#include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/PatternMatch.h"
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -80,7 +80,7 @@ inline std::string sanitizeForMlirIdentifier(llvm::StringRef raw) {
 /// are extracted from \p source using tensor.dim at each dynamic index.
 /// Suitable for ops where the output shape aligns positionally with one input
 /// (e.g., softmax, element-wise).
-inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
+inline mlir::Value createEmptyTensor(mlir::OpBuilder& builder,
                                      mlir::Location loc,
                                      mlir::RankedTensorType resultType,
                                      mlir::Value source) {
@@ -94,14 +94,41 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
+/// Read an `ArrayAttr` of integer attributes from \p op and unpack it into
+/// a `SmallVector<int64_t>`.  Returns \p defaultValues when the attribute is
+/// absent.  Each element of the array is assumed to be an `IntegerAttr` --
+/// any non-integer element is a hard error in the surrounding pattern.
+///
+/// Replaces the recurring four-line idiom
+///
+///   SmallVector<int64_t> v;
+///   if (auto a = op->getAttrOfType<ArrayAttr>("name"))
+///     for (auto i : a)
+///       v.push_back(cast<IntegerAttr>(i).getInt());
+///
+/// across the per-operator conversion files.
+inline llvm::SmallVector<int64_t>
+getInt64ArrayAttrOrDefault(mlir::Operation* op, llvm::StringRef name,
+                           llvm::ArrayRef<int64_t> defaultValues = {}) {
+  llvm::SmallVector<int64_t> result;
+  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>(name)) {
+    result.reserve(attr.size());
+    for (mlir::Attribute a : attr)
+      result.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+    return result;
+  }
+  result.assign(defaultValues.begin(), defaultValues.end());
+  return result;
+}
+
 /// Get !hip.context from function argument 0. Returns failure if the
 /// function has no arguments or the first argument is not !hip.context.
 inline mlir::FailureOr<mlir::Value>
-getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
+getContextArg(mlir::Operation* op, mlir::PatternRewriter& rewriter) {
   auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
   if (!funcOp)
     return rewriter.notifyMatchFailure(op, "not inside a function");
-  auto &entry = funcOp.getBody().front();
+  auto& entry = funcOp.getBody().front();
   if (entry.getNumArguments() == 0)
     return rewriter.notifyMatchFailure(op, "function has no arguments");
   mlir::Value ctx = entry.getArgument(0);
@@ -112,44 +139,44 @@ getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
 }
 
 // Pattern population functions (one per operator file)
-void populateMatMulConversionPatterns(RewritePatternSet &patterns,
-                                      MLIRContext *ctx);
-void populateTransposeConversionPatterns(RewritePatternSet &patterns,
-                                         MLIRContext *ctx);
-void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
-                                           MLIRContext *ctx);
-void populatePowerConversionPatterns(RewritePatternSet &patterns,
-                                     MLIRContext *ctx);
-void populateActivationConversionPatterns(RewritePatternSet &patterns,
-                                          MLIRContext *ctx);
-void populateCastConversionPatterns(RewritePatternSet &patterns,
-                                    MLIRContext *ctx);
-void populateReduceSumConversionPatterns(RewritePatternSet &patterns,
-                                         MLIRContext *ctx);
-void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
-                                           MLIRContext *ctx);
-void populateQMoEConversionPatterns(RewritePatternSet &patterns,
-                                    MLIRContext *ctx);
-void populateConvConversionPatterns(RewritePatternSet &patterns,
-                                    MLIRContext *ctx);
-void populateNormConversionPatterns(RewritePatternSet &patterns,
-                                    MLIRContext *ctx);
-void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
-                                               MLIRContext *ctx);
-void populateGqaConversionPatterns(RewritePatternSet &patterns,
-                                   MLIRContext *ctx);
-void populateGatherConversionPatterns(RewritePatternSet &patterns,
-                                      MLIRContext *ctx);
-void populateReshapeConversionPatterns(RewritePatternSet &patterns,
-                                       MLIRContext *ctx);
-void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
-                                                   MLIRContext *ctx);
-void populateGemmConversionPatterns(RewritePatternSet &patterns,
-                                    MLIRContext *ctx);
-void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
-                                               MLIRContext *ctx);
-void populateRangeConversionPatterns(RewritePatternSet &patterns,
-                                     MLIRContext *ctx);
+void populateMatMulConversionPatterns(RewritePatternSet& patterns,
+                                      MLIRContext* ctx);
+void populateTransposeConversionPatterns(RewritePatternSet& patterns,
+                                         MLIRContext* ctx);
+void populateElementwiseConversionPatterns(RewritePatternSet& patterns,
+                                           MLIRContext* ctx);
+void populatePowerConversionPatterns(RewritePatternSet& patterns,
+                                     MLIRContext* ctx);
+void populateActivationConversionPatterns(RewritePatternSet& patterns,
+                                          MLIRContext* ctx);
+void populateCastConversionPatterns(RewritePatternSet& patterns,
+                                    MLIRContext* ctx);
+void populateReduceSumConversionPatterns(RewritePatternSet& patterns,
+                                         MLIRContext* ctx);
+void populateMatMulNBitsConversionPatterns(RewritePatternSet& patterns,
+                                           MLIRContext* ctx);
+void populateQMoEConversionPatterns(RewritePatternSet& patterns,
+                                    MLIRContext* ctx);
+void populateConvConversionPatterns(RewritePatternSet& patterns,
+                                    MLIRContext* ctx);
+void populateNormConversionPatterns(RewritePatternSet& patterns,
+                                    MLIRContext* ctx);
+void populateRotaryEmbeddingConversionPatterns(RewritePatternSet& patterns,
+                                               MLIRContext* ctx);
+void populateGqaConversionPatterns(RewritePatternSet& patterns,
+                                   MLIRContext* ctx);
+void populateGatherConversionPatterns(RewritePatternSet& patterns,
+                                      MLIRContext* ctx);
+void populateReshapeConversionPatterns(RewritePatternSet& patterns,
+                                       MLIRContext* ctx);
+void populateCausalConvWithStateConversionPatterns(RewritePatternSet& patterns,
+                                                   MLIRContext* ctx);
+void populateGemmConversionPatterns(RewritePatternSet& patterns,
+                                    MLIRContext* ctx);
+void populateLinearAttentionConversionPatterns(RewritePatternSet& patterns,
+                                               MLIRContext* ctx);
+void populateRangeConversionPatterns(RewritePatternSet& patterns,
+                                     MLIRContext* ctx);
 
 } // namespace hip
 } // namespace mlir

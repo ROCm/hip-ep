@@ -1,19 +1,28 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-#ifndef HIP_COMPILER_CONVERSION_PASSES_H
-#define HIP_COMPILER_CONVERSION_PASSES_H
+//===- Passes.h - HIP conversion pass umbrella header -----------*- C++ -*-===//
+//
+// Aggregates per-subsystem conversion-pass declarations and exposes the
+// TableGen-generated `registerHipConversionPasses()` that registers all of
+// them at once. Mirrors `mlir/include/mlir/Conversion/Passes.h` upstream.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef HIP_CONVERSION_PASSES_H
+#define HIP_CONVERSION_PASSES_H
 
 #include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 
-namespace hip::compiler {
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassRegistry.h"
 
-/// Register all conversion passes (ONNX->HIP, HIP->LLVM).
-void registerConversionPasses();
+namespace mlir {
+namespace hip {
 
-} // namespace hip::compiler
+#define GEN_PASS_REGISTRATION
+#include "hip/Conversion/Passes.h.inc"
 
-#endif // HIP_COMPILER_CONVERSION_PASSES_H
+} // namespace hip
+} // namespace mlir
+
+#endif // HIP_CONVERSION_PASSES_H

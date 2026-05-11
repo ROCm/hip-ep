@@ -1,9 +1,13 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- ConstantsIO.cpp - ONNX-to-HIP constants externalization I/O - *- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Conversion/OnnxToHip/ConstantsIO.h"
+
 #include "morphizen-foundation/file_io.hpp"
 
 #include <algorithm>
@@ -18,7 +22,7 @@ namespace hip {
 
 // Fills the gap between `pos` and `targetOffset` with zeros using a small
 // shared buffer; advances `pos`.
-static bool writePaddingTo(morphizen::FileWriter *writer, int64_t &pos,
+static bool writePaddingTo(morphizen::FileWriter* writer, int64_t& pos,
                            int64_t targetOffset) {
   static constexpr size_t kZeroChunk = 4096;
   static const char zeros[kZeroChunk] = {};
@@ -39,7 +43,7 @@ static bool writePaddingTo(morphizen::FileWriter *writer, int64_t &pos,
 // writes it repeatedly until `size` bytes have been emitted. Preserves the
 // historical OnnxToHip splat-write behavior, bounding peak host memory
 // independent of individual constant size.
-static void writeSplat(morphizen::FileWriter *writer, const void *elemBytes,
+static void writeSplat(morphizen::FileWriter* writer, const void* elemBytes,
                        int64_t elemSize, int64_t size) {
   static constexpr size_t kSplatChunk = 1024 * 1024;
   size_t elem = static_cast<size_t>(elemSize);
@@ -66,30 +70,30 @@ namespace {
 // hundreds of fopen/fclose round trips.
 struct FileHandleCache {
   ~FileHandleCache() {
-    for (auto &kv : handles)
+    for (auto& kv : handles)
       if (kv.second)
         std::fclose(kv.second);
   }
-  std::FILE *get(const std::string &path) {
+  std::FILE* get(const std::string& path) {
     auto it = handles.find(path);
     if (it != handles.end())
       return it->second;
-    std::FILE *f = std::fopen(path.c_str(), "rb");
+    std::FILE* f = std::fopen(path.c_str(), "rb");
     handles.emplace(path, f);
     return f;
   }
-  std::unordered_map<std::string, std::FILE *> handles;
+  std::unordered_map<std::string, std::FILE*> handles;
 };
 } // namespace
 
 // Streams `size` bytes from `file_path` at `file_offset` through a fixed
 // 1 MB buffer into the writer. Bounded peak host memory, identical pattern
 // to writeSplat so the constants.bin emission stays predictable.
-static bool writeFileRef(FileHandleCache &cache, morphizen::FileWriter *writer,
-                         const std::string &file_path, int64_t file_offset,
+static bool writeFileRef(FileHandleCache& cache, morphizen::FileWriter* writer,
+                         const std::string& file_path, int64_t file_offset,
                          int64_t size) {
   static constexpr size_t kReadChunk = 1024 * 1024;
-  std::FILE *f = cache.get(file_path);
+  std::FILE* f = cache.get(file_path);
   if (!f)
     return false;
 #ifdef _WIN32
@@ -113,9 +117,9 @@ static bool writeFileRef(FileHandleCache &cache, morphizen::FileWriter *writer,
   return true;
 }
 
-bool writeConstantsBinToFileSystem(morphizen::FileSystem *fs,
-                                   const std::string &filename,
-                                   const std::vector<ConstantEntry> &entries,
+bool writeConstantsBinToFileSystem(morphizen::FileSystem* fs,
+                                   const std::string& filename,
+                                   const std::vector<ConstantEntry>& entries,
                                    int64_t totalBlobSize) {
   if (!fs)
     return false;
@@ -126,7 +130,7 @@ bool writeConstantsBinToFileSystem(morphizen::FileSystem *fs,
   FileHandleCache fileCache;
 
   int64_t pos = 0;
-  for (const auto &e : entries) {
+  for (const auto& e : entries) {
     if (!writePaddingTo(writer.get(), pos, e.offset))
       return false;
     if (!e.file_path.empty()) {

@@ -1,9 +1,13 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- Pipelines.cpp - HIP pass pipeline construction --------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Transforms/Pipelines.h"
+
+#include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -22,7 +26,7 @@
 using namespace mlir;
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
-static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
+static void buildOnnxToHipPipelineTail(OpPassManager& pm) {
   // 2. Bufferize tensor IR to memref IR
   //
   // Use IdentityLayoutMap for function boundaries: all EP inputs/outputs come
@@ -90,31 +94,17 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   pm.addPass(createCanonicalizerPass());
 }
 
-void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
-                                       const OnnxToHipPipelineOptions &options,
-                                       morphizen::FileSystem *fs) {
-  pm.addPass(createHipAddContextArgPass());
-
-  if (fs) {
-    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData));
-  } else {
-    ConvertOnnxToHipPassOptions onnxToHipOpts;
-    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
-    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
-  }
-
-  buildOnnxToHipPipelineTail(pm);
-}
-
-void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
-                                       const OnnxToHipPipelineOptions &options,
-                                       morphizen::FileSystem *fs,
+void mlir::hip::buildOnnxToHipPipeline(OpPassManager& pm,
+                                       const OnnxToHipPipelineOptions& options,
+                                       morphizen::FileSystem* fs,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
   pm.addPass(createHipAddContextArgPass());
 
+  // Optional hipDNN graph compilation: outline supported ONNX ops into
+  // `hip.hipdnn_graph_outline` regions and ask the live handle to compile
+  // each one into a runnable hipDNN graph.  Skipped entirely when no handle
+  // is provided (CLI / lit-test path through hip-mlir-opt).
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());
     pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
@@ -134,7 +124,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 }
 
 void mlir::hip::buildHipToLLVMPipeline(
-    OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
+    OpPassManager& pm, const HipToLLVMPipelineOptions& options) {
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.
   // populateFinalizeMemRefToLLVMConversionPatterns (used by ConvertHipToLLVM)
@@ -156,8 +146,8 @@ void mlir::hip::buildHipToLLVMPipeline(
   pm.addPass(createGenerateInterfacePass(compOpts));
 }
 
-void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
-                                    const HipdnnPipelineOptions &options) {
+void mlir::hip::buildHipdnnPipeline(OpPassManager& pm,
+                                    const HipdnnPipelineOptions& options) {
   OnnxToHipPipelineOptions onnxOpts;
   onnxOpts.externalizeOutputDir = options.constantsDir;
   onnxOpts.externalizeMinNumElements = options.externalizeMinNumElements;
@@ -173,7 +163,7 @@ void mlir::hip::registerHipPipelines() {
       "onnx-to-hip-pipeline",
       "Lower ONNX IR to bufferized HIP memref IR with optional constant "
       "externalization",
-      [](OpPassManager &pm, const OnnxToHipPipelineOptions &opts) {
+      [](OpPassManager& pm, const OnnxToHipPipelineOptions& opts) {
         buildOnnxToHipPipeline(pm, opts);
       });
 

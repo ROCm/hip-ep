@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- ConstantsIO.h - ONNX-to-HIP constants externalization I/O - *- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 // Shared emit logic for the constants.bin sidecar.
 //
@@ -47,7 +50,7 @@ struct ConstantEntry {
   std::string name;
   int64_t offset = 0;          // aligned offset in constants.bin
   int64_t size = 0;            // total byte size after splat expansion
-  const void *data = nullptr;  // mmap addr / rawData.data() / owned buffer
+  const void* data = nullptr;  // mmap addr / rawData.data() / owned buffer
   int64_t splat_elem_size = 0; // 0 = data is already `size` bytes; >0 = splat
   std::string file_path;       // non-empty: read from disk on demand
   int64_t file_offset = 0;     // byte offset within file_path
@@ -60,9 +63,9 @@ struct ConstantEntry {
 ///
 /// Returns true on success; false if the writer could not be opened or a
 /// splat entry has invalid element size.
-bool writeConstantsBinToFileSystem(morphizen::FileSystem *fs,
-                                   const std::string &filename,
-                                   const std::vector<ConstantEntry> &entries,
+bool writeConstantsBinToFileSystem(morphizen::FileSystem* fs,
+                                   const std::string& filename,
+                                   const std::vector<ConstantEntry>& entries,
                                    int64_t totalBlobSize);
 
 } // namespace hip

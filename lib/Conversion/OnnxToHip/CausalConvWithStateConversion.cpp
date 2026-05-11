@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CausalConvWithStateConversion.cpp - ONNX-to-HIP CausalConvWithState
+// conversion - *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -10,33 +13,33 @@ namespace hip {
 namespace {
 
 /// com.microsoft.CausalConvWithState -> hip.causal_conv_with_state
-struct CausalConvWithStateToHip : public mlir::RewritePattern {
-  CausalConvWithStateToHip(mlir::MLIRContext *ctx)
+struct CausalConvWithStateToHip : public RewritePattern {
+  CausalConvWithStateToHip(MLIRContext* ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override;
 };
 
-mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
-  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+LogicalResult
+CausalConvWithStateToHip::matchAndRewrite(Operation* op,
+                                          PatternRewriter& rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "CausalConvWithState")
     return rewriter.notifyMatchFailure(op,
                                        "not a CausalConvWithState operation");
 
-  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  auto domainAttr = op->getAttrOfType<StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
     return rewriter.notifyMatchFailure(
         op, "domain must be com.microsoft for CausalConvWithState");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
+  if (failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
+  Location loc = op->getLoc();
 
   // CausalConvWithState has 2-4 inputs:
   //   input (required), weight (required), bias (optional), past_state
@@ -46,26 +49,26 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "CausalConvWithState expects 2-4 operands");
 
-  auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
+  auto getOptionalOperand = [&](size_t idx) -> Value {
     if (idx >= numOps)
       return nullptr;
-    mlir::Value val = op->getOperand(idx);
-    if (mlir::isa<mlir::NoneType>(val.getType()))
+    Value val = op->getOperand(idx);
+    if (isa<NoneType>(val.getType()))
       return nullptr;
     return val;
   };
 
-  mlir::Value input = op->getOperand(0);
-  mlir::Value weight = op->getOperand(1);
-  mlir::Value bias = getOptionalOperand(2);
-  mlir::Value pastState = getOptionalOperand(3);
+  Value input = op->getOperand(0);
+  Value weight = op->getOperand(1);
+  Value bias = getOptionalOperand(2);
+  Value pastState = getOptionalOperand(3);
 
   // Extract attributes with defaults
-  auto activationAttr = op->getAttrOfType<mlir::StringAttr>("activation");
+  auto activationAttr = op->getAttrOfType<StringAttr>("activation");
   if (!activationAttr)
     activationAttr = rewriter.getStringAttr("none");
 
-  auto ndimAttrOnnx = op->getAttrOfType<mlir::IntegerAttr>("ndim");
+  auto ndimAttrOnnx = op->getAttrOfType<IntegerAttr>("ndim");
   auto ndimAttr =
       ndimAttrOnnx
           ? rewriter.getI64IntegerAttr(ndimAttrOnnx.getValue().getSExtValue())
@@ -77,18 +80,16 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "CausalConvWithState expects exactly 2 results");
 
-  auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto presentStateType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  auto outputType = cast<RankedTensorType>(op->getResult(0).getType());
+  auto presentStateType = cast<RankedTensorType>(op->getResult(1).getType());
 
   // Create DPS init tensors
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
-  mlir::Value presentStateInit = createEmptyTensor(
-      rewriter, loc, presentStateType, pastState ? pastState : input);
+  Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  Value presentStateInit = createEmptyTensor(rewriter, loc, presentStateType,
+                                             pastState ? pastState : input);
 
   // Build operands
-  mlir::SmallVector<mlir::Value> operands;
+  SmallVector<Value> operands;
   operands.push_back(context);
   operands.push_back(input);
   operands.push_back(weight);
@@ -100,17 +101,17 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
   operands.push_back(presentStateInit);
 
   // Build attributes
-  mlir::SmallVector<mlir::NamedAttribute> attrs;
+  SmallVector<NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("activation", activationAttr));
   attrs.push_back(rewriter.getNamedAttr("ndim", ndimAttr));
 
   // Build result types
-  mlir::SmallVector<mlir::Type> resultTypes;
+  SmallVector<Type> resultTypes;
   resultTypes.push_back(outputType);
   resultTypes.push_back(presentStateType);
 
   // Create operation with operand_segment_sizes
-  auto state = mlir::OperationState(loc, "hip.causal_conv_with_state");
+  auto state = OperationState(loc, "hip.causal_conv_with_state");
   state.addOperands(operands);
   state.addAttributes(attrs);
   state.addTypes(resultTypes);
@@ -131,13 +132,13 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
 
   auto hipOp = rewriter.create(state);
   rewriter.replaceOp(op, hipOp->getResults());
-  return mlir::success();
+  return success();
 }
 
 } // namespace
 
 void mlir::hip::populateCausalConvWithStateConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+    RewritePatternSet& patterns, MLIRContext* ctx) {
   patterns.add<CausalConvWithStateToHip>(ctx);
 }
 

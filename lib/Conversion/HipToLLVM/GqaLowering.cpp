@@ -1,7 +1,37 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- GqaLowering.cpp - HIP-to-LLVM Gqa lowering ------------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+//
+// Why this lowering exists
+// ------------------------
+// `hip.gqa` is the dialect-level handle on group-query attention: a
+// monolithic op that captures Q/K/V projections, the KV cache slots
+// (`past_key`, `past_value`), seqlen metadata (`seqlens_k`,
+// `total_seq_len`), the optional cos/sin tables for rotary embedding fused
+// into the attention prologue, and the attention attributes (head counts,
+// rotary mode).  At LLVM time we forward all of that to the runtime entry
+// `wrap_group_query_attention`, which selects between the kernels in
+// `lib/Runtime/real/gqa.cpp` based on shape.
+//
+// Non-obvious choices
+// -------------------
+// * Optional operands (`cos_cache`, `sin_cache`) are passed via
+//   `extractOptionalMemRefPtr`, which substitutes a null pointer when the
+//   operand is absent.  The runtime distinguishes "no rotary" from "rotary
+//   with these tables" by null vs non-null pointer rather than by a
+//   separate boolean flag, mirroring the upstream `flash-attn` C ABI.
+// * Output (`output`, optional `present_key`, `present_value`) follows
+//   the same identity-layout precondition as every other `hip.*` consumer,
+//   established by PromoteStridedHipOperands earlier in the pipeline.
+// * Attention attributes are emitted as i32 constants and packed into the
+//   call argument list.  We do not bundle them into a struct so the call
+//   IR stays trivially recognizable in `llc -O0` output for runtime
+//   debugging.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -17,7 +47,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -222,8 +252,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
 } // namespace
 
-void mlir::hip::populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns) {
+void mlir::hip::populateGqaLoweringPatterns(const LLVMTypeConverter& converter,
+                                            RewritePatternSet& patterns) {
   patterns.add<GqaOpLowering>(converter);
 }
 

@@ -1,16 +1,18 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- DLLLinker.cpp - Native DLL linker for the HIP compiler - *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 #include "hip/Target/LLVM/DLLLinker.h"
+
+#include "hip/debug_log.h"
 
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/raw_ostream.h>
-
-#include "hip/debug_log.h"
 
 #include <fstream>
 #include <sstream>
@@ -27,11 +29,11 @@ namespace hipdnn {
 DLLLinker::DLLLinker() = default;
 DLLLinker::~DLLLinker() = default;
 
-bool DLLLinker::linkDLL(const std::string &objectFile,
-                        const std::string &outputDLL,
-                        const std::vector<std::string> &libraries,
-                        const std::vector<std::string> &libraryPaths,
-                        const std::vector<std::string> &exportSymbols) {
+bool DLLLinker::linkDLL(const std::string& objectFile,
+                        const std::string& outputDLL,
+                        const std::vector<std::string>& libraries,
+                        const std::vector<std::string>& libraryPaths,
+                        const std::vector<std::string>& exportSymbols) {
 #ifdef _WIN32
   return linkDLL_Windows(objectFile, outputDLL, libraries, libraryPaths,
                          exportSymbols);
@@ -40,11 +42,11 @@ bool DLLLinker::linkDLL(const std::string &objectFile,
 #endif
 }
 
-bool DLLLinker::linkDLLInMemory(const std::vector<uint8_t> &objectBytes,
-                                std::vector<uint8_t> &outDLLBytes,
-                                const std::vector<std::string> &libraries,
-                                const std::vector<std::string> &libraryPaths,
-                                const std::vector<std::string> &exportSymbols) {
+bool DLLLinker::linkDLLInMemory(const std::vector<uint8_t>& objectBytes,
+                                std::vector<uint8_t>& outDLLBytes,
+                                const std::vector<std::string>& libraries,
+                                const std::vector<std::string>& libraryPaths,
+                                const std::vector<std::string>& exportSymbols) {
   // LLD does not provide a pure in-memory linking API
   // Strategy: Use temporary files for linking, then read result into memory
   // This approach works for MVP; can be improved with MemoryModule later
@@ -76,7 +78,7 @@ bool DLLLinker::linkDLLInMemory(const std::vector<uint8_t> &objectBytes,
       llvm::sys::fs::remove(dllFile);
       return false;
     }
-    objOut.write(reinterpret_cast<const char *>(objectBytes.data()),
+    objOut.write(reinterpret_cast<const char*>(objectBytes.data()),
                  objectBytes.size());
   }
 
@@ -101,8 +103,8 @@ bool DLLLinker::linkDLLInMemory(const std::vector<uint8_t> &objectBytes,
       llvm::sys::fs::remove(dllFile);
       return false;
     }
-    auto &buf = *bufOrErr;
-    const auto *data = reinterpret_cast<const uint8_t *>(buf->getBufferStart());
+    auto& buf = *bufOrErr;
+    const auto* data = reinterpret_cast<const uint8_t*>(buf->getBufferStart());
     outDLLBytes.assign(data, data + buf->getBufferSize());
   }
 
@@ -118,7 +120,7 @@ bool DLLLinker::linkDLLInMemory(const std::vector<uint8_t> &objectBytes,
 #ifdef _WIN32
 
 bool DLLLinker::createModuleDefinitionFile(
-    const std::string &defPath, const std::vector<std::string> &exportSymbols) {
+    const std::string& defPath, const std::vector<std::string>& exportSymbols) {
   std::ofstream defFile(defPath);
   if (!defFile) {
     llvm::errs() << "Failed to create .def file: " << defPath << "\n";
@@ -126,7 +128,7 @@ bool DLLLinker::createModuleDefinitionFile(
   }
 
   defFile << "EXPORTS\n";
-  for (const auto &symbol : exportSymbols) {
+  for (const auto& symbol : exportSymbols) {
     defFile << "    " << symbol << "\n";
   }
 
@@ -134,11 +136,11 @@ bool DLLLinker::createModuleDefinitionFile(
   return true;
 }
 
-bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
-                                const std::string &outputDLL,
-                                const std::vector<std::string> &libraries,
-                                const std::vector<std::string> &libraryPaths,
-                                const std::vector<std::string> &exportSymbols) {
+bool DLLLinker::linkDLL_Windows(const std::string& objectFile,
+                                const std::string& outputDLL,
+                                const std::vector<std::string>& libraries,
+                                const std::vector<std::string>& libraryPaths,
+                                const std::vector<std::string>& exportSymbols) {
   // Create temporary .def file for exports
   std::string defFile = objectFile + ".def";
   if (!createModuleDefinitionFile(defFile, exportSymbols)) {
@@ -157,12 +159,12 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
   argStrings.push_back(objectFile);
 
   // Add library paths
-  for (const auto &libPath : libraryPaths) {
+  for (const auto& libPath : libraryPaths) {
     argStrings.push_back("/LIBPATH:" + libPath);
   }
 
   // Add libraries
-  for (const auto &lib : libraries) {
+  for (const auto& lib : libraries) {
     if (lib.find('/') != std::string::npos ||
         lib.find('\\') != std::string::npos) {
       argStrings.push_back(lib); // full path — pass as-is
@@ -179,7 +181,7 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
   // DLL loads on machines without VS installed (debug CRT DLLs such as
   // ucrtbased.dll and VCRUNTIME140D.dll are not redistributable).
   argStrings.push_back("/NODEFAULTLIB");
-  for (const char *sysLib :
+  for (const char* sysLib :
        {"msvcrt.lib", "ucrt.lib", "vcruntime.lib", "oldnames.lib",
         "libcpmt.lib", "libcmt.lib", "kernel32.lib", "user32.lib"})
     argStrings.push_back(sysLib);
@@ -194,8 +196,8 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
   argStrings.push_back("/OPT:NOICF"); // Don't fold identical functions
 
   // Convert to C-style args for LLD
-  std::vector<const char *> args;
-  for (const auto &arg : argStrings) {
+  std::vector<const char*> args;
+  for (const auto& arg : argStrings) {
     args.push_back(arg.c_str());
   }
 
@@ -209,7 +211,7 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
   llvm::raw_string_ostream stdoutOS(stdoutStr);
   llvm::raw_string_ostream stderrOS(stderrStr);
 
-  llvm::ArrayRef<const char *> argsRef(args);
+  llvm::ArrayRef<const char*> argsRef(args);
 
   // Use lldMain for crash recovery instead of direct link() call
   // lldMain provides:
@@ -246,10 +248,10 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
 
 #else // Linux
 
-bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
-                              const std::string &outputDLL,
-                              const std::vector<std::string> &libraries,
-                              const std::vector<std::string> &libraryPaths) {
+bool DLLLinker::linkDLL_Linux(const std::string& objectFile,
+                              const std::string& outputDLL,
+                              const std::vector<std::string>& libraries,
+                              const std::vector<std::string>& libraryPaths) {
   // Build LLD-ELF command line arguments for shared library
   std::vector<std::string> argStrings;
   argStrings.push_back("ld.lld");  // Program name (required by LLD)
@@ -259,17 +261,17 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
   argStrings.push_back(objectFile);
 
   // Add library paths
-  for (const auto &libPath : libraryPaths) {
+  for (const auto& libPath : libraryPaths) {
     argStrings.push_back("-L" + libPath);
   }
 
   // Add libraries
-  for (const auto &lib : libraries) {
+  for (const auto& lib : libraries) {
     argStrings.push_back("-l" + lib);
   }
 
   // Add RPATH for runtime library search
-  for (const auto &libPath : libraryPaths) {
+  for (const auto& libPath : libraryPaths) {
     argStrings.push_back("-rpath");
     argStrings.push_back(libPath);
   }
@@ -279,8 +281,8 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
   argStrings.push_back("--no-undefined");   // Error on undefined symbols
 
   // Convert to C-style args for LLD
-  std::vector<const char *> args;
-  for (const auto &arg : argStrings) {
+  std::vector<const char*> args;
+  for (const auto& arg : argStrings) {
     args.push_back(arg.c_str());
   }
 
@@ -318,14 +320,14 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
 #endif
 
 bool DLLLinker::verifyDLLExports(
-    const std::string &dllPath,
-    const std::vector<std::string> &requiredSymbols) {
+    const std::string& dllPath,
+    const std::vector<std::string>& requiredSymbols) {
   // This is a simplified implementation
   // A complete implementation would use LLVM's object file libraries
   // to parse the DLL/SO and verify exported symbols
 
   COMPILER_DEBUG_LOG("Verifying DLL exports for: " << dllPath << "\n");
-  for (const auto &symbol : requiredSymbols) {
+  for (const auto& symbol : requiredSymbols) {
     COMPILER_DEBUG_LOG("  Required symbol: " << symbol << "\n");
   }
 

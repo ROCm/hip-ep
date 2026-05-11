@@ -1,9 +1,12 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-#ifndef DLL_LINKER_H
-#define DLL_LINKER_H
+//===- DLLLinker.h - Native DLL linker declarations for the HIP compiler - *-
+// C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
+#ifndef HIP_TARGET_LLVM_DLLLINKER_H
+#define HIP_TARGET_LLVM_DLLLINKER_H
 
 #include <string>
 #include <vector>
@@ -32,10 +35,10 @@ public:
   //   exportSymbols: Symbol names to export from DLL (inference_init, etc.)
   //
   // Returns: true on success, false on failure
-  bool linkDLL(const std::string &objectFile, const std::string &outputDLL,
-               const std::vector<std::string> &libraries,
-               const std::vector<std::string> &libraryPaths,
-               const std::vector<std::string> &exportSymbols);
+  bool linkDLL(const std::string& objectFile, const std::string& outputDLL,
+               const std::vector<std::string>& libraries,
+               const std::vector<std::string>& libraryPaths,
+               const std::vector<std::string>& exportSymbols);
 
   // In-Memory Mode: Link object bytes to DLL in memory (for EPContext storage)
   // Parameters:
@@ -46,38 +49,38 @@ public:
   //   exportSymbols: Symbol names to export from DLL (inference_init, etc.)
   //
   // Returns: true on success, false on failure
-  bool linkDLLInMemory(const std::vector<uint8_t> &objectBytes,
-                       std::vector<uint8_t> &outDLLBytes,
-                       const std::vector<std::string> &libraries,
-                       const std::vector<std::string> &libraryPaths,
-                       const std::vector<std::string> &exportSymbols);
+  bool linkDLLInMemory(const std::vector<uint8_t>& objectBytes,
+                       std::vector<uint8_t>& outDLLBytes,
+                       const std::vector<std::string>& libraries,
+                       const std::vector<std::string>& libraryPaths,
+                       const std::vector<std::string>& exportSymbols);
 
   // Verify DLL has required exports (debugging utility)
   // Returns: true if all symbols are exported, false otherwise
-  bool verifyDLLExports(const std::string &dllPath,
-                        const std::vector<std::string> &requiredSymbols);
+  bool verifyDLLExports(const std::string& dllPath,
+                        const std::vector<std::string>& requiredSymbols);
 
 private:
   // Platform-specific linker implementations
 #ifdef _WIN32
-  bool linkDLL_Windows(const std::string &objectFile,
-                       const std::string &outputDLL,
-                       const std::vector<std::string> &libraries,
-                       const std::vector<std::string> &libraryPaths,
-                       const std::vector<std::string> &exportSymbols);
+  bool linkDLL_Windows(const std::string& objectFile,
+                       const std::string& outputDLL,
+                       const std::vector<std::string>& libraries,
+                       const std::vector<std::string>& libraryPaths,
+                       const std::vector<std::string>& exportSymbols);
 
   // Create module definition file (.def) for Windows exports
   bool
-  createModuleDefinitionFile(const std::string &defPath,
-                             const std::vector<std::string> &exportSymbols);
+  createModuleDefinitionFile(const std::string& defPath,
+                             const std::vector<std::string>& exportSymbols);
 #else
-  bool linkDLL_Linux(const std::string &objectFile,
-                     const std::string &outputDLL,
-                     const std::vector<std::string> &libraries,
-                     const std::vector<std::string> &libraryPaths);
+  bool linkDLL_Linux(const std::string& objectFile,
+                     const std::string& outputDLL,
+                     const std::vector<std::string>& libraries,
+                     const std::vector<std::string>& libraryPaths);
 #endif
 };
 
 } // namespace hipdnn
 
-#endif // DLL_LINKER_H
+#endif // HIP_TARGET_LLVM_DLLLINKER_H

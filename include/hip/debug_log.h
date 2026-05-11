@@ -1,12 +1,15 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- debug_log.h - HIP compiler debug-logging helpers ------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 #pragma once
+
+#include "llvm/Support/raw_ostream.h"
 
 #include "timing.h"
 
-#include "llvm/Support/raw_ostream.h"
 #include <cstdlib>
 #include <string>
 

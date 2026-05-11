@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- ActivationLowering.cpp - HIP-to-LLVM Activation lowering - *- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -28,7 +31,7 @@ namespace {
 template <typename OpType, int64_t activationMode>
 static LogicalResult
 lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
-                      ConversionPatternRewriter &rewriter) {
+                      ConversionPatternRewriter& rewriter) {
   Location loc = op.getLoc();
   ModuleOp module = op->template getParentOfType<ModuleOp>();
   Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
@@ -111,7 +114,7 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
 
   LogicalResult
   matchAndRewrite(SigmoidOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     return lowerMiopenActivation<SigmoidOp, kActivationSigmoid>(op, adaptor,
                                                                 rewriter);
   }
@@ -126,7 +129,7 @@ struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
 
   LogicalResult
   matchAndRewrite(SoftplusOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     return lowerMiopenActivation<SoftplusOp, kActivationSoftplus>(op, adaptor,
                                                                   rewriter);
   }
@@ -143,7 +146,7 @@ struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
 
   LogicalResult
   matchAndRewrite(GeluOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
@@ -225,7 +228,7 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 
   LogicalResult
   matchAndRewrite(SiluOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -257,7 +260,7 @@ struct MiopenSoftmaxOpLowering
 
   LogicalResult
   matchAndRewrite(MiopenSoftmaxOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -296,7 +299,7 @@ struct MiopenSoftmaxOpLowering
 } // namespace
 
 void mlir::hip::populateActivationLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<SigmoidOpLowering, SoftplusOpLowering, GeluOpLowering,
                SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
 }
