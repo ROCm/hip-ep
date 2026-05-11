@@ -1,7 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- MatmulLowering.cpp - HIP-to-LLVM Matmul lowering ------- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
 
@@ -19,7 +21,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
 
   LogicalResult
   matchAndRewrite(MatmulOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter& rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -107,7 +109,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
 } // namespace
 
 void mlir::hip::populateMatmulLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns) {
   patterns.add<MatmulOpLowering>(converter);
 }
 

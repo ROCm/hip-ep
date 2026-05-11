@@ -1,9 +1,9 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
-
-//===- ResolveExternConstants.cpp - Replace extern globals with hip.get_constant
+//===- ResolveExternConstants.cpp - Resolve extern constants ---*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 //
 // The --hip-resolve-extern-constants pass bridges the gap between compile-time
 // constant externalization (which produces memref.global ops with
@@ -29,14 +29,13 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
-
-#include "llvm/ADT/Statistic.h"
-#include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "hip-resolve-extern-constants"
 
@@ -98,7 +97,7 @@ void ResolveExternConstantsPass::runOnOperation() {
       continue;
 
     // Get !hip.context from arg 0.
-    auto &entry = funcOp.getBody().front();
+    auto& entry = funcOp.getBody().front();
     if (entry.getNumArguments() == 0)
       continue;
     Value ctxArg = entry.getArgument(0);
@@ -118,7 +117,7 @@ void ResolveExternConstantsPass::runOnOperation() {
     }
 
     for (auto getGlobalOp : getGlobalOps) {
-      ExternGlobalInfo &info =
+      ExternGlobalInfo& info =
           externGlobals[globalsByName[getGlobalOp.getName()]];
       OpBuilder builder(getGlobalOp);
       Location loc = getGlobalOp.getLoc();
@@ -143,7 +142,7 @@ void ResolveExternConstantsPass::runOnOperation() {
   }
 
   // Clean up -- erase extern globals and strip module attribute.
-  for (auto &info : externGlobals)
+  for (auto& info : externGlobals)
     info.globalOp.erase();
 
   // Keep hip.constants_file so GenerateInterface can embed the correct

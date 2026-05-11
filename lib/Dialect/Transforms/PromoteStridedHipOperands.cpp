@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- PromoteStridedHipOperands.cpp - Strided -> contiguous copy ---------===//
 //
 // Materializes a contiguous temporary buffer for any DPS-input memref operand
@@ -45,13 +41,12 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
-
-#include "llvm/ADT/Statistic.h"
-#include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "hip-promote-strided-operands"
 
@@ -84,7 +79,7 @@ static MemRefType makeContiguousType(MemRefType src) {
 
 /// Collects SSA values for each dynamic dimension of \p src (in dim order).
 /// Emits memref.dim ops at the current insertion point of \p builder.
-static SmallVector<Value> collectDynamicSizes(OpBuilder &builder, Location loc,
+static SmallVector<Value> collectDynamicSizes(OpBuilder& builder, Location loc,
                                               Value src, MemRefType type) {
   SmallVector<Value> sizes;
   for (int64_t i : llvm::seq<int64_t>(type.getRank())) {
@@ -102,7 +97,7 @@ static SmallVector<Value> collectDynamicSizes(OpBuilder &builder, Location loc,
 ///   %tmp = memref.alloc(%dyn0, %dyn1, ...) : memref<...identity...>
 ///   memref.copy %strided, %tmp
 ///   <consumer rewritten to read %tmp>
-static Value materializeContiguousCopy(OpOperand &use, Operation *consumer) {
+static Value materializeContiguousCopy(OpOperand& use, Operation* consumer) {
   Value strided = use.get();
   auto stridedType = cast<MemRefType>(strided.getType());
   MemRefType contiguousType = makeContiguousType(stridedType);
@@ -131,7 +126,7 @@ struct PromoteStridedHipOperandsPass
     : public impl::PromoteStridedHipOperandsPassBase<
           PromoteStridedHipOperandsPass> {
 
-  void getDependentDialects(DialectRegistry &registry) const override {
+  void getDependentDialects(DialectRegistry& registry) const override {
     registry.insert<memref::MemRefDialect>();
   }
 
@@ -147,16 +142,16 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
   // ops) does not invalidate the walk.
   SmallVector<DestinationStyleOpInterface> consumers;
   funcOp.walk([&](DestinationStyleOpInterface dpsOp) {
-    Operation *op = dpsOp.getOperation();
+    Operation* op = dpsOp.getOperation();
     if (op->getDialect() != op->getContext()->getLoadedDialect<HipDialect>())
       return;
     consumers.push_back(dpsOp);
   });
 
   for (DestinationStyleOpInterface dpsOp : consumers) {
-    Operation *consumer = dpsOp.getOperation();
+    Operation* consumer = dpsOp.getOperation();
     SmallVector<Value> tmps;
-    for (OpOperand *input : dpsOp.getDpsInputOperands()) {
+    for (OpOperand* input : dpsOp.getDpsInputOperands()) {
       auto type = dyn_cast<MemRefType>(input->get().getType());
       if (!type || !isNonIdentityMemRef(type))
         continue;
@@ -168,7 +163,7 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
     // push each new dealloc directly after the consumer, reversing the
     // sequence.  Advancing the anchor preserves source order and makes the
     // IR easier to read in tests / dumps.
-    Operation *anchor = consumer;
+    Operation* anchor = consumer;
     OpBuilder builder(consumer);
     for (Value tmp : tmps) {
       builder.setInsertionPointAfter(anchor);

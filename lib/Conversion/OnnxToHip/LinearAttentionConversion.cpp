@@ -1,7 +1,10 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- LinearAttentionConversion.cpp - ONNX-to-HIP LinearAttention conversion -
+//*- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -10,33 +13,32 @@ namespace hip {
 namespace {
 
 /// onnx.Custom(LinearAttention) -> hip.linear_attention
-struct LinearAttentionToHip : public mlir::RewritePattern {
-  LinearAttentionToHip(mlir::MLIRContext *ctx)
+struct LinearAttentionToHip : public RewritePattern {
+  LinearAttentionToHip(MLIRContext* ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override;
 };
 
-mlir::LogicalResult
-LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
-                                      mlir::PatternRewriter &rewriter) const {
-  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+LogicalResult
+LinearAttentionToHip::matchAndRewrite(Operation* op,
+                                      PatternRewriter& rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "LinearAttention")
     return rewriter.notifyMatchFailure(op, "not a LinearAttention operation");
 
-  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  auto domainAttr = op->getAttrOfType<StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
     return rewriter.notifyMatchFailure(
         op, "domain must be com.microsoft for LinearAttention");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
+  if (failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");
-  mlir::Value context = *ctxOrFailure;
+  Value context = *ctxOrFailure;
 
-  mlir::Location loc = op->getLoc();
+  Location loc = op->getLoc();
 
   // Support variable operand count (3-6 inputs as per spec)
   size_t numOps = op->getNumOperands();
@@ -44,63 +46,60 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(op,
                                        "LinearAttention expects 3-6 operands");
 
-  auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
+  auto getOptionalOperand = [&](size_t idx) -> Value {
     if (idx >= numOps)
       return nullptr;
-    mlir::Value val = op->getOperand(idx);
-    if (mlir::isa<mlir::NoneType>(val.getType()))
+    Value val = op->getOperand(idx);
+    if (isa<NoneType>(val.getType()))
       return nullptr;
     return val;
   };
 
   // === Extract Inputs (spec order 1-6) ===
-  mlir::Value query = op->getOperand(0);
-  mlir::Value key = op->getOperand(1);
-  mlir::Value value = op->getOperand(2);
-  mlir::Value pastState = getOptionalOperand(3);
-  mlir::Value decay = getOptionalOperand(4);
-  mlir::Value beta = getOptionalOperand(5);
+  Value query = op->getOperand(0);
+  Value key = op->getOperand(1);
+  Value value = op->getOperand(2);
+  Value pastState = getOptionalOperand(3);
+  Value decay = getOptionalOperand(4);
+  Value beta = getOptionalOperand(5);
 
   // === Extract Attributes ===
-  auto qNumHeadsAttrOnnx = op->getAttrOfType<mlir::IntegerAttr>("q_num_heads");
+  auto qNumHeadsAttrOnnx = op->getAttrOfType<IntegerAttr>("q_num_heads");
   if (!qNumHeadsAttrOnnx)
     return rewriter.notifyMatchFailure(op, "missing q_num_heads attribute");
   auto qNumHeadsAttr =
       rewriter.getI64IntegerAttr(qNumHeadsAttrOnnx.getValue().getSExtValue());
 
-  auto kvNumHeadsAttrOnnx =
-      op->getAttrOfType<mlir::IntegerAttr>("kv_num_heads");
+  auto kvNumHeadsAttrOnnx = op->getAttrOfType<IntegerAttr>("kv_num_heads");
   if (!kvNumHeadsAttrOnnx)
     return rewriter.notifyMatchFailure(op, "missing kv_num_heads attribute");
   auto kvNumHeadsAttr =
       rewriter.getI64IntegerAttr(kvNumHeadsAttrOnnx.getValue().getSExtValue());
 
-  auto getFloatAttr = [&](const char *name,
-                          float defaultVal) -> mlir::FloatAttr {
-    auto attr = op->getAttrOfType<mlir::FloatAttr>(name);
+  auto getFloatAttr = [&](const char* name, float defaultVal) -> FloatAttr {
+    auto attr = op->getAttrOfType<FloatAttr>(name);
     return attr ? attr : rewriter.getF32FloatAttr(defaultVal);
   };
 
-  auto getI64Attr = [&](const char *name,
-                        int64_t defaultVal) -> mlir::IntegerAttr {
-    auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
+  auto getI64Attr = [&](const char* name, int64_t defaultVal) -> IntegerAttr {
+    auto attr = op->getAttrOfType<IntegerAttr>(name);
     return attr ? rewriter.getI64IntegerAttr(attr.getValue().getSExtValue())
                 : rewriter.getI64IntegerAttr(defaultVal);
   };
 
-  auto getStrAttr = [&](const char *name,
-                        const char *defaultVal) -> mlir::StringAttr {
-    auto attr = op->getAttrOfType<mlir::StringAttr>(name);
+  auto getStrAttr = [&](const char* name,
+                        const char* defaultVal) -> StringAttr {
+    auto attr = op->getAttrOfType<StringAttr>(name);
     return attr ? attr : rewriter.getStringAttr(defaultVal);
   };
 
   // scale = 0.0 means "auto-compute 1/sqrt(d_k) at runtime"
-  auto queryType = mlir::cast<mlir::RankedTensorType>(query.getType());
+  auto queryType = cast<RankedTensorType>(query.getType());
   int64_t qNumHeads = qNumHeadsAttrOnnx.getValue().getSExtValue();
   float defaultScale = 0.0f;
   if (queryType.hasRank() && queryType.getRank() >= 3) {
     int64_t hiddenSize = queryType.getDimSize(2);
-    if (hiddenSize != mlir::ShapedType::kDynamic && qNumHeads > 0) {
+    if (hiddenSize != ShapedType::kDynamic && qNumHeads > 0) {
       int64_t headSize = hiddenSize / qNumHeads;
       defaultScale = 1.0f / std::sqrt(static_cast<float>(headSize));
     }
@@ -116,22 +115,20 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "LinearAttention expects exactly 2 results");
 
-  auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto presentStateType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  auto outputType = cast<RankedTensorType>(op->getResult(0).getType());
+  auto presentStateType = cast<RankedTensorType>(op->getResult(1).getType());
 
   // === Create DPS init tensors ===
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentStateInit = createEmptyTensor(
-      rewriter, loc, presentStateType, pastState ? pastState : key);
+  Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
+  Value presentStateInit = createEmptyTensor(rewriter, loc, presentStateType,
+                                             pastState ? pastState : key);
 
   // === Create hip.linear_attention operation ===
-  mlir::SmallVector<mlir::Type> resultTypes;
+  SmallVector<Type> resultTypes;
   resultTypes.push_back(outputType);
   resultTypes.push_back(presentStateType);
 
-  mlir::SmallVector<mlir::Value> operands;
+  SmallVector<Value> operands;
   operands.push_back(context);
   operands.push_back(query);
   operands.push_back(key);
@@ -145,14 +142,14 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
   operands.push_back(outputInit);
   operands.push_back(presentStateInit);
 
-  mlir::SmallVector<mlir::NamedAttribute> attrs;
+  SmallVector<NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("q_num_heads", qNumHeadsAttr));
   attrs.push_back(rewriter.getNamedAttr("kv_num_heads", kvNumHeadsAttr));
   attrs.push_back(rewriter.getNamedAttr("scale", scaleAttr));
   attrs.push_back(rewriter.getNamedAttr("chunk_size", chunkSizeAttr));
   attrs.push_back(rewriter.getNamedAttr("update_rule", updateRuleAttr));
 
-  auto state = mlir::OperationState(loc, "hip.linear_attention");
+  auto state = OperationState(loc, "hip.linear_attention");
   state.addOperands(operands);
   state.addAttributes(attrs);
   state.addTypes(resultTypes);
@@ -175,13 +172,13 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
   auto hipOp = rewriter.create(state);
   rewriter.replaceOp(op, hipOp->getResults());
-  return mlir::success();
+  return success();
 }
 
 } // namespace
 
 void mlir::hip::populateLinearAttentionConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+    RewritePatternSet& patterns, MLIRContext* ctx) {
   patterns.add<LinearAttentionToHip>(ctx);
 }
 

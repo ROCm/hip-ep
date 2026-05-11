@@ -1,10 +1,12 @@
+//===- HipOps.td - HIP dialect operation definitions ------*- tablegen -*-===//
 //
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
 // Licensed under the MIT License.
 //
+//===----------------------------------------------------------------------===//
 
-#ifndef HIP_OPS
-#define HIP_OPS
+#ifndef HIP_DIALECT_IR_HIPOPS
+#define HIP_DIALECT_IR_HIPOPS
 
 include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipTypes.td"
@@ -1446,4 +1448,4 @@ def Hip_GemmOp : Hip_DpsOp<"gemm">{
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
-#endif // HIP_OPS
+#endif // HIP_DIALECT_IR_HIPOPS

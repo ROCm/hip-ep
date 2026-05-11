@@ -1,79 +1,82 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- HipToLLVMUtils.h - Shared helpers for HIP-to-LLVM patterns -*- C++
+//-*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #ifndef HIP_CONVERSION_HIPTOLLVM_UTILS_H
 #define HIP_CONVERSION_HIPTOLLVM_UTILS_H
 
+// Header for shared inline helpers (descriptor extraction, runtime symbol
+// names, dtype enums) used by the per-operator HIP -> LLVM lowering files.
+//
+// Include only what the inline helpers and the populator signatures need.
+// Heavy umbrella headers that are only used inside `HipToLLVM.cpp`'s
+// `runOnOperation` (e.g. `MemRefToLLVM.h`, `ArithToLLVM.h`,
+// `ControlFlowToLLVM.h`, `FuncToLLVM/ConvertFuncToLLVM.h`,
+// `LLVMCommon/ConversionTarget.h`) live in the `.cpp` to keep this header
+// cheap to include from each per-operator lowering file.
+
 #include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
-#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
-#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
-#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
-#include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
+
+#include "llvm/ADT/Sequence.h"
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
-#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
-#include "llvm/ADT/Sequence.h"
 
 namespace mlir {
 namespace hip {
 
-inline constexpr const char *kHipMalloc = "hip_device_malloc";
-inline constexpr const char *kHipFree = "hip_device_free";
-inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
+inline constexpr const char* kHipMalloc = "hip_device_malloc";
+inline constexpr const char* kHipFree = "hip_device_free";
+inline constexpr const char* kHipGetPoolBase = "hipdnn_ep_get_pool_base";
 
-inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
-inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
+inline constexpr const char* kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
+inline constexpr const char* kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 
-inline constexpr const char *kMiopenConvolutionForward =
+inline constexpr const char* kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
-inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
-inline constexpr const char *kWrapMiopenT5LayerNormForward =
+inline constexpr const char* kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
+inline constexpr const char* kWrapMiopenT5LayerNormForward =
     "wrap_miopenT5LayerNormForward";
-inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
+inline constexpr const char* kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
-inline constexpr const char *kMiopenAdd = "hip_miopen_add";
-inline constexpr const char *kMiopenMul = "hip_miopen_mul";
-inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
-inline constexpr const char *kHipTranspose = "hip_transpose";
-inline constexpr const char *kWrapGather = "wrap_gather";
-inline constexpr const char *kHipSilu = "hip_silu";
-inline constexpr const char *kWrapMiopenActivationForward =
+inline constexpr const char* kMiopenAdd = "hip_miopen_add";
+inline constexpr const char* kMiopenMul = "hip_miopen_mul";
+inline constexpr const char* kMiopenSoftmax = "hip_miopen_softmax";
+inline constexpr const char* kHipTranspose = "hip_transpose";
+inline constexpr const char* kWrapGather = "wrap_gather";
+inline constexpr const char* kHipSilu = "hip_silu";
+inline constexpr const char* kWrapMiopenActivationForward =
     "wrap_miopenActivationForward";                   // hip.sigmoid
-inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
-inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
-inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
-inline constexpr const char *kWrapMiopenOpTensor =
+inline constexpr const char* kWrapGelu = "wrap_gelu"; // hip.gelu
+inline constexpr const char* kWrapElementwiseSub = "wrap_elementwise_sub";
+inline constexpr const char* kWrapRotaryEmbedding = "wrap_rotary_embedding";
+inline constexpr const char* kWrapMiopenOpTensor =
     "wrap_miopenOpTensor"; // hip.mul, hip.add (with 4D shape for broadcasting)
-inline constexpr const char *kWrapCast = "wrap_cast";
-inline constexpr const char *kWrapPower = "wrap_power";
-inline constexpr const char *kWrapRange = "wrap_range";
-inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
-inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
-inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
-inline constexpr const char *kWrapQMoE = "wrap_qmoe";
-inline constexpr const char *kWrapGemm = "wrap_gemm";
-inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
-inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
-inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
-inline constexpr const char *kWrapCausalConvWithState =
+inline constexpr const char* kWrapCast = "wrap_cast";
+inline constexpr const char* kWrapPower = "wrap_power";
+inline constexpr const char* kWrapRange = "wrap_range";
+inline constexpr const char* kWrapReduceSum = "wrap_reduce_sum";
+inline constexpr const char* kWrapGQA = "wrap_group_query_attention";
+inline constexpr const char* kWrapMatMulNBits = "wrap_matmul_nbits";
+inline constexpr const char* kWrapQMoE = "wrap_qmoe";
+inline constexpr const char* kWrapGemm = "wrap_gemm";
+inline constexpr const char* kWrapLinearAttention = "wrap_linear_attention";
+inline constexpr const char* kHipGetConstant = "hipdnn_ep_constant_get";
+inline constexpr const char* kHipDNNGraphExecute = "hipdnn_graph_execute";
+inline constexpr const char* kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
 
 // LLVM memref descriptor struct field indices.
@@ -139,7 +142,7 @@ enum class TensorOp : int64_t {
 // pool are respected -- each view has the same allocatedPtr but a distinct
 // alignedPtr.
 inline Value extractContiguousMemRefPtr(Value memrefDesc,
-                                        ConversionPatternRewriter &rewriter,
+                                        ConversionPatternRewriter& rewriter,
                                         Location loc) {
   Value ptr = MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
@@ -154,8 +157,8 @@ inline Value extractContiguousMemRefPtr(Value memrefDesc,
 // Use for HIP/MIOpen entry points when the memref may be a subview with a
 // non-zero descriptor offset (same base alignedPtr as parent, distinct offset).
 inline Value extractMemRefDataPtr(Value memrefDesc, MemRefType memrefType,
-                                  const TypeConverter *typeConverter,
-                                  ConversionPatternRewriter &rewriter,
+                                  const TypeConverter* typeConverter,
+                                  ConversionPatternRewriter& rewriter,
                                   Location loc) {
   SmallVector<Type, 1> llvmElemTypes;
   if (failed(typeConverter->convertType(memrefType.getElementType(),
@@ -185,7 +188,7 @@ inline Value extractMemRefDataPtr(Value memrefDesc, MemRefType memrefType,
 //
 // Same identity-layout precondition as extractContiguousMemRefPtr.
 inline Value extractOptionalMemRefPtr(Value memrefDesc,
-                                      ConversionPatternRewriter &rewriter,
+                                      ConversionPatternRewriter& rewriter,
                                       Location loc) {
   Value result;
   if (memrefDesc) {
@@ -207,7 +210,7 @@ inline Value extractOptionalMemRefPtr(Value memrefDesc,
 // measurably expensive and the underlying library natively accepts strides).
 // No in-tree callers today.
 inline MemRefDescriptor
-extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter &rewriter,
+extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter& rewriter,
                         Location loc) {
   (void)rewriter;
   (void)loc;
@@ -218,7 +221,7 @@ extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter &rewriter,
 // constant for static dims and extracting from the descriptor for dynamic dims.
 inline Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
                               Value descriptor,
-                              ConversionPatternRewriter &rewriter,
+                              ConversionPatternRewriter& rewriter,
                               Location loc) {
   Value result;
   if (type.isDynamicDim(dimIdx)) {
@@ -234,7 +237,7 @@ inline Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
 // Helper: compute total number of elements in a memref, handling both static
 // and dynamic dimensions.
 inline Value computeNumElements(MemRefType type, Value descriptor,
-                                ConversionPatternRewriter &rewriter,
+                                ConversionPatternRewriter& rewriter,
                                 Location loc) {
   Type i64Type = rewriter.getI64Type();
   Value num = LLVM::ConstantOp::create(rewriter, loc, i64Type,
@@ -258,7 +261,7 @@ inline Value computeNumElements(MemRefType type, Value descriptor,
 // to broadcast that dimension against the corresponding dim of the other
 // operand.
 inline SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
-                                            ConversionPatternRewriter &rewriter,
+                                            ConversionPatternRewriter& rewriter,
                                             Location loc, Type i64Type) {
   auto createConst = [&](int64_t v) {
     return LLVM::ConstantOp::create(rewriter, loc, i64Type,
@@ -287,46 +290,46 @@ enum HipdnnTensorOp : int64_t {
 };
 
 // Pattern population functions (one per operator file)
-void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns);
-void populateConvLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
-void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns);
-void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns);
-void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns);
-void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
-                                        RewritePatternSet &patterns);
-void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
-void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
-                                    RewritePatternSet &patterns);
-void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns);
-void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
-void populateReduceSumLoweringPatterns(const LLVMTypeConverter &converter,
-                                       RewritePatternSet &patterns);
-void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
-                                       RewritePatternSet &patterns);
-void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
-void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
-                                 RewritePatternSet &patterns);
-void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
-                                         RewritePatternSet &patterns);
-void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
-void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
-                                   RewritePatternSet &patterns);
+void populateMemoryLoweringPatterns(const LLVMTypeConverter& converter,
+                                    RewritePatternSet& patterns);
+void populateConvLoweringPatterns(const LLVMTypeConverter& converter,
+                                  RewritePatternSet& patterns);
+void populateMatmulLoweringPatterns(const LLVMTypeConverter& converter,
+                                    RewritePatternSet& patterns);
+void populateElementwiseLoweringPatterns(const LLVMTypeConverter& converter,
+                                         RewritePatternSet& patterns);
+void populatePowerLoweringPatterns(const LLVMTypeConverter& converter,
+                                   RewritePatternSet& patterns);
+void populateActivationLoweringPatterns(const LLVMTypeConverter& converter,
+                                        RewritePatternSet& patterns);
+void populateNormLoweringPatterns(const LLVMTypeConverter& converter,
+                                  RewritePatternSet& patterns);
+void populateGatherLoweringPatterns(const LLVMTypeConverter& converter,
+                                    RewritePatternSet& patterns);
+void populateRangeLoweringPatterns(const LLVMTypeConverter& converter,
+                                   RewritePatternSet& patterns);
+void populateCastLoweringPatterns(const LLVMTypeConverter& converter,
+                                  RewritePatternSet& patterns);
+void populateReduceSumLoweringPatterns(const LLVMTypeConverter& converter,
+                                       RewritePatternSet& patterns);
+void populateTransposeLoweringPatterns(const LLVMTypeConverter& converter,
+                                       RewritePatternSet& patterns);
+void populateRopeLoweringPatterns(const LLVMTypeConverter& converter,
+                                  RewritePatternSet& patterns);
+void populateGqaLoweringPatterns(const LLVMTypeConverter& converter,
+                                 RewritePatternSet& patterns);
+void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter& converter,
+                                         RewritePatternSet& patterns);
+void populateQMoELoweringPatterns(const LLVMTypeConverter& converter,
+                                  RewritePatternSet& patterns);
+void populateGraphLoweringPatterns(const LLVMTypeConverter& converter,
+                                   RewritePatternSet& patterns);
 void populateCausalConvWithStateLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns);
-void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns);
+    const LLVMTypeConverter& converter, RewritePatternSet& patterns);
+void populateGemmLoweringPatterns(const LLVMTypeConverter& converter,
+                                  RewritePatternSet& patterns);
+void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter& converter,
+                                             RewritePatternSet& patterns);
 
 } // namespace hip
 } // namespace mlir

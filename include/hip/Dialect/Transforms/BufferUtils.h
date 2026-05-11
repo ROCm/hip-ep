@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
 //===- BufferUtils.h - Shared buffer analysis utilities -------------------===//
 //
 // Utilities shared by PoolAllocs, OptimizeMemRefs, and LowerAllocs.
@@ -27,7 +23,7 @@ int64_t getStaticByteSize(MemRefType type);
 /// Emit arith ops for: llvm::alignTo(value, alignment).
 /// Produces: ((value + alignment - 1) / alignment) * alignment.
 /// Returns \p value unchanged if alignment <= 1.
-Value emitAlignUp(OpBuilder &builder, Location loc, Value value,
+Value emitAlignUp(OpBuilder& builder, Location loc, Value value,
                   int64_t alignment);
 
 /// Find the highest block-local operation index among all transitive users
@@ -38,22 +34,22 @@ Value emitAlignUp(OpBuilder &builder, Location loc, Value value,
 /// Users in nested regions are resolved to their ancestor in \p block
 /// via Block::findAncestorOpInBlock.
 unsigned findLastAliasedUseIndex(Value allocResult,
-                                 const BufferViewFlowAnalysis &aliasAnalysis,
-                                 Block &block,
-                                 const DenseMap<Operation *, unsigned> &opIndex,
+                                 const BufferViewFlowAnalysis& aliasAnalysis,
+                                 Block& block,
+                                 const DenseMap<Operation*, unsigned>& opIndex,
                                  unsigned blockSize);
 
 /// Find the last Operation* among all transitive users of \p allocResult,
 /// following view-like aliases via \p aliasAnalysis.  Resolves nested-region
 /// users to their ancestor in \p entryBlock.
-Operation *findLastAliasedUser(Value allocResult,
-                               const BufferViewFlowAnalysis &aliasAnalysis,
-                               Block &entryBlock);
+Operation* findLastAliasedUser(Value allocResult,
+                               const BufferViewFlowAnalysis& aliasAnalysis,
+                               Block& entryBlock);
 
 /// Return true if any value in the transitive alias set of \p root
 /// (as determined by \p aliasAnalysis) is contained in \p valueSet.
-bool isAliasInSet(Value root, const BufferViewFlowAnalysis &aliasAnalysis,
-                  const DenseSet<Value> &valueSet);
+bool isAliasInSet(Value root, const BufferViewFlowAnalysis& aliasAnalysis,
+                  const DenseSet<Value>& valueSet);
 
 } // namespace hip
 } // namespace mlir

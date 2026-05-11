@@ -2,15 +2,15 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "compilation_options_generated.h"
 #include "hip/Compiler/CompilerDriver.h"
 
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "CrashHandler.h"
+#include "compilation_options_generated.h"
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   hip::install_crash_handlers("hip-compiler");
   std::string inputFilename;
   std::string outputDll;
@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
 
   mlir::hip::CompilationOptionsT options;
   std::string errorMessage;
-  hip::compiler::CompilerDriver driver;
+  mlir::hip::CompilerDriver driver;
 
   if (!driver.compile((*bufOrErr)->getBuffer(), outputDll, options,
                       errorMessage)) {

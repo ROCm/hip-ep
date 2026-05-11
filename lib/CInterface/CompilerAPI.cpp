@@ -1,18 +1,19 @@
-/*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
- * Licensed under the MIT License.
- */
+//===- CompilerAPI.cpp - C ABI for the HIP compiler driver ---- *- C++ -*-===//
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc.  All rights reserved.
+// Licensed under the MIT License.
+//
+//===----------------------------------------------------------------------===//
 
 #include "hip/Compiler/CompilerDriver.h"
 #include "hip/compiler_api.h"
 #include "hip/compiler_types.h"
 #include "hip/flatbuffers_json.h"
-
 #include "morphizen-foundation/file_io.hpp"
 
-#include "compilation_options_schema.h"
-
 #include "llvm/ADT/StringRef.h"
+
+#include "compilation_options_schema.h"
 
 #include <cstring>
 #include <string>
@@ -21,9 +22,9 @@
 #include "../HipDNNGraphRuntime/hipdnn_graph_runtime.h"
 #endif
 
-using namespace hip::compiler;
+using namespace mlir::hip;
 
-static const char *COMPILER_VERSION = "1.0.0";
+static const char* COMPILER_VERSION = "1.0.0";
 
 // Parse JSON into CompilationOptionsT (defined in
 // schemas/compilation_options.fbs). Key fields:
@@ -32,9 +33,9 @@ static const char *COMPILER_VERSION = "1.0.0";
 //   constants_file     — externalized weights filename (default
 //   "constants.bin") skip_constant_data — skip writing constant bytes (default
 //   false)
-static bool parseOptions(const char *options_json,
-                         mlir::hip::CompilationOptionsT &opts,
-                         std::string &error_message) {
+static bool parseOptions(const char* options_json,
+                         mlir::hip::CompilationOptionsT& opts,
+                         std::string& error_message) {
   if (!options_json || strlen(options_json) == 0)
     return true;
 
@@ -43,7 +44,7 @@ static bool parseOptions(const char *options_json,
       error_message);
 }
 
-static void setError(CompilerError *error, const std::string &message) {
+static void setError(CompilerError* error, const std::string& message) {
   if (error) {
     size_t len = message.length();
     if (len >= sizeof(error->message)) {
@@ -57,8 +58,8 @@ static void setError(CompilerError *error, const std::string &message) {
 extern "C" {
 
 COMPILER_API CompilerErrorCode hip_compile_with_fs(
-    const void *input_mlir, size_t input_size, const char *output_path,
-    const char *options_json, CompilerError *error, void *fs) {
+    const void* input_mlir, size_t input_size, const char* output_path,
+    const char* options_json, CompilerError* error, void* fs) {
   if (!input_mlir || input_size == 0 || !output_path) {
     setError(error, "Invalid input: input_mlir, input_size, and output_path "
                     "must be valid");
@@ -78,17 +79,16 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
     }
 
     CompilerDriver driver;
-    driver.setFileSystem(static_cast<morphizen::FileSystem *>(fs));
+    driver.setFileSystem(static_cast<morphizen::FileSystem*>(fs));
 
 #ifdef HIPDNN_GRAPH_RUNTIME_AVAILABLE
-    void *hipdnn_handle = hipdnn_graph_create_handle();
+    void* hipdnn_handle = hipdnn_graph_create_handle();
     if (hipdnn_handle)
       driver.setHipdnnHandle(hipdnn_handle);
 #endif
 
     std::string error_message;
-    llvm::StringRef input_ref(static_cast<const char *>(input_mlir),
-                              input_size);
+    llvm::StringRef input_ref(static_cast<const char*>(input_mlir), input_size);
     std::string output_str(output_path);
 
     bool success =
@@ -103,8 +103,8 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
     if (hipdnn_handle) {
       auto graphs = driver.getCompiledGraphs();
       if (graphs && !graphs->empty()) {
-        void *registry = hipdnn_graph_registry_create();
-        for (auto &[name, graph] : *graphs) {
+        void* registry = hipdnn_graph_registry_create();
+        for (auto& [name, graph] : *graphs) {
           int graph_id = std::stoi(name.str().substr(strlen("hipdnn_graph_")));
           hipdnn_graph_registry_store(registry, graph_id, graph.release());
         }
@@ -116,7 +116,7 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
 
     return COMPILER_SUCCESS;
 
-  } catch (const std::exception &ex) {
+  } catch (const std::exception& ex) {
     setError(error, std::string("Exception: ") + ex.what());
     return COMPILER_ERROR_INTERNAL;
   } catch (...) {
@@ -125,6 +125,6 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
   }
 }
 
-COMPILER_API const char *hip_get_version(void) { return COMPILER_VERSION; }
+COMPILER_API const char* hip_get_version(void) { return COMPILER_VERSION; }
 
 } // extern "C"
