@@ -1215,18 +1215,30 @@ void GemmFp16U4Impl(
     const int wrow = wid / WN_L;
     const int wcol = wid % WN_L;
 
+    // Block-to-tile mapping with column swizzle for L2 locality.
+    // Splits the grid into a "main" region of (n_tiles/sw)*sw cols where full
+    // sw-wide groups apply, and a "tail" region of (n_tiles%sw) leftover cols
+    // that uses plain row-major. The previous implementation fell back to
+    // row-major only when bx >= n_tiles, which produced both collisions AND
+    // missing tiles when n_tiles % sw != 0, leaving those tiles with stale
+    // output data from prior kernel launches.
     const int n_tiles  = gridDim.x;
     const int m_tiles  = gridDim.y;
     const int block_id = blockIdx.y * n_tiles + blockIdx.x;
-    const int sw       = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
-    const int super    = block_id / (sw * m_tiles);
-    const int rem      = block_id % (sw * m_tiles);
-    int by             = rem / sw;
-    int bx             = super * sw + rem % sw;
-    if(bx >= n_tiles)
-    {
-        bx = block_id % n_tiles;
-        by = block_id / n_tiles;
+    const int sw          = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
+    const int main_cols   = (n_tiles / sw) * sw;
+    const int main_blocks = main_cols * m_tiles;
+    int by, bx;
+    if (block_id < main_blocks) {
+        const int super = block_id / (sw * m_tiles);
+        const int rem   = block_id % (sw * m_tiles);
+        by = rem / sw;
+        bx = super * sw + rem % sw;
+    } else {
+        const int tail_id   = block_id - main_blocks;
+        const int tail_cols = n_tiles - main_cols;
+        by = tail_id / tail_cols;
+        bx = main_cols + (tail_id % tail_cols);
     }
     const int row0 = by * BM_T;
     const int col0 = bx * BN_T;
@@ -1443,11 +1455,11 @@ void GemmFp16U4Impl(
                 int r = e * 2 + sub;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        __builtin_nontemporal_store((_Float16)acc[wm][wn][e],
-                                                    &C[(mbase + r) * ldc + nbase + lane]);
+                        C[(mbase + r) * ldc + nbase + lane] =
+                            (_Float16)acc[wm][wn][e];
                 } else {
-                    __builtin_nontemporal_store((_Float16)acc[wm][wn][e],
-                                                &C[(mbase + r) * ldc + nbase + lane]);
+                    C[(mbase + r) * ldc + nbase + lane] =
+                        (_Float16)acc[wm][wn][e];
                 }
             }
         }
@@ -2122,17 +2134,30 @@ void GemmFp16I8Impl(
     const int wrow = wid / WN_L;
     const int wcol = wid % WN_L;
 
+    // Block-to-tile mapping with column swizzle for L2 locality.
+    // Splits the grid into a "main" region of (n_tiles/sw)*sw cols where full
+    // sw-wide groups apply, and a "tail" region of (n_tiles%sw) leftover cols
+    // that uses plain row-major. The previous implementation fell back to
+    // row-major only when bx >= n_tiles, which produced both collisions AND
+    // missing tiles when n_tiles % sw != 0, leaving those tiles with stale
+    // output data from prior kernel launches.
     const int n_tiles  = gridDim.x;
     const int m_tiles  = gridDim.y;
     const int block_id = blockIdx.y * n_tiles + blockIdx.x;
-    const int sw       = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
-    const int super    = block_id / (sw * m_tiles);
-    const int rem      = block_id % (sw * m_tiles);
-    int by             = rem / sw;
-    int bx             = super * sw + rem % sw;
-    if (bx >= n_tiles) {
-        bx = block_id % n_tiles;
-        by = block_id / n_tiles;
+    const int sw          = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
+    const int main_cols   = (n_tiles / sw) * sw;
+    const int main_blocks = main_cols * m_tiles;
+    int by, bx;
+    if (block_id < main_blocks) {
+        const int super = block_id / (sw * m_tiles);
+        const int rem   = block_id % (sw * m_tiles);
+        by = rem / sw;
+        bx = super * sw + rem % sw;
+    } else {
+        const int tail_id   = block_id - main_blocks;
+        const int tail_cols = n_tiles - main_cols;
+        by = tail_id / tail_cols;
+        bx = main_cols + (tail_id % tail_cols);
     }
     const int row0 = by * BM_T;
     const int col0 = bx * BN_T;
@@ -2321,13 +2346,11 @@ void GemmFp16I8Impl(
                 int r = e * 2 + sub;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        __builtin_nontemporal_store(
-                            (_Float16)acc[wm][wn][e],
-                            &C[(mbase + r) * ldc + nbase + lane]);
+                        C[(mbase + r) * ldc + nbase + lane] =
+                            (_Float16)acc[wm][wn][e];
                 } else {
-                    __builtin_nontemporal_store(
-                        (_Float16)acc[wm][wn][e],
-                        &C[(mbase + r) * ldc + nbase + lane]);
+                    C[(mbase + r) * ldc + nbase + lane] =
+                        (_Float16)acc[wm][wn][e];
                 }
             }
         }
