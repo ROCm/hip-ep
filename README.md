@@ -60,6 +60,7 @@ These operations are handled through standard MLIR transformations without requi
 | Unsqueeze | tensor.expand_shape | Inserts size-1 axes; shape/stride reinterpretation only |
 | Squeeze | tensor.collapse_shape | Removes size-1 axes; shape/stride reinterpretation only |
 | Split | tensor.extract_slice | Zero-copy tensor partitioning; creates views without data movement |
+| Shape | arith.constant (static) / tensor.dim + tensor.from_elements (dynamic) | Extracts tensor dimensions as int64 tensor; static shapes fold to constant |
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 
 ---
