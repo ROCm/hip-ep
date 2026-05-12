@@ -975,6 +975,29 @@ int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
   return 0;
 }
 
+int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
+                             void *bias, void *output, void *mean,
+                             void *inv_std, int64_t input_num_elements,
+                             int64_t scale_num_elements,
+                             int64_t element_size_bytes, int64_t axis,
+                             float epsilon, int64_t stash_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_layer_normalization\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_layer_normalization(input_num_elements=%lld, "
+             "scale_num_elements=%lld, element_size_bytes=%lld, "
+             "axis=%lld, epsilon=%f, stash_type=%lld, "
+             "bias=%s, mean=%s, inv_std=%s)\n",
+             (long long)input_num_elements, (long long)scale_num_elements,
+             (long long)element_size_bytes, (long long)axis, epsilon,
+             (long long)stash_type, bias ? "yes" : "null",
+             mean ? "yes" : "null", inv_std ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyDeviceToHost,
                            static_cast<hipStream_t>(stream)));
