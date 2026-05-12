@@ -1058,9 +1058,11 @@ def Hip_DivOp : Hip_DpsOp<"div"> {
     Hip_TensorOrMemRef:$output
   );
 
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 def Hip_EqualOp : Hip_DpsOp<"equal"> {
