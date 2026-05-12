@@ -28,6 +28,7 @@ add_library(OnnxToHip STATIC
   RangeConversion.cpp
   CastLikeConversion.cpp
   ReduceMaxConversion.cpp
+  MinConversion.cpp
 )
 
 add_dependencies(OnnxToHip

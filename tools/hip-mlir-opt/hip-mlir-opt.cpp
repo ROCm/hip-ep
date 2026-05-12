@@ -148,6 +148,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::WhereOp>>(*ctx);
     mlir::hip::LayerNormOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::LayerNormOp>>(*ctx);
+    mlir::hip::MinOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::MinOp>>(*ctx);
   });
 }
 
