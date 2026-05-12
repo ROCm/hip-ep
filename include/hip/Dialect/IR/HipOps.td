@@ -1034,6 +1034,38 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
   }];
 }
 
+def Hip_EqualOp : Hip_DpsOp<"equal"> {
+  let summary = "Element-wise equality comparison: c = (a == b)";
+  let description = [{
+    Compares two input tensors element-wise for equality.
+    Output is a boolean tensor (i1) with the same broadcast shape.
+    Implements the standard ONNX Equal operator.
+
+    Supports multidirectional (Numpy-style) broadcasting.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.equal(%ctx) ins(%a, %b : memref<3x4xf32, 1>, memref<3x4xf32, 1>)
+                    outs(%c : memref<3x4xi1, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NegOp : Hip_DpsOp<"neg"> {
   let summary = "Element-wise negation: y = -x";
   let description = [{
