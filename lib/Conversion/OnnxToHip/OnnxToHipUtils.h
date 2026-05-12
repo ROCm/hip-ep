@@ -152,6 +152,8 @@ void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populateCastLikeConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir
