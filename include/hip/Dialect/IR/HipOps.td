@@ -1034,6 +1034,35 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
   }];
 }
 
+def Hip_DivOp : Hip_DpsOp<"div"> {
+  let summary = "Elementwise division";
+  let description = [{
+    Performs elementwise division: output = lhs / rhs
+
+    Supports multidirectional (Numpy-style) broadcasting.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.div(%ctx) ins(%lhs, %rhs : memref<3x4xf32, 1>,
+                                   memref<3x4xf32, 1>)
+                  outs(%output : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  // result_tensors inherited from Hip_DpsOp
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
 def Hip_EqualOp : Hip_DpsOp<"equal"> {
   let summary = "Element-wise equality comparison: c = (a == b)";
   let description = [{
@@ -1062,6 +1091,96 @@ def Hip_EqualOp : Hip_DpsOp<"equal"> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
     `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_NotOp : Hip_DpsOp<"not"> {
+  let summary = "Element-wise logical NOT: y = !x";
+  let description = [{
+    Computes the logical NOT of each element (boolean/i1).
+    Implements the standard ONNX Not operator.
+
+    Formula: Y = !X
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.not(%ctx) ins(%x : memref<3x4xi1, 1>)
+                  outs(%y : memref<3x4xi1, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_CosOp : Hip_DpsOp<"cos"> {
+  let summary = "Element-wise cosine: y = cos(x)";
+  let description = [{
+    Computes the cosine of each element.
+    Implements the standard ONNX Cos operator.
+
+    Formula: Y = cos(X)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.cos(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                  outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_SinOp : Hip_DpsOp<"sin"> {
+  let summary = "Element-wise sine: y = sin(x)";
+  let description = [{
+    Computes the sine of each element.
+    Implements the standard ONNX Sin operator.
+
+    Formula: Y = sin(X)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.sin(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                  outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

@@ -28,8 +28,12 @@ add_library(OnnxToHip STATIC
   RangeConversion.cpp
   CastLikeConversion.cpp
   EqualConversion.cpp
+  DivConversion.cpp
   ReduceMaxConversion.cpp
   MinConversion.cpp
+  NotConversion.cpp
+  CosConversion.cpp
+  SinConversion.cpp
 )
 
 add_dependencies(OnnxToHip

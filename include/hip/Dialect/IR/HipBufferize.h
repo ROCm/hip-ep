@@ -104,6 +104,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     NegOp::attachInterface<HipDstBufferizableModel<NegOp>>(*ctx);
     EqualOp::attachInterface<HipDstBufferizableModel<EqualOp>>(*ctx);
+    DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
+    NotOp::attachInterface<HipDstBufferizableModel<NotOp>>(*ctx);
+    CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
+    SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
   });
 }
 

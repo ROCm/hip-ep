@@ -1007,6 +1007,52 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
   return 0;
 }
 
+int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_div\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_div(num_elements=%lld, data_type=%s)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+  return 0;
+}
+
+int wrap_not(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_not\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_not(num_elements=%lld, data_type=%lld)\n",
+             (long long)num_elements, (long long)data_type);
+  return 0;
+}
+
+int wrap_cos(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_cos\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_cos(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_sin(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_sin\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_sin(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
                              void *bias, void *output, void *mean,
                              void *inv_std, int64_t input_num_elements,
