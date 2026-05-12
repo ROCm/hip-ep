@@ -205,8 +205,9 @@ runtime reads `constants_filename` and per-constant offsets, then:
 
 1. Opens the configured constants file via `fs`.
 2. Reads the file size and allocates a single GPU buffer for the entire
-   constants blob (`hipMalloc`). On iGPU (integrated GPU), pinned host memory
-   (`hipHostMalloc`) is used instead and the GPU reads in-place without a copy.
+   constants blob (`hipMalloc`). Same path on both dGPU and iGPU — the
+   one-time copy cost at init is negligible compared to per-inference VRAM
+   access savings.
 3. Copies the file contents into the GPU buffer in one operation.
 4. Sets each per-constant GPU pointer to the stored offset within the buffer —
    no per-constant allocation or copy.

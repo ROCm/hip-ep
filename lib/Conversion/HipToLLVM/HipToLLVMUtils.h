@@ -25,6 +25,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -38,6 +39,9 @@ inline constexpr const char *kHipMalloc = "hip_device_malloc";
 inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
 
+inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
+inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
+
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
@@ -48,26 +52,30 @@ inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
-inline constexpr const char *kHipTranspose = "hip_transpose";
+inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kHipSilu = "hip_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
-    "wrap_miopenActivationForward"; // hip.sigmoid
+    "wrap_miopenActivationForward";                   // hip.sigmoid
+inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
 inline constexpr const char *kWrapMiopenOpTensor =
     "wrap_miopenOpTensor"; // hip.mul, hip.add (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
 inline constexpr const char *kWrapPower = "wrap_power";
+inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
+inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
+inline constexpr const char *kWrapWhere = "wrap_where";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -100,6 +108,8 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return 4; // HIPDNN_EP_DATATYPE_INT64
   if (elemType.isInteger(8))
     return 5; // HIPDNN_EP_DATATYPE_INT8
+  if (elemType.isF64())
+    return 6; // HIPDNN_EP_DATATYPE_DOUBLE
   return -1;
 }
 
@@ -113,12 +123,25 @@ enum class TensorOp : int64_t {
 
 // Helper: extract the aligned data pointer from a converted memref descriptor,
 // casting to address space 0 if needed.
+//
+// PRECONDITION: the source memref must have an identity layout (zero offset,
+// contiguous strides).  The returned pointer is alignedPtr only — offset and
+// strides are dropped on the floor.  Calling this on a strided/offset memref
+// (e.g., the result of memref.subview) silently produces a pointer to the
+// base of the parent buffer, not the slice.
+//
+// The --hip-promote-strided-operands pass enforces this precondition for
+// hip.* DPS-input operands by materializing contiguous temporaries upstream.
+// Direct callers (outside the standard hip.* lowering path) must guarantee
+// it themselves; if you need the descriptor's offset / strides, use
+// extractMemRefDescriptor below.
+//
 // Uses alignedPtr (not allocatedPtr) so that memref.view offsets into a memory
 // pool are respected -- each view has the same allocatedPtr but a distinct
 // alignedPtr.
-inline Value extractMemRefPtr(Value memrefDesc,
-                              ConversionPatternRewriter &rewriter,
-                              Location loc) {
+inline Value extractContiguousMemRefPtr(Value memrefDesc,
+                                        ConversionPatternRewriter &rewriter,
+                                        Location loc) {
   Value ptr = MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
   if (ptrTy.getAddressSpace() != 0)
@@ -128,19 +151,68 @@ inline Value extractMemRefPtr(Value memrefDesc,
   return ptr;
 }
 
+// First logical element: alignedPtr + offset (elements), then cast to AS 0.
+// Use for HIP/MIOpen entry points when the memref may be a subview with a
+// non-zero descriptor offset (same base alignedPtr as parent, distinct offset).
+inline Value extractMemRefDataPtr(Value memrefDesc, MemRefType memrefType,
+                                  const TypeConverter *typeConverter,
+                                  ConversionPatternRewriter &rewriter,
+                                  Location loc) {
+  SmallVector<Type, 1> llvmElemTypes;
+  if (failed(typeConverter->convertType(memrefType.getElementType(),
+                                        llvmElemTypes)) ||
+      llvmElemTypes.empty())
+    return Value();
+  Type llvmElemTy = llvmElemTypes.front();
+
+  MemRefDescriptor desc(memrefDesc);
+  Value aligned = desc.alignedPtr(rewriter, loc);
+  Value offset = desc.offset(rewriter, loc);
+  Type ptrTy = aligned.getType();
+  Value dataPtr =
+      LLVM::GEPOp::create(rewriter, loc, ptrTy, llvmElemTy, aligned,
+                          ValueRange{offset}, LLVM::GEPNoWrapFlags::inbounds)
+          .getResult();
+
+  if (cast<LLVM::LLVMPointerType>(dataPtr.getType()).getAddressSpace() != 0)
+    dataPtr = LLVM::AddrSpaceCastOp::create(
+        rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0),
+        dataPtr);
+  return dataPtr;
+}
+
 // Returns the aligned pointer for an optional memref operand, or a null
 // pointer if the operand is absent.
+//
+// Same identity-layout precondition as extractContiguousMemRefPtr.
 inline Value extractOptionalMemRefPtr(Value memrefDesc,
                                       ConversionPatternRewriter &rewriter,
                                       Location loc) {
   Value result;
   if (memrefDesc) {
-    result = extractMemRefPtr(memrefDesc, rewriter, loc);
+    result = extractContiguousMemRefPtr(memrefDesc, rewriter, loc);
   } else {
     result = LLVM::ZeroOp::create(
         rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0));
   }
   return result;
+}
+
+// Returns the full LLVM memref descriptor wrapper for \p memrefDesc, exposing
+// allocatedPtr / alignedPtr / offset / sizes / strides via MemRefDescriptor's
+// accessors.  Use this when a runtime call needs to honor the slice (offset,
+// per-dim strides) instead of treating the operand as contiguous.
+//
+// Reserved for future per-op zero-copy lowerings (hot ops where the upstream
+// promote-then-copy materialization in --hip-promote-strided-operands is
+// measurably expensive and the underlying library natively accepts strides).
+// No in-tree callers today.
+inline MemRefDescriptor
+extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter &rewriter,
+                        Location loc) {
+  (void)rewriter;
+  (void)loc;
+  return MemRefDescriptor(memrefDesc);
 }
 
 // Helper: get a single memref dimension as an i64 Value, using a compile-time
@@ -232,6 +304,8 @@ void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
+void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateReduceSumLoweringPatterns(const LLVMTypeConverter &converter,
@@ -252,6 +326,10 @@ void populateCausalConvWithStateLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
+void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns);
 void populateDumpTensorLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 

@@ -29,6 +29,20 @@ project(
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Use /Z7 (embedded debug info) instead of /Zi (shared PDB) so that parallel
+# compilations under sccache don't fight over a single .pdb file (C1041).
+# Also disable incremental linking to avoid .ilk file contention (LNK1104).
+if(MSVC)
+  foreach(lang C CXX)
+    foreach(config DEBUG RELWITHDEBINFO)
+      string(REPLACE "/Zi" "/Z7" CMAKE_${lang}_FLAGS_${config} "${CMAKE_${lang}_FLAGS_${config}}")
+    endforeach()
+  endforeach()
+  foreach(type EXE SHARED MODULE)
+    string(REPLACE "/INCREMENTAL" "/INCREMENTAL:NO" CMAKE_${type}_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_${type}_LINKER_FLAGS_RELWITHDEBINFO}")
+  endforeach()
+endif()
+
 # ==============================================================================
 # TheRock ROCm SDK Configuration
 # ==============================================================================
@@ -77,6 +91,22 @@ if(BUILD_HIP_TOOLS)
   find_package(LLVM REQUIRED CONFIG)
   find_package(MLIR REQUIRED CONFIG)
   find_package(flatbuffers REQUIRED CONFIG)
+
+  # cpptrace for crash backtraces
+  include(FetchContent)
+  set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+  if(WIN32)
+    set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
+    set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
+  endif()
+  FetchContent_Declare(
+    cpptrace
+    GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+    GIT_TAG v0.8.3
+  )
+  FetchContent_MakeAvailable(cpptrace)
+  set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")

@@ -77,11 +77,13 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     TransposeOp::attachInterface<HipDstBufferizableModel<TransposeOp>>(*ctx);
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
+    RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
     SoftplusOp::attachInterface<HipDstBufferizableModel<SoftplusOp>>(*ctx);
+    GeluOp::attachInterface<HipDstBufferizableModel<GeluOp>>(*ctx);
     ReciprocalOp::attachInterface<HipDstBufferizableModel<ReciprocalOp>>(*ctx);
     SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);
     SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
@@ -94,6 +96,9 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
         *ctx);
     GemmOp::attachInterface<HipDstBufferizableModel<GemmOp>>(*ctx);
+    WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
+    LinearAttentionOp::attachInterface<
+        HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
   });
 }
 

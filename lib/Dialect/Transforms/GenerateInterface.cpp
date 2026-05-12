@@ -71,6 +71,26 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
   auto constantOffsetsAttr =
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_offsets");
 
+  // Streaming-mode source descriptors. Present when OnnxToHip's finalize
+  // emitted per-constant source info (splat / file-ref / sidecar). Absent in
+  // full-sidecar mode (EPContext export), in which case every ConstantInfo
+  // keeps source = NONE and runtime falls back to the bulk constants_filename
+  // read. In hybrid mode (skipDataWrite=true with mem-addr entries) some
+  // constants carry SidecarSource pointing at a *partial* sidecar that holds
+  // only mem-addr bytes.
+  auto sourceKindsAttr =
+      module->getAttrOfType<DenseI32ArrayAttr>("hipdnn.constant_source_kinds");
+  auto splatValuesAttr = module->getAttrOfType<DenseI64ArrayAttr>(
+      "hipdnn.constant_splat_elem_values");
+  auto splatElemSizesAttr = module->getAttrOfType<DenseI64ArrayAttr>(
+      "hipdnn.constant_splat_elem_sizes");
+  auto filePathsAttr =
+      module->getAttrOfType<ArrayAttr>("hipdnn.constant_file_paths");
+  auto fileOffsetsAttr =
+      module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_file_offsets");
+  auto sidecarOffsetsAttr = module->getAttrOfType<DenseI64ArrayAttr>(
+      "hipdnn.constant_sidecar_offsets");
+
   mlir::hip::HipModelMetaInfoT meta;
   meta.version = 1;
   meta.constants_filename = constantsFile;
@@ -79,10 +99,47 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
     auto sizes = constantSizesAttr.asArrayRef();
     auto offsets = constantOffsetsAttr ? constantOffsetsAttr.asArrayRef()
                                        : ArrayRef<int64_t>{};
+    auto kinds =
+        sourceKindsAttr ? sourceKindsAttr.asArrayRef() : ArrayRef<int32_t>{};
+    auto splatValues =
+        splatValuesAttr ? splatValuesAttr.asArrayRef() : ArrayRef<int64_t>{};
+    auto splatElemSizes = splatElemSizesAttr ? splatElemSizesAttr.asArrayRef()
+                                             : ArrayRef<int64_t>{};
+    auto fileOffsets =
+        fileOffsetsAttr ? fileOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
+    auto sidecarOffsets = sidecarOffsetsAttr ? sidecarOffsetsAttr.asArrayRef()
+                                             : ArrayRef<int64_t>{};
     for (auto i : llvm::seq<size_t>(0, sizes.size())) {
       auto ci = std::make_unique<mlir::hip::ConstantInfoT>();
       ci->size = sizes[i];
       ci->offset = (i < offsets.size()) ? offsets[i] : 0;
+      int32_t kind = (i < kinds.size()) ? kinds[i] : 0;
+      if (kind == 1) {
+        // Splat: extract the left-packed elem bytes out of the i64 carrier.
+        auto splat = std::make_unique<mlir::hip::SplatSourceT>();
+        int64_t elemSize = (i < splatElemSizes.size()) ? splatElemSizes[i] : 0;
+        size_t n = static_cast<size_t>(std::min<int64_t>(elemSize, 8));
+        const auto *base = reinterpret_cast<const uint8_t *>(&splatValues[i]);
+        splat->elem_bytes.assign(base, base + n);
+        ci->source.Set(std::move(*splat));
+      } else if (kind == 2) {
+        auto fref = std::make_unique<mlir::hip::FileRefSourceT>();
+        if (filePathsAttr && i < filePathsAttr.size()) {
+          if (auto s = dyn_cast<StringAttr>(filePathsAttr.getValue()[i]))
+            fref->path = s.getValue().str();
+        }
+        fref->file_offset = (i < fileOffsets.size()) ? fileOffsets[i] : 0;
+        ci->source.Set(std::move(*fref));
+      } else if (kind == 3) {
+        // Sidecar: mem-addr entry packed into
+        // HipModelMetaInfo.constants_filename at sidecar_offset by the
+        // OnnxToHip hybrid finalize. Runtime reads size bytes from that offset
+        // through the EP FileSystem.
+        auto side = std::make_unique<mlir::hip::SidecarSourceT>();
+        side->sidecar_offset =
+            (i < sidecarOffsets.size()) ? sidecarOffsets[i] : 0;
+        ci->source.Set(std::move(*side));
+      }
       meta.constants.push_back(std::move(ci));
     }
   }
@@ -389,6 +446,9 @@ private:
         {"hipdnn_ep_tensor_buffer_get_rank", i64, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_size_bytes", i64, {ptr}},
         {"hipdnn_ep_state_init_with_fs", i32, {ptr, ptr, ptr, i64}},
+        {"hipdnn_ep_stream_sync", i32, {ptr}},
+        {"hipdnn_ep_state_reset_error_flag", i32, {ptr}},
+        {"hipdnn_ep_state_read_and_clear_error_flag", i32, {ptr}},
     };
   }
 
@@ -608,7 +668,9 @@ private:
   ///     // 5. Call @main_graph(%state, %input_memrefs, %output_memrefs)
   ///     // 6. For each output: call hipdnn_ep_tensor_finalize_output,
   ///     error-check
-  ///     // 7. Free input TensorBuffers
+  ///     // 7. Call hipdnn_ep_stream_sync (GPU sync + PERF profiling output)
+  ///     // 8. Read device-side error flag
+  ///     // 9. Free input TensorBuffers
   ///     // On error: store error code, free inputs, return error
   ///   }
   void generateInferenceCompute(ModuleOp module, ArrayAttr inputShapes,
@@ -656,6 +718,12 @@ private:
         "hipdnn_ep_tensor_buffer_get_gpu_ptr");
     auto getShapePtrFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
         "hipdnn_ep_tensor_buffer_get_shape_ptr");
+    auto resetErrorFlagFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        "hipdnn_ep_state_reset_error_flag");
+    auto streamSyncFunc =
+        module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_stream_sync");
+    auto readErrorFlagFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        "hipdnn_ep_state_read_and_clear_error_flag");
 
     Value errorCodePtr =
         LLVM::AllocaOp::create(builder, loc, ptrType, i32Type, c1_i64, 0);
@@ -785,6 +853,10 @@ private:
       LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
     }
 
+    // Reset kernel-side runtime error flag before graph execution.
+    emitErrorCheckedCall(builder, loc, resetErrorFlagFunc, ValueRange{state},
+                         errorCodePtr, errorCleanupBlock, funcOp);
+
     // Call @main_graph with arrays of pointers
     Block *mainSuccessBlock;
 
@@ -812,6 +884,16 @@ private:
                            ValueRange{state, bufferPtr}, errorCodePtr,
                            errorCleanupBlock, funcOp);
     }
+
+    // Synchronize GPU stream after all D2H copies are queued. Also prints
+    // PERF phase timing and per-op profile when HIPDNN_EP_PERF is enabled.
+    emitErrorCheckedCall(builder, loc, streamSyncFunc, ValueRange{state},
+                         errorCodePtr, errorCleanupBlock, funcOp);
+
+    // Read aggregated device-side runtime error flag (no extra hot-path sync in
+    // operator wrappers; check occurs at interface boundary).
+    emitErrorCheckedCall(builder, loc, readErrorFlagFunc, ValueRange{state},
+                         errorCodePtr, errorCleanupBlock, funcOp);
 
     // Free input tensors
     for (auto i : llvm::seq<size_t>(0, numInputs)) {

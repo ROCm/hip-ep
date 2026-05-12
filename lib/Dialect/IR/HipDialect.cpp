@@ -465,7 +465,7 @@ void MiopenSoftmaxOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
-// TransposeOp: ins(input), outs(output), extra scalars: dim0, dim1
+// TransposeOp: ins(input), outs(output), attrs: perm
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange TransposeOp::getDpsInitsMutable() {
@@ -479,17 +479,37 @@ void TransposeOp::getEffects(
 }
 
 LogicalResult TransposeOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
-}
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
 
-ParseResult TransposeOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/1,
-                              /*extraScalars=*/2);
-}
+  // Determine input rank when available (ranked tensor or memref).
+  int64_t rank = -1;
+  if (auto t = dyn_cast<RankedTensorType>(getInput().getType()))
+    rank = t.getRank();
+  else if (auto m = dyn_cast<MemRefType>(getInput().getType()))
+    rank = m.getRank();
 
-void TransposeOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), {getDim0(), getDim1()}, {getInput()},
-                       {getOutput()});
+  ArrayAttr permAttr = getPerm();
+  if (rank >= 0 && static_cast<int64_t>(permAttr.size()) != rank)
+    return emitOpError("perm length (")
+           << permAttr.size() << ") must match input rank (" << rank << ")";
+
+  // perm must be a permutation of [0, rank).
+  llvm::SmallVector<bool> seen(permAttr.size(), false);
+  for (Attribute a : permAttr) {
+    auto intAttr = dyn_cast<IntegerAttr>(a);
+    if (!intAttr)
+      return emitOpError("perm must be a list of integers");
+    int64_t v = intAttr.getValue().getSExtValue();
+    if (v < 0 || v >= static_cast<int64_t>(permAttr.size()))
+      return emitOpError("perm value ") << v << " is out of range";
+    if (seen[v])
+      return emitOpError("perm must be a permutation (duplicate value ")
+             << v << ")";
+    seen[v] = true;
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -501,6 +521,18 @@ MutableOperandRange GatherOp::getDpsInitsMutable() {
 }
 
 void GatherOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// RangeOp: ins(start, limit, delta), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RangeOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void RangeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -554,6 +586,19 @@ void SoftplusOp::getEffects(
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
+
+//===----------------------------------------------------------------------===//
+// GeluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GeluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void GeluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 //===----------------------------------------------------------------------===//
 // ReciprocalOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
@@ -585,6 +630,18 @@ void SqrtOp::getEffects(
 MutableOperandRange SubOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void SubOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// WhereOp: ins(condition, x, y), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange WhereOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void WhereOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -685,6 +742,35 @@ void GemmOp::getEffects(
 //        total_seq_len,
 //            [cos_cache, sin_cache, position_ids, attention_bias, head_sink,
 //             k_scale, v_scale])
+//        outs(output, present_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LinearAttentionOp::getDpsInitsMutable() {
+  // Operand segments:
+  //   ctx(1), query(1), key(1), value(1),
+  //   past_state(0|1), decay(0|1), beta(0|1),
+  //   output(1), present_state(1)
+  unsigned numInputs = 4; // ctx, query, key, value
+  if (getPastState())
+    ++numInputs;
+  if (getDecay())
+    ++numInputs;
+  if (getBeta())
+    ++numInputs;
+
+  // DPS inits: output, present_state (always 2)
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+}
+
+void LinearAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GqaOp: ins(query, [key, value, past_key, past_value,]
+//             seqlens_k, total_seq_len, [cos_cache, ...])
 //        outs(output, present_key, present_value, [output_qk])
 //===----------------------------------------------------------------------===//
 

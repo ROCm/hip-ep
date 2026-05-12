@@ -10,8 +10,12 @@ namespace hip {
 namespace {
 
 // hip.reduce_sum(ctx, input, output) {axes = [...], keepdims = ...}
-//   -> wrap_miopenReduceSum(state, input, output, num_elements,
-//                           axes_ptr, num_axes, keepdims, data_type)
+//   -> wrap_reduce_sum(state, data, axes, output,
+//                      data_num_elements, output_num_elements,
+//                      axes_num_elements, data_type,
+//                      keepdims, noop_with_empty_axes)
+// data_type is a HIPDNN_EP_DATATYPE_* enum value identifying the element type;
+// the runtime maps it to the kernel-level hip_dtype_t.
 // Supports both static and dynamic shapes (computes num_elements at runtime).
 struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -33,13 +37,22 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
 
     // Extract pointers using alignedPtr
     Value statePtr = adaptor.getCtx();
-    Value dataPtr = extractMemRefPtr(adaptor.getData(), rewriter, loc);
-    Value axesPtr = extractMemRefPtr(adaptor.getAxes(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value dataPtr =
+        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
+    Value axesPtr =
+        extractContiguousMemRefPtr(adaptor.getAxes(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto dataType = cast<MemRefType>(op.getData().getType());
     auto axesType = cast<MemRefType>(op.getAxes().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
+
+    // Map element type to HIPDNN_EP_DATATYPE_* enum used by wrap_reduce_sum.
+    int64_t dataTypeEnum = getHipdnnDataType(dataType.getElementType());
+    if (dataTypeEnum < 0)
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element type for hip.reduce_sum");
 
     // Compute data_num_elements (supports dynamic shapes)
     Value dataNumElements = createI64Const(1);
@@ -85,18 +98,14 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
           LLVM::MulOp::create(rewriter, loc, axesNumElements, dimSize);
     }
 
-    // Element size in bytes
-    unsigned elementSizeBytes =
-        dataType.getElementType().getIntOrFloatBitWidth() / 8;
-    Value elemSizeVal = createI64Const(elementSizeBytes);
-
+    Value dataTypeVal = createI64Const(dataTypeEnum);
     Value keepdimsVal = createI64Const(op.getKeepdims());
     Value noopWithEmptyAxesVal = createI64Const(op.getNoopWithEmptyAxes());
 
     // int wrap_reduce_sum(RuntimeState* state, void* data, void* axes,
     //                     void* output, int64_t data_num_elements,
-    //                     int64_t output_num_elements, int64_t
-    //                     axes_num_elements, int64_t element_size_bytes,
+    //                     int64_t output_num_elements,
+    //                     int64_t axes_num_elements, int64_t data_type,
     //                     int64_t keepdims, int64_t noop_with_empty_axes)
     SmallVector<Type, 10> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         i64Type, i64Type, i64Type, i64Type,
@@ -110,7 +119,7 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
     SmallVector<Value, 10> args = {statePtr,        dataPtr,
                                    axesPtr,         outputPtr,
                                    dataNumElements, outputNumElements,
-                                   axesNumElements, elemSizeVal,
+                                   axesNumElements, dataTypeVal,
                                    keepdimsVal,     noopWithEmptyAxesVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

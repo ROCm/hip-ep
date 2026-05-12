@@ -66,6 +66,8 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
     json << ", \"dump_tensors\": true";
     json << ", \"dump_tensors_dir\": \"" << json_escape(config.dumpDir) << "\"";
   }
+  json << ", \"skip_constant_data\": "
+       << (config.skipConstantData ? "true" : "false");
   json << "}";
   return json.str();
 }

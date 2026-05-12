@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "CrashHandler.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
@@ -109,6 +110,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::TransposeOp>>(*ctx);
     mlir::hip::GatherOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::GatherOp>>(*ctx);
+    mlir::hip::RangeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::RangeOp>>(*ctx);
     mlir::hip::SiluOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SiluOp>>(*ctx);
     mlir::hip::GqaOp::attachInterface<
@@ -119,6 +122,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SigmoidOp>>(*ctx);
     mlir::hip::SoftplusOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SoftplusOp>>(*ctx);
+    mlir::hip::GeluOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GeluOp>>(*ctx);
     mlir::hip::ReciprocalOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ReciprocalOp>>(*ctx);
     mlir::hip::SqrtOp::attachInterface<
@@ -131,16 +136,21 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::MatMulNBitsOp>>(*ctx);
     mlir::hip::QMoEOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::QMoEOp>>(*ctx);
+    mlir::hip::LinearAttentionOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LinearAttentionOp>>(*ctx);
     mlir::hip::CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::CausalConvWithStateOp>>(*ctx);
     mlir::hip::HipDNNGraphOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::HipDNNGraphOp>>(*ctx);
+    mlir::hip::WhereOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::WhereOp>>(*ctx);
   });
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
+  hip::install_crash_handlers("hip-mlir-opt");
   mlir::DialectRegistry registry;
   registry.insert<mlir::BuiltinDialect>();
   registry.insert<mlir::arith::ArithDialect>();

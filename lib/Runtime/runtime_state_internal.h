@@ -29,17 +29,17 @@ struct RuntimeState {
   // Single allocation holding all constants as one blob.
   // gpu_constants[i] points into gpu_constants_blob at the offset stored in
   // ConstantInfo, so only one allocation/copy is needed at init time.
-  // On dGPU: hipMalloc (VRAM). On iGPU: hipHostMalloc (pinned system RAM,
-  // GPU reads in-place, no hipMemcpy needed).
+  // Always hipMalloc (VRAM) for both dGPU and iGPU.
   void *gpu_constants_blob;
-  bool constants_blob_is_host; // true = hipHostMalloc, false = hipMalloc
   void **gpu_constants;
   size_t num_constants;
 
-  // Shared constants support: in OGA pipeline mode, prefill and decode models
-  // share the same constants.bin. The second model reuses the first's blob
-  // via a process-wide named shared memory descriptor with atomic ref count.
-  bool constants_is_shared;       // true = reusing another model's blob
+  // OGA pipeline shared constants cache: prefill and decode models share
+  // the same constants blob via process-wide named shared memory + atomic
+  // ref count. Set by try_attach_shared_constants when reusing another
+  // model's blob; cleanup decrements ref_count and only the last
+  // reference frees the GPU memory.
+  bool constants_is_shared;
   void *shared_constants_mapping; // Win32 file mapping HANDLE
   void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
 
@@ -54,6 +54,62 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
+  // Per-state scratch buffer for wrap_qmoe transient device buffers
+  // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
+  // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
+  //
+  // Why this exists: pre-cache wrap_qmoe issued 8 hipMalloc + 8 hipFree per
+  // call, every layer, every inference. On 24-layer gpt-oss-20b that's 192
+  // mallocs + 192 frees per token; HIP's hipMalloc takes ~50 us each on
+  // Windows, so the storm cost ~10-12 ms/token and bottlenecked decode TPS to
+  // ~40 tok/s versus a Vulkan baseline of ~70 on the same gfx1151.
+  //
+  // Layout policy: one contiguous buffer sized to fit ALL sub-buffers for the
+  // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
+  // by this session. Sub-buffer offsets recomputed per-call (cheap arithmetic);
+  // the buffer itself grows on demand via hipdnn_ep_state_ensure_qmoe_scratch
+  // and never shrinks (mirrors the `workspace` field's policy).
+  //
+  // Pinned host mirror is needed for the 24-bytes-per-layer D2H readback of
+  // expert routing decisions (still required at decode pre-Phase-2). hipHost-
+  // Malloc'd once with hipHostMallocDefault; reused across calls without sync.
+  void *qmoe_scratch;
+  size_t qmoe_scratch_size;
+  void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
+  size_t qmoe_host_scratch_size;
+
+  // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
+  // Caches hipBLASLt descriptors + algorithms by GEMM shape.
+  void *gqa_gemm_cache;
+
+  // CausalConvWithState MIOpen descriptor + algorithm cache
+  // (CausalConvCache*). Caches MIOpen tensor / convolution / bias / activation
+  // descriptors and the heuristic-selected forward algorithm by shape, so that
+  // miopenFindConvolutionForwardAlgorithm runs only once per shape rather than
+  // every layer × every token.
+  void *causal_conv_cache;
+
+  // MatMulNBits asym-path zero_points unpack cache (ZpUnpackCache*).
+  //
+  // The asym AWQ path stores zero_points as packed nibbles [N, ceil(K/bs/2)].
+  // Two unpacked layouts are needed (u8 [N, K/bs] for GEMV/naive, fp16 for
+  // WMMA/col-major GEMV M>1), and naively the unpack kernel is launched on
+  // every wrap_matmul_nbits call. For 8B asym decode this is ~225 redundant
+  // launches per Compute(). Since zero_points points into the model constants
+  // blob (stable for the session lifetime), we cache the unpacked buffer per
+  // input pointer. Lazily created on first asym call. Owned by
+  // lib/Runtime/real/matmul_nbits.cpp; freed in hipdnn_ep_state_cleanup via
+  // hipdnn_ep_zp_unpack_cache_destroy.
+  void *zp_unpack_cache;
+
+  // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
+  // Allocated in state_init, freed in state_cleanup.
+  void *op_profile;
+
+  // Device-side error flag used by kernels to report runtime-invalid inputs.
+  // 0 = no error, non-zero = error code (currently -1).
+  int *device_error_flag;
+
   // hipDNN graph execution support.
   // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
   // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up
@@ -61,6 +117,26 @@ struct RuntimeState {
   // cleaned up here)
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
+
+  // Per-Compute() cache for seqlens_k_val (decode hot path).
+  //
+  // Decode runs 32 GQA layers per token, all reading the same seqlens_k
+  // from device memory. The decomposed-path readback in gqa.cpp issues a
+  // hipMemcpyAsync(D2H) + hipStreamSynchronize per layer (31 redundant
+  // pipeline stalls, ~30-45 ms/token on Strix Halo with the asym Llama
+  // sliding-window path). The cache is on by default
+  // (HIPDNN_EP_GQA_CACHE_SEQLENS=1, set to 0 to disable): the first GQA
+  // in a forward pass populates the cache and the remaining 31 layers
+  // reuse it.
+  //
+  // Invalidated by hipdnn_ep_runtime_begin_compute() at the start of each
+  // Compute(), called from the EP-side MlirCustomOp::Compute() entry.
+  // If the symbol is not exported (older model.dll), invalidation does
+  // not happen and the cache is unsafe -- the EP logs a warning at
+  // session creation and the user must set HIPDNN_EP_GQA_CACHE_SEQLENS=0.
+  bool seqlens_k_cached_valid;
+  int32_t seqlens_k_cached_val;
+  const void *seqlens_k_cached_ptr;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

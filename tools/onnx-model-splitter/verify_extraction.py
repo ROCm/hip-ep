@@ -127,17 +127,40 @@ def _collect_fixed_variant_shape_issues(model):
 
 
 def _infer_shapes_for_check(model):
-    """Return inferred model; ONNX uses check_type (not check_types)."""
+    """Return inferred model with graceful fallback across ONNX APIs.
+
+    Newer ONNX builds accept ``strict_mode=True`` and are useful to catch
+    hard mismatches. Some real-world exports still carry stale ValueInfo
+    annotations (for example Constant rank metadata) that only fail in strict
+    mode while regular infer_shapes succeeds. For verification we therefore
+    progressively relax inference before giving up.
+    """
     infer = onnx.shape_inference.infer_shapes
+    first_error = None
+
     try:
         return infer(model, check_type=True, strict_mode=True)
     except TypeError:
+        # Older ONNX doesn't expose strict_mode.
         pass
+    except Exception as e:
+        first_error = e
+
     try:
         return infer(model, check_type=True)
     except TypeError:
+        # Older ONNX doesn't expose check_type.
         pass
-    return infer(model)
+    except Exception as e:
+        if first_error is None:
+            first_error = e
+
+    try:
+        return infer(model)
+    except Exception as e:
+        if first_error is not None:
+            raise first_error from e
+        raise
 
 
 def _graph_initializers_use_external_data(graph):

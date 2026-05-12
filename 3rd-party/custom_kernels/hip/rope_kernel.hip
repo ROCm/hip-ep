@@ -10,6 +10,50 @@
 
 #include "hip_custom_kernels.h"
 
+// Layout helpers
+//
+// Two input layouts are supported (selected by the is_bnsh flag):
+//   is_bnsh == 0 : BSNH = [batch, seq_len, num_heads, head_dim]
+//                  (also covers 3D [batch, seq_len, num_heads*head_dim] which
+//                   has identical row-major strides)
+//   is_bnsh != 0 : BNSH = [batch, num_heads, seq_len, head_dim]
+//                  (ONNX com.microsoft.RotaryEmbedding 4D default; also the
+//                   layout used for K/V in GQA-style attention)
+//
+// position_ids is always [batch, seq_len] regardless of input layout.
+
+static __device__ __forceinline__ int rope_decompose_idx(
+    int idx, int seq_len, int num_heads, int head_dim, int is_bnsh,
+    int& b, int& s, int& h, int& d) {
+  d = idx % head_dim;
+  int r1 = idx / head_dim;
+  if (is_bnsh) {
+    s = r1 % seq_len;
+    int r2 = r1 / seq_len;
+    h = r2 % num_heads;
+    b = r2 / num_heads;
+  } else {
+    h = r1 % num_heads;
+    int r2 = r1 / num_heads;
+    s = r2 % seq_len;
+    b = r2 / seq_len;
+  }
+  return 0;
+}
+
+static __device__ __forceinline__ int rope_base_offset(
+    int b, int s, int h, int seq_len, int num_heads, int head_dim,
+    int is_bnsh) {
+  if (is_bnsh) {
+    return b * (num_heads * seq_len * head_dim) +
+           h * (seq_len * head_dim) +
+           s * head_dim;
+  }
+  return b * (seq_len * num_heads * head_dim) +
+         s * (num_heads * head_dim) +
+         h * head_dim;
+}
+
 // Half-rotated RoPE: dimensions [0..half) and [half..rotary_dim) form pairs.
 // Uses int32 index arithmetic for RDNA GPU performance (int64 div/mod is slow).
 template <typename T>
@@ -25,7 +69,8 @@ __global__ void rope_half_rotated_kernel(
     int head_dim,
     int rotary_dim,
     int half_rot,
-    int max_seq_len) {
+    int max_seq_len,
+    int is_bnsh) {
 
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_elements = batch_size * seq_len * num_heads * head_dim;
@@ -33,12 +78,8 @@ __global__ void rope_half_rotated_kernel(
   if (idx >= total_elements)
     return;
 
-  int d = idx % head_dim;
-  int remaining = idx / head_dim;
-  int h = remaining % num_heads;
-  remaining = remaining / num_heads;
-  int s = remaining % seq_len;
-  int b = remaining / seq_len;
+  int b, s, h, d;
+  rope_decompose_idx(idx, seq_len, num_heads, head_dim, is_bnsh, b, s, h, d);
 
   if (d >= rotary_dim) {
     output[idx] = input[idx];
@@ -53,9 +94,7 @@ __global__ void rope_half_rotated_kernel(
     T cos_val = cos_cache[pos * half_rot + d];
     T sin_val = sin_cache[pos * half_rot + d];
 
-    int base = b * (seq_len * num_heads * head_dim) +
-               s * (num_heads * head_dim) +
-               h * head_dim;
+    int base = rope_base_offset(b, s, h, seq_len, num_heads, head_dim, is_bnsh);
     int idx_0 = base + d;
     int idx_1 = base + d + half_rot;
 
@@ -80,7 +119,8 @@ __global__ void rope_interleaved_kernel(
     int head_dim,
     int rotary_dim,
     int half_rot,
-    int max_seq_len) {
+    int max_seq_len,
+    int is_bnsh) {
 
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_pairs = batch_size * seq_len * num_heads * half_rot;
@@ -89,11 +129,19 @@ __global__ void rope_interleaved_kernel(
     return;
 
   int pair = idx % half_rot;
-  int remaining = idx / half_rot;
-  int h = remaining % num_heads;
-  remaining = remaining / num_heads;
-  int s = remaining % seq_len;
-  int b = remaining / seq_len;
+  int r1 = idx / half_rot;
+  int b, s, h;
+  if (is_bnsh) {
+    s = r1 % seq_len;
+    int r2 = r1 / seq_len;
+    h = r2 % num_heads;
+    b = r2 / num_heads;
+  } else {
+    h = r1 % num_heads;
+    int r2 = r1 / num_heads;
+    s = r2 % seq_len;
+    b = r2 / seq_len;
+  }
 
   int64_t pos_raw = position_ids[b * seq_len + s];
   int pos = static_cast<int>(pos_raw < 0 ? 0 :
@@ -102,9 +150,7 @@ __global__ void rope_interleaved_kernel(
   T cos_val = cos_cache[pos * half_rot + pair];
   T sin_val = sin_cache[pos * half_rot + pair];
 
-  int base = b * (seq_len * num_heads * head_dim) +
-             s * (num_heads * head_dim) +
-             h * head_dim;
+  int base = rope_base_offset(b, s, h, seq_len, num_heads, head_dim, is_bnsh);
   int idx_0 = base + 2 * pair;
   int idx_1 = base + 2 * pair + 1;
 
@@ -123,7 +169,8 @@ __global__ void rope_copy_remaining_kernel(
     int seq_len,
     int num_heads,
     int head_dim,
-    int rotary_dim) {
+    int rotary_dim,
+    int is_bnsh) {
 
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int remaining_per_head = head_dim - rotary_dim;
@@ -133,15 +180,22 @@ __global__ void rope_copy_remaining_kernel(
     return;
 
   int local_d = idx % remaining_per_head;
-  int remaining = idx / remaining_per_head;
-  int h = remaining % num_heads;
-  remaining = remaining / num_heads;
-  int s = remaining % seq_len;
-  int b = remaining / seq_len;
+  int r1 = idx / remaining_per_head;
+  int b, s, h;
+  if (is_bnsh) {
+    s = r1 % seq_len;
+    int r2 = r1 / seq_len;
+    h = r2 % num_heads;
+    b = r2 / num_heads;
+  } else {
+    h = r1 % num_heads;
+    int r2 = r1 / num_heads;
+    s = r2 % seq_len;
+    b = r2 / seq_len;
+  }
 
-  int src_idx = b * (seq_len * num_heads * head_dim) +
-                s * (num_heads * head_dim) +
-                h * head_dim + rotary_dim + local_d;
+  int base = rope_base_offset(b, s, h, seq_len, num_heads, head_dim, is_bnsh);
+  int src_idx = base + rotary_dim + local_d;
   output[src_idx] = input[src_idx];
 }
 
@@ -159,7 +213,8 @@ extern "C" int hip_rope_forward(
     int64_t rotary_dim,
     int64_t max_seq_len_i64,
     int64_t interleaved,
-    int64_t element_size_bytes) {
+    int64_t element_size_bytes,
+    int64_t is_bnsh) {
 
   if (!input || !position_ids || !cos_cache || !sin_cache || !output) {
     fprintf(stderr, "hip_rope_forward: null pointer argument\n");
@@ -176,6 +231,7 @@ extern "C" int hip_rope_forward(
   int rd = static_cast<int>(rotary_dim);
   int hr = rd / 2;
   int max_seq_len = static_cast<int>(max_seq_len_i64);
+  int bnsh = is_bnsh ? 1 : 0;
 
   if (element_size_bytes == 2) {
     auto* in = static_cast<const __half*>(input);
@@ -190,14 +246,14 @@ extern "C" int hip_rope_forward(
       hipLaunchKernelGGL(rope_interleaved_kernel<__half>,
           dim3(grid_size), dim3(block_size), 0, stream,
           in, pos, cos_c, sin_c, out,
-          bs, sl, nh, hd, rd, hr, max_seq_len);
+          bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
     } else {
       int total = bs * sl * nh * hd;
       int grid_size = (total + block_size - 1) / block_size;
       hipLaunchKernelGGL(rope_half_rotated_kernel<__half>,
           dim3(grid_size), dim3(block_size), 0, stream,
           in, pos, cos_c, sin_c, out,
-          bs, sl, nh, hd, rd, hr, max_seq_len);
+          bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
     }
 
     if (interleaved && rd < hd) {
@@ -206,7 +262,7 @@ extern "C" int hip_rope_forward(
       int grid_size = (total_remaining + block_size - 1) / block_size;
       hipLaunchKernelGGL(rope_copy_remaining_kernel<__half>,
           dim3(grid_size), dim3(block_size), 0, stream,
-          in, out, bs, sl, nh, hd, rd);
+          in, out, bs, sl, nh, hd, rd, bnsh);
     }
   } else if (element_size_bytes == 4) {
     auto* in = static_cast<const float*>(input);
@@ -221,14 +277,14 @@ extern "C" int hip_rope_forward(
       hipLaunchKernelGGL(rope_interleaved_kernel<float>,
           dim3(grid_size), dim3(block_size), 0, stream,
           in, pos, cos_c, sin_c, out,
-          bs, sl, nh, hd, rd, hr, max_seq_len);
+          bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
     } else {
       int total = bs * sl * nh * hd;
       int grid_size = (total + block_size - 1) / block_size;
       hipLaunchKernelGGL(rope_half_rotated_kernel<float>,
           dim3(grid_size), dim3(block_size), 0, stream,
           in, pos, cos_c, sin_c, out,
-          bs, sl, nh, hd, rd, hr, max_seq_len);
+          bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
     }
 
     if (interleaved && rd < hd) {
@@ -237,7 +293,7 @@ extern "C" int hip_rope_forward(
       int grid_size = (total_remaining + block_size - 1) / block_size;
       hipLaunchKernelGGL(rope_copy_remaining_kernel<float>,
           dim3(grid_size), dim3(block_size), 0, stream,
-          in, out, bs, sl, nh, hd, rd);
+          in, out, bs, sl, nh, hd, rd, bnsh);
     }
   } else {
     fprintf(stderr, "hip_rope_forward: unsupported element_size %lld\n",

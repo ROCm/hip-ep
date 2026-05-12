@@ -8,6 +8,7 @@
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -55,6 +56,20 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
 
   // 6. HIP-specific buffer optimizations
   pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
+
+  // 6a. Promote strided memref operands of hip.* ops to contiguous
+  //     temporaries.  Required because the HIP runtime call ABI (used by
+  //     --convert-hip-to-llvm) only forwards a bare alignedPtr per memref
+  //     operand and has no channel for offset / per-dim strides; without
+  //     this pass, hip.* ops that consume memref.subview results read the
+  //     base of the parent buffer rather than the slice.
+  //
+  //     Placement: after OptimizeMemRefs (so we don't fight its
+  //     subview-folding) and before PoolAllocs (so the new transient
+  //     memref.alloc / memref.dealloc pairs flow through pool views and do
+  //     not trigger extra hipMalloc calls per inference).
+  pm.addNestedPass<func::FuncOp>(hip::createPromoteStridedHipOperandsPass());
+
   pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
 
   // 7. Lower remaining bufferization ops to memref
@@ -82,7 +97,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements));
+        fs, options.externalizeMinNumElements, options.skipConstantData));
   } else {
     ConvertOnnxToHipPassOptions onnxToHipOpts;
     onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
@@ -107,7 +122,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements));
+        fs, options.externalizeMinNumElements, options.skipConstantData));
   } else {
     ConvertOnnxToHipPassOptions onnxToHipOpts;
     onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
@@ -126,6 +141,13 @@ void mlir::hip::buildHipToLLVMPipeline(
   // does not include patterns for these ops; expand-strided-metadata rewrites
   // them into ops that it can lower.
   pm.addPass(memref::createExpandStridedMetadataPass());
+
+  // ExpandStridedMetadata can emit affine.apply for collapse-shape stride
+  // products (e.g. flattening an MoE expert-major 3D memref to 2D). The
+  // ConvertHipToLLVM lowering does not include affine→arith patterns, so any
+  // surviving affine.apply leaves builtin.unrealized_conversion_cast in the
+  // final LLVM IR and "Failed to translate MLIR to LLVM IR" aborts compile.
+  pm.addPass(createLowerAffinePass());
 
   pm.addPass(createConvertHipToLLVMPass());
 

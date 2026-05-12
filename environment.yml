@@ -1,0 +1,34 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: hipdnn-ep
+channels:
+  - conda-forge
+dependencies:
+  # cmake>=3.31 — avoids satisfying constraint with cygwin's stale /usr/bin/cmake
+  # 3.14.5 if PATH order is wrong (CMakeLists.txt requires >=3.20).
+  - python>=3.10
+  - cmake>=3.31
+  - ninja
+  - sccache
+  - gh
+  - pip
+  - pip:
+    - lit
+    - lintrunner==0.12.7
+    - lintrunner-adapters==0.12.4
+    - ruff==0.11.9
+    - clang-format==16.0.1
+    - pre-commit
+    - licenseheaders==0.8.8
+    - pytest
+    - onnx
+    - onnx_ir
+    - onnxruntime-directml
+    # Needed by OGA fork build (wheel packaging, distutils replacement)
+    # and for fetching dependency archives during the OGA build.
+    - setuptools
+    - wheel
+    - packaging
+    - requests
