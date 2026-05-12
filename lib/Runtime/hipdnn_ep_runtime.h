@@ -837,6 +837,10 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
               int64_t cDim0, int64_t cDim1);
 
+int wrap_equal(RuntimeState *state, void *a, void *b,
+               void *output, int64_t num_elements,
+               int64_t data_type);
+
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
 //===----------------------------------------------------------------------===//

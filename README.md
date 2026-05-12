@@ -40,6 +40,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Cast | Custom HIP Kernel |
 | CastLike | Decomposed → Cast |
 | Neg | Reuses wrap_power (alpha=0, beta=-1, gamma=1) |
+| Equal | Custom HIP Kernel |
 | Min | MIOpen |
 | ReduceSum | Custom HIP Kernel |
 | ReduceMax | Custom HIP Kernel |
