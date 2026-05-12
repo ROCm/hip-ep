@@ -488,8 +488,12 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateRangeConversionPatterns(patterns, ctx);
   populateCastLikeConversionPatterns(patterns, ctx);
   populateEqualConversionPatterns(patterns, ctx);
+  populateDivConversionPatterns(patterns, ctx);
   populateReduceMaxConversionPatterns(patterns, ctx);
   populateMinConversionPatterns(patterns, ctx);
+  populateNotConversionPatterns(patterns, ctx);
+  populateCosConversionPatterns(patterns, ctx);
+  populateSinConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

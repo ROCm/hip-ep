@@ -156,10 +156,18 @@ void populateCastLikeConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateEqualConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populateDivConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateMinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateNotConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateCosConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateSinConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir
