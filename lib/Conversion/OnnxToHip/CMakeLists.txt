@@ -27,6 +27,7 @@ add_library(OnnxToHip STATIC
   LinearAttentionConversion.cpp
   RangeConversion.cpp
   CastLikeConversion.cpp
+  ReduceMaxConversion.cpp
 )
 
 add_dependencies(OnnxToHip
