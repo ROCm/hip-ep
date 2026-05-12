@@ -1193,8 +1193,7 @@ def Hip_NegOp : Hip_DpsOp<"neg"> {
 
     Formula: Y = -X
 
-    Lowered via wrap_power(alpha=0, beta=-1, gamma=1) so no dedicated
-    runtime kernel is needed.
+    Lowered via the unified unary elementwise path (wrap_neg).
 
     Uses destination-passing style: output buffer is provided as argument.
 
