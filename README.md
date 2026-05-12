@@ -40,6 +40,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Cast | Custom HIP Kernel |
 | CastLike | Decomposed → Cast |
 | ReduceSum | Custom HIP Kernel |
+| ReduceMax | Custom HIP Kernel |
 | Range | Custom HIP kernel |
 | Gather | Custom HIP Kernel |
 | LayerNormalization | MIOpen |

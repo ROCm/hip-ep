@@ -16,6 +16,7 @@ add_library(HipToLLVM STATIC
   RangeLowering.cpp
   CastLowering.cpp
   ReduceSumLowering.cpp
+  ReduceMaxLowering.cpp
   TransposeLowering.cpp
   RopeLowering.cpp
   GqaLowering.cpp

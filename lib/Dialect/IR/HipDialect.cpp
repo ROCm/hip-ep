@@ -708,6 +708,20 @@ void ReduceSumOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ReduceMaxOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // MatMulNBitsOp
 //===----------------------------------------------------------------------===//
 
