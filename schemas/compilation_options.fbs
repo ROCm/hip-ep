@@ -15,6 +15,7 @@ table CompilationOptions {
   constants_file: string = "constants.bin";
   dump_tensors: bool = false;
   dump_tensors_dir: string;
+  skip_constant_data: bool = false;
 }
 
 root_type CompilationOptions;

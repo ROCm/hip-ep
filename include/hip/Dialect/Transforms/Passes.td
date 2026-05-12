@@ -103,6 +103,43 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
   ];
 }
 
+def PromoteStridedHipOperandsPass
+    : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
+  let summary = "Materialize contiguous temporaries for non-canonical memref "
+                "operands of hip.* ops";
+  let description = [{
+    Walks every DestinationStyleOpInterface op in the `hip` dialect.  For
+    each input (DPS-input) operand whose memref type has a non-identity
+    layout (non-zero offset or non-contiguous strides), inserts:
+
+    ```mlir
+    %tmp = memref.alloc() : memref<...identity-layout...>
+    memref.copy %strided, %tmp : ..., ...
+    // consumer is rewritten to read from %tmp instead of %strided
+    memref.dealloc %tmp : memref<...identity-layout...>
+    ```
+
+    DPS-init (output) operands are left untouched: in this pipeline they are
+    always either fresh `memref.alloc` results or function arguments under
+    `IdentityLayoutMap`, so they are guaranteed contiguous by construction.
+
+    The pass exists to bridge the contract gap between the IR (which can
+    represent strided memrefs faithfully via memref.subview) and the HIP
+    runtime call ABI (which receives a single bare pointer with no offset /
+    strides channel).  Without this promotion, hip.* runtime calls silently
+    read the base of the parent buffer instead of the intended slice.
+
+    Recommended pipeline position:
+      hip-optimize-memrefs -> hip-promote-strided-operands -> hip-pool-allocs
+
+    This placement ensures the new transient allocations are routed through
+    the HIP memory pool instead of producing extra hipMalloc calls.
+  }];
+  let dependentDialects = [
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
   let summary = "Pool memref.alloc ops into a grow-on-demand i8 byte buffer";
   let description = [{

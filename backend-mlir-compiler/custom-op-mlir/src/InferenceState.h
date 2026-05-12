@@ -41,6 +41,26 @@ public:
   // Execute inference computation
   int compute(span_t *inputs, span_t *outputs) const;
 
+  // Mark the start of a new forward pass before inference_compute. If the
+  // model.dll exports hipdnn_ep_runtime_begin_compute (resolved once in
+  // create()) it is invoked to invalidate per-Compute() runtime caches
+  // such as the GQA seqlens_k cache. On older model.dlls the symbol is
+  // absent and this call is a no-op -- such DLLs must be paired with
+  // HIPDNN_EP_GQA_CACHE_SEQLENS=0 (the cache is on by default; create()
+  // logs a LOG(WARNING) when it detects the mismatch).
+  void begin_compute() const;
+
+  // Diagnostic-only accessor: returns the hipStream_t used by
+  // inference_compute, as a void*.  Relies on RuntimeState
+  // (lib/Runtime/runtime_state_internal.h) keeping hipStream_t as its first
+  // field; the cast is encapsulated in InferenceState.cpp with a static_assert
+  // on pointer size.  Returning void* keeps hip headers out of this public
+  // header.
+  //
+  // Intended for HIPDNN_EP_PERF instrumentation in MlirCustomOp::Compute().
+  // Callers reinterpret_cast to hipStream_t (itself a void* on amdhip64).
+  void *get_stream_raw() const;
+
   // Public constructor gated by PrivateTag: use create() factory instead.
   // PrivateTag is declared private below — external callers cannot form one.
   struct PrivateTag;
@@ -60,6 +80,13 @@ private:
 
   // Temporary DLL file path (deleted in destructor)
   std::string temp_dll_path_;
+
+  // Cached function pointer for hipdnn_ep_runtime_begin_compute. Resolved
+  // once in create() so begin_compute() avoids a per-call GetProcAddress /
+  // dlsym round-trip on the decode hot path. Null when the model.dll
+  // predates the export.
+  using BeginComputeFn = void (*)(void *);
+  BeginComputeFn begin_compute_fn_;
 };
 
 } // namespace mlir_compilation::customop

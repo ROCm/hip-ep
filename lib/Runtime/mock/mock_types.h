@@ -47,6 +47,8 @@ extern "C" hipError_t hipMemcpy(void *dst, const void *src, size_t size,
                                 int kind);
 extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
                                      int kind, hipStream_t stream);
+extern "C" hipError_t hipMemsetAsync(void *dst, int value, size_t size,
+                                     hipStream_t stream);
 extern "C" hipError_t hipEventCreate(hipEvent_t *event);
 extern "C" hipError_t hipEventDestroy(hipEvent_t event);
 extern "C" hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream);

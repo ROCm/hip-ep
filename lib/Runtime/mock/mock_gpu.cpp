@@ -155,6 +155,14 @@ extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
   return hipSuccess;
 }
 
+extern "C" hipError_t hipMemsetAsync(void *dst, int value, size_t size,
+                                     hipStream_t stream) {
+  MOCK_PRINT("[MOCK] hipMemsetAsync(dst=%p, value=%d, size=%zu, stream=%p)\n",
+             dst, value, size, stream);
+  memset(dst, value, size);
+  return hipSuccess;
+}
+
 // Mock MIOpen types and constants
 typedef void *miopenTensorDescriptor_t;
 typedef void *miopenConvolutionDescriptor_t;
@@ -587,6 +595,57 @@ int wrap_group_query_attention(
   return 0;
 }
 
+int wrap_linear_attention(RuntimeState *state, const void *query,
+                          const void *key, const void *value,
+                          const void *past_state, const void *decay,
+                          const void *beta, void *output, void *present_state,
+                          int64_t Hq, int64_t Hkv, int64_t Nk,
+                          int64_t decay_per_key_dim, int64_t beta_per_head,
+                          float scale, int64_t chunk_size, int64_t update_rule,
+                          int64_t B, int64_t seq_len, int64_t dk, int64_t dv,
+                          int64_t type) {
+  if (!state || !query || !key || !value || !output || !present_state) {
+    fprintf(stderr, "Invalid required argument in wrap_linear_attention\n");
+    return -1;
+  }
+
+  // LinearAttention update_rule enum: 0=linear, 1=gated, 2=delta,
+  // 3=gated_delta. Kept inline here because it is op-specific and does not
+  // belong to the generic hipdnn_ep_* enum helpers.
+  const char *rule_name = "unknown";
+  switch (update_rule) {
+  case 0:
+    rule_name = "linear";
+    break;
+  case 1:
+    rule_name = "gated";
+    break;
+  case 2:
+    rule_name = "delta";
+    break;
+  case 3:
+    rule_name = "gated_delta";
+    break;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_linear_attention(\n");
+  MOCK_PRINT("[MOCK]   B=%lld, seq_len=%lld, dk=%lld, dv=%lld,\n", (long long)B,
+             (long long)seq_len, (long long)dk, (long long)dv);
+  MOCK_PRINT("[MOCK]   Hq=%lld, Hkv=%lld, Nk=%lld,\n", (long long)Hq,
+             (long long)Hkv, (long long)Nk);
+  MOCK_PRINT("[MOCK]   decay_per_key_dim=%lld, beta_per_head=%lld,\n",
+             (long long)decay_per_key_dim, (long long)beta_per_head);
+  MOCK_PRINT("[MOCK]   scale=%f, chunk_size=%lld, update_rule=%s(%lld),\n",
+             (double)scale, (long long)chunk_size, rule_name,
+             (long long)update_rule);
+  MOCK_PRINT("[MOCK]   type=%lld,\n", (long long)type);
+  MOCK_PRINT("[MOCK]   past_state=%s, decay=%s, beta=%s)\n",
+             past_state ? "yes" : "null", decay ? "yes" : "null",
+             beta ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
                         int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
@@ -647,9 +706,21 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
+               void *output, int64_t output_num_elements, int64_t hip_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_range\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_range(output_num_elements=%lld, hip_dtype=%lld)\n",
+             (long long)output_num_elements, (long long)hip_dtype);
+  return 0;
+}
+
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t axes_num_elements, int64_t element_size_bytes,
+                    int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_reduce_sum\n");
@@ -658,11 +729,12 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
 
   MOCK_PRINT(
       "[MOCK] wrap_reduce_sum(data_num_elements=%lld, "
-      "output_num_elements=%lld, axes_num_elements=%lld, element_size=%lld, "
+      "output_num_elements=%lld, axes_num_elements=%lld, data_type=%s(%lld), "
       "keepdims=%lld, noop_with_empty_axes=%lld)\n",
       (long long)data_num_elements, (long long)output_num_elements,
-      (long long)axes_num_elements, (long long)element_size_bytes,
-      (long long)keepdims, (long long)noop_with_empty_axes);
+      (long long)axes_num_elements, hipdnn_ep_datatype_name(data_type),
+      (long long)data_type, (long long)keepdims,
+      (long long)noop_with_empty_axes);
 
   return 0;
 }
@@ -703,21 +775,22 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
-                          int64_t interleaved, int64_t num_heads,
-                          int64_t rotary_dim, int64_t input_num_elements,
-                          int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes) {
+                          int64_t interleaved, int64_t batch_size,
+                          int64_t seq_len, int64_t num_heads, int64_t head_dim,
+                          int64_t rotary_dim, int64_t cos_cache_num_elements,
+                          int64_t element_size_bytes, int64_t is_bnsh) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_rotary_embedding\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_rotary_embedding(interleaved=%lld, num_heads=%lld, "
-             "rotary_dim=%lld, input_num_elements=%lld, "
-             "cos_cache_num_elements=%lld, element_size=%lld)\n",
-             (long long)interleaved, (long long)num_heads,
-             (long long)rotary_dim, (long long)input_num_elements,
-             (long long)cos_cache_num_elements, (long long)element_size_bytes);
+  MOCK_PRINT("[MOCK] wrap_rotary_embedding(interleaved=%lld, batch=%lld, "
+             "seq_len=%lld, num_heads=%lld, head_dim=%lld, rotary_dim=%lld, "
+             "cos_cache_num_elements=%lld, element_size=%lld, is_bnsh=%lld)\n",
+             (long long)interleaved, (long long)batch_size, (long long)seq_len,
+             (long long)num_heads, (long long)head_dim, (long long)rotary_dim,
+             (long long)cos_cache_num_elements, (long long)element_size_bytes,
+             (long long)is_bnsh);
 
   return 0;
 }
@@ -767,7 +840,8 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       const void *scales, const void *zero_points,
                       const void *g_idx, const void *bias, void *output,
                       int64_t M, int64_t N, int64_t K, int64_t batch_count,
-                      int64_t bits, int64_t block_size, int64_t elem_size) {
+                      int64_t bits, int64_t block_size, int64_t elem_size,
+                      int64_t zp_elem_size) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
     return -1;
@@ -856,6 +930,47 @@ int wrap_power(RuntimeState *state, void *input, void *output,
              "alpha=%g, beta=%g, gamma=%g)\n",
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
              (long long)data_type, alpha, beta, gamma);
+
+  return 0;
+}
+
+// ONNX Where: output[i] = condition[i] ? x[i] : y[i] with multidirectional
+// broadcasting. Mirrors the validation in real/where.cpp so the same bad
+// inputs are rejected in both builds.
+int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
+               void *output, const int64_t *cond_shape, int64_t cond_rank,
+               const int64_t *x_shape, int64_t x_rank, const int64_t *y_shape,
+               int64_t y_rank, const int64_t *out_shape, int64_t out_rank,
+               int64_t data_type) {
+  if (!state || !condition || !x || !y || !output) {
+    fprintf(stderr, "wrap_where: null tensor argument\n");
+    return -1;
+  }
+  if ((cond_rank > 0 && !cond_shape) || (x_rank > 0 && !x_shape) ||
+      (y_rank > 0 && !y_shape) || (out_rank > 0 && !out_shape)) {
+    fprintf(stderr, "wrap_where: null shape argument with non-zero rank\n");
+    return -1;
+  }
+
+  auto dump_shape = [](const char *name, const int64_t *shape, int64_t rank) {
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), "[MOCK]   %s rank=%lld shape=[", name,
+                     (long long)rank);
+    for (int64_t i = 0; i < rank && n < (int)sizeof(buf); ++i) {
+      n += snprintf(buf + n, sizeof(buf) - n, "%s%lld", i ? "," : "",
+                    (long long)shape[i]);
+    }
+    if (n < (int)sizeof(buf))
+      snprintf(buf + n, sizeof(buf) - n, "]\n");
+    MOCK_PRINT("%s", buf);
+  };
+
+  MOCK_PRINT("[MOCK] wrap_where(data_type=%s(%lld))\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type);
+  dump_shape("condition", cond_shape, cond_rank);
+  dump_shape("x", x_shape, x_rank);
+  dump_shape("y", y_shape, y_rank);
+  dump_shape("output", out_shape, out_rank);
 
   return 0;
 }

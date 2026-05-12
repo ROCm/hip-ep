@@ -42,6 +42,10 @@ static CompilationConfig load_config(PassContext *ctx) {
   config.artifactFormat = ArtifactFormat::Native;
   config.optLevel = 2;
 
+  auto ep_ctx = ctx->get_session_config("ep.context_enable");
+  bool epctxExport = ep_ctx.has_value() && ep_ctx.value() == "1";
+  config.skipConstantData = !epctxExport;
+
   try {
     // Parse artifact format
     std::string artifact_format_str =
@@ -69,7 +73,11 @@ static CompilationConfig load_config(PassContext *ctx) {
 
   MY_LOG(1) << "Artifact format: "
             << (config.artifactFormat == ArtifactFormat::Native ? "native"
-                                                                : "llvm_ir");
+                                                                : "llvm_ir")
+            << "; skipConstantData="
+            << (config.skipConstantData ? "true" : "false")
+            << (epctxExport ? " (EPContext export -> sidecar)"
+                            : " (streaming default)");
 
   return config;
 }

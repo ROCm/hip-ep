@@ -35,6 +35,8 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
 #define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
 #define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
+#define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
+#define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
 
 //===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
@@ -76,6 +78,10 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 4;
   case HIPDNN_EP_DATATYPE_INT64:
     return 8;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return 1;
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return 8;
   default:
     return -1;
   }
@@ -93,6 +99,10 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "i32";
   case HIPDNN_EP_DATATYPE_INT64:
     return "i64";
+  case HIPDNN_EP_DATATYPE_INT8:
+    return "i8";
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return "f64";
   default:
     return "unknown";
   }
@@ -159,7 +169,7 @@ typedef struct RuntimeState RuntimeState;
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
 //   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
-// Return codes: 0=success, 1=alloc/read error, 2-9=GPU handle init error
+// Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size);
 
@@ -198,6 +208,33 @@ void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
 
+// Per-state scratch for wrap_qmoe transient buffers (device + pinned-host
+// mirror for routing readback). Replaces the per-call hipMalloc/hipFree storm
+// (8 buffers x N MoE layers per inference). Same grow-on-demand policy as
+// the shared workspace; never shrinks. See runtime_state_internal.h for
+// rationale.
+void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
+                                        size_t needed_size);
+void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
+                                             size_t needed_size);
+
+// Device-side runtime error flag (set by kernels, observed by wrappers).
+// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
+// delta==0) and need to propagate an error code back through main_graph.
+void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
+int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
+// Mark the start of a new Compute() call. Invalidates per-forward-pass
+// caches such as the GQA seqlens_k cache (see runtime_state_internal.h).
+// Called by the EP-side MlirCustomOp::Compute() entry once per inference;
+// safe to call unconditionally (cheap: writes a single bool). Required for
+// the GQA seqlens_k cache (default on, set HIPDNN_EP_GQA_CACHE_SEQLENS=0
+// to disable) to be correct -- without this hook the cache would persist
+// across forward passes and return stale values.
+void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
+
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
 // Parameters:
@@ -213,13 +250,64 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 // Inference API Types (for generated interface)
 //===----------------------------------------------------------------------===//
 
-// Represents a tensor with host data and shape information
+// Memory placement of a tensor's `data` pointer. Values are 1:1 with ORT's
+// OrtMemoryInfoDeviceType (onnxruntime_c_api.h) so MlirCustomOp can write
+// the ORT value straight into tensor_t.memory_type with no remapping.
+//
+// Today the runtime only special-cases TENSOR_MEMORY_GPU (alias path,
+// avoids the per-inference H2D / D2H copy on AMD APU iGPU mapped-pinned
+// memory). CPU / FPGA / NPU all fall through to the legacy host H2D / D2H
+// path, preserving existing behaviour for hip-test-dll, hip-onnx-runner,
+// and any other host-input caller.
+//
+// Must match the matching enum in
+// `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp`.
+enum {
+  TENSOR_MEMORY_CPU = 0, // == OrtMemoryInfoDeviceType_CPU
+  TENSOR_MEMORY_GPU = 1, // == OrtMemoryInfoDeviceType_GPU  (alias path; only
+                         // mode optimized today)
+  TENSOR_MEMORY_FPGA =
+      2, // == OrtMemoryInfoDeviceType_FPGA (treated as host today)
+  TENSOR_MEMORY_NPU =
+      3, // == OrtMemoryInfoDeviceType_NPU  (treated as host today)
+};
+
+// Represents a tensor with data pointer and shape information.
+//
+// Memory ownership: caller-owned. `memory_type` selects the data pointer's
+// placement (see the enum above) and tells prepare_input/finalize_output
+// whether to copy H2D/D2H or alias the caller's GPU-accessible buffer.
+//
+// tensor_t is the wire-protocol ABI between three components that are
+// intentionally kept decoupled (compiler-emitted model.dll, EP runtime
+// DLL, hip-test-dll harness), so we re-declare it here instead of
+// sharing a header. The static_assert block below catches any layout
+// drift at compile time. Sibling copies live at:
+//   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
+//   * `tools/hip-test-dll/hip-test-dll.cpp`                         (test
+//   driver)
 typedef struct {
-  void *data;          // Host data pointer
+  void *data;          // Data pointer (host or GPU-accessible per memory_type)
   int64_t *shape;      // Array of dimension sizes
   size_t rank;         // Number of dimensions
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
+  int memory_type;     // One of TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 } tensor_t;
+
+// Compile-time guard for the wire-protocol ABI described above. The same
+// three asserts live in each of the three sibling headers; if you reorder
+// / add / remove a field in one copy and forget to mirror it in the others,
+// at least one of them fails to build. Per-field offsets (not raw sizeof)
+// because trailing padding after `memory_type` is compiler-defined and not
+// part of what model.dll actually reads.
+static_assert(offsetof(tensor_t, data) == 0,
+              "tensor_t.data must remain the first field");
+static_assert(offsetof(tensor_t, shape) == sizeof(void *),
+              "tensor_t.shape moved -- update all three tensor_t copies");
+static_assert(offsetof(tensor_t, memory_type) ==
+                  offsetof(tensor_t, element_size) + sizeof(size_t),
+              "tensor_t.memory_type moved -- update all three tensor_t "
+              "copies");
 
 // Represents a span of tensors (inputs or outputs)
 typedef struct {
@@ -230,12 +318,17 @@ typedef struct {
 // Represents a prepared tensor with GPU buffer and metadata
 // Used internally by tensor preparation helpers
 typedef struct {
-  void *gpu_ptr;      // GPU memory (allocated or from pool)
+  void *gpu_ptr;      // GPU memory (allocated, from pool, or aliased)
   void *host_ptr;     // Host memory (from tensor_t.data)
   int64_t *shape_ptr; // Shape array (from tensor_t.shape) for memref building
   size_t rank;        // Tensor rank (for validation)
   size_t size_bytes;  // Buffer size
   bool is_pooled;     // Internal: true if from pool, false if allocated
+  // Internal: true if gpu_ptr aliases caller's GPU-accessible memory
+  // (tensor_t.memory_type == TENSOR_MEMORY_GPU). When set, finalize_output
+  // skips the D2H copy and free_input skips pool_release/hipFree because
+  // the memory is owned by the caller, not by us.
+  bool is_aliased;
 } TensorBuffer;
 
 //===----------------------------------------------------------------------===//
@@ -303,6 +396,23 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state, TensorBuffer *buffer);
 //   buffer: TensorBuffer from prepare_input
 void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer);
 
+// Synchronize the GPU stream and print PERF/profile timing (if enabled).
+// Called by generated code after finalize_output, before free_input.
+int hipdnn_ep_stream_sync(RuntimeState *state);
+
+// Per-operator profiling state accessor (OpProfileState*, gated on
+// HIPDNN_EP_PERF)
+void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
+
+// GQA GEMM cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
+
+// CausalConvWithState descriptor/algo cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_causal_conv_cache_destroy(void *cache);
+
+// MatMulNBits asym zero_points unpack cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
+
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
 //
@@ -338,7 +448,7 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 // Memory Operations
 //===----------------------------------------------------------------------===//
 
-// HIP memory copy wrapper (GPU-to-GPU using hipMemcpyAsync)
+// GPU D2D memcpy (hipMemcpyAsync); called from generated LLVM IR.
 // Follows opaque RuntimeState pattern - extracts stream internally
 //
 // Parameters:
@@ -352,6 +462,12 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 //   -1 = copy failed
 int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes);
+
+/// 2D pitched device copy (e.g. strided memref → dense output). Width is in
+/// bytes; pitches are row pitches (hipMemcpy2DAsync semantics).
+int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
+                          const void *src_ptr, size_t src_pitch, size_t width,
+                          size_t height);
 
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
@@ -460,6 +576,24 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes);
 
+// Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
+// arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
+// per-operand broadcasting.
+//
+// Each operand is described by its own (shape, rank) pair: the shape array
+// holds `rank` i64 dims in row-major order. Operand shapes are left-padded
+// with 1s up to `out_rank` by the runtime, and dims of 1 are broadcast
+// against the corresponding larger output dim. No fixed layout is assumed;
+// any rank up to HIP_WHERE_MAX_RANK is supported.
+//
+//   condition: bool tensor (1 byte per element)
+//   x, y, output: same data_type (HIPDNN_EP_DATATYPE_*)
+int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
+               void *output, const int64_t *cond_shape, int64_t cond_rank,
+               const int64_t *x_shape, int64_t x_rank, const int64_t *y_shape,
+               int64_t y_rank, const int64_t *out_shape, int64_t out_rank,
+               int64_t data_type);
+
 // Unified power entry: output = f(input; alpha, beta, gamma).
 // alpha, beta, gamma match the MIOpen POWER activation tuple where the
 // MIOpen path is used. data_type is HIPDNN_EP_DATATYPE_* (FLOAT=0, HALF=1,
@@ -479,10 +613,27 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t indices_num_elements, int64_t output_num_elements,
                 int64_t element_size_bytes);
 
+// Range operation wrapper
+int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
+               void *output, int64_t output_num_elements, int64_t hip_dtype);
+
+// Transpose operation wrapper (ONNX Transpose).
+// Permutes the dimensions of `input` according to `perm` and writes the
+// result to `output`.  `input_shape` and `perm` are host-side arrays of
+// length `rank`; `num_elements` is the product of `input_shape`.
+// `element_size_bytes` selects the kernel datapath (1/2/4/8 currently).
+int wrap_transpose(RuntimeState *state, const void *input, void *output,
+                   int64_t rank, const int64_t *input_shape,
+                   const int64_t *perm, int64_t num_elements,
+                   int64_t element_size_bytes);
+
 // ReduceSum operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_INT32,
+//                  HIPDNN_EP_DATATYPE_INT64.
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t axes_num_elements, int64_t element_size_bytes,
+                    int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes);
 
 // Cast operation wrapper (element type conversion)
@@ -498,13 +649,27 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode);
 
-// Rotary embedding operation wrapper
+// GELU activation wrapper (uses custom HIP kernel)
+// Applies GELU element-wise with support for exact or approximate mode
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
+// approximate: 0 = exact (erf), 1 = tanh approximation
+int wrap_gelu(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type, int64_t approximate);
+
+// Rotary embedding operation wrapper.
+//
+// Supports M-RoPE / partial rotary embedding (rotary_dim < head_dim) and the
+// two standard input layouts:
+//   is_bnsh == 0 : BSNH [batch, seq_len, num_heads, head_dim]
+//                  (also covers 3D [batch, seq_len, num_heads*head_dim])
+//   is_bnsh != 0 : BNSH [batch, num_heads, seq_len, head_dim]
+//                  (ONNX com.microsoft.RotaryEmbedding 4D default; GQA K/V)
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
-                          int64_t interleaved, int64_t num_heads,
-                          int64_t rotary_dim, int64_t input_num_elements,
-                          int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes);
+                          int64_t interleaved, int64_t batch_size,
+                          int64_t seq_len, int64_t num_heads, int64_t head_dim,
+                          int64_t rotary_dim, int64_t cos_cache_num_elements,
+                          int64_t element_size_bytes, int64_t is_bnsh);
 
 // SimplifiedLayerNormalization operation wrapper
 int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
@@ -544,7 +709,8 @@ int wrap_matmul_nbits(
     int64_t batch_count,     // number of batches
     int64_t bits,            // quantization bits (e.g. 4)
     int64_t block_size,      // quantization block size
-    int64_t elem_size);      // element size in bytes
+    int64_t elem_size,       // element size in bytes
+    int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
@@ -597,6 +763,53 @@ int wrap_causal_conv_with_state(
     int64_t ndim,
     int64_t activation, // 0=none, 1=silu/swish
     int64_t element_size_bytes);
+
+//==============================================================================
+// ONNX Gemm via hipBLASLt
+//==============================================================================
+// Y = alpha * op(A) * op(B) + beta * C
+// op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
+// LinearAttention operation wrapper (com.microsoft.LinearAttention)
+// Unified linear attention with recurrent state for autoregressive decoding
+// and prefill. Supports update rules: linear(0), gated(1), delta(2),
+// gated_delta(3).
+// All tensor inputs use packed 3D format [B, T, H*D] except past/present
+// state which is 4D [B, H_kv, d_k, d_v].
+// Head counts are three-way:
+//   - Hq : query heads
+//   - Hkv: KV state heads
+//   - Nk : number of key heads in the packed key tensor (Nk divides H_kv when
+//          multiple KV heads share a K head; Nk < Hkv).
+// Supports both standard GQA (Hq >= Hkv, Hq % Hkv == 0) and inverse GQA
+// (Hq < Hkv, Hkv % Hq == 0).  The output tensor's last dim is max(Hq, Hkv)*d_v,
+// packed in Q-head order for standard GQA and KV-head order for inverse GQA.
+// Optional pointer args: pass nullptr if the corresponding input is absent.
+// Last arg `type` is HIPDNN_EP_DATATYPE_FLOAT (0), HIPDNN_EP_DATATYPE_HALF (1),
+// or HIPDNN_EP_DATATYPE_BFLOAT16 (2).
+//
+// decay_per_key_dim / beta_per_head describe the layout of the optional
+// decay / beta tensors so the runtime can pick the correct stride. Values
+// are ignored when the corresponding pointer is nullptr; compilers should
+// pass 0 in that case.
+//   decay_per_key_dim = 1  -> decay is [B, T, H_kv * d_k] (GLA / RWKV-6)
+//                     = 0  -> decay is [B, T, H_kv]       (DeltaNet / RetNet)
+//   beta_per_head     = 1  -> beta  is [B, T, H_kv]
+//                     = 0  -> beta  is [B, T, 1]          (broadcast over
+//                     heads)
+int wrap_linear_attention(
+    RuntimeState *state,
+    const void *query,      // [B, T, Hq * dk]
+    const void *key,        // [B, T, Nk * dk]
+    const void *value,      // [B, T, H_kv * d_v]
+    const void *past_state, // [B, H_kv, d_k, d_v] (nullable)
+    const void *decay,      // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
+    const void *beta,       // [B, T, H_kv] or [B, T, 1] (nullable)
+    void *output,           // [B, T, max(H_q, H_kv) * d_v]
+    void *present_state,    // [B, H_kv, d_k, d_v]
+    int64_t Hq, int64_t Hkv, int64_t Nk, int64_t decay_per_key_dim,
+    int64_t beta_per_head, float scale, int64_t chunk_size,
+    int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
+    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

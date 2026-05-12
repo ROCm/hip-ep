@@ -55,8 +55,11 @@ jobs:
           }
 
       # -----------------------------------------------------------------
-      # Download the pre-built gpu-test-package artifact from the
-      # latest successful main build of the Windows Build workflow.
+      # Download the pre-built gpu-test-package artifact from the latest
+      # successful Windows Build run on the same branch this workflow was
+      # dispatched against (e.g. release_0_1_0 GPU runs pull release_0_1_0
+      # build artifacts, not main). github.ref_name is the short branch name
+      # for workflow_dispatch triggered against a branch ref.
       # -----------------------------------------------------------------
       - name: Download gpu-test-package
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe # v3.1.4
@@ -64,7 +67,7 @@ jobs:
           workflow: windows-build.yml
           name: gpu-test-package
           path: gpu-test-package
-          branch: main
+          branch: ${{ github.ref_name }}
           workflow_conclusion: success
           if_no_artifact_found: fail
 

@@ -819,6 +819,27 @@ typedef float    float8 __attribute__((ext_vector_type(8)));
 //     2. Online softmax in log2e space: score *= scale * LOG2E, then exp2f
 //     3. Accumulate weighted V: acc += softmax_weight * V[s,tid]
 //
+// Memory pipeline: launches B*H blocks of D threads -> only ~32 waves total
+// at typical inference shapes (B=1, H=32, D=128 -> 4 waves/block * 32 blocks
+// = 128 waves; for G=8 we still get 8 blocks effective on the kv-replication
+// path). Per-SIMD wave count is far below what is needed to hide ~400-cycle
+// global-load latency by switching waves. Streaming K/V one row at a time
+// stalls the wave on every iteration. To compensate we LDS-tile the K and
+// V cache reads: each outer iteration cooperatively prefetches TILE rows of
+// K and V (TILE*2 outstanding global loads per thread), then the inner loop
+// crunches TILE softmax steps from fast LDS. Memory-level parallelism is now
+// driven by TILE rather than by wave count.
+//
+// LDS use per block: 2 * TILE * D * sizeof(_Float16). For TILE=8, D=128 this
+// is 4 KB K + 4 KB V = 8 KB / block, well within RDNA3 LDS budget (64 KB/CU).
+//
+// Per-thread cooperative-load access pattern: thread `tid` writes
+// K_tile[i*D + tid] and reads K_tile[t_off*D + tid] -- own column only.
+// LDS writes from a thread are visible to subsequent reads from the same
+// thread without __syncthreads, so no barrier is needed between the prefetch
+// and the inner loop. The cross-wave reduction sync on `smem[]` inside the
+// inner loop is unchanged from the streaming version.
+//
 // Assumes RDNA wave32 (__shfl_xor with masks 16,8,4,2,1).
 // Reads Q in BSHD layout, KV cache in BNSD layout.
 
@@ -834,6 +855,14 @@ fused_gqa_decode_kernel(
     const int* __restrict__ seqlens_k)
 {
     constexpr int NUM_WAVES = D / WAVE_SIZE;
+    // TILE = number of KV rows prefetched per outer iteration.
+    // 8 chosen as the sweet spot from sweep: large enough to give the compiler
+    // 16 concurrent loads per thread to amortize ~400-cycle global-load
+    // latency, small enough to keep outer-loop overhead low. TILE=4 loses
+    // to outer-loop overhead at small skv; TILE=16 saturates the per-thread
+    // outstanding-load budget and loses at small skv too. LDS use:
+    // 2 * TILE * D * sizeof(_Float16) = 4 KB / block at D=128.
+    constexpr int TILE = 8;
 
     const int head_q  = __builtin_amdgcn_readfirstlane(blockIdx.x % H);
     const int batch   = __builtin_amdgcn_readfirstlane(blockIdx.x / H);
@@ -849,6 +878,8 @@ fused_gqa_decode_kernel(
     const int eff_skv = clamp_hi > 0 ? clamp_hi : 0;
 
     __shared__ float smem[NUM_WAVES];
+    __shared__ _Float16 K_tile[TILE * D];
+    __shared__ _Float16 V_tile[TILE * D];
 
     const float scale_log2e = scale * LOG2E;
 
@@ -861,34 +892,53 @@ fused_gqa_decode_kernel(
     float l = 0.0f;
     float O_acc = 0.0f;
 
-    for (int t = 0; t < eff_skv; ++t) {
-        float dot = Q_val * __half2float(Kcache[kv_base + (size_t)t * d + tid]);
+    for (int t_base = 0; t_base < eff_skv; t_base += TILE) {
+        const int tile_n = (t_base + TILE <= eff_skv) ? TILE : (eff_skv - t_base);
 
-        dot += __shfl_xor(dot, 16);
-        dot += __shfl_xor(dot, 8);
-        dot += __shfl_xor(dot, 4);
-        dot += __shfl_xor(dot, 2);
-        dot += __shfl_xor(dot, 1);
+        // Prefetch up to TILE rows of K and V into LDS. Compiler unrolls and
+        // issues TILE*2 global loads concurrently before any wait, so a
+        // single ~400-cycle memory wait covers the whole tile rather than
+        // one wait per row. The `i < tile_n` predicate handles the tail.
+        #pragma unroll
+        for (int i = 0; i < TILE; ++i) {
+            if (i < tile_n) {
+                K_tile[i * D + tid] = Kcache[kv_base + (size_t)(t_base + i) * d + tid];
+                V_tile[i * D + tid] = Vcache[kv_base + (size_t)(t_base + i) * d + tid];
+            }
+        }
+        // No __syncthreads needed: each thread reads only its own column
+        // (K_tile[t_off*D + tid] / V_tile[t_off*D + tid]) below, and same-
+        // thread LDS writes are program-ordered visible to subsequent reads.
 
-        if (lane_id == 0)
-            smem[wave_id] = dot;
-        __syncthreads();
+        for (int t_off = 0; t_off < tile_n; ++t_off) {
+            float dot = Q_val * __half2float(K_tile[t_off * D + tid]);
 
-        float score = 0.0f;
-        for (int w = 0; w < NUM_WAVES; ++w)
-            score += smem[w];
-        score *= scale_log2e;
+            dot += __shfl_xor(dot, 16);
+            dot += __shfl_xor(dot, 8);
+            dot += __shfl_xor(dot, 4);
+            dot += __shfl_xor(dot, 2);
+            dot += __shfl_xor(dot, 1);
 
-        __syncthreads();
+            if (lane_id == 0)
+                smem[wave_id] = dot;
+            __syncthreads();
 
-        float m_new = fmaxf(m, score);
-        float correction = exp2f(m - m_new);
-        float p = exp2f(score - m_new);
-        l = correction * l + p;
+            float score = 0.0f;
+            for (int w = 0; w < NUM_WAVES; ++w)
+                score += smem[w];
+            score *= scale_log2e;
 
-        float V_val = __half2float(Vcache[kv_base + (size_t)t * d + tid]);
-        O_acc = correction * O_acc + p * V_val;
-        m = m_new;
+            __syncthreads();
+
+            float m_new = fmaxf(m, score);
+            float correction = exp2f(m - m_new);
+            float p = exp2f(score - m_new);
+            l = correction * l + p;
+
+            float V_val = __half2float(V_tile[t_off * D + tid]);
+            O_acc = correction * O_acc + p * V_val;
+            m = m_new;
+        }
     }
 
     O_acc /= fmaxf(l, 1e-6f);
@@ -1186,5 +1236,384 @@ extern "C" int hip_gqa_fused_prefill(
       static_cast<const __half*>(Vcache),
       static_cast<__half*>(O),
       B, H, G, sq, skv, max_seq, past_len, scale);
+  return hipGetLastError();
+}
+
+//===----------------------------------------------------------------------===//
+// FA-2 Split-K GQA Decode Kernel (Phase 1)
+//===----------------------------------------------------------------------===//
+// Goal: 4-15x speedup over hip_gqa_fused_decode at high KV depth (skv >= 256)
+// by exploiting:
+//   1. GQA-aware KV reuse: one block per (batch, head_kv) instead of per
+//      (batch, head_q). HPG=4 query heads share K/V loaded once into LDS,
+//      reducing global KV bandwidth by 4x.
+//   2. Split-K parallelism: K_SPLITS blocks per (batch, head_kv) cover
+//      different KV ranges, raising occupancy for long sequences.
+//   3. LDS-staged K/V tiles (BKV=64): K[t] is loaded once and reused HPG
+//      times for dot products across 4 query heads.
+//
+// Algorithm:
+//   Each block computes partial (m, l, O) for its slice [kv_start, kv_end)
+//   using online softmax in log2e space. Partials written to workspace
+//   [B, H, K_SPLITS, D+2] floats. A second kernel (gqa_flash_decode_reduce)
+//   merges the K_SPLITS partials per (batch, head_q) into the final output.
+//
+// Block geometry:
+//   Block = HPG waves of 32 = HPG * 32 threads. Each wave handles ONE query
+//   head out of HPG. Thread `lane` in wave handles d-elements
+//   [lane * EPT, (lane+1) * EPT) where EPT = D / WAVE_SIZE.
+//
+// Grid:
+//   gridX = B * G        - one block per (batch, head_kv)
+//   gridY = K_SPLITS     - split-K dimension
+//
+// Supported HPG specializations (template param):
+//   - HPG=4  (Llama-3.x family at d=64 and d=128)
+//   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
+//
+// Constraints (asserted at launcher):
+//   - D must be 64 or 128.
+//   - RDNA wave32 (uses __shfl_xor across 32 lanes).
+//===----------------------------------------------------------------------===//
+
+static constexpr int FLASH_DECODE_BKV     = 64;
+
+// Partial layout per (b, h_q, k_split): {m: float, l: float, O[D]: float}
+__device__ __forceinline__ size_t flash_decode_partial_offset(
+    int b, int h_q, int k_split, int H, int K_SPLITS, int D) {
+  return ((size_t)((b * H + h_q) * K_SPLITS + k_split)) * (size_t)(D + 2);
+}
+
+template <int D, int K_SPLITS, int HPG>
+__global__ void __launch_bounds__(HPG * WAVE_SIZE)
+gqa_flash_decode_kernel(
+    const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
+    const __half* __restrict__ Kcache,     // [B, G, max_seq, D] (BNSD)
+    const __half* __restrict__ Vcache,     // [B, G, max_seq, D]
+    float* __restrict__ partials,          // [B, H, K_SPLITS, D+2]
+    int H, int G, int max_seq,
+    float scale,
+    const int* __restrict__ seqlens_k,
+    int local_window_size) {  // <=0 disables; > 0 = sliding-window length
+  constexpr int BKV = FLASH_DECODE_BKV;
+  constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
+  constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
+
+  static_assert(D % WAVE_SIZE == 0, "D must be a multiple of WAVE_SIZE");
+  static_assert(EPT >= 1 && EPT <= 4, "EPT must be 1..4");
+
+  const int batch     = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
+  const int head_kv   = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
+  const int split_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  const int tid       = threadIdx.x;
+  const int wave_id   = tid / WAVE_SIZE;       // [0, HPG)
+  const int lane_id   = tid % WAVE_SIZE;
+  const int head_q    = head_kv * HPG + wave_id;
+
+  // total_seq = seqlens_k[batch] + 1, clamped to [0, max_seq].
+  const int raw_skv = seqlens_k
+      ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1)
+      : max_seq;
+  const int eff_skv = (raw_skv > 0)
+      ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
+
+  // Sliding-window: at decode (sq==1) the query position is total_seq-1, so
+  // it attends to KV positions [max(0, total_seq - window), total_seq). When
+  // window <= 0 the attention is full (kv_lo = 0). gpt-oss-20b alternates
+  // sliding (local_window_size=128) and full layers; clamping kv_lo here lets
+  // sliding layers skip the full KV cache scan and process only ~window slots.
+  int kv_lo = 0;
+  if (local_window_size > 0 && eff_skv > local_window_size) {
+    kv_lo = eff_skv - local_window_size;
+  }
+  const int kv_range = eff_skv - kv_lo;
+
+  // Partition KV range into K_SPLITS roughly-equal chunks.
+  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
+  const int kv_start = kv_lo + chunk * split_idx;
+  int kv_end_tmp     = kv_start + chunk;
+  if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
+  const int kv_end   = kv_end_tmp;
+
+  // Output partials destination for THIS wave's query head.
+  float* partial_dst = partials +
+      flash_decode_partial_offset(batch, head_q, split_idx, H, K_SPLITS, D);
+
+  // Empty slice: write neutral identity so the merge ignores this split.
+  // exp2(-INFINITY - global_m) == 0, so l/O contributions vanish.
+  if (kv_start >= kv_end) {
+    if (lane_id == 0) {
+      partial_dst[0] = -INFINITY;  // m
+      partial_dst[1] = 0.0f;       // l
+    }
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e)
+      partial_dst[2 + lane_id * EPT + e] = 0.0f;
+    return;
+  }
+
+  // LDS tiles for K/V (shared across HPG=4 query heads for dedup).
+  __shared__ __half K_lds[BKV * D];
+  __shared__ __half V_lds[BKV * D];
+
+  // Load this wave's Q into registers (fp16, EPT elements per lane).
+  __half Q_reg[EPT];
+  {
+    const __half* Q_ptr = Q_roped + (size_t)(batch * H + head_q) * D;
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e)
+      Q_reg[e] = Q_ptr[lane_id * EPT + e];
+  }
+
+  // KV cache base offset for this (batch, head_kv).
+  const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
+      (unsigned)((batch * G + head_kv) * max_seq)) * (size_t)D;
+
+  const float scale_log2e = scale * LOG2E;
+
+  // Online softmax accumulators (per query head, in registers).
+  float m_acc = -INFINITY;
+  float l_acc = 0.0f;
+  float O_acc[EPT];
+  #pragma unroll
+  for (int e = 0; e < EPT; ++e) O_acc[e] = 0.0f;
+
+  // Iterate KV tiles within this block's split.
+  for (int tile_start = kv_start; tile_start < kv_end; tile_start += BKV) {
+    const int tile_n = (tile_start + BKV <= kv_end)
+        ? BKV : (kv_end - tile_start);
+
+    // Cooperative LDS load of K and V tiles. All THREADS = HPG*WAVE_SIZE
+    // threads. Tile element count = tile_n * D, distributed round-robin.
+    // HPG=8 doubles thread count (256 vs 128) so the load also doubles its
+    // parallelism, partially offsetting the larger Q working set per block.
+    for (int i = tid; i < tile_n * D; i += THREADS) {
+      const int t = i / D;
+      const int dd = i % D;
+      const size_t g_off = kv_base + (size_t)(tile_start + t) * D + dd;
+      K_lds[t * D + dd] = Kcache[g_off];
+      V_lds[t * D + dd] = Vcache[g_off];
+    }
+    __syncthreads();
+
+    // Each wave processes the tile against its own query head.
+    for (int t = 0; t < tile_n; ++t) {
+      // Per-lane partial dot: sum_e Q[lane*EPT+e] * K[t, lane*EPT+e]
+      float dot_partial = 0.0f;
+      #pragma unroll
+      for (int e = 0; e < EPT; ++e) {
+        dot_partial += __half2float(Q_reg[e]) *
+                       __half2float(K_lds[t * D + lane_id * EPT + e]);
+      }
+      // Warp reduce across 32 lanes -> all lanes hold the full dot.
+      dot_partial += __shfl_xor(dot_partial, 16);
+      dot_partial += __shfl_xor(dot_partial, 8);
+      dot_partial += __shfl_xor(dot_partial, 4);
+      dot_partial += __shfl_xor(dot_partial, 2);
+      dot_partial += __shfl_xor(dot_partial, 1);
+
+      const float score = dot_partial * scale_log2e;
+      const float m_new = fmaxf(m_acc, score);
+      const float correction = exp2f(m_acc - m_new);
+      const float p = exp2f(score - m_new);
+      l_acc = correction * l_acc + p;
+
+      #pragma unroll
+      for (int e = 0; e < EPT; ++e) {
+        const float V_val = __half2float(V_lds[t * D + lane_id * EPT + e]);
+        O_acc[e] = correction * O_acc[e] + p * V_val;
+      }
+      m_acc = m_new;
+    }
+    __syncthreads();
+  }
+
+  // Write partial (m, l, O) for this wave's query head.
+  if (lane_id == 0) {
+    partial_dst[0] = m_acc;
+    partial_dst[1] = l_acc;
+  }
+  #pragma unroll
+  for (int e = 0; e < EPT; ++e) {
+    partial_dst[2 + lane_id * EPT + e] = O_acc[e];
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// FA-2 Split-K Reduction
+//===----------------------------------------------------------------------===//
+// Combines K_SPLITS partial (m, l, O) into the final output per (B, head_q).
+//
+//   global_m = max_k m_k
+//   global_l = sum_k (exp2(m_k - global_m) * l_k)
+//   global_O = sum_k (exp2(m_k - global_m) * O_k) / global_l
+//
+// Empty splits write m=-INFINITY, l=0, O=0; exp2(-INF - global_m) = 0 so
+// those splits contribute nothing.
+//
+// Smooth softmax (attention sink): when head_sink is non-null OR
+// use_smooth_softmax is set, an extra term is added to the denominator only:
+//   global_l += exp(s - global_m_natural)
+// where s is in natural (qk*scale) units. The partials are in log2-scaled
+// space (m and l use exp2/LOG2E), so the natural identity becomes
+//   exp(s - m_nat) = exp2((s - m_nat) * LOG2E) = exp2(s*LOG2E - global_m).
+// The sink contributes to L only — there is no V term for it (gpt-oss-20b /
+// Mistral-style attention sink).
+//
+// Grid: (B * H, 1) - one block per query head.
+// Block: D threads. Each thread reduces one element of the d-dimension.
+//===----------------------------------------------------------------------===//
+
+template <int D, int K_SPLITS>
+__global__ void __launch_bounds__(D)
+gqa_flash_decode_reduce_kernel(
+    const float* __restrict__ partials,    // [B, H, K_SPLITS, D+2]
+    __half* __restrict__ O,                // [B, 1, H, D] (BSHD with sq=1)
+    int H,
+    const __half* __restrict__ head_sink,  // [num_heads] or null
+    int num_heads,
+    int use_smooth_softmax) {
+  const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
+  const int batch  = __builtin_amdgcn_readfirstlane(linear / H);
+  const int head_q = __builtin_amdgcn_readfirstlane(linear % H);
+  const int tid    = threadIdx.x;
+
+  // Pass 1: find global_m. K_SPLITS is small (8) - serial per thread is fine.
+  float global_m = -INFINITY;
+  #pragma unroll
+  for (int k = 0; k < K_SPLITS; ++k) {
+    const float* p = partials +
+        flash_decode_partial_offset(batch, head_q, k, H, K_SPLITS, D);
+    const float m_k = p[0];
+    global_m = fmaxf(global_m, m_k);
+  }
+
+  // When all splits are -INF (eff_skv == 0) but a sink is configured, the
+  // sink term still defines a valid (zero) output: softmax over empty +
+  // sink ⇒ all weight on the sink, which contributes 0 to V. We therefore
+  // write a zero output here either way.
+  if (!isfinite(global_m)) {
+    O[(batch * H + head_q) * D + tid] = __float2half(0.0f);
+    return;
+  }
+
+  // Pass 2: accumulate l and O contributions.
+  float l_sum = 0.0f;
+  float O_sum = 0.0f;
+  #pragma unroll
+  for (int k = 0; k < K_SPLITS; ++k) {
+    const float* p = partials +
+        flash_decode_partial_offset(batch, head_q, k, H, K_SPLITS, D);
+    const float m_k = p[0];
+    const float l_k = p[1];
+    const float scale_k = exp2f(m_k - global_m);
+    l_sum += scale_k * l_k;
+    O_sum += scale_k * p[2 + tid];
+  }
+
+  // Smooth softmax: add the sink term to the denominator only. global_m is
+  // in log2-scaled units (it's the max of dot*scale*LOG2E across splits), so
+  // the natural-space exp(s - m_nat) becomes exp2(s*LOG2E - global_m).
+  if (head_sink != nullptr) {
+    const int actual_head = head_q % num_heads;
+    const float s = __half2float(head_sink[actual_head]);
+    l_sum += exp2f(s * (float)LOG2E - global_m);
+  } else if (use_smooth_softmax) {
+    // s = 0 in natural units; exp2(0*LOG2E - global_m) = exp2(-global_m).
+    l_sum += exp2f(-global_m);
+  }
+
+  const float inv_l = 1.0f / fmaxf(l_sum, 1e-6f);
+  O[(batch * H + head_q) * D + tid] = __float2half(O_sum * inv_l);
+}
+
+// Launcher: dispatches FA-2 split-K decode + reduction.
+//   workspace: float scratch of size B*H*K_SPLITS*(D+2)*4 bytes.
+//   K_SPLITS: only 8 supported in V1.
+extern "C" int hip_gqa_flash_decode(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax) {
+  // HPG = heads-per-group (Q heads sharing one KV head). The kernel is
+  // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128) and HPG=8
+  // (gpt-oss-20b at d=64). HPG=8 with d=128 is rejected to keep template
+  // bloat bounded; no current model needs it.
+  if (G <= 0 || H % G != 0) {
+    fprintf(stderr, "hip_gqa_flash_decode: H=%d not divisible by G=%d\n", H, G);
+    return -1;
+  }
+  const int hpg = H / G;
+  if (hpg != 4 && hpg != 8) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: unsupported HPG=%d (must be 4 or 8; H=%d, G=%d)\n",
+            hpg, H, G);
+    return -1;
+  }
+  if (d != 64 && d != 128) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: unsupported d=%d (must be 64 or 128)\n", d);
+    return -1;
+  }
+  if (hpg == 8 && d != 64) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: HPG=8 currently requires d=64 (got d=%d)\n",
+            d);
+    return -1;
+  }
+  if (K_SPLITS != 8) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode: only K_SPLITS=8 supported (got %d)\n",
+            K_SPLITS);
+    return -1;
+  }
+
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  const __half* hQ = static_cast<const __half*>(Q);
+  const __half* hK = static_cast<const __half*>(Kcache);
+  const __half* hV = static_cast<const __half*>(Vcache);
+  __half* hO = static_cast<__half*>(O);
+  float* hP = static_cast<float*>(partials_workspace);
+  const int* iSeq = static_cast<const int*>(seqlens_k);
+
+  dim3 grid_main(B * G, K_SPLITS);
+  if (hpg == 4) {
+    if (d == 128) {
+      gqa_flash_decode_kernel<128, 8, 4>
+          <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+    } else { /* d == 64 */
+      gqa_flash_decode_kernel<64, 8, 4>
+          <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+    }
+  } else { /* hpg == 8, d == 64 (asserted above) */
+    gqa_flash_decode_kernel<64, 8, 8>
+        <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
+            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+  }
+
+  // Reduce kernel does not depend on HPG; it walks the K_SPLITS partials
+  // per (b, h_q) and merges. Grid is one block per query head, block dim D.
+  // The smooth-softmax / head_sink path is folded into the denominator here
+  // (not the partials), since the sink only affects the final L term.
+  dim3 grid_reduce(B * H);
+  const __half* hSink = static_cast<const __half*>(head_sink);
+  if (d == 128) {
+    gqa_flash_decode_reduce_kernel<128, 8>
+        <<<grid_reduce, 128, 0, stream>>>(hP, hO, H, hSink, H,
+                                          use_smooth_softmax);
+  } else { /* d == 64 */
+    gqa_flash_decode_reduce_kernel<64, 8>
+        <<<grid_reduce, 64, 0, stream>>>(hP, hO, H, hSink, H,
+                                         use_smooth_softmax);
+  }
+
   return hipGetLastError();
 }

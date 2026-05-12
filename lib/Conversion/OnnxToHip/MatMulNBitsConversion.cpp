@@ -84,13 +84,37 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   auto accuracyLevelAttr = rewriter.getI64IntegerAttr(
       accuracyIntAttr ? accuracyIntAttr.getSInt() : 0);
 
+  // Validate and detect zero_points element type.
+  // Supported formats:
+  //   - uint8 (i8): packed uint4 nibbles, two zero_points per byte
+  //   - fp16  (f16): one zero_point per element
+  // Reject anything else at compile time to avoid silent precision bugs.
+  int64_t zpElemSize = 2; // default: fp16 (when zeroPoints is absent)
+  if (zeroPoints) {
+    auto zpTy = mlir::cast<mlir::ShapedType>(zeroPoints.getType());
+    mlir::Type elemTy = zpTy.getElementType();
+    if (elemTy.isInteger(8)) {
+      zpElemSize = 1; // uint8 container holding packed uint4 nibbles
+    } else if (elemTy.isF16()) {
+      zpElemSize = 2;
+    } else {
+      std::string msg;
+      llvm::raw_string_ostream os(msg);
+      os << "MatMulNBits: unsupported zero_points element type: ";
+      elemTy.print(os);
+      os << ". Expected i8 (packed uint4) or f16";
+      return rewriter.notifyMatchFailure(op, msg);
+    }
+  }
+  auto zpElemSizeAttr = rewriter.getI64IntegerAttr(zpElemSize);
+
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
 
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
       rewriter, loc, mlir::TypeRange{rt}, context, A, B, scales, zeroPoints,
       gIdx, bias, init, KAttr, NAttr, bitsAttr, blockSizeAttr,
-      accuracyLevelAttr);
+      accuracyLevelAttr, zpElemSizeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }

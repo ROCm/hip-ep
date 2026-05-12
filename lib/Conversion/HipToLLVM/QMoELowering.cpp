@@ -36,18 +36,20 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     };
 
     Value statePtr = adaptor.getHandle();
-    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value routerPtr = extractMemRefPtr(adaptor.getRouterProbs(), rewriter, loc);
-    Value fc1WeightsPtr =
-        extractMemRefPtr(adaptor.getFc1ExpertsWeights(), rewriter, loc);
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value routerPtr =
+        extractContiguousMemRefPtr(adaptor.getRouterProbs(), rewriter, loc);
+    Value fc1WeightsPtr = extractContiguousMemRefPtr(
+        adaptor.getFc1ExpertsWeights(), rewriter, loc);
     Value fc1ScalesPtr =
-        extractMemRefPtr(adaptor.getFc1Scales(), rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getFc1Scales(), rewriter, loc);
     Value fc1BiasPtr =
         extractOptionalMemRefPtr(adaptor.getFc1ExpertsBias(), rewriter, loc);
-    Value fc2WeightsPtr =
-        extractMemRefPtr(adaptor.getFc2ExpertsWeights(), rewriter, loc);
+    Value fc2WeightsPtr = extractContiguousMemRefPtr(
+        adaptor.getFc2ExpertsWeights(), rewriter, loc);
     Value fc2ScalesPtr =
-        extractMemRefPtr(adaptor.getFc2Scales(), rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getFc2Scales(), rewriter, loc);
     Value fc2BiasPtr =
         extractOptionalMemRefPtr(adaptor.getFc2ExpertsBias(), rewriter, loc);
     Value fc3WeightsPtr =
@@ -64,7 +66,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         extractOptionalMemRefPtr(adaptor.getFc3ZeroPoints(), rewriter, loc);
     Value routerWeightsPtr =
         extractOptionalMemRefPtr(adaptor.getRouterWeights(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto routerType = cast<MemRefType>(op.getRouterProbs().getType());
