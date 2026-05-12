@@ -841,6 +841,8 @@ int wrap_equal(RuntimeState *state, void *a, void *b,
                void *output, int64_t num_elements,
                int64_t data_type);
 
+int wrap_neg(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
 int wrap_not(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_cos(RuntimeState *state, void *input, void *output,

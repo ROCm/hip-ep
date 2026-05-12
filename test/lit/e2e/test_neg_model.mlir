@@ -1,12 +1,12 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
 // Test Neg E2E full pipeline
-// Neg: y = -x, lowered via wrap_power(alpha=0, beta=-1, gamma=1)
+// Neg: y = -x, lowered via unified unary elementwise path (wrap_neg)
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_power
+// CHECK: llvm.func @wrap_neg
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup
