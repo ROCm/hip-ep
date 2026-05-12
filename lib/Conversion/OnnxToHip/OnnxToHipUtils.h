@@ -154,6 +154,8 @@ void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateCastLikeConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
+void populateMinConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 

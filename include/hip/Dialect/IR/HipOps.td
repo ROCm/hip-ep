@@ -732,6 +732,38 @@ def Hip_AddOp : Hip_DpsOp<"add"> {
   let hasVerifier = 1;
 }
 
+def Hip_MinOp : Hip_DpsOp<"min"> {
+  let summary = "Elementwise minimum";
+  let description = [{
+    Performs elementwise minimum: output = min(lhs, rhs)
+
+    Supports multidirectional (NumPy-style) broadcasting via MIOpen's
+    miopenOpTensor with miopenTensorOpMin.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.min(%ctx) ins(%lhs, %rhs : memref<3xf32, 1>,
+                                   memref<3xf32, 1>)
+                  outs(%output : memref<3xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
   let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
   let arguments = (ins
