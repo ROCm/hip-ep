@@ -150,6 +150,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::LayerNormOp>>(*ctx);
     mlir::hip::MinOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::MinOp>>(*ctx);
+    mlir::hip::NegOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::NegOp>>(*ctx);
   });
 }
 

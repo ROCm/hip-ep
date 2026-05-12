@@ -1034,6 +1034,39 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
   }];
 }
 
+def Hip_NegOp : Hip_DpsOp<"neg"> {
+  let summary = "Element-wise negation: y = -x";
+  let description = [{
+    Negates each element of the input tensor.
+    Implements the standard ONNX Neg operator.
+
+    Formula: Y = -X
+
+    Lowered via wrap_power(alpha=0, beta=-1, gamma=1) so no dedicated
+    runtime kernel is needed.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.neg(%ctx) ins(%x : memref<3x4xf32, 1>)
+                  outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SubOp : Hip_DpsOp<"sub"> {
   let summary = "Elementwise subtraction";
   let description = [{
