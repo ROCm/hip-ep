@@ -99,6 +99,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
+    LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
   });
 }
 

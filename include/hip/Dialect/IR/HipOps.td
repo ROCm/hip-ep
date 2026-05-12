@@ -449,6 +449,98 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
   let hasVerifier = 1;
 }
 
+def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
+    [AttrSizedOperandSegments]> {
+  let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";
+  let description = [{
+    Full ONNX LayerNormalization (opset 17+) with mean subtraction and an
+    optional bias term, fused into a single runtime call.
+
+    Stage 1 (in stash_type precision):
+      Mean       = ReduceMean(X, axes=[axis ... rank-1])
+      D          = X - Mean
+      Var        = ReduceMean(D * D, axes=[axis ... rank-1])
+      InvStdDev  = 1 / sqrt(Var + epsilon)
+      Normalized = D * InvStdDev   (cast back to T)
+
+    Stage 2 (in T precision):
+      NormalizedScaled = Normalized * Scale
+      Y                = NormalizedScaled + B   (only when B is present)
+
+    Inputs (2-3, MS spec order):
+      input  (required, T) - N-D tensor to normalize
+      scale  (required, T) - unidirectional broadcastable scale
+      bias   (optional, T) - unidirectional broadcastable bias
+
+    DPS output buffers (1-3, Variadic outputs):
+      outputs[0] = output     (required, T) - normalized result, same shape as input
+      outputs[1] = mean       (optional, U) - saved mean (training-only)
+      outputs[2] = inv_std    (optional, U) - saved inverse standard deviation
+                                              (training-only)
+
+    Attributes:
+      axis       - first normalization dimension (negative = from rank-1, default -1)
+      epsilon    - small value added to variance (default 1e-5)
+      stash_type - internal computation precision (1 = float, default)
+
+    The runtime treats all dims < axis as the "row" dimension and all dims >= axis
+    as the "feature" dimension being normalized. mean / inv_std outputs may be
+    nullptr in the runtime call when the corresponding optional output buffer
+    is omitted.
+
+    Example (inference, output only):
+    ```mlir
+    hip.layer_norm(%ctx)
+        ins(%input, %scale, %bias :
+            memref<1x128x4096xf16, 1>, memref<4096xf16, 1>, memref<4096xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
+    ```
+
+    Example (training, all 3 outputs, no bias):
+    ```mlir
+    hip.layer_norm(%ctx)
+        ins(%input, %scale :
+            memref<1x128x4096xf16, 1>, memref<4096xf16, 1>)
+        outs(%output, %mean, %inv_std :
+            memref<1x128x4096xf16, 1>,
+            memref<1x128x1xf32, 1>, memref<1x128x1xf32, 1>)
+        {axis = -1 : i64, epsilon = 1.0e-05 : f32, stash_type = 1 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    // ONNX spec inputs 1-2 (required)
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+
+    // ONNX spec input 3 (optional)
+    Optional<Hip_TensorOrMemRef>:$bias,
+
+    // DPS output buffers (1-3): [output] | [output, mean] | [output, mean, inv_std]
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+
+    // Attributes (mirror ONNX LayerNormalization)
+    DefaultValuedAttr<I64Attr, "-1">:$axis,
+    DefaultValuedAttr<F32Attr, "9.99999974E-6">:$epsilon,
+    DefaultValuedAttr<I64Attr, "1">:$stash_type
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale
+        ( `,` $bias^ )?
+        `:` type($input) `,` type($scale)
+        ( `,` type($bias)^ )?
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";

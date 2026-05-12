@@ -345,6 +345,40 @@ void SkipRmsNormOp::getEffects(
 LogicalResult SkipRmsNormOp::verify() { return success(); }
 
 //===----------------------------------------------------------------------===//
+// LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LayerNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void LayerNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult LayerNormOp::verify() {
+  // Outputs cardinality must be 1, 2, or 3 (output, [mean], [inv_std]).
+  unsigned numOutputs = getOutputs().size();
+  if (numOutputs < 1 || numOutputs > 3)
+    return emitOpError("expected 1 to 3 output buffers (output, [mean, "
+                       "[inv_std]]), got ")
+           << numOutputs;
+
+  // Defer the all-tensor-or-all-memref consistency check to the shared helper
+  // so this op behaves like the rest of the DPS family.
+  SmallVector<Value> dataOperands;
+  dataOperands.push_back(getInput());
+  dataOperands.push_back(getScale());
+  if (Value b = getBias())
+    dataOperands.push_back(b);
+  for (Value out : getOutputs())
+    dataOperands.push_back(out);
+  return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, position_ids, cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 

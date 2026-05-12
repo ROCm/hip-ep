@@ -144,6 +144,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::HipDNNGraphOp>>(*ctx);
     mlir::hip::WhereOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::WhereOp>>(*ctx);
+    mlir::hip::LayerNormOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LayerNormOp>>(*ctx);
   });
 }
 
