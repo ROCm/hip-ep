@@ -975,5 +975,77 @@ void HipDNNGraphOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+//===----------------------------------------------------------------------===//
+// EqualOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange EqualOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void EqualOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// DivOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DivOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void DivOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// NegOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NegOp::getDpsInitsMutable() { return getYMutable(); }
+
+void NegOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// NotOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NotOp::getDpsInitsMutable() { return getYMutable(); }
+
+void NotOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CosOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CosOp::getDpsInitsMutable() { return getYMutable(); }
+
+void CosOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SinOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SinOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SinOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.cpp.inc"
