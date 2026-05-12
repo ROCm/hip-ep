@@ -102,6 +102,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
+    NegOp::attachInterface<HipDstBufferizableModel<NegOp>>(*ctx);
   });
 }
 

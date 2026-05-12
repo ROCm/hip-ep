@@ -111,10 +111,12 @@ struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 void mlir::hip::populatePowerLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   // Reciprocal: (0 + 1*x)^(-1) = 1/x; Sqrt: (0 + 1*x)^(0.5) = √x
+  // Neg: (0 + (-1)*x)^1 = -x
   // Same LLVM callee @wrap_power; reciprocal/sqrt use HIP kernels in power.cpp.
   patterns.insert<PowerOpLowering<ReciprocalOp>>(converter, 0.0, 1.0, -1.0,
                                                  "reciprocal");
   patterns.insert<PowerOpLowering<SqrtOp>>(converter, 0.0, 1.0, 0.5, "sqrt");
+  patterns.insert<PowerOpLowering<NegOp>>(converter, 0.0, -1.0, 1.0, "neg");
 }
 
 } // namespace hip
