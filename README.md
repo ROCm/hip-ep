@@ -38,6 +38,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Sqrt | Custom HIP kernel |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
+| CastLike | Decomposed → Cast |
 | ReduceSum | Custom HIP Kernel |
 | Range | Custom HIP kernel |
 | Gather | Custom HIP Kernel |
