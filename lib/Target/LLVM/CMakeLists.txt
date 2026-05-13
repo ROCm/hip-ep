@@ -153,24 +153,37 @@ target_link_libraries(HipTargetLLVM PUBLIC
   $<$<BOOL:${LLVM_DTLTO_LIB}>:${LLVM_DTLTO_LIB}>
 )
 
-# DLLLinker.cpp's Linux path invokes ld.lld as a subprocess instead of
-# lld::lldMain — see the long comment in linkDLL_Linux for the reason.
-# Bake the discovered ld.lld path so the runtime invocation doesn't have
-# to rely on PATH (the host process running the EP may not include the
-# llvm-XX bin dir).
+# DLLLinker.cpp's Linux path invokes `clang -shared` as a subprocess
+# (driver-mediated link via ld.lld) instead of in-process lld::lldMain —
+# see the long comment in linkDLL_Linux for the reason. Bake the
+# discovered clang path so the runtime invocation doesn't have to rely on
+# PATH (the host process running the EP may not include the llvm-XX bin
+# dir). PATH lookup remains the fallback in DLLLinker.cpp if the baked
+# path is stale (e.g. CI build with /usr/lib/llvm-22 deployed to a host
+# where clang lives elsewhere).
 if(NOT WIN32)
-    find_program(LD_LLD_EXECUTABLE NAMES ld.lld
-        PATHS
+    # HINTS (vs PATHS) gives priority to the LLVM tree we're configuring
+    # against, so a stale `/usr/bin/clang-18` won't be picked over the
+    # apt llvm-22 install when both exist. Default-PATH search is still
+    # the fallback if the hints don't pan out.
+    # We bake the clang++ driver (not bare clang) so the runtime link
+    # auto-pulls libstdc++ — the generated model object references C++
+    # ABI symbols (__cxa_begin_catch, __cxa_rethrow, etc.) via the
+    # libhip_custom_kernels.a archive's std::unordered_map / std::string
+    # usage. With bare `clang -shared` the link errors "undefined symbol:
+    # __cxa_*" on every model.
+    find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
+        HINTS
             ${LLVM_BINARY_DIR}/bin
             ${LLVM_TOOLS_BINARY_DIR}
     )
-    if(LD_LLD_EXECUTABLE)
-        message(STATUS "Found ld.lld for runtime DLL linking: ${LD_LLD_EXECUTABLE}")
+    if(HIPDNN_CLANG_EXECUTABLE)
+        message(STATUS "Found clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
         target_compile_definitions(HipTargetLLVM PRIVATE
-            HIPDNN_LD_LLD_PATH="${LD_LLD_EXECUTABLE}")
+            HIPDNN_CLANG_PATH="${HIPDNN_CLANG_EXECUTABLE}")
     else()
         message(WARNING
-            "ld.lld not found at configure time; runtime DLL linking will "
+            "clang not found at configure time; runtime DLL linking will "
             "rely on PATH lookup at execution time.")
     endif()
 endif()

@@ -52,9 +52,19 @@ for dev in /dev/kfd /dev/dri/renderD*; do
     if [ -e "$dev" ]; then
         dev_gid=$(stat -c '%g' "$dev")
         if [ "$dev_gid" != "0" ] && ! id -G "$HOST_USER" | tr ' ' '\n' | grep -qx "$dev_gid"; then
-            grp_name="hostgid_${dev_gid}"
-            getent group "$dev_gid" >/dev/null || groupadd -g "$dev_gid" "$grp_name"
-            usermod -aG "$dev_gid" "$HOST_USER"
+            # Resolve a name for the device's GID: prefer the existing group
+            # name if one is already mapped (e.g. `render` from a base image),
+            # otherwise create a synthetic one.
+            grp_name=$(getent group "$dev_gid" | cut -d: -f1)
+            if [ -z "$grp_name" ]; then
+                grp_name="hostgid_${dev_gid}"
+                groupadd -g "$dev_gid" "$grp_name"
+            fi
+            # `usermod -aG` accepts either a numeric GID or a group name, but
+            # some shadow-utils builds silently no-op on numeric input when no
+            # named group with that literal numeric name exists. Pass the name
+            # to be safe.
+            usermod -aG "$grp_name" "$HOST_USER"
         fi
     fi
 done

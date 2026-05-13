@@ -261,7 +261,27 @@ kernel, etc.), the canonical sources of truth are:
   sequence the Docker path runs
 - [`docker/Dockerfile`](../docker/Dockerfile) — exact apt package list
   (`llvm-22-dev`, `libpolly-22-dev`, `libmlir-22-dev`, `lld-22`,
-  `python3-dev`, ...)
+  `clang-22`, `python3-dev`, ...)
+
+## Runtime requirements (deploy host)
+
+The artifact's `bin/hip-compiler` invokes `clang++` at runtime to link
+the per-model DLL (driver-mediated link via `ld.lld`). The path is
+baked at configure time and PATH-lookup is the fallback, so deploy
+hosts need **either** the same `/usr/lib/llvm-22/bin/clang++` baked
+path **or** `clang++` somewhere on `$PATH`. One apt invocation covers
+both:
+
+```bash
+sudo apt install clang-22
+```
+
+No other LLVM/GCC tools are needed at runtime — the clang driver
+handles crt selection, sysroot, multiarch -L paths, and the
+libstdc++ link line internally. (The container image installs
+`clang-22` in [`docker/Dockerfile`](../docker/Dockerfile) Layer 2 as
+part of the `apt.llvm.org` block, so users on the Docker path don't
+need any host-side install.)
 
 ## Troubleshooting
 
@@ -278,3 +298,40 @@ Either:
    Without `-ml -1`, model_benchmark overrides the config's `search.max_length`
    with `prompt_length + generation_length`, breaking the static mask shape
    that decode_*.onnx expects.
+
+**`Failed to get HIP device count or no devices available` on bare-metal host**
+
+Most common cause: the host user is not in the `render` group, so opening
+`/dev/kfd` fails silently and `hipGetDeviceCount` returns 0. Check:
+
+```bash
+ls -la /dev/kfd          # expect group=render
+groups                   # expect 'render' in the list
+```
+
+Fix: `sudo usermod -aG render $USER && newgrp render` (or relogin).
+Inside `./docker/run.sh shell` this is handled automatically — the
+container entrypoint reads the host GID off `/dev/kfd` and adds the
+in-container user to it, so you don't need host `render` membership.
+
+**`EP library not found: libonnxruntime_morphizen_ep.so` from `hip-onnx-runner`**
+
+The runner's search order is `$MORPHIZEN_EP_LIB` (full path) → cwd →
+`<exe-dir>/libonnxruntime_morphizen_ep.so` → `<exe-dir>/../lib/libonnxruntime_morphizen_ep.so`.
+If you're running out of `install/bin/`, no env vars are needed — the
+sibling `install/lib/` is auto-discovered. If you've copied the binary
+elsewhere, set `MORPHIZEN_EP_LIB=/full/path/to/libonnxruntime_morphizen_ep.so`.
+
+**`clang++ not found on PATH and HIPDNN_CLANG_PATH is unset or stale` from `hip-compiler`**
+
+The per-model DLL link calls `clang++ -shared` as a subprocess; the
+driver handles crt / sysroot / multiarch / libstdc++ for us. The path
+is baked at configure time (`HIPDNN_CLANG_PATH`) with `findProgramByName`
+as the runtime fallback, so this error only fires when **both** the
+baked path is invalid (e.g. CI artifact deployed to a host that doesn't
+have llvm-22 in the same location) **and** `clang++` is absent from
+PATH.
+
+Fix on the deploy host: `sudo apt install clang-22` (or the matching
+LLVM version package). The container image installs this in Layer 2 of
+[`docker/Dockerfile`](../docker/Dockerfile).
