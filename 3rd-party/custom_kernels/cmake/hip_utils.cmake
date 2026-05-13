@@ -83,7 +83,54 @@ if(WIN32)
         message(STATUS "[hip_utils] hip::host not available - using manual HIP setup")
     endif()
 else()
-    # On Linux, enable HIP language support
+    # On Linux, enable HIP language support.
+    #
+    # cmake 3.31's CMakeDetermineHIPCompiler.cmake resolves the ROCm
+    # toolkit via, in order:
+    #
+    #   1. CMAKE_HIP_COMPILER_ROCM_ROOT (cmake var, direct override)
+    #   2. ${CMAKE_HIP_COMPILER} -v -print-targets
+    #      → grep "Found HIP installation: <path>" from compiler stderr
+    #   3. `hipconfig --rocmpath` (requires hipconfig on PATH)
+    #
+    # It does NOT consult ENV{ROCM_PATH} or ENV{HIP_PATH}, despite a common
+    # misconception. Routes (2)/(3) require either a clang++ that already
+    # knows its sibling ROCm root or hipconfig on the system PATH — neither
+    # holds when ROCm lives at a non-default prefix (TheRock dist tarball,
+    # vcpkg, custom CMAKE_INSTALL_PREFIX, ...) and the install isn't on PATH.
+    #
+    # Pin CMAKE_HIP_COMPILER_ROCM_ROOT directly so route (1) succeeds and
+    # cmake skips the brittle stderr-scrape / PATH-lookup steps. Also point
+    # CMAKE_HIP_COMPILER at the clang++ shipped inside HIP_PATH so the
+    # compiler-detection step (run before the root lookup) finds the right
+    # binary instead of system /usr/bin/clang++.
+    if(NOT CMAKE_HIP_COMPILER_ROCM_ROOT)
+        set(CMAKE_HIP_COMPILER_ROCM_ROOT "${HIP_PATH}")
+    endif()
+    if(NOT CMAKE_HIP_COMPILER)
+        # TheRock dist ships LLVM under <root>/llvm/bin/clang++.
+        # Stock ROCm uses <root>/bin/clang++. Probe both, preferring the
+        # AMD-fork amdclang++ if present.
+        find_program(_HIP_CLANGXX
+            NAMES amdclang++ clang++
+            PATHS
+                "${HIP_PATH}/bin"
+                "${HIP_PATH}/llvm/bin"
+            NO_DEFAULT_PATH
+        )
+        if(_HIP_CLANGXX)
+            set(CMAKE_HIP_COMPILER "${_HIP_CLANGXX}")
+            message(STATUS "[hip_utils] CMAKE_HIP_COMPILER: ${CMAKE_HIP_COMPILER}")
+        else()
+            message(FATAL_ERROR
+                "Could not find amdclang++ or clang++ under "
+                "${HIP_PATH}/bin or ${HIP_PATH}/llvm/bin. "
+                "Set CMAKE_HIP_COMPILER explicitly or install a complete "
+                "ROCm/TheRock distribution at HIP_PATH.")
+        endif()
+    endif()
+    message(STATUS "[hip_utils] CMAKE_HIP_COMPILER_ROCM_ROOT: ${CMAKE_HIP_COMPILER_ROCM_ROOT}")
+
     enable_language(HIP)
     if(NOT hip_FOUND)
         find_package(hip REQUIRED)
