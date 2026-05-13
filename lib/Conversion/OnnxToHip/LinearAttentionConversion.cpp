@@ -180,8 +180,8 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateLinearAttentionConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx) {
   patterns.add<LinearAttentionToHip>(ctx);
 }
 

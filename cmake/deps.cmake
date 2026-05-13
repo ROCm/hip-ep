@@ -129,4 +129,26 @@ FetchContent_MakeAvailable(cpptrace)
 set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
 # Add morphizen subdirectory (after all options are set)
+#
+# morphizen's compile_options.linux.cmake defaults MORPHIZEN_COMPILER_OPTIONS
+# to "-Wall -Werror -Wconversion -pedantic -Wextra -fPIC" via CACHE STRING (no
+# FORCE). On Linux this propagates into the morphizen-* targets, including the
+# ones that include protobuf-generated *.pb.h headers. GCC 13+ emits
+# -Wconversion on the boilerplate that protobuf >=22 generates (e.g.
+# `return _internal_foo().size();` returns size_t but the accessor signature
+# is `int`), and the morphizen `-Werror` then upgrades those to hard errors.
+#
+# Override the cache value with `FORCE` before add_subdirectory(morphizen) so
+# the new value sticks across reconfigures: keep -Wconversion as a warning
+# (still useful as a signal during code review) but stop -Werror from
+# promoting it to a build failure. Other diagnostics (sign-compare, etc.)
+# remain -Werror. Windows / MSVC users are unaffected because the equivalent
+# /WX-only knob lives in compile_options.msvc.cmake.
+if(UNIX AND NOT APPLE)
+    set(MORPHIZEN_COMPILER_OPTIONS
+        -Wall -Werror -Wconversion -Wno-error=conversion -pedantic
+        -Wextra -fPIC
+        CACHE STRING "Compiler options for Morphizen" FORCE)
+endif()
+
 add_subdirectory(3rd-party/morphizen)

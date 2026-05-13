@@ -351,7 +351,7 @@ static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
 
 /// Lowers memref.copy on GPU memrefs to wrap_hipMemcpyAsync /
 /// wrap_hipMemcpy2DAsync when strides are statically known. Otherwise leaves
-/// conversion to the default MemRef→LLVM copy lowering (benefit 1).
+/// conversion to the default MemRefâ†’LLVM copy lowering (benefit 1).
 struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
   MemRefCopyOpLowering(const LLVMTypeConverter &converter)
       : ConvertOpToLLVMPattern(converter, PatternBenefit(10)) {}
@@ -530,8 +530,8 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 
 } // namespace
 
-void mlir::hip::populateMemoryLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
                GetConstantOpLowering, MemRefAllocOpLowering,
                MemRefDeallocOpLowering>(converter);
