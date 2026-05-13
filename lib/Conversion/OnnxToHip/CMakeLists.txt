@@ -34,6 +34,15 @@ add_library(OnnxToHip STATIC
   NotConversion.cpp
   CosConversion.cpp
   SinConversion.cpp
+  CumSumConversion.cpp
+  PadConversion.cpp
+  TileConversion.cpp
+  ExpandConversion.cpp
+  ReduceProdConversion.cpp
+  LessConversion.cpp
+  GatherNDConversion.cpp
+  SignConversion.cpp
+  ModConversion.cpp
 )
 
 add_dependencies(OnnxToHip

@@ -45,9 +45,18 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Cos | Custom HIP Kernel |
 | Sin | Custom HIP Kernel |
 | Div | Custom HIP Kernel |
+| Mod | Custom HIP Kernel |
+| Sign | Custom HIP Kernel |
+| Less | Custom HIP Kernel |
 | Min | MIOpen |
 | ReduceSum | Custom HIP Kernel |
 | ReduceMax | Custom HIP Kernel |
+| ReduceProd | Custom HIP Kernel |
+| CumSum | Custom HIP Kernel |
+| Pad | Custom HIP Kernel |
+| Tile | Custom HIP Kernel |
+| Expand | Custom HIP Kernel |
+| GatherND | Custom HIP Kernel |
 | Range | Custom HIP kernel |
 | Gather | Custom HIP Kernel |
 | LayerNormalization | MIOpen |

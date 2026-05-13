@@ -168,6 +168,24 @@ void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateCumSumConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populatePadConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateTileConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateExpandConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populateReduceProdConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
+void populateLessConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateGatherNDConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
+void populateSignConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateModConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

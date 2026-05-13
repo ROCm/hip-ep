@@ -85,6 +85,15 @@ inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapSin = "wrap_sin";
 inline constexpr const char *kWrapDiv = "wrap_div";
+inline constexpr const char *kWrapCumSum = "wrap_cumsum";
+inline constexpr const char *kWrapPad = "wrap_pad";
+inline constexpr const char *kWrapTile = "wrap_tile";
+inline constexpr const char *kWrapExpand = "wrap_expand";
+inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
+inline constexpr const char *kWrapLess = "wrap_less";
+inline constexpr const char *kWrapGatherND = "wrap_gather_nd";
+inline constexpr const char *kWrapSign = "wrap_sign";
+inline constexpr const char *kWrapMod = "wrap_mod";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -317,8 +326,12 @@ void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
-void populateReduceSumLoweringPatterns(const LLVMTypeConverter &converter,
-                                       RewritePatternSet &patterns);
+// Shared lowering for hip.reduce_sum / hip.reduce_max / hip.reduce_prod.
+// All three use the same wrap_reduce_{sum,max,prod} signature, so we
+// template a single ReduceOpLowering and register all variants from one
+// populate function.
+void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
 void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
@@ -339,14 +352,26 @@ void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
-void populateReduceMaxLoweringPatterns(const LLVMTypeConverter &converter,
-                                       RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateDivLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
 void populateUnaryElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateCumSumLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populatePadLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
+void populateTileLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateExpandLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populateLessLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateGatherNDLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
+void populateModLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

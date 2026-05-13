@@ -1852,4 +1852,319 @@ def Hip_GemmOp : Hip_DpsOp<"gemm">{
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+def Hip_CumSumOp : Hip_DpsOp<"cumsum"> {
+  let summary = "Cumulative sum along an axis";
+  let description = [{
+    Computes the cumulative sum of input tensor elements along the given axis.
+    Implements the standard ONNX CumSum operator (opset 14+).
+
+    The `axis` input is a 0-D scalar tensor selecting the reduction axis. The
+    `exclusive` attribute (0 / 1) toggles inclusive vs exclusive accumulation,
+    and `reverse` (0 / 1) reverses the accumulation direction along the axis.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.cumsum(%ctx) ins(%x, %axis : memref<3x4xf32, 1>, memref<i64, 1>)
+                     outs(%y : memref<3x4xf32, 1>)
+                     {exclusive = 0 : i64, reverse = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$axis,
+    Hip_TensorOrMemRef:$y,
+    DefaultValuedAttr<I64Attr, "0">:$exclusive,
+    DefaultValuedAttr<I64Attr, "0">:$reverse
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `,` $axis `:` type($x) `,` type($axis) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_PadOp : Hip_DpsOp<"pad", [AttrSizedOperandSegments]> {
+  let summary = "Pad a tensor with constant / reflect / edge / wrap";
+  let description = [{
+    Pads input tensor along the axes selected by `axes` (or all axes if
+    `axes` is empty) according to the `pads` tensor.
+    Implements the standard ONNX Pad operator (opset 25+).
+
+    `pads` is a 1-D int64 tensor of shape `[2 * num_axes]` formatted as
+    `[x1_begin, ..., xN_begin, x1_end, ..., xN_end]`. `constant_value` is
+    an optional scalar used in `constant` mode (default 0). `axes` is an
+    optional 1-D int64 tensor selecting which axes the pads apply to;
+    when omitted (rank-0 / size-0), all axes are padded.
+
+    The `mode` attribute is one of `"constant"`, `"reflect"`, `"edge"`,
+    `"wrap"`.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.pad(%ctx) ins(%data, %pads : memref<3x2xf32, 1>, memref<4xi64, 1>)
+                  cval(%cval : memref<f32, 1>)
+                  axes(%axes : memref<2xi64, 1>)
+                  outs(%out : memref<3x4xf32, 1>) {mode = "constant"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$pads,
+    Optional<Hip_TensorOrMemRef>:$constant_value,
+    Optional<Hip_TensorOrMemRef>:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $pads `:` type($data) `,` type($pads) `)`
+    (`cval` `(` $constant_value^ `:` type($constant_value) `)`)?
+    (`axes` `(` $axes^ `:` type($axes) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_TileOp : Hip_DpsOp<"tile"> {
+  let summary = "Tile a tensor by repeating along each dimension";
+  let description = [{
+    Constructs a new tensor by repeating `input` along each dimension by the
+    counts specified in `repeats`. Implements the standard ONNX Tile operator.
+
+    `repeats` is a 1-D int64 tensor with the same length as `input`'s rank;
+    `output_dim[i] = input_dim[i] * repeats[i]`.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.tile(%ctx) ins(%x, %repeats : memref<2x2xf32, 1>, memref<2xi64, 1>)
+                   outs(%y : memref<2x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$repeats,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $repeats `:` type($input) `,` type($repeats) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ExpandOp : Hip_DpsOp<"expand"> {
+  let summary = "Broadcast a tensor to a target shape";
+  let description = [{
+    Broadcasts `input` to the target `shape` following NumPy broadcast rules.
+    Implements the standard ONNX Expand operator.
+
+    `shape` is a 1-D int64 tensor describing the target shape (which is
+    broadcast against the input shape, so output rank may exceed `shape`'s
+    length).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.expand(%ctx) ins(%x, %shape : memref<3x1xf32, 1>, memref<3xi64, 1>)
+                     outs(%y : memref<2x3x6xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$shape,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $shape `:` type($input) `,` type($shape) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ReduceProdOp : Hip_DpsOp<"reduce_prod"> {
+  let summary = "Reduce tensor by multiplying elements along axes";
+  let description = [{
+    Computes the product of input tensor elements along the specified axes.
+    Implements the ONNX ReduceProd operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_prod(%ctx) ins(%data, %axes : memref<3x2x2xf32, 1>, memref<0xi64, 1>)
+                          outs(%output : memref<1x1x1xf32, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_LessOp : Hip_DpsOp<"less"> {
+  let summary = "Element-wise less-than comparison: c = (a < b)";
+  let description = [{
+    Compares two input tensors element-wise. Output is a boolean tensor (i1)
+    with the broadcast shape. Implements the standard ONNX Less operator.
+
+    Supports multidirectional (NumPy-style) broadcasting.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.less(%ctx) ins(%a, %b : memref<3x4xf32, 1>, memref<3x4xf32, 1>)
+                   outs(%c : memref<3x4xi1, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_GatherNDOp : Hip_DpsOp<"gather_nd"> {
+  let summary = "GatherND: gather slices using N-D index tuples";
+  let description = [{
+    Gathers slices of `data` indexed by the trailing dimension of `indices`.
+    Implements the standard ONNX GatherND operator.
+
+    `indices` is an integer tensor whose last dimension defines the rank of
+    each index tuple, optionally with `batch_dims` leading batch dims that
+    must match `data`. Output rank is
+    `q + r - indices_shape[-1] - 1 - batch_dims`, where `q = rank(indices)`
+    and `r = rank(data)`.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.gather_nd(%ctx) ins(%data, %indices : memref<2x2xf32, 1>, memref<2x2xi64, 1>)
+                        outs(%out : memref<2xf32, 1>) {batch_dims = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$batch_dims
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `:` type($data) `,` type($indices) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_SignOp : Hip_DpsOp<"sign"> {
+  let summary = "Element-wise sign: y = sign(x)";
+  let description = [{
+    Computes the element-wise sign of the input. Returns +1 / 0 / -1 for
+    positive / zero / negative elements respectively. Implements the standard
+    ONNX Sign operator.
+
+    Lowered via the unified unary elementwise path (wrap_sign).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.sign(%ctx) ins(%x : memref<3x4xf32, 1>)
+                   outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ModOp : Hip_DpsOp<"mod"> {
+  let summary = "Element-wise modulo / fmod operation";
+  let description = [{
+    Performs element-wise binary modulo. Implements the standard ONNX Mod
+    operator. The semantics depend on the `fmod` attribute:
+
+    * `fmod = 0` (default): integer modulo; sign follows divisor (Python `%`).
+    * `fmod = 1`: floating-point fmod; sign follows dividend (C `fmod`).
+
+    Supports multidirectional (NumPy-style) broadcasting.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.mod(%ctx) ins(%a, %b : memref<3x4xi32, 1>, memref<3x4xi32, 1>)
+                  outs(%c : memref<3x4xi32, 1>) {fmod = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$fmod
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS
