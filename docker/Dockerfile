@@ -53,9 +53,17 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # sets ACTIONS_CACHE_URL + ACTIONS_RUNTIME_TOKEN + SCCACHE_GHA_ENABLED=true;
 # docker/run.sh forwards these into the container so the in-container sccache
 # talks to the same GitHub Actions cache backend. docker/build.sh wires
-# CMAKE_*_COMPILER_LAUNCHER=sccache only when SCCACHE_GHA_ENABLED is "true",
-# so this layer is a no-op for local non-CI builds (the binary just sits idle).
-ARG SCCACHE_VERSION=0.8.2
+# CMAKE_*_COMPILER_LAUNCHER=sccache only when SCCACHE_GHA_ENABLED is "true"
+# AND a GHA cache URL is forwarded in, so this layer is a no-op for local
+# non-CI builds (the binary just sits idle).
+#
+# Pinned to 0.10.0 (vs the 2024-vintage 0.8.2): GitHub rolled out the
+# Actions Cache v2 service in early 2026 and started exporting
+# ACTIONS_RESULTS_URL instead of (or alongside) ACTIONS_CACHE_URL.
+# sccache <0.9 only knows about the v1 URL and fails at startup with
+# `ACTIONS_CACHE_URL not found, maybe not in github action environment?`
+# when only the v2 URL is set on the runner. 0.10+ handles both URLs.
+ARG SCCACHE_VERSION=0.10.0
 RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
         | tar -xz -C /tmp \
     && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/ \
