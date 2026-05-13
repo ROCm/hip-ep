@@ -74,7 +74,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     auto fc1Type = cast<MemRefType>(op.getFc1ExpertsWeights().getType());
     int64_t elemSize = inputType.getElementType().getIntOrFloatBitWidth() / 8;
 
-    // input shape: [batch, seq, ..., hidden] — numTokens = product of all
+    // input shape: [batch, seq, ..., hidden] â€” numTokens = product of all
     // dims except the last (hidden), supporting dynamic batch/seq dimensions.
     int64_t inputRank = inputType.getRank();
     Value numTokensVal = createI64Const(1);
@@ -205,8 +205,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
 
 } // namespace
 
-void mlir::hip::populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns) {
   patterns.add<QMoEOpLowering>(converter);
 }
 

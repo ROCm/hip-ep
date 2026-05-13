@@ -14,11 +14,11 @@ namespace {
 //
 // Ops lower to wrap_power(state, input, output, num_elements, data_type,
 // alpha, beta, gamma). Reciprocal (gamma=-1) and Sqrt (gamma=0.5) use HIP
-// elementwise kernels at runtime; other powers use MIOpen POWER: y=(α+βx)^γ.
-//   - Reciprocal: alpha=0, beta=1, gamma=-1.0 → HIP elementwise 1/x
-//   - Sqrt:       alpha=0, beta=1, gamma=0.5   → HIP elementwise sqrt (ONNX)
-//   - Square:     alpha=0, beta=1, gamma=2.0   → (0 + 1*x)^2 = x^2
-//   - Cube:       alpha=0, beta=1, gamma=3.0   → (0 + 1*x)^3 = x^3
+// elementwise kernels at runtime; other powers use MIOpen POWER: y=(Î±+Î²x)^Î³.
+//   - Reciprocal: alpha=0, beta=1, gamma=-1.0 â†’ HIP elementwise 1/x
+//   - Sqrt:       alpha=0, beta=1, gamma=0.5   â†’ HIP elementwise sqrt (ONNX)
+//   - Square:     alpha=0, beta=1, gamma=2.0   â†’ (0 + 1*x)^2 = x^2
+//   - Cube:       alpha=0, beta=1, gamma=3.0   â†’ (0 + 1*x)^3 = x^3
 template <typename OpTy>
 struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -108,9 +108,9 @@ struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 } // namespace
 
-void mlir::hip::populatePowerLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  // Reciprocal: (0 + 1*x)^(-1) = 1/x; Sqrt: (0 + 1*x)^(0.5) = √x
+void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns) {
+  // Reciprocal: (0 + 1*x)^(-1) = 1/x; Sqrt: (0 + 1*x)^(0.5) = âˆšx
   // Same LLVM callee @wrap_power; reciprocal/sqrt use HIP kernels in power.cpp.
   patterns.insert<PowerOpLowering<ReciprocalOp>>(converter, 0.0, 1.0, -1.0,
                                                  "reciprocal");

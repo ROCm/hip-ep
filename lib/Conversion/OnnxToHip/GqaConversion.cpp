@@ -303,8 +303,8 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
 
 } // namespace
 
-void mlir::hip::populateGqaConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx) {
+void populateGqaConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx) {
   patterns.add<GroupQueryAttentionToHip>(ctx);
 }
 

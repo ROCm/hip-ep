@@ -12,7 +12,8 @@ namespace {
 // Maps MLIR element type to hip_dtype_t for hip_range() in range_kernel.hip.
 // ONNX Range only defines int32/int64/float/double; the kernel implements those
 // plus int16. F16/BF16 are not ONNX Range types and are not implemented in
-// hip_range — reject here so lowering fails instead of a runtime default case.
+// hip_range â€” reject here so lowering fails instead of a runtime default
+// case.
 static int64_t getHipCustomKernelDType(Type elemType) {
   if (elemType.isF32())
     return 0; // HIP_DTYPE_FLOAT32
@@ -84,8 +85,8 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
 
 } // namespace
 
-void mlir::hip::populateRangeLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns) {
   patterns.add<RangeOpLowering>(converter);
 }
 

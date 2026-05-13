@@ -46,7 +46,7 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     int64_t ARank = AType.getRank();
     int64_t elemSize = AType.getElementType().getIntOrFloatBitWidth() / 8;
 
-    // A shape: [..., M, K] — M is the second-to-last dim
+    // A shape: [..., M, K] â€” M is the second-to-last dim
     Value m = (ARank >= 2) ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
                                               rewriter, loc)
                            : createI64Const(1);
@@ -115,8 +115,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
 
 } // namespace
 
-void mlir::hip::populateMatMulNBitsLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns) {
   patterns.add<MatMulNBitsOpLowering>(converter);
 }
 
