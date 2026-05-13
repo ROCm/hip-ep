@@ -5,6 +5,7 @@
 #ifndef DLL_LINKER_H
 #define DLL_LINKER_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
