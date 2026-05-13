@@ -188,29 +188,12 @@ genrule(
     """,
 )
 
-# Downloaded files from external repositories (defined in MODULE.bazel)
-# The tar.h file is downloaded and patched automatically by the repository rule
-# We can directly reference external files without copying them
-# generate file using patch_wrapper.py
-# pass the file from @freebsd_tar_h//file to patch_wrapper.py
-genrule(
-    name = "generate_tar_h",
-    srcs = [
-        "@freebsd_tar_h//file",
-        "patches/tar.h.force_align_1.patch",
-    ],
-    outs = ["tar.h"],
-    # Use the hello binary to generate the tar.h file
-    cmd = "$(location //scripts/bazel:patch_wrapper) $(location patches/tar.h.force_align_1.patch) $(location @freebsd_tar_h//file) $(@D) -- --debug -v -p1 -d $(@D)",
-    tools = ["//scripts/bazel:patch_wrapper"],
-    visibility = ["//visibility:public"],
-)
 
-## test xclbin.h
+## xclbin.h (vendored)
 genrule(
     name = "test_xclbin.h",
     srcs = [
-        "@xclbin_h//file",
+        "//3rd-party/xclbin:xclbin.h",
     ],
     outs = ["xclbin.h"],
     cmd = "cp $(SRCS)  $@",
@@ -351,7 +334,7 @@ cc_library(
     hdrs = [
         ":config_json_binary.hpp",
         ":mem_binary_file.hpp.inc",
-        ":tar.h",
+        "include/morphizen/tar.h",
         ":morphizen_version_info.hpp.inc",
         ":xclbin.h",
     ],
@@ -386,7 +369,7 @@ cc_library(
         "//encryption",
         "//morphizen-utils:morphizen_utils",
         "//morphizen-ort-api-ext",
-        "//3rd-party:hash-library",
+        "@hash-library//:hash-library",
         "@glog",
         "@gsl",
         "@onnxruntime//:onnxruntime_headers",
