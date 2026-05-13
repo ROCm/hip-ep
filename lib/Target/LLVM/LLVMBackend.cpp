@@ -170,6 +170,16 @@ llvm::TargetMachine *LLVMBackend::createTargetMachine() {
   std::string cpu = "generic";
   std::string features = "";
   llvm::TargetOptions options;
+  // LLVM's default is the legacy `.ctors` section for C++ global constructors.
+  // Modern glibc's dynamic loader (>= 2.x) only iterates DT_INIT_ARRAY; entries
+  // in `.ctors` are never called when the .so is dlopen'd. Without this flag,
+  // every static-storage-duration object in the generated DLL (e.g. the
+  // `std::unordered_map g_optensor_cache` in lib/Runtime/real/elementwise.cpp)
+  // stays zero-initialized BSS, and the first `unordered_map::emplace` does
+  // `hash % bucket_count(==0)` → SIGFPE on inference. Setting UseInitArray=true
+  // routes ctors into `.init_array`, matching what clang's driver does for
+  // Linux ELF targets.
+  options.UseInitArray = true;
   llvm::Reloc::Model RM =
       llvm::Reloc::PIC_; // Position-independent code for DLL
 
