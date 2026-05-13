@@ -247,206 +247,86 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
 
 #else // Linux
 
-// Resolve a gcc-managed file (crtbeginS.o, libgcc.a, ...) via
-// `gcc -print-file-name=<name>`. Returns empty string if gcc isn't on PATH
-// or returns the input unchanged (gcc's "not found" convention).
-static std::string gccPrintFileName(const char *name) {
-  std::string cmd =
-      std::string("gcc -print-file-name=") + name + " 2>/dev/null";
-  FILE *fp = popen(cmd.c_str(), "r");
-  if (!fp)
-    return {};
-  char buf[1024];
-  std::string result;
-  if (fgets(buf, sizeof(buf), fp))
-    result = buf;
-  pclose(fp);
-  while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
-    result.pop_back();
-  // gcc returns the input verbatim when it can't find the file; treat that
-  // as "not found" so callers don't pass nonsense paths to the linker.
-  if (result == name)
-    return {};
-  return result;
-}
-
 bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
                               const std::string &outputDLL,
                               const std::vector<std::string> &libraries,
                               const std::vector<std::string> &libraryPaths) {
-  // Resolve gcc CRT objects up-front so the link line below stays linear.
-  // These bracket the user object files and provide the per-DSO startup +
-  // teardown glue that `clang`/`gcc` driver normally injects but we have to
-  // do by hand because we invoke ld.lld directly. Specifically:
+  // Driver-mediated link: clang -shared owns crt selection, sysroot,
+  // multiarch -L, libgcc -L, sys-lib ordering, the glibc 2.34
+  // libpthread/libdl merge, and the start/end-group bracket around its own
+  // implicit libs. We only pass user objects + user libs + rpath, and let
+  // clang generate the right argv for ld.lld.
   //
-  //   crti.o       — opens _init / _fini function bodies (sentinel pair
-  //                  with crtn.o). Strictly only needed when the DLL has
-  //                  DT_INIT/DT_FINI, but harmless when paired with crtn.o.
-  //   crtbeginS.o  — provides __dso_handle and __do_global_dtors_aux. The
-  //                  init_array entry from this object registers
-  //                  __cxa_atexit(__do_global_dtors_aux, ..., __dso_handle)
-  //                  at load time so glibc has a hook to call when the DLL
-  //                  is dlclose'd (the .fini_array reciprocal then walks
-  //                  __cxa_finalize(&__dso_handle) and drains the
-  //                  per-DSO destructor list).
-  //   crtendS.o    — terminator counterpart for crtbeginS.o (closes the
-  //                  .init_array / .fini_array sections).
-  //   crtn.o       — closes _init / _fini bodies started by crti.o.
+  // Subprocess (not in-process lld::lldMain) because lld::lldMain SIGSEGV's
+  // during its post-output cleanup when libhip-compiler.so is loaded into
+  // a long-lived host process via dlopen — exactly the path the MorphiZen
+  // EP takes. The .so is on disk by then, but lldMain's exit path corrupts
+  // host state. clang -shared invokes ld.lld in its own child process and
+  // exits cleanly because there is no host state to corrupt.
   //
-  // Without crtbeginS.o + crtendS.o the model DLL has an empty (or missing)
-  // .fini_array, so dlclose never invokes __cxa_finalize for the DLL. C++
-  // global destructors stay registered in the global atexit list with
-  // function pointers that point into the just-unmapped DLL. When libc's
-  // exit() walks that list, it hits an unmapped PC and SIGSEGV's. See the
-  // "S" variant of each object: those are the shared-library / PIC ones
-  // (crtbegin.o vs crtbeginS.o etc.).
-  const std::string crti = gccPrintFileName("crti.o");
-  const std::string crtbeginS = gccPrintFileName("crtbeginS.o");
-  const std::string crtendS = gccPrintFileName("crtendS.o");
-  const std::string crtn = gccPrintFileName("crtn.o");
-
-  // Build LLD-ELF command line arguments for shared library
-  std::vector<std::string> argStrings;
-  argStrings.push_back("ld.lld");  // Program name (required by LLD)
-  argStrings.push_back("-shared"); // Create shared library
-  argStrings.push_back("-o");
-  argStrings.push_back(outputDLL);
-
-  // CRT prologue: must precede the user objects so the .init_array entries
-  // contributed by crtbeginS.o land before our _GLOBAL__sub_I_* ctors.
-  if (!crti.empty())
-    argStrings.push_back(crti);
-  if (!crtbeginS.empty())
-    argStrings.push_back(crtbeginS);
-
-  // User object file (the per-model bitcode after LLVM codegen).
-  argStrings.push_back(objectFile);
-
-  // Add library paths
-  for (const auto &libPath : libraryPaths) {
-    argStrings.push_back("-L" + libPath);
-  }
-
-  // Add libraries. Mirror the Windows path's behaviour: callers can pass
-  // either bare names ("MIOpen" -> "-lMIOpen") or absolute paths to a
-  // specific archive/.so (e.g. install-prefix paths to
-  // libhip_custom_kernels.a). Bare-`-l/abs/path` is a malformed lld arg that
-  // fails with "unable to find library -l/abs/path" — pass full paths as
-  // positional args.
-  for (const auto &lib : libraries) {
-    if (lib.find('/') != std::string::npos) {
-      argStrings.push_back(lib);
-    } else {
-      argStrings.push_back("-l" + lib);
-    }
-  }
-
-  // Add RPATH for runtime library search
-  for (const auto &libPath : libraryPaths) {
-    argStrings.push_back("-rpath");
-    argStrings.push_back(libPath);
-  }
-
-  // Add system library search paths + standard C/C++ runtime libraries.
-  //
-  // We invoke ld.lld directly (via lld::lldMain) for crash-recovery, so unlike
-  // a clang/gcc driver invocation NOTHING auto-pulls libc/libstdc++/libgcc.
-  // The runtime bitcode (std::chrono, operator new, ...) and the custom-kernel
-  // archive (fprintf/memcpy/__cxa_guard_acquire/...) reference dozens of libc
-  // and libstdc++ symbols; without these the link fails with hundreds of
-  // "undefined symbol" errors. The Windows path solves the same problem by
-  // explicitly adding msvcrt.lib/ucrt.lib/vcruntime.lib above. This is the
-  // ELF analogue.
-  //
-  // Multiarch path is hard-coded to x86_64-linux-gnu (the only Linux target
-  // we currently support). The gcc internal libdir (libgcc.a, crtbeginS.o)
-  // is discovered by parsing `gcc --print-libgcc-file-name` so we don't have
-  // to hard-code the gcc version. On glibc 2.34+ libpthread/libdl/librt are
-  // merged into libc, so they're omitted (would error "unable to find
-  // -lpthread" because the .so files are gone).
-  argStrings.push_back("-L/usr/lib/x86_64-linux-gnu");
-  argStrings.push_back("-L/lib/x86_64-linux-gnu");
-  if (FILE *fp = popen("gcc --print-libgcc-file-name 2>/dev/null", "r")) {
-    char buf[1024];
-    if (fgets(buf, sizeof(buf), fp)) {
-      std::string libgccPath(buf);
-      while (!libgccPath.empty() &&
-             (libgccPath.back() == '\n' || libgccPath.back() == '\r'))
-        libgccPath.pop_back();
-      auto slash = libgccPath.find_last_of('/');
-      if (slash != std::string::npos)
-        argStrings.push_back("-L" + libgccPath.substr(0, slash));
-    }
-    pclose(fp);
-  }
-  for (const char *sysLib : {"stdc++", "m", "gcc_s", "gcc", "c"})
-    argStrings.push_back(std::string("-l") + sysLib);
-
-  // CRT epilogue: must come AFTER user libs (the symbols crtendS.o / crtn.o
-  // provide bracket .init_array / .fini_array / _init / _fini).
-  if (!crtendS.empty())
-    argStrings.push_back(crtendS);
-  if (!crtn.empty())
-    argStrings.push_back(crtn);
-
-  // Add default flags
-  argStrings.push_back("--export-dynamic"); // Export all symbols by default
-  argStrings.push_back("--no-undefined");   // Error on undefined symbols
-
-  // Convert to C-style args for LLD
-  std::vector<const char *> args;
-  for (const auto &arg : argStrings) {
-    args.push_back(arg.c_str());
-  }
-
-  // Invoke ld.lld as a SUBPROCESS rather than via lld::lldMain.
-  //
-  // Why: when libhip-compiler.so (which statically links lldELF) is loaded
-  // into a long-lived host process via dlopen — exactly the path the
-  // MorphiZen EP takes — lld::lldMain writes the .so output successfully
-  // but then segfaults during its internal cleanup (likely a static-state
-  // / atexit / llvm_shutdown interaction with the host process). The
-  // crash happens AFTER the artifact is on disk, so the link "worked" but
-  // the EP never sees a successful return. The same args invoked via the
-  // ld.lld binary subprocess complete cleanly. Windows lldMain (lld-link
-  // / COFF driver) does not exhibit this and stays on the in-process path.
-  //
-  // ld.lld discovery: HIPDNN_LD_LLD_PATH is baked at configure time
-  // (lib/Target/LLVM/CMakeLists.txt). PATH lookup is the fallback so the
-  // build still works in environments that don't have llvm-XX-dev's
-  // ld.lld at the discovered location.
-  std::string ldLldPath;
-#ifdef HIPDNN_LD_LLD_PATH
-  ldLldPath = HIPDNN_LD_LLD_PATH;
+  // The Windows path (linkDLL_Windows) does not have this issue because
+  // lld-link (COFF driver) cleans up safely in-process; we keep that on
+  // lld::lldMain.
+  // Use the clang++ driver flavor — it auto-pulls libstdc++ (which provides
+  // __cxa_begin_catch / __cxa_rethrow / __cxa_end_catch / etc. that the
+  // generated model object pulls in via std::string / std::unordered_map).
+  // The bare `clang` driver only links libc and would error with
+  // "undefined symbol: __cxa_*" on every model.
+  std::string clangPath;
+#ifdef HIPDNN_CLANG_PATH
+  clangPath = HIPDNN_CLANG_PATH;
 #endif
-  if (ldLldPath.empty() || !llvm::sys::fs::exists(ldLldPath)) {
-    auto found = llvm::sys::findProgramByName("ld.lld");
+  if (clangPath.empty() || !llvm::sys::fs::exists(clangPath)) {
+    auto found = llvm::sys::findProgramByName("clang++");
     if (!found) {
-      llvm::errs() << "ld.lld not found on PATH and HIPDNN_LD_LLD_PATH "
-                      "is unset. Install lld or rebuild with a working "
-                      "find_program(ld.lld).\n";
+      llvm::errs() << "clang++ not found on PATH and HIPDNN_CLANG_PATH is "
+                      "unset or stale. Install clang (e.g. apt install "
+                      "clang-22) or rebuild with HIPDNN_CLANG_PATH "
+                      "pointing to a valid clang++ binary.\n";
       return false;
     }
-    ldLldPath = *found;
+    clangPath = *found;
   }
 
-  // Skip argv[0] ("ld.lld" — the program name) when handing args to
-  // ExecuteAndWait. The first element of the new argv is the path itself.
-  std::vector<llvm::StringRef> execArgs;
-  execArgs.reserve(argStrings.size());
-  execArgs.emplace_back(ldLldPath);
-  for (size_t i = 1; i < argStrings.size(); ++i)
-    execArgs.emplace_back(argStrings[i]);
+  std::vector<std::string> args = {clangPath, "-shared", "-fuse-ld=lld",
+                                   "-o",      outputDLL, objectFile};
+  for (const auto &p : libraryPaths)
+    args.push_back("-L" + p);
+  // --start-group bracket: user archives may mutually reference each other
+  // (e.g. libhip_custom_kernels.a pulls libstdc++ symbols that another
+  // user archive also references). Cheap on a final shared link.
+  args.push_back("-Wl,--start-group");
+  for (const auto &lib : libraries) {
+    // Mirror the Windows path: callers pass either bare names ("MIOpen")
+    // or absolute paths to archives/.so files. `-l/abs/path` is malformed
+    // for ld; absolute paths go through as positional args.
+    if (lib.find('/') != std::string::npos)
+      args.push_back(lib);
+    else
+      args.push_back("-l" + lib);
+  }
+  args.push_back("-Wl,--end-group");
+  for (const auto &p : libraryPaths)
+    args.push_back("-Wl,-rpath," + p);
+  args.push_back("-Wl,--export-dynamic");
+  args.push_back("-Wl,--no-undefined");
 
+  COMPILER_DEBUG_LOG("clang -shared command (" << args.size() << " args):\n");
+  for (size_t i = 0; i < args.size(); ++i) {
+    COMPILER_DEBUG_LOG("  [" << i << "]='" << args[i] << "'\n");
+  }
+
+  std::vector<llvm::StringRef> execArgs(args.begin(), args.end());
   std::string errMsg;
   bool execFailed = false;
-  int rc = llvm::sys::ExecuteAndWait(ldLldPath, execArgs,
+  int rc = llvm::sys::ExecuteAndWait(clangPath, execArgs,
                                      /*Env=*/std::nullopt,
                                      /*Redirects=*/{},
                                      /*SecondsToWait=*/0,
                                      /*MemoryLimit=*/0, &errMsg, &execFailed);
   if (execFailed || rc != 0) {
-    llvm::errs() << "ld.lld failed (rc=" << rc << "): " << errMsg << "\n";
+    llvm::errs() << "clang -shared failed (rc=" << rc << "): " << errMsg
+                 << "\n";
     return false;
   }
 

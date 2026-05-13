@@ -77,11 +77,17 @@ populate_common_args() {
         --network=host
     )
     # Forward sccache + GitHub Actions cache env vars when present. The
-    # mozilla-actions/sccache-action step in CI sets these on the host runner;
-    # the in-container sccache binary (installed via the Dockerfile) needs
-    # them to talk to the same GHA cache backend.
+    # mozilla-actions/sccache-action step in CI sets these on the host
+    # runner; the in-container sccache binary (installed via the
+    # Dockerfile) needs them to talk to the same GHA cache backend.
+    # ACTIONS_RESULTS_URL is the cache v2 URL (GitHub started rolling out
+    # in early 2026); ACTIONS_CACHE_URL is the v1 URL still set by older
+    # runners. Forward both — whichever the runner exposes wins, and
+    # docker/build.sh enables the compiler launcher only when at least
+    # one is non-empty.
     local var
-    for var in SCCACHE_GHA_ENABLED ACTIONS_CACHE_URL ACTIONS_RUNTIME_TOKEN; do
+    for var in SCCACHE_GHA_ENABLED ACTIONS_CACHE_URL ACTIONS_RESULTS_URL \
+               ACTIONS_RUNTIME_TOKEN; do
         if [ -n "${!var:-}" ]; then
             _out+=(-e "$var=${!var}")
         fi

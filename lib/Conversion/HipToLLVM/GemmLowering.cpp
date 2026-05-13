@@ -85,7 +85,7 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     }
 
     // Extract C's shape normalized to 2D [cDim0, cDim1] for broadcast support.
-    // Scalar/absent â†’ [0,0], 1D [X] â†’ [1,X], 2D [X,Y] â†’ [X,Y].
+    // Scalar/absent → [0,0], 1D [X] → [1,X], 2D [X,Y] → [X,Y].
     Value cDim0, cDim1;
     if (adaptor.getInputC()) {
       auto CType = cast<MemRefType>(op.getInputC().getType());

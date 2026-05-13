@@ -223,9 +223,14 @@ fi
 step "A.2  Verify submodules (incl. MorphiZen)"
 cd "$SOURCE_DIR"
 # git on host vs container can disagree on the .git working-tree owner when
-# UID matches but the namespace differs; mark this tree safe.
+# UID matches but the namespace differs; mark this tree safe. Also whitelist
+# the submodule and sibling source dirs that A.5 (ORT) and A.9 (OGA) touch.
+# We deliberately do NOT use `safe.directory '*'` — that swallows owner
+# mismatches everywhere and can mask real environment bugs.
 git config --global --add safe.directory "$SOURCE_DIR"
-git config --global --add safe.directory '*'
+git config --global --add safe.directory "$SOURCE_DIR/3rd-party/morphizen"
+git config --global --add safe.directory "$ORT_SRC"
+git config --global --add safe.directory "$OGA_SRC"
 # Trust user-managed submodule checkouts (same .git-guard pattern as A.5 ORT
 # and A.9 OGA below). The host normally runs
 # `git submodule update --init --recursive` with ssh-agent loaded before
@@ -240,17 +245,34 @@ else
     git submodule update --init --recursive
 fi
 
-# Optional sccache integration. SCCACHE_GHA_ENABLED + ACTIONS_CACHE_URL +
-# ACTIONS_RUNTIME_TOKEN are set on GitHub Actions runners by
-# mozilla-actions/sccache-action and forwarded into the container by
-# docker/run.sh. Outside CI (no env vars set) the launchers stay unset,
-# so sccache is a no-op even though the binary is on PATH.
+# Optional sccache integration. mozilla-actions/sccache-action exports
+# SCCACHE_GHA_ENABLED + ACTIONS_CACHE_URL + ACTIONS_RUNTIME_TOKEN +
+# ACTIONS_RESULTS_URL (cache v2) into the runner env; docker/run.sh
+# forwards all four into the container. Wrap compilers with sccache only
+# when ALL of these are present:
+#   1. SCCACHE_GHA_ENABLED=true
+#   2. sccache binary on PATH (Dockerfile Layer 4 installs it)
+#   3. ACTIONS_CACHE_URL or ACTIONS_RESULTS_URL non-empty
+# The third check is the gate that broke CI run 25804869662: the
+# sccache-action exports SCCACHE_GHA_ENABLED unconditionally, but the
+# cache URL only when GitHub's cache service is actually reachable from
+# the runner. Without it, sccache --start-server fails immediately and
+# every ninja compile job dies with "ACTIONS_CACHE_URL not found".
+#
+# Outside CI all three are empty, so SCCACHE_LAUNCHER_ARGS stays empty
+# and the build runs without a compiler launcher (uncached, as expected
+# for local dev).
 SCCACHE_LAUNCHER_ARGS=()
-if [ "${SCCACHE_GHA_ENABLED:-}" = "true" ] && command -v sccache >/dev/null 2>&1; then
+if [ "${SCCACHE_GHA_ENABLED:-}" = "true" ] \
+        && command -v sccache >/dev/null 2>&1 \
+        && [ -n "${ACTIONS_CACHE_URL:-}${ACTIONS_RESULTS_URL:-}" ]; then
     SCCACHE_LAUNCHER_ARGS=(
         -DCMAKE_C_COMPILER_LAUNCHER=sccache
         -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
     )
+    echo "[sccache] enabled (gha backend; cache URL detected)"
+else
+    echo "[sccache] disabled — no GHA cache URL in env (cold build expected)"
 fi
 
 # A.7 — Configure + build hipdnn-ep. BUILD_DIR / INSTALL_DIR were resolved
