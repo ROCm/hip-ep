@@ -162,6 +162,24 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::CosOp>>(*ctx);
     mlir::hip::SinOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SinOp>>(*ctx);
+    mlir::hip::CumSumOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::CumSumOp>>(*ctx);
+    mlir::hip::PadOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::PadOp>>(*ctx);
+    mlir::hip::TileOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::TileOp>>(*ctx);
+    mlir::hip::ExpandOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ExpandOp>>(*ctx);
+    mlir::hip::ReduceProdOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ReduceProdOp>>(*ctx);
+    mlir::hip::LessOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LessOp>>(*ctx);
+    mlir::hip::GatherNDOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GatherNDOp>>(*ctx);
+    mlir::hip::SignOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SignOp>>(*ctx);
+    mlir::hip::ModOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ModOp>>(*ctx);
   });
 }
 

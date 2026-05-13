@@ -260,6 +260,15 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/not.cpp runtime_not.bc)
     compile_to_bitcode(real/cos.cpp runtime_cos.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
+    compile_to_bitcode(real/cumsum.cpp runtime_cumsum.bc)
+    compile_to_bitcode(real/pad.cpp runtime_pad.bc)
+    compile_to_bitcode(real/tile.cpp runtime_tile.bc)
+    compile_to_bitcode(real/expand.cpp runtime_expand.bc)
+    compile_to_bitcode(real/reduce_prod.cpp runtime_reduce_prod.bc)
+    compile_to_bitcode(real/less.cpp runtime_less.bc)
+    compile_to_bitcode(real/gather_nd.cpp runtime_gather_nd.bc)
+    compile_to_bitcode(real/sign.cpp runtime_sign.bc)
+    compile_to_bitcode(real/mod.cpp runtime_mod.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -297,6 +306,15 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_not.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cos.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_cumsum.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_pad.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_tile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_expand.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_prod.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_less.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_nd.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_sign.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mod.bc
     )
 else()
     # Mock runtime for testing without GPU

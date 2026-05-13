@@ -854,6 +854,72 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs,
              void *output, int64_t num_elements,
              int64_t data_type);
 
+// CumSum operation wrapper (cumulative sum along an axis).
+// `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the
+// reduction axis; the runtime is responsible for reading it (typically a
+// single hipMemcpyAsync D2H or kernel-side load).
+// `axis_dtype` is HIPDNN_EP_DATATYPE_INT32 / _INT64.
+// `data_type` is HIPDNN_EP_DATATYPE_* of the data tensor.
+int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
+                const int64_t *data_shape, int64_t data_rank,
+                int64_t num_elements, int64_t data_type, int64_t axis_dtype,
+                int64_t exclusive, int64_t reverse);
+
+// Pad operation wrapper (constant / reflect / edge / wrap modes).
+// pads:           int64 1-D tensor [2 * num_axes]
+//                 -- formatted as [x1_begin, ..., x1_end, ...]
+// constant_value: nullable scalar tensor (only used when mode_id == 0)
+// axes:           nullable int64 1-D tensor selecting axes; nullptr/empty
+//                 means "all axes"
+// mode_id:        0=constant, 1=reflect, 2=edge, 3=wrap
+int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
+             void *axes, void *output, const int64_t *data_shape,
+             int64_t data_rank, const int64_t *output_shape,
+             int64_t output_rank, int64_t pads_num_elements,
+             int64_t axes_num_elements, int64_t data_type, int64_t mode_id);
+
+// Tile operation wrapper.
+// repeats: int64 1-D tensor of length `data_rank`.
+int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
+              const int64_t *input_shape, int64_t input_rank,
+              const int64_t *output_shape, int64_t output_rank,
+              int64_t data_type);
+
+// Expand operation wrapper (NumPy-style broadcasting to a target shape).
+int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
+                const int64_t *input_shape, int64_t input_rank,
+                const int64_t *output_shape, int64_t output_rank,
+                int64_t data_type);
+
+// ReduceProd operation wrapper. Same calling convention as wrap_reduce_sum
+// / wrap_reduce_max.
+int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
+                     int64_t data_num_elements, int64_t output_num_elements,
+                     int64_t axes_num_elements, int64_t data_type,
+                     int64_t keepdims, int64_t noop_with_empty_axes);
+
+// Less operation wrapper (element-wise C = A < B). Output is bool (1 byte).
+int wrap_less(RuntimeState *state, void *a, void *b, void *output,
+              int64_t num_elements, int64_t data_type);
+
+// GatherND operation wrapper. data_shape has rank `data_rank`; indices has
+// rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
+int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
+                   const int64_t *data_shape, int64_t data_rank,
+                   const int64_t *indices_shape, int64_t indices_rank,
+                   const int64_t *output_shape, int64_t output_rank,
+                   int64_t batch_dims, int64_t data_type);
+
+// Sign operation wrapper (element-wise sign(x)).
+int wrap_sign(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type);
+
+// Mod operation wrapper (element-wise modulo / fmod).
+//   fmod = 0  -> integer modulo (Python %); requires integer data_type
+//   fmod = 1  -> C fmod         ; requires float data_type
+int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
+             int64_t num_elements, int64_t data_type, int64_t fmod);
+
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
 //===----------------------------------------------------------------------===//

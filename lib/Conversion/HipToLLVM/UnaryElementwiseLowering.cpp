@@ -10,7 +10,8 @@ namespace hip {
 namespace {
 
 // Generic template for unary elementwise operations lowering.
-// Handles: hip.neg, hip.not, hip.cos, hip.sin (and future unary elementwise ops).
+// Handles: hip.neg, hip.not, hip.cos, hip.sin, hip.sign (and future unary
+// elementwise ops).
 //
 // Ops lower to wrap_{op}(state, input, output, num_elements, data_type).
 template <typename OpTy>
@@ -96,6 +97,8 @@ void mlir::hip::populateUnaryElementwiseLoweringPatterns(
                                                      "cos");
   patterns.insert<UnaryElementwiseOpLowering<SinOp>>(converter, kWrapSin,
                                                      "sin");
+  patterns.insert<UnaryElementwiseOpLowering<SignOp>>(converter, kWrapSign,
+                                                      "sign");
 }
 
 } // namespace hip

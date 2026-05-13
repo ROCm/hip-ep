@@ -108,6 +108,15 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     NotOp::attachInterface<HipDstBufferizableModel<NotOp>>(*ctx);
     CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
     SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
+    CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);
+    PadOp::attachInterface<HipDstBufferizableModel<PadOp>>(*ctx);
+    TileOp::attachInterface<HipDstBufferizableModel<TileOp>>(*ctx);
+    ExpandOp::attachInterface<HipDstBufferizableModel<ExpandOp>>(*ctx);
+    ReduceProdOp::attachInterface<HipDstBufferizableModel<ReduceProdOp>>(*ctx);
+    LessOp::attachInterface<HipDstBufferizableModel<LessOp>>(*ctx);
+    GatherNDOp::attachInterface<HipDstBufferizableModel<GatherNDOp>>(*ctx);
+    SignOp::attachInterface<HipDstBufferizableModel<SignOp>>(*ctx);
+    ModOp::attachInterface<HipDstBufferizableModel<ModOp>>(*ctx);
   });
 }
 
