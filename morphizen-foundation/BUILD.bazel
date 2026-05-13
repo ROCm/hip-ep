@@ -40,10 +40,9 @@ cc_library(
         "include/morphizen-foundation/parse_value.hpp",
     ],
     copts = select({
-        "@bazel_tools//src/conditions:windows": ["/std:c++17", "/DWITH_OPENSSL=1"],
-        "//conditions:default": ["-std=c++17", "-DWITH_OPENSSL=1"],
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17"],
     }),
-    defines = ["WITH_OPENSSL=1"],
     # includes = ["."] exposes the package's bazel-out directory so the compiler
     # can find mem_binary_file.hpp.inc via the bare #include "mem_binary_file.hpp.inc".
     includes = ["."],
@@ -51,8 +50,6 @@ cc_library(
     deps = [
         "@glog",
         "@gsl",
-        "@openssl//:crypto",
-        "@openssl//:ssl",
         "@zlib",
     ],
 )
