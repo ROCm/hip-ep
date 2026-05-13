@@ -366,7 +366,7 @@ cc_library(
         ":morphizen-core-headers",
         ":morphizen-core-proto-headers",
         ":morphizen_proto_lib",
-        "//encryption",
+        "//morphizen-foundation",
         "//morphizen-utils:morphizen_utils",
         "//morphizen-ort-api-ext",
         "@hash-library//:hash-library",
