@@ -121,7 +121,15 @@ have_protobuf() {
         || ls "$PREBUILT_DIR"/lib/cmake/utf8_range/utf8_rangeConfig.cmake >/dev/null 2>&1
 }
 have_flatbuffers() {
-    ls "$PREBUILT_DIR"/lib/cmake/flatbuffers/FlatBuffersConfig.cmake >/dev/null 2>&1
+    # flatbuffers v25.12.19 installs the cmake package config as
+    # `flatbuffers-config.cmake` (lowercase, hyphenated), not the
+    # CamelCase `FlatBuffersConfig.cmake` an earlier flatbuffers release
+    # used. Both names are valid per find_package(flatbuffers) semantics,
+    # but the actual file determines whether we can skip A.6b. Probing
+    # the wrong name made A.6b rebuild on every CI run even after a
+    # prebuilt-local cache hit (~2-3 min wasted each time).
+    ls "$PREBUILT_DIR"/lib/cmake/flatbuffers/flatbuffers-config.cmake >/dev/null 2>&1 \
+        || ls "$PREBUILT_DIR"/lib/cmake/flatbuffers/FlatBuffersConfig.cmake >/dev/null 2>&1
 }
 
 # A.4 — TheRock SDK
