@@ -154,7 +154,7 @@ struct MyOpState {
   explicit MyOpState(RuntimeState *) {}
   // Optional, all detected by SFINAE:
   //   void begin_compute(RuntimeState *);  // per-Compute() invalidation
-  //   size_t mem_bytes() const;            // HIPDNN_EP_DUMP_STATE reporting
+  //   void end_compute(RuntimeState *);    // detected but no caller today
 };
 HIPDNN_OP_MODULE(my_op_module, "my_op", MyOpState);
 }
@@ -168,14 +168,14 @@ int wrap_my_op(RuntimeState *state, ...) {
 - **Steady-state hot path**: after the first call in a session, `my_op_module(state)` is bounds-check + load + null-branch. No mutex, no allocation.
 - **Lifecycle**: `MyOpState` is constructed lazily on first access; destroyed by the registry in reverse-registration order during `hipdnn_ep_state_cleanup` (after the shared stream sync).
 - **Per-Compute() invalidation**: define `void begin_compute(RuntimeState*)` and it fires from `hipdnn_ep_runtime_begin_compute` through the registry's lock-free fan-out. Modules without the hook are skipped at zero cost.
-- **Observability**: `HIPDNN_EP_DUMP_STATE=1` prints one line per populated slot at cleanup with the module name and `mem_bytes()` if defined.
+- **No framework-level persistence hook.** The registry intentionally has no save/load and no live-session dump callback — op-modules hold derived state (descriptors, algo choices, sized scratch) that is cheap to rebuild on first hot call, and the opaque HIP/MIOpen/hipBLASLt handles inside descriptor caches aren't portable across processes/drivers anyway. When a specific op genuinely benefits from cross-process caching (e.g. autotune), persist **algo-selection metadata only** (not descriptors or buffers), key it on `{model_hash, driver_version, GPU_arch, shape_signature}`, and manage the file directly from the op's `.cpp` — the way matmul_nbits WMMA autotune handles `_results.json`. See `docs/design/runtime-module-registry.md` ("On-disk persistence") for the convention.
 
 **When NOT to use a module:** truly framework-level shared resources (stream / library handles, the shared `workspace`, the constants blob, the buffer pool). Those stay on `RuntimeState` directly.
 
 **Where the helpers live:**
 - `lib/Runtime/module_registry.{h,cpp}` — registry, `HIPDNN_OP_MODULE`, lifecycle hooks.
 - `lib/Runtime/growable_buffer.h` — `hipdnn_ep::GrowableDeviceBuffer` / `GrowablePinnedBuffer` for the canonical "1.5x grow, sync-then-realloc, never shrink" pattern. Prefer these over hand-rolling `hipMalloc`/`hipFree` inside a module.
-- Live examples: `CausalConvState`, `ZpUnpackState`, `GqaGemmState`, `GqaSeqlensCache` (with `begin_compute`), `QmoeState` (with `mem_bytes()`).
+- Live examples: `CausalConvState`, `ZpUnpackState`, `GqaGemmState`, `GqaSeqlensCache` (with `begin_compute`), `QmoeState`.
 - Design doc: `docs/design/runtime-module-registry.md` — single canonical reference; describes the in-tree registry and `growable_buffer.h` precisely, no plan / draft framing.
 - Smoke test: CTest #58 `RuntimeSteadyState` exercises hook-detection, slot stability, lazy init, destruction order, and the post-warmup steady-state assertion. Lives in `test/runtime_steady_state/`.
 
