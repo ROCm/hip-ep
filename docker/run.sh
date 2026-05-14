@@ -20,24 +20,8 @@
 
 set -euo pipefail
 
-# Path resolution. This script lives at <SOURCE_DIR>/docker/run.sh, so:
-#   DOCKER_DIR = <repo>/docker
-#   SOURCE_DIR = <repo>            (one level up — the onnx-hipdnn-ep checkout)
-#   WORKSPACE  = <repo>/..         (two levels up — sibling-layout root)
-# Use `pwd -P` to resolve symlinks (e.g. /home/$USER/hipdnn-ep ->
-# /wrk/.../hipdnn-ep on autofs setups). Otherwise env vars handed to the
-# container would name the symlinked path, which doesn't exist inside the
-# container — only the bind-mount target path does.
-#
-# Workspace layout (sibling-of-source — mirrors Windows quick_start.md
-# "Directory Layout" so the same cmake/curl invocations work on both OSes):
-#   $WORKSPACE/onnx-hipdnn-ep/     source (= SOURCE_DIR)
-#   $WORKSPACE/onnxruntime/        ORT source
-#   $WORKSPACE/onnxruntime-genai/  OGA source (BUILD_OGA=1 only)
-#   $WORKSPACE/prebuilt-local/     built deps (ORT, protobuf, flatbuffers)
-#   $WORKSPACE/therock-dist/       TheRock SDK (~13 GB)
-#   $WORKSPACE/build/              cmake build dirs (out-of-source)
-#   $WORKSPACE/install/            cmake install prefix
+# `pwd -P` resolves autofs symlinks (e.g. /home/$USER/hipdnn-ep ->
+# /wrk/.../hipdnn-ep); container bind-mounts only know the real path.
 DOCKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SOURCE_DIR="$(cd "$DOCKER_DIR/.." && pwd -P)"
 WORKSPACE="$(cd "$SOURCE_DIR/.." && pwd -P)"
@@ -46,10 +30,8 @@ WORKSPACE="$(cd "$SOURCE_DIR/.." && pwd -P)"
 : "${CONTAINER_NAME:=${USER}.hipdnn-ep.shell}"
 : "${HIP_ARCHITECTURES:=gfx1151}"
 : "${BUILD_OGA:=0}"
-# OGA_REF is intentionally NOT defaulted here — docker/build.sh has the
-# pin as its own default. Leaving this unset lets `OGA_REF=... ./run.sh`
-# from the host (or the workflow env: block in linux-build.yml) override
-# the container default without docker/run.sh needing to know the SHA.
+# OGA_REF intentionally not defaulted; build.sh owns the pin. Unset on the
+# host means "use build.sh default"; setting it overrides.
 : "${SKIP_LIT:=0}"
 : "${FORCE_RECONFIGURE:=0}"
 
@@ -59,10 +41,8 @@ host_user=$(id -un)
 host_group=$(id -gn)
 
 populate_common_args() {
-    # $1 = name of array variable to append into.
     local -n _out=$1
-    # Workspace bind-mount (bind-propagation=shared works around autofs/NFS
-    # edge cases on some host filesystems).
+    # bind-propagation=shared works around autofs/NFS edge cases.
     _out+=(
         --mount "type=bind,source=$WORKSPACE,target=$WORKSPACE,bind-propagation=shared"
         -e "HOST_UID=$host_uid"
@@ -76,10 +56,6 @@ populate_common_args() {
         -e "SKIP_LIT=$SKIP_LIT"
         -e "FORCE_RECONFIGURE=$FORCE_RECONFIGURE"
     )
-    # OGA_REF is forwarded only when set on the host. Unset → container
-    # falls back to docker/build.sh's hard-coded default. CI exports it
-    # from the workflow env block so a cache-key change propagates as
-    # a different SHA inside the container's git checkout.
     if [ -n "${OGA_REF:-}" ]; then
         _out+=(-e "OGA_REF=$OGA_REF")
     fi
@@ -89,15 +65,9 @@ populate_common_args() {
         -v "/dev/shm:/dev/shm"
         --network=host
     )
-    # Forward sccache + GitHub Actions cache env vars when present. The
-    # mozilla-actions/sccache-action step in CI sets these on the host
-    # runner; the in-container sccache binary (installed via the
-    # Dockerfile) needs them to talk to the same GHA cache backend.
-    # ACTIONS_RESULTS_URL is the cache v2 URL (GitHub started rolling out
-    # in early 2026); ACTIONS_CACHE_URL is the v1 URL still set by older
-    # runners. Forward both — whichever the runner exposes wins, and
-    # docker/build.sh enables the compiler launcher only when at least
-    # one is non-empty.
+    # Forward both GHA cache URLs (v1 = ACTIONS_CACHE_URL, v2 =
+    # ACTIONS_RESULTS_URL) — runners may export either. build.sh gates
+    # the compiler launcher on at least one being non-empty.
     local var
     for var in SCCACHE_GHA_ENABLED ACTIONS_CACHE_URL ACTIONS_RESULTS_URL \
                ACTIONS_RUNTIME_TOKEN; do
@@ -107,9 +77,7 @@ populate_common_args() {
     done
 }
 
-# Best-effort GPU passthrough. Only attach for `shell` — `build` doesn't need
-# a GPU (compile-only; the GPU is only used by `ctest` Execute tests and
-# downstream tools like hip-onnx-runner).
+# GPU passthrough — `shell` only, since `build` is compile-only.
 populate_gpu_args() {
     local -n _out=$1
     [ -e /dev/kfd ] && _out+=(--device=/dev/kfd)

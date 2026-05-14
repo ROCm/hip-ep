@@ -3,17 +3,14 @@
 ## Licensed under the MIT License.
 ##
 
-# hipdnn-ep build environment.
-# Mirrors `.github/workflows/linux-build.yml` step "Install apt build deps + LLVM 22"
-# so a local build matches what CI does on ubuntu-latest.
+# hipdnn-ep Linux build environment. Mirrors the apt setup in
+# .github/workflows/linux-build.yml so local matches CI on ubuntu-latest.
 FROM ubuntu:24.04
 
 ARG LLVM_MAJOR=22
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Layer 1: base toolchain + tools that the various sub-builds (ORT, protobuf,
-# flatbuffers, OGA) reach for. Kept in one RUN so apt cache can be cleaned
-# atomically and the layer stays small.
+# Layer 1: base toolchain for ORT / protobuf / flatbuffers / OGA sub-builds.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build pkg-config \
         git ca-certificates curl wget gnupg lsb-release \
@@ -22,8 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zip unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Layer 2: LLVM/MLIR/clang/lld 22 from apt.llvm.org. Pinned LLVM_MAJOR so the
-# image rebuilds when CI bumps the version.
+# Layer 2: LLVM/MLIR/clang/lld from apt.llvm.org (pinned via LLVM_MAJOR).
 RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
         | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null \
     && echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_MAJOR} main" \
@@ -40,48 +36,29 @@ RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
         liblld-${LLVM_MAJOR}-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Layer 3: pip-installed bits.
-#  - lit: required by `check-hip-mlir-lit`
-#  - cmake: ubuntu:24.04 ships 3.28.3 but backend-mlir-compiler needs >=3.29.
-#    pip cmake is staged earlier in PATH (/usr/local/bin) than apt's, so it wins.
+# Layer 3: pip bits. ubuntu:24.04 ships cmake 3.28.3 but backend-mlir-compiler
+# needs >=3.29; pip cmake lands at /usr/local/bin and wins over apt's.
 RUN pip3 install --no-cache-dir --break-system-packages \
         cmake lit setuptools wheel numpy requests packaging \
     && ln -sf /usr/local/bin/lit /usr/bin/lit
 
-# Layer 4: sccache for CI cache hits.
-# linux-build.yml runs mozilla-actions/sccache-action on the host runner which
-# sets ACTIONS_CACHE_URL + ACTIONS_RUNTIME_TOKEN + SCCACHE_GHA_ENABLED=true;
-# docker/run.sh forwards these into the container so the in-container sccache
-# talks to the same GitHub Actions cache backend. docker/build.sh wires
-# CMAKE_*_COMPILER_LAUNCHER=sccache only when SCCACHE_GHA_ENABLED is "true"
-# AND a GHA cache URL is forwarded in, so this layer is a no-op for local
-# non-CI builds (the binary just sits idle).
-#
-# Pinned to 0.10.0 (vs the 2024-vintage 0.8.2): GitHub rolled out the
-# Actions Cache v2 service in early 2026 and started exporting
-# ACTIONS_RESULTS_URL instead of (or alongside) ACTIONS_CACHE_URL.
-# sccache <0.9 only knows about the v1 URL and fails at startup with
-# `ACTIONS_CACHE_URL not found, maybe not in github action environment?`
-# when only the v2 URL is set on the runner. 0.10+ handles both URLs.
+# Layer 4: sccache for CI cache hits. Pinned to 0.10.0 — earlier 0.8.x only
+# knows GHA cache v1 (ACTIONS_CACHE_URL) and fails on the v2-only runners
+# GitHub rolled out in early 2026 (ACTIONS_RESULTS_URL).
 ARG SCCACHE_VERSION=0.10.0
 RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
         | tar -xz -C /tmp \
     && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/ \
     && rm -rf "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl" \
     && chmod +x /usr/local/bin/sccache
-# ^ test/lit/CMakeLists.txt does find_program(LIT_EXECUTABLE NAMES lit
-#   HINTS ${python_dir}/bin NO_DEFAULT_PATH). System python lives in
-#   /usr/bin, but pip puts lit at /usr/local/bin/lit. Symlink so the
-#   HINT-based search hits it.
 
-# Sanity: cmake configs the build will look for.
+# Sanity: the cmake configs the build needs are actually present.
 RUN test -f /usr/lib/llvm-${LLVM_MAJOR}/lib/cmake/llvm/LLVMConfig.cmake \
     && test -f /usr/lib/llvm-${LLVM_MAJOR}/lib/cmake/mlir/MLIRConfig.cmake \
     && test -f /usr/lib/llvm-${LLVM_MAJOR}/lib/cmake/lld/LLDConfig.cmake \
     && test -f /usr/lib/llvm-${LLVM_MAJOR}/lib/libPolly.a
 
-# Allow any user added at runtime to use sudo without a password (entrypoint
-# adds the host UID/GID to the `dev` group).
+# NOPASSWD sudo for any user the entrypoint puts into the `dev` group.
 RUN echo "%dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev-nopasswd \
     && chmod 0440 /etc/sudoers.d/dev-nopasswd
 
