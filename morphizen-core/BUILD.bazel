@@ -310,5 +310,6 @@ cc_library(
 cc_library(
     name = "morphizen-core-proto-headers",
     hdrs = [":morphizen_proto_pb_h"],
+    includes = ["."],  # exposes bazel-out/.../morphizen-core/ so morphizen/*.pb.h resolves
     visibility = ["//visibility:public"],
 )
