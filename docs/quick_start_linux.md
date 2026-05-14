@@ -9,9 +9,9 @@ point `$ROOT` at it, then follow the shared **Testing & Benchmarking**
 section — every tool runs the same way regardless of which entry path
 you chose.
 
-- **Path A — Build from source** (developers). `./docker/run.sh build`
-  produces a self-contained `<workspace>/install/`.
-- **Path C — Use the prebuilt CI artifact** (testers). `gh run download
+- **Build from source** (developers). `./docker/run.sh build` produces
+  a self-contained `<workspace>/install/`.
+- **Use the prebuilt CI artifact** (testers). `gh run download
   linux-gpu-test-package` lands the binaries under
   `<workspace>/prebuilt/<run-id>/`; no rebuild needed.
 
@@ -23,7 +23,7 @@ See [quick_start.md](quick_start.md) for the Windows flow.
 |------|---------|
 | **Docker** 26+ | Build + run environment |
 | **AMD gfx1151 GPU** + `/dev/kfd` + `/dev/dri/renderD*` | HIP runtime |
-| **`gh` CLI** (`gh auth login`) | Download CI artifacts (Path C only) |
+| **`gh` CLI** (`gh auth login`) | Download CI artifacts (artifact path only) |
 
 The current user must be in the host **`docker`** group. The user does
 **not** need to be in `render` / `video` — GPU passthrough is handled by
@@ -36,7 +36,7 @@ project root). Sibling directories (`onnxruntime/`, `onnxruntime-genai/`,
 `prebuilt-local/`, `therock-dist/`, `build/`, `install/`, `prebuilt/`)
 are auto-mounted into the container by `docker/run.sh`.
 
-## Path A — Build from source (developers)
+## Build from source (developers)
 
 ```bash
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
@@ -75,19 +75,20 @@ The result tree under `<workspace>/install/` is self-contained:
 Skip to the [Open a container shell](#open-a-container-shell-and-set-root)
 section once `install/bin/` is populated.
 
-## Path C — Use the prebuilt CI artifact (testers, no compile)
+## Use the prebuilt CI artifact (testers, no compile)
 
 The CI workflow
 [`.github/workflows/linux-build.yml`](../.github/workflows/linux-build.yml)
 builds and bundles every `.so` / binary the host needs (libamdhip64,
 libLLVM 22, libonnxruntime, libonnxruntime_morphizen_ep, hip-onnx-runner,
-onnxruntime_perf_test, model_benchmark, libonnxruntime-genai). Path C
-reuses Path A's Docker image — no `./docker/run.sh build` needed:
+onnxruntime_perf_test, model_benchmark, libonnxruntime-genai). The
+artifact path reuses the same Docker image as the build-from-source
+flow — no `./docker/run.sh build` needed:
 
 ```bash
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 cd onnx-hipdnn-ep
-./docker/run.sh image    # skip if Path A's image is already built
+./docker/run.sh image    # skip if the image is already built
 
 # Pick the latest green run from
 # https://github.com/ROCm/onnx-hipdnn-ep/actions/workflows/linux-build.yml
@@ -99,9 +100,8 @@ mkdir -p ../prebuilt/$RUN_ID
     chmod +x bin/* )
 ```
 
-After extraction, `<workspace>/prebuilt/$RUN_ID/` matches Path A's
-`install/` layout (`bin/`, `lib/`, `etc/`, plus an extra `wheels/` for
-`pip install onnxruntime-*.whl`).
+After extraction, `<workspace>/prebuilt/$RUN_ID/` matches the
+build-from-source `install/` layout (`bin/`, `lib/`, `etc/`).
 
 ## Open a container shell and set `$ROOT`
 
@@ -112,12 +112,23 @@ container with GPU passthrough and UID alignment:
 ./docker/run.sh shell
 
 # Inside the container — pick ONE depending on which entry path you used:
-export ROOT="$WORKSPACE/install"           # Path A
-# export ROOT="$WORKSPACE/prebuilt/$RUN_ID"  # Path C
+export ROOT="$WORKSPACE/install"            # built from source
+# export ROOT="$WORKSPACE/prebuilt/$RUN_ID"  # downloaded CI artifact
 
-# Both paths produce a self-contained $ROOT/lib (Path A via the build's
-# stage step; Path C via the CI artifact's bundled lib/).
-export LD_LIBRARY_PATH="$ROOT/lib"
+# THEROCK_DIST points the in-process tooling at the TheRock SDK that
+# `docker/build.sh` A.4 already downloaded into the workspace. It is
+# required at runtime even though the artifact bundles transitive .so
+# files into $ROOT/lib, because:
+#   1. CompilerDriver::discoverLibraries() reads $THEROCK_DIST to
+#      construct `-L<therock>/lib` paths it passes to ld.lld when
+#      compiling per-model DLLs (otherwise the link errors with
+#      "undefined symbol: hipGetDeviceCount" etc.).
+#   2. libamd_comgr_loader.so.1 (shipped in $ROOT/lib) is a stub that
+#      dlopen()s the real libamd_comgr.so.3 at runtime; the real lib
+#      lives only in $THEROCK_DIST/lib and is not in ldd's view of
+#      transitive deps, so it has to be on LD_LIBRARY_PATH explicitly.
+export THEROCK_DIST="$WORKSPACE/therock-dist"
+export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 
 # Sanity check
 ldd "$ROOT/lib/libonnxruntime_morphizen_ep.so" | grep "not found"   # expect empty
@@ -179,8 +190,8 @@ $ROOT/bin/hip-onnx-runner -L ep_o_dump,cpu_o_dump
 
 ### Latency Benchmarking with onnxruntime_perf_test
 
-`onnxruntime_perf_test` benchmarks inference latency. Path A and Path C
-both ship it next to `hip-onnx-runner`. The examples below compare
+`onnxruntime_perf_test` benchmarks inference latency. Both entry paths
+ship it next to `hip-onnx-runner`. The examples below compare
 MorphiZen EP against the CPU EP baseline (DML is Windows-only).
 
 ```bash
@@ -211,8 +222,8 @@ $ROOT/bin/onnxruntime_perf_test \
 ### OGA End-to-End Benchmarking with model_benchmark
 
 `model_benchmark` benchmarks the full generative pipeline (prefill +
-decode token generation). Path A requires `BUILD_OGA=1`; Path C bundles
-it automatically.
+decode token generation). The build-from-source path requires
+`BUILD_OGA=1` to produce it; the CI artifact bundles it automatically.
 
 ```bash
 # Auto-generated prompt (128 tokens, generate 32)
