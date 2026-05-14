@@ -20,6 +20,7 @@ struct PagedAttentionOpLowering
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
     Type i64Type = rewriter.getI64Type();
+    Type i32Type = rewriter.getI32Type();
     Type f32Type = rewriter.getF32Type();
 
     auto createI64Const = [&](int64_t value) -> Value {
