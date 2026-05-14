@@ -388,6 +388,15 @@ if ! verify_install_closure; then
 fi
 echo "[verify] install/ closure OK"
 
+# sccache stats from the IN-CONTAINER server (the host's sccache-action
+# `Post Setup sccache` queries the host binary which never sees our
+# compiles and always reports 0). Both processes share the same GHA
+# cache backend; this is the real picture of how well we cached.
+if [ "${#SCCACHE_LAUNCHER_ARGS[@]}" -gt 0 ]; then
+    step "sccache stats (in-container)"
+    sccache --show-stats || true
+fi
+
 step "DONE"
 echo "Install tree: $INSTALL_DIR"
 echo
