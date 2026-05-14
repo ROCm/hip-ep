@@ -558,14 +558,16 @@ int wrap_group_query_attention(
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
 
 // PagedAttention (com.microsoft) — stub implementation; MLIR plumbing only.
-int wrap_paged_attention(
-    RuntimeState *state, void *query, void *key, void *value, void *key_cache,
-    void *value_cache, void *cumulative_sequence_length, void *past_seqlens,
-    void *block_table, void *cos_cache, void *sin_cache, void *output,
-    void *key_cache_out, void *value_cache_out, int64_t num_heads,
-    int64_t kv_num_heads, int64_t do_rotary, int64_t rotary_interleaved,
-    int64_t local_window_size, float scale, float softcap, int64_t num_tokens,
-    int64_t query_dim1, int64_t element_size_bytes);
+int wrap_paged_attention(RuntimeState *state, void *query, void *key,
+                         void *value, void *key_cache, void *value_cache,
+                         void *cumulative_sequence_length, void *past_seqlens,
+                         void *block_table, void *cos_cache, void *sin_cache,
+                         void *output, void *key_cache_out,
+                         void *value_cache_out, int64_t num_heads,
+                         int64_t kv_num_heads, int64_t do_rotary,
+                         int64_t rotary_interleaved, int64_t local_window_size,
+                         float scale, float softcap, int64_t num_tokens,
+                         int64_t query_dim1, int64_t element_size_bytes);
 
 // Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
