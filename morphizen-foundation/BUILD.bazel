@@ -36,6 +36,7 @@ cc_library(
     hdrs = [
         "include/morphizen-foundation/encryption.hpp",
         "include/morphizen-foundation/env_config.hpp",
+        "include/morphizen-foundation/file_io.hpp",
         "include/morphizen-foundation/mem_binary.hpp",
         "include/morphizen-foundation/parse_value.hpp",
     ],
