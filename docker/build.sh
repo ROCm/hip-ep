@@ -4,51 +4,18 @@
 ## Licensed under the MIT License.
 ##
 
-# In-container build script. Implements steps A.4-A.8 of docs/quick_start.md
-# "Linux Support → A. Build from source on Linux".
+# In-container build script. Each step is idempotent (skips if its install
+# marker is present); wipe a dir to force that step to redo.
 #
-# Layout matches the Windows quick_start.md "Directory Layout" section:
-# everything is a sibling under <workspace>/, mirroring the upstream pattern
-# so cmake invocations in docs (e.g. `cmake --install ../build/onnxruntime`)
-# work verbatim from the project root.
+# Sibling-of-source layout under <workspace>/ (= dirname $SOURCE_DIR):
+#   onnx-hipdnn-ep/      SOURCE_DIR
+#   onnxruntime/         ORT source     onnxruntime-genai/  OGA source (BUILD_OGA=1)
+#   prebuilt-local/      built deps     therock-dist/       ROCm SDK
+#   build/               cmake builds   install/            install prefix
 #
-#   <workspace>/                          (= dirname $SOURCE_DIR)
-#   ├── onnx-hipdnn-ep/      (SOURCE_DIR — this project's source)
-#   ├── onnxruntime/         (ORT_SRC — ORT source clone, kept on disk so
-#   │                          incremental rebuilds reuse the .git tree)
-#   ├── onnxruntime-genai/   (OGA_SRC — OGA source clone, sibling of ORT
-#   │                          with the repo name; only used when BUILD_OGA=1)
-#   ├── prebuilt-local/      (PREBUILT_DIR — installed deps: ORT, protobuf,
-#   │                          flatbuffers, etc.)
-#   ├── therock-dist/        (THEROCK_DIST_DIR — TheRock ROCm SDK, ~13 GB)
-#   ├── build/               (BUILD_ROOT)
-#   │   ├── onnx-hipdnn-ep/      (BUILD_DIR — this project's cmake build)
-#   │   ├── onnxruntime/         (ORT_BUILD — ORT cmake build)
-#   │   ├── onnxruntime-genai/   (OGA_BUILD — OGA cmake build)
-#   │   └── scratch/             (SCRATCH_DIR — transient src+build for
-#   │                              protobuf / flatbuffers)
-#   ├── install/             (INSTALL_DIR — this project's install prefix)
-#   └── docker/              (this script + run.sh)
-#
-# Each step is idempotent: it checks for the install marker and skips if
-# already done. Re-running this script after a partial failure resumes from
-# the failed step. Wipe a specific dir (e.g. prebuilt-local/, therock-dist/)
-# to force that step to redo.
-#
-# Required env (passed by run.sh):
-#   SOURCE_DIR        — bind-mounted path of onnx-hipdnn-ep checkout
-#   HIP_ARCHITECTURES — gpu arch (e.g. gfx1151)
-#
-# Optional (all default to the layout above; override individually if needed):
-#   PREBUILT_DIR, THEROCK_DIST_DIR, BUILD_ROOT, BUILD_DIR, INSTALL_DIR,
-#   ORT_SRC, ORT_BUILD, OGA_SRC, OGA_BUILD, SCRATCH_DIR
-#   ONNXRUNTIME_VERSION (default 1.25.1)
-#   PROTOBUF_REF        (default v34.0)
-#   FLATBUFFERS_REF     (default v25.12.19)
-#   THEROCK_VERSION     (default therock-dist-linux-gfx1151-7.11.0)
-#   BUILD_OGA           (default 0; 1 = also build OGA model_benchmark)
-#   SKIP_LIT            (default 0; 1 = skip LIT tests)
-#   FORCE_RECONFIGURE   (default 0; 1 = re-run cmake even if build/ exists)
+# Required env (passed by run.sh): SOURCE_DIR, HIP_ARCHITECTURES.
+# Knobs (defaulted below): ONNXRUNTIME_VERSION, PROTOBUF_REF, FLATBUFFERS_REF,
+# THEROCK_VERSION, OGA_REF, BUILD_OGA, SKIP_LIT, FORCE_RECONFIGURE.
 
 set -euo pipefail
 
@@ -58,11 +25,7 @@ set -euo pipefail
 : "${PROTOBUF_REF:=v34.0}"
 : "${FLATBUFFERS_REF:=v25.12.19}"
 : "${THEROCK_VERSION:=therock-dist-linux-gfx1151-7.11.0}"
-# OGA pin: this is the single source of truth for "which OGA SHA to build
-# against" inside the container. CI forwards `OGA_REF` from
-# .github/workflows/linux-build.yml's env block via docker/run.sh, so
-# bumping the workflow env is enough to roll OGA forward. Local dev
-# without an explicit override gets this hard-coded pin.
+# OGA pin (single source of truth; CI overrides via linux-build.yml env).
 : "${OGA_REF:=2615301864b4d2397231d443865cb96111cc5fc2}"
 : "${BUILD_OGA:=0}"
 : "${SKIP_LIT:=0}"
@@ -127,24 +90,13 @@ have_protobuf() {
         || ls "$PREBUILT_DIR"/lib/cmake/utf8_range/utf8_rangeConfig.cmake >/dev/null 2>&1
 }
 have_flatbuffers() {
-    # flatbuffers v25.12.19 installs the cmake package config as
-    # `flatbuffers-config.cmake` (lowercase, hyphenated), not the
-    # CamelCase `FlatBuffersConfig.cmake` an earlier flatbuffers release
-    # used. Both names are valid per find_package(flatbuffers) semantics,
-    # but the actual file determines whether we can skip A.6b. Probing
-    # the wrong name made A.6b rebuild on every CI run even after a
-    # prebuilt-local cache hit (~2-3 min wasted each time).
+    # v25.12.19 ships lowercase `flatbuffers-config.cmake`; older releases used
+    # CamelCase. Probe both so A.6b actually skips on cache hit.
     ls "$PREBUILT_DIR"/lib/cmake/flatbuffers/flatbuffers-config.cmake >/dev/null 2>&1 \
         || ls "$PREBUILT_DIR"/lib/cmake/flatbuffers/FlatBuffersConfig.cmake >/dev/null 2>&1
 }
 have_oga() {
-    # OGA produces two install-facing artifacts that downstream consumers
-    # (gpu-perf-accuracy-test.yml's model_benchmark runs, this artifact's
-    # bin/lib trees) actually use: the model_benchmark CLI binary and the
-    # libonnxruntime-genai.so* SONAME chain. When both are in place we
-    # can skip A.9 entirely. The CI's `Cache OGA install outputs` step
-    # restores exactly these paths on cache hit, so this check is what
-    # bridges the GHA cache to the skip-build path.
+    # Bridges the CI `Cache OGA install outputs` to A.9's skip path.
     [ -x "$INSTALL_DIR/bin/model_benchmark" ] \
         && ls "$INSTALL_DIR"/lib/libonnxruntime-genai.so* >/dev/null 2>&1
 }
@@ -173,13 +125,8 @@ else
         echo "[skip] $ORT_SRC/.git exists — using user-managed checkout as-is"
     fi
     cd "$ORT_SRC"
-    # NOTE: docs/quick_start.md A.5 lists --disable_memleak_checker, but ORT
-    # 1.25.1's Linux build.py rejects it (it's a Windows-only flag from the
-    # build.bat path). Dropping it; memleak checker only matters for tests
-    # which we --skip_tests anyway.
-    # No --build_wheel: it pulls in onnxruntime_python.cmake which needs
-    # Python::NumPy and python dev headers. The hipdnn-ep build only needs
-    # the C++ libs + headers + onnxruntime_perf_test.
+    # No --build_wheel: ORT's python wheel target pulls Python::NumPy and
+    # dev headers; we only need C++ libs + headers + onnxruntime_perf_test.
     ./build.sh \
         --config Release \
         --build_shared_lib \
@@ -189,26 +136,18 @@ else
         --build_dir "$ORT_BUILD" \
         --skip_tests \
         --cmake_generator Ninja
-    # ORT 1.25.1 Linux build.sh writes to $build_dir/Release (no Linux/ prefix
-    # despite docs A.5 implying otherwise — that's the Windows layout).
+    # ORT 1.25.1 Linux build.sh writes to $build_dir/Release (no Linux/
+    # prefix; that's the Windows layout).
     cmake --install "$ORT_BUILD/Release" --prefix "$PREBUILT_DIR"
     PERF_TEST=$(find "$ORT_BUILD" -name onnxruntime_perf_test -type f | head -1)
     mkdir -p "$PREBUILT_DIR/bin"
     if [ -n "$PERF_TEST" ]; then cp "$PERF_TEST" "$PREBUILT_DIR/bin/"; fi
 fi
 
-# OGA's cmake/global_variables.cmake (A.9 below) checks for the ORT C API
-# header at $ORT_HOME/include/onnxruntime_c_api.h (flat), but ORT 1.25.1's
-# `cmake --install` puts them under $PREBUILT_DIR/include/onnxruntime/*.h
-# (nested). Mirror the public headers up to include/ so both layouts
-# resolve.
-#
-# This runs unconditionally — NOT inside the A.5 `if have_ort` block —
-# because actions/cache may restore a prebuilt-local/ from a previous
-# run that didn't have the flatten step, so flattening only on first
-# fresh install would leave cache-hit runs broken. cp -n keeps it
-# idempotent: any file already at include/ root (incl. those from
-# protobuf / flatbuffers installs) is never clobbered.
+# OGA expects ORT C API headers flat at $ORT_HOME/include/onnxruntime_c_api.h
+# but ORT installs them nested under include/onnxruntime/. Flatten so both
+# layouts resolve. Runs outside the `if have_ort` block so cache-restored
+# prebuilt-local/ from older runs also gets the mirror; cp -n is idempotent.
 if [ -d "$PREBUILT_DIR/include/onnxruntime" ]; then
     cp -rn "$PREBUILT_DIR/include/onnxruntime/." "$PREBUILT_DIR/include/" 2>/dev/null || true
 fi
@@ -257,52 +196,28 @@ else
     rm -rf "$FB_SRC" "$FB_BUILD"
 fi
 
-# A.2 — submodules. Run on the HOST first if any submodule is private (the
-# container has no git creds). With submodules already checked out, this is
-# a no-op verification pass. Note: NOT --depth 1 — MorphiZen's recorded
-# commit is not at branch tip, so shallow fetch fails.
+# A.2 — submodules. The container has no SSH creds for the private MorphiZen
+# repo; host runs `git submodule update --init --recursive` with ssh-agent
+# before invoking us (CI does the same via webfactory/ssh-agent). Whitelist
+# only the dirs we touch — avoid `safe.directory '*'` which masks real owner
+# bugs.
 step "A.2  Verify submodules (incl. MorphiZen)"
 cd "$SOURCE_DIR"
-# git on host vs container can disagree on the .git working-tree owner when
-# UID matches but the namespace differs; mark this tree safe. Also whitelist
-# the submodule and sibling source dirs that A.5 (ORT) and A.9 (OGA) touch.
-# We deliberately do NOT use `safe.directory '*'` — that swallows owner
-# mismatches everywhere and can mask real environment bugs.
 git config --global --add safe.directory "$SOURCE_DIR"
 git config --global --add safe.directory "$SOURCE_DIR/3rd-party/morphizen"
 git config --global --add safe.directory "$ORT_SRC"
 git config --global --add safe.directory "$OGA_SRC"
-# Trust user-managed submodule checkouts (same .git-guard pattern as A.5 ORT
-# and A.9 OGA below). The host normally runs
-# `git submodule update --init --recursive` with ssh-agent loaded before
-# invoking docker/run.sh, and CI does the same via webfactory/ssh-agent in
-# linux-build.yml. The container does NOT carry SSH credentials for the
-# private ROCm/MorphiZen repo, so we cannot run `submodule update` here;
-# but we also do not need to, because the submodule is already on disk via
-# the bind-mounted workspace.
 if [ -f 3rd-party/morphizen/CMakeLists.txt ]; then
     echo "[skip] 3rd-party/morphizen already populated — trusting user-managed checkout"
 else
     git submodule update --init --recursive
 fi
 
-# Optional sccache integration. mozilla-actions/sccache-action exports
-# SCCACHE_GHA_ENABLED + ACTIONS_CACHE_URL + ACTIONS_RUNTIME_TOKEN +
-# ACTIONS_RESULTS_URL (cache v2) into the runner env; docker/run.sh
-# forwards all four into the container. Wrap compilers with sccache only
-# when ALL of these are present:
-#   1. SCCACHE_GHA_ENABLED=true
-#   2. sccache binary on PATH (Dockerfile Layer 4 installs it)
-#   3. ACTIONS_CACHE_URL or ACTIONS_RESULTS_URL non-empty
-# The third check is the gate that broke CI run 25804869662: the
-# sccache-action exports SCCACHE_GHA_ENABLED unconditionally, but the
-# cache URL only when GitHub's cache service is actually reachable from
-# the runner. Without it, sccache --start-server fails immediately and
-# every ninja compile job dies with "ACTIONS_CACHE_URL not found".
-#
-# Outside CI all three are empty, so SCCACHE_LAUNCHER_ARGS stays empty
-# and the build runs without a compiler launcher (uncached, as expected
-# for local dev).
+# Optional sccache integration. Gate on ALL of: SCCACHE_GHA_ENABLED=true,
+# sccache on PATH, and ACTIONS_{CACHE,RESULTS}_URL non-empty. The URL check
+# matters because mozilla-actions/sccache-action exports SCCACHE_GHA_ENABLED
+# unconditionally but the URL only when GitHub's cache service is reachable;
+# without it, `sccache --start-server` fails and every compile dies.
 SCCACHE_LAUNCHER_ARGS=()
 if [ "${SCCACHE_GHA_ENABLED:-}" = "true" ] \
         && command -v sccache >/dev/null 2>&1 \
@@ -316,9 +231,7 @@ else
     echo "[sccache] disabled — no GHA cache URL in env (cold build expected)"
 fi
 
-# A.7 — Configure + build hipdnn-ep. BUILD_DIR / INSTALL_DIR were resolved
-# at the top of this script (defaults: <workspace>/build/<repo>/ and
-# <workspace>/install/). Source tree stays untouched.
+# A.7 — Configure + build hipdnn-ep. Out-of-source: source tree untouched.
 if [ "$FORCE_RECONFIGURE" = "1" ] || [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
     step "A.7  Configure (HIP_ARCHITECTURES=$HIP_ARCHITECTURES)"
     cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" \
@@ -346,43 +259,24 @@ cmake --build "$BUILD_DIR" --parallel "$NPROC"
 step "A.7  Install -> $INSTALL_DIR"
 cmake --install "$BUILD_DIR"
 
-# A.7b — Stage runtime .so deps we BUILD ourselves (prebuilt-local sources:
-# ORT + protobuf + flatbuffers) into install/lib. Without this step,
-# install/lib only carries libhip-compiler.so +
-# libonnxruntime_morphizen_ep.so and the caller still has to add
-# prebuilt-local/lib to LD_LIBRARY_PATH.
+# A.7b — Stage prebuilt-local deps (ORT + protobuf + flatbuffers) into
+# install/lib so LD_LIBRARY_PATH=install/lib:therock-dist/lib is enough.
 #
-# We deliberately do NOT stage TheRock-origin .so files (libamdhip64,
-# libhsa-runtime64, librocprofiler-register, libamd_comgr_loader,
-# librocm_sysdeps_*, ...) — matching the Windows artifact's contract
-# (gpu-perf-accuracy-test.yml downloads TheRock separately on the GPU
-# host and adds it to PATH/LIB). Reasons:
-#   1. The artifact halves in size (~310 MB -> ~150 MB) without TheRock
-#      bundles, since libamdhip64 alone is 26 MB and pulls another
-#      ~35 MB of transitive ROCm sysdeps + profiler libs.
-#   2. libamd_comgr_loader.so is a stub that dlopens the real
-#      libamd_comgr.so.3 at runtime; ldd does NOT see that runtime
-#      dlopen, so bundling the stub without the real lib silently
-#      breaks the artifact for any consumer who lacks TheRock on PATH.
-#      Not shipping the stub at all forces consumers to set up the
-#      full TheRock SDK (which then has both the stub AND its target).
-#   3. ROCm runtime is host-environment in nature — version skew
-#      between bundled libamdhip64 and the host's kernel driver / KFD
-#      ioctl ABI is a real risk. Letting the host provide both kernel
-#      and userland keeps that interface consistent.
+# We do NOT bundle TheRock-origin .so files (libamdhip64, libhsa-runtime64,
+# librocm_sysdeps_*, libamd_comgr_loader, ...). Matches the Windows
+# artifact contract (gpu-perf-accuracy-test.yml downloads TheRock
+# separately on the GPU host). Reasons:
+#   1. Halves artifact size (310 -> 150 MB).
+#   2. libamd_comgr_loader.so is a stub that dlopens libamd_comgr.so.3 at
+#      runtime — ldd misses the dlopen, so we'd ship the stub without its
+#      target and silently break consumers without TheRock on PATH.
+#   3. ROCm userland shares a private ioctl ABI with the amdgpu kernel
+#      driver; bundling a fixed libamdhip64 risks kernel-vs-userland skew.
 #
-# Implementation:
-#   Pass 1 — ldd the EP + CLI tools with TheRock + prebuilt-local on
-#            LD_LIBRARY_PATH so all SONAMEs resolve; pick up every .so
-#            whose resolved path lives under PREBUILT_DIR and copy it
-#            (plus its readlink target so the SONAME chain stays
-#            valid) into install/lib.
-#   Pass 2 — ldd the just-staged set so transitive deps within
-#            prebuilt-local (e.g. onnxruntime_providers_shared.so)
-#            are caught. With TheRock excluded the pass converges in
-#            1-2 iterations.
-# /usr/lib/x86_64-linux-gnu/libLLVM.so.22.1 et al. also stay system-
-# managed (container apt packages on the default ld.so search path).
+# 2-pass ldd: pass 1 ldds the EP + CLI tools; pass 2 loops over the just-
+# staged libs to catch transitive deps (e.g. onnxruntime_providers_shared.so).
+# awk filter copies only PREBUILT_DIR-resolved paths; TheRock + /usr/lib
+# entries stay system-managed.
 step "A.7b  Stage runtime .so into install/lib (prebuilt-local only)"
 stage_from_ldd_pass() {
     LD_LIBRARY_PATH="$THEROCK_DIST_DIR/lib:$PREBUILT_DIR/lib:$INSTALL_DIR/lib" \
@@ -393,8 +287,7 @@ stage_from_ldd_pass() {
             dst="$INSTALL_DIR/lib/$(basename "$src")"
             if [ ! -e "$dst" ]; then
                 cp -a "$src" "$dst"
-                # If $src is a symlink, also copy the readlink target so the
-                # `lib<name>.so.1 -> lib<name>.so.1.X.Y` chain resolves.
+                # Also copy the readlink target so the SONAME chain resolves.
                 real=$(readlink -f "$src")
                 rb=$(basename "$real")
                 if [ "$rb" != "$(basename "$src")" ] && [ ! -e "$INSTALL_DIR/lib/$rb" ]; then
@@ -404,7 +297,6 @@ stage_from_ldd_pass() {
         done
 }
 
-# Pass 1: direct deps of the EP + CLI tools.
 stage_from_ldd_pass \
     "$INSTALL_DIR/lib/libonnxruntime_morphizen_ep.so" \
     "$INSTALL_DIR/lib/libhip-compiler.so" \
@@ -412,9 +304,7 @@ stage_from_ldd_pass \
     "$INSTALL_DIR/bin/hip-onnx-runner" \
     "$INSTALL_DIR/bin/hip-test-dll"
 
-# Pass 2: transitive — ldd the libs we just staged. Loop to a fixed point so
-# any second-level deps that Pass 2 itself introduces (rare with current ORT
-# + TheRock SO graph, but cheap to be defensive) are also picked up.
+# Loop to a fixed point so second-level transitive deps are caught too.
 prev_count=0
 for _i in 1 2 3 4; do
     mapfile -t _staged < <(find "$INSTALL_DIR/lib" -maxdepth 1 -name 'lib*.so*' -type f)
@@ -432,20 +322,9 @@ if [ "$SKIP_LIT" != "1" ]; then
     cmake --build "$BUILD_DIR" --target check-hip-mlir-lit
 fi
 
-# A.9 — OGA model_benchmark (optional)
-#
-# Source layout mirrors ORT: <workspace>/onnxruntime-genai/ (sibling to
-# onnxruntime/, named after the repo) so users who manage their own checkout
-# can drop it in beside ORT without touching env vars. The .git guard below
-# means an existing checkout is respected as-is — no fetch, no checkout, no
-# submodule update. OGA_REF (resolved at the top of this script from env or
-# the hard-coded default) is applied only to a fresh clone.
-#
-# Skip-the-build gate: have_oga() returns true when the install artifacts
-# are already in place — either built earlier this run, or restored from
-# CI's `Cache OGA install outputs` cache step. The CI cache key includes
-# OGA_REF + ONNXRUNTIME_VERSION, so bumping either at the workflow level
-# automatically misses the cache here and triggers a rebuild.
+# A.9 — OGA model_benchmark (optional). have_oga skips the build when the
+# install artifacts are present (either built this run or restored from CI's
+# `Cache OGA install outputs`). OGA_REF bumps invalidate that cache key.
 if [ "$BUILD_OGA" = "1" ]; then
     if have_oga; then
         echo "[skip] OGA model_benchmark + libonnxruntime-genai.so* already in $INSTALL_DIR"
@@ -458,12 +337,9 @@ if [ "$BUILD_OGA" = "1" ]; then
         else
             echo "[skip] $OGA_SRC/.git exists — using user-managed checkout as-is"
         fi
-        # --skip_wheel: the OGA python wheel is unusable on Linux without
-        # an ORT python wheel (the OGA wheel does `import onnxruntime` at
-        # runtime), and A.5 deliberately omits ORT --build_wheel to avoid
-        # the Python::NumPy / dev-headers dependency drag. Skipping the
-        # OGA wheel saves ~1-3 min of pybind11 + pip wheel pack on cold
-        # builds. Consumers who need the wheel build OGA from source.
+        # --skip_wheel: the OGA python wheel needs an ORT python wheel at
+        # `import` time, but A.5 omits ORT --build_wheel; shipping it would
+        # be useless and burns ~1-3 min on pybind11 + wheel pack.
         python3 "$OGA_SRC/build.py" \
             --config Release \
             --cmake_generator Ninja \
@@ -474,42 +350,24 @@ if [ "$BUILD_OGA" = "1" ]; then
         cp "$OGA_BUILD/Release/benchmark/c/model_benchmark" "$INSTALL_DIR/bin/"
         cp -a "$OGA_BUILD"/Release/libonnxruntime-genai.so* "$INSTALL_DIR/lib/"
     fi
-    # OGA brought in libonnxruntime-genai.so (and possibly transitively
-    # libonnxruntime.so already staged in A.7b). Re-run one ldd pass so
-    # any new deps OGA pulls in (e.g. pybind11 runtime, tokenizers) land
-    # in install/lib too. Runs regardless of build-vs-skip so a cache-
-    # restored libonnxruntime-genai.so still drives its transitive .so
-    # set through the closure check below.
+    # Drag OGA's transitive prebuilt-local deps (pybind11 etc.) into
+    # install/lib. Runs in both build + skip branches so cache-restored
+    # libonnxruntime-genai.so still feeds the closure check below.
     stage_from_ldd_pass \
         "$INSTALL_DIR/bin/model_benchmark" \
         "$INSTALL_DIR"/lib/libonnxruntime-genai.so*
 fi
 
-# Final closure check: with install/lib + therock-dist/lib on
-# LD_LIBRARY_PATH, every binary under install/bin and every .so under
-# install/lib must resolve all of its DT_NEEDED entries. Runs AFTER A.9
-# so OGA's deps are covered.
-#
-# Why include therock-dist/lib instead of just install/lib: per A.7b we
-# intentionally do NOT bundle TheRock-origin .so files into install/lib
-# (consumers are expected to set THEROCK_DIST and add it to their
-# LD_LIBRARY_PATH at runtime, matching the Windows artifact contract).
-# The check therefore reflects the actual supported invocation:
-#     LD_LIBRARY_PATH=$ROOT/lib:$THEROCK_DIST/lib
-# (documented in docs/quick_start_linux.md "Open a container shell").
-#
-# Failure here means the artifact will break on a fresh host (where the
-# build-host's apt LLVM / ORT prefixes are absent), or that something
-# leaked into install/lib that needed a prefix outside the supported
-# {install, therock-dist, system-apt} set — better to surface it now
-# than ship a broken linux-gpu-test-package.
+# Closure check: with install/lib + therock-dist/lib on LD_LIBRARY_PATH
+# (the supported runtime invocation, per docs/quick_start_linux.md), every
+# install/bin binary and install/lib .so must resolve all DT_NEEDED. Catches
+# leaks into install/lib that depend on a prefix outside {install,
+# therock-dist, system-apt} before they ship.
 step "Verify install/ closure (LD_LIBRARY_PATH=install/lib:therock-dist/lib)"
 verify_install_closure() {
     local fail=0
     local target unresolved
     while IFS= read -r target; do
-        # ldd a non-ELF file (e.g. shell wrapper script we accidentally
-        # dropped into bin/) prints "not a dynamic executable" — skip those.
         unresolved=$(LD_LIBRARY_PATH="$INSTALL_DIR/lib:$THEROCK_DIST_DIR/lib" \
                      ldd "$target" 2>&1 \
                      | grep -F "not found" || true)
