@@ -65,16 +65,6 @@ populate_common_args() {
         -v "/dev/shm:/dev/shm"
         --network=host
     )
-    # Forward both GHA cache URLs (v1 = ACTIONS_CACHE_URL, v2 =
-    # ACTIONS_RESULTS_URL) — runners may export either. build.sh gates
-    # the compiler launcher on at least one being non-empty.
-    local var
-    for var in SCCACHE_GHA_ENABLED ACTIONS_CACHE_URL ACTIONS_RESULTS_URL \
-               ACTIONS_RUNTIME_TOKEN; do
-        if [ -n "${!var:-}" ]; then
-            _out+=(-e "$var=${!var}")
-        fi
-    done
 }
 
 # GPU passthrough — `shell` only, since `build` is compile-only.

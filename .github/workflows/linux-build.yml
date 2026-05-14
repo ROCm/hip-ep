@@ -14,13 +14,6 @@ on:
 
 permissions:
   contents: read
-  # GHA cache v2 (ACTIONS_RESULTS_URL) requires `actions: write` for cache
-  # writes. actions/cache wraps the API so its writes succeed with the
-  # default token scopes, but sccache talks to the v2 service directly via
-  # opendal and needs the explicit grant. Without this the previous run
-  # logged 314 cache write errors / 0 cache writes from in-container
-  # sccache 0.10.0 and the next run still cold-built the project.
-  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,13 +25,6 @@ env:
   # or docker/build.sh meaningfully changes what lands under prebuilt-local/
   # (ORT + protobuf + flatbuffers install trees).
   CACHE_VERSION: "1"
-  # SCCACHE_GHA_ENABLED is consumed by:
-  #   1. mozilla-actions/sccache-action's auto-config (sets ACTIONS_CACHE_URL
-  #      and ACTIONS_RUNTIME_TOKEN on the runner)
-  #   2. docker/run.sh which forwards all three vars into the container
-  #   3. docker/build.sh which wires CMAKE_*_COMPILER_LAUNCHER=sccache only
-  #      when this is "true" (the binary is otherwise idle inside the image)
-  SCCACHE_GHA_ENABLED: "true"
   # Pinned versions — kept in lockstep with docker/build.sh defaults.
   ONNXRUNTIME_VERSION: "1.25.1"
   THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
@@ -95,13 +81,6 @@ jobs:
           large-packages: false    # skipped: very slow, marginal gain
           swap-storage: true       # ~4 GB
 
-      # sccache + GHA cache backend. The action sets ACTIONS_CACHE_URL /
-      # ACTIONS_RUNTIME_TOKEN on the runner; docker/run.sh forwards them
-      # into the container so the in-container sccache binary (installed
-      # via docker/Dockerfile) talks back to the same backend.
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
       # -----------------------------------------------------------------------
       # Caches live as siblings of the source checkout (matches the layout
       # docker/build.sh expects). Cache misses get repopulated by the Docker
@@ -145,10 +124,7 @@ jobs:
       # The actual build: one docker invocation runs all of A.4-A.9
       # (TheRock + ORT + protobuf + flatbuffers + project + OGA). Each step
       # has its own `[skip]` short-circuit when the corresponding install
-      # artifact is already in place from the cache. The container reads
-      # SCCACHE_GHA_ENABLED + ACTIONS_CACHE_URL + ACTIONS_RUNTIME_TOKEN
-      # (forwarded by docker/run.sh) and routes compiler launchers to
-      # in-container sccache via docker/build.sh's opt-in wiring.
+      # artifact is already in place from the cache.
       #
       # The same image + recipe is what local developers run via
       # `./docker/run.sh build` — see docs/quick_start_linux.md.

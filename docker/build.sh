@@ -213,24 +213,6 @@ else
     git submodule update --init --recursive
 fi
 
-# Optional sccache integration. Gate on ALL of: SCCACHE_GHA_ENABLED=true,
-# sccache on PATH, and ACTIONS_{CACHE,RESULTS}_URL non-empty. The URL check
-# matters because mozilla-actions/sccache-action exports SCCACHE_GHA_ENABLED
-# unconditionally but the URL only when GitHub's cache service is reachable;
-# without it, `sccache --start-server` fails and every compile dies.
-SCCACHE_LAUNCHER_ARGS=()
-if [ "${SCCACHE_GHA_ENABLED:-}" = "true" ] \
-        && command -v sccache >/dev/null 2>&1 \
-        && [ -n "${ACTIONS_CACHE_URL:-}${ACTIONS_RESULTS_URL:-}" ]; then
-    SCCACHE_LAUNCHER_ARGS=(
-        -DCMAKE_C_COMPILER_LAUNCHER=sccache
-        -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-    )
-    echo "[sccache] enabled (gha backend; cache URL detected)"
-else
-    echo "[sccache] disabled — no GHA cache URL in env (cold build expected)"
-fi
-
 # A.7 — Configure + build hipdnn-ep. Out-of-source: source tree untouched.
 if [ "$FORCE_RECONFIGURE" = "1" ] || [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
     step "A.7  Configure (HIP_ARCHITECTURES=$HIP_ARCHITECTURES)"
@@ -247,8 +229,7 @@ if [ "$FORCE_RECONFIGURE" = "1" ] || [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
         -DBUILD_EP=ON \
         -DBUILD_MOCK_RUNTIME=OFF \
         -DBUILD_HIP_TOOLS=ON \
-        -Dmorphizen_ENABLE_UNIT_TEST=OFF \
-        "${SCCACHE_LAUNCHER_ARGS[@]}"
+        -Dmorphizen_ENABLE_UNIT_TEST=OFF
 else
     echo "[skip] $BUILD_DIR/CMakeCache.txt exists — skipping configure (FORCE_RECONFIGURE=1 to redo)"
 fi
@@ -387,15 +368,6 @@ if ! verify_install_closure; then
     exit 1
 fi
 echo "[verify] install/ closure OK"
-
-# sccache stats from the IN-CONTAINER server (the host's sccache-action
-# `Post Setup sccache` queries the host binary which never sees our
-# compiles and always reports 0). Both processes share the same GHA
-# cache backend; this is the real picture of how well we cached.
-if [ "${#SCCACHE_LAUNCHER_ARGS[@]}" -gt 0 ]; then
-    step "sccache stats (in-container)"
-    sccache --show-stats || true
-fi
 
 step "DONE"
 echo "Install tree: $INSTALL_DIR"
