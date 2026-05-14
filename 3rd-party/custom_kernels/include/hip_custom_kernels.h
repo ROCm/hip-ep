@@ -606,6 +606,38 @@ int hip_reduce_sum(
     int hip_dtype);
 
 /* =========================================================================
+ * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
+ * =========================================================================
+ *
+ * Both share the structure: one block reduces `reduce_size = num_input /
+ * num_output` consecutive input elements into a single output. The reduce
+ * axes must already be collapsed into the trailing dimension of `data`
+ * (the upstream lowering arranges this for us).
+ *
+ * - hip_reduce_max  : Max op, init = -INF (FP) / TYPE_MIN (INT). NaN propagating
+ *                     on the FP path (matches ORT _Max<float>).
+ * - hip_reduce_prod : Mul op, init = 1.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
+ * (FP16 accumulates in float, narrows on write).
+ */
+int hip_reduce_max(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int hip_dtype);
+
+int hip_reduce_prod(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int hip_dtype);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *
