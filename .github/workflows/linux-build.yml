@@ -106,12 +106,6 @@ jobs:
           path: ${{ github.workspace }}/prebuilt-local
           key: linux-deps-v${{ env.CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
-      - name: Cache TheRock SDK
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ github.workspace }}/therock-dist
-          key: ${{ env.THEROCK_VERSION }}
-
       - name: Cache ORT source clone
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
@@ -123,6 +117,22 @@ jobs:
         with:
           path: ${{ github.workspace }}/onnxruntime-genai
           key: oga-src-${{ env.OGA_REF }}
+
+      # Cache the OGA INSTALL outputs (not the full build/ tree). With
+      # docker/build.sh A.9's have_oga() guard, a cache hit on this key
+      # means we skip the 5-10 min OGA build entirely. ORT version is in
+      # the key because OGA's libonnxruntime-genai.so links libonnxruntime.so
+      # at its pinned ABI; an ORT version bump must invalidate the OGA
+      # outputs. ${OGA_REF} is the primary update knob — change it in env
+      # above to roll OGA forward and the cache key automatically misses.
+      - name: Cache OGA install outputs
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            ${{ github.workspace }}/install/bin/model_benchmark
+            ${{ github.workspace }}/install/lib/libonnxruntime-genai.so
+            ${{ github.workspace }}/install/lib/libonnxruntime-genai.so.0
+          key: oga-out-v${{ env.CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
       # -----------------------------------------------------------------------
       # The actual build: one docker invocation runs all of A.4-A.9
@@ -138,6 +148,13 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Build via Docker
         working-directory: onnx-hipdnn-ep
+        env:
+          # OGA_REF is the single source of truth for which OGA SHA gets
+          # cloned + built. docker/run.sh forwards it into the container
+          # and docker/build.sh A.9 reads it as the checkout target. Bump
+          # OGA_REF in this workflow's env block to roll OGA forward —
+          # nothing else needs to change.
+          OGA_REF: ${{ env.OGA_REF }}
         run: |
           set -euo pipefail
           ./docker/run.sh image
@@ -151,17 +168,24 @@ jobs:
       #                    libonnxruntime.so*, libonnxruntime-genai.so*,
       #                    libamdhip64.so* + TheRock transitive + libLLVM.so.22.1
       #   staging/etc/   – morphizen_config.json
-      #   staging/wheels – onnxruntime-*.whl + onnxruntime_genai-*.whl
       #
-      # docker/build.sh A.7b already runs a 2-pass `ldd` inside the container
-      # and bundles the TheRock + ORT transitive .so set into install/lib/,
-      # so this step is just a flat `cp` from install/ + a couple of side
-      # gather operations (wheels live under build/, config under repo's etc/).
+      # No staging/wheels on Linux: the OGA python wheel needs `import
+      # onnxruntime` at runtime, but the Linux build deliberately omits
+      # the ORT wheel (A.5 skips --build_wheel to avoid pulling in
+      # Python::NumPy + dev headers). Without an ORT wheel, the OGA
+      # wheel can't be `pip install`ed on its own, so shipping it serves
+      # no consumer. The C++ model_benchmark binary is what's actually
+      # used for benchmarking and it lands in staging/bin/.
+      #
+      # docker/build.sh A.7b already runs a 2-pass `ldd` inside the
+      # container and bundles the TheRock + ORT transitive .so set into
+      # install/lib/, so this step is a flat `cp` from install/ + one
+      # config side-copy.
       # -----------------------------------------------------------------------
       - name: Stage Linux GPU test package
         run: |
           set -euo pipefail
-          mkdir -p staging/bin staging/lib staging/etc staging/wheels
+          mkdir -p staging/bin staging/lib staging/etc
 
           cp -a "${{ github.workspace }}/install/bin/." staging/bin/
           cp -a "${{ github.workspace }}/install/lib/." staging/lib/
@@ -169,12 +193,6 @@ jobs:
           # Config lives in the repo etc/ on Path A (install/bin gets a copy
           # too; both are fine, we pick the source-of-truth here).
           cp onnx-hipdnn-ep/etc/morphizen_config.json staging/etc/
-
-          # Python wheels (ORT + OGA) for pip-install consumers.
-          find "${{ github.workspace }}/build" -name "onnxruntime_genai-*.whl" \
-            -exec cp {} staging/wheels/ \; || true
-          find "${{ github.workspace }}/build" -name "onnxruntime-*-linux_x86_64.whl" \
-            -exec cp {} staging/wheels/ \; || true
 
           chmod +x staging/bin/*
 
