@@ -1077,20 +1077,25 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   // Grow: free old, allocate new.
   // Sync the stream first to ensure no in-flight kernel is still using the
   // old workspace buffer (prevents use-after-free on async GPU execution).
+  // Sync failure is logged but not propagated: there is no recovery
+  // (refusing to grow would deadlock the caller, and the next hipFree /
+  // hipMalloc will surface a real device fault if the sync truly left
+  // things unusable).
   if (state->workspace) {
     if (state->stream) {
-      hipStreamSynchronize(state->stream);
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
     HIP_CLEANUP(hipFree(state->workspace));
     state->workspace = nullptr;
     state->workspace_size = 0;
   }
 
-  if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
-    fprintf(
-        stderr,
-        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
-        alloc_size);
+  hipError_t alloc_err = hipMalloc(&state->workspace, alloc_size);
+  if (alloc_err != hipSuccess || !state->workspace) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_workspace: hipMalloc(%zu) failed: %s\n",
+            alloc_size, hipGetErrorString(alloc_err));
+    state->workspace = nullptr;
     std::abort();
   }
 

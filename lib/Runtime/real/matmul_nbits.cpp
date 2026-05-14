@@ -7,7 +7,7 @@
 #include "../module_registry.h"
 #include "../op_profile.h"
 #include "../runtime_state_internal.h"
-#include "error_check_macros.h"
+#include "error_check_macros.h" // HIP_CHECK_GOTO + HIP_CLEANUP
 #include "hip_custom_kernels.h"
 #include "zp_unpack_cache.h"
 
@@ -39,10 +39,17 @@ struct ZpUnpackState {
   explicit ZpUnpackState(RuntimeState *) {}
 
   ~ZpUnpackState() {
-    for (auto &kv : u8)
-      hipFree(kv.second.first);
-    for (auto &kv : fp16)
-      hipFree(kv.second.first);
+    // Best-effort: HIP_CLEANUP logs and continues so a single bad entry
+    // doesn't leak the rest. Callers (op-module destroy) have already
+    // synced the stream, so no in-flight kernel should reference these.
+    for (auto &kv : u8) {
+      if (kv.second.first)
+        HIP_CLEANUP(hipFree(kv.second.first));
+    }
+    for (auto &kv : fp16) {
+      if (kv.second.first)
+        HIP_CLEANUP(hipFree(kv.second.first));
+    }
   }
 };
 
@@ -55,9 +62,20 @@ HIPDNN_OP_MODULE(zp_unpack_module, "zp_unpack", hipdnn_ep_real::ZpUnpackState);
 namespace hipdnn_ep_real {
 
 // Returns the cached u8 buffer for `zp_packed`, or unpacks into a freshly
-// allocated buffer on miss. Returns nullptr only on hipMalloc failure.
+// allocated buffer on miss. Returns nullptr on validation, allocation, or
+// kernel-launch failure. On launch failure we free dst before returning so
+// the cache is NOT poisoned with a buffer holding undefined contents (a
+// silently-cached miss would otherwise feed garbage to every later
+// matmul_nbits/qmoe call that shares this zero_points pointer).
 const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
                                    const void *zp_packed, int N, int groups_k) {
+  if (!zp_packed || !stream || N <= 0 || groups_k <= 0) {
+    fprintf(stderr,
+            "matmul_nbits: lookup_or_unpack_zp_u8 invalid arg "
+            "(zp_packed=%p, stream=%p, N=%d, groups_k=%d)\n",
+            zp_packed, stream, N, groups_k);
+    return nullptr;
+  }
   ZpUnpackState *st = zp_unpack_module(state);
   if (!st) {
     fprintf(stderr, "matmul_nbits: failed to obtain ZpUnpackState\n");
@@ -73,16 +91,34 @@ const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
   // Miss (or cached buffer too small for an unexpected re-shape on the same
   // pointer — shouldn't happen for stable model constants, but guard it).
   void *dst = nullptr;
-  if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_u8 cache failed\n",
-            need);
+  hipError_t alloc_err = hipMalloc(&dst, need);
+  if (alloc_err != hipSuccess || !dst) {
+    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_u8 cache failed: %s\n",
+            need, hipGetErrorString(alloc_err));
     return nullptr;
   }
+
+  // Clear any leftover error before launch so the post-launch check
+  // attributes only THIS kernel's outcome. hipPeekAtLastError is a sticky
+  // read-and-clear shim; hipGetLastError after the launch tests the launch
+  // status (config errors land here for async kernels).
+  (void)hipGetLastError();
   hip_matmul_nbits_unpack_zp_u8(stream, zp_packed, dst, N, groups_k);
+  hipError_t launch_err = hipGetLastError();
+  if (launch_err != hipSuccess) {
+    fprintf(stderr,
+            "matmul_nbits: hip_matmul_nbits_unpack_zp_u8 launch failed: "
+            "%s (N=%d, groups_k=%d)\n",
+            hipGetErrorString(launch_err), N, groups_k);
+    HIP_CLEANUP(hipFree(dst));
+    return nullptr;
+  }
 
   if (it != st->u8.end()) {
-    // Replace the undersized entry. Free the stale buffer.
-    hipFree(it->second.first);
+    // Replace the undersized entry. Free the stale buffer (best-effort:
+    // logging without aborting -- worst case a small one-time leak).
+    if (it->second.first)
+      HIP_CLEANUP(hipFree(it->second.first));
     it->second = {dst, need};
   } else {
     st->u8.emplace(zp_packed, std::make_pair(dst, need));
@@ -93,6 +129,13 @@ const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
 const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
                                       const void *zp_packed, int N,
                                       int groups_k) {
+  if (!zp_packed || !stream || N <= 0 || groups_k <= 0) {
+    fprintf(stderr,
+            "matmul_nbits: lookup_or_convert_zp_fp16 invalid arg "
+            "(zp_packed=%p, stream=%p, N=%d, groups_k=%d)\n",
+            zp_packed, stream, N, groups_k);
+    return nullptr;
+  }
   ZpUnpackState *st = zp_unpack_module(state);
   if (!st) {
     fprintf(stderr, "matmul_nbits: failed to obtain ZpUnpackState\n");
@@ -107,15 +150,29 @@ const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
     return it->second.first;
 
   void *dst = nullptr;
-  if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_fp16 cache failed\n",
-            need);
+  hipError_t alloc_err = hipMalloc(&dst, need);
+  if (alloc_err != hipSuccess || !dst) {
+    fprintf(stderr,
+            "matmul_nbits: hipMalloc(%zu) for zp_fp16 cache failed: %s\n", need,
+            hipGetErrorString(alloc_err));
     return nullptr;
   }
+
+  (void)hipGetLastError();
   hip_matmul_nbits_convert_zp_fp16(stream, zp_packed, dst, N, groups_k);
+  hipError_t launch_err = hipGetLastError();
+  if (launch_err != hipSuccess) {
+    fprintf(stderr,
+            "matmul_nbits: hip_matmul_nbits_convert_zp_fp16 launch failed: "
+            "%s (N=%d, groups_k=%d)\n",
+            hipGetErrorString(launch_err), N, groups_k);
+    HIP_CLEANUP(hipFree(dst));
+    return nullptr;
+  }
 
   if (it != st->fp16.end()) {
-    hipFree(it->second.first);
+    if (it->second.first)
+      HIP_CLEANUP(hipFree(it->second.first));
     it->second = {dst, need};
   } else {
     st->fp16.emplace(zp_packed, std::make_pair(dst, need));

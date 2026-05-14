@@ -10,7 +10,14 @@
 // inline the alloc / free pair into module destructors. grow() returns
 // 0 / -1; sync-then-realloc on grow; destructor frees without pre-sync
 // (relies on hipdnn_ep_state_cleanup having already synced the stream).
+//
+// HIP calls outside of grow()'s alloc step are best-effort: a failure in
+// hipStreamSynchronize or hipFree/hipHostFree is logged but does not
+// abort the surrounding op. The alloc step is the only one that returns
+// -1 to the caller, because that is the only failure mode the caller can
+// usefully react to.
 
+#include "hip_cleanup.h" // HIP_CLEANUP (best-effort logging wrapper)
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
@@ -69,7 +76,8 @@ public:
   size_t size() const noexcept { return size_; }
 
   // Returns 0 (already large enough OR grown successfully) or -1 (alloc
-  // failure). Syncs the bound stream before freeing the old pointer.
+  // failure). Syncs the bound stream before freeing the old pointer so a
+  // late in-flight kernel can't fault on the about-to-be-freed buffer.
   int grow(size_t needed) {
     if (needed == 0)
       return 0;
@@ -80,16 +88,21 @@ public:
 
     if (ptr_) {
       if (stream_) {
-        hipStreamSynchronize(stream_);
+        // Sync failure is logged but not propagated: there is no good
+        // recovery here, and refusing to grow would deadlock the caller.
+        // hipFree below will surface a real fault if the sync truly left
+        // the device unusable.
+        HIP_CLEANUP(hipStreamSynchronize(stream_));
       }
-      hipFree(ptr_);
+      HIP_CLEANUP(hipFree(ptr_));
       ptr_ = nullptr;
       size_ = 0;
     }
 
-    if (hipMalloc(&ptr_, alloc_size) != hipSuccess) {
-      fprintf(stderr, "GrowableDeviceBuffer: hipMalloc failed for %zu bytes\n",
-              alloc_size);
+    hipError_t alloc_err = hipMalloc(&ptr_, alloc_size);
+    if (alloc_err != hipSuccess || !ptr_) {
+      fprintf(stderr, "GrowableDeviceBuffer: hipMalloc(%zu) failed: %s\n",
+              alloc_size, hipGetErrorString(alloc_err));
       ptr_ = nullptr;
       return -1;
     }
@@ -100,7 +113,7 @@ public:
 private:
   void free_now() noexcept {
     if (ptr_) {
-      hipFree(ptr_);
+      HIP_CLEANUP(hipFree(ptr_));
       ptr_ = nullptr;
       size_ = 0;
     }
@@ -156,18 +169,20 @@ public:
     if (ptr_) {
       if (stream_) {
         // Any in-flight hipMemcpyAsync targeting this pinned buffer must
-        // complete before we free it.
-        hipStreamSynchronize(stream_);
+        // complete before we free it. Sync failure is logged but not
+        // propagated (same reason as GrowableDeviceBuffer).
+        HIP_CLEANUP(hipStreamSynchronize(stream_));
       }
-      hipHostFree(ptr_);
+      HIP_CLEANUP(hipHostFree(ptr_));
       ptr_ = nullptr;
       size_ = 0;
     }
 
-    if (hipHostMalloc(&ptr_, alloc_size, hipHostMallocDefault) != hipSuccess) {
-      fprintf(stderr,
-              "GrowablePinnedBuffer: hipHostMalloc failed for %zu bytes\n",
-              alloc_size);
+    hipError_t alloc_err =
+        hipHostMalloc(&ptr_, alloc_size, hipHostMallocDefault);
+    if (alloc_err != hipSuccess || !ptr_) {
+      fprintf(stderr, "GrowablePinnedBuffer: hipHostMalloc(%zu) failed: %s\n",
+              alloc_size, hipGetErrorString(alloc_err));
       ptr_ = nullptr;
       return -1;
     }
@@ -178,7 +193,7 @@ public:
 private:
   void free_now() noexcept {
     if (ptr_) {
-      hipHostFree(ptr_);
+      HIP_CLEANUP(hipHostFree(ptr_));
       ptr_ = nullptr;
       size_ = 0;
     }
