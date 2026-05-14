@@ -21,8 +21,14 @@ namespace {
 /// Requires: (1) supported op type and (2) all tensor shapes are static
 /// (hipDNN compiles execution plans for concrete dimensions).
 static bool isSupportedOp(Operation *op) {
-  if (op->getName().getStringRef() != "onnx.Conv")
+  StringRef opName = op->getName().getStringRef();
+
+  // Check if op is a supported type
+  if (opName != "onnx.Conv" &&
+      opName != "onnx.MatMul")
     return false;
+
+  // All inputs and outputs must have static shapes
   auto isStaticIfTensor = [](Type t) {
     if (auto ranked = dyn_cast<RankedTensorType>(t))
       return ranked.hasStaticShape();

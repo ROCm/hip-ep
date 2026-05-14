@@ -263,6 +263,36 @@ AddConvNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
   return Status::Success();
 }
 
+// Add MatMul operation from an onnx.MatMul op to hipDNN graph.
+// Implements C = A @ B with optional batch dimensions (broadcasting supported).
+static Status
+AddMatMulNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
+                          mlir::Operation *op,
+                          const std::vector<TensorAttrPtr> &input_attrs,
+                          TensorAttrPtr &output_attr, int64_t &next_uid) {
+  using namespace hipdnn_frontend::graph;
+
+  // Validate input count: MatMul requires exactly 2 inputs (A and B)
+  if (input_attrs.size() != 2)
+    return Status::Failure("onnx.MatMul requires exactly 2 inputs (A and B)");
+
+  const auto &a_attr = input_attrs[0];
+  const auto &b_attr = input_attrs[1];
+
+  // Validate inputs are tensors, not scalars
+  if (IsScalarAttr(a_attr) || IsScalarAttr(b_attr))
+    return Status::Failure("onnx.MatMul inputs must be tensors, not scalars");
+
+  // Create MatmulAttributes (ONNX MatMul is simple: C = A @ B)
+  // No additional attributes needed - hipDNN infers compute type automatically
+  MatmulAttributes matmul_attrs;
+
+  // Call hipDNN graph API to add matmul node
+  output_attr = graph.matmul(a_attr, b_attr, matmul_attrs);
+
+  return Status::Success();
+}
+
 // Dispatch generic ONNX MLIR op to appropriate node builder.
 static Status AddNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
                                   mlir::Operation *op,
@@ -278,6 +308,16 @@ static Status AddNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
     if (status.failed())
       return status;
     output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (op_name == "onnx.MatMul") {
+    TensorAttrPtr c_attr;
+    auto status =
+        AddMatMulNodeFromOnnxMLIR(graph, op, input_attrs, c_attr, next_uid);
+    if (status.failed())
+      return status;
+    output_attrs.push_back(c_attr);
     return Status::Success();
   }
 
