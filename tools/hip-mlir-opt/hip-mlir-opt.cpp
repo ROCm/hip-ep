@@ -116,6 +116,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SiluOp>>(*ctx);
     mlir::hip::GqaOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::GqaOp>>(*ctx);
+    mlir::hip::PagedAttentionOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::PagedAttentionOp>>(*ctx);
     mlir::hip::CastOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::CastOp>>(*ctx);
     mlir::hip::SigmoidOp::attachInterface<

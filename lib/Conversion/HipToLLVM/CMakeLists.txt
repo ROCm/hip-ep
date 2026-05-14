@@ -19,6 +19,7 @@ add_library(HipToLLVM STATIC
   TransposeLowering.cpp
   RopeLowering.cpp
   GqaLowering.cpp
+  PagedAttentionLowering.cpp
   MatMulNBitsLowering.cpp
   QMoELowering.cpp
   GraphLowering.cpp

@@ -80,6 +80,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
+    PagedAttentionOp::attachInterface<
+        HipDstBufferizableModel<PagedAttentionOp>>(*ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
     SoftplusOp::attachInterface<HipDstBufferizableModel<SoftplusOp>>(*ctx);
