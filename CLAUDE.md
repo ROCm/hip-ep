@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **MANDATORY:** When a session produces new critical observations (build gotchas, API patterns, model quirks, test conventions), update this file and relevant `docs/*` files before finishing. **Any code change that affects behavior documented in `docs/` or `docs/design/` must update those docs in the same session — never leave them stale.** Always check `docs/design/*` for design documents that reference renamed symbols, changed APIs, updated metrics, or modified architecture. This is the single source of truth — do not use `.claude/memory` or external memory files.
 
+**MANDATORY (per-gfx backend):** Any code change that touches `lib/Backend/`, `lib/Runtime/real/hip_backend_client.{h,cpp}`, `lib/Runtime/real/ck_conv.cpp`, the `HIPBackendVTable` contract in `lib/Backend/hipdnn_ep_backend.h`, or the runtime scratch-provider plumbing in `lib/Runtime/hipdnn_ep_runtime_state.cpp` MUST refresh **[`docs/design/per-gfx-backend.md`](docs/design/per-gfx-backend.md)** in the same session. That document is authoritative for the backend ABI, runtime client (`hip::Backend` / `hip::GetBackend`), CK build details, the op-adding recipe, and troubleshooting; CLAUDE.md only carries a pointer.
+
 ## Project Overview
 
 ONNX HIP DNN Execution Provider — an MLIR compiler that converts ONNX models into AMD GPU-accelerated DLLs via a HIP dialect, targeting MIOpen, hipBLASLt, and custom HIP kernels. Integrates into ONNX Runtime through the MorphiZen Execution Provider framework.
@@ -120,6 +122,8 @@ For manual builds without `build.py`, see the cmake invocations in `build.py`'s 
 - **`model_benchmark.exe` for fixed-shape pipeline directories needs `-ml <KV_LEN>`.** For fixed-shape pipelines (e.g. `Llama-3.1-8B-Instruct-awq-g128-int4-Pipeline-p512m16384`) you MUST pass `-ml <KV_LEN>` (e.g. `-ml 16384`) to override `model_benchmark`'s default `max_length = prompt_length + generation_length` — otherwise the KV-cache buffers OGA pre-allocates won't match the ONNX's static `total_sequence_length` and prefill bind fails with `Got invalid dimensions for input: past_key_values.0.key Got: 256 Expected: 16384`.
 - **cmd.exe `set X=value && next` captures trailing whitespace into the value.** When invoking `model_benchmark.exe` (or anything else that reads `THEROCK_DIST`) from a chained cmd line, **always quote the assignment**: `set "THEROCK_DIST=C:\...\install\therock" && model_benchmark.exe ...`. Without quotes, the value becomes `C:\...\install\therock ` (trailing space before `&&`), and `CompilerDriver` builds the search path as `C:\...\install\therock /lib` — lld-link fails to open `amdhip64.lib`/`MIOpen.lib` and the EP silently falls back to CPU. Same trap applies to `set "PATH=...;%PATH%"`. (PowerShell does not have this issue.)
 - **Linker byproducts not cleaned up.** `CompilerDriver::cleanupIntermediates()` removes `.ll` and `.obj` files after linking, but LLD also creates `.lib`, `.pdb`, and `.exp` byproducts alongside each `.dll`. These accumulate in `%TEMP%` (hundreds of files over time). Known issue — fix requires extending `cleanupIntermediates()` in `CompilerDriver.cpp`.
+- **Conv backend dispatch shim.** `hip.conv` lowers to `wrap_conv_forward_dispatch` (`lib/Runtime/real/conv_dispatch.cpp`), a thin shim that reads `HIPDNN_EP_CONV` once into a static and picks between `wrap_miopenConvolutionForward` (fp16 + fp32) and `wrap_ckConvForward` (`lib/Runtime/real/ck_conv.cpp`; fp16 only). The wrap ABI carries `int64_t element_size_bytes` (2=fp16, 4=fp32); ConvLowering reads the input MemRef's element type and emits the right constant. **Default behavior (env unset or `auto`)**: CK for fp16, MIOpen for fp32 (CK is fp16-only -- TheRock's CK build has `CK_ENABLE_DL_KERNELS` undef'd so fp32 NHWGC has no precompiled instances). Explicit values: `HIPDNN_EP_CONV=ck` forces CK (fp32 calls get -1); `HIPDNN_EP_CONV=miopen` forces MIOpen. The env var is per-process -- model.dll is cached in `%TEMP%` and shared, so flipping the var between InferenceSessions in one process does NOT switch backends. To regression-test both backends, run pytest with each explicit value (the unset / Auto path is exercised by every other workload).
+- **Per-gfx backend DLL** (`hip-backend-gfx<ARCH>.dll`) -- the vtable C ABI, the `hip::Backend` runtime client, the scratch-provider plumbing, CK layout + build gotchas, and the recipe for adding new ops are all documented in **[`docs/design/per-gfx-backend.md`](docs/design/per-gfx-backend.md)**. Read it before touching `lib/Backend/`, `lib/Runtime/real/hip_backend_client.{h,cpp}`, `lib/Runtime/real/ck_conv.cpp`, or the `HIPBackendVTable` contract; refresh it whenever any of those change (per the MANDATORY rule at the top of this file).
 
 ## Architecture
 
@@ -356,6 +360,50 @@ Best observed `model_benchmark.exe` numbers (`-g 32 -ml 16384 -r 5`, `-w 1` for 
 | gpt-oss-20b (webgpu int4-rtn b32) | 324.4 / **76.4** | 1116.9 / **72.4** |
 | gpt-oss-120b (uint4 pergroup-asym AWQ) | 5.6 / **35.7** | 128.2 / **35.1** |
 | DeepSeek-R1-Distill-Llama-70B (AWQ b128) | 22.6 / **5.5** | 102.0 / **5.2** |
+
+### Verified perf snapshot — Conv backends (gfx1151), 2026-05-14
+
+`bench/bench_conv.py` per-shape timings for the two backends, fp16 NCHW, 200
+timed iters after 20 warmup, IOBinding round-trip. Numbers below are an
+end-to-end sample (Python -> ORT -> EP marshaling -> backend compute ->
+read-back), so the constant ~0.3 ms floor is fixed cost. Use this as the
+regression baseline; a >10% drop on the same shape on the same hardware should
+be investigated.
+
+| Shape | input -> output | MIOpen ms | CK ms | CK speedup | MIOpen GFLOPS | CK GFLOPS |
+|---|---|---:|---:|---:|---:|---:|
+| smoke_3x3       | 1×3×32² → 1×16×32²         | 0.526   | **0.295** | **1.78×** | 1.7  | 3.0       |
+| rn50_stem       | 1×3×224² → 1×64×112² s2    | 0.658   | **0.456** | **1.44×** | 359  | **518**   |
+| rn50_s3_3x3     | 1×256×14² → 1×256×14²      | 0.668   | **0.552** | **1.21×** | 346  | **419**   |
+| 1x1             | 1×16×32² → 1×32×32²        | 0.660   | **0.319** | **2.07×** | 1.6  | 3.3       |
+| ViT-L/14 (CLIP) | 1×3×224² → 1×1024×16² s14  | 0.596   | **0.419** | **1.42×** | 517  | **735**   |
+| sdxl_unet_1280  | 1×1280×16² → 1×1280×16²    | 575.6   | **2.327** | **247×**  | 13.1 | **3245**  |
+| 2k_vit_b16      | 1×3×2048² → 1×768×128² s16 | 1656.9  | **5.508** | **301×**  | 11.7 | **3509**  |
+
+Headlines: CK is the new default for fp16 (`HIPDNN_EP_CONV=auto`, the
+unset/default), MIOpen is the explicit-only fallback. CK wins every shape;
+on the heavy generative-model classes (`sdxl_unet_1280`, `2k_vit_b16`)
+MIOpen is 200–300× slower because `wrap_miopenConvolutionForward` caps the
+MIOpen workspace at 10 MB and MIOpen falls back to a workspace-fitting
+slow algorithm (look for `MIOpen(HIP): Warning [IsEnoughWorkspace] ...`
+in stderr). CK doesn't have this problem -- it pulls scratch from the
+model.dll's grow-on-demand pool via the registered scratch provider (see
+`docs/design/per-gfx-backend.md`). On compute-bound workloads CK peaks at
+~3.5 TFLOPS for the 2K-image patch conv. Verify with `bench/bench_conv.py`:
+
+```
+del %TEMP%\morphizen_mlir_*           # clear cached model.dlls (required after runtime changes)
+set "THEROCK_DIST=...\install\therock"
+set "PATH=...\install\therock\bin;...\install\dist\bin;%PATH%"
+set "HIPDNN_EP_CONV=miopen" && python bench\bench_conv.py
+set "HIPDNN_EP_CONV=ck"     && python bench\bench_conv.py
+```
+
+`test/python/test_op_conv.py` is the correctness sibling: same shape matrix
+(7 representative entries: tiny smoke, RN50 stem + 3x3 mid, 1x1 pointwise,
+ViT-L/14 patch, SDXL UNet bottom block, 2K image patchify) plus a depthwise
+xfail row, fp16 ONNX, asserts CPU EP vs MorphiZen EP. Both backends pass
+7/7 + 1 xfail (depthwise: MIOpen rejects, CK handles -> shows as xpass).
 
 ### Known limitations (open / accepted)
 

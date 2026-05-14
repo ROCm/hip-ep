@@ -12,12 +12,16 @@ namespace {
 // ===== Convolution ops ================================
 
 // hip.conv(%ctx, %input, %weights, %bias, %output)
-//   -> wrap_miopenConvolutionForward(ctx, input, input_n, input_c, input_h,
-//                                     input_w, weights, weights_k, bias,
-//                                     output, output_h, output_w, kernel_h,
-//                                     kernel_w, stride_h, stride_w, pad_top,
-//                                     pad_left, pad_bottom, pad_right,
-//                                     dilation_h, dilation_w, group)
+//   -> wrap_conv_forward_dispatch(ctx, input, input_n, input_c, input_h,
+//                                  input_w, weights, weights_k, bias,
+//                                  output, output_h, output_w, kernel_h,
+//                                  kernel_w, stride_h, stride_w, pad_top,
+//                                  pad_left, pad_bottom, pad_right,
+//                                  dilation_h, dilation_w, group)
+//
+// The shim picks between wrap_miopenConvolutionForward and wrap_ckConvForward
+// at runtime based on HIPDNN_EP_CONV (default miopen). Both backends have the
+// same C-ABI as this lowering target.
 struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -149,8 +153,17 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     Value dilationW = createI64Const(getI64(dilations[1]));
     Value groupVal = createI64Const(group);
 
+    // Element size in bytes: dispatch shim + both backends use this to pick
+    // the right miopenDataType (or refuse, in CK's fp16-only case).
+    Type elemTy = inputType.getElementType();
+    int64_t elemBytes = elemTy.getIntOrFloatBitWidth() / 8;
+    if (elemBytes != 2 && elemBytes != 4) {
+      return op.emitError("Conv supports fp16 (2B) or fp32 (4B) elements only");
+    }
+    Value elemSizeBytes = createI64Const(elemBytes);
+
     // Build function signature
-    SmallVector<Type, 24> paramTypes = {
+    SmallVector<Type, 25> paramTypes = {
         ptrType, // state
         ptrType, // input
         i64Type, // input_n
@@ -173,21 +186,24 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
         i64Type, // pad_right
         i64Type, // dilation_h
         i64Type, // dilation_w
-        i64Type  // group
+        i64Type, // group
+        i64Type  // element_size_bytes
     };
 
-    // Lookup or create the runtime function
+    // Lookup or create the runtime function. We target the dispatch shim,
+    // not wrap_miopenConvolutionForward directly -- the shim selects between
+    // MIOpen and CK via HIPDNN_EP_CONV.
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kMiopenConvolutionForward, paramTypes, i32Type);
+        rewriter, module, kConvForwardDispatch, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
     // Build argument list matching the signature
-    SmallVector<Value, 24> args = {
-        statePtr,   inputPtr, inputN,    inputC,    inputH,  inputW,
-        weightsPtr, weightsK, biasPtr,   outputPtr, outputH, outputW,
-        kernelH,    kernelW,  strideH,   strideW,   padTop,  padLeft,
-        padBottom,  padRight, dilationH, dilationW, groupVal};
+    SmallVector<Value, 25> args = {
+        statePtr,   inputPtr, inputN,    inputC,    inputH,   inputW,
+        weightsPtr, weightsK, biasPtr,   outputPtr, outputH,  outputW,
+        kernelH,    kernelW,  strideH,   strideW,   padTop,   padLeft,
+        padBottom,  padRight, dilationH, dilationW, groupVal, elemSizeBytes};
 
     // Call the runtime function
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

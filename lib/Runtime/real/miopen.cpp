@@ -106,7 +106,8 @@ int wrap_miopenConvolutionForward(
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t element_size_bytes) {
   OP_PROFILE(
       "conv",
       [&] {
@@ -151,22 +152,38 @@ int wrap_miopenConvolutionForward(
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
 
-  // Set tensor descriptors with explicit NCHW layout (float32).
-  // miopenSet4dTensorDescriptor leaves layout as UNKNOWN which triggers
-  // warnings in MIOpen 7.12+.
+  // Set tensor descriptors with explicit NCHW layout. miopenSet4dTensor-
+  // Descriptor leaves layout as UNKNOWN which triggers warnings in MIOpen
+  // 7.12+. Pick miopenHalf vs miopenFloat from the caller-supplied
+  // element_size_bytes (2 = fp16, 4 = fp32) -- the MemRef element type at
+  // ConvLowering knows the dtype, the wrap signature carries it.
+  miopenDataType_t mio_dtype;
+  if (element_size_bytes == 2) {
+    mio_dtype = miopenHalf;
+  } else if (element_size_bytes == 4) {
+    mio_dtype = miopenFloat;
+  } else {
+    fprintf(
+        stderr,
+        "wrap_miopenConvolutionForward: unsupported element_size_bytes=%lld "
+        "(expected 2 or 4)\n",
+        (long long)element_size_bytes);
+    result = -1;
+    goto cleanup;
+  }
   {
     int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        input_desc, miopenFloat, miopenTensorNCHW, in_dims, 4));
+        input_desc, mio_dtype, miopenTensorNCHW, in_dims, 4));
 
     int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h, (int)kernel_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        weights_desc, miopenFloat, miopenTensorNCHW, w_dims, 4));
+        weights_desc, mio_dtype, miopenTensorNCHW, w_dims, 4));
 
     int out_dims[] = {(int)input_n, (int)weights_k, (int)output_h,
                       (int)output_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        output_desc, miopenFloat, miopenTensorNCHW, out_dims, 4));
+        output_desc, mio_dtype, miopenTensorNCHW, out_dims, 4));
   }
 
   // Create convolution descriptor

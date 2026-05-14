@@ -3,21 +3,19 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify HIP convolution operations are correctly lowered to LLVM calls
-// to MIOpen library.
+// Verify hip.conv lowers to an LLVM call to wrap_conv_forward_dispatch (the
+// runtime-selectable shim that picks between MIOpen and CK via HIPDNN_EP_CONV).
 //
 // This test validates:
-// - hip.conv → llvm.call @wrap_miopenConvolutionForward
+// - hip.conv → llvm.call @wrap_conv_forward_dispatch
 // - Type conversion: !hip.context → !llvm.ptr
 // - Memref descriptors expanded to individual LLVM parameters
 // - Attribute passing to runtime calls
-// - Proper function signature for MIOpen API
+// - Proper function signature for the conv ABI shared by both backends
 //
 // Note: MLIR's memref-to-LLVM conversion expands memref descriptors into
 // individual scalar parameters (allocated_ptr, aligned_ptr, offset, sizes,
 // strides). This is standard MLIR behavior.
-//
-// Expected: LLVM function with expanded parameters calling MIOpen wrapper
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -41,9 +39,10 @@ module {
                    {kernel_shape = [7, 7], strides = [2, 2],
                     pads = [3, 3, 3, 3], dilations = [1, 1], group = 1}
 
-    // Should lower to MIOpen convolution forward call
-    // The wrapper is declared and called
-    // CHECK: llvm.call @wrap_miopenConvolutionForward
+    // Should lower to the dispatch shim, NOT to wrap_miopenConvolutionForward
+    // directly -- HIPDNN_EP_CONV picks the actual backend at runtime.
+    // CHECK: llvm.call @wrap_conv_forward_dispatch
+    // CHECK-NOT: llvm.call @wrap_miopenConvolutionForward
 
     return
   }

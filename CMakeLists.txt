@@ -147,6 +147,9 @@ if(BUILD_HIP_TOOLS)
     message(STATUS "Building with REAL runtime (requires HIP/MIOpen)")
     # Add custom HIP kernels library for Real Runtime
     add_subdirectory(3rd-party/custom_kernels)
+    # Per-gfx EP backend DLL (hosts CK and other heavy kernels behind a
+    # stable C ABI so model.dll never has to link the giant libs).
+    add_subdirectory(lib/Backend)
   endif()
 
   # TableGen targets
