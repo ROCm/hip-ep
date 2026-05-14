@@ -663,6 +663,16 @@ int hip_tile(
     int rank,
     int hip_dtype);
 
+int hip_expand(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape_host,
+    int input_rank,
+    const int64_t* output_shape_host,
+    int output_rank,
+    int hip_dtype);
+
 /* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
