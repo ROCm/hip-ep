@@ -846,9 +846,6 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // The stream sync above guarantees no in-flight kernel references the
   // cached buffers.
   if (state->modules) {
-    if (hipdnn_ep_dump_state_enabled()) {
-      hipdnn_ep::module_registry_dump(state->modules);
-    }
     hipdnn_ep::module_registry_destroy(state->modules);
     state->modules = nullptr;
   }

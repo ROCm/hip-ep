@@ -57,20 +57,6 @@ inline bool hipdnn_ep_perf_isolate_enabled() {
   return enabled;
 }
 
-// HIPDNN_EP_DUMP_STATE=1: print one line per populated op-module slot at
-// session cleanup (name + mem_bytes() if defined).
-inline bool hipdnn_ep_dump_state_enabled() {
-  static const bool enabled = [] {
-#ifdef _WIN32
-    return detail::check_env("HIPDNN_EP_DUMP_STATE");
-#else
-    const char *v = std::getenv("HIPDNN_EP_DUMP_STATE");
-    return v && v[0] >= '1';
-#endif
-  }();
-  return enabled;
-}
-
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime

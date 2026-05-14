@@ -4,8 +4,9 @@
  */
 
 // Native smoke test for lib/Runtime/module_registry.{h,cpp}. Links only
-// module_registry.cpp -- no HIP / MIOpen / hipBLASLt. See
-// docs/design/runtime-module-registry.md for the seven cases this covers.
+// module_registry.cpp -- no HIP / MIOpen / hipBLASLt. Covers SFINAE hook
+// detection, slot id assignment, lazy init, begin_compute fan-out,
+// reverse destroy order, and the steady-state invariant.
 
 #include "module_registry.h"
 
@@ -34,7 +35,6 @@ struct Counters {
   int init = 0;
   int destroy = 0;
   int begin_compute = 0;
-  int mem_bytes_calls = 0;
 };
 
 Counters g_full;
@@ -53,11 +53,6 @@ struct FullHooksState {
   void begin_compute(::RuntimeState *s) {
     ++g_full.begin_compute;
     last_begin_compute_marker = s ? s->marker : -1;
-  }
-
-  size_t mem_bytes() const {
-    ++g_full.mem_bytes_calls;
-    return 42;
   }
 };
 
@@ -107,13 +102,14 @@ static void test_make_op_module_spec_hook_detection() {
   TEST_ASSERT(spec_full.init_fn != nullptr);
   TEST_ASSERT(spec_full.destroy_fn != nullptr);
   TEST_ASSERT(spec_full.begin_compute_fn != nullptr);
-  TEST_ASSERT(spec_full.mem_bytes_fn != nullptr);
+  // FullHooksState does not define end_compute, so SFINAE must leave it
+  // null even though every other optional hook is wired.
+  TEST_EQ((long long)spec_full.end_compute_fn, 0);
 
   TEST_ASSERT(spec_minimal.init_fn != nullptr);
   TEST_ASSERT(spec_minimal.destroy_fn != nullptr);
   TEST_EQ((long long)spec_minimal.begin_compute_fn, 0);
   TEST_EQ((long long)spec_minimal.end_compute_fn, 0);
-  TEST_EQ((long long)spec_minimal.mem_bytes_fn, 0);
 
   std::printf("ok test_make_op_module_spec_hook_detection\n");
 }

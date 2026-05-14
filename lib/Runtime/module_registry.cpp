@@ -63,13 +63,12 @@ int op_module_count() {
   return static_cast<int>(spec_table().size());
 }
 
-// SlotEntry caches the spec's fn-pointers so begin_compute / destroy /
-// dump never re-enter the mutex-guarded process-global spec table.
+// SlotEntry caches the spec's fn-pointers so begin_compute / destroy
+// never re-enter the mutex-guarded process-global spec table.
 struct SlotEntry {
   void *state_ptr = nullptr;
   OpBeginComputeFn begin_compute_fn = nullptr;
   OpEndComputeFn end_compute_fn = nullptr;
-  OpMemBytesFn mem_bytes_fn = nullptr;
   OpDestroyFn destroy_fn = nullptr;
   const char *name = nullptr;
 };
@@ -105,42 +104,6 @@ void module_registry_begin_compute(ModuleRegistry *reg, RuntimeState *state) {
   }
 }
 
-void module_registry_dump(ModuleRegistry *reg) {
-  // Always print the header so the user can confirm the env var was picked
-  // up even when no module has been populated.
-  std::fprintf(stderr, "[HIPDNN_EP_DUMP_STATE] registered op-module slots:\n");
-  if (!reg) {
-    std::fprintf(stderr, "[HIPDNN_EP_DUMP_STATE]   (registry is null)\n");
-    return;
-  }
-  size_t total = 0;
-  size_t known = 0;
-  for (size_t i = 0; i < reg->slots.size(); ++i) {
-    const SlotEntry &slot = reg->slots[i];
-    if (!slot.state_ptr)
-      continue;
-    if (slot.mem_bytes_fn) {
-      size_t b = slot.mem_bytes_fn(slot.state_ptr);
-      total += b;
-      ++known;
-      std::fprintf(stderr,
-                   "[HIPDNN_EP_DUMP_STATE]   slot=%zu name='%s' "
-                   "mem_bytes=%zu\n",
-                   i, slot.name ? slot.name : "?", b);
-    } else {
-      std::fprintf(stderr,
-                   "[HIPDNN_EP_DUMP_STATE]   slot=%zu name='%s' "
-                   "mem_bytes=?  (define `size_t mem_bytes() const` on the "
-                   "state type to report)\n",
-                   i, slot.name ? slot.name : "?");
-    }
-  }
-  std::fprintf(stderr,
-               "[HIPDNN_EP_DUMP_STATE] total reported = %zu bytes across "
-               "%zu module(s) with mem_bytes()\n",
-               total, known);
-}
-
 void *op_module_get(ModuleRegistry *reg, RuntimeState *state, int slot_id) {
   if (!reg || slot_id < 0)
     return nullptr;
@@ -167,7 +130,6 @@ void *op_module_get(ModuleRegistry *reg, RuntimeState *state, int slot_id) {
   slot.state_ptr = p;
   slot.begin_compute_fn = spec->begin_compute_fn;
   slot.end_compute_fn = spec->end_compute_fn;
-  slot.mem_bytes_fn = spec->mem_bytes_fn;
   slot.destroy_fn = spec->destroy_fn;
   slot.name = spec->name;
   return p;

@@ -44,15 +44,6 @@ struct ZpUnpackState {
     for (auto &kv : fp16)
       hipFree(kv.second.first);
   }
-
-  size_t mem_bytes() const {
-    size_t total = 0;
-    for (auto &kv : u8)
-      total += kv.second.second;
-    for (auto &kv : fp16)
-      total += kv.second.second;
-    return total;
-  }
 };
 
 } // namespace hipdnn_ep_real

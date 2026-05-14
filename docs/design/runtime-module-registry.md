@@ -11,11 +11,10 @@ Mechanism the runtime uses for per-session, per-operator state.
 | Path | Contents |
 |---|---|
 | `lib/Runtime/module_registry.h` | `OpModuleSpec`, fn-pointer typedefs, SFINAE detectors, `make_op_module_spec<T>`, `HIPDNN_OP_MODULE` macro, free-function decls. |
-| `lib/Runtime/module_registry.cpp` | Process-global `spec_table()` + mutex; `SlotEntry` and `ModuleRegistry` definitions; lifecycle / lookup / dump implementations. |
+| `lib/Runtime/module_registry.cpp` | Process-global `spec_table()` + mutex; `SlotEntry` and `ModuleRegistry` definitions; lifecycle and lookup implementations. |
 | `lib/Runtime/growable_buffer.h` | `hipdnn_ep::GrowableDeviceBuffer` / `GrowablePinnedBuffer`. |
 | `lib/Runtime/runtime_state_internal.h` | Forward-declares `ModuleRegistry`; `RuntimeState` ends with `hipdnn_ep::ModuleRegistry *modules;`. |
 | `lib/Runtime/hipdnn_ep_runtime_state.cpp` | Create / destroy / `begin_compute` fan-out; defines `hipdnn_ep::get_module_registry`. |
-| `lib/Runtime/debug_log.h` | `hipdnn_ep_dump_state_enabled()`. |
 | `lib/Runtime/real/causal_conv_with_state.cpp` | `CausalConvState`. |
 | `lib/Runtime/real/matmul_nbits.cpp` | `ZpUnpackState` (shared with `qmoe`). |
 | `lib/Runtime/real/gqa.cpp` | `GqaGemmState`, `GqaSeqlensCache`. |
@@ -34,8 +33,6 @@ A C++ struct authored by the op owner:
     `Compute()`, for cache invalidation.
   - `void end_compute(RuntimeState *)` — detected and dispatched, but
     nothing calls it today.
-  - `size_t mem_bytes() const` — reports footprint for
-    `HIPDNN_EP_DUMP_STATE`.
 
 ## `HIPDNN_OP_MODULE` macro
 
@@ -77,7 +74,6 @@ struct SlotEntry {
   void *state_ptr = nullptr;
   OpBeginComputeFn begin_compute_fn = nullptr;
   OpEndComputeFn end_compute_fn = nullptr;
-  OpMemBytesFn mem_bytes_fn = nullptr;
   OpDestroyFn destroy_fn = nullptr;
   const char *name = nullptr;
 };
@@ -88,8 +84,8 @@ struct ModuleRegistry {
 ```
 
 The slot entry caches the spec's fn-pointers at first access, so the
-per-Compute() fan-out, the dump, and cleanup never re-enter the
-mutex-guarded spec table.
+per-Compute() fan-out and cleanup never re-enter the mutex-guarded
+spec table.
 
 - **`module_registry_create`** — empty registry.
 - **`module_registry_destroy`** — iterates slots in reverse and calls
@@ -117,7 +113,6 @@ void *op_module_get(ModuleRegistry *reg, RuntimeState *state, int slot_id) {
   slot.state_ptr        = p;
   slot.begin_compute_fn = spec->begin_compute_fn;
   slot.end_compute_fn   = spec->end_compute_fn;
-  slot.mem_bytes_fn     = spec->mem_bytes_fn;
   slot.destroy_fn       = spec->destroy_fn;
   slot.name             = spec->name;
   return p;
@@ -160,7 +155,7 @@ It inlines through `llvm-link` in the bitcode build.
 | First `wrap_*` call per slot | Cold path of `op_module_get`: `new T(state)`, cache fn-pointers + state ptr. |
 | Subsequent `wrap_*` calls | Hot path: bounds + load + null branch. |
 | EP enters `Compute()` | EP calls `hipdnn_ep_runtime_begin_compute(state)` (`extern "C"`, `__declspec(dllexport)`). Fans out via `module_registry_begin_compute`. |
-| Session cleanup | After shared stream sync: optional `module_registry_dump` (when `HIPDNN_EP_DUMP_STATE=1`), then `module_registry_destroy`. Library handles (`stream`, `miopen_handle`, `hipblas_handle`) are still live, so destructors may call `hipFree` / `hipblasLt*Destroy`. |
+| Session cleanup | After shared stream sync: `module_registry_destroy`. Library handles (`stream`, `miopen_handle`, `hipblas_handle`) are still live, so destructors may call `hipFree` / `hipblasLt*Destroy`. |
 
 There is no end-of-Compute hook caller today.
 
@@ -176,23 +171,6 @@ After warmup, per call:
 
 CTest target `RuntimeSteadyState` asserts that `init_fn` fires exactly
 once per slot across warmup + 1000 simulated inferences.
-
-## `HIPDNN_EP_DUMP_STATE`
-
-`hipdnn_ep_dump_state_enabled()` reads `HIPDNN_EP_DUMP_STATE` once via
-`GetEnvironmentVariableA` (Windows) / `getenv` (POSIX) and caches the
-boolean. When enabled, `module_registry_dump` runs immediately before
-destruction in cleanup and writes to stderr:
-
-```
-[HIPDNN_EP_DUMP_STATE] registered op-module slots:
-[HIPDNN_EP_DUMP_STATE]   slot=0 name='zp_unpack' mem_bytes=147456
-[HIPDNN_EP_DUMP_STATE]   slot=1 name='qmoe' mem_bytes=3692992
-[HIPDNN_EP_DUMP_STATE]   slot=2 name='gqa_gemm_cache' mem_bytes=?  (define `size_t mem_bytes() const` on the state type to report)
-[HIPDNN_EP_DUMP_STATE] total reported = 3840448 bytes across 2 module(s) with mem_bytes()
-```
-
-`?` appears when the state type lacks `size_t mem_bytes() const`.
 
 ## `growable_buffer.h`
 
@@ -226,10 +204,10 @@ Used by composition. Not registered as modules themselves.
 | Slot name | State type | TU | Notes |
 |---|---|---|---|
 | `"causal_conv_with_state"` | `CausalConvState` | `real/causal_conv_with_state.cpp` | `unordered_map<CausalConvKey, CausalConvCacheEntry, ...>`. Destructor frees MIOpen descriptors via the file-local `destroyEntry`. |
-| `"zp_unpack"` | `hipdnn_ep_real::ZpUnpackState` | `real/matmul_nbits.cpp` | Two `unordered_map<const void *, std::pair<void *, size_t>>` for the asym AWQ `(u8, fp16)` unpacked zero_points buffers, plus a `std::mutex`. Destructor `hipFree`s every cached buffer; `mem_bytes()` returns combined cached footprint. Reached by both `wrap_matmul_nbits` and `wrap_qmoe` via `lookup_or_unpack_zp_u8` / `lookup_or_convert_zp_fp16` — single slot, no duplication. |
+| `"zp_unpack"` | `hipdnn_ep_real::ZpUnpackState` | `real/matmul_nbits.cpp` | Two `unordered_map<const void *, std::pair<void *, size_t>>` for the asym AWQ `(u8, fp16)` unpacked zero_points buffers, plus a `std::mutex`. Destructor `hipFree`s every cached buffer. Reached by both `wrap_matmul_nbits` and `wrap_qmoe` via `lookup_or_unpack_zp_u8` / `lookup_or_convert_zp_fp16` — single slot, no duplication. |
 | `"gqa_seqlens_cache"` | `GqaSeqlensCache` | `real/gqa.cpp` | POD (`bool valid; int32_t val; const void *ptr;`). `begin_compute` resets `valid` and `ptr`. First GQA layer in a `Compute()` pays the D2H to read `seqlens_k[0]`; later layers reuse it. |
 | `"gqa_gemm_cache"` | `GqaGemmState` | `real/gqa.cpp` | `unordered_map<GqaGemmKey, GqaGemmCacheEntry, ...>`. Destructor frees the hipBLASLt matrix layouts (`layA..layD`) and matmul descriptor. |
-| `"qmoe"` | `QmoeState` | `real/qmoe.cpp` | `GrowableDeviceBuffer scratch`, `GrowablePinnedBuffer host_scratch`. Constructor calls `set_stream(rs->stream)` on both. `mem_bytes()` returns `scratch.size() + host_scratch.size()`. |
+| `"qmoe"` | `QmoeState` | `real/qmoe.cpp` | `GrowableDeviceBuffer scratch`, `GrowablePinnedBuffer host_scratch`. Constructor calls `set_stream(rs->stream)` on both. |
 
 ## C-ABI shims (`hipdnn_ep_state_*_qmoe_*`)
 
@@ -267,7 +245,9 @@ across host code and generated bitcode.
 (non-GPU, non-bitcode) test that links `module_registry.cpp` directly.
 It uses two fake state types:
 
-- `FullHooksState` — defines `begin_compute`, `mem_bytes`, destructor.
+- `FullHooksState` — defines `begin_compute` + destructor (exercises
+  the `has_begin_compute_` SFINAE branch; absent `end_compute` keeps
+  that one null even when the rest are wired).
 - `MinimalState` — only the required constructor + destructor.
 
 It stubs `get_module_registry` locally and uses a one-int
@@ -275,8 +255,8 @@ It stubs `get_module_registry` locally and uses a one-int
 
 Seven cases:
 
-1. SFINAE installs all optional fn-pointers for `FullHooksState`,
-   leaves them null for `MinimalState`.
+1. SFINAE installs `begin_compute_fn` for `FullHooksState`, leaves
+   `end_compute_fn` null on both types.
 2. `register_op_module` assigns monotonic slot ids; out-of-range
    `get_op_module_spec` returns null.
 3. First `op_module_get` calls the ctor once; 100 follow-up calls
@@ -322,7 +302,9 @@ In the op's `.cpp` (no edits to any framework file):
 
 1. Define `MyOpState` (anonymous namespace). Constructor takes
    `RuntimeState *`. Add a destructor if needed.
-2. Optionally add `begin_compute`, `mem_bytes`, `end_compute`.
+2. Optionally add `begin_compute(RuntimeState *)` or
+   `end_compute(RuntimeState *)`. Exact signature required for SFINAE
+   pickup.
 3. `HIPDNN_OP_MODULE(my_op_module, "my_op", MyOpState);` at namespace
    scope. The name must be unique across the DLL.
 4. Inside `wrap_*`: `auto *s = my_op_module(state);` — null only on
@@ -331,6 +313,35 @@ In the op's `.cpp` (no edits to any framework file):
 If the state owns grow-on-demand device or pinned-host memory,
 compose `GrowableDeviceBuffer` / `GrowablePinnedBuffer` rather than
 hand-rolling the grow logic.
+
+### On-disk persistence (algo caches, autotune results, etc.)
+
+Persistence is **out of scope for the module registry**. Op-modules
+hold derived state — descriptors, algorithm choices, sized scratch
+buffers — that is cheap to rebuild on the first hot call. Serializing
+the in-memory layout would couple every disk artifact to ABI; the
+opaque HIP/MIOpen/hipBLASLt handles inside descriptor caches are not
+portable across processes, driver versions, or GPU resets anyway.
+
+When a specific op genuinely benefits from cross-process caching
+(e.g. autotune results that take seconds to converge), follow the
+matmul_nbits autotune convention:
+
+- Persist **algo-selection metadata only**, never descriptors or
+  buffers (`int` indices, kernel-config tuples, hash → choice map).
+- Key on something **content-derived and version-aware** — e.g.
+  `{model_hash, driver_version, GPU_arch, shape_signature}`.
+- Read/write the file directly from the op's `.cpp` (typically a
+  small JSON or binary blob next to the executable, the way
+  `_results.json` is handled for matmul_nbits WMMA tuning).
+- Consult the file inside the op's `constructor` if you want
+  cold-start speedup, and update it from the destructor (or
+  opportunistically inside `wrap_*` after a new tuning result).
+
+This keeps persistence **opt-in per op**, the on-disk format
+decoupled from in-memory state, and the framework contract minimal.
+The `HIPDNN_OP_MODULE` macro intentionally has no `save_fn` /
+`load_fn` slot.
 
 ## Fields that stay flat on `RuntimeState`
 

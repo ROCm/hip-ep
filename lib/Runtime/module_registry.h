@@ -29,7 +29,6 @@ using OpInitFn = void *(*)(RuntimeState *);
 using OpDestroyFn = void (*)(void *);
 using OpBeginComputeFn = void (*)(void *, RuntimeState *);
 using OpEndComputeFn = void (*)(void *, RuntimeState *);
-using OpMemBytesFn = size_t (*)(void *);
 
 struct OpModuleSpec {
   const char *name = nullptr;
@@ -37,7 +36,6 @@ struct OpModuleSpec {
   OpDestroyFn destroy_fn = nullptr;
   OpBeginComputeFn begin_compute_fn = nullptr;
   OpEndComputeFn end_compute_fn = nullptr;
-  OpMemBytesFn mem_bytes_fn = nullptr;
 };
 
 // Register a spec. Returns a stable, non-negative slot id. Aborts on
@@ -57,9 +55,6 @@ void module_registry_destroy(ModuleRegistry *reg);
 // Lock-free fan-out called from hipdnn_ep_runtime_begin_compute. Iterates
 // populated slots and invokes each cached begin_compute_fn.
 void module_registry_begin_compute(ModuleRegistry *reg, RuntimeState *state);
-
-// HIPDNN_EP_DUMP_STATE=1: one line per populated slot to stderr.
-void module_registry_dump(ModuleRegistry *reg);
 
 // Hot path: bounds check + load + null branch. Cold path: resize, spec
 // lookup, init_fn call.
@@ -88,17 +83,9 @@ struct has_end_compute_<T, std::void_t<decltype(std::declval<T &>().end_compute(
                                std::declval<RuntimeState *>()))>>
     : std::true_type {};
 
-template <typename T, typename = void>
-struct has_mem_bytes_ : std::false_type {};
-
-template <typename T>
-struct has_mem_bytes_<
-    T, std::void_t<decltype(std::declval<const T &>().mem_bytes())>>
-    : std::true_type {};
-
 // Build a spec for state type T. T must be constructible from
-// RuntimeState*. begin_compute / end_compute / mem_bytes are wired up only
-// when the corresponding SFINAE detector is true.
+// RuntimeState*. begin_compute / end_compute are wired up only when the
+// corresponding SFINAE detector is true.
 template <typename T>
 inline OpModuleSpec make_op_module_spec(const char *name) {
   OpModuleSpec spec{};
@@ -115,11 +102,6 @@ inline OpModuleSpec make_op_module_spec(const char *name) {
     spec.end_compute_fn =
         +[](void *p, RuntimeState *s) { static_cast<T *>(p)->end_compute(s); };
   }
-  if constexpr (has_mem_bytes_<T>::value) {
-    spec.mem_bytes_fn = +[](void *p) -> size_t {
-      return static_cast<const T *>(p)->mem_bytes();
-    };
-  }
   return spec;
 }
 
@@ -128,7 +110,7 @@ inline OpModuleSpec make_op_module_spec(const char *name) {
 // Strongly-typed accessor: two function-local statics (spec + slot id),
 // initialized once per TU; every subsequent call is one op_module_get.
 //   ACCESSOR : generated function name, e.g. `causal_conv_module`.
-//   NAME     : unique string id (logs / dump / duplicate-detect).
+//   NAME     : unique string id (logs / duplicate-detect).
 //   STATE_T  : state type; must be constructible from RuntimeState*.
 #define HIPDNN_OP_MODULE(ACCESSOR, NAME, STATE_T)                              \
   static STATE_T *ACCESSOR(::RuntimeState *state) {                            \

@@ -41,8 +41,6 @@ struct QmoeState {
     scratch.set_stream(s);
     host_scratch.set_stream(s);
   }
-
-  size_t mem_bytes() const { return scratch.size() + host_scratch.size(); }
 };
 
 HIPDNN_OP_MODULE(qmoe_module, "qmoe", QmoeState);
