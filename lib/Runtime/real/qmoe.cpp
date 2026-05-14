@@ -34,13 +34,11 @@ struct QmoeState {
   hipdnn_ep::GrowableDeviceBuffer scratch;
   hipdnn_ep::GrowablePinnedBuffer host_scratch;
 
-  // Stream is created in initialize_state_handles before any wrap_qmoe
-  // call, so it's safe to capture at module-construction time.
-  explicit QmoeState(RuntimeState *rs) {
-    hipStream_t s = rs ? rs->stream : nullptr;
-    scratch.set_stream(s);
-    host_scratch.set_stream(s);
-  }
+  // GrowableBuffer no longer needs a bound stream: hipFree / hipHostFree
+  // each perform an implicit hipDeviceSynchronize() per the HIP API, so
+  // the previous set_stream(rs->stream) was a no-op pre-sync. We still
+  // declare the constructor to keep op-module registration happy.
+  explicit QmoeState(RuntimeState *) {}
 };
 
 HIPDNN_OP_MODULE(qmoe_module, "qmoe", QmoeState);

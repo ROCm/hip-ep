@@ -5,16 +5,24 @@
 #ifndef HIPDNN_EP_GROWABLE_BUFFER_H
 #define HIPDNN_EP_GROWABLE_BUFFER_H
 
-// Move-only RAII helpers for the "grow-on-demand, never shrink" buffer
-// pattern. Two concrete types (no templates) so the bitcode compiler can
-// inline the alloc / free pair into module destructors. grow() returns
-// 0 / -1; sync-then-realloc on grow; destructor frees without pre-sync
-// (relies on hipdnn_ep_state_cleanup having already synced the stream).
+// Move-only RAII helper for the "grow-on-demand, never shrink" buffer
+// pattern. One class template, two policies:
+//   GrowableDeviceBuffer  - hipMalloc     / hipFree
+//   GrowablePinnedBuffer  - hipHostMalloc / hipHostFree
 //
-// HIP calls outside of grow()'s alloc step are best-effort: a failure in
-// hipStreamSynchronize or hipFree/hipHostFree is logged but does not
-// abort the surrounding op. The alloc step is the only one that returns
-// -1 to the caller, because that is the only failure mode the caller can
+// grow() returns 0 (already large enough OR grown successfully) or -1
+// (alloc failure). On grow we free the old pointer and allocate a new
+// one; we do NOT call hipStreamSynchronize ourselves because the HIP
+// runtime API specifies that both hipFree and hipHostFree "perform an
+// implicit hipDeviceSynchronize() call" before reclaiming the buffer
+// (see the HIP 7.0 reference: Memory management). Synchronizing on top
+// of that would be redundant and slightly broader (device vs stream is
+// implementation-defined). The destructor uses the same property.
+//
+// HIP calls outside of grow()'s alloc step are best-effort: a failure
+// in hipFree / hipHostFree is logged via HIP_CLEANUP but does not abort
+// the surrounding op. The alloc step is the only one that returns -1
+// to the caller, because that is the only failure mode the caller can
 // usefully react to.
 
 #include "hip_cleanup.h" // HIP_CLEANUP (best-effort logging wrapper)
@@ -38,27 +46,43 @@ inline size_t pick_grow_size(size_t current_size, size_t requested) {
   return grown > requested ? grown : requested;
 }
 
+// Backend policies for GrowableBuffer. Each member is a tiny static
+// wrapper around the corresponding HIP call; the bitcode compiler
+// inlines them away (template static dispatch, no function pointers,
+// no virtuals).
+struct DevicePolicy {
+  static hipError_t alloc(void **p, size_t n) { return hipMalloc(p, n); }
+  static hipError_t free(void *p) { return hipFree(p); }
+  static constexpr const char *tag() { return "GrowableDeviceBuffer"; }
+  static constexpr const char *alloc_name() { return "hipMalloc"; }
+};
+
+struct PinnedPolicy {
+  static hipError_t alloc(void **p, size_t n) {
+    return hipHostMalloc(p, n, hipHostMallocDefault);
+  }
+  static hipError_t free(void *p) { return hipHostFree(p); }
+  static constexpr const char *tag() { return "GrowablePinnedBuffer"; }
+  static constexpr const char *alloc_name() { return "hipHostMalloc"; }
+};
+
 } // namespace detail
 
-// Device buffer (hipMalloc / hipFree). `stream` is used only to sync
-// before freeing the old pointer on grow.
-class GrowableDeviceBuffer {
+template <class Policy> class GrowableBuffer {
 public:
-  explicit GrowableDeviceBuffer(hipStream_t stream = nullptr)
-      : stream_(stream) {}
+  GrowableBuffer() = default;
 
-  GrowableDeviceBuffer(const GrowableDeviceBuffer &) = delete;
-  GrowableDeviceBuffer &operator=(const GrowableDeviceBuffer &) = delete;
+  GrowableBuffer(const GrowableBuffer &) = delete;
+  GrowableBuffer &operator=(const GrowableBuffer &) = delete;
 
-  GrowableDeviceBuffer(GrowableDeviceBuffer &&other) noexcept
-      : stream_(other.stream_), ptr_(other.ptr_), size_(other.size_) {
+  GrowableBuffer(GrowableBuffer &&other) noexcept
+      : ptr_(other.ptr_), size_(other.size_) {
     other.ptr_ = nullptr;
     other.size_ = 0;
   }
-  GrowableDeviceBuffer &operator=(GrowableDeviceBuffer &&other) noexcept {
+  GrowableBuffer &operator=(GrowableBuffer &&other) noexcept {
     if (this != &other) {
       free_now();
-      stream_ = other.stream_;
       ptr_ = other.ptr_;
       size_ = other.size_;
       other.ptr_ = nullptr;
@@ -67,17 +91,12 @@ public:
     return *this;
   }
 
-  ~GrowableDeviceBuffer() { free_now(); }
-
-  void set_stream(hipStream_t stream) { stream_ = stream; }
+  ~GrowableBuffer() { free_now(); }
 
   // Stable across calls until the next grow() that actually enlarges it.
   void *data() const noexcept { return ptr_; }
   size_t size() const noexcept { return size_; }
 
-  // Returns 0 (already large enough OR grown successfully) or -1 (alloc
-  // failure). Syncs the bound stream before freeing the old pointer so a
-  // late in-flight kernel can't fault on the about-to-be-freed buffer.
   int grow(size_t needed) {
     if (needed == 0)
       return 0;
@@ -87,22 +106,19 @@ public:
     size_t alloc_size = detail::pick_grow_size(size_, needed);
 
     if (ptr_) {
-      if (stream_) {
-        // Sync failure is logged but not propagated: there is no good
-        // recovery here, and refusing to grow would deadlock the caller.
-        // hipFree below will surface a real fault if the sync truly left
-        // the device unusable.
-        HIP_CLEANUP(hipStreamSynchronize(stream_));
-      }
-      HIP_CLEANUP(hipFree(ptr_));
+      // hipFree / hipHostFree both perform an implicit
+      // hipDeviceSynchronize() per the HIP runtime API, so we do NOT
+      // need an explicit hipStreamSynchronize here. The free will
+      // block until in-flight kernels referencing this buffer drain.
+      HIP_CLEANUP(Policy::free(ptr_));
       ptr_ = nullptr;
       size_ = 0;
     }
 
-    hipError_t alloc_err = hipMalloc(&ptr_, alloc_size);
+    hipError_t alloc_err = Policy::alloc(&ptr_, alloc_size);
     if (alloc_err != hipSuccess || !ptr_) {
-      fprintf(stderr, "GrowableDeviceBuffer: hipMalloc(%zu) failed: %s\n",
-              alloc_size, hipGetErrorString(alloc_err));
+      fprintf(stderr, "%s: %s(%zu) failed: %s\n", Policy::tag(),
+              Policy::alloc_name(), alloc_size, hipGetErrorString(alloc_err));
       ptr_ = nullptr;
       return -1;
     }
@@ -113,96 +129,19 @@ public:
 private:
   void free_now() noexcept {
     if (ptr_) {
-      HIP_CLEANUP(hipFree(ptr_));
+      HIP_CLEANUP(Policy::free(ptr_));
       ptr_ = nullptr;
       size_ = 0;
     }
   }
 
-  hipStream_t stream_ = nullptr;
   void *ptr_ = nullptr;
   size_t size_ = 0;
 };
 
-// Pinned host buffer (hipHostMalloc / hipHostFree). Same shape as
-// GrowableDeviceBuffer. Required for D2H staging on Windows where
-// pageable host memory silently falls back to sync-staging.
-class GrowablePinnedBuffer {
-public:
-  explicit GrowablePinnedBuffer(hipStream_t stream = nullptr)
-      : stream_(stream) {}
-
-  GrowablePinnedBuffer(const GrowablePinnedBuffer &) = delete;
-  GrowablePinnedBuffer &operator=(const GrowablePinnedBuffer &) = delete;
-
-  GrowablePinnedBuffer(GrowablePinnedBuffer &&other) noexcept
-      : stream_(other.stream_), ptr_(other.ptr_), size_(other.size_) {
-    other.ptr_ = nullptr;
-    other.size_ = 0;
-  }
-  GrowablePinnedBuffer &operator=(GrowablePinnedBuffer &&other) noexcept {
-    if (this != &other) {
-      free_now();
-      stream_ = other.stream_;
-      ptr_ = other.ptr_;
-      size_ = other.size_;
-      other.ptr_ = nullptr;
-      other.size_ = 0;
-    }
-    return *this;
-  }
-
-  ~GrowablePinnedBuffer() { free_now(); }
-
-  void set_stream(hipStream_t stream) { stream_ = stream; }
-  void *data() const noexcept { return ptr_; }
-  size_t size() const noexcept { return size_; }
-
-  int grow(size_t needed) {
-    if (needed == 0)
-      return 0;
-    if (size_ >= needed)
-      return 0;
-
-    size_t alloc_size = detail::pick_grow_size(size_, needed);
-
-    if (ptr_) {
-      if (stream_) {
-        // Any in-flight hipMemcpyAsync targeting this pinned buffer must
-        // complete before we free it. Sync failure is logged but not
-        // propagated (same reason as GrowableDeviceBuffer).
-        HIP_CLEANUP(hipStreamSynchronize(stream_));
-      }
-      HIP_CLEANUP(hipHostFree(ptr_));
-      ptr_ = nullptr;
-      size_ = 0;
-    }
-
-    hipError_t alloc_err =
-        hipHostMalloc(&ptr_, alloc_size, hipHostMallocDefault);
-    if (alloc_err != hipSuccess || !ptr_) {
-      fprintf(stderr, "GrowablePinnedBuffer: hipHostMalloc(%zu) failed: %s\n",
-              alloc_size, hipGetErrorString(alloc_err));
-      ptr_ = nullptr;
-      return -1;
-    }
-    size_ = alloc_size;
-    return 0;
-  }
-
-private:
-  void free_now() noexcept {
-    if (ptr_) {
-      HIP_CLEANUP(hipHostFree(ptr_));
-      ptr_ = nullptr;
-      size_ = 0;
-    }
-  }
-
-  hipStream_t stream_ = nullptr;
-  void *ptr_ = nullptr;
-  size_t size_ = 0;
-};
+// Concrete aliases preserve the names callers already use.
+using GrowableDeviceBuffer = GrowableBuffer<detail::DevicePolicy>;
+using GrowablePinnedBuffer = GrowableBuffer<detail::PinnedPolicy>;
 
 } // namespace hipdnn_ep
 

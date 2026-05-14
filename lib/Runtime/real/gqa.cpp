@@ -1460,7 +1460,3 @@ int wrap_group_query_attention(
 
   return rc;
 }
-
-// (Removed: hipdnn_ep_gqa_gemm_cache_destroy. The cache now lives in the
-//  GqaGemmState op-module and is freed by ~GqaGemmState via the module
-//  registry on session cleanup.)
