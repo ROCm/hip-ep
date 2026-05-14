@@ -24,8 +24,7 @@ static bool isSupportedOp(Operation *op) {
   StringRef opName = op->getName().getStringRef();
 
   // Check if op is a supported type
-  if (opName != "onnx.Conv" &&
-      opName != "onnx.MatMul")
+  if (opName != "onnx.Conv" && opName != "onnx.MatMul")
     return false;
 
   // All inputs and outputs must have static shapes
