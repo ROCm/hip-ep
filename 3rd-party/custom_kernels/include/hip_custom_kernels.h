@@ -166,6 +166,53 @@ int hip_elementwise_not(
     int64_t num_elements);
 
 /* =========================================================================
+ * Elementwise Binary (Div / Mod / Equal / Less)
+ * =========================================================================
+ *
+ * Same-shape binary elementwise ops added for the Qwen3.5 vision model.
+ * All four share a single .hip TU (elementwise_binary_kernel.hip).
+ *
+ * Important: broadcasting is NOT performed in these kernels. lhs and rhs
+ * must already have identical shape (broadcasting is materialised
+ * upstream via Expand).
+ *
+ * Output dtype for Equal/Less is bool (1 byte); their hip_dtype refers to
+ * the INPUT type. For Div/Mod, output dtype matches input dtype.
+ */
+int hip_elementwise_div(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_mod(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype,
+    int fmod_flag);
+
+int hip_elementwise_equal(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_less(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+/* =========================================================================
  * Elementwise reciprocal (1 / x)
  * =========================================================================
  *

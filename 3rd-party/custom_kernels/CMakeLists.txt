@@ -37,6 +37,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/elementwise_gelu_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/elementwise_unary_kernel.hip
+    hip/elementwise_binary_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip
