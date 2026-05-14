@@ -60,8 +60,8 @@ struct RuntimeState {
   // hipDNN graph execution support. Both attached by the EP via
   // hipdnn_graph_runtime_attach() after inference_init(); owned by the EP
   // and not cleaned up here.
-  void *hipdnn_handle;          // hipdnnHandle_t cast to void*
-  void *hipdnn_graph_registry;  // opaque GraphRegistry*
+  void *hipdnn_handle;         // hipdnnHandle_t cast to void*
+  void *hipdnn_graph_registry; // opaque GraphRegistry*
 
   // Op-module registry. New ops add per-session state by registering
   // through HIPDNN_OP_MODULE rather than growing this struct.
