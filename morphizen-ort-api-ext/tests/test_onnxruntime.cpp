@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include <core/session/onnxruntime_c_api.h>
+#include <core/session/onnxruntime_cxx_api.h>
 #include <iostream>
 #include <morphizen/morphizen_ort_api.h>
 
