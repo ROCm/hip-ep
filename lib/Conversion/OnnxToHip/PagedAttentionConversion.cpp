@@ -19,8 +19,9 @@ struct PagedAttentionToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult PagedAttentionToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+mlir::LogicalResult
+PagedAttentionToHip::matchAndRewrite(mlir::Operation *op,
+                                     mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "PagedAttention")
     return rewriter.notifyMatchFailure(op, "not a PagedAttention operation");
@@ -38,8 +39,8 @@ mlir::LogicalResult PagedAttentionToHip::matchAndRewrite(
   mlir::Location loc = op->getLoc();
   size_t numOps = op->getNumOperands();
   if (numOps < 8 || numOps > 10)
-    return rewriter.notifyMatchFailure(
-        op, "PagedAttention expects 8-10 operands");
+    return rewriter.notifyMatchFailure(op,
+                                       "PagedAttention expects 8-10 operands");
 
   auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
     if (idx >= numOps)
@@ -63,8 +64,8 @@ mlir::LogicalResult PagedAttentionToHip::matchAndRewrite(
 
   size_t numResults = op->getNumResults();
   if (numResults < 1 || numResults > 3)
-    return rewriter.notifyMatchFailure(
-        op, "PagedAttention expects 1-3 results");
+    return rewriter.notifyMatchFailure(op,
+                                       "PagedAttention expects 1-3 results");
 
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());

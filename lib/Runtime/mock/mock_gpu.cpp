@@ -595,14 +595,16 @@ int wrap_group_query_attention(
   return 0;
 }
 
-int wrap_paged_attention(
-    RuntimeState *state, void *query, void *key, void *value, void *key_cache,
-    void *value_cache, void *cumulative_sequence_length, void *past_seqlens,
-    void *block_table, void *cos_cache, void *sin_cache, void *output,
-    void *key_cache_out, void *value_cache_out, int64_t num_heads,
-    int64_t kv_num_heads, int64_t do_rotary, int64_t rotary_interleaved,
-    int64_t local_window_size, float scale, float softcap, int64_t num_tokens,
-    int64_t query_dim1, int64_t element_size_bytes) {
+int wrap_paged_attention(RuntimeState *state, void *query, void *key,
+                         void *value, void *key_cache, void *value_cache,
+                         void *cumulative_sequence_length, void *past_seqlens,
+                         void *block_table, void *cos_cache, void *sin_cache,
+                         void *output, void *key_cache_out,
+                         void *value_cache_out, int64_t num_heads,
+                         int64_t kv_num_heads, int64_t do_rotary,
+                         int64_t rotary_interleaved, int64_t local_window_size,
+                         float scale, float softcap, int64_t num_tokens,
+                         int64_t query_dim1, int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_paged_attention\n");
     return -1;
@@ -612,13 +614,14 @@ int wrap_paged_attention(
              "do_rotary=%lld, rotary_interleaved=%lld, local_window=%lld, "
              "scale=%f, softcap=%f, num_tokens=%lld, query_dim1=%lld, "
              "elem_size=%lld; key=%s value=%s cos=%s sin=%s kco=%s vco=%s)\n",
-             (long long)num_heads, (long long)kv_num_heads, (long long)do_rotary,
-             (long long)rotary_interleaved, (long long)local_window_size,
-             (double)scale, (double)softcap, (long long)num_tokens,
-             (long long)query_dim1, (long long)element_size_bytes,
-             key ? "yes" : "null", value ? "yes" : "null",
-             cos_cache ? "yes" : "null", sin_cache ? "yes" : "null",
-             key_cache_out ? "yes" : "null", value_cache_out ? "yes" : "null");
+             (long long)num_heads, (long long)kv_num_heads,
+             (long long)do_rotary, (long long)rotary_interleaved,
+             (long long)local_window_size, (double)scale, (double)softcap,
+             (long long)num_tokens, (long long)query_dim1,
+             (long long)element_size_bytes, key ? "yes" : "null",
+             value ? "yes" : "null", cos_cache ? "yes" : "null",
+             sin_cache ? "yes" : "null", key_cache_out ? "yes" : "null",
+             value_cache_out ? "yes" : "null");
 
   (void)query;
   (void)key_cache;
