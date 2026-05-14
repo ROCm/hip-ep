@@ -58,7 +58,7 @@ proto_library(
 proto_library(
     name = "config_proto",
     srcs = ["src/config.proto"],
-    deps = [ ":version_proto"] ,
+    deps = [":version_proto", "@protobuf//:struct_proto"],
     strip_import_prefix = "src",
     visibility = ["//visibility:public"],
 )
