@@ -291,6 +291,7 @@ cc_library(
         "@hash-library//:hash-library",
         "@glog",
         "@gsl",
+        "@onnx//:onnx",
         "@onnxruntime//:onnxruntime_headers",
         "@protobuf",
         "@zlib",
