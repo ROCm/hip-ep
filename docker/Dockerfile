@@ -42,16 +42,6 @@ RUN pip3 install --no-cache-dir --break-system-packages \
         cmake lit setuptools wheel numpy requests packaging \
     && ln -sf /usr/local/bin/lit /usr/bin/lit
 
-# Layer 4: sccache for CI cache hits. Pinned to 0.10.0 — earlier 0.8.x only
-# knows GHA cache v1 (ACTIONS_CACHE_URL) and fails on the v2-only runners
-# GitHub rolled out in early 2026 (ACTIONS_RESULTS_URL).
-ARG SCCACHE_VERSION=0.10.0
-RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-        | tar -xz -C /tmp \
-    && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/ \
-    && rm -rf "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl" \
-    && chmod +x /usr/local/bin/sccache
-
 # Sanity: the cmake configs the build needs are actually present.
 RUN test -f /usr/lib/llvm-${LLVM_MAJOR}/lib/cmake/llvm/LLVMConfig.cmake \
     && test -f /usr/lib/llvm-${LLVM_MAJOR}/lib/cmake/mlir/MLIRConfig.cmake \
