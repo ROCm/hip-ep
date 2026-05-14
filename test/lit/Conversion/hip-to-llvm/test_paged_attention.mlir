@@ -38,6 +38,8 @@ module {
   func.func @test_paged_attention_dynamic_query(
       %ctx: !hip.context,
       %query: memref<?x128xf16, 1>,
+      %key: memref<?x128xf16, 1>,
+      %value: memref<?x128xf16, 1>,
       %key_cache: memref<8x16x2x16xf16, 1>,
       %value_cache: memref<8x16x2x16xf16, 1>,
       %cum_seq: memref<2xi32, 1>,
@@ -45,11 +47,11 @@ module {
       %block_table: memref<1x8xi32, 1>,
       %output: memref<?x128xf16, 1>) {
     hip.paged_attention(%ctx)
-        ins(%query, %key_cache, %value_cache, %cum_seq, %past_seqlens,
-            %block_table :
-            memref<?x128xf16, 1>, memref<8x16x2x16xf16, 1>,
-            memref<8x16x2x16xf16, 1>, memref<2xi32, 1>, memref<1xi32, 1>,
-            memref<1x8xi32, 1>)
+        ins(%query, %key, %value, %key_cache, %value_cache, %cum_seq,
+            %past_seqlens, %block_table :
+            memref<?x128xf16, 1>, memref<?x128xf16, 1>, memref<?x128xf16, 1>,
+            memref<8x16x2x16xf16, 1>, memref<8x16x2x16xf16, 1>,
+            memref<2xi32, 1>, memref<1xi32, 1>, memref<1x8xi32, 1>)
         outs(%output : memref<?x128xf16, 1>)
         {num_heads = 4 : i64, kv_num_heads = 2 : i64}
     return
