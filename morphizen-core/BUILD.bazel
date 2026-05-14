@@ -12,7 +12,7 @@ load("@rules_python//python:defs.bzl", "py_binary")
 genrule(
     name = "generate_mem_binary_file",
     outs = ["mem_binary_file.hpp.inc"],
-    cmd = "$(location //morphizen-foundation:compress_binary_py) $@",
+    cmd = "$(location //morphizen-foundation:compress_binary_py) 0 $@",
     tools = ["//morphizen-foundation:compress_binary_py"],
 )
 # # Proto libraries for morphizen-core
