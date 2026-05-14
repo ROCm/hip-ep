@@ -35,8 +35,7 @@ struct PagedAttentionOpLowering
     Value statePtr = adaptor.getCtx();
     Value queryPtr =
         extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
-    Value keyPtr =
-        extractOptionalMemRefPtr(adaptor.getKey(), rewriter, loc);
+    Value keyPtr = extractOptionalMemRefPtr(adaptor.getKey(), rewriter, loc);
     Value valuePtr =
         extractOptionalMemRefPtr(adaptor.getValue(), rewriter, loc);
     Value keyCachePtr =
@@ -70,25 +69,23 @@ struct PagedAttentionOpLowering
 
     auto queryTy = cast<MemRefType>(op.getQuery().getType());
     MemRefDescriptor qDesc(adaptor.getQuery());
-    Value numTokens =
-        queryTy.isDynamicDim(0)
-            ? qDesc.size(rewriter, loc, 0)
-            : createI64Const(queryTy.getDimSize(0));
-    Value queryDim1 =
-        queryTy.isDynamicDim(1)
-            ? qDesc.size(rewriter, loc, 1)
-            : createI64Const(queryTy.getDimSize(1));
-    Value elemSizeBytes = createI64Const(
-        queryTy.getElementType().getIntOrFloatBitWidth() / 8);
+    Value numTokens = queryTy.isDynamicDim(0)
+                          ? qDesc.size(rewriter, loc, 0)
+                          : createI64Const(queryTy.getDimSize(0));
+    Value queryDim1 = queryTy.isDynamicDim(1)
+                          ? qDesc.size(rewriter, loc, 1)
+                          : createI64Const(queryTy.getDimSize(1));
+    Value elemSizeBytes =
+        createI64Const(queryTy.getElementType().getIntOrFloatBitWidth() / 8);
 
     SmallVector<Type, 32> paramTypes = {
         ptrType, // state
-        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType,
-        ptrType, ptrType, // query..sin (10)
-        ptrType, ptrType, ptrType, // outputs
+        ptrType, ptrType, ptrType, ptrType, ptrType,
+        ptrType, ptrType, ptrType, ptrType, ptrType, // query..sin (10)
+        ptrType, ptrType, ptrType,                   // outputs
         i64Type, i64Type, i64Type, i64Type, i64Type, // attrs i64
-        f32Type, f32Type,                           // scale, softcap
-        i64Type, i64Type, i64Type                   // shape
+        f32Type, f32Type,                            // scale, softcap
+        i64Type, i64Type, i64Type                    // shape
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -97,30 +94,18 @@ struct PagedAttentionOpLowering
       return failure();
 
     SmallVector<Value, 32> args = {
-        statePtr,
-        queryPtr,
-        keyPtr,
-        valuePtr,
-        keyCachePtr,
-        valueCachePtr,
-        cumSeqPtr,
-        pastSeqlensPtr,
-        blockTablePtr,
-        cosPtr,
-        sinPtr,
-        outputPtr,
-        keyCacheOutPtr,
-        valueCacheOutPtr,
-        numHeads,
-        kvNumHeads,
-        doRotary,
-        rotaryInterleaved,
-        localWindowSize,
-        scale,
-        softcap,
-        numTokens,
-        queryDim1,
-        elemSizeBytes,
+        statePtr,        queryPtr,
+        keyPtr,          valuePtr,
+        keyCachePtr,     valueCachePtr,
+        cumSeqPtr,       pastSeqlensPtr,
+        blockTablePtr,   cosPtr,
+        sinPtr,          outputPtr,
+        keyCacheOutPtr,  valueCacheOutPtr,
+        numHeads,        kvNumHeads,
+        doRotary,        rotaryInterleaved,
+        localWindowSize, scale,
+        softcap,         numTokens,
+        queryDim1,       elemSizeBytes,
     };
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

@@ -536,8 +536,8 @@ void populateGqaLoweringPatterns(
     const DenseMap<Operation *, Value> &hostScalars);
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populatePagedAttentionLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populatePagedAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateDequantBnb4LoweringPatterns(const LLVMTypeConverter &converter,
