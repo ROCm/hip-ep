@@ -116,6 +116,56 @@ int hip_elementwise_where(
     int hip_dtype);
 
 /* =========================================================================
+ * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
+ * =========================================================================
+ *
+ * Per-op launchers for the 5 ONNX unary ops added for the Qwen3.5 vision
+ * model. All five share a single .hip translation unit
+ * (3rd-party/custom_kernels/hip/elementwise_unary_kernel.hip).
+ *
+ * Supported hip_dtype (per op, may differ):
+ *   Neg/Sign  : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
+ *   Cos/Sin   : FLOAT16, FLOAT32
+ *   Not       : bool (i.e. 1-byte; pass element_size_bytes is unused -- the
+ *               kernel reads/writes 1 byte unconditionally and ignores
+ *               hip_dtype)
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+int hip_elementwise_neg(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_sign(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_cos(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_sin(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_not(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements);
+
+/* =========================================================================
  * Elementwise reciprocal (1 / x)
  * =========================================================================
  *
