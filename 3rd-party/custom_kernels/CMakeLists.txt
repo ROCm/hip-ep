@@ -41,6 +41,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/tile_kernel.hip
     hip/expand_kernel.hip
     hip/gather_nd_kernel.hip
+    hip/cumsum_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip
