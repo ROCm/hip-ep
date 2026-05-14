@@ -42,6 +42,7 @@ cc_library(
         "//morphizen-ort-api-ext",
         "//morphizen-utils:morphizen_utils",
 
+        "//morphizen-graph:morphizen-graph",
         "//morphizen-core:morphizen-core-static",  # Complete morphizen-core library
         "@glog",
         "@gsl",
