@@ -78,6 +78,13 @@ proto_library(
     visibility = ["//visibility:public"],
 )
 
+proto_library(
+    name = "model_compatibility_proto",
+    srcs = ["src/model_compatibility.proto"],
+    strip_import_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
 # C++ proto libraries
 cc_proto_library(
     name = "anchor_point_cc_proto",
@@ -109,6 +116,11 @@ cc_proto_library(
     deps = [":version_proto"],
 )
 
+cc_proto_library(
+    name = "model_compatibility_cc_proto",
+    deps = [":model_compatibility_proto"],
+)
+
 
 # Convenience target to group all proto dependencies
 collect_pb(
@@ -118,6 +130,7 @@ collect_pb(
         ":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
+        ":model_compatibility_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
         ":version_cc_proto",
@@ -133,6 +146,7 @@ collect_pb(
         ":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
+        ":model_compatibility_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
         ":version_cc_proto",
@@ -143,12 +157,15 @@ collect_pb(
 cc_library(
     name = "morphizen_proto_lib",
     visibility = ["//visibility:public"],
-    deps = [":anchor_point_cc_proto",
+    deps = [
+        ":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
+        ":model_compatibility_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
-        ":version_cc_proto",],
+        ":version_cc_proto",
+    ],
 )
 # Generated files that would normally be created by CMake custom commands
 # Based on morphizen-core-static.cmake configuration
