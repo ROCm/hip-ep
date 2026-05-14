@@ -76,12 +76,6 @@ proto_library(
     visibility = ["//visibility:public"],
 )
 
-proto_library(
-    name = "pattern_proto",
-    srcs = [":src/pattern.proto"],
-    strip_import_prefix = "src",
-    visibility = ["//visibility:public"],
-)
 
 proto_library(
     name = "version_proto",
@@ -120,7 +114,7 @@ cc_proto_library(
 
 cc_proto_library(
     name = "pattern_cc_proto",
-    deps = [":pattern_proto"],
+    deps = ["//morphizen-pattern:pattern_proto"],
 )
 
 cc_proto_library(
