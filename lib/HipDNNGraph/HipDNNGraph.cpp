@@ -283,9 +283,17 @@ AddMatMulNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
   if (IsScalarAttr(a_attr) || IsScalarAttr(b_attr))
     return Status::Failure("onnx.MatMul inputs must be tensors, not scalars");
 
-  // Create MatmulAttributes (ONNX MatMul is simple: C = A @ B)
-  // No additional attributes needed - hipDNN infers compute type automatically
+  // Determine compute data type (same logic as Conv)
+  auto compute_dtype =
+      GetComputeDataType(a_attr->get_data_type(), b_attr->get_data_type());
+  if (!compute_dtype.has_value())
+    return Status::Failure(
+        "Unsupported data type combination for MatMul compute");
+
+  // Create MatmulAttributes and set compute_data_type
+  // hipDNN Graph requires explicit compute_data_type (cannot be NOT_SET)
   MatmulAttributes matmul_attrs;
+  matmul_attrs.set_compute_data_type(compute_dtype.value());
 
   // Call hipDNN graph API to add matmul node
   output_attr = graph.matmul(a_attr, b_attr, matmul_attrs);
