@@ -24,7 +24,19 @@ static bool isSupportedOp(Operation *op) {
   StringRef opName = op->getName().getStringRef();
 
   // Check if op is a supported type
-  if (opName != "onnx.Conv" && opName != "onnx.MatMul")
+  // Conv and MatMul
+  if (opName == "onnx.Conv" || opName == "onnx.MatMul")
+    ; // Supported, continue to shape check
+  // Pointwise operations (unary)
+  else if (opName == "onnx.Neg" || opName == "onnx.Sin" ||
+           opName == "onnx.Not")
+    ; // Supported, continue to shape check
+  // Pointwise operations (binary)
+  else if (opName == "onnx.Div" || opName == "onnx.And" ||
+           opName == "onnx.Equal" || opName == "onnx.Min" ||
+           opName == "onnx.Less")
+    ; // Supported, continue to shape check
+  else
     return false;
 
   // All inputs and outputs must have static shapes
