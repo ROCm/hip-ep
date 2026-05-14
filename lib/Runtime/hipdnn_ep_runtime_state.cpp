@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "debug_log.h"
+#include "growable_buffer.h"
 #include "hip/timing.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
@@ -214,8 +215,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->pool_size = 0;
   state->buffer_offsets = nullptr;
   state->num_buffers = 0;
-  state->workspace = nullptr;
-  state->workspace_size = 0;
+  // workspace lives in the WorkspaceState op-module (lazy-init on first
+  // hipdnn_ep_state_ensure_workspace call); no direct RuntimeState field.
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
@@ -845,14 +846,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // destructors may issue hipFree / hipblasLt*Destroy / miopen*Destroy.
   // The stream sync above guarantees no in-flight kernel references the
   // cached buffers.
+  // Module-owned state (workspace, qmoe scratch, per-op caches, ...) is
+  // freed here. Order matters: this must run before we tear down handles
+  // / pool so module destructors see a still-valid stream.
   if (state->modules) {
     hipdnn_ep::module_registry_destroy(state->modules);
     state->modules = nullptr;
-  }
-
-  // Free shared workspace (if allocated)
-  if (state->workspace) {
-    HIP_CLEANUP(hipFree(state->workspace));
   }
 
   if (state->device_error_flag) {
@@ -1041,13 +1040,46 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state) {
 //===----------------------------------------------------------------------===//
 // Shared Workspace Support
 //===----------------------------------------------------------------------===//
+//
+// The shared workspace is a single grow-on-demand device-VRAM scratch
+// region used by multiple ops (GQA, hipBLASLt-backed matmul/gemm, LayerNorm,
+// CausalConv, etc.) within one inference. Implementation lives in a
+// WorkspaceState op-module backed by GrowableDeviceBuffer, exactly like
+// QmoeState in real/qmoe.cpp -- this collapses what used to be a hand-rolled
+// 1.5x-grow / sync-then-realloc inline body into the same RAII helper used
+// elsewhere in the runtime.
+//
+// The three exported C-ABI entry points keep their signatures so the bitcode
+// embedded into compiled model.dlls links against them unchanged.
+
+namespace {
+
+struct WorkspaceState {
+  hipdnn_ep::GrowableDeviceBuffer ws;
+
+  // Stream is set in initialize_state_handles before any wrap_* call, so
+  // we can capture it at module-construction time.
+  explicit WorkspaceState(RuntimeState *rs) {
+    ws.set_stream(rs ? rs->stream : nullptr);
+  }
+};
+
+HIPDNN_OP_MODULE(workspace_module, "workspace", WorkspaceState);
+
+} // namespace
 
 void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
-  return state ? state->workspace : nullptr;
+  if (!state)
+    return nullptr;
+  WorkspaceState *m = workspace_module(state);
+  return m ? m->ws.data() : nullptr;
 }
 
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state) {
-  return state ? state->workspace_size : 0;
+  if (!state)
+    return 0;
+  WorkspaceState *m = workspace_module(state);
+  return m ? m->ws.size() : 0;
 }
 
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
@@ -1055,54 +1087,27 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
     return -1;
   if (needed_size == 0)
     return 0;
-  if (state->workspace_size >= needed_size)
-    return 0;
-
-  // Amortize growth: when enlarging an existing workspace, round the new
-  // size up to at least 1.5x the current buffer. Callers whose request
-  // size grows monotonically by a small increment per inference (e.g. the
-  // GQA decode path, which sizes S buffers to B*H*total_seq and adds B*H
-  // elements per token) would otherwise trigger a hipStreamSynchronize +
-  // hipFree + hipMalloc cycle on every decode step; with the 1.5x factor
-  // that drops to O(log N) reallocations over the whole generation.
-  // Cold-start (no existing workspace) keeps the exact requested size so
-  // warmup doesn't silently double large initial allocations.
-  size_t alloc_size = needed_size;
-  if (state->workspace_size > 0) {
-    size_t grown = state->workspace_size + state->workspace_size / 2; // 1.5x
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-
-  // Grow: free old, allocate new.
-  // Sync the stream first to ensure no in-flight kernel is still using the
-  // old workspace buffer (prevents use-after-free on async GPU execution).
-  // Sync failure is logged but not propagated: there is no recovery
-  // (refusing to grow would deadlock the caller, and the next hipFree /
-  // hipMalloc will surface a real device fault if the sync truly left
-  // things unusable).
-  if (state->workspace) {
-    if (state->stream) {
-      HIP_CLEANUP(hipStreamSynchronize(state->stream));
-    }
-    HIP_CLEANUP(hipFree(state->workspace));
-    state->workspace = nullptr;
-    state->workspace_size = 0;
-  }
-
-  hipError_t alloc_err = hipMalloc(&state->workspace, alloc_size);
-  if (alloc_err != hipSuccess || !state->workspace) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_workspace: hipMalloc(%zu) failed: %s\n",
-            alloc_size, hipGetErrorString(alloc_err));
-    state->workspace = nullptr;
+  WorkspaceState *m = workspace_module(state);
+  if (!m) {
+    fprintf(
+        stderr,
+        "hipdnn_ep_state_ensure_workspace: failed to obtain WorkspaceState\n");
     std::abort();
   }
-
-  state->workspace_size = alloc_size;
+  // GrowableDeviceBuffer::grow() implements the same "sync-then-realloc,
+  // 1.5x geometric, cold-start uses exact request" policy that this
+  // function used to inline. See lib/Runtime/growable_buffer.h. Workspace
+  // OOM is unrecoverable in practice -- every consumer fails the same way
+  // and there is no fallback path -- so abort, matching upstream main's
+  // #214 policy on this allocator.
+  if (m->ws.grow(needed_size) != 0) {
+    fprintf(stderr, "hipdnn_ep_state_ensure_workspace: grow(%zu) failed\n",
+            needed_size);
+    std::abort();
+  }
   RUNTIME_DEBUG_LOG(
       "[workspace] Allocated shared workspace: %zu bytes (requested %zu)\n",
-      alloc_size, needed_size);
+      m->ws.size(), needed_size);
   return 0;
 }
 

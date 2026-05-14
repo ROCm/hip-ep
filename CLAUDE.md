@@ -175,7 +175,7 @@ int wrap_my_op(RuntimeState *state, ...) {
 **Where the helpers live:**
 - `lib/Runtime/module_registry.{h,cpp}` — registry, `HIPDNN_OP_MODULE`, lifecycle hooks.
 - `lib/Runtime/growable_buffer.h` — `hipdnn_ep::GrowableDeviceBuffer` / `GrowablePinnedBuffer` for the canonical "1.5x grow, sync-then-realloc, never shrink" pattern. Prefer these over hand-rolling `hipMalloc`/`hipFree` inside a module.
-- Live examples: `CausalConvState`, `ZpUnpackState`, `GqaGemmState`, `GqaSeqlensCache` (with `begin_compute`), `QmoeState`.
+- Live examples: `WorkspaceState` (the shared device-VRAM scratch behind `hipdnn_ep_state_(get|ensure)_workspace`), `CausalConvState`, `ZpUnpackState`, `GqaGemmState`, `GqaSeqlensCache` (with `begin_compute`), `QmoeState`.
 - Design doc: `docs/design/runtime-module-registry.md` — single canonical reference; describes the in-tree registry and `growable_buffer.h` precisely, no plan / draft framing.
 - Smoke test: CTest #58 `RuntimeSteadyState` exercises hook-detection, slot stability, lazy init, destruction order, and the post-warmup steady-state assertion. Lives in `test/runtime_steady_state/`.
 

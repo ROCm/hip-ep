@@ -199,10 +199,11 @@ class GrowablePinnedBuffer { /* hipHostMalloc / hipHostFree, same API */ };
 
 Used by composition. Not registered as modules themselves.
 
-## The five op-modules in the tree
+## The six op-modules in the tree
 
 | Slot name | State type | TU | Notes |
 |---|---|---|---|
+| `"workspace"` | `WorkspaceState` | `hipdnn_ep_runtime_state.cpp` | Single `GrowableDeviceBuffer ws` — the shared device-VRAM scratch used by GQA, hipBLASLt-backed MatMul/Gemm, LayerNorm, CausalConv, etc. Exposed to ops through the flat C-ABI (`hipdnn_ep_state_(get|ensure)_workspace` / `..._get_workspace_size`), so ops are unaware of the registry layer. Module-tier (rather than per-op) on purpose: it is shared cross-op scratch, but the underlying grow / free / sync policy is identical to `QmoeState::scratch`, so it reuses the same RAII helper instead of hand-rolling the loop. |
 | `"causal_conv_with_state"` | `CausalConvState` | `real/causal_conv_with_state.cpp` | `unordered_map<CausalConvKey, CausalConvCacheEntry, ...>`. Destructor frees MIOpen descriptors via the file-local `destroyEntry`. |
 | `"zp_unpack"` | `hipdnn_ep_real::ZpUnpackState` | `real/matmul_nbits.cpp` | Two `unordered_map<const void *, std::pair<void *, size_t>>` for the asym AWQ `(u8, fp16)` unpacked zero_points buffers, plus a `std::mutex`. Destructor `hipFree`s every cached buffer. Reached by both `wrap_matmul_nbits` and `wrap_qmoe` via `lookup_or_unpack_zp_u8` / `lookup_or_convert_zp_fp16` — single slot, no duplication. |
 | `"gqa_seqlens_cache"` | `GqaSeqlensCache` | `real/gqa.cpp` | POD (`bool valid; int32_t val; const void *ptr;`). `begin_compute` resets `valid` and `ptr`. First GQA layer in a `Compute()` pays the D2H to read `seqlens_k[0]`; later layers reuse it. |

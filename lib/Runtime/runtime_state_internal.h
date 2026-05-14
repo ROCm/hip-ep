@@ -46,10 +46,10 @@ struct RuntimeState {
   size_t *buffer_offsets; // Offset for each buffer in the pool
   size_t num_buffers;     // Number of buffers in the pool
 
-  // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
-  // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
-  void *workspace;
-  size_t workspace_size;
+  // Shared workspace (MatMul GEMM ws, GQA pipeline, LayerNorm rstd, ...) is
+  // owned by the WorkspaceState op-module; accessed only through the C-ABI
+  // helpers (hipdnn_ep_state_(get|ensure)_workspace) so the bitcode-compiled
+  // model.dll is unaffected by the migration.
 
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   void *op_profile;
