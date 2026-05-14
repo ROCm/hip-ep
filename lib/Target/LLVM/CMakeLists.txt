@@ -103,21 +103,9 @@ if(WIN32)
     list(APPEND llvm_libs ${llvm_libs_coff})
 endif()
 
-# Locate LLD (Windows only — Linux invokes ld.lld via the clang++ driver
-# subprocess and links no lld libs in-process). Two shipping conventions:
-#
-#  (a) Source-built / install-tree layout (Windows / LLVM cross-compiled in
-#      vendored 3rd-party): split static archives liblldCOFF.a, liblldCommon.a
-#      co-located in LLVM_LIBRARY_DIRS. Discover with find_library against
-#      bare names.
-#
-#  (b) Distro dev package (apt.llvm.org liblld-XX-dev, brew llvm on macOS,
-#      ...): only LLDConfig.cmake + LLDTargets.cmake under lib/cmake/lld/;
-#      libraries are exposed exclusively as IMPORTED targets (lldCOFF,
-#      lldCommon, ...) via find_package(LLD CONFIG).
-#
-# Try the CONFIG path first; fall back to find_library for legacy trees
-# that omit LLDConfig.cmake.
+# LLD: Windows only (Linux uses clang++ driver subprocess). Prefer
+# find_package(LLD CONFIG) (apt.llvm.org / IMPORTED targets); fall back to
+# find_library for legacy trees that omit LLDConfig.cmake.
 set(lld_libs "")
 if(WIN32)
     find_package(LLD CONFIG QUIET)
@@ -147,25 +135,14 @@ target_link_libraries(HipTargetLLVM PUBLIC
   $<$<BOOL:${LLVM_DTLTO_LIB}>:${LLVM_DTLTO_LIB}>
 )
 
-# DLLLinker.cpp's Linux path invokes `clang -shared` as a subprocess
-# (driver-mediated link via ld.lld) instead of in-process lld::lldMain —
-# see the long comment in linkDLL_Linux for the reason. Bake the
-# discovered clang path so the runtime invocation doesn't have to rely on
-# PATH (the host process running the EP may not include the llvm-XX bin
-# dir). PATH lookup remains the fallback in DLLLinker.cpp if the baked
-# path is stale (e.g. CI build with /usr/lib/llvm-22 deployed to a host
-# where clang lives elsewhere).
+# Bake the clang++ path used by DLLLinker.cpp's Linux subprocess link.
+# DLLLinker has a PATH fallback if the baked path is stale (e.g. CI build
+# deployed to a host with clang elsewhere). HINTS scopes the search to
+# the LLVM tree we configure against so a stale `/usr/bin/clang-18`
+# doesn't shadow apt llvm-22. clang++ (not bare clang) — the driver
+# auto-pulls libstdc++ which the generated model object needs for
+# __cxa_begin_catch / __cxa_rethrow.
 if(NOT WIN32)
-    # HINTS (vs PATHS) gives priority to the LLVM tree we're configuring
-    # against, so a stale `/usr/bin/clang-18` won't be picked over the
-    # apt llvm-22 install when both exist. Default-PATH search is still
-    # the fallback if the hints don't pan out.
-    # We bake the clang++ driver (not bare clang) so the runtime link
-    # auto-pulls libstdc++ — the generated model object references C++
-    # ABI symbols (__cxa_begin_catch, __cxa_rethrow, etc.) via the
-    # libhip_custom_kernels.a archive's std::unordered_map / std::string
-    # usage. With bare `clang -shared` the link errors "undefined symbol:
-    # __cxa_*" on every model.
     find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
         HINTS
             ${LLVM_BINARY_DIR}/bin

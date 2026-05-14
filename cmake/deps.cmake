@@ -130,21 +130,12 @@ set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
 # Add morphizen subdirectory.
 #
-# Note (linux): GCC 13+ emits -Wconversion on protobuf >=22 generated *.pb.h
-# inline accessors (`Map::size()` returns size_t but the accessor signature
-# is `int`), which would otherwise trip MORPHIZEN_COMPILER_OPTIONS's
-# `-Werror -Wconversion` in every morphizen-* target that includes a .pb.h.
-# Fixed at the root in the morphizen submodule by marking the generated-
-# header BINARY_DIR as SYSTEM PUBLIC (morphizen-core-static) / SYSTEM PRIVATE
-# (morphizen-pattern) — see those targets' CMakeLists.txt. The SYSTEM
-# marking propagates to all PUBLIC consumers via
-# INTERFACE_SYSTEM_INCLUDE_DIRECTORIES, so ort-bridge / morphizen-graph /
-# etc. inherit the suppression automatically. No parent-side override on
-# MORPHIZEN_COMPILER_OPTIONS is needed; full `-Werror -Wconversion` strict
-# mode remains in force for non-protobuf code.
-#
-# onnx-ir-imp keeps a narrower per-target `-Wno-error=conversion` because
-# its .pb.h surface comes from the external `onnx_proto` target whose
-# INTERFACE_INCLUDE_DIRECTORIES are not under our control to flip SYSTEM;
-# fixing that requires upstream onnx changes (tracked as a follow-up).
+# GCC -Wconversion on protobuf >=22 *.pb.h accessors is suppressed at the
+# root by marking the generated-header BINARY_DIR as SYSTEM in
+# morphizen-{core-static,pattern}; the SYSTEM propagation handles all
+# transitive consumers, so no parent-side -Werror override is needed.
+# onnx-ir-imp still needs a per-target `-Wno-error=conversion` because
+# its .pb.h surface comes from external `onnx_proto` whose
+# INTERFACE_INCLUDE_DIRECTORIES we don't control (upstream onnx fix is a
+# follow-up).
 add_subdirectory(3rd-party/morphizen)

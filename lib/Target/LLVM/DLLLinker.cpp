@@ -253,27 +253,13 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
                               const std::string &outputDLL,
                               const std::vector<std::string> &libraries,
                               const std::vector<std::string> &libraryPaths) {
-  // Driver-mediated link: clang -shared owns crt selection, sysroot,
-  // multiarch -L, libgcc -L, sys-lib ordering, the glibc 2.34
-  // libpthread/libdl merge, and the start/end-group bracket around its own
-  // implicit libs. We only pass user objects + user libs + rpath, and let
-  // clang generate the right argv for ld.lld.
-  //
-  // Subprocess (not in-process lld::lldMain) because lld::lldMain SIGSEGV's
-  // during its post-output cleanup when libhip-compiler.so is loaded into
-  // a long-lived host process via dlopen — exactly the path the MorphiZen
-  // EP takes. The .so is on disk by then, but lldMain's exit path corrupts
-  // host state. clang -shared invokes ld.lld in its own child process and
-  // exits cleanly because there is no host state to corrupt.
-  //
-  // The Windows path (linkDLL_Windows) does not have this issue because
-  // lld-link (COFF driver) cleans up safely in-process; we keep that on
-  // lld::lldMain.
-  // Use the clang++ driver flavor — it auto-pulls libstdc++ (which provides
-  // __cxa_begin_catch / __cxa_rethrow / __cxa_end_catch / etc. that the
-  // generated model object pulls in via std::string / std::unordered_map).
-  // The bare `clang` driver only links libc and would error with
-  // "undefined symbol: __cxa_*" on every model.
+  // Delegate to `clang++ -shared` driver subprocess (vs in-process
+  // lld::lldMain). Driver owns crt + sysroot + multiarch -L + libgcc + the
+  // glibc 2.34 libpthread merge. Subprocess because lldMain SIGSEGVs on
+  // its post-output cleanup when libhip-compiler.so is dlopen'd into the
+  // EP host process (Windows linkDLL_Windows stays in-process — lld-link
+  // doesn't have this cleanup bug). clang++ (not bare clang) auto-links
+  // libstdc++ for the generated object's __cxa_begin_catch / __cxa_rethrow.
   std::string clangPath;
 #ifdef HIPDNN_CLANG_PATH
   clangPath = HIPDNN_CLANG_PATH;
@@ -294,14 +280,12 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
                                    "-o",      outputDLL, objectFile};
   for (const auto &p : libraryPaths)
     args.push_back("-L" + p);
-  // --start-group bracket: user archives may mutually reference each other
-  // (e.g. libhip_custom_kernels.a pulls libstdc++ symbols that another
-  // user archive also references). Cheap on a final shared link.
+  // --start-group: user archives may mutually reference each other
+  // (custom_kernels.a <-> libstdc++ via another user lib).
   args.push_back("-Wl,--start-group");
   for (const auto &lib : libraries) {
-    // Mirror the Windows path: callers pass either bare names ("MIOpen")
-    // or absolute paths to archives/.so files. `-l/abs/path` is malformed
-    // for ld; absolute paths go through as positional args.
+    // Mirror Windows: callers pass bare names or absolute paths.
+    // `-l/abs/path` is malformed for ld; abs paths go through positional.
     if (lib.find('/') != std::string::npos)
       args.push_back(lib);
     else
