@@ -21,7 +21,7 @@ py_binary(
 genrule(
     name = "generate_mem_binary_file",
     outs = ["mem_binary_file.hpp.inc"],
-    cmd = "$(location :compress_binary_py) $@",
+    cmd = "$(location :compress_binary_py) 0 $@",
     tools = [":compress_binary_py"],
 )
 
