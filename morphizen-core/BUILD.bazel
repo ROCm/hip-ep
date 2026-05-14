@@ -261,15 +261,11 @@ cc_library(
         "@bazel_tools//src/conditions:windows": [
             "/W0",  # Suppress all warnings
             "/DONNX_NAMESPACE=onnx",
-            "/DMORPHIZEN_USE_DLL=1",
-            "/DMORPHIZEN_EXPORT_DLL=1",
             "/Zc:__cplusplus",
         ],
         "//conditions:default": [
             "-w",  # Suppress all warnings
             "-DONNX_NAMESPACE=onnx",
-            "-DMORPHIZEN_USE_DLL=1",
-            "-DMORPHIZEN_EXPORT_DLL=1",
             "-fPIC",
         ],
     }),
