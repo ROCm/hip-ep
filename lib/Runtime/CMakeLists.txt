@@ -221,6 +221,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/module_registry.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/growable_buffer.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
                 ${IMPL_DEPS}
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
@@ -234,6 +236,7 @@ endmacro()
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 compile_to_bitcode(op_profile.cpp runtime_op_profile.bc)
+compile_to_bitcode(module_registry.cpp runtime_module_registry.bc)
 
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
@@ -267,6 +270,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_module_registry.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
@@ -302,6 +306,7 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_module_registry.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc

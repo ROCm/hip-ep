@@ -6,6 +6,7 @@
 #include "hip/timing.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
+#include "module_registry.h"
 #include "op_profile.h"
 #include "runtime_state_internal.h"
 
@@ -215,20 +216,27 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
-  state->qmoe_scratch = nullptr;
-  state->qmoe_scratch_size = 0;
-  state->qmoe_host_scratch = nullptr;
-  state->qmoe_host_scratch_size = 0;
-  state->gqa_gemm_cache = nullptr;
-  state->causal_conv_cache = nullptr;
-  state->zp_unpack_cache = nullptr;
+  // qmoe_scratch / qmoe_host_scratch: now owned by the QmoeState op-module
+  // (lib/Runtime/real/qmoe.cpp). Allocated lazily on first wrap_qmoe call.
+  // gqa_gemm_cache, causal_conv_cache, zp_unpack_cache: now owned by the
+  // ModuleRegistry below (GqaGemmState / CausalConvState / ZpUnpackState).
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
-  state->seqlens_k_cached_valid = false;
-  state->seqlens_k_cached_val = 0;
-  state->seqlens_k_cached_ptr = nullptr;
+  // seqlens_k_cached_*: now owned by the GqaSeqlensCache op-module
+  // (invalidated each Compute() via its begin_compute hook).
+
+  // Op-module registry: empty container created up front so subsequent
+  // wrap_* calls can populate slots lazily without a null check on the
+  // registry pointer. Per-slot state ptrs are still nullptr until first
+  // access. See module_registry.h.
+  state->modules = hipdnn_ep::module_registry_create();
+  if (!state->modules) {
+    fprintf(stderr, "Failed to create op-module registry\n");
+    free(state);
+    return 1;
+  }
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -841,18 +849,30 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipStreamSynchronize(state->stream));
   }
 
+  // Tear down op modules first: each module's destructor may issue
+  // hipFree / hipblasLtMatmulDesc_destroy / etc. against the still-live
+  // stream and library handles.  We just synced the stream above, so any
+  // in-flight kernel referencing these caches has completed.
+  //
+  // HIPDNN_EP_DUMP_STATE=1: print one line per populated module slot with
+  // its name and reported memory footprint, then proceed with destruction.
+  // Useful for auditing which modules a session actually used and how much
+  // GPU / pinned memory each holds at teardown. Zero-overhead when unset.
+  if (state->modules) {
+    if (hipdnn_ep_dump_state_enabled()) {
+      hipdnn_ep::module_registry_dump(state->modules);
+    }
+    hipdnn_ep::module_registry_destroy(state->modules);
+    state->modules = nullptr;
+  }
+
   // Free shared workspace (if allocated)
   if (state->workspace) {
     HIP_CLEANUP(hipFree(state->workspace));
   }
 
-  // Free qmoe device scratch + pinned host mirror (if allocated)
-  if (state->qmoe_scratch) {
-    HIP_CLEANUP(hipFree(state->qmoe_scratch));
-  }
-  if (state->qmoe_host_scratch) {
-    HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
-  }
+  // qmoe device scratch + pinned host mirror: owned by the QmoeState
+  // op-module above, freed by its destructor via the module registry.
 
   if (state->device_error_flag) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
@@ -889,23 +909,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->gpu_constants)
     free(state->gpu_constants);
 
-  // Free GQA GEMM descriptor cache
-  if (state->gqa_gemm_cache) {
-    hipdnn_ep_gqa_gemm_cache_destroy(state->gqa_gemm_cache);
-    state->gqa_gemm_cache = nullptr;
-  }
-
-  // Free CausalConvWithState descriptor/algo cache
-  if (state->causal_conv_cache) {
-    hipdnn_ep_causal_conv_cache_destroy(state->causal_conv_cache);
-    state->causal_conv_cache = nullptr;
-  }
-
-  // Free MatMulNBits asym zero_points unpack cache
-  if (state->zp_unpack_cache) {
-    hipdnn_ep_zp_unpack_cache_destroy(state->zp_unpack_cache);
-    state->zp_unpack_cache = nullptr;
-  }
+  // GQA GEMM descriptor cache, CausalConvWithState descriptor/algo cache,
+  // and MatMulNBits asym zero_points unpack cache: all now owned by the
+  // ModuleRegistry above (GqaGemmState / CausalConvState / ZpUnpackState).
 
   // Free op profiling state
   if (state->op_profile) {
@@ -959,6 +965,15 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
 }
 
+namespace hipdnn_ep {
+// Glue called by the HIPDNN_OP_MODULE-generated accessor. Defined here so
+// module_registry.cpp stays agnostic of RuntimeState's layout. Trivial body
+// inlines through llvm-link in the bitcode build.
+ModuleRegistry *get_module_registry(RuntimeState *state) {
+  return state ? state->modules : nullptr;
+}
+} // namespace hipdnn_ep
+
 // Per-Compute() cache invalidation hook. Today this only resets the GQA
 // seqlens_k cache; future per-forward-pass caches should be cleared here
 // as well so the EP-side hook stays a single call.
@@ -975,8 +990,15 @@ extern "C"
   if (!state) {
     return;
   }
-  state->seqlens_k_cached_valid = false;
-  state->seqlens_k_cached_ptr = nullptr;
+  // GQA seqlens_k cache and any other per-Compute() caches are reset by
+  // each module's begin_compute hook (detected at registration time via
+  // SFINAE). Fan-out is a lock-free loop over a tiny vector of cached
+  // fn-pointer / state-pointer pairs (see module_registry.cpp); modules
+  // without a begin_compute hook are skipped at zero cost (cached fn
+  // pointer is null).
+  if (state->modules) {
+    hipdnn_ep::module_registry_begin_compute(state->modules, state);
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -1115,99 +1137,11 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   return 0;
 }
 
-// qmoe device scratch (single contiguous buffer, sub-buffer offsets computed
-// per-call by wrap_qmoe). Same grow-on-demand policy as workspace; never
-// shrinks. Caller is responsible for ensuring no in-flight kernel still reads
-// the old buffer when growing -- we sync the stream before hipFree+hipMalloc.
-void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state) {
-  return state ? state->qmoe_scratch : nullptr;
-}
-
-int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
-                                        size_t needed_size) {
-  if (!state)
-    return -1;
-  if (needed_size == 0)
-    return 0;
-  if (state->qmoe_scratch_size >= needed_size)
-    return 0;
-
-  // Same 1.5x growth amortization as the shared workspace -- prefill->decode
-  // shape transitions and any future autotune retries grow monotonically.
-  size_t alloc_size = needed_size;
-  if (state->qmoe_scratch_size > 0) {
-    size_t grown = state->qmoe_scratch_size + state->qmoe_scratch_size / 2;
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-
-  if (state->qmoe_scratch) {
-    if (state->stream) {
-      hipStreamSynchronize(state->stream);
-    }
-    HIP_CLEANUP(hipFree(state->qmoe_scratch));
-    state->qmoe_scratch = nullptr;
-    state->qmoe_scratch_size = 0;
-  }
-
-  if (hipMalloc(&state->qmoe_scratch, alloc_size) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_qmoe_scratch: hipMalloc failed for %zu "
-            "bytes\n",
-            alloc_size);
-    return -1;
-  }
-  state->qmoe_scratch_size = alloc_size;
-  return 0;
-}
-
-// Pinned host mirror used for the small (k * sizeof(int32_t) + k * elem_size)
-// readback of expert routing decisions per qmoe call. hipHostMalloc'd once,
-// reused; no sync on grow because grow only fires when a larger num_tokens*k
-// is seen and growth is rare relative to call frequency.
-void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state) {
-  return state ? state->qmoe_host_scratch : nullptr;
-}
-
-int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
-                                             size_t needed_size) {
-  if (!state)
-    return -1;
-  if (needed_size == 0)
-    return 0;
-  if (state->qmoe_host_scratch_size >= needed_size)
-    return 0;
-
-  size_t alloc_size = needed_size;
-  if (state->qmoe_host_scratch_size > 0) {
-    size_t grown =
-        state->qmoe_host_scratch_size + state->qmoe_host_scratch_size / 2;
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-
-  if (state->qmoe_host_scratch) {
-    // Sync first: any in-flight hipMemcpyAsync(D2H) targeting this pinned
-    // buffer must complete before we free it. Cheap relative to alloc.
-    if (state->stream) {
-      hipStreamSynchronize(state->stream);
-    }
-    HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
-    state->qmoe_host_scratch = nullptr;
-    state->qmoe_host_scratch_size = 0;
-  }
-
-  if (hipHostMalloc(&state->qmoe_host_scratch, alloc_size,
-                    hipHostMallocDefault) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_qmoe_host_scratch: hipHostMalloc failed "
-            "for %zu bytes\n",
-            alloc_size);
-    return -1;
-  }
-  state->qmoe_host_scratch_size = alloc_size;
-  return 0;
-}
+// hipdnn_ep_state_(get|ensure)_qmoe_(scratch|host_scratch): the C ABI is
+// preserved (still declared in hipdnn_ep_runtime.h and called from the
+// qmoe runtime bitcode), but the implementations now live in
+// lib/Runtime/real/qmoe.cpp and delegate to the QmoeState op-module's
+// GrowableDeviceBuffer / GrowablePinnedBuffer (see growable_buffer.h).
 
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
   return state ? static_cast<void *>(state->device_error_flag) : nullptr;

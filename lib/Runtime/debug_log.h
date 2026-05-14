@@ -57,6 +57,24 @@ inline bool hipdnn_ep_perf_isolate_enabled() {
   return enabled;
 }
 
+// Op-module state dump (HIPDNN_EP_DUMP_STATE=1). Triggers
+// module_registry_dump() once during hipdnn_ep_state_cleanup, printing one
+// line per registered module slot with its name and (when the module
+// defines `size_t mem_bytes() const`) reported buffer footprint. Use to
+// audit which modules a session actually populated and how much GPU /
+// pinned memory each holds at teardown.
+inline bool hipdnn_ep_dump_state_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_DUMP_STATE");
+#else
+    const char *v = std::getenv("HIPDNN_EP_DUMP_STATE");
+    return v && v[0] >= '1';
+#endif
+  }();
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
