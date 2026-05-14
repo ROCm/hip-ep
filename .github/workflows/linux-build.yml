@@ -14,6 +14,13 @@ on:
 
 permissions:
   contents: read
+  # GHA cache v2 (ACTIONS_RESULTS_URL) requires `actions: write` for cache
+  # writes. actions/cache wraps the API so its writes succeed with the
+  # default token scopes, but sccache talks to the v2 service directly via
+  # opendal and needs the explicit grant. Without this the previous run
+  # logged 314 cache write errors / 0 cache writes from in-container
+  # sccache 0.10.0 and the next run still cold-built the project.
+  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
