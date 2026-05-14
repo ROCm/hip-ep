@@ -183,7 +183,7 @@ py_binary(
     ],
     main = "src/binary/config_json_binary.hpp.bazel.py",
     deps = [
-        "//scripts/bazel:xxd",
+        "//tools:xxd",
     ],
 )
 
