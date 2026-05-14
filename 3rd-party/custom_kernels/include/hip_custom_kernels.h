@@ -638,6 +638,32 @@ int hip_reduce_prod(
     int hip_dtype);
 
 /* =========================================================================
+ * Tile / Expand (shape replication)
+ * =========================================================================
+ *
+ * Both ops copy `input` into a larger `output`. Shapes are passed as
+ * host-side int64 arrays from the lowering, so neither op needs to D2H
+ * the GPU-side shape / repeats tensors.
+ *
+ * - Tile  : output_shape[d] = input_shape[d] * repeats[d].
+ *           in_coord[d] = out_coord[d] % input_shape[d].
+ * - Expand: output_shape[d] is the broadcast result; any input dim that is 1
+ *           is replicated. in_coord[d] = (in_shape[d] == 1) ? 0
+ *                                       : out_coord[d - rank_diff].
+ *
+ * Both kernels are bounded to kTileMaxRank = 8 input/output dimensions
+ * (matches ORT's TArray<int64, 8> default).
+ */
+int hip_tile(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape_host,
+    const int64_t* output_shape_host,
+    int rank,
+    int hip_dtype);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *
