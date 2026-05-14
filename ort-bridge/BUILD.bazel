@@ -53,7 +53,7 @@ cc_library(
     deps = [
         "//morphizen-ort-api-ext",
         "//morphizen-utils:morphizen_utils",
-        "//onnx-ir-imp:onnx_ir_imp",  # For ModelUniquePtr and ONNX model types
+
         "//morphizen-core:morphizen-core-static",  # Complete morphizen-core library
         "@glog",
         "@gsl",
