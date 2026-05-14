@@ -78,13 +78,6 @@ proto_library(
     visibility = ["//visibility:public"],
 )
 
-proto_library(
-    name = "dpu_sg_report_proto",
-    srcs = [":src/dpu_sg_report.proto"],
-    visibility = ["//visibility:public"],
-    deps = [":anchor_point_proto"],
-)
-
 # C++ proto libraries
 cc_proto_library(
     name = "anchor_point_cc_proto",
@@ -116,10 +109,6 @@ cc_proto_library(
     deps = [":version_proto"],
 )
 
-cc_proto_library(
-    name = "dpu_sg_report_cc_proto",
-    deps = [":dpu_sg_report_proto"],
-)
 
 # Convenience target to group all proto dependencies
 collect_pb(
@@ -129,7 +118,6 @@ collect_pb(
         ":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
-        ":dpu_sg_report_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
         ":version_cc_proto",
@@ -145,7 +133,6 @@ collect_pb(
         ":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
-        ":dpu_sg_report_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
         ":version_cc_proto",
@@ -159,7 +146,6 @@ cc_library(
     deps = [":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
-        ":dpu_sg_report_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
         ":version_cc_proto",],
