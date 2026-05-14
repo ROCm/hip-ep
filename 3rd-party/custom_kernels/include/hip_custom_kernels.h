@@ -720,6 +720,32 @@ int hip_cumsum(
     int reverse);
 
 /* =========================================================================
+ * Pad (constant / reflect / edge / wrap)
+ * =========================================================================
+ *
+ * One thread per output element. For each output coord, walk the dims and
+ * either copy input or fill from the pad_value depending on mode.
+ *
+ * `pad_mode`:    0 = Constant, 1 = Reflect, 2 = Edge, 3 = Wrap.
+ * `lower_pads_host`: per-dim begin pad (length = rank), already filtered
+ *                    by the `axes` attribute (defaults to 0 for unaffected
+ *                    dims). Upper bound implied by output_shape.
+ * `pad_value_host` : host pointer to a scalar of the data type (used only
+ *                    when pad_mode == Constant). May be null -> default 0.
+ */
+int hip_pad(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape_host,
+    const int64_t* output_shape_host,
+    const int64_t* lower_pads_host,
+    int rank,
+    int hip_dtype,
+    int pad_mode,
+    const void* pad_value_host);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *
