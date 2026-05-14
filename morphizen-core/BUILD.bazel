@@ -261,11 +261,15 @@ cc_library(
         "@bazel_tools//src/conditions:windows": [
             "/W0",  # Suppress all warnings
             "/DONNX_NAMESPACE=onnx",
+            "/DMORPHIZEN_EXPORT_DLL=1",  # Allow internal headers (satisfies _sanity_check.hpp)
+            "/UUNICODE",  # Undefine UNICODE (toolchain sets it; util_mswin.cpp uses LPCSTR)
+            "/U_UNICODE",
             "/Zc:__cplusplus",
         ],
         "//conditions:default": [
             "-w",  # Suppress all warnings
             "-DONNX_NAMESPACE=onnx",
+            "-DMORPHIZEN_EXPORT_DLL=1",
             "-fPIC",
         ],
     }),
