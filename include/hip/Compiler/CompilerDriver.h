@@ -30,13 +30,12 @@ class FileSystem;
 
 namespace hip::compiler {
 
-/// End-to-end compilation driver for MLIR → DLL/Object/IR.
+/// End-to-end compilation driver for MLIR → LLVM bitcode.
 ///
 /// Orchestrates the complete compilation pipeline:
 /// - MLIR pass pipeline (ONNX→HIP→LLVM→Interface)
-/// - LLVM IR translation and optimization
-/// - Object file generation
-/// - DLL linking
+/// - LLVM IR translation, runtime.bc linking, and optimization
+/// - LLVM bitcode emission (consumed by BitcodeJIT in the EP DLL)
 class CompilerDriver {
 public:
   CompilerDriver() = default;
@@ -88,23 +87,8 @@ private:
 
   void optimizeLLVMIR(llvm::Module *llvmModule, int optLevel);
 
-  bool emitLLVMIR(llvm::Module *llvmModule, const std::string &outputPath,
-                  std::string &error_message);
-
-  bool compileToObject(llvm::Module *llvmModule, const std::string &outputPath,
-                       std::string &error_message);
-
-  bool linkToDLL(const std::string &objPath, const std::string &dllPath,
-                 const std::vector<std::string> &libraries,
-                 const std::vector<std::string> &library_paths,
-                 const std::vector<std::string> &export_symbols,
-                 std::string &error_message);
-
-  /// Discover GPU runtime libraries from THEROCK_DIST environment variable.
-  void discoverLibraries(std::vector<std::string> &libraries,
-                         std::vector<std::string> &library_paths);
-
-  void cleanupIntermediates(const std::string &basePath);
+  bool emitBitcode(llvm::Module *llvmModule, const std::string &outputPath,
+                   std::string &error_message);
 
   morphizen::FileSystem *fileSystem_ = nullptr;
   void *hipdnnHandle_ = nullptr;

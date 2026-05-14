@@ -208,6 +208,25 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         COMMAND ${CLANG_EXECUTABLE}
                 -c -emit-llvm -std=c++17
                 -D_CRT_SECURE_NO_WARNINGS
+                # The runtime is JITted in-process by `BitcodeJIT`
+                # (`backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`).
+                # The flags below trim symbols that the static MSVC CRT
+                # would otherwise drop into the bitcode but that aren't
+                # exported by any DLL and would cause ORC LLJIT to fail
+                # with "Symbols not found":
+                #   -fno-threadsafe-statics  no `_Init_thread_*` magic-static
+                #                            guards (we serialise statics
+                #                            ourselves)
+                #   -fno-sized-deallocation  no `??3@YAXPEAX_K@Z` (sized
+                #                            operator delete) -- the
+                #                            unsized form is shimmed by
+                #                            BitcodeJIT.cpp
+                #   -fno-rtti                no `??_7type_info@@6B@`
+                #                            vtable references (the
+                #                            runtime never uses RTTI)
+                -fno-threadsafe-statics
+                -fno-sized-deallocation
+                -fno-rtti
                 $<$<CONFIG:Debug>:-D_DEBUG>
                 $<$<CONFIG:Debug>:-D_ITERATOR_DEBUG_LEVEL=2>
                 $<$<CONFIG:Debug>:-O0>

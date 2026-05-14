@@ -19,12 +19,56 @@ if(NOT BUILD_MOCK_RUNTIME)
   find_package(hip CONFIG REQUIRED)
 endif()
 
+# LLVM ORC JIT (BitcodeJIT.cpp). LLVM is already resolved transitively
+# by `add_subdirectory(3rd-party/morphizen)` in cmake/deps.cmake; we
+# re-call find_package here so `llvm_map_components_to_libnames` and the
+# `LLVM_LIBRARY_DIRS` / `LLVM_INCLUDE_DIRS` variables are imported into
+# this subdir's scope. The call is a no-op if LLVM was already found.
+find_package(LLVM REQUIRED CONFIG)
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+include(AddLLVM)
+
+# The set below covers everything ORC's LLJIT pulls in on Windows /
+# Linux for the host target. JITLink + RuntimeDyld are both included
+# because LLJIT picks RuntimeDyld by default on Windows (better COFF
+# support today) but newer LLVM may switch to JITLink. Listing both
+# keeps the EP DLL forward-compatible with an LLVM bump.
+llvm_map_components_to_libnames(bitcode_jit_llvm_libs
+  Core
+  Support
+  BitReader
+  IRReader
+  Passes
+  Target
+  TargetParser
+  MC
+  MCParser
+  MCDisassembler
+  ExecutionEngine
+  OrcJIT
+  OrcShared
+  OrcTargetProcess
+  JITLink
+  RuntimeDyld
+  CodeGen
+  SelectionDAG
+  AsmPrinter
+  BinaryFormat
+  Object
+  # Host arch -- X86 today. Add AArch64* here when we cross-build for ARM.
+  X86CodeGen
+  X86AsmParser
+  X86Desc
+  X86Info
+)
+
 # Create custom op library
 set(LIB_NAME morphizen-custom-op-mlir)
 add_library(${LIB_NAME} STATIC
   src/plugin_registration.cpp
   src/MlirCustomOp.cpp
   src/InferenceState.cpp
+  src/BitcodeJIT.cpp
 )
 
 # Define MORPHIZEN_CUSTOM_OP for conditional compilation
@@ -39,6 +83,7 @@ target_link_libraries(${LIB_NAME} PRIVATE
   morphizen::morphizen-core-static
   glog::glog
   mlir_compilation_proto  # Shared protobuf metadata library
+  ${bitcode_jit_llvm_libs}  # LLVM ORC stack for BitcodeJIT
 )
 if(NOT BUILD_MOCK_RUNTIME)
   target_link_libraries(${LIB_NAME} PRIVATE hip::host)
@@ -49,6 +94,7 @@ target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
+  ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by BitcodeJIT.cpp
 )
 
 # Link to EP target with whole archive to ensure registration
@@ -59,6 +105,27 @@ if(DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET AND
     ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
     PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>"
   )
+
+  # Custom GPU kernels live inside the signed EP DLL after the bitcode
+  # switch: the JIT-loaded per-model bitcode looks up `hip_*` launcher
+  # symbols (exported in onnxruntime_morphizen_ep[_with_ort_bridge].def)
+  # via ORC's GetForCurrentProcess search generator, and the hipcc-emitted
+  # CRT initializers in each kernel .obj register the embedded fatbin with
+  # libamdhip64 on EP-DLL load. The kernels lib is added by the root
+  # CMakeLists when BUILD_EP=ON and BUILD_MOCK_RUNTIME=OFF.
+  #
+  # Plain (non-WHOLE_ARCHIVE) link is intentional: the .def file references
+  # each launcher symbol by name, which pulls in the corresponding kernel
+  # .obj along with its .CRT$XCU initializer and __hip_fatbin_wrapper
+  # rdata. WHOLE_ARCHIVE would still work but the morphizen-core-static
+  # transitivity comment above (re multiple WHOLE_ARCHIVE markers) makes
+  # the plain link the lower-risk choice.
+  if(TARGET hip_custom_kernels)
+    target_link_libraries(
+      ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
+      PRIVATE hip_custom_kernels
+    )
+  endif()
 else()
   message(WARNING "morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET not defined or not a target - skipping custom-op-mlir registration")
 endif()

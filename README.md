@@ -76,7 +76,7 @@ These operations are handled through standard MLIR transformations without requi
 - **Custom HIP Kernels** (`3rd-party/custom_kernels/`) — handwritten `.hip` kernels for GQA, RoPE, etc.
 - **Compiler DLL** (`dll/`) — `hip-compiler.dll` exposing the C API
 - **Schemas** (`schemas/`) — FlatBuffers definitions for model metadata and compilation options
-- **Tools** — `hip-mlir-opt`, `hip-compiler`, `hip-test-dll`, `hip-inspect-dll`, `hip-onnx-runner`
+- **Tools** — `hip-mlir-opt`, `hip-compiler`, `hip-onnx-runner`
 - **Backend Integration** (`backend-mlir-compiler/`) — bridges to MorphiZen Execution Provider
 
 ### Architecture

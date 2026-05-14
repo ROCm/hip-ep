@@ -30,7 +30,7 @@ Callers may pass `NULL` for `options_json` to accept all defaults when using the
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `opt_level` | `int` | `2` | LLVM optimization level (0–3) |
-| `output_mode` | `OutputMode` | `DLL` | Output format: `DLL` or `LLVM_IR` |
+| `output_mode` | `OutputMode` | `BITCODE` | Output format. Only `BITCODE` is supported; the field is kept for forward compatibility. |
 | `verbose` | `bool` | `false` | Enable verbose diagnostic output |
 | `constants_file` | `string` | `"constants.bin"` | Filename (relative to the `FileSystem` root) where constant weight data is written during compilation and read back at `inference_init` time. See [constant-handling-design.md](constant-handling-design.md). |
 
@@ -38,8 +38,10 @@ Callers may pass `NULL` for `options_json` to accept all defaults when using the
 
 | Value | Meaning |
 |-------|---------|
-| `DLL` | Produce a shared library (`.dll` / `.so`) |
-| `LLVM_IR` | Emit LLVM IR text (`.ll`) for inspection |
+| `BITCODE` | Emit binary LLVM bitcode (`.bc`). The EP DLL JITs these bytes via `BitcodeJIT` (see `backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`). |
+
+The former `DLL` and `LLVM_IR` modes have been removed; native shared-library
+output was retired with the switch to in-process ORC JIT loading.
 
 ---
 
@@ -48,18 +50,17 @@ Callers may pass `NULL` for `options_json` to accept all defaults when using the
 ### From `hip-compiler` CLI
 
 ```sh
-hip-compiler --mode dll --constants-file weights.bin --constants-dir ./out -O 2 model.mlir -o model.dll
+hip-compiler --constants-file weights.bin --constants-dir ./out -O 2 model.mlir -o model.bc
 ```
 
 | CLI flag | Maps to |
 |----------|---------|
-| `--mode dll\|ir` | `output_mode` |
 | `--constants-file <name>` | `constants_file` |
 | `-O <level>` | `opt_level` |
 | `-v / --verbose` | `verbose` |
 
 `--constants-dir` is CLI-only — it sets the `DiskFileSystem` root directory and
-is never embedded in compilation options or the DLL metadata.
+is never embedded in compilation options or the bitcode metadata.
 
 ### From `hip-mlir-opt` pipeline
 
@@ -85,7 +86,7 @@ CompilerErrorCode hip_compile_with_fs(
 ```json
 {
   "opt_level": 0,
-  "output_mode": "LLVM_IR",
+  "output_mode": "BITCODE",
   "verbose": true,
   "constants_file": "my_model/weights.bin"
 }
@@ -96,5 +97,5 @@ CompilerErrorCode hip_compile_with_fs(
 ## Related Documents
 
 - **[constant-handling-design.md](constant-handling-design.md)** — How `constants_file` is used during constant extraction and runtime upload
-- **[compiler-runtime-contract.md](compiler-runtime-contract.md)** — How `constants_file` is embedded in `__metadata_blob` inside the DLL
+- **[compiler-runtime-contract.md](compiler-runtime-contract.md)** — How `constants_file` is embedded in `__metadata_blob` inside the bitcode
 - **[morphizen-ep-integration.md](morphizen-ep-integration.md)** — End-to-end compilation and inference flow

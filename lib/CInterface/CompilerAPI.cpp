@@ -28,10 +28,10 @@ static const char *COMPILER_VERSION = "1.0.0";
 // Parse JSON into CompilationOptionsT (defined in
 // schemas/compilation_options.fbs). Key fields:
 //   opt_level          — LLVM optimization level 0-3 (default 2)
-//   output_mode        — DLL or LLVM_IR (default DLL)
+//   output_mode        — BITCODE (only mode after the JIT switch)
 //   constants_file     — externalized weights filename (default
-//   "constants.bin") skip_constant_data — skip writing constant bytes (default
-//   false)
+//                        "constants.bin")
+//   skip_constant_data — skip writing constant bytes (default false)
 static bool parseOptions(const char *options_json,
                          mlir::hip::CompilationOptionsT &opts,
                          std::string &error_message) {

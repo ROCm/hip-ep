@@ -6,8 +6,19 @@ Licensed under the MIT License.
 
 **Date:** 2026-03-05
 **Document Type:** Design
-**Status:** Draft
+**Status:** Draft (partially out of date — see note below)
 **Related:** [constant-handling-design.md](constant-handling-design.md), [compiler-runtime-contract.md](compiler-runtime-contract.md), [compilation-options.md](compilation-options.md)
+
+> **Note (bitcode-only artifact)** — references in this document to
+> `model.dll`, native shared-library loading, and per-model DLL exports
+> describe the *previous* design. The per-model artifact is now LLVM
+> bitcode; `morphizen-ep.dll` JITs it in-process via `BitcodeJIT`
+> (`backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`). The 5-symbol
+> contract (`inference_init`, `inference_compute`, `inference_cleanup`,
+> `inference_get_metadata_json`, `inference_runtime_begin_compute`) is
+> unchanged — only the loader changed. See
+> [compiler-runtime-contract.md](compiler-runtime-contract.md) and
+> [compilation-options.md](compilation-options.md) for the current design.
 
 ---
 

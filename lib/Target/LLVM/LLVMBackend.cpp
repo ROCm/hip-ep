@@ -9,45 +9,20 @@
 #include <mlir/Target/LLVMIR/Export.h>
 
 #include <llvm/Bitcode/BitcodeReader.h>
-#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Linker/Linker.h>
-#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
-#include <llvm/Support/TargetSelect.h>
-
 #include <llvm/Support/raw_ostream.h>
-#include <llvm/Target/TargetMachine.h>
-#include <llvm/Target/TargetOptions.h>
-#include <llvm/TargetParser/Host.h>
 
 #include "hip/debug_log.h"
 
 #include <system_error>
 
 namespace hipdnn {
-
-LLVMBackend::LLVMBackend() : target_initialized_(false) {
-  // Target initialization is deferred to first use
-}
-
-LLVMBackend::~LLVMBackend() = default;
-
-void LLVMBackend::initializeTarget() {
-  if (target_initialized_) {
-    return;
-  }
-
-  // Initialize native target for object file emission
-  llvm::InitializeNativeTarget();
-  llvm::InitializeNativeTargetAsmPrinter();
-  llvm::InitializeNativeTargetAsmParser();
-
-  target_initialized_ = true;
-}
 
 std::unique_ptr<llvm::Module>
 LLVMBackend::translateMLIRtoLLVMIR(mlir::ModuleOp mlirModule,
@@ -115,169 +90,34 @@ void LLVMBackend::optimizeLLVMIR(llvm::Module *module, int optLevel) {
   MPM.run(*module, MAM);
 }
 
-bool LLVMBackend::emitLLVMIR(llvm::Module *module,
-                             const std::string &outputPath) {
+bool LLVMBackend::emitBitcode(llvm::Module *module,
+                              const std::string &outputPath) {
   if (!module) {
-    llvm::errs() << "Null module in emitLLVMIR\n";
+    llvm::errs() << "Null module in emitBitcode\n";
     return false;
   }
 
-  // Open output file
   std::error_code EC;
   llvm::raw_fd_ostream out(outputPath, EC, llvm::sys::fs::OF_None);
   if (EC) {
-    llvm::errs() << "Failed to open output file: " << EC.message() << "\n";
+    llvm::errs() << "Failed to open bitcode output file: " << EC.message()
+                 << "\n";
     return false;
   }
 
-  // Print LLVM IR in human-readable text format
-  module->print(out, nullptr);
-
-  COMPILER_DEBUG_LOG("Emitted LLVM IR to: " << outputPath << "\n");
-  return true;
-}
-
-bool LLVMBackend::emitLLVMIRToString(llvm::Module *module, std::string &outIR) {
-  if (!module) {
-    llvm::errs() << "Null module in emitLLVMIRToString\n";
-    return false;
-  }
-
-  // Use raw_string_ostream to write LLVM IR to string
-  llvm::raw_string_ostream stringStream(outIR);
-  module->print(stringStream, nullptr);
-  stringStream.flush();
-
-  return true;
-}
-
-llvm::TargetMachine *LLVMBackend::createTargetMachine() {
-  initializeTarget();
-
-  // Get target triple for current platform
-  llvm::Triple target_triple(llvm::sys::getDefaultTargetTriple());
-
-  // Look up target
-  std::string error_msg;
-  const llvm::Target *target =
-      llvm::TargetRegistry::lookupTarget(target_triple.str(), error_msg);
-  if (!target) {
-    llvm::errs() << "Failed to lookup target: " << error_msg << "\n";
-    return nullptr;
-  }
-
-  // Configure target machine
-  std::string cpu = "generic";
-  std::string features = "";
-  llvm::TargetOptions options;
-  // Route C++ static ctors into DT_INIT_ARRAY (LLVM's legacy default is the
-  // `.ctors` section which glibc's loader silently drops on dlopen,
-  // leaving every static unordered_map / string in the generated DLL at
-  // zero-init BSS → SIGFPE on first emplace's `hash % bucket_count(0)`).
-  //
-  // Not an LLVM bug — `UseInitArray=false` is a backwards-compat default
-  // for legacy ELF targets that lacked .init_array. clang's own driver
-  // sets this to true for modern Linux (see clang/lib/Driver/ToolChains/
-  // Gnu.cpp), but we bypass the driver and drive the TargetMachine API
-  // directly, so we have to flip it ourselves.
-  options.UseInitArray = true;
-  llvm::Reloc::Model RM =
-      llvm::Reloc::PIC_; // Position-independent code for DLL
-
-  llvm::TargetMachine *TM =
-      target->createTargetMachine(target_triple, cpu, features, options, RM);
-
-  if (!TM) {
-    llvm::errs() << "Failed to create target machine\n";
-    return nullptr;
-  }
-
-  return TM;
-}
-
-bool LLVMBackend::compileToObjectFile(llvm::Module *module,
-                                      const std::string &outputPath) {
-  if (!module) {
-    llvm::errs() << "Null module in compileToObjectFile\n";
-    return false;
-  }
-
-  // Create target machine
-  std::unique_ptr<llvm::TargetMachine> TM(createTargetMachine());
-  if (!TM) {
-    return false;
-  }
-
-  // Set module data layout and target triple
-  module->setDataLayout(TM->createDataLayout());
-  module->setTargetTriple(TM->getTargetTriple());
-
-  // Open output file
-  std::error_code EC;
-  llvm::raw_fd_ostream out(outputPath, EC, llvm::sys::fs::OF_None);
-  if (EC) {
-    llvm::errs() << "Failed to open output file: " << EC.message() << "\n";
-    return false;
-  }
-
-  // Create legacy pass manager for code generation
-  llvm::legacy::PassManager pass;
-
-  // Add pass to emit object file
-  if (TM->addPassesToEmitFile(pass, out, nullptr,
-                              llvm::CodeGenFileType::ObjectFile)) {
-    llvm::errs() << "TargetMachine can't emit object file\n";
-    return false;
-  }
-
-  // Run code generation passes
-  pass.run(*module);
+  // WriteBitcodeToFile produces the canonical LLVM bitcode container which
+  // ORC's LLJIT can re-materialize via llvm::parseBitcodeFile. We deliberately
+  // skip the ModuleHash / per-function summary (ThinLTO metadata) since the
+  // JIT loader is monolithic and doesn't need it; this keeps the .bc small
+  // and the EPContext tar deterministic across rebuilds.
+  llvm::WriteBitcodeToFile(*module, out);
   out.flush();
-
-  COMPILER_DEBUG_LOG("Compiled object file to: " << outputPath << "\n");
-  return true;
-}
-
-bool LLVMBackend::compileToObjectInMemory(llvm::Module *module,
-                                          std::vector<uint8_t> &outBytes) {
-  if (!module) {
-    llvm::errs() << "Null module in compileToObjectInMemory\n";
+  if (out.has_error()) {
+    llvm::errs() << "Failed to write bitcode to: " << outputPath << "\n";
     return false;
   }
 
-  // Create target machine
-  std::unique_ptr<llvm::TargetMachine> TM(createTargetMachine());
-  if (!TM) {
-    return false;
-  }
-
-  // Set module data layout and target triple
-  module->setDataLayout(TM->createDataLayout());
-  module->setTargetTriple(TM->getTargetTriple());
-
-  // Use SmallVector with raw_svector_ostream for in-memory compilation
-  llvm::SmallVector<char, 0> objBuffer;
-  llvm::raw_svector_ostream objStream(objBuffer);
-
-  // Create legacy pass manager for code generation
-  llvm::legacy::PassManager pass;
-
-  // Add pass to emit object file to memory stream
-  if (TM->addPassesToEmitFile(pass, objStream, nullptr,
-                              llvm::CodeGenFileType::ObjectFile)) {
-    llvm::errs() << "TargetMachine can't emit object file\n";
-    return false;
-  }
-
-  // Run code generation passes
-  pass.run(*module);
-  // Note: raw_svector_ostream auto-flushes, flush() is deleted in newer LLVM
-
-  // Copy result to output vector
-  outBytes.assign(objBuffer.begin(), objBuffer.end());
-
-  COMPILER_DEBUG_LOG("Compiled object to memory: " << outBytes.size()
-                                                   << " bytes\n");
+  COMPILER_DEBUG_LOG("Emitted LLVM bitcode to: " << outputPath << "\n");
   return true;
 }
 

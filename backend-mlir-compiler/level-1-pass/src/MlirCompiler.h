@@ -15,8 +15,13 @@
 
 namespace hipdnn::level1pass {
 
-// Artifact format (native DLL or LLVM IR)
-enum class ArtifactFormat { Native, LlvmIr };
+// Artifact format. After the switch to in-process JIT the only format
+// the compiler emits is LLVM bitcode (see BitcodeJIT in
+// backend-mlir-compiler/custom-op-mlir/src/). The enum is kept as a
+// scoped type so the field has a strong name in CompilationConfig /
+// CompilationArtifact and a future "bitcode + native cache" mode can
+// be added without churning call sites.
+enum class ArtifactFormat { Bitcode };
 
 // Compilation configuration
 //
@@ -42,25 +47,27 @@ struct CompilationArtifact {
 };
 
 /**
- * Simplified MLIR compiler that uses the hip-compiler plugin C API.
+ * MLIR compiler driver that dispatches to the hip-compiler plugin C API.
  *
- * Replaces the old direct LLVM/MLIR integration (MlirParser, MlirTransformer,
- * LlvmCompiler).
+ * `compileFromBytecode` serializes the provided MLIR bytecode, calls
+ * `hip_compile_with_fs` in `hip-compiler.dll`, and reads back the
+ * resulting per-model LLVM bitcode artifact for inclusion in the
+ * EPContext tar. The downstream EP loads it via BitcodeJIT.
  *
  * NOTE: Mock runtime is not supported. The hip-compiler plugin always
- * generates native code that targets the actual HIP/ROCm runtime.
- * Mock runtime functionality was removed as it is not compatible with the
- * plugin-based compilation architecture.
+ * targets the real HIP/ROCm runtime; ML inference on a host without
+ * ROCm is fundamentally out of scope for this driver.
  */
 class MlirCompiler {
 public:
   /**
-   * Compile MLIR bytecode to native artifact (DLL).
+   * Compile MLIR bytecode to a per-model LLVM bitcode artifact.
    *
    * @param mlir_bytecode  MLIR bytecode (as from Graph.save_string())
    * @param config         Compilation configuration
-   * @return               Compiled artifact (bytes + metadata), or nullopt on
-   * failure
+   * @param fs             FileSystem for externalized constants
+   * @return               Compiled bitcode artifact (bytes + metadata),
+   *                       or nullopt on failure
    */
   static std::optional<CompilationArtifact>
   compileFromBytecode(const std::string &mlir_bytecode,

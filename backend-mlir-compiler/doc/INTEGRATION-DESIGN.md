@@ -154,7 +154,7 @@ struct span_t {
 
 | Option | Values | Default | Purpose |
 |--------|--------|---------|---------|
-| `artifact_format` | "native", "llvm_ir" | "native" | Compilation output format |
+| `artifact_format` | "bitcode" | "bitcode" | Compilation output format. The legacy "native" / "llvm_ir" values are accepted but ignored — every artifact is bitcode. |
 | `optimization_level` | "0", "1", "2", "3" | "2" | MLIR optimization passes |
 
 **Environment Variables:**
@@ -167,7 +167,7 @@ struct span_t {
 ```json
 {
   "opt_level": 2,
-  "output_mode": "OUTPUT_MODE_DLL"
+  "output_mode": "BITCODE"
 }
 ```
 
@@ -179,17 +179,17 @@ Level-1 Pass maintains no state between compilations. Rationale: simplifies conc
 **Plugin-Based Compilation:**
 hip-compiler loaded dynamically via morphizen plugin API. Invoked via C API `morphizen_mlir_compile()`. Rationale: decouples backend from compiler implementation.
 
-**Artifact Format Extensibility:**
-Provider option `artifact_format` supports "native" or "llvm_ir". Current implementation uses native DLL.
+**Bitcode-only Artifact Format:**
+The compiler emits binary LLVM bitcode. The EP DLL JITs the bytes in-process via `BitcodeJIT` (`backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`). Rationale: removes the unsigned-PE drop-and-LoadLibrary deployment pattern that broke under WDAC / EDR, and folds the custom HIP kernels into the single signed EP DLL.
 
 **Metadata Separation:**
-Metadata stored in MetaDefProto separately from DLL bytes. Rationale: enables output tensor allocation without loading DLL.
+Metadata stored in MetaDefProto separately from the bitcode bytes. Rationale: enables output tensor allocation without paying JIT codegen cost.
 
-**Temporary File Usage:**
-Plugin writes DLL to temp file. CustomOp writes EPContext bytes to temp DLL before loading. Rationale: DLL loading requires file on disk.
+**In-process JIT Loading:**
+CustomOp hands bitcode bytes directly to ORC LLJIT — no temp files, no `LoadLibrary`, nothing for WDAC / EDR to flag. The 5-symbol contract (`inference_init`, `inference_compute`, `inference_cleanup`, `inference_get_metadata_json`, `inference_runtime_begin_compute`) is resolved from the JITted module.
 
 **Lifecycle Management:**
-Destructor sequence: `inference_cleanup(state)` → plugin unload → temp DLL deletion. Rationale: prevents GPU resource leaks.
+Destructor sequence: `inference_cleanup(state)` → `BitcodeJIT` destructor (tears down `LLJIT`). Rationale: prevents GPU resource leaks; no temp files to remove.
 
 **Opaque State Pattern:**
 Uses opaque `void *state` handle. CustomOp passes state to three-function interface without inspecting contents.

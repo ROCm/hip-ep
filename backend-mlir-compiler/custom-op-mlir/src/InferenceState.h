@@ -7,21 +7,28 @@
 
 #include "custom_op_mlir.hpp"
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
-// Forward declare to avoid include order issues
 namespace morphizen {
-struct Plugin; // Must match definition in morphizen_plugin.hpp (struct, not
-               // class)
 class FileSystem;
 } // namespace morphizen
 
 namespace mlir_compilation::customop {
 
-// Manages inference state and owns the plugin that provides inference
-// functions. Uses morphizen::Plugin infrastructure for dynamic library loading.
+class BitcodeJIT;
+
+// Manages inference state and owns the JIT-compiled bitcode module that
+// provides the per-model `inference_*` entry points.
+//
+// The compiled artifact carried inside an EPContext tar (`model_compiled`
+// entry) is LLVM bitcode -- the host-side runtime is statically merged in
+// at compile time via `LLVMBackend::linkRuntimeModule`, GPU device code
+// lives inside the signed EP DLL as fatbin sections from
+// `hip_custom_kernels`. The artifact is therefore data, not code, and is
+// JIT-compiled in-process via `BitcodeJIT` (ORC `LLJIT`). The previous
+// "drop unsigned PE to TEMP, LoadLibrary, delete" path is gone, removing
+// the WDAC / EDR reflective-DLL hazard.
 class InferenceState {
   // Passkey tag for the public constructor below: external callers cannot
   // name this type (it is implicitly private under the `class` keyword), so
@@ -44,38 +51,39 @@ class InferenceState {
   struct PrivateTag {};
 
 public:
-  // Create inference state from DLL bytes.
-  // fs: FileSystem for resolving model constants (passed to inference_init).
-  // Logs FATAL and terminates on failure.
+  // Create inference state from the per-model bitcode payload stored in
+  // the EPContext tar. `bitcode_bytes` is the raw `.bc` blob. `fs` is the
+  // morphizen FileSystem that resolves model constants and is forwarded
+  // to `inference_init`. Logs FATAL and terminates on failure.
   static std::unique_ptr<InferenceState>
-  create(const std::vector<uint8_t> &dll_bytes, morphizen::FileSystem *fs);
+  create(const std::vector<uint8_t> &bitcode_bytes, morphizen::FileSystem *fs);
 
   ~InferenceState();
 
-  // Non-copyable, non-movable
+  // Non-copyable, non-movable (the JIT owns generated machine code whose
+  // page mappings cannot be moved without invalidating function pointers).
   InferenceState(const InferenceState &) = delete;
   InferenceState &operator=(const InferenceState &) = delete;
   InferenceState(InferenceState &&) = delete;
   InferenceState &operator=(InferenceState &&) = delete;
 
-  // Execute inference computation
+  // Execute inference computation.
   int compute(span_t *inputs, span_t *outputs) const;
 
-  // Mark the start of a new forward pass before inference_compute. If the
-  // model.dll exports hipdnn_ep_runtime_begin_compute (resolved once in
-  // create()) it is invoked to invalidate per-Compute() runtime caches
-  // such as the GQA seqlens_k cache. On older model.dlls the symbol is
-  // absent and this call is a no-op -- such DLLs must be paired with
-  // HIPDNN_EP_GQA_CACHE_SEQLENS=0 (the cache is on by default; create()
-  // logs a LOG(WARNING) when it detects the mismatch).
+  // Mark the start of a new forward pass before inference_compute. When
+  // the JIT module exports `hipdnn_ep_runtime_begin_compute` (resolved
+  // once in create()) the symbol is invoked to invalidate per-Compute()
+  // runtime caches such as the GQA seqlens_k cache. The hook is required
+  // for the seqlens_k cache to be correct; create() logs a LOG(WARNING)
+  // when the symbol is absent.
   void begin_compute() const;
 
   // Diagnostic-only accessor: returns the hipStream_t used by
-  // inference_compute, as a void*.  Relies on RuntimeState
-  // (lib/Runtime/runtime_state_internal.h) keeping hipStream_t as its first
-  // field; the cast is encapsulated in InferenceState.cpp with a static_assert
-  // on pointer size.  Returning void* keeps hip headers out of this public
-  // header.
+  // inference_compute, as a void*. Relies on RuntimeState
+  // (lib/Runtime/runtime_state_internal.h) keeping hipStream_t as its
+  // first field; the cast is encapsulated in InferenceState.cpp with a
+  // static_assert on pointer size. Returning void* keeps hip headers out
+  // of this public header.
   //
   // Intended for HIPDNN_EP_PERF instrumentation in MlirCustomOp::Compute().
   // Callers reinterpret_cast to hipStream_t (itself a void* on amdhip64).
@@ -84,24 +92,21 @@ public:
   // Public constructor gated by PrivateTag (defined at the top of this
   // class). Use the create() factory instead -- external callers cannot
   // construct a PrivateTag and therefore cannot call this constructor.
-  InferenceState(PrivateTag, void *state,
-                 std::unique_ptr<morphizen::Plugin> plugin,
-                 const std::string &temp_dll_path);
+  InferenceState(PrivateTag, void *state, std::unique_ptr<BitcodeJIT> jit);
 
 private:
-  // Opaque handle returned by inference_init()
+  // Opaque handle returned by inference_init().
   void *state_;
 
-  // Owned plugin - must outlive state_
-  std::unique_ptr<morphizen::Plugin> plugin_;
-
-  // Temporary DLL file path (deleted in destructor)
-  std::string temp_dll_path_;
+  // Owns the JIT'd machine code that provides inference_init / compute /
+  // cleanup / begin_compute. Must outlive `state_` because the pointer
+  // returned by inference_init references memory allocated by JIT'd code.
+  std::unique_ptr<BitcodeJIT> jit_;
 
   // Cached function pointer for hipdnn_ep_runtime_begin_compute. Resolved
-  // once in create() so begin_compute() avoids a per-call GetProcAddress /
-  // dlsym round-trip on the decode hot path. Null when the model.dll
-  // predates the export.
+  // once in create() so begin_compute() avoids a per-call symbol-table
+  // round-trip on the decode hot path. Null when the module does not
+  // export the hook.
   using BeginComputeFn = void (*)(void *);
   BeginComputeFn begin_compute_fn_;
 };

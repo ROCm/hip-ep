@@ -8,7 +8,6 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 
-#include "hip/Target/LLVM/DLLLinker.h"
 #include "hip/Target/LLVM/LLVMBackend.h"
 
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -32,14 +31,6 @@
 #include <sstream>
 
 namespace hip::compiler {
-
-namespace {
-bool fileExists(const std::string &path) {
-  llvm::sys::fs::file_status status;
-  std::error_code EC = llvm::sys::fs::status(path, status);
-  return !EC && llvm::sys::fs::exists(status);
-}
-} // namespace
 
 bool CompilerDriver::compile(llvm::StringRef input_mlir,
                              const std::string &output_path,
@@ -141,56 +132,20 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   optimizeLLVMIR(llvmModule.get(), options.opt_level);
   logPhase("optimizeLLVMIR");
 
-  // Strip .dll extension to derive intermediate file paths (.ll, .obj).
-  std::string base_path = output_path;
-  llvm::StringRef dll_ext = ".dll";
-  if (llvm::StringRef(base_path).ends_with(dll_ext))
-    base_path.resize(base_path.size() - dll_ext.size());
-  std::string ll_path = base_path + ".ll";
-  std::string obj_path = base_path + ".obj";
-
-  if (options.output_mode == mlir::hip::OutputMode::LLVM_IR) {
-    if (!emitLLVMIR(llvmModule.get(), ll_path, error_message))
-      return false;
-    logPhase("emitLLVMIR");
-    if (timing) {
-      llvm::errs() << "[CompilerDriver] total: "
-                   << llvm::format("%.3f", elapsed_since(totalStart)) << "s\n";
-    }
-    return true;
-  }
-
-  if (!compileToObject(llvmModule.get(), obj_path, error_message))
+  // The per-model artifact is LLVM bitcode. It is consumed in-process by
+  // ORC LLJIT (BitcodeJIT in backend-mlir-compiler/custom-op-mlir/src/)
+  // and shipped inside the EPContext tar as data, not code. There is no
+  // longer any object-file, LLD-link, or temp-DLL step on the runtime
+  // path -- the host-side runtime has already been merged in via
+  // LLVMBackend::linkRuntimeModule above, and GPU device code lives in
+  // the signed EP DLL.
+  if (!emitBitcode(llvmModule.get(), output_path, error_message))
     return false;
-  logPhase("compileToObject");
-
-  // Symbols exported from the generated DLL:
-  //   inference_init/compute/cleanup       — runtime entry points
-  //   inference_get_metadata_json          — model metadata query
-  //   test_hip_from_dll                    — diagnostic hook for test-model-dll
-  //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
-  //                                          hook (called from EP-side
-  //                                          MlirCustomOp::Compute() entry)
-  std::vector<std::string> export_symbols = {
-      "inference_init",    "inference_compute",
-      "inference_cleanup", "inference_get_metadata_json",
-      "test_hip_from_dll", "hipdnn_ep_runtime_begin_compute"};
-  std::vector<std::string> libraries;
-  std::vector<std::string> library_paths;
-  discoverLibraries(libraries, library_paths);
-
-  if (!linkToDLL(obj_path, output_path, libraries, library_paths,
-                 export_symbols, error_message))
-    return false;
-  logPhase("linkToDLL");
-
-  cleanupIntermediates(base_path);
-
+  logPhase("emitBitcode");
   if (timing) {
     llvm::errs() << "[CompilerDriver] total: "
                  << llvm::format("%.3f", elapsed_since(totalStart)) << "s\n";
   }
-
   return true;
 }
 
@@ -287,165 +242,15 @@ void CompilerDriver::optimizeLLVMIR(llvm::Module *llvmModule, int optLevel) {
   backend.optimizeLLVMIR(llvmModule, optLevel);
 }
 
-bool CompilerDriver::emitLLVMIR(llvm::Module *llvmModule,
-                                const std::string &outputPath,
-                                std::string &error_message) {
+bool CompilerDriver::emitBitcode(llvm::Module *llvmModule,
+                                 const std::string &outputPath,
+                                 std::string &error_message) {
   hipdnn::LLVMBackend backend;
-  if (!backend.emitLLVMIR(llvmModule, outputPath)) {
-    error_message = "Failed to emit LLVM IR";
+  if (!backend.emitBitcode(llvmModule, outputPath)) {
+    error_message = "Failed to emit LLVM bitcode";
     return false;
   }
   return true;
-}
-
-bool CompilerDriver::compileToObject(llvm::Module *llvmModule,
-                                     const std::string &outputPath,
-                                     std::string &error_message) {
-  hipdnn::LLVMBackend backend;
-  if (!backend.compileToObjectFile(llvmModule, outputPath)) {
-    error_message = "Failed to compile to object file";
-    return false;
-  }
-  return true;
-}
-
-bool CompilerDriver::linkToDLL(const std::string &objPath,
-                               const std::string &dllPath,
-                               const std::vector<std::string> &libraries,
-                               const std::vector<std::string> &library_paths,
-                               const std::vector<std::string> &export_symbols,
-                               std::string &error_message) {
-  hipdnn::DLLLinker linker;
-
-  if (!linker.linkDLL(objPath, dllPath, libraries, library_paths,
-                      export_symbols)) {
-    error_message = "Failed to link DLL";
-    return false;
-  }
-
-  return true;
-}
-
-void CompilerDriver::discoverLibraries(
-    std::vector<std::string> &libraries,
-    std::vector<std::string> &library_paths) {
-  const char *therock = std::getenv("THEROCK_DIST");
-  if (!therock)
-    return;
-
-  std::string dist(therock);
-  std::string lib_dir = dist + "/lib";
-  library_paths.push_back(lib_dir);
-  COMPILER_DEBUG_LOG("THEROCK_DIST detected: " << dist << "\n");
-  COMPILER_DEBUG_LOG("  Adding library path: " << lib_dir << "\n");
-
-  libraries.push_back("amdhip64");
-  libraries.push_back("MIOpen");
-
-  // hipblaslt ships as .lib (Windows), .dll.a (cross-compiled), or
-  // .so (native Linux). Bare name "hipblaslt" lets the linker resolve via
-  // -L<lib_dir> to libhipblaslt.so on Linux.
-  std::string hipblaslt_lib = lib_dir + "/hipblaslt.lib";
-  std::string hipblaslt_dll_a = lib_dir + "/libhipblaslt.dll.a";
-  std::string hipblaslt_so = lib_dir + "/libhipblaslt.so";
-  if (llvm::sys::fs::exists(hipblaslt_lib))
-    libraries.push_back("hipblaslt");
-  else if (llvm::sys::fs::exists(hipblaslt_dll_a))
-    libraries.push_back(hipblaslt_dll_a);
-  else if (llvm::sys::fs::exists(hipblaslt_so))
-    libraries.push_back("hipblaslt");
-  else
-    COMPILER_DEBUG_LOG("  WARNING: hipblaslt import library not found\n");
-
-  // Custom kernels library discovery (priority high → low):
-  //
-  //   1. HIP_CUSTOM_KERNELS_DIR env var  — runtime override for end-users
-  //      who deploy the library in a non-standard location.  The directory
-  //      is added to library_paths so the linker can find it.
-  //
-  //   2. HIP_CUSTOM_KERNELS_LIB_PATH    — compile-time absolute path set
-  //      by CMake (CMAKE_INSTALL_PREFIX/lib/hip_custom_kernels.lib).
-  //      Used by developers whose kernels library is in the install tree.
-  //
-  //   3. Name-only fallback              — "hip_custom_kernels" is passed
-  //      to the linker, which searches library_paths (/LIBPATH:) and the
-  //      system LIB environment variable.
-  {
-    bool found = false;
-
-    const char *custom_dir_env = std::getenv("HIP_CUSTOM_KERNELS_DIR");
-    if (custom_dir_env && custom_dir_env[0] != '\0') {
-      std::string custom_dir(custom_dir_env);
-      library_paths.push_back(custom_dir);
-      libraries.push_back("hip_custom_kernels");
-      found = true;
-      COMPILER_DEBUG_LOG("  Custom kernels dir (env): " << custom_dir << "\n");
-    }
-
-#ifdef HIP_CUSTOM_KERNELS_LIB_PATH
-    if (!found) {
-      std::string custom_lib = HIP_CUSTOM_KERNELS_LIB_PATH;
-      if (llvm::sys::fs::exists(custom_lib)) {
-        libraries.push_back(custom_lib);
-        found = true;
-        COMPILER_DEBUG_LOG("  Custom kernels: " << custom_lib << "\n");
-      } else {
-        COMPILER_DEBUG_LOG("  WARNING: custom kernels lib not found at: "
-                           << custom_lib << "\n");
-      }
-    }
-#endif
-
-    if (!found) {
-      libraries.push_back("hip_custom_kernels");
-      COMPILER_DEBUG_LOG(
-          "  Custom kernels (name fallback): hip_custom_kernels\n");
-    }
-  }
-
-  // hipDNN graph runtime: only needed when hipDNN graphs are compiled
-  if (hipdnnHandle_) {
-    std::string hipdnn_backend_lib = lib_dir + "/hipdnn_backend.lib";
-    if (llvm::sys::fs::exists(hipdnn_backend_lib))
-      libraries.push_back("hipdnn_backend");
-    else
-      COMPILER_DEBUG_LOG(
-          "  WARNING: hipdnn_backend import library not found\n");
-
-#ifdef HIPDNN_GRAPH_RUNTIME_LIB_PATH
-    {
-      std::string runtime_lib = HIPDNN_GRAPH_RUNTIME_LIB_PATH;
-      if (llvm::sys::fs::exists(runtime_lib)) {
-        libraries.push_back(runtime_lib);
-        COMPILER_DEBUG_LOG("  hipDNN graph runtime: " << runtime_lib << "\n");
-      } else {
-        libraries.push_back("hipdnn_graph_runtime");
-        COMPILER_DEBUG_LOG("  hipDNN graph runtime (name fallback): "
-                           "hipdnn_graph_runtime.lib\n");
-      }
-    }
-#else
-    libraries.push_back("hipdnn_graph_runtime");
-    COMPILER_DEBUG_LOG("  hipDNN graph runtime: hipdnn_graph_runtime\n");
-#endif
-  }
-
-  for (const auto &lib : libraries) {
-    COMPILER_DEBUG_LOG("  Linking library: " << lib << "\n");
-  }
-}
-
-void CompilerDriver::cleanupIntermediates(const std::string &basePath) {
-  std::string ll_path = basePath + ".ll";
-  std::string obj_path = basePath + ".obj";
-
-  if (fileExists(ll_path)) {
-    llvm::sys::fs::remove(ll_path);
-  }
-
-  if (fileExists(obj_path)) {
-    llvm::sys::fs::remove(obj_path);
-  }
 }
 
 } // namespace hip::compiler

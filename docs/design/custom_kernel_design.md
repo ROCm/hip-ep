@@ -228,7 +228,7 @@ The `custom_kernels/CMakeLists.txt` install rules ensure that after `cmake --ins
 - `<prefix>/lib/hip_custom_kernels.lib` -- static library with compiled HIP kernels (fat binaries)
 - `<prefix>/include/hip_custom_kernels.h` -- pure C header for the kernel API
 
-CompilerDriver discovers the `.lib` at model-compile time via the configured install prefix path, and passes it to DLLLinker alongside MIOpen/hipBLASLt import libs.
+`hip_custom_kernels` is statically linked into `onnxruntime_morphizen_ep.dll` (see `3rd-party/morphizen/morphizen-core/CMakeLists.txt`). The kernel launchers are exported from the EP DLL via `onnxruntime_morphizen_ep.def`, so the per-model bitcode JITted by `BitcodeJIT` resolves them as ordinary process-wide symbols. The compiler does not need to link the kernel `.lib` anymore.
 
 ### 10. `custom_kernels/hip/matmul_nbits_kernel.hip`
 

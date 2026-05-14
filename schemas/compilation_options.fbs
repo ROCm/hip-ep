@@ -3,14 +3,17 @@
 
 namespace mlir.hip;
 
+// OutputMode used to support `DLL` and `LLVM_IR` text. With the switch
+// to in-process JIT (see backend-mlir-compiler/custom-op-mlir/src/
+// BitcodeJIT.h), the production artifact is binary LLVM bitcode -- the
+// only output the compiler still emits.
 enum OutputMode : int {
-  DLL = 0,
-  LLVM_IR = 1
+  BITCODE = 0
 }
 
 table CompilationOptions {
   opt_level: int = 2;
-  output_mode: OutputMode = DLL;
+  output_mode: OutputMode = BITCODE;
   verbose: bool = false;
   constants_file: string = "constants.bin";
   skip_constant_data: bool = false;
