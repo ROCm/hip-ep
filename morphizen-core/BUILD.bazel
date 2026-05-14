@@ -199,7 +199,7 @@ genrule(
         "morphizen_config.json",
     ],
     cmd = """
-    $(location :config_json_binary_py) --in_morphizen_config_json $(location :label_morphizen_config.json) --out_morphizen_config_json $(location :morphizen_config.json) --morphizen_config_binary_hpp $(location :config_json_binary.hpp) --is_trim_config OFF --xclbin_path "" --enable_default_config ON
+    $(location :config_json_binary_py) --in_morphizen_config_json $(location :label_morphizen_config.json) --out_morphizen_config_json $(location :morphizen_config.json) --morphizen_config_binary_hpp $(location :config_json_binary.hpp) --is_trim_config OFF --enable_default_config ON
     """,
     tools = [
         ":config_json_binary_py",
