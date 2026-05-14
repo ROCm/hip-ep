@@ -35,8 +35,8 @@ struct HIPBackendVTable;
 
 // Re-declared here (matches the typedef in hipdnn_ep_backend.h) so callers
 // of Backend::SetScratchProvider don't have to include the backend header.
-extern "C" typedef void *(*hip_backend_scratch_provider_fn)(void *ctx,
-                                                            size_t needed_bytes);
+extern "C" typedef void *(*hip_backend_scratch_provider_fn)(
+    void *ctx, size_t needed_bytes);
 
 namespace hip {
 
@@ -54,15 +54,11 @@ public:
 
   // Conv slot. Throws std::runtime_error on missing slot or non-zero status.
   // Argument list mirrors HIPBackendVTable::conv_fwd_fp16_nchw 1:1.
-  void Conv(void *stream,
-            const void *input, int N, int C, int H, int W,
+  void Conv(void *stream, const void *input, int N, int C, int H, int W,
             const void *weights, int K, int kernel_h, int kernel_w,
-            const void *bias,
-            void *output, int Ho, int Wo,
-            int stride_h, int stride_w,
-            int pad_top, int pad_left, int pad_bottom, int pad_right,
-            int dilation_h, int dilation_w,
-            int group);
+            const void *bias, void *output, int Ho, int Wo, int stride_h,
+            int stride_w, int pad_top, int pad_left, int pad_bottom,
+            int pad_right, int dilation_h, int dilation_w, int group);
 
   // Diagnostics.
   const char *Arch() const noexcept;

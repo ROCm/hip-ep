@@ -81,8 +81,8 @@ std::string detect_gfx_arch() {
   hipDeviceProp_t prop{};
   hipError_t err = hipGetDeviceProperties(&prop, 0);
   if (err != hipSuccess) {
-    throw std::runtime_error(
-        std::string("hipGetDeviceProperties failed: ") + hipGetErrorString(err));
+    throw std::runtime_error(std::string("hipGetDeviceProperties failed: ") +
+                             hipGetErrorString(err));
   }
   std::string name(prop.gcnArchName);
   if (auto colon = name.find(':'); colon != std::string::npos)
@@ -129,8 +129,7 @@ Backend::Backend() {
   // The exported symbol is `const HIPBackendVTable *const HIPBackendAPI`,
   // i.e. dlsym returns the address of a pointer variable. Deref once to
   // get the vtable pointer value.
-  vtable_ =
-      *reinterpret_cast<const HIPBackendVTable *const *>(sym);
+  vtable_ = *reinterpret_cast<const HIPBackendVTable *const *>(sym);
   if (!vtable_) {
     void *h = dll_handle_;
     dll_handle_ = nullptr;
@@ -200,15 +199,11 @@ void Backend::SetScratchProvider(void *ctx,
   vtable_->set_scratch_provider(ctx, provider);
 }
 
-void Backend::Conv(void *stream,
-                   const void *input, int N, int C, int H, int W,
+void Backend::Conv(void *stream, const void *input, int N, int C, int H, int W,
                    const void *weights, int K, int kernel_h, int kernel_w,
-                   const void *bias,
-                   void *output, int Ho, int Wo,
-                   int stride_h, int stride_w,
-                   int pad_top, int pad_left, int pad_bottom, int pad_right,
-                   int dilation_h, int dilation_w,
-                   int group) {
+                   const void *bias, void *output, int Ho, int Wo, int stride_h,
+                   int stride_w, int pad_top, int pad_left, int pad_bottom,
+                   int pad_right, int dilation_h, int dilation_w, int group) {
   if (!vtable_ || !vtable_->conv_fwd_fp16_nchw) {
     throw std::runtime_error(std::string("backend ") + Arch() +
                              " does not implement conv_fwd_fp16_nchw");

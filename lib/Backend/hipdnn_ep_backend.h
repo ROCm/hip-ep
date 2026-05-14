@@ -37,8 +37,8 @@
  *      BACKEND_HIP_SOURCES in lib/Backend/CMakeLists.txt.
  *   3. Wire the impl into the static vtable instance in lib/Backend/main.cpp.
  *   4. Add a thin `void hip::Backend::<Op>(...)` method in
- *      lib/Runtime/real/hip_backend_client.{h,cpp} that null-checks the slot and
- *      throws std::runtime_error on missing-or-failure.
+ *      lib/Runtime/real/hip_backend_client.{h,cpp} that null-checks the slot
+ * and throws std::runtime_error on missing-or-failure.
  *   5. Wire the new wrap in lib/Runtime/real/<op>.cpp + the dispatch shim.
  * No edits to lib/Backend/hip_backend.def are required -- the .def file
  * exports only `HIPBackendAPI` and is permanently a 1-line file.
@@ -106,14 +106,10 @@ typedef void *(*hip_backend_scratch_provider_fn)(void *ctx,
  * hipStreamSynchronize internally -- the caller orders execution.
  */
 typedef int (*hip_backend_conv_fwd_fp16_nchw_fn)(
-    void *stream,
-    const void *input, int N, int C, int H, int W,
-    const void *weights, int K, int kernel_h, int kernel_w,
-    const void *bias,
-    void *output, int Ho, int Wo,
-    int stride_h, int stride_w,
-    int pad_top, int pad_left, int pad_bottom, int pad_right,
-    int dilation_h, int dilation_w,
+    void *stream, const void *input, int N, int C, int H, int W,
+    const void *weights, int K, int kernel_h, int kernel_w, const void *bias,
+    void *output, int Ho, int Wo, int stride_h, int stride_w, int pad_top,
+    int pad_left, int pad_bottom, int pad_right, int dilation_h, int dilation_w,
     int group);
 
 /*

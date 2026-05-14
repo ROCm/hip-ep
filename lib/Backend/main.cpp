@@ -35,14 +35,10 @@ std::atomic<int> g_init_state{0}; // 0 = not init, 1 = init
 // Forward decls of slot implementations. Each impl is `static` linkage in
 // its own TU; only the vtable variable below is exported from the DLL.
 extern int backend_conv_fwd_fp16_nchw_impl(
-    void *stream,
-    const void *input, int N, int C, int H, int W,
-    const void *weights, int K, int kernel_h, int kernel_w,
-    const void *bias,
-    void *output, int Ho, int Wo,
-    int stride_h, int stride_w,
-    int pad_top, int pad_left, int pad_bottom, int pad_right,
-    int dilation_h, int dilation_w,
+    void *stream, const void *input, int N, int C, int H, int W,
+    const void *weights, int K, int kernel_h, int kernel_w, const void *bias,
+    void *output, int Ho, int Wo, int stride_h, int stride_w, int pad_top,
+    int pad_left, int pad_bottom, int pad_right, int dilation_h, int dilation_w,
     int group);
 
 // conv.cpp owns its caches; release them on shutdown.
