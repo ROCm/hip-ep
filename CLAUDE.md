@@ -162,10 +162,12 @@ Runtime functions called from generated code must be declared in `hipdnn_ep_runt
 | Tool | Purpose |
 |------|---------|
 | `hip-mlir-opt` | MLIR optimizer with all HIP passes registered |
-| `hip-compiler` | End-to-end ONNX → DLL compiler CLI |
-| `hip-test-dll` | Load and execute a compiled DLL |
-| `hip-inspect-dll` | Inspect DLL metadata (FlatBuffers) |
+| `hip-compiler` | End-to-end ONNX MLIR → LLVM bitcode compiler CLI |
 | `hip-onnx-runner` | Run ONNX models via HIP EP |
+
+`hip-test-dll` and `hip-inspect-dll` are retired: the per-model artifact
+is no longer a native DLL but LLVM bitcode JITted in-process by the EP
+(see `backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`).
 
 ## Adding a New Operator
 

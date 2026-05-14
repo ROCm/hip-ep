@@ -70,6 +70,19 @@ option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 
 if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
+
+  # Custom GPU kernels: with the bitcode-based EPContext flow the per-model
+  # artifact is data (LLVM bitcode), not a DLL, so the fatbin sections that
+  # used to ship inside each model.dll must instead live inside the signed
+  # EP DLL. Adding the kernels subdir here makes hip_custom_kernels available
+  # as a CMake target before backend-mlir-compiler/custom-op-mlir wires it
+  # into onnxruntime_morphizen_ep.dll. The same subdir is also re-added under
+  # BUILD_HIP_TOOLS below; the include guard inside that block prevents a
+  # double add_subdirectory.
+  if(NOT BUILD_MOCK_RUNTIME AND NOT TARGET hip_custom_kernels)
+    add_subdirectory(3rd-party/custom_kernels)
+  endif()
+
   # MLIR backend compiler
   add_subdirectory(backend-mlir-compiler)
   add_subdirectory(tools/hip-onnx-runner)
@@ -145,8 +158,11 @@ if(BUILD_HIP_TOOLS)
     message(STATUS "Building with MOCK runtime (no GPU required)")
   else()
     message(STATUS "Building with REAL runtime (requires HIP/MIOpen)")
-    # Add custom HIP kernels library for Real Runtime
-    add_subdirectory(3rd-party/custom_kernels)
+    # Add custom HIP kernels library for Real Runtime. Guarded by TARGET
+    # check because BUILD_EP above may have already added the subdir.
+    if(NOT TARGET hip_custom_kernels)
+      add_subdirectory(3rd-party/custom_kernels)
+    endif()
   endif()
 
   # TableGen targets

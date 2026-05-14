@@ -39,7 +39,7 @@ namespace {
 // Step 1: Load configuration from provider options
 static CompilationConfig load_config(PassContext *ctx) {
   CompilationConfig config;
-  config.artifactFormat = ArtifactFormat::Native;
+  config.artifactFormat = ArtifactFormat::Bitcode;
   config.optLevel = 2;
 
   auto ep_ctx = ctx->get_session_config("ep.context_enable");
@@ -47,17 +47,18 @@ static CompilationConfig load_config(PassContext *ctx) {
   config.skipConstantData = !epctxExport;
 
   try {
-    // Parse artifact format
+    // The `artifact_format` provider option is accepted for forward
+    // compatibility but currently only the `bitcode` value is honored.
+    // Unknown values are logged and silently coerced to bitcode -- this
+    // matches the post-clean-break decision that the compiler has a
+    // single output format.
     std::string artifact_format_str =
-        ctx->get_provider_option("artifact_format", "native");
-    if (artifact_format_str == "llvm_ir") {
-      config.artifactFormat = ArtifactFormat::LlvmIr;
-    } else if (artifact_format_str != "native") {
-      MY_LOG(1) << "Unknown artifact_format: " << artifact_format_str
-                << ", using default: native";
+        ctx->get_provider_option("artifact_format", "bitcode");
+    if (artifact_format_str != "bitcode") {
+      MY_LOG(1) << "artifact_format=" << artifact_format_str
+                << " is no longer supported; falling back to bitcode.";
     }
 
-    // Parse optimization level
     std::string opt_level_str =
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
@@ -67,9 +68,7 @@ static CompilationConfig load_config(PassContext *ctx) {
               << ", using defaults";
   }
 
-  MY_LOG(1) << "Artifact format: "
-            << (config.artifactFormat == ArtifactFormat::Native ? "native"
-                                                                : "llvm_ir")
+  MY_LOG(1) << "Artifact format: bitcode"
             << "; skipConstantData="
             << (config.skipConstantData ? "true" : "false")
             << (epctxExport ? " (EPContext export -> sidecar)"

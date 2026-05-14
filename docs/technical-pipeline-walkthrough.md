@@ -405,15 +405,23 @@ MLIR LLVM Dialect IR  (what ir_dump.mlir shows)
         ▼
    Optimized LLVM IR
         │
-        │  (4) compileToObject       — LLVM TargetMachine emits native x86-64 COFF
+        │  (4) emitBitcode           — llvm::WriteBitcodeToFile serializes the module
         ▼
-   model.obj
+   model.bc  (binary bitcode, stored in the EPContext tar)
+
+   --- runtime side, inside the signed EP DLL ---
         │
-        │  (5) linkToDLL             — system linker produces Windows DLL,
-        │                              exporting: inference_init, inference_compute,
-        │                              inference_cleanup, inference_get_metadata_json
+        │  (5) BitcodeJIT::create    — parseBitcodeFile + llvm::orc::LLJIT codegen,
+        │                              symbols resolved against the EP DLL
+        │                              (custom kernels + runtime exports) and the
+        │                              ROCm DLLs explicitly loaded by BitcodeJIT.
         ▼
-   model.dll  (temporary, loaded at inference time)
+   JITted in-memory module
+        │
+        │  (6) lookup_raw            — resolve `inference_init`, `inference_compute`,
+        │                              `inference_cleanup`, etc.
+        ▼
+   ready to run
 ```
 
 **File:** `lib/Compiler/CompilerDriver.cpp`
@@ -434,14 +442,11 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
 
   optimizeLLVMIR(llvmModule.get(), options.opt_level);      // (3)
 
-  if (!compileToObject(llvmModule.get(), obj_path, error_message))  // (4)
+  hipdnn::LLVMBackend backend;
+  if (!backend.emitBitcode(llvmModule.get(), output_path)) {  // (4)
+    error_message = "Failed to emit bitcode";
     return false;
-
-  if (!linkToDLL(obj_path, output_path, libraries, library_paths,   // (5)
-                 export_symbols, error_message))
-    return false;
-
-  cleanupIntermediates(base_path);  // removes .ll and .obj
+  }
   return true;
 }
 ```
@@ -712,10 +717,10 @@ cleanly separated with stable C ABI boundaries.
 | EP tensor marshalling (GPU) | `lib/Runtime/hipdnn_ep_runtime_tensor.cpp` |
 | **Bitcode Embedding & Linking** | |
 | LLVM IR translation + bitcode linking | `lib/Target/LLVM/LLVMBackend.cpp` |
-| DLL linking (lld-based) | `lib/Target/LLVM/DLLLinker.cpp` |
 | Bitcode embed build (xxd.py) | `lib/Target/LLVM/CMakeLists.txt` |
 | **Runtime (Host-side)** | |
-| Load model DLL + call init/compute | `backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp` |
+| In-process ORC JIT for per-model bitcode | `backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.cpp` |
+| JIT bitcode + call init/compute | `backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp` |
 | ORT tensor marshalling | `backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp` |
 | hipDNN graph runtime API | `lib/HipDNNGraphRuntime/hipdnn_graph_runtime.h`, `.cpp` |
 

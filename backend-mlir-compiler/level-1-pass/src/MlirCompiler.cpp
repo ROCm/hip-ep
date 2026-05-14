@@ -46,7 +46,11 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
   std::ostringstream json;
   json << "{";
   json << "\"opt_level\": " << config.optLevel;
-  json << ", \"output_mode\": \"DLL\"";
+  // BITCODE is the production output format consumed by InferenceState's
+  // BitcodeJIT loader. The hip-compiler plugin writes a binary LLVM bitcode
+  // (.bc) module containing the generated MLIR-lowered host code plus the
+  // statically-merged runtime.bc. See docs/design/compiler-runtime-contract.md.
+  json << ", \"output_mode\": \"BITCODE\"";
   json << ", \"skip_constant_data\": "
        << (config.skipConstantData ? "true" : "false");
   json << "}";

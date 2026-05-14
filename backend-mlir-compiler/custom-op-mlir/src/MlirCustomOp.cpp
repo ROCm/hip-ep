@@ -466,7 +466,11 @@ MlirCustomOp::MlirCustomOp(
   // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
   auto fs =
       const_cast<morphizen::PassContext *>(context.get())->get_file_system();
-  // Create inference state from DLL bytes (uses morphizen::Plugin)
+  // Create inference state from the per-model LLVM bitcode artifact
+  // stored in the EPContext tar. The bytes are JIT-compiled in-process
+  // by BitcodeJIT (ORC LLJIT) -- no temp file, no LoadLibrary, no
+  // unsigned PE on disk. See backend-mlir-compiler/custom-op-mlir/src/
+  // BitcodeJIT.h for the symbol-resolution model.
   inference_state_ = customop::InferenceState::create(
       load_artifact_from_epcontext(context, metadata_.artifact_filename()),
       fs.get());
