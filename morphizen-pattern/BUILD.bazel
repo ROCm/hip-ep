@@ -22,7 +22,7 @@ cc_proto_library(
 
 cc_library(
     name = "morphizen-pattern",
-    srcs = glob(["src/*.cpp"]),
+    srcs = glob(["src/*.cpp", "src/*.hpp"]),
     hdrs = glob(["include/morphizen/*.hpp"]),
     strip_include_prefix = "include",
     copts = select({
