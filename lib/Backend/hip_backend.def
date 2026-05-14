@@ -1,0 +1,19 @@
+; Module-definition file for hip-backend-gfx<ARCH>.dll.
+;
+; The backend exposes a SINGLE symbol -- `HIPBackendAPI` -- a pointer to a
+; static `HIPBackendVTable` instance (defined in lib/Backend/main.cpp,
+; struct layout in lib/Backend/hipdnn_ep_backend.h). Everything else --
+; CK templates pulled in by linking device_conv_operations.lib, the NCHW
+; <-> NHWGC transpose helpers, hip::host transitive deps -- stays internal.
+;
+; The `DATA` keyword is mandatory for variable exports on MSVC. Without it
+; the linker treats `HIPBackendAPI` as a function and GetProcAddress on the
+; client side returns a thunk; dereferencing that thunk crashes.
+;
+; Adding a new op to the backend does NOT require editing this file -- ops
+; are added by appending a slot to HIPBackendVTable in hipdnn_ep_backend.h
+; and filling it in in main.cpp's `g_vtable` initializer. This file stays
+; a 1-line file forever.
+
+EXPORTS
+    HIPBackendAPI DATA

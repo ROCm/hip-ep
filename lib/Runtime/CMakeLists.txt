@@ -112,6 +112,17 @@ if(NOT BUILD_MOCK_RUNTIME)
     find_package(hip QUIET)
     find_package(MIOpen QUIET)
     find_package(hipblaslt QUIET)
+    # composable_kernel ships device_conv_operations.lib + utility.lib in TheRock.
+    # The CK template instantiations live in ck_conv_impl.hip (compiled by
+    # hipcc into hip_custom_kernels.lib) -- this bitcode path doesn't see CK
+    # headers. The .libs are linked into model.dll by CompilerDriver.cpp.
+    # find_package here is informational only.
+    find_package(composable_kernel QUIET COMPONENTS device_conv_operations utility)
+    if(composable_kernel_FOUND)
+        message(STATUS "  composable_kernel: ${composable_kernel_DIR}")
+    else()
+        message(WARNING "composable_kernel not found under THEROCK_DIST; CK conv backend will fail to link at model-compile time")
+    endif()
 
     if(DEFINED THEROCK_DIST)
         set(CMAKE_PREFIX_PATH "${ORIGINAL_CMAKE_PREFIX_PATH}")
@@ -192,15 +203,24 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             list(APPEND COMPILE_FLAGS "-D__HIP_PLATFORM_AMD__")
         endif()
 
+        # Surface the per-gfx backend public header so
+        # hip_backend_client.{h,cpp} can see the HIPBackendVTable definition
+        # + ABI constants. The actual gfx string is detected at runtime via
+        # hipGetDeviceProperties() (no compile-time arch baking required).
+        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/lib/Backend")
+
         list(APPEND IMPL_DEPS
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
-            ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h)
+            ${CMAKE_CURRENT_SOURCE_DIR}/real/hip_backend_client.h
+            ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h
+            ${CMAKE_SOURCE_DIR}/lib/Backend/hipdnn_ep_backend.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
         list(APPEND IMPL_DEPS
-            ${CMAKE_CURRENT_SOURCE_DIR}/mock/runtime_types.h)
+            ${CMAKE_CURRENT_SOURCE_DIR}/mock/runtime_types.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/mock/hip_backend_client.h)
     endif()
 
     add_custom_command(
@@ -257,6 +277,9 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
+    compile_to_bitcode(real/hip_backend_client.cpp runtime_hip_backend_client.bc)
+    compile_to_bitcode(real/ck_conv.cpp runtime_ck_conv.bc)
+    compile_to_bitcode(real/conv_dispatch.cpp runtime_conv_dispatch.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
     compile_to_bitcode(real/where.cpp runtime_where.bc)
@@ -286,6 +309,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip_backend_client.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ck_conv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv_dispatch.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_where.bc

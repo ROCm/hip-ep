@@ -42,8 +42,12 @@ inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 
-inline constexpr const char *kMiopenConvolutionForward =
-    "wrap_miopenConvolutionForward";
+// Conv forward dispatch shim (lib/Runtime/real/conv_dispatch.cpp). Selects
+// between MIOpen and CK at runtime via HIPDNN_EP_CONV. The two backend
+// wrappers (wrap_miopenConvolutionForward, wrap_ckConvForward) share this
+// C-ABI and are not referenced directly by lowering -- only by the shim.
+inline constexpr const char *kConvForwardDispatch =
+    "wrap_conv_forward_dispatch";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
 inline constexpr const char *kWrapMiopenT5LayerNormForward =
     "wrap_miopenT5LayerNormForward";

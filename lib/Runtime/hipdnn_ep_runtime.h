@@ -501,7 +501,44 @@ int wrap_miopenConvolutionForward(
     int64_t pad_right,   // Padding right
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
-    int64_t group);      // Number of groups
+    int64_t group,       // Number of groups
+    int64_t
+        element_size_bytes); // 2 = fp16 (miopenHalf), 4 = fp32 (miopenFloat)
+
+// CK (Composable Kernel) convolution forward wrapper.
+// Same C-ABI as wrap_miopenConvolutionForward. Forwards through the per-gfx
+// hip-backend-gfx<ARCH>.dll, loaded at runtime via hip::GetBackend() (see
+// lib/Runtime/real/hip_backend_client.{h,cpp} + lib/Runtime/real/ck_conv.cpp); the
+// actual CK kernel + layout transposes + per-shape cache live in the backend
+// DLL (lib/Backend/), not in model.dll.  element_size_bytes must be 2 (fp16);
+// CK is fp16-only in v1 because TheRock's CK build has CK_ENABLE_DL_KERNELS
+// undef'd, leaving WMMA cshufflev3 fp16 NHWGC as the only precompiled
+// instance set on RDNA3+.
+int wrap_ckConvForward(RuntimeState *state, const void *input, int64_t input_n,
+                       int64_t input_c, int64_t input_h, int64_t input_w,
+                       const void *weights, int64_t weights_k, const void *bias,
+                       void *output, int64_t output_h, int64_t output_w,
+                       int64_t kernel_h, int64_t kernel_w, int64_t stride_h,
+                       int64_t stride_w, int64_t pad_top, int64_t pad_left,
+                       int64_t pad_bottom, int64_t pad_right,
+                       int64_t dilation_h, int64_t dilation_w, int64_t group,
+                       int64_t element_size_bytes);
+
+// Conv forward dispatch shim. Selects ck or miopen at runtime based on
+// HIPDNN_EP_CONV (read once into a static on first call):
+//   unset / "auto" -> ck for fp16, miopen for fp32 (default)
+//   "ck"           -> always ck (fp16-only)
+//   "miopen"       -> always miopen
+// Same C-ABI as the two wrappers it delegates to; this is the symbol that
+// hip.conv -> LLVM lowering targets.
+int wrap_conv_forward_dispatch(
+    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
+    const void *bias, void *output, int64_t output_h, int64_t output_w,
+    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
+    int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t element_size_bytes);
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations
