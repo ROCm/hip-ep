@@ -127,8 +127,15 @@ export ROOT="$WORKSPACE/install"            # built from source
 #      dlopen()s the real libamd_comgr.so.3 at runtime; the real lib
 #      lives only in $THEROCK_DIST/lib and is not in ldd's view of
 #      transitive deps, so it has to be on LD_LIBRARY_PATH explicitly.
+#
+# LIBRARY_PATH is GCC/clang's build-time linker search-path env;
+# clang++ -shared (driving the per-model DLL link inside hip-compiler)
+# prepends every entry as `-L<dir>`, so the in-tree
+# `libhip_custom_kernels.a` resolves via the level-3 name-only
+# `-lhip_custom_kernels` fallback.
 export THEROCK_DIST="$WORKSPACE/therock-dist"
 export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
+export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 
 # Sanity check
 ldd "$ROOT/lib/libonnxruntime_morphizen_ep.so" | grep "not found"   # expect empty
