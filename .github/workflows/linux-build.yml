@@ -144,26 +144,31 @@ jobs:
           BUILD_OGA=1 ./docker/run.sh build
 
       # -----------------------------------------------------------------------
-      # Stage the artifact in the layout the GPU host workflow expects:
-      #   staging/bin/   – hip-onnx-runner, hip-compiler, hip-mlir-opt,
-      #                    hip-test-dll, onnxruntime_perf_test, model_benchmark
-      #   staging/lib/   – libhip-compiler.so, libonnxruntime_morphizen_ep.so,
-      #                    libonnxruntime.so*, libonnxruntime-genai.so*,
-      #                    libamdhip64.so* + TheRock transitive + libLLVM.so.22.1
-      #   staging/etc/   – morphizen_config.json
+      # Stage the artifact:
+      #   staging/bin/  hip-onnx-runner, hip-compiler, hip-mlir-opt,
+      #                 hip-test-dll, hip-inspect-dll, model_benchmark,
+      #                 onnxruntime_perf_test
+      #   staging/lib/  libhip-compiler.so, libonnxruntime_morphizen_ep.so,
+      #                 libonnxruntime.so*, libonnxruntime-genai.so*,
+      #                 libhip_custom_kernels.a (needed at per-model
+      #                 DLL link time)
+      #   staging/etc/  morphizen_config.json
       #
-      # No staging/wheels on Linux: the OGA python wheel needs `import
-      # onnxruntime` at runtime, but the Linux build deliberately omits
-      # the ORT wheel (A.5 skips --build_wheel to avoid pulling in
-      # Python::NumPy + dev headers). Without an ORT wheel, the OGA
-      # wheel can't be `pip install`ed on its own, so shipping it serves
-      # no consumer. The C++ model_benchmark binary is what's actually
-      # used for benchmarking and it lands in staging/bin/.
+      # The artifact does NOT bundle TheRock (deploy host installs ROCm
+      # separately and exports THEROCK_DIST) nor the Python wheels (the
+      # Linux build deliberately omits ORT --build_wheel and OGA
+      # --skip_wheel so the wheels can't satisfy `import onnxruntime`
+      # anyway).
       #
-      # docker/build.sh A.7b already runs a 2-pass `ldd` inside the
-      # container and bundles the TheRock + ORT transitive .so set into
-      # install/lib/, so this step is a flat `cp` from install/ + one
-      # config side-copy.
+      # docker/build.sh A.7b runs a 2-pass `ldd` inside the container
+      # and bundles prebuilt-local transitive .so files into install/lib/,
+      # so the bulk `cp -a install/. staging/` here is most of the work.
+      # Filter out artifact-irrelevant pieces shipped only for local
+      # developers / SDK consumers: the static archives we statically
+      # link into hip-compiler.so (libcpptrace.a, libdwarf.a, libzstd.a,
+      # libHipCInterface.a), pkgconfig descriptors, and the duplicate
+      # morphizen_config.json that the submodule's install rule drops
+      # into bin/.
       # -----------------------------------------------------------------------
       - name: Stage Linux GPU test package
         run: |
@@ -173,9 +178,26 @@ jobs:
           cp -a "${{ github.workspace }}/install/bin/." staging/bin/
           cp -a "${{ github.workspace }}/install/lib/." staging/lib/
 
-          # Config lives in the repo etc/ on Path A (install/bin gets a copy
-          # too; both are fine, we pick the source-of-truth here).
+          # ORT latency tool lives in prebuilt-local (A.5 copies it
+          # there from ORT's build dir); cmake --install of this project
+          # doesn't re-stage it into install/bin/.
+          cp "${{ github.workspace }}/prebuilt-local/bin/onnxruntime_perf_test" \
+              staging/bin/
+
+          # Repo etc/ is the canonical source for morphizen_config.json
+          # (the submodule's bin/ copy gets dropped below).
           cp onnx-hipdnn-ep/etc/morphizen_config.json staging/etc/
+
+          # Drop artifact-irrelevant content. The static archives are
+          # already whole-archived into the shipped .so files; the .pc
+          # files are dev-time pkg-config descriptors; bin/<config> is
+          # the submodule-install duplicate of etc/<config>.
+          rm -f staging/lib/libHipCInterface.a \
+                staging/lib/libcpptrace.a \
+                staging/lib/libdwarf.a \
+                staging/lib/libzstd.a
+          rm -rf staging/lib/pkgconfig
+          rm -f staging/bin/morphizen_config.json
 
           chmod +x staging/bin/*
 
