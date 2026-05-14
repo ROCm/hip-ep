@@ -101,23 +101,14 @@ struct CausalConvCacheEntry {
 
 void destroyEntry(CausalConvCacheEntry &e);
 
-// Op-module state: owns the per-shape MIOpen descriptor + algorithm cache.
-// Created lazily on first wrap_causal_conv_with_state call (when the model
-// actually contains a CausalConvWithState op); destroyed in
-// hipdnn_ep_state_cleanup via the module registry's destroy_fn.
+// Per-shape MIOpen descriptor + algorithm cache, lazily populated on first
+// wrap_causal_conv_with_state call.
 struct CausalConvState {
   std::unordered_map<CausalConvKey, CausalConvCacheEntry, CausalConvKeyHash>
       entries;
 
-  // The constructor is intentionally empty: cache entries are populated on
-  // demand. We only need the RuntimeState* in the destructor's signature
-  // contract (none of our state actually depends on it at construction
-  // time), so the parameter is unused here.
   explicit CausalConvState(RuntimeState *) {}
 
-  // RAII teardown: walk every entry and free the MIOpen descriptors. The
-  // stream has already been synchronized by hipdnn_ep_state_cleanup before
-  // the module registry runs, so descriptor destruction is safe.
   ~CausalConvState() {
     for (auto &kv : entries)
       destroyEntry(kv.second);

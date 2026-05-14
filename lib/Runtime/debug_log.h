@@ -57,12 +57,8 @@ inline bool hipdnn_ep_perf_isolate_enabled() {
   return enabled;
 }
 
-// Op-module state dump (HIPDNN_EP_DUMP_STATE=1). Triggers
-// module_registry_dump() once during hipdnn_ep_state_cleanup, printing one
-// line per registered module slot with its name and (when the module
-// defines `size_t mem_bytes() const`) reported buffer footprint. Use to
-// audit which modules a session actually populated and how much GPU /
-// pinned memory each holds at teardown.
+// HIPDNN_EP_DUMP_STATE=1: print one line per populated op-module slot at
+// session cleanup (name + mem_bytes() if defined).
 inline bool hipdnn_ep_dump_state_enabled() {
   static const bool enabled = [] {
 #ifdef _WIN32

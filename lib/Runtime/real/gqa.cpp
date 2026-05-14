@@ -162,18 +162,11 @@ static int gqa_fused_decode_max_t() {
 // legacy per-call D2H readback site they already implement.
 static constexpr int32_t kSeqlensKNotRead = -2;
 
-//===---------------------------------------------------------------------===//
-// GqaSeqlensCache op-module
-//===---------------------------------------------------------------------===//
-//
-// Per-Compute() cache of the int32 seqlens_k value. Decode runs 32 GQA
-// layers per token, all reading the same seqlens_k from device memory;
-// without this cache each layer does its own D2H + hipStreamSynchronize
-// (~30-45 ms/token of pipeline stall on Strix Halo).
-//
-// Invalidated by GqaSeqlensCache::begin_compute(), which is dispatched
-// from hipdnn_ep_runtime_begin_compute via the module registry on every
-// Compute() entry. Disable end-to-end with HIPDNN_EP_GQA_CACHE_SEQLENS=0.
+// Per-Compute() cache of seqlens_k[0]. Decode hits 32 GQA layers per token
+// all reading the same value -- without this each layer does its own D2H +
+// hipStreamSynchronize (~30-45 ms/token stall on Strix Halo). Invalidated
+// on every Compute() via begin_compute. Disable with
+// HIPDNN_EP_GQA_CACHE_SEQLENS=0.
 
 namespace {
 
@@ -184,9 +177,6 @@ struct GqaSeqlensCache {
 
   explicit GqaSeqlensCache(RuntimeState *) {}
 
-  // Invoked on every Compute() entry via the module registry's
-  // begin_compute fan-out. Resets the cache so the first GQA layer in the
-  // new forward pass pays the D2H, then subsequent layers reuse it.
   void begin_compute(RuntimeState *) {
     valid = false;
     ptr = nullptr;
@@ -228,10 +218,7 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
-  // Look up the per-Compute() seqlens_k cache. Lazily created on first
-  // access; persists for the session. Invalidated at the top of every
-  // Compute() via GqaSeqlensCache::begin_compute (dispatched by the
-  // module registry from hipdnn_ep_runtime_begin_compute).
+  // Cache hit: subsequent GQA layers in this Compute() pay zero D2H.
   GqaSeqlensCache *cache = (gqa_cache_seqlens_enabled() && state)
                                ? gqa_seqlens_module(state)
                                : nullptr;
@@ -364,15 +351,8 @@ struct GqaGemmCacheEntry {
   size_t workspace_size;      // workspace bytes required by algo
 };
 
-//===---------------------------------------------------------------------===//
-// GqaGemmState op-module
-//===---------------------------------------------------------------------===//
-//
 // Per-shape hipBLASLt descriptor + algorithm cache for the decomposed
-// (prefill) GQA path. Lazily created on first wrap_group_query_attention
-// call; freed by ~GqaGemmState via the module registry at session cleanup.
-// The shared stream sync inside hipdnn_ep_state_cleanup happens BEFORE
-// module destructors fire, so descriptor destruction is safe.
+// (prefill) GQA path. Lazily populated on first call.
 
 namespace {
 

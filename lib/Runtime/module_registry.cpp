@@ -15,10 +15,7 @@ namespace hipdnn_ep {
 
 namespace {
 
-// Construct-On-First-Use for the process-global spec vector. Static-init
-// fiasco avoidance: ops register from function-local statics inside their
-// accessor, which fires on first wrap_* call -- always after main() /
-// DllMain() has run and these locals have been constructed.
+// Construct-On-First-Use: avoids static-init ordering fiasco between TUs.
 std::vector<const OpModuleSpec *> &spec_table() {
   static std::vector<const OpModuleSpec *> table;
   return table;
@@ -66,28 +63,15 @@ int op_module_count() {
   return static_cast<int>(spec_table().size());
 }
 
-//===------------------- Per-RuntimeState slots --------------------------===//
-//
-// SlotEntry caches the spec's begin_compute / destroy / mem_bytes fn
-// pointers alongside the state pointer. This means:
-//   * module_registry_begin_compute (per-Compute hot path) never enters the
-//     process-global spec table -- no mutex, no array lookup outside the
-//     ModuleRegistry's own slots vector.
-//   * module_registry_destroy (cleanup cold path) doesn't either, so old
-//     deregistered modules wouldn't break cleanup. (No deregistration API
-//     today, but this is free insurance.)
-//
-// The slots vector grows on demand inside op_module_get; once a slot has
-// been populated, subsequent op_module_get hits are pure (one bounds
-// compare + one load + null-check) -- the steady-state invariant.
-
+// SlotEntry caches the spec's fn-pointers so begin_compute / destroy /
+// dump never re-enter the mutex-guarded process-global spec table.
 struct SlotEntry {
   void *state_ptr = nullptr;
   OpBeginComputeFn begin_compute_fn = nullptr;
   OpEndComputeFn end_compute_fn = nullptr;
   OpMemBytesFn mem_bytes_fn = nullptr;
   OpDestroyFn destroy_fn = nullptr;
-  const char *name = nullptr; // Cached for HIPDNN_EP_DUMP_STATE / abort msgs
+  const char *name = nullptr;
 };
 
 struct ModuleRegistry {
@@ -99,9 +83,8 @@ ModuleRegistry *module_registry_create() { return new ModuleRegistry; }
 void module_registry_destroy(ModuleRegistry *reg) {
   if (!reg)
     return;
-  // Reverse registration order so caches that internally hold references to
-  // earlier-registered modules clean up first. (No such case today; this is
-  // free insurance for future cross-module dependencies.)
+  // Reverse registration order in case a later-registered module ever
+  // references an earlier one in its destructor.
   for (size_t i = reg->slots.size(); i-- > 0;) {
     SlotEntry &slot = reg->slots[i];
     if (slot.state_ptr && slot.destroy_fn) {
@@ -115,9 +98,6 @@ void module_registry_destroy(ModuleRegistry *reg) {
 void module_registry_begin_compute(ModuleRegistry *reg, RuntimeState *state) {
   if (!reg)
     return;
-  // Tight loop over a tiny vector of cached fn-pointer / state-pointer
-  // pairs. No locks, no allocations, no spec-table walk -- this runs once
-  // per Compute() and must stay allocation-free.
   for (auto &slot : reg->slots) {
     if (slot.state_ptr && slot.begin_compute_fn) {
       slot.begin_compute_fn(slot.state_ptr, state);
@@ -126,8 +106,8 @@ void module_registry_begin_compute(ModuleRegistry *reg, RuntimeState *state) {
 }
 
 void module_registry_dump(ModuleRegistry *reg) {
-  // Header always prints (even when no slots populated) so the user can tell
-  // the env var was actually picked up by the runtime they're inspecting.
+  // Always print the header so the user can confirm the env var was picked
+  // up even when no module has been populated.
   std::fprintf(stderr, "[HIPDNN_EP_DUMP_STATE] registered op-module slots:\n");
   if (!reg) {
     std::fprintf(stderr, "[HIPDNN_EP_DUMP_STATE]   (registry is null)\n");
@@ -165,7 +145,7 @@ void *op_module_get(ModuleRegistry *reg, RuntimeState *state, int slot_id) {
   if (!reg || slot_id < 0)
     return nullptr;
 
-  // Hot path: slot in range and already populated. Three ops total.
+  // Hot path: bounds compare + load + null branch.
   if (static_cast<size_t>(slot_id) < reg->slots.size()) {
     void *p = reg->slots[slot_id].state_ptr;
     if (p)

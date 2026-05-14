@@ -216,21 +216,13 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
-  // qmoe_scratch / qmoe_host_scratch: now owned by the QmoeState op-module
-  // (lib/Runtime/real/qmoe.cpp). Allocated lazily on first wrap_qmoe call.
-  // gqa_gemm_cache, causal_conv_cache, zp_unpack_cache: now owned by the
-  // ModuleRegistry below (GqaGemmState / CausalConvState / ZpUnpackState).
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
-  // seqlens_k_cached_*: now owned by the GqaSeqlensCache op-module
-  // (invalidated each Compute() via its begin_compute hook).
 
-  // Op-module registry: empty container created up front so subsequent
-  // wrap_* calls can populate slots lazily without a null check on the
-  // registry pointer. Per-slot state ptrs are still nullptr until first
-  // access. See module_registry.h.
+  // Op-module slots are populated lazily on first wrap_* call. Create the
+  // registry up front so wrap_* sites can skip a null check on state->modules.
   state->modules = hipdnn_ep::module_registry_create();
   if (!state->modules) {
     fprintf(stderr, "Failed to create op-module registry\n");
@@ -849,15 +841,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipStreamSynchronize(state->stream));
   }
 
-  // Tear down op modules first: each module's destructor may issue
-  // hipFree / hipblasLtMatmulDesc_destroy / etc. against the still-live
-  // stream and library handles.  We just synced the stream above, so any
-  // in-flight kernel referencing these caches has completed.
-  //
-  // HIPDNN_EP_DUMP_STATE=1: print one line per populated module slot with
-  // its name and reported memory footprint, then proceed with destruction.
-  // Useful for auditing which modules a session actually used and how much
-  // GPU / pinned memory each holds at teardown. Zero-overhead when unset.
+  // Tear down op modules first while the stream / handles are still live --
+  // destructors may issue hipFree / hipblasLt*Destroy / miopen*Destroy.
+  // The stream sync above guarantees no in-flight kernel references the
+  // cached buffers.
   if (state->modules) {
     if (hipdnn_ep_dump_state_enabled()) {
       hipdnn_ep::module_registry_dump(state->modules);
@@ -870,9 +857,6 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->workspace) {
     HIP_CLEANUP(hipFree(state->workspace));
   }
-
-  // qmoe device scratch + pinned host mirror: owned by the QmoeState
-  // op-module above, freed by its destructor via the module registry.
 
   if (state->device_error_flag) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
@@ -908,10 +892,6 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
   if (state->gpu_constants)
     free(state->gpu_constants);
-
-  // GQA GEMM descriptor cache, CausalConvWithState descriptor/algo cache,
-  // and MatMulNBits asym zero_points unpack cache: all now owned by the
-  // ModuleRegistry above (GqaGemmState / CausalConvState / ZpUnpackState).
 
   // Free op profiling state
   if (state->op_profile) {
@@ -966,22 +946,15 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
 }
 
 namespace hipdnn_ep {
-// Glue called by the HIPDNN_OP_MODULE-generated accessor. Defined here so
-// module_registry.cpp stays agnostic of RuntimeState's layout. Trivial body
-// inlines through llvm-link in the bitcode build.
+// Defined here (not in module_registry.cpp) so that TU has visibility of
+// RuntimeState's full layout. Inlines through llvm-link in bitcode builds.
 ModuleRegistry *get_module_registry(RuntimeState *state) {
   return state ? state->modules : nullptr;
 }
 } // namespace hipdnn_ep
 
-// Per-Compute() cache invalidation hook. Today this only resets the GQA
-// seqlens_k cache; future per-forward-pass caches should be cleared here
-// as well so the EP-side hook stays a single call.
-//
-// __declspec(dllexport) matches the convention in real/test_hip_from_dll.cpp
-// (belt-and-suspenders with the .def export list in CompilerDriver.cpp) and
-// guarantees the symbol survives LLVM optimization in the compiled
-// model.dll, which dlsym/GetProcAddress resolves it from.
+// Per-Compute() entry hook resolved by EP via GetProcAddress; dllexport
+// keeps the symbol visible after LLVM optimization on Windows.
 extern "C"
 #ifdef _WIN32
     __declspec(dllexport)
@@ -990,12 +963,6 @@ extern "C"
   if (!state) {
     return;
   }
-  // GQA seqlens_k cache and any other per-Compute() caches are reset by
-  // each module's begin_compute hook (detected at registration time via
-  // SFINAE). Fan-out is a lock-free loop over a tiny vector of cached
-  // fn-pointer / state-pointer pairs (see module_registry.cpp); modules
-  // without a begin_compute hook are skipped at zero cost (cached fn
-  // pointer is null).
   if (state->modules) {
     hipdnn_ep::module_registry_begin_compute(state->modules, state);
   }
