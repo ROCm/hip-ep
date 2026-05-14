@@ -6,6 +6,7 @@
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
+load("//scripts/bazel:collect_pb.bzl", "collect_pb")
 
 proto_library(
     name = "pattern_proto",
@@ -20,11 +21,20 @@ cc_proto_library(
     visibility = ["//visibility:public"],
 )
 
+collect_pb(
+    name = "pattern_proto_pb_h",
+    srcs = [":pattern_cc_proto"],
+    output_dir = "morphizen",
+    extensions = ".pb.h",
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "morphizen-pattern",
     srcs = glob(["src/*.cpp", "src/*.hpp"]),
-    hdrs = glob(["include/morphizen/*.hpp"]),
+    hdrs = glob(["include/morphizen/*.hpp"]) + [":pattern_proto_pb_h"],
     strip_include_prefix = "include",
+    includes = ["."],  # exposes bazel-out/.../morphizen-pattern/ so morphizen/pattern.pb.h resolves
     copts = select({
         "@bazel_tools//src/conditions:windows": [
             "/W0",
