@@ -172,6 +172,22 @@ else
     if [ -n "$PERF_TEST" ]; then cp "$PERF_TEST" "$PREBUILT_DIR/bin/"; fi
 fi
 
+# OGA's cmake/global_variables.cmake (A.9 below) checks for the ORT C API
+# header at $ORT_HOME/include/onnxruntime_c_api.h (flat), but ORT 1.25.1's
+# `cmake --install` puts them under $PREBUILT_DIR/include/onnxruntime/*.h
+# (nested). Mirror the public headers up to include/ so both layouts
+# resolve.
+#
+# This runs unconditionally — NOT inside the A.5 `if have_ort` block —
+# because actions/cache may restore a prebuilt-local/ from a previous
+# run that didn't have the flatten step, so flattening only on first
+# fresh install would leave cache-hit runs broken. cp -n keeps it
+# idempotent: any file already at include/ root (incl. those from
+# protobuf / flatbuffers installs) is never clobbered.
+if [ -d "$PREBUILT_DIR/include/onnxruntime" ]; then
+    cp -rn "$PREBUILT_DIR/include/onnxruntime/." "$PREBUILT_DIR/include/" 2>/dev/null || true
+fi
+
 # A.6a — protobuf v34
 if have_protobuf; then
     echo "[skip] protobuf already installed in $PREBUILT_DIR"
