@@ -1057,11 +1057,11 @@ namespace {
 struct WorkspaceState {
   hipdnn_ep::GrowableDeviceBuffer ws;
 
-  // Stream is set in initialize_state_handles before any wrap_* call, so
-  // we can capture it at module-construction time.
-  explicit WorkspaceState(RuntimeState *rs) {
-    ws.set_stream(rs ? rs->stream : nullptr);
-  }
+  // GrowableDeviceBuffer no longer needs a bound stream: hipFree
+  // performs an implicit hipDeviceSynchronize() per the HIP API.
+  // Constructor is declared so HIPDNN_OP_MODULE's SFINAE detects an
+  // explicit RuntimeState* hook even though we ignore it.
+  explicit WorkspaceState(RuntimeState *) {}
 };
 
 HIPDNN_OP_MODULE(workspace_module, "workspace", WorkspaceState);
