@@ -674,6 +674,29 @@ int hip_expand(
     int hip_dtype);
 
 /* =========================================================================
+ * GatherND
+ * =========================================================================
+ *
+ * Pick slices of `data` along the first K = indices.shape[-1] dims (after
+ * `batch_dims`), one slice per row of `indices`. INT64 indices only.
+ *
+ * Shapes pass as host int64 arrays (no GPU shape D2H). K and the rank
+ * decomposition are computed on the host; the kernel runs one thread per
+ * output element and reads K indices inline (no scratch buffer).
+ */
+int hip_gather_nd(
+    void* stream,
+    const void* input,
+    const void* indices,
+    void* output,
+    const int64_t* data_shape_host,
+    int data_rank,
+    const int64_t* indices_shape_host,
+    int indices_rank,
+    int batch_dims,
+    int hip_dtype);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *
