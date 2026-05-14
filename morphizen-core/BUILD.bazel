@@ -9,17 +9,11 @@ load("//scripts/bazel:collect_pb.bzl", "collect_pb")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_python//python:defs.bzl", "py_binary")
 
-py_binary(
-    name = "compress_binary_py",
-    srcs = ["src/binary/compress_binary.py"],
-    main = "src/binary/compress_binary.py",
-)
-
 genrule(
     name = "generate_mem_binary_file",
     outs = ["mem_binary_file.hpp.inc"],
-    cmd = "$(location :compress_binary_py) $@",
-    tools = [":compress_binary_py"],
+    cmd = "$(location //morphizen-foundation:compress_binary_py) $@",
+    tools = ["//morphizen-foundation:compress_binary_py"],
 )
 # # Proto libraries for morphizen-core
 # No, it's **not a good practice** to combine all proto files into a single `proto_library` rule. Here's why:
