@@ -7,26 +7,8 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 cc_library(
     name = "ort-bridge",
-    srcs = [
-        "src/ort-bridge.cpp",
-        "src/api-ptrs.cpp",
-        "src/ort-status-exception.cpp",
-        "src/ort-graph-wrapper.cpp",
-        "src/vitisai-ep-factory.cpp",
-        "src/vitisai-ep.cpp",
-        "src/ir-converter.cpp",
-        "src/ir-converter-imp.cpp",
-    ],
-    hdrs = [
-        "src/api-ptrs.hpp",
-        "src/ort-status-exception.hpp",
-        "src/ort-graph-wrapper.hpp",
-        "src/vitisai-ep-factory.hpp",
-        "src/vitisai-ep.hpp",
-        "src/ir-converter.hpp",
-        "src/ir-converter-imp.hpp",
-        "src/morphizen-deps.hpp",
-    ],
+    srcs = glob(["src/*.cpp"]),
+    hdrs = glob(["src/*.hpp"]),
     copts = select({
         "@bazel_tools//src/conditions:windows": [
             "/W0",  # Suppress all warnings for ONNX-related code
