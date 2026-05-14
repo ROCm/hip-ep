@@ -7,8 +7,14 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 cc_library(
     name = "ort-bridge",
-    srcs = glob(["src/*.cpp"]),
-    hdrs = glob(["src/*.hpp"]),
+    srcs = glob(
+        ["src/*.cpp"],
+        exclude = ["src/morphizen-hip-gpu-allocator.cpp"],  # requires HIP SDK
+    ),
+    hdrs = glob(
+        ["src/*.hpp"],
+        exclude = ["src/morphizen-hip-gpu-allocator.hpp"],
+    ),
     copts = select({
         "@bazel_tools//src/conditions:windows": [
             "/W0",  # Suppress all warnings for ONNX-related code
