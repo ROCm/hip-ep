@@ -239,6 +239,7 @@ cc_library(
             "src/*.cpp",
             "src/*.hpp",
             "src/binary/*.cpp",
+            "src/binary/*.hpp",  # includes onnx_schema_json_binary.hpp (static file)
         ],
         exclude = [
             # Platform-specific files handled by select() below
