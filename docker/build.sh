@@ -370,22 +370,18 @@ stage_from_ldd_pass \
     "$INSTALL_DIR/bin/hip-onnx-runner" \
     "$INSTALL_DIR/bin/hip-test-dll"
 
-# Pass 2: transitive — ldd the libs we just staged.
-mapfile -t _staged < <(find "$INSTALL_DIR/lib" -maxdepth 1 -name 'lib*.so*' -type f)
-if [ "${#_staged[@]}" -gt 0 ]; then
+# Pass 2: transitive — ldd the libs we just staged. Loop to a fixed point so
+# any second-level deps that Pass 2 itself introduces (rare with current ORT
+# + TheRock SO graph, but cheap to be defensive) are also picked up.
+prev_count=0
+for _i in 1 2 3 4; do
+    mapfile -t _staged < <(find "$INSTALL_DIR/lib" -maxdepth 1 -name 'lib*.so*' -type f)
+    [ "${#_staged[@]}" -eq 0 ] && break
     stage_from_ldd_pass "${_staged[@]}"
-fi
-
-# Verification: no unresolved deps when only install/lib is on the path.
-if LD_LIBRARY_PATH="$INSTALL_DIR/lib" \
-        ldd "$INSTALL_DIR/lib/libonnxruntime_morphizen_ep.so" \
-        | grep -qF "not found"; then
-    echo "ERROR: unresolved deps after stage:" >&2
-    LD_LIBRARY_PATH="$INSTALL_DIR/lib" \
-        ldd "$INSTALL_DIR/lib/libonnxruntime_morphizen_ep.so" \
-        | grep -F "not found" >&2
-    exit 1
-fi
+    new_count=$(find "$INSTALL_DIR/lib" -maxdepth 1 -name 'lib*.so*' -type f | wc -l)
+    if [ "$new_count" -eq "$prev_count" ]; then break; fi
+    prev_count=$new_count
+done
 echo "[stage] $(find "$INSTALL_DIR/lib" -name 'lib*.so*' | wc -l) lib*.so* in $INSTALL_DIR/lib/"
 
 # A.8 — LIT tests (no GPU needed)
@@ -421,7 +417,47 @@ if [ "$BUILD_OGA" = "1" ]; then
         --build_dir "$OGA_BUILD"
     cp "$OGA_BUILD/Release/benchmark/c/model_benchmark" "$INSTALL_DIR/bin/"
     cp -a "$OGA_BUILD"/Release/libonnxruntime-genai.so* "$INSTALL_DIR/lib/"
+    # OGA brought in libonnxruntime-genai.so (and possibly transitively
+    # libonnxruntime.so already staged in A.7b). Re-run one ldd pass so
+    # any new deps OGA pulls in (e.g. pybind11 runtime, tokenizers) land
+    # in install/lib too.
+    stage_from_ldd_pass \
+        "$INSTALL_DIR/bin/model_benchmark" \
+        "$INSTALL_DIR"/lib/libonnxruntime-genai.so*
 fi
+
+# Final closure check: with ONLY install/lib on LD_LIBRARY_PATH, every binary
+# under install/bin and every .so under install/lib must resolve all of its
+# DT_NEEDED entries. Runs AFTER A.9 so OGA's deps are covered.
+#
+# Failure here means the artifact will break on a fresh host (where the
+# build-host's apt LLVM / TheRock / ORT prefixes are absent) — better to
+# surface it now than ship a broken linux-gpu-test-package.
+step "Verify install/ closure (LD_LIBRARY_PATH=install/lib)"
+verify_install_closure() {
+    local fail=0
+    local target unresolved
+    while IFS= read -r target; do
+        # ldd a non-ELF file (e.g. shell wrapper script we accidentally
+        # dropped into bin/) prints "not a dynamic executable" — skip those.
+        unresolved=$(LD_LIBRARY_PATH="$INSTALL_DIR/lib" ldd "$target" 2>&1 \
+                     | grep -F "not found" || true)
+        if [ -n "$unresolved" ]; then
+            echo "ERROR: unresolved deps in $target:" >&2
+            echo "$unresolved" >&2
+            fail=1
+        fi
+    done < <(
+        find "$INSTALL_DIR/bin" -maxdepth 1 -type f -executable 2>/dev/null
+        find "$INSTALL_DIR/lib" -maxdepth 1 -name 'lib*.so*' -type f 2>/dev/null
+    )
+    return $fail
+}
+if ! verify_install_closure; then
+    echo "ERROR: install/ is not self-contained — see unresolved deps above." >&2
+    exit 1
+fi
+echo "[verify] install/ closure OK"
 
 step "DONE"
 echo "Install tree: $INSTALL_DIR"

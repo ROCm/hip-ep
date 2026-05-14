@@ -128,34 +128,23 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(cpptrace)
 set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
-# morphizen's compile_options.linux.cmake defaults MORPHIZEN_COMPILER_OPTIONS
-# to "-Wall -Werror -Wconversion -pedantic -Wextra -fPIC" via CACHE STRING
-# (no FORCE). On Linux this propagates into every morphizen-* target.
-# Many of those targets either directly compile protobuf-generated *.pb.cc
-# or transitively include morphizen-core's public *.pb.h headers. GCC 13+
-# emits -Wconversion on protobuf >=22 boilerplate (`Map::size()` returns
-# size_t but the accessor signature is `int`), and morphizen's -Werror
-# upgrades that to a hard error.
+# Add morphizen subdirectory.
 #
-# An earlier attempt at narrowing this to per-target opt-outs in the
-# morphizen submodule (morphizen-pattern + onnx-ir-imp + morphizen-core)
-# under-covered: ort-bridge / morphizen-graph / etc. transitively pull
-# the same .pb.h via morphizen-core's PUBLIC includes and trip the same
-# error. Rather than chase whack-a-mole across every consumer, FORCE the
-# parent cache value before add_subdirectory(morphizen) so the suppression
-# applies to all morphizen-* targets at once. -Wconversion still fires as
-# a warning (useful code-review signal), only the -Werror promotion is
-# disabled. Other diagnostics (sign-compare, etc.) remain -Werror.
+# Note (linux): GCC 13+ emits -Wconversion on protobuf >=22 generated *.pb.h
+# inline accessors (`Map::size()` returns size_t but the accessor signature
+# is `int`), which would otherwise trip MORPHIZEN_COMPILER_OPTIONS's
+# `-Werror -Wconversion` in every morphizen-* target that includes a .pb.h.
+# Fixed at the root in the morphizen submodule by marking the generated-
+# header BINARY_DIR as SYSTEM PUBLIC (morphizen-core-static) / SYSTEM PRIVATE
+# (morphizen-pattern) — see those targets' CMakeLists.txt. The SYSTEM
+# marking propagates to all PUBLIC consumers via
+# INTERFACE_SYSTEM_INCLUDE_DIRECTORIES, so ort-bridge / morphizen-graph /
+# etc. inherit the suppression automatically. No parent-side override on
+# MORPHIZEN_COMPILER_OPTIONS is needed; full `-Werror -Wconversion` strict
+# mode remains in force for non-protobuf code.
 #
-# Windows / MSVC users are unaffected — the equivalent /WX-only knob lives
-# in morphizen's compile_options.msvc.cmake. APPLE is excluded to match the
-# Linux-specific scope of the GCC behavior.
-if(UNIX AND NOT APPLE)
-    set(MORPHIZEN_COMPILER_OPTIONS
-        -Wall -Werror -Wconversion -Wno-error=conversion -pedantic
-        -Wextra -fPIC
-        CACHE STRING "Compiler options for Morphizen" FORCE)
-endif()
-
-# Add morphizen subdirectory (after all options are set).
+# onnx-ir-imp keeps a narrower per-target `-Wno-error=conversion` because
+# its .pb.h surface comes from the external `onnx_proto` target whose
+# INTERFACE_INCLUDE_DIRECTORIES are not under our control to flip SYSTEM;
+# fixing that requires upstream onnx changes (tracked as a follow-up).
 add_subdirectory(3rd-party/morphizen)

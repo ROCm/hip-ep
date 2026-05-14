@@ -16,12 +16,14 @@
 #include <fstream>
 #include <sstream>
 
-// LLD linker driver - use lldMain for crash recovery
+// In-process lld is only used by linkDLL_Windows (COFF). Linux uses a
+// subprocess `clang++ -shared -fuse-ld=lld` instead (see linkDLL_Linux for
+// the reason), so the ELF driver and lld::lldMain pull-in are scoped to
+// _WIN32 to keep the Linux build free of liblldELF / liblldCommon link deps.
+#ifdef _WIN32
 #include "lld/Common/Driver.h"
-
-// Still need to declare the link functions for driver registration
 LLD_HAS_DRIVER(coff)
-LLD_HAS_DRIVER(elf)
+#endif
 
 namespace hipdnn {
 
