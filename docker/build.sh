@@ -58,6 +58,12 @@ set -euo pipefail
 : "${PROTOBUF_REF:=v34.0}"
 : "${FLATBUFFERS_REF:=v25.12.19}"
 : "${THEROCK_VERSION:=therock-dist-linux-gfx1151-7.11.0}"
+# OGA pin: this is the single source of truth for "which OGA SHA to build
+# against" inside the container. CI forwards `OGA_REF` from
+# .github/workflows/linux-build.yml's env block via docker/run.sh, so
+# bumping the workflow env is enough to roll OGA forward. Local dev
+# without an explicit override gets this hard-coded pin.
+: "${OGA_REF:=2615301864b4d2397231d443865cb96111cc5fc2}"
 : "${BUILD_OGA:=0}"
 : "${SKIP_LIT:=0}"
 : "${FORCE_RECONFIGURE:=0}"
@@ -130,6 +136,17 @@ have_flatbuffers() {
     # prebuilt-local cache hit (~2-3 min wasted each time).
     ls "$PREBUILT_DIR"/lib/cmake/flatbuffers/flatbuffers-config.cmake >/dev/null 2>&1 \
         || ls "$PREBUILT_DIR"/lib/cmake/flatbuffers/FlatBuffersConfig.cmake >/dev/null 2>&1
+}
+have_oga() {
+    # OGA produces two install-facing artifacts that downstream consumers
+    # (gpu-perf-accuracy-test.yml's model_benchmark runs, this artifact's
+    # bin/lib trees) actually use: the model_benchmark CLI binary and the
+    # libonnxruntime-genai.so* SONAME chain. When both are in place we
+    # can skip A.9 entirely. The CI's `Cache OGA install outputs` step
+    # restores exactly these paths on cache hit, so this check is what
+    # bridges the GHA cache to the skip-build path.
+    [ -x "$INSTALL_DIR/bin/model_benchmark" ] \
+        && ls "$INSTALL_DIR"/lib/libonnxruntime-genai.so* >/dev/null 2>&1
 }
 
 # A.4 — TheRock SDK
@@ -404,31 +421,48 @@ fi
 # onnxruntime/, named after the repo) so users who manage their own checkout
 # can drop it in beside ORT without touching env vars. The .git guard below
 # means an existing checkout is respected as-is — no fetch, no checkout, no
-# submodule update. OGA_REF below is documentation of CI's pin; we apply it
-# only to a fresh clone.
+# submodule update. OGA_REF (resolved at the top of this script from env or
+# the hard-coded default) is applied only to a fresh clone.
+#
+# Skip-the-build gate: have_oga() returns true when the install artifacts
+# are already in place — either built earlier this run, or restored from
+# CI's `Cache OGA install outputs` cache step. The CI cache key includes
+# OGA_REF + ONNXRUNTIME_VERSION, so bumping either at the workflow level
+# automatically misses the cache here and triggers a rebuild.
 if [ "$BUILD_OGA" = "1" ]; then
-    step "A.9  (optional) Build OGA model_benchmark"
-    OGA_REF="2615301864b4d2397231d443865cb96111cc5fc2"  # CI pin
-    if [ ! -d "$OGA_SRC/.git" ]; then
-        rm -rf "$OGA_SRC"
-        git clone --recursive https://github.com/AMDmoore/onnxruntime-genai.git "$OGA_SRC"
-        ( cd "$OGA_SRC" && git checkout "$OGA_REF" && git submodule update --init --recursive )
+    if have_oga; then
+        echo "[skip] OGA model_benchmark + libonnxruntime-genai.so* already in $INSTALL_DIR"
     else
-        echo "[skip] $OGA_SRC/.git exists — using user-managed checkout as-is"
+        step "A.9  (optional) Build OGA model_benchmark"
+        if [ ! -d "$OGA_SRC/.git" ]; then
+            rm -rf "$OGA_SRC"
+            git clone --recursive https://github.com/AMDmoore/onnxruntime-genai.git "$OGA_SRC"
+            ( cd "$OGA_SRC" && git checkout "$OGA_REF" && git submodule update --init --recursive )
+        else
+            echo "[skip] $OGA_SRC/.git exists — using user-managed checkout as-is"
+        fi
+        # --skip_wheel: the OGA python wheel is unusable on Linux without
+        # an ORT python wheel (the OGA wheel does `import onnxruntime` at
+        # runtime), and A.5 deliberately omits ORT --build_wheel to avoid
+        # the Python::NumPy / dev-headers dependency drag. Skipping the
+        # OGA wheel saves ~1-3 min of pybind11 + pip wheel pack on cold
+        # builds. Consumers who need the wheel build OGA from source.
+        python3 "$OGA_SRC/build.py" \
+            --config Release \
+            --cmake_generator Ninja \
+            --ort_home "$PREBUILT_DIR" \
+            --skip_tests --skip_examples --skip_wheel \
+            --parallel \
+            --build_dir "$OGA_BUILD"
+        cp "$OGA_BUILD/Release/benchmark/c/model_benchmark" "$INSTALL_DIR/bin/"
+        cp -a "$OGA_BUILD"/Release/libonnxruntime-genai.so* "$INSTALL_DIR/lib/"
     fi
-    python3 "$OGA_SRC/build.py" \
-        --config Release \
-        --cmake_generator Ninja \
-        --ort_home "$PREBUILT_DIR" \
-        --skip_tests --skip_examples \
-        --parallel \
-        --build_dir "$OGA_BUILD"
-    cp "$OGA_BUILD/Release/benchmark/c/model_benchmark" "$INSTALL_DIR/bin/"
-    cp -a "$OGA_BUILD"/Release/libonnxruntime-genai.so* "$INSTALL_DIR/lib/"
     # OGA brought in libonnxruntime-genai.so (and possibly transitively
     # libonnxruntime.so already staged in A.7b). Re-run one ldd pass so
     # any new deps OGA pulls in (e.g. pybind11 runtime, tokenizers) land
-    # in install/lib too.
+    # in install/lib too. Runs regardless of build-vs-skip so a cache-
+    # restored libonnxruntime-genai.so still drives its transitive .so
+    # set through the closure check below.
     stage_from_ldd_pass \
         "$INSTALL_DIR/bin/model_benchmark" \
         "$INSTALL_DIR"/lib/libonnxruntime-genai.so*

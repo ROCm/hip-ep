@@ -46,6 +46,10 @@ WORKSPACE="$(cd "$SOURCE_DIR/.." && pwd -P)"
 : "${CONTAINER_NAME:=${USER}.hipdnn-ep.shell}"
 : "${HIP_ARCHITECTURES:=gfx1151}"
 : "${BUILD_OGA:=0}"
+# OGA_REF is intentionally NOT defaulted here — docker/build.sh has the
+# pin as its own default. Leaving this unset lets `OGA_REF=... ./run.sh`
+# from the host (or the workflow env: block in linux-build.yml) override
+# the container default without docker/run.sh needing to know the SHA.
 : "${SKIP_LIT:=0}"
 : "${FORCE_RECONFIGURE:=0}"
 
@@ -71,6 +75,15 @@ populate_common_args() {
         -e "BUILD_OGA=$BUILD_OGA"
         -e "SKIP_LIT=$SKIP_LIT"
         -e "FORCE_RECONFIGURE=$FORCE_RECONFIGURE"
+    )
+    # OGA_REF is forwarded only when set on the host. Unset → container
+    # falls back to docker/build.sh's hard-coded default. CI exports it
+    # from the workflow env block so a cache-key change propagates as
+    # a different SHA inside the container's git checkout.
+    if [ -n "${OGA_REF:-}" ]; then
+        _out+=(-e "OGA_REF=$OGA_REF")
+    fi
+    _out+=(
         -w "$SOURCE_DIR"
         --cap-add SYS_PTRACE
         -v "/dev/shm:/dev/shm"
