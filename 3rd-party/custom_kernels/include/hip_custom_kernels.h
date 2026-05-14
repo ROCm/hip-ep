@@ -746,6 +746,32 @@ int hip_pad(
     const void* pad_value_host);
 
 /* =========================================================================
+ * LayerNormalization (ONNX-17)
+ * =========================================================================
+ *
+ *   y = (x - mean) * rsqrt(var + epsilon) * scale + bias
+ *
+ * Per-row reduction with FP32 accumulators. Bias and the optional `mean` /
+ * `inv_std` outputs may be null.
+ *
+ * `hip_dtype`   : I/O type for input/scale/bias/output -- FLOAT16 or FLOAT32.
+ * `mean_dtype`  : type of mean/inv_std output buffers -- FLOAT16 or FLOAT32.
+ */
+int hip_layer_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,         // optional
+    void* output,
+    void* mean_out,           // optional
+    void* inv_std_out,        // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int hip_dtype,
+    int mean_dtype);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *
