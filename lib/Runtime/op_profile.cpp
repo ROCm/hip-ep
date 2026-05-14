@@ -4,6 +4,7 @@
  */
 
 #include "op_profile.h"
+#include "hip_cleanup.h" // HIP_CLEANUP for best-effort destroy logging
 #include <algorithm>
 #include <cstdio>
 #include <map>
@@ -52,8 +53,10 @@ void op_profile_destroy(OpProfileState *ps) {
   if (!ps)
     return;
   for (auto &ep : ps->eventPool) {
-    hipEventDestroy(ep.start);
-    hipEventDestroy(ep.stop);
+    if (ep.start)
+      HIP_CLEANUP(hipEventDestroy(ep.start));
+    if (ep.stop)
+      HIP_CLEANUP(hipEventDestroy(ep.stop));
   }
   delete ps;
 }
@@ -69,22 +72,49 @@ void op_profile_reset(OpProfileState *ps) {
 
 bool op_profile_is_active(OpProfileState *ps) { return ps && ps->active; }
 
+// Returns a non-negative pool index on success, or -1 on hipEventCreate
+// failure. Callers (OpProfileScope) treat -1 as "skip recording for this
+// op" so a transient HIP failure disables one sample instead of aborting
+// the inference. Pool slots are only published on full success — a
+// half-created pair never enters the pool and won't be torn down.
 int op_profile_acquire_event_pair(OpProfileState *ps) {
-  int idx = ps->nextEventIndex++;
+  if (!ps)
+    return -1;
+  int idx = ps->nextEventIndex;
   if (idx >= (int)ps->eventPool.size()) {
-    OpProfileState::EventPair ep;
-    hipEventCreate(&ep.start);
-    hipEventCreate(&ep.stop);
+    OpProfileState::EventPair ep{nullptr, nullptr};
+    hipError_t e1 = hipEventCreate(&ep.start);
+    if (e1 != hipSuccess || !ep.start) {
+      fprintf(stderr,
+              "op_profile: hipEventCreate(start) failed: %s; "
+              "skipping this op sample\n",
+              hipGetErrorString(e1));
+      return -1;
+    }
+    hipError_t e2 = hipEventCreate(&ep.stop);
+    if (e2 != hipSuccess || !ep.stop) {
+      fprintf(stderr,
+              "op_profile: hipEventCreate(stop) failed: %s; "
+              "skipping this op sample\n",
+              hipGetErrorString(e2));
+      HIP_CLEANUP(hipEventDestroy(ep.start));
+      return -1;
+    }
     ps->eventPool.push_back(ep);
   }
+  ps->nextEventIndex++;
   return idx;
 }
 
 hipEvent_t op_profile_get_start_event(OpProfileState *ps, int index) {
+  if (!ps || index < 0 || index >= (int)ps->eventPool.size())
+    return nullptr;
   return ps->eventPool[index].start;
 }
 
 hipEvent_t op_profile_get_stop_event(OpProfileState *ps, int index) {
+  if (!ps || index < 0 || index >= (int)ps->eventPool.size())
+    return nullptr;
   return ps->eventPool[index].stop;
 }
 
@@ -116,8 +146,21 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
 
   for (auto &ev : ps->pending) {
     float gpuMs = 0.0f;
-    hipEventElapsedTime(&gpuMs, ps->eventPool[ev.eventIndex].start,
-                        ps->eventPool[ev.eventIndex].stop);
+    // Defensive: a skipped op (eventIndex<0) should never reach here, but
+    // guard the indexing in case a future code path adds one. On
+    // hipEventElapsedTime failure we still record cpu_ms (count this call)
+    // but leave gpu_ms at 0 so the [PERF] table is still produced.
+    if (ev.eventIndex >= 0 && ev.eventIndex < (int)ps->eventPool.size()) {
+      hipError_t e =
+          hipEventElapsedTime(&gpuMs, ps->eventPool[ev.eventIndex].start,
+                              ps->eventPool[ev.eventIndex].stop);
+      if (e != hipSuccess) {
+        fprintf(stderr,
+                "op_profile: hipEventElapsedTime failed for op=%s: %s\n",
+                ev.name.c_str(), hipGetErrorString(e));
+        gpuMs = 0.0f;
+      }
+    }
     auto &op = ps->profile[ev.name];
     if (op.name.empty())
       op.name = ev.name;
