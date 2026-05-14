@@ -283,6 +283,18 @@ AddMatMulNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
   if (IsScalarAttr(a_attr) || IsScalarAttr(b_attr))
     return Status::Failure("onnx.MatMul inputs must be tensors, not scalars");
 
+  // Check hipDNN's same-rank requirement
+  // hipDNN MatMul requires both inputs to have identical rank (unlike ONNX
+  // MatMul which supports broadcasting across different ranks)
+  auto a_dims = a_attr->get_dim();
+  auto b_dims = b_attr->get_dim();
+  if (a_dims.size() != b_dims.size()) {
+    return Status::Failure("hipDNN MatMul requires same-rank inputs: A has "
+                           "rank=" +
+                           std::to_string(a_dims.size()) +
+                           ", B has rank=" + std::to_string(b_dims.size()));
+  }
+
   // Determine compute data type (same logic as Conv)
   auto compute_dtype =
       GetComputeDataType(a_attr->get_data_type(), b_attr->get_data_type());
