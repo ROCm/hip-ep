@@ -3,6 +3,7 @@ cc_binary(
     srcs = ["test_onnxruntime.cpp"],
     deps = [
         "@onnxruntime//:onnxruntime_headers",
+        "//3rd-party/onnxruntime-morphizen-headers",
     ],
     copts = select({
         "@bazel_tools//src/conditions:windows": ["/std:c++17"],
