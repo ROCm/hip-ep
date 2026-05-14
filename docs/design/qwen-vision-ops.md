@@ -1,0 +1,315 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
+# Qwen Vision Runtime Kernels — Design Notes
+
+This document captures the design rationale, runtime ABI conventions, and
+gotchas encountered while implementing 16 GPU runtime kernels for the
+Qwen3.5-35B-A3B vision encoder (`vision.onnx`). All 16 kernels live in
+`lib/Runtime/real/*.cpp` (host wrappers) and `3rd-party/custom_kernels/hip/*.hip`
+(device code), and are dispatched from MLIR via `wrap_*` functions declared in
+`lib/Runtime/hipdnn_ep_runtime.h`.
+
+## 1. Scope
+
+The kernels implemented in this round are:
+
+| Group        | Ops                                                       | New `.hip` file                      |
+|--------------|-----------------------------------------------------------|--------------------------------------|
+| Unary EW     | Neg, Sign, Cos, Sin, Not                                  | `elementwise_unary_kernel.hip`       |
+| Binary EW    | Div, Mod, Equal, Less                                     | `elementwise_binary_kernel.hip`      |
+| Reduction    | ReduceMax, ReduceProd                                     | (extends `reduce_sum_kernel.hip`)    |
+| Shape        | Tile, Expand, GatherND                                    | `tile_kernel.hip`, `expand_kernel.hip`, `gather_nd_kernel.hip` |
+| Scan / Pad   | CumSum, Pad                                               | `cumsum_kernel.hip`, `pad_kernel.hip`|
+| Norm         | LayerNormalization                                        | `layer_norm_kernel.hip`              |
+
+All kernels target FP16 / FP32 / INT32 / INT64 data types (a strict subset
+of ORT's CUDA EP support). Indices for GatherND are INT64 only.
+
+Reference implementations were ported from
+`onnxruntime/core/providers/cuda/...` at tag **v1.22.2**. We deliberately
+simplified or replaced ORT's design where the EP framework already gave us
+information (host-side shapes from the MLIR lowering) that lets us skip ORT
+machinery (TArray + fast_divmod, scratch buffers, broadcasting).
+
+## 2. Recurring design choices
+
+### 2.1 Host-side shape arrays — no GPU shape D2H
+
+Every `wrap_*` function for shape-aware ops (Tile, Expand, GatherND, Pad,
+CumSum, ReduceMax/Prod) receives `input_shape` / `output_shape` as
+**host-side `int64_t*` arrays** from the HipToLLVM lowering. The lowering
+emits these as stack-allocated arrays built from the MLIR `MemRefType`'s
+static dims (or from `extractStridedMetadata` for dynamic).
+
+Consequence: the GPU `shape` / `repeats` input tensors (when present)
+are **not** read by the runtime. We save a per-call D2H of the shape
+tensor that the ORT CUDA EP performs. The same pattern works for Tile
+(repeats[d] = output_shape[d] / input_shape[d]) and Expand (output_shape
+is the broadcast result).
+
+**Gotcha**: when a future op gets added, the lowering must pass shapes
+through, otherwise the runtime is forced into a per-call D2H. The
+template to follow is `lib/Conversion/HipToLLVM/TileLowering.cpp`'s
+`emitShapeArray` helper.
+
+### 2.2 D2H is sometimes unavoidable
+
+Three ops still need synchronous D2H reads:
+
+| Op       | What is D2H-read                          | When                                  |
+|----------|-------------------------------------------|---------------------------------------|
+| CumSum   | `axis` scalar (int32 or int64)            | Once per call (one stall)             |
+| Pad      | `pads[]` (int64), optional `axes[]`, optional `constant_value` | Once per call (one stall, batched)    |
+
+Each stall is one `hipStreamSynchronize`. This is acceptable because both
+ops typically appear at most once or twice in a graph, but if either ever
+becomes hot the right fix is to **fold the constant tensor into an
+operator attribute at OnnxToHip time** — the way `Reshape`'s shape
+tensor is already folded today. That moves the value into the compiled
+DLL and eliminates the stall entirely.
+
+### 2.3 Single fused kernel over multi-pass
+
+ORT's GatherND splits into `_ComputeSliceOffsetsKernel` (writes per-slice
+base offsets into a scratch buffer) + `_GatherNDKernel` (gathers using
+those offsets). We **fuse into one kernel**: each output thread re-reads
+the K = `indices.shape[-1]` int64 indices inline. K is small (≤ 2 for
+all vision-graph GatherND nodes seen so far), so the extra global loads
+are dwarfed by the scatter copy, and we avoid a scratch buffer + a
+kernel launch.
+
+The same fused-kernel approach applies to:
+- **Pad**: ORT has a separate kernel per mode + an NCHW special case;
+  we have one generic kernel with a `pad_mode` branch.
+- **ReduceMax / ReduceProd**: a single templated
+  `reduce_int_kernel<T, OP>` + `reduce_f16_kernel<OP>` covers both
+  operators (and ReduceSum's existing path).
+- **CumSum**: one generic per-slice serial-scan template covers
+  forward / reverse and inclusive / exclusive via four kernel branches.
+
+### 2.4 FP16 numerics: float accumulators everywhere
+
+Every kernel that performs reduction or normalization on FP16 input
+accumulates in **float**:
+
+- ReduceMax / ReduceProd / ReduceSum: float accumulator, FP16 init via
+  `-INF` (max) / `1.0f` (prod) / `0.0f` (sum).
+- CumSum (FP16 variant): float accumulator across the axis.
+- LayerNormalization: sum / sum² and final `(x - mean) * inv_std * s + b`
+  all in float, narrow on store.
+- Equal / Less (FP16 inputs): promote to float for the comparison; output
+  is a 1-byte bool stream.
+
+The pattern is `static_cast<float>(x)` on load and
+`static_cast<T>(value)` (or `__float2half`) on store — see the existing
+matmul_nbits and reduce_sum kernels for the convention.
+
+### 2.5 Rank bounded to 8
+
+All shape-aware kernels (`tile_kernel.hip`, `expand_kernel.hip`,
+`gather_nd_kernel.hip`, `pad_kernel.hip`) hard-cap input rank at 8 via a
+`kFooMaxRank` constant. This matches `TArray<int64_t, 8>` from ORT and
+covers every op shape we observed in `vision.onnx` (max rank 6). A
+higher rank would silently fail the host pre-check — error message
+identifies the kernel + the requested rank.
+
+### 2.6 Broadcasting is upstream's job
+
+The binary elementwise kernels (Div, Mod, Equal, Less) **do not
+broadcast** — they require identical layouts for the two inputs. The
+ONNX-to-HIP conversion is expected to insert explicit `Expand` (or
+similar) nodes upstream to produce equally-shaped operands. This matches
+the existing Add/Mul/Sub family in `elementwise_kernel.hip`. If a graph
+arrives with implicit broadcasting it will fail at the lowering stage,
+not at runtime.
+
+### 2.7 No new `RuntimeState` fields
+
+None of the 16 kernels add persistent per-session state — they're all
+stateless or use the existing shared workspace via
+`hipdnn_ep_state_ensure_workspace`. If any of them ever grows a cache
+(e.g. LayerNorm wants to memoize a tuned block size per shape), follow
+the **runtime module registry** convention in
+`docs/design/runtime-module-registry.md` — do **not** add a new field
+on `RuntimeState`.
+
+## 3. Build / cache hygiene gotchas
+
+Discovered the hard way during incremental commits. None of these are
+new — they're listed in `CLAUDE.md` already — but they bit us multiple
+times per kernel.
+
+1. **Bitcode `DEPENDS` list in `lib/Runtime/CMakeLists.txt`.** Every
+   header included by a runtime `.cpp` must appear in the bitcode
+   target's `DEPENDS` list (`compile_to_bitcode(...)` macro). Without
+   this, editing the header (e.g. `hip_custom_kernels.h`) leaves the
+   bitcode stale and the compiled model DLL silently uses old code.
+
+2. **Stale compiled-model DLLs in `%TEMP%`.** The MorphiZen cache key is
+   the ONNX-graph hash, **not** the runtime version. Every kernel
+   commit that changes runtime behaviour must be followed by
+   `del %TEMP%\morphizen_mlir_*` (the build helper `_build.bat` does
+   this automatically). Forgetting this is the #1 source of "my fix
+   doesn't work" false alarms.
+
+3. **`compile_to_bitcode` listed twice.** When adding a new
+   `compile_to_bitcode(real/foo.cpp ...)` and `RUNTIME_BC_MODULES`
+   entry, double-check the file isn't already present further down
+   (often is, from a previous skeleton stub). A duplicate isn't fatal —
+   CMake silently re-uses the same target — but it costs build time.
+
+4. **New `.hip` file requires CMakeLists.txt update.** Each new
+   `3rd-party/custom_kernels/hip/foo_kernel.hip` must be added to the
+   `HIP_KERNEL_SOURCES` list in `3rd-party/custom_kernels/CMakeLists.txt`
+   or it won't be linked into `custom_kernels.lib`.
+
+5. **PowerShell + commit messages.** Use `git commit -F <file>` with a
+   pre-written message file — `cmd /c` heredoc-style commits do not
+   work reliably on Windows PowerShell.
+
+## 4. Silent stubs are the worst kind of bug
+
+Before this round, all 16 op `wrap_*` functions were `return 0` stubs.
+The runtime returned success while doing nothing — the output tensor
+was left at whatever uninitialised state the pool allocator gave it. The
+E2E lit tests in `test/lit/` check **only** for NaN/Inf in the output,
+not numerical correctness against a reference, so they **passed** for
+every silent-stub op. The op was completely missing in production and
+nobody noticed until model accuracy regressed at a higher level.
+
+**Lesson**: when seeing a new "kernel didn't break the test" green
+checkmark, verify the kernel was actually called. The host wrapper
+should always log `[REAL] wrap_foo: ... -> hip_foo` at debug level so
+`HIPDNN_EP_DEBUG=1` traces show whether the new code path ran. Every
+kernel in this round added that line.
+
+The follow-up structural fix (not in this commit) is to make the test
+harness compare against a CPU reference, not against NaN/Inf. Until that
+lands, prefer to validate new kernels with the actual production model
+(`vision.onnx`) and inspect the final embedding rather than trusting
+the lit test alone.
+
+## 5. Reduce / binary signature loss
+
+The MLIR lowering for `ReduceMax` / `ReduceProd` collapses all reduce
+axes into the **trailing dims** of `data` before the call, so the
+runtime can compute `reduce_size = data_num / output_num` without
+inspecting `axes`. This is why `wrap_reduce_*` accepts only `data_num`
+and `output_num` plus `axes_num_elements` (and a `noop_with_empty_axes`
+flag for the short-circuit). The actual axes vector is gone by the
+time we get the call — the lowering has consumed it.
+
+Same story for the binary elementwise ops: `wrap_div` / `wrap_mod` /
+`wrap_equal` / `wrap_less` take only a single `num_elements` and
+require both inputs already broadcast to that shape. No per-input
+shape, no broadcast factors. The MLIR side does the work, and the
+runtime stays simple.
+
+When adding a new reduction or binary op, **do not** request shape info
+that the lowering didn't volunteer — that's a sign the op needs to be
+expressed differently in the MLIR pipeline rather than worked around in
+C++.
+
+## 6. ONNX corner cases handled
+
+A few small specification quirks worth recording so the next session
+doesn't re-discover them:
+
+- **`Mod` and the `fmod` attribute**: integer mod follows Python's
+  sign-of-divisor convention. Float Mod with `fmod=0` is also
+  Python-style; `fmod=1` is C99 `fmod()` (sign-of-dividend). Two code
+  paths inside `hip_elementwise_mod`.
+
+- **`Not` ignores `data_type`**: ONNX `Not` runs on `tensor<i1>` but
+  the lowering passes `data_type=0` (FLOAT) because the MLIR i1 type
+  has no HIPDNN_EP enum slot. `wrap_not` treats both input and output
+  as raw uint8 byte streams unconditionally.
+
+- **`GatherND`'s negative indices**: indices in `[-D, D-1]` are valid;
+  the kernel normalises `idx += dim` when `idx < 0`. Out-of-range
+  indices are NOT clamped — matches ORT's release-build behaviour
+  (CUDA_KERNEL_ASSERT becomes a no-op).
+
+- **`Pad` mode IDs from the lowering**: 0 = constant, 1 = reflect,
+  2 = edge, 3 = wrap. The lowering maps the string attribute via
+  `PadOpLowering::modeIdFromString`. Wrap mode is not in ORT's
+  `pad_impl.cu` — we added it as a `%` of the axis length.
+
+- **`CumSum` axis is a 0-D scalar input**, not an attribute. Can be
+  int32 or int64; D2H + sync once per call to read it.
+
+- **`LayerNormalization` stash_type is raw ONNX `TensorProto.DataType`**
+  (1 = FLOAT, 10 = FLOAT16), **not** the HIPDNN_EP enum. The lowering
+  passes `op.getStashType()` unchanged. Default is FLOAT.
+
+## 7. What this leaves unfinished for `vision.onnx`
+
+The 16 ops fix the obvious silent-stub holes. They do **not** by
+themselves make `vision.onnx` produce correct output end-to-end —
+known remaining blockers:
+
+- **`GroupQueryAttention` packed-QKV variants** beyond the
+  `(HPG, d) in {(4, 64), (4, 128), (8, 64)}` cluster aren't
+  instantiated for flash_decode. Qwen2.5-VL uses HPG=5; gemma3 uses
+  d=256. Neither has a flash_decode instantiation. The fused/legacy
+  fallback paths exist but cap at `total_seq=256`.
+
+- **`castlike_model` E2E test** still fails — pre-existing,
+  unrelated to this work.
+
+- **Dynamic shape support.** `vision.onnx` is fixed-shape (the perf
+  test harness runs `fix_shapes()` first), but the production OGA
+  pipeline may want dynamic image-patch counts. The compiler does
+  not yet support symbolic dims.
+
+- **`SkipLayerNormalization` and `BiasAdd` fusions** that ORT applies
+  to LN-heavy paths are not implemented here. The
+  `hip_layer_norm` kernel handles the bias but won't fuse a residual
+  add.
+
+- **Per-op profiling.** Every kernel in this round added an
+  `OP_PROFILE("opname", ...)` scope, so `HIPDNN_EP_PERF=1` will
+  surface their GPU/CPU times. Use this **before** chasing the next
+  bottleneck rather than after.
+
+## 8. Future-development checklist
+
+When adding the next op:
+
+1. Read `CLAUDE.md`'s "Adding a New Operator" section — it's the
+   authoritative checklist.
+2. Decide if the lowering can hand you everything you need (host
+   shape arrays, constant attributes). If yes, write a stateless
+   `wrap_foo` + a `.hip` file. If you need anything cross-call, use
+   `HIPDNN_OP_MODULE` (`docs/design/runtime-module-registry.md`).
+3. Always add an `OP_PROFILE` scope with a meaningful shape string —
+   it costs nothing when profiling is off and is invaluable when on.
+4. Always log `[REAL] wrap_foo: ... -> hip_foo` so
+   `HIPDNN_EP_DEBUG=1` traces show the kernel ran.
+5. Add the `.cpp` to **both** `compile_to_bitcode(...)` and
+   `RUNTIME_BC_MODULES` in `lib/Runtime/CMakeLists.txt`. Add the
+   `.hip` to `HIP_KERNEL_SOURCES` in
+   `3rd-party/custom_kernels/CMakeLists.txt`.
+6. Add the kernel header's prototype to
+   `3rd-party/custom_kernels/include/hip_custom_kernels.h`, **inside
+   the existing `extern "C"` block**.
+7. After building, `del %TEMP%\morphizen_mlir_*` before testing — the
+   build helper does this, manual cmake runs don't.
+8. Run the matching `E2E_Execute_test_<op>_model` lit test, but
+   remember (Section 4) that it only checks NaN/Inf — verify against
+   the production model too.
+
+## 9. References
+
+- `CLAUDE.md` — the canonical session knowledge base. Read first.
+- `docs/design/custom_kernel_design.md` — the bitcode-link-into-DLL
+  pipeline these kernels plug into.
+- `docs/design/runtime-module-registry.md` — for ops that need
+  per-session state.
+- `docs/design/compiler-runtime-contract.md` — the ABI rules the
+  `wrap_*` functions must obey (extern "C", listed in
+  `getRuntimeFuncSpecs`).
+- `onnxruntime/core/providers/cuda/...` @ tag `v1.22.2` — the
+  reference implementations cited per-op in each kernel commit.
