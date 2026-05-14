@@ -15,6 +15,7 @@ cc_library(
     strip_include_prefix = "include",
     deps = [
         "//morphizen-foundation",
+        "//3rd-party/onnxruntime-morphizen-headers",
         "@glog//:glog",
     ],
     visibility = ["//visibility:public"],
