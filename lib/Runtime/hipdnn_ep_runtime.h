@@ -404,14 +404,11 @@ int hipdnn_ep_stream_sync(RuntimeState *state);
 // HIPDNN_EP_PERF)
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 
-// GQA GEMM cache lifecycle (managed by RuntimeState)
-void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
-
-// CausalConvWithState descriptor/algo cache lifecycle (managed by RuntimeState)
-void hipdnn_ep_causal_conv_cache_destroy(void *cache);
-
-// MatMulNBits asym zero_points unpack cache lifecycle (managed by RuntimeState)
-void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
+// (Removed: hipdnn_ep_gqa_gemm_cache_destroy,
+//  hipdnn_ep_causal_conv_cache_destroy, hipdnn_ep_zp_unpack_cache_destroy.
+//  All three caches now live in typed op-modules (GqaGemmState,
+//  CausalConvState, ZpUnpackState) and are freed by the module registry
+//  at session cleanup. See lib/Runtime/module_registry.h.)
 
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//

@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../module_registry.h"
 #include "../op_profile.h"
 #include "../runtime_state_internal.h"
 #include "error_check_macros.h"
@@ -29,13 +30,16 @@
 // per-call unpack/convert kernel launches that were the dominant per-call
 // overhead for asym 8B decode (~225 launches per Compute()).
 //
-// Lifecycle: lazily created on first asym call; freed in
-// hipdnn_ep_state_cleanup via hipdnn_ep_zp_unpack_cache_destroy.
+// Lifecycle: registered as the "zp_unpack" op-module. The single slot is
+// shared between wrap_matmul_nbits (this TU) and wrap_qmoe (qmoe.cpp), both
+// reaching it through the lookup_or_*_zp_* helpers below. Created lazily on
+// first call; freed via ZpUnpackState::~ZpUnpackState from
+// module_registry_destroy at session cleanup.
 // ---------------------------------------------------------------------------
 
 namespace hipdnn_ep_real {
 
-struct ZpUnpackCache {
+struct ZpUnpackState {
   // Map keyed on zero_points GPU pointer. Value = (device buffer, byte size).
   std::unordered_map<const void *, std::pair<void *, size_t>> u8;
   std::unordered_map<const void *, std::pair<void *, size_t>> fp16;
@@ -43,28 +47,60 @@ struct ZpUnpackCache {
   // stream, sequential Compute() calls) but the lock is cheap and lets us
   // remain correct if that ever changes.
   std::mutex mu;
+
+  // The op-module spec uses make_op_module_spec<ZpUnpackState>, which expects
+  // a (RuntimeState*) constructor. The runtime state itself isn't needed --
+  // all per-call info arrives through lookup_or_*_zp_*'s arguments.
+  explicit ZpUnpackState(RuntimeState *) {}
+
+  // RAII teardown: free every cached device buffer. The shared cleanup path
+  // synchronizes the stream before tearing down the ModuleRegistry, so any
+  // in-flight unpack/convert kernel has finished by the time we free.
+  ~ZpUnpackState() {
+    for (auto &kv : u8)
+      hipFree(kv.second.first);
+    for (auto &kv : fp16)
+      hipFree(kv.second.first);
+  }
+
+  // HIPDNN_EP_DUMP_STATE hook: report combined cached-unpacked-buffer
+  // footprint. Stable across inferences once warmup has populated every
+  // unique zero_points pointer in the model.
+  size_t mem_bytes() const {
+    size_t total = 0;
+    for (auto &kv : u8)
+      total += kv.second.second;
+    for (auto &kv : fp16)
+      total += kv.second.second;
+    return total;
+  }
 };
 
+} // namespace hipdnn_ep_real
+
 namespace {
-
-ZpUnpackCache *get_or_create_zp_cache(RuntimeState *state) {
-  if (!state->zp_unpack_cache)
-    state->zp_unpack_cache = new ZpUnpackCache();
-  return static_cast<ZpUnpackCache *>(state->zp_unpack_cache);
-}
-
+// Slot accessor for the asym zero_points unpack cache. Single slot shared
+// between matmul_nbits and qmoe paths -- both wrap_* entry points reach this
+// state through the lookup_or_*_zp_* helpers below.
+HIPDNN_OP_MODULE(zp_unpack_module, "zp_unpack", hipdnn_ep_real::ZpUnpackState);
 } // namespace
+
+namespace hipdnn_ep_real {
 
 // Returns the cached u8 buffer for `zp_packed`, or unpacks into a freshly
 // allocated buffer on miss. Returns nullptr only on hipMalloc failure.
 const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
                                    const void *zp_packed, int N, int groups_k) {
-  ZpUnpackCache *cache = get_or_create_zp_cache(state);
+  ZpUnpackState *st = zp_unpack_module(state);
+  if (!st) {
+    fprintf(stderr, "matmul_nbits: failed to obtain ZpUnpackState\n");
+    return nullptr;
+  }
   const size_t need = static_cast<size_t>(N) * static_cast<size_t>(groups_k);
 
-  std::lock_guard<std::mutex> lock(cache->mu);
-  auto it = cache->u8.find(zp_packed);
-  if (it != cache->u8.end() && it->second.second >= need)
+  std::lock_guard<std::mutex> lock(st->mu);
+  auto it = st->u8.find(zp_packed);
+  if (it != st->u8.end() && it->second.second >= need)
     return it->second.first;
 
   // Miss (or cached buffer too small for an unexpected re-shape on the same
@@ -77,12 +113,12 @@ const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
   }
   hip_matmul_nbits_unpack_zp_u8(stream, zp_packed, dst, N, groups_k);
 
-  if (it != cache->u8.end()) {
+  if (it != st->u8.end()) {
     // Replace the undersized entry. Free the stale buffer.
     hipFree(it->second.first);
     it->second = {dst, need};
   } else {
-    cache->u8.emplace(zp_packed, std::make_pair(dst, need));
+    st->u8.emplace(zp_packed, std::make_pair(dst, need));
   }
   return dst;
 }
@@ -90,13 +126,17 @@ const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
 const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
                                       const void *zp_packed, int N,
                                       int groups_k) {
-  ZpUnpackCache *cache = get_or_create_zp_cache(state);
+  ZpUnpackState *st = zp_unpack_module(state);
+  if (!st) {
+    fprintf(stderr, "matmul_nbits: failed to obtain ZpUnpackState\n");
+    return nullptr;
+  }
   const size_t need =
       static_cast<size_t>(N) * static_cast<size_t>(groups_k) * sizeof(__fp16);
 
-  std::lock_guard<std::mutex> lock(cache->mu);
-  auto it = cache->fp16.find(zp_packed);
-  if (it != cache->fp16.end() && it->second.second >= need)
+  std::lock_guard<std::mutex> lock(st->mu);
+  auto it = st->fp16.find(zp_packed);
+  if (it != st->fp16.end() && it->second.second >= need)
     return it->second.first;
 
   void *dst = nullptr;
@@ -107,27 +147,16 @@ const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
   }
   hip_matmul_nbits_convert_zp_fp16(stream, zp_packed, dst, N, groups_k);
 
-  if (it != cache->fp16.end()) {
+  if (it != st->fp16.end()) {
     hipFree(it->second.first);
     it->second = {dst, need};
   } else {
-    cache->fp16.emplace(zp_packed, std::make_pair(dst, need));
+    st->fp16.emplace(zp_packed, std::make_pair(dst, need));
   }
   return dst;
 }
 
 } // namespace hipdnn_ep_real
-
-extern "C" void hipdnn_ep_zp_unpack_cache_destroy(void *cache_ptr) {
-  auto *cache = static_cast<hipdnn_ep_real::ZpUnpackCache *>(cache_ptr);
-  if (!cache)
-    return;
-  for (auto &[k, v] : cache->u8)
-    hipFree(v.first);
-  for (auto &[k, v] : cache->fp16)
-    hipFree(v.first);
-  delete cache;
-}
 
 int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       const void *scales, const void *zero_points,

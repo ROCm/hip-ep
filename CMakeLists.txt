@@ -183,5 +183,8 @@ if(BUILD_HIP_TOOLS)
 
     # E2E integration tests (compile MLIR → DLL → execute)
     add_subdirectory(test/e2e)
+
+    # Standalone unit tests for the runtime (no GPU required).
+    add_subdirectory(test/runtime_steady_state)
   endif()
 endif()

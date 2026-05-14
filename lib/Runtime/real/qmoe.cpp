@@ -3,8 +3,11 @@
  * Licensed under the MIT License.
  */
 #include "../debug_log.h"
+#include "../growable_buffer.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../module_registry.h"
 #include "../op_profile.h"
+#include "../runtime_state_internal.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -17,6 +20,105 @@
 #include <vector>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
+
+//===---------------------------------------------------------------------===//
+// QmoeState op-module
+//===---------------------------------------------------------------------===//
+//
+// Two grow-on-demand buffers used by wrap_qmoe:
+//   * scratch:      device VRAM, holds the 8 transient sub-buffers
+//                   (expert_indices, expert_weights, gather_buf, fc1_buf,
+//                   act_buf, fc2_buf, token_ids, token_wts) laid out at
+//                   fixed offsets each call.
+//   * host_scratch: pinned host memory (hipHostMallocDefault), mirror used
+//                   for D2H readback of the routing decision (a few dozen
+//                   bytes per layer at decode). Pageable host buffers
+//                   silently fall back to sync-staging on Windows -- pinned
+//                   is required for true async DMA overlap.
+//
+// Both share the GrowableDeviceBuffer / GrowablePinnedBuffer policy
+// (1.5x exponential growth, sync-then-realloc on grow, never shrink).
+// Lazily allocated by the C ABI ensure_* functions below; freed via
+// ~QmoeState through the module registry at session cleanup.
+
+namespace {
+
+struct QmoeState {
+  hipdnn_ep::GrowableDeviceBuffer scratch;
+  hipdnn_ep::GrowablePinnedBuffer host_scratch;
+
+  // Bind both buffers' stream to the live RuntimeState stream so any future
+  // grow() sees the right stream to sync on. The stream is created in
+  // initialize_state_handles before the first wrap_qmoe call, so it's safe
+  // to capture at module-construction time.
+  explicit QmoeState(RuntimeState *rs) {
+    hipStream_t s = rs ? rs->stream : nullptr;
+    scratch.set_stream(s);
+    host_scratch.set_stream(s);
+  }
+
+  // HIPDNN_EP_DUMP_STATE hook: report combined device + pinned-host
+  // footprint. SFINAE detection in make_op_module_spec picks this up
+  // automatically -- no extra registration plumbing needed.
+  size_t mem_bytes() const { return scratch.size() + host_scratch.size(); }
+};
+
+HIPDNN_OP_MODULE(qmoe_module, "qmoe", QmoeState);
+
+} // namespace
+
+// C-ABI getters / ensure helpers exported by the runtime DLL. The signature
+// must stay byte-compatible with the prior pre-modularization version in
+// hipdnn_ep_runtime_state.cpp (where these used to live) because they are
+// declared in the public header hipdnn_ep_runtime.h and called from
+// generated code via plain C linkage. The implementation now delegates to
+// the QmoeState op-module so the buffers move with the op rather than
+// growing the framework's RuntimeState struct.
+
+extern "C" void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state) {
+  if (!state)
+    return nullptr;
+  QmoeState *m = qmoe_module(state);
+  return m ? m->scratch.data() : nullptr;
+}
+
+extern "C" int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
+                                                   size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  QmoeState *m = qmoe_module(state);
+  if (!m) {
+    fprintf(stderr, "hipdnn_ep_state_ensure_qmoe_scratch: failed to obtain "
+                    "QmoeState\n");
+    return -1;
+  }
+  return m->scratch.grow(needed_size);
+}
+
+extern "C" void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state) {
+  if (!state)
+    return nullptr;
+  QmoeState *m = qmoe_module(state);
+  return m ? m->host_scratch.data() : nullptr;
+}
+
+extern "C" int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
+                                                        size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  QmoeState *m = qmoe_module(state);
+  if (!m) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_qmoe_host_scratch: failed to obtain "
+            "QmoeState\n");
+    return -1;
+  }
+  return m->host_scratch.grow(needed_size);
+}
 
 struct TokenEntry {
   int32_t token_id;

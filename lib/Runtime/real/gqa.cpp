@@ -5,6 +5,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../module_registry.h"
 #include "../op_profile.h"
 #include "../runtime_state_internal.h"
 #include "cache_utils.h"
@@ -161,6 +162,41 @@ static int gqa_fused_decode_max_t() {
 // legacy per-call D2H readback site they already implement.
 static constexpr int32_t kSeqlensKNotRead = -2;
 
+//===---------------------------------------------------------------------===//
+// GqaSeqlensCache op-module
+//===---------------------------------------------------------------------===//
+//
+// Per-Compute() cache of the int32 seqlens_k value. Decode runs 32 GQA
+// layers per token, all reading the same seqlens_k from device memory;
+// without this cache each layer does its own D2H + hipStreamSynchronize
+// (~30-45 ms/token of pipeline stall on Strix Halo).
+//
+// Invalidated by GqaSeqlensCache::begin_compute(), which is dispatched
+// from hipdnn_ep_runtime_begin_compute via the module registry on every
+// Compute() entry. Disable end-to-end with HIPDNN_EP_GQA_CACHE_SEQLENS=0.
+
+namespace {
+
+struct GqaSeqlensCache {
+  bool valid = false;
+  int32_t val = 0;
+  const void *ptr = nullptr;
+
+  explicit GqaSeqlensCache(RuntimeState *) {}
+
+  // Invoked on every Compute() entry via the module registry's
+  // begin_compute fan-out. Resets the cache so the first GQA layer in the
+  // new forward pass pays the D2H, then subsequent layers reuse it.
+  void begin_compute(RuntimeState *) {
+    valid = false;
+    ptr = nullptr;
+  }
+};
+
+HIPDNN_OP_MODULE(gqa_seqlens_module, "gqa_seqlens_cache", GqaSeqlensCache);
+
+} // namespace
+
 // Read seqlens_k_val from device (or the per-Compute() cache when
 // HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
 // dispatch decision. Two purposes:
@@ -192,9 +228,16 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
-  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
-      state->seqlens_k_cached_ptr == seqlens_k_ptr) {
-    return state->seqlens_k_cached_val;
+  // Look up the per-Compute() seqlens_k cache. Lazily created on first
+  // access; persists for the session. Invalidated at the top of every
+  // Compute() via GqaSeqlensCache::begin_compute (dispatched by the
+  // module registry from hipdnn_ep_runtime_begin_compute).
+  GqaSeqlensCache *cache = (gqa_cache_seqlens_enabled() && state)
+                               ? gqa_seqlens_module(state)
+                               : nullptr;
+
+  if (cache && cache->valid && cache->ptr == seqlens_k_ptr) {
+    return cache->val;
   }
 
   int32_t seqlens_k_val = 0;
@@ -206,10 +249,10 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
-  if (gqa_cache_seqlens_enabled() && state) {
-    state->seqlens_k_cached_val = seqlens_k_val;
-    state->seqlens_k_cached_ptr = seqlens_k_ptr;
-    state->seqlens_k_cached_valid = true;
+  if (cache) {
+    cache->val = seqlens_k_val;
+    cache->ptr = seqlens_k_ptr;
+    cache->valid = true;
   }
 
   return seqlens_k_val;
@@ -321,23 +364,55 @@ struct GqaGemmCacheEntry {
   size_t workspace_size;      // workspace bytes required by algo
 };
 
-struct GqaGemmCache {
+//===---------------------------------------------------------------------===//
+// GqaGemmState op-module
+//===---------------------------------------------------------------------===//
+//
+// Per-shape hipBLASLt descriptor + algorithm cache for the decomposed
+// (prefill) GQA path. Lazily created on first wrap_group_query_attention
+// call; freed by ~GqaGemmState via the module registry at session cleanup.
+// The shared stream sync inside hipdnn_ep_state_cleanup happens BEFORE
+// module destructors fire, so descriptor destruction is safe.
+
+namespace {
+
+struct GqaGemmState {
   std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash> entries;
+
+  explicit GqaGemmState(RuntimeState *) {}
+
+  ~GqaGemmState() {
+    for (auto &kv : entries) {
+      auto &e = kv.second;
+      if (e.layD)
+        hipblasLtMatrixLayoutDestroy(e.layD);
+      if (e.layC)
+        hipblasLtMatrixLayoutDestroy(e.layC);
+      if (e.layB)
+        hipblasLtMatrixLayoutDestroy(e.layB);
+      if (e.layA)
+        hipblasLtMatrixLayoutDestroy(e.layA);
+      if (e.desc)
+        hipblasLtMatmulDescDestroy(e.desc);
+    }
+  }
 };
 
-static GqaGemmCache *get_gemm_cache(RuntimeState *state) {
-  if (!state->gqa_gemm_cache)
-    state->gqa_gemm_cache = new GqaGemmCache;
-  return static_cast<GqaGemmCache *>(state->gqa_gemm_cache);
-}
+HIPDNN_OP_MODULE(gqa_gemm_module, "gqa_gemm_cache", GqaGemmState);
+
+} // namespace
 
 static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
                                                        hipblasLtHandle_t handle,
                                                        const GqaGemmKey &key) {
   assert(handle && "queryOrCreateGemmState: null handle");
-  auto *cache = get_gemm_cache(state);
-  auto it = cache->entries.find(key);
-  if (it != cache->entries.end())
+  GqaGemmState *gs = gqa_gemm_module(state);
+  if (!gs) {
+    fprintf(stderr, "GQA: failed to obtain GqaGemmState\n");
+    return nullptr;
+  }
+  auto it = gs->entries.find(key);
+  if (it != gs->entries.end())
     return &it->second;
 
   int64_t m = key.m, n = key.n, k = key.k;
@@ -436,7 +511,7 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = cache->entries.emplace(key, entry);
+  auto [ins, _] = gs->entries.emplace(key, entry);
   return &ins->second;
 }
 
@@ -1406,21 +1481,6 @@ int wrap_group_query_attention(
   return rc;
 }
 
-void hipdnn_ep_gqa_gemm_cache_destroy(void *cache_ptr) {
-  auto *cache = static_cast<GqaGemmCache *>(cache_ptr);
-  if (!cache)
-    return;
-  for (auto &[k, e] : cache->entries) {
-    if (e.layD)
-      hipblasLtMatrixLayoutDestroy(e.layD);
-    if (e.layC)
-      hipblasLtMatrixLayoutDestroy(e.layC);
-    if (e.layB)
-      hipblasLtMatrixLayoutDestroy(e.layB);
-    if (e.layA)
-      hipblasLtMatrixLayoutDestroy(e.layA);
-    if (e.desc)
-      hipblasLtMatmulDescDestroy(e.desc);
-  }
-  delete cache;
-}
+// (Removed: hipdnn_ep_gqa_gemm_cache_destroy. The cache now lives in the
+//  GqaGemmState op-module and is freed by ~GqaGemmState via the module
+//  registry on session cleanup.)

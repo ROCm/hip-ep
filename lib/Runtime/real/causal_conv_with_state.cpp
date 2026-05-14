@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../module_registry.h"
 #include "../op_profile.h"
 #include "../runtime_state_internal.h"
 #include "cache_utils.h"
@@ -98,16 +99,32 @@ struct CausalConvCacheEntry {
   bool algo_valid = false;
 };
 
-struct CausalConvCache {
+void destroyEntry(CausalConvCacheEntry &e);
+
+// Op-module state: owns the per-shape MIOpen descriptor + algorithm cache.
+// Created lazily on first wrap_causal_conv_with_state call (when the model
+// actually contains a CausalConvWithState op); destroyed in
+// hipdnn_ep_state_cleanup via the module registry's destroy_fn.
+struct CausalConvState {
   std::unordered_map<CausalConvKey, CausalConvCacheEntry, CausalConvKeyHash>
       entries;
+
+  // The constructor is intentionally empty: cache entries are populated on
+  // demand. We only need the RuntimeState* in the destructor's signature
+  // contract (none of our state actually depends on it at construction
+  // time), so the parameter is unused here.
+  explicit CausalConvState(RuntimeState *) {}
+
+  // RAII teardown: walk every entry and free the MIOpen descriptors. The
+  // stream has already been synchronized by hipdnn_ep_state_cleanup before
+  // the module registry runs, so descriptor destruction is safe.
+  ~CausalConvState() {
+    for (auto &kv : entries)
+      destroyEntry(kv.second);
+  }
 };
 
-CausalConvCache *get_causal_conv_cache(RuntimeState *state) {
-  if (!state->causal_conv_cache)
-    state->causal_conv_cache = new CausalConvCache;
-  return static_cast<CausalConvCache *>(state->causal_conv_cache);
-}
+HIPDNN_OP_MODULE(causal_conv_module, "causal_conv_with_state", CausalConvState);
 
 // Build the static (shape-only) descriptors. The convolution algorithm and its
 // workspace size are filled in lazily on first use, once the input/output
@@ -178,15 +195,6 @@ void destroyEntry(CausalConvCacheEntry &e) {
 }
 
 } // namespace
-
-void hipdnn_ep_causal_conv_cache_destroy(void *cache_ptr) {
-  auto *cache = static_cast<CausalConvCache *>(cache_ptr);
-  if (!cache)
-    return;
-  for (auto &kv : cache->entries)
-    destroyEntry(kv.second);
-  delete cache;
-}
 
 // SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
 template <typename T> static inline T silu(T x) {
@@ -309,11 +317,19 @@ int wrap_causal_conv_with_state(
                     bias ? 1 : 0,
                     activation};
 
-  auto *cache = get_causal_conv_cache(state);
+  // Strongly-typed op-module accessor: O(1) array load + null-check after
+  // the first call per session. Replaces the old void*-keyed
+  // get_causal_conv_cache() + manual state->causal_conv_cache lazy alloc.
+  CausalConvState *cc_state = causal_conv_module(state);
+  if (!cc_state) {
+    fprintf(stderr,
+            "wrap_causal_conv_with_state: failed to obtain CausalConvState\n");
+    return -1;
+  }
   CausalConvCacheEntry *entry = nullptr;
   {
-    auto it = cache->entries.find(key);
-    if (it == cache->entries.end()) {
+    auto it = cc_state->entries.find(key);
+    if (it == cc_state->entries.end()) {
       CausalConvCacheEntry fresh;
       miopenStatus_t st = buildEntryDescriptors(
           fresh, dt, batch_size, channels, virtual_len, seq_len, kernel_size,
@@ -326,7 +342,7 @@ int wrap_causal_conv_with_state(
         destroyEntry(fresh);
         return -1;
       }
-      entry = &cache->entries.emplace(key, std::move(fresh)).first->second;
+      entry = &cc_state->entries.emplace(key, std::move(fresh)).first->second;
     } else {
       entry = &it->second;
     }

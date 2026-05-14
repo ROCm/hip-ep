@@ -19,6 +19,15 @@
 
 #include "runtime_types.h"
 
+// Forward declaration of the op-module registry. Defined in
+// module_registry.cpp; only accessed through the hipdnn_ep:: free functions.
+// Lives at the bottom of the struct so it sits next to the other "opaque
+// per-op state" pointers and the existing flat fields keep their offsets
+// (no ABI churn for already-compiled model.dlls).
+namespace hipdnn_ep {
+struct ModuleRegistry;
+} // namespace hipdnn_ep
+
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
@@ -54,53 +63,21 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
-  // Per-state scratch buffer for wrap_qmoe transient device buffers
-  // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
-  // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
-  //
-  // Why this exists: pre-cache wrap_qmoe issued 8 hipMalloc + 8 hipFree per
-  // call, every layer, every inference. On 24-layer gpt-oss-20b that's 192
-  // mallocs + 192 frees per token; HIP's hipMalloc takes ~50 us each on
-  // Windows, so the storm cost ~10-12 ms/token and bottlenecked decode TPS to
-  // ~40 tok/s versus a Vulkan baseline of ~70 on the same gfx1151.
-  //
-  // Layout policy: one contiguous buffer sized to fit ALL sub-buffers for the
-  // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
-  // by this session. Sub-buffer offsets recomputed per-call (cheap arithmetic);
-  // the buffer itself grows on demand via hipdnn_ep_state_ensure_qmoe_scratch
-  // and never shrinks (mirrors the `workspace` field's policy).
-  //
-  // Pinned host mirror is needed for the 24-bytes-per-layer D2H readback of
-  // expert routing decisions (still required at decode pre-Phase-2). hipHost-
-  // Malloc'd once with hipHostMallocDefault; reused across calls without sync.
-  void *qmoe_scratch;
-  size_t qmoe_scratch_size;
-  void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
-  size_t qmoe_host_scratch_size;
+  // (Removed: qmoe_scratch, qmoe_host_scratch and their *_size fields.
+  //  Both now live in the QmoeState op-module (lib/Runtime/real/qmoe.cpp)
+  //  built on top of hipdnn_ep::GrowableDeviceBuffer /
+  //  GrowablePinnedBuffer in growable_buffer.h. Allocated lazily on first
+  //  wrap_qmoe call. The C-ABI getters / ensure helpers
+  //  (hipdnn_ep_state_*_qmoe_*) are preserved in hipdnn_ep_runtime.h and
+  //  now delegate through the QmoeState slot, so qmoe runtime bitcode is
+  //  unaffected.)
 
-  // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
-  // Caches hipBLASLt descriptors + algorithms by GEMM shape.
-  void *gqa_gemm_cache;
-
-  // CausalConvWithState MIOpen descriptor + algorithm cache
-  // (CausalConvCache*). Caches MIOpen tensor / convolution / bias / activation
-  // descriptors and the heuristic-selected forward algorithm by shape, so that
-  // miopenFindConvolutionForwardAlgorithm runs only once per shape rather than
-  // every layer × every token.
-  void *causal_conv_cache;
-
-  // MatMulNBits asym-path zero_points unpack cache (ZpUnpackCache*).
-  //
-  // The asym AWQ path stores zero_points as packed nibbles [N, ceil(K/bs/2)].
-  // Two unpacked layouts are needed (u8 [N, K/bs] for GEMV/naive, fp16 for
-  // WMMA/col-major GEMV M>1), and naively the unpack kernel is launched on
-  // every wrap_matmul_nbits call. For 8B asym decode this is ~225 redundant
-  // launches per Compute(). Since zero_points points into the model constants
-  // blob (stable for the session lifetime), we cache the unpacked buffer per
-  // input pointer. Lazily created on first asym call. Owned by
-  // lib/Runtime/real/matmul_nbits.cpp; freed in hipdnn_ep_state_cleanup via
-  // hipdnn_ep_zp_unpack_cache_destroy.
-  void *zp_unpack_cache;
+  // (Removed: gqa_gemm_cache, causal_conv_cache, zp_unpack_cache.
+  //  All three have moved into typed op-modules:
+  //    - GqaGemmState     (lib/Runtime/real/gqa.cpp)
+  //    - CausalConvState  (lib/Runtime/real/causal_conv_with_state.cpp)
+  //    - ZpUnpackState    (lib/Runtime/real/matmul_nbits.cpp)
+  //  Slots are allocated lazily inside the ModuleRegistry below.)
 
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.
@@ -118,25 +95,20 @@ struct RuntimeState {
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
 
-  // Per-Compute() cache for seqlens_k_val (decode hot path).
-  //
-  // Decode runs 32 GQA layers per token, all reading the same seqlens_k
-  // from device memory. The decomposed-path readback in gqa.cpp issues a
-  // hipMemcpyAsync(D2H) + hipStreamSynchronize per layer (31 redundant
-  // pipeline stalls, ~30-45 ms/token on Strix Halo with the asym Llama
-  // sliding-window path). The cache is on by default
-  // (HIPDNN_EP_GQA_CACHE_SEQLENS=1, set to 0 to disable): the first GQA
-  // in a forward pass populates the cache and the remaining 31 layers
-  // reuse it.
-  //
-  // Invalidated by hipdnn_ep_runtime_begin_compute() at the start of each
-  // Compute(), called from the EP-side MlirCustomOp::Compute() entry.
-  // If the symbol is not exported (older model.dll), invalidation does
-  // not happen and the cache is unsafe -- the EP logs a warning at
-  // session creation and the user must set HIPDNN_EP_GQA_CACHE_SEQLENS=0.
-  bool seqlens_k_cached_valid;
-  int32_t seqlens_k_cached_val;
-  const void *seqlens_k_cached_ptr;
+  // (Removed: seqlens_k_cached_*. The per-Compute() seqlens_k cache now
+  //  lives in the GqaSeqlensCache op-module (lib/Runtime/real/gqa.cpp).
+  //  Its begin_compute() hook fires from hipdnn_ep_runtime_begin_compute
+  //  through the module registry's begin_compute fan-out, so the
+  //  invalidation contract documented above still holds end-to-end.)
+
+  // Op-module registry. New ops add per-session state by registering through
+  // module_registry.h's HIPDNN_OP_MODULE macro instead of growing this
+  // struct. Created in initialize_state_handles; destroyed (along with every
+  // populated slot) in hipdnn_ep_state_cleanup. The per-Compute()
+  // invalidation iteration is also driven through here (see
+  // hipdnn_ep_runtime_begin_compute). Existing flat fields above stay put
+  // for now; they migrate to dedicated modules in later stages of the plan.
+  hipdnn_ep::ModuleRegistry *modules;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
