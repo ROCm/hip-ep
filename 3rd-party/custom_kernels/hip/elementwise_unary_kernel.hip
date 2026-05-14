@@ -142,6 +142,49 @@ __global__ void elementwise_cos_f32_kernel(const float *__restrict__ input,
   }
 }
 
+// =====================================================================
+// Not: y = !x  (bool input -> bool output, 1 byte each).
+// ORT: SPECIALIZED_UNARY_ELEMENTWISE_IMPL(Not, bool) with OP_Not(a) = !a.
+// In our world bool is encoded as uint8_t (1 byte) so we use that.
+// =====================================================================
+
+__global__ void elementwise_not_kernel(const uint8_t *__restrict__ input,
+                                       uint8_t *__restrict__ output,
+                                       int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<uint8_t>(!input[idx]);
+  }
+}
+
+extern "C" int hip_elementwise_not(void *stream, const void *input,
+                                   void *output, int64_t num_elements) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_elementwise_not: num=%lld\n",
+      (long long)num_elements);
+  hipLaunchKernelGGL(elementwise_not_kernel, dim3(grid_size),
+                     dim3(kBlockSize), 0, hip_stream,
+                     static_cast<const uint8_t *>(input),
+                     static_cast<uint8_t *>(output), num_elements);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_not launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 __global__ void elementwise_sin_f16_kernel(const __half *__restrict__ input,
                                            __half *__restrict__ output,
                                            int64_t num_elements) {
