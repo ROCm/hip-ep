@@ -10,11 +10,12 @@
 // (2.6 GB archive) happens here ONCE at backend-DLL build time -- not on
 // every model.dll compile in the EP pipeline.
 //
-// Process-global cache keyed by (N,C,H,W,K,Ky,Kx,Ho,Wo,strides,pads,dilations,group):
-// caches the chosen DeviceOp + BaseInvoker so subsequent calls with the
-// same shape skip the factory iteration. NOT keyed on data pointers --
-// weights are transposed on every call (negligible for typical conv
-// shapes; revisit if profiling shows otherwise).
+// Process-global cache keyed by
+// (N,C,H,W,K,Ky,Kx,Ho,Wo,strides,pads,dilations,group): caches the chosen
+// DeviceOp + BaseInvoker so subsequent calls with the same shape skip the
+// factory iteration. NOT keyed on data pointers -- weights are transposed on
+// every call (negligible for typical conv shapes; revisit if profiling shows
+// otherwise).
 //
 // Scratch (NCHW<->NHWGC transpose buffers + GKYXC weight materialization
 // + CK internal workspace) comes from the model.dll's pool via the
@@ -86,10 +87,9 @@ __global__ void nhwc_to_nchw_kernel(const T *__restrict__ src,
 // For group > 1 we treat the [K, C/g, Y, X] input as [G, K/g, C/g, Y, X]
 // and write [G, K/g, Y, X, C/g] -- same kernel, just different lengths.
 template <typename T>
-__global__ void kcyx_to_gkyxc_kernel(const T *__restrict__ src,
-                                     T *__restrict__ dst, int64_t G,
-                                     int64_t Kpg, int64_t Cpg, int64_t Y,
-                                     int64_t X) {
+__global__ void
+kcyx_to_gkyxc_kernel(const T *__restrict__ src, T *__restrict__ dst, int64_t G,
+                     int64_t Kpg, int64_t Cpg, int64_t Y, int64_t X) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   int64_t total = G * Kpg * Y * X * Cpg;
   if (tid >= total)
@@ -185,10 +185,9 @@ using GKYXC = conv_layout::GKYXC;
 using NHWGK = conv_layout::NHWGK;
 using EmptyTuple = ck::Tuple<>;
 
-using DeviceOp =
-    ck::tensor_operation::device::DeviceGroupedConvFwdMultipleABD<
-        2, NHWGC, GKYXC, EmptyTuple, NHWGK, F16, F16, EmptyTuple, F16,
-        PassThrough, PassThrough, PassThrough>;
+using DeviceOp = ck::tensor_operation::device::DeviceGroupedConvFwdMultipleABD<
+    2, NHWGC, GKYXC, EmptyTuple, NHWGK, F16, F16, EmptyTuple, F16, PassThrough,
+    PassThrough, PassThrough>;
 
 using Factory =
     ck::tensor_operation::device::instance::DeviceOperationInstanceFactory<
@@ -312,16 +311,14 @@ void backend_conv_shutdown_impl(void) {
   s.cache.clear();
 }
 
-int backend_conv_fwd_fp16_nchw_impl(
-    void *stream_void,
-    const void *input, int N, int C, int H, int W,
-    const void *weights, int K, int kernel_h, int kernel_w,
-    const void *bias,
-    void *output, int Ho, int Wo,
-    int stride_h, int stride_w,
-    int pad_top, int pad_left, int pad_bottom, int pad_right,
-    int dilation_h, int dilation_w,
-    int group) {
+int backend_conv_fwd_fp16_nchw_impl(void *stream_void, const void *input, int N,
+                                    int C, int H, int W, const void *weights,
+                                    int K, int kernel_h, int kernel_w,
+                                    const void *bias, void *output, int Ho,
+                                    int Wo, int stride_h, int stride_w,
+                                    int pad_top, int pad_left, int pad_bottom,
+                                    int pad_right, int dilation_h,
+                                    int dilation_w, int group) {
   if (!input || !weights || !output)
     return -1;
   if (group <= 0 || C % group != 0 || K % group != 0)
@@ -330,12 +327,23 @@ int backend_conv_fwd_fp16_nchw_impl(
   hipStream_t stream = static_cast<hipStream_t>(stream_void);
 
   ConvShapeKey key{};
-  key.N = N; key.C = C; key.H = H; key.W = W;
-  key.K = K; key.Ky = kernel_h; key.Kx = kernel_w;
-  key.Ho = Ho; key.Wo = Wo;
-  key.sh = stride_h; key.sw = stride_w;
-  key.pt = pad_top; key.pl = pad_left; key.pb = pad_bottom; key.pr = pad_right;
-  key.dh = dilation_h; key.dw = dilation_w;
+  key.N = N;
+  key.C = C;
+  key.H = H;
+  key.W = W;
+  key.K = K;
+  key.Ky = kernel_h;
+  key.Kx = kernel_w;
+  key.Ho = Ho;
+  key.Wo = Wo;
+  key.sh = stride_h;
+  key.sw = stride_w;
+  key.pt = pad_top;
+  key.pl = pad_left;
+  key.pb = pad_bottom;
+  key.pr = pad_right;
+  key.dh = dilation_h;
+  key.dw = dilation_w;
   key.group = group;
 
   // Scratch layout: | nhwc_in | nhwc_out | gkyxc_w | ck_workspace |, each
@@ -347,7 +355,8 @@ int backend_conv_fwd_fp16_nchw_impl(
   auto align_up = [](size_t v, size_t a) { return (v + a - 1) & ~(a - 1); };
   size_t in_bytes = static_cast<size_t>(N) * C * H * W * kElem;
   size_t out_bytes = static_cast<size_t>(N) * K * Ho * Wo * kElem;
-  size_t w_bytes = static_cast<size_t>(K) * (C / group) * kernel_h * kernel_w * kElem;
+  size_t w_bytes =
+      static_cast<size_t>(K) * (C / group) * kernel_h * kernel_w * kElem;
 
   std::lock_guard<std::mutex> lk(state().mu);
 
@@ -388,8 +397,8 @@ int backend_conv_fwd_fp16_nchw_impl(
       entry->workspace_bytes ? static_cast<void *>(base + off_ws) : nullptr;
 
   if (launch_nchw_to_nhwc<F16>(stream, static_cast<const F16 *>(input),
-                               static_cast<F16 *>(nhwc_in), N, C, H, W) !=
-      hipSuccess)
+                               static_cast<F16 *>(nhwc_in), N, C, H,
+                               W) != hipSuccess)
     return -1;
 
   // KCYX -> GKYXC. K = G*Kpg, C = G*Cpg.
@@ -412,13 +421,14 @@ int backend_conv_fwd_fp16_nchw_impl(
   PassThrough op_a, op_b, op_cde;
 
   auto arg = entry->op->MakeArgumentPointer(
-      nhwc_in, gkyxc_w, std::array<const void *, 0>{}, nhwc_out, al, as, bl,
-      bs, std::array<std::array<ck::index_t, 5>, 0>{},
+      nhwc_in, gkyxc_w, std::array<const void *, 0>{}, nhwc_out, al, as, bl, bs,
+      std::array<std::array<ck::index_t, 5>, 0>{},
       std::array<std::array<ck::index_t, 5>, 0>{}, el, es, conv_strides,
       conv_dilations, left_pads, right_pads, op_a, op_b, op_cde);
   if (!entry->op->IsSupportedArgument(arg.get())) {
-    fprintf(stderr,
-            "[ep_backend] arg unsupported on real-pointer build (unexpected)\n");
+    fprintf(
+        stderr,
+        "[ep_backend] arg unsupported on real-pointer build (unexpected)\n");
     return -1;
   }
   if (entry->workspace_bytes)
@@ -441,8 +451,8 @@ int backend_conv_fwd_fp16_nchw_impl(
   }
 
   if (launch_nhwc_to_nchw<F16>(stream, static_cast<const F16 *>(nhwc_out),
-                               static_cast<F16 *>(output), N, K, Ho, Wo) !=
-      hipSuccess)
+                               static_cast<F16 *>(output), N, K, Ho,
+                               Wo) != hipSuccess)
     return -1;
 
   return 0;

@@ -55,17 +55,17 @@ from conftest import register_morphizen_ep  # noqa: E402
 SHAPES = [
     # Tiny smoke -- per-call overhead dominates; useful as the bottom
     # of the dispatch curve.
-    ("smoke_3x3",      1, 3, 32, 32, 16, 3, 3, 1, 1, 1, 1),
+    ("smoke_3x3", 1, 3, 32, 32, 16, 3, 3, 1, 1, 1, 1),
     # ResNet-50 stem -- canonical large-spatial 7x7 stride-2 entry layer.
-    ("rn50_stem",      1, 3, 224, 224, 64, 7, 7, 2, 3, 1, 1),
+    ("rn50_stem", 1, 3, 224, 224, 64, 7, 7, 2, 3, 1, 1),
     # ResNet-50 mid-stage 3x3 -- canonical interior conv (most CV models).
-    ("rn50_s3_3x3",    1, 256, 14, 14, 256, 3, 3, 1, 1, 1, 1),
+    ("rn50_s3_3x3", 1, 256, 14, 14, 256, 3, 3, 1, 1, 1, 1),
     # 1x1 pointwise -- exercises the pointwise / projection path.
-    ("1x1",            1, 16, 32, 32, 32, 1, 1, 1, 0, 1, 1),
+    ("1x1", 1, 16, 32, 32, 32, 1, 1, 1, 0, 1, 1),
     # CLIP ViT-L/14 patch conv -- representative of all VL/ViT patch stems
     # (large-K, large-spatial, big-stride single-shot). 1x3x224x224 ->
     # 1x1024x16x16.
-    ("vit_l14_224",    1, 3, 224, 224, 1024, 14, 14, 14, 0, 1, 1),
+    ("vit_l14_224", 1, 3, 224, 224, 1024, 14, 14, 14, 0, 1, 1),
     # SDXL UNet bottom block (1280 channels @ 16x16) -- the deepest /
     # widest residual conv in SDXL inference. Big weights (~28 MB fp16),
     # small spatial -- the canonical generative-diffusion hot loop.
@@ -75,7 +75,7 @@ SHAPES = [
     # better stress-test for spatial scaling but takes ~30 ms/iter, which
     # blows up the bench's 200-iter run; 2K trades half the spatial axis
     # for ~4x lower wall time. 1x3x2048x2048 -> 1x768x128x128.
-    ("2k_vit_b16",     1, 3, 2048, 2048, 768, 16, 16, 16, 0, 1, 1),
+    ("2k_vit_b16", 1, 3, 2048, 2048, 768, 16, 16, 16, 0, 1, 1),
 ]
 
 N_WARMUP = 20
@@ -85,7 +85,9 @@ N_RUNS = 200
 def make_conv_onnx_fp16(N, C, H, W, K, ky, kx, stride, pad, dilation, group, *, seed=0):
     rng = np.random.default_rng(seed)
     inp = rng.standard_normal((N, C, H, W), dtype=np.float32).astype(np.float16)
-    weights = (rng.standard_normal((K, C // group, ky, kx), dtype=np.float32) * 0.1).astype(np.float16)
+    weights = (
+        rng.standard_normal((K, C // group, ky, kx), dtype=np.float32) * 0.1
+    ).astype(np.float16)
     Ho = (H + 2 * pad - dilation * (ky - 1) - 1) // stride + 1
     Wo = (W + 2 * pad - dilation * (kx - 1) - 1) // stride + 1
 
@@ -93,9 +95,14 @@ def make_conv_onnx_fp16(N, C, H, W, K, ky, kx, stride, pad, dilation, group, *, 
     inp_proto = helper.make_tensor_value_info("X", TensorProto.FLOAT16, (N, C, H, W))
     out_proto = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, (N, K, Ho, Wo))
     node = helper.make_node(
-        "Conv", ["X", "W"], ["Y"],
-        kernel_shape=[ky, kx], strides=[stride, stride],
-        pads=[pad, pad, pad, pad], dilations=[dilation, dilation], group=group,
+        "Conv",
+        ["X", "W"],
+        ["Y"],
+        kernel_shape=[ky, kx],
+        strides=[stride, stride],
+        pads=[pad, pad, pad, pad],
+        dilations=[dilation, dilation],
+        group=group,
     )
     g = helper.make_graph([node], "g", [inp_proto], [out_proto], [weight_init])
     m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)], ir_version=10)
@@ -109,7 +116,7 @@ def bench_shape(name, *args):
     if not devices:
         raise SystemExit("MorphiZen EP not found -- run python build.py first")
 
-    model_bytes, inp, out_shape = make_conv_onnx_fp16(*args, seed=42)
+    model_bytes, inp, _out_shape = make_conv_onnx_fp16(*args, seed=42)
     so = ort.SessionOptions()
     so.add_provider_for_devices(devices, {})
     sess = ort.InferenceSession(model_bytes, sess_options=so)
@@ -118,13 +125,12 @@ def bench_shape(name, *args):
     # whichever device memory the EP wants; that copy is constant across
     # both backends so it cancels in relative comparison.
     bnd = sess.io_binding()
-    out = np.empty(out_shape, dtype=np.float16)
     for _ in range(N_WARMUP):
         bnd.bind_cpu_input("X", inp)
         bnd.bind_output("Y", "cpu")
         sess.run_with_iobinding(bnd)
-        # Copy out so timing isn't masked by lazy materialization.
-        ev = bnd.get_outputs()[0].numpy()
+        # Force materialization so timing isn't masked by lazy copy-on-read.
+        bnd.get_outputs()[0].numpy()
         bnd.clear_binding_inputs()
         bnd.clear_binding_outputs()
 
@@ -134,7 +140,7 @@ def bench_shape(name, *args):
         bnd.bind_output("Y", "cpu")
         t0 = time.perf_counter()
         sess.run_with_iobinding(bnd)
-        ev = bnd.get_outputs()[0].numpy()
+        bnd.get_outputs()[0].numpy()
         times.append(time.perf_counter() - t0)
         bnd.clear_binding_inputs()
         bnd.clear_binding_outputs()
@@ -164,14 +170,18 @@ def bench_shape(name, *args):
 def main():
     backend = os.environ.get("HIPDNN_EP_CONV", "miopen")
     print(f"\nbench_conv.py  backend={backend}  warmup={N_WARMUP} runs={N_RUNS}\n")
-    print(f"{'shape':<14} {'avg_ms':>9} {'min_ms':>9} {'p50_ms':>9} "
-          f"{'p99_ms':>9} {'it/s':>9} {'GFLOPS':>9}")
+    print(
+        f"{'shape':<14} {'avg_ms':>9} {'min_ms':>9} {'p50_ms':>9} "
+        f"{'p99_ms':>9} {'it/s':>9} {'GFLOPS':>9}"
+    )
     print("-" * 80)
     for shape in SHAPES:
         r = bench_shape(*shape)
-        print(f"{r['name']:<14} {r['avg_ms']:>9.3f} {r['min_ms']:>9.3f} "
-              f"{r['p50_ms']:>9.3f} {r['p99_ms']:>9.3f} "
-              f"{r['iter_per_sec']:>9.1f} {r['gflops']:>9.1f}")
+        print(
+            f"{r['name']:<14} {r['avg_ms']:>9.3f} {r['min_ms']:>9.3f} "
+            f"{r['p50_ms']:>9.3f} {r['p99_ms']:>9.3f} "
+            f"{r['iter_per_sec']:>9.1f} {r['gflops']:>9.1f}"
+        )
     print()
 
 

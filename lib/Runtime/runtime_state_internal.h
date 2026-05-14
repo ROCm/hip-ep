@@ -28,7 +28,9 @@
 // declaration; the dtor and copy/move are instantiated where T is
 // complete (state_init / state_cleanup both include hip_backend_client.h
 // before touching the field).
-namespace hip { class Backend; }
+namespace hip {
+class Backend;
+}
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*).

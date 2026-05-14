@@ -233,7 +233,16 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // the GQA seqlens_k cache (default on, set HIPDNN_EP_GQA_CACHE_SEQLENS=0
 // to disable) to be correct -- without this hook the cache would persist
 // across forward passes and return stale values.
-void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
+//
+// __declspec(dllexport) here matches the definition in
+// hipdnn_ep_runtime_state.cpp -- the symbol must survive LLVM optimization
+// and be visible to dlsym/GetProcAddress on the model.dll side. Without
+// matching attributes, clang warns:
+//   "redeclaration of '...' should not add 'dllexport' attribute"
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+    void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
@@ -508,12 +517,12 @@ int wrap_miopenConvolutionForward(
 // CK (Composable Kernel) convolution forward wrapper.
 // Same C-ABI as wrap_miopenConvolutionForward. Forwards through the per-gfx
 // hip-backend-gfx<ARCH>.dll, loaded at runtime via hip::GetBackend() (see
-// lib/Runtime/real/hip_backend_client.{h,cpp} + lib/Runtime/real/ck_conv.cpp); the
-// actual CK kernel + layout transposes + per-shape cache live in the backend
-// DLL (lib/Backend/), not in model.dll.  element_size_bytes must be 2 (fp16);
-// CK is fp16-only in v1 because TheRock's CK build has CK_ENABLE_DL_KERNELS
-// undef'd, leaving WMMA cshufflev3 fp16 NHWGC as the only precompiled
-// instance set on RDNA3+.
+// lib/Runtime/real/hip_backend_client.{h,cpp} + lib/Runtime/real/ck_conv.cpp);
+// the actual CK kernel + layout transposes + per-shape cache live in the
+// backend DLL (lib/Backend/), not in model.dll.  element_size_bytes must be 2
+// (fp16); CK is fp16-only in v1 because TheRock's CK build has
+// CK_ENABLE_DL_KERNELS undef'd, leaving WMMA cshufflev3 fp16 NHWGC as the only
+// precompiled instance set on RDNA3+.
 int wrap_ckConvForward(RuntimeState *state, const void *input, int64_t input_n,
                        int64_t input_c, int64_t input_h, int64_t input_w,
                        const void *weights, int64_t weights_k, const void *bias,

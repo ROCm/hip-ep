@@ -24,13 +24,9 @@ CK_ENABLE_DL_KERNELS is undef'd. wrap_miopenConvolutionForward handles both
 fp16 and fp32 via element_size_bytes.
 """
 
-import gc
-import io
 import os
 import pathlib
-import subprocess
 import sys
-import tempfile
 
 import numpy as np
 import onnx
@@ -123,26 +119,40 @@ CONV_SHAPES = [
     # bench/bench_conv.py's SHAPES list (perf side); if you add a row
     # here, mirror it there and justify what behavior or workload class
     # it covers that the others don't.
-    ("smoke_3x3",      1, 3, 32, 32, 16, 3, 3, 1, 1, 1, 1),
-    ("rn50_stem",      1, 3, 224, 224, 64, 7, 7, 2, 3, 1, 1),
-    ("rn50_s3_3x3",    1, 256, 14, 14, 256, 3, 3, 1, 1, 1, 1),
-    ("1x1",            1, 16, 32, 32, 32, 1, 1, 1, 0, 1, 1),
-    pytest.param("depthwise_3x3", 1, 16, 16, 16, 16, 3, 3, 1, 1, 1, 16,
-                 marks=pytest.mark.xfail(
-                     reason=("MIOpen rejects group == C depthwise with "
-                             "'Invalid filter channel number'; CK handles it "
-                             "fine. strict=False so xpass on the CK backend "
-                             "still counts as success."),
-                     strict=False)),
-    ("vit_l14_224",    1, 3, 224, 224, 1024, 14, 14, 14, 0, 1, 1),
+    ("smoke_3x3", 1, 3, 32, 32, 16, 3, 3, 1, 1, 1, 1),
+    ("rn50_stem", 1, 3, 224, 224, 64, 7, 7, 2, 3, 1, 1),
+    ("rn50_s3_3x3", 1, 256, 14, 14, 256, 3, 3, 1, 1, 1, 1),
+    ("1x1", 1, 16, 32, 32, 32, 1, 1, 1, 0, 1, 1),
+    pytest.param(
+        "depthwise_3x3",
+        1,
+        16,
+        16,
+        16,
+        16,
+        3,
+        3,
+        1,
+        1,
+        1,
+        16,
+        marks=pytest.mark.xfail(
+            reason=(
+                "MIOpen rejects group == C depthwise with "
+                "'Invalid filter channel number'; CK handles it "
+                "fine. strict=False so xpass on the CK backend "
+                "still counts as success."
+            ),
+            strict=False,
+        ),
+    ),
+    ("vit_l14_224", 1, 3, 224, 224, 1024, 14, 14, 14, 0, 1, 1),
     ("sdxl_unet_1280", 1, 1280, 16, 16, 1280, 3, 3, 1, 1, 1, 1),
-    ("2k_vit_b16",     1, 3, 2048, 2048, 768, 16, 16, 16, 0, 1, 1),
+    ("2k_vit_b16", 1, 3, 2048, 2048, 768, 16, 16, 16, 0, 1, 1),
 ]
 
 
-@pytest.mark.parametrize(
-    "name,N,C,H,W,K,ky,kx,stride,pad,dilation,group", CONV_SHAPES
-)
+@pytest.mark.parametrize("name,N,C,H,W,K,ky,kx,stride,pad,dilation,group", CONV_SHAPES)
 def test_conv_cpu_vs_ep(name, N, C, H, W, K, ky, kx, stride, pad, dilation, group):
     """CPU EP vs MorphiZen EP -- output must match within fp32 tolerance.
 
@@ -214,6 +224,6 @@ def test_conv_perf_resnet_stem():
     avg_ms = elapsed / n * 1000
     print(
         f"\n[test_conv perf] backend={backend} shape=resnet_stem "
-        f"avg={avg_ms:.3f} ms/iter ({1000/avg_ms:.1f} it/s)"
+        f"avg={avg_ms:.3f} ms/iter ({1000 / avg_ms:.1f} it/s)"
     )
     cleanup(sess)

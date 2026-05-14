@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # Per-gfx backend DLL
 
 This document describes how heavy ROCm kernels (Composable Kernel today;
