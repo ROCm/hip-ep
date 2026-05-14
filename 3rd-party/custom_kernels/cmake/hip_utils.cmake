@@ -83,34 +83,19 @@ if(WIN32)
         message(STATUS "[hip_utils] hip::host not available - using manual HIP setup")
     endif()
 else()
-    # On Linux, enable HIP language support.
+    # Linux HIP language setup.
     #
-    # cmake 3.31's CMakeDetermineHIPCompiler.cmake resolves the ROCm
-    # toolkit via, in order:
-    #
-    #   1. CMAKE_HIP_COMPILER_ROCM_ROOT (cmake var, direct override)
-    #   2. ${CMAKE_HIP_COMPILER} -v -print-targets
-    #      → grep "Found HIP installation: <path>" from compiler stderr
-    #   3. `hipconfig --rocmpath` (requires hipconfig on PATH)
-    #
-    # It does NOT consult ENV{ROCM_PATH} or ENV{HIP_PATH}, despite a common
-    # misconception. Routes (2)/(3) require either a clang++ that already
-    # knows its sibling ROCm root or hipconfig on the system PATH — neither
-    # holds when ROCm lives at a non-default prefix (TheRock dist tarball,
-    # vcpkg, custom CMAKE_INSTALL_PREFIX, ...) and the install isn't on PATH.
-    #
-    # Pin CMAKE_HIP_COMPILER_ROCM_ROOT directly so route (1) succeeds and
-    # cmake skips the brittle stderr-scrape / PATH-lookup steps. Also point
-    # CMAKE_HIP_COMPILER at the clang++ shipped inside HIP_PATH so the
-    # compiler-detection step (run before the root lookup) finds the right
-    # binary instead of system /usr/bin/clang++.
+    # cmake 3.31's CMakeDetermineHIPCompiler resolves the ROCm root via
+    # CMAKE_HIP_COMPILER_ROCM_ROOT, then a `clang++ -v` stderr-scrape, then
+    # `hipconfig --rocmpath` — it ignores ENV{ROCM_PATH} / ENV{HIP_PATH}.
+    # When ROCm lives at a non-default prefix (TheRock dist tarball, vcpkg,
+    # ...) and isn't on PATH, the latter two routes fail. Pin the root
+    # directly + point CMAKE_HIP_COMPILER at the in-tree clang++.
     if(NOT CMAKE_HIP_COMPILER_ROCM_ROOT)
         set(CMAKE_HIP_COMPILER_ROCM_ROOT "${HIP_PATH}")
     endif()
     if(NOT CMAKE_HIP_COMPILER)
-        # TheRock dist ships LLVM under <root>/llvm/bin/clang++.
-        # Stock ROCm uses <root>/bin/clang++. Probe both, preferring the
-        # AMD-fork amdclang++ if present.
+        # TheRock: <root>/llvm/bin; stock ROCm: <root>/bin. Prefer amdclang++.
         find_program(_HIP_CLANGXX
             NAMES amdclang++ clang++
             PATHS
