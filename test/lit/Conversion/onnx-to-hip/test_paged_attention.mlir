@@ -35,8 +35,9 @@ module {
 
     // CHECK: tensor.empty() : tensor<4x128xf16>
     // CHECK: hip.paged_attention(%[[CTX]])
-    // CHECK-SAME: num_heads = 4
+    // Attributes printed in alphabetical order by MLIR's attr-dict printer.
     // CHECK-SAME: kv_num_heads = 2
+    // CHECK-SAME: num_heads = 4
     // CHECK-NOT: onnx.Custom
 
     return %0 : tensor<4x128xf16>
