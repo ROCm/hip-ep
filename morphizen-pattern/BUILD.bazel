@@ -29,12 +29,20 @@ collect_pb(
     visibility = ["//visibility:public"],
 )
 
+# Exposes morphizen/pattern.pb.h via includes = ["."] (output dir root)
+cc_library(
+    name = "pattern_proto_headers",
+    hdrs = [":pattern_proto_pb_h"],
+    includes = ["."],
+    deps = [":pattern_cc_proto"],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "morphizen-pattern",
     srcs = glob(["src/*.cpp", "src/*.hpp"]),
-    hdrs = glob(["include/morphizen/*.hpp"]) + [":pattern_proto_pb_h"],
+    hdrs = glob(["include/morphizen/*.hpp"]),
     strip_include_prefix = "include",
-    includes = ["."],  # exposes bazel-out/.../morphizen-pattern/ so morphizen/pattern.pb.h resolves
     copts = select({
         "@bazel_tools//src/conditions:windows": [
             "/W0",
@@ -51,7 +59,7 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     deps = [
-        ":pattern_cc_proto",
+        ":pattern_proto_headers",
         "//morphizen-graph:morphizen-graph",
         "@glog",
         "@gsl",
