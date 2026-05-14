@@ -697,6 +697,29 @@ int hip_gather_nd(
     int hip_dtype);
 
 /* =========================================================================
+ * CumSum
+ * =========================================================================
+ *
+ * One thread per (outer, inner) slice; each thread sequentially scans
+ * `axis_size` elements with stride `inner`. The host wrapper decomposes
+ *   outer = product(shape[:axis]); axis_size = shape[axis];
+ *   inner = product(shape[axis+1:])
+ * and synchronously D2H-reads the axis scalar.
+ *
+ * FP16 accumulates in float to avoid precision loss for long axes.
+ */
+int hip_cumsum(
+    void* stream,
+    const void* x,
+    void* y,
+    int64_t outer,
+    int64_t axis_size,
+    int64_t inner,
+    int hip_dtype,
+    int exclusive,
+    int reverse);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *
