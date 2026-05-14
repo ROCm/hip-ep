@@ -56,11 +56,11 @@ endif()
 
 # Link LLVM components
 #
-# DLLLinker.cpp invokes lldMain with either the COFF driver (Windows model.dll
-# output) or the ELF driver (Linux model.so output), gated on _WIN32. Each
-# backend pulls its own set of LLVM transitive dependencies (e.g. lldCOFF
-# needs WindowsDriver/WindowsManifest/LibDriver; lldELF does not). Split the
-# component list and the find_library calls along the same platform line.
+# DLLLinker.cpp's Windows path invokes lld::lldMain in-process with the COFF
+# driver. The Linux path uses a `clang++ -shared` subprocess instead (see
+# linkDLL_Linux for the rationale), so it pulls in no in-process lld libs.
+# The COFF driver, lldCOFF/lldCommon, and the WindowsDriver/WindowsManifest/
+# LibDriver transitives are therefore Windows-only.
 llvm_map_components_to_libnames(llvm_libs
   # Core infrastructure
   Support
@@ -103,39 +103,33 @@ if(WIN32)
     list(APPEND llvm_libs ${llvm_libs_coff})
 endif()
 
-# Locate LLD. Two shipping conventions in the wild:
+# Locate LLD (Windows only — Linux invokes ld.lld via the clang++ driver
+# subprocess and links no lld libs in-process). Two shipping conventions:
 #
 #  (a) Source-built / install-tree layout (Windows / LLVM cross-compiled in
-#      vendored 3rd-party): split static archives liblldCOFF.a, liblldELF.a,
-#      liblldCommon.a co-located in LLVM_LIBRARY_DIRS. Discover with
-#      find_library against bare names.
+#      vendored 3rd-party): split static archives liblldCOFF.a, liblldCommon.a
+#      co-located in LLVM_LIBRARY_DIRS. Discover with find_library against
+#      bare names.
 #
-#  (b) Distro dev package (apt.llvm.org liblld-XX-dev on Ubuntu noble,
-#      brew llvm on macOS, ...): only LLDConfig.cmake + LLDTargets.cmake
-#      under lib/cmake/lld/. No bare .a files for find_library to chew on;
+#  (b) Distro dev package (apt.llvm.org liblld-XX-dev, brew llvm on macOS,
+#      ...): only LLDConfig.cmake + LLDTargets.cmake under lib/cmake/lld/;
 #      libraries are exposed exclusively as IMPORTED targets (lldCOFF,
-#      lldELF, lldCommon, ...) via find_package(LLD CONFIG).
+#      lldCommon, ...) via find_package(LLD CONFIG).
 #
 # Try the CONFIG path first; fall back to find_library for legacy trees
-# that omit LLDConfig.cmake (older 12.x source builds, custom vendored
-# minimal LLD installs).
-find_package(LLD CONFIG QUIET)
-if(LLD_FOUND)
-    message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
-    set(lld_libs lldCommon lldELF)
-    if(WIN32)
-        list(APPEND lld_libs lldCOFF)
-    endif()
-else()
-    message(STATUS "LLD CONFIG package not found; falling back to find_library")
-    set(lld_libs "")
-    if(WIN32)
+# that omit LLDConfig.cmake.
+set(lld_libs "")
+if(WIN32)
+    find_package(LLD CONFIG QUIET)
+    if(LLD_FOUND)
+        message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
+        set(lld_libs lldCommon lldCOFF)
+    else()
+        message(STATUS "LLD CONFIG package not found; falling back to find_library")
         find_library(LLD_COFF_LIB NAMES lldCOFF PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
-        list(APPEND lld_libs ${LLD_COFF_LIB})
+        find_library(LLD_COMMON_LIB NAMES lldCommon PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
+        list(APPEND lld_libs ${LLD_COFF_LIB} ${LLD_COMMON_LIB})
     endif()
-    find_library(LLD_ELF_LIB NAMES lldELF PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
-    find_library(LLD_COMMON_LIB NAMES lldCommon PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
-    list(APPEND lld_libs ${LLD_ELF_LIB} ${LLD_COMMON_LIB})
 endif()
 
 # LLVMDTLTO was split from LLVMLTO in LLVM 22.1; link it when present.
