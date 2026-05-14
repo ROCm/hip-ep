@@ -20,42 +20,24 @@
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 
-// ---------------------------------------------------------------------------
-// Asym MatMulNBits zero_points unpack cache.
-//
-// For each unique zero_points input pointer (which is stable for the lifetime
-// of the model.dll — the pointer comes from the constants blob), cache the
-// unpacked uint8 buffer used by GEMV/naive paths and the converted fp16
-// buffer used by the WMMA / col-major-GEMV (M>1) paths. This avoids the
-// per-call unpack/convert kernel launches that were the dominant per-call
-// overhead for asym 8B decode (~225 launches per Compute()).
-//
-// Lifecycle: registered as the "zp_unpack" op-module. The single slot is
-// shared between wrap_matmul_nbits (this TU) and wrap_qmoe (qmoe.cpp), both
-// reaching it through the lookup_or_*_zp_* helpers below. Created lazily on
-// first call; freed via ZpUnpackState::~ZpUnpackState from
-// module_registry_destroy at session cleanup.
-// ---------------------------------------------------------------------------
+// Asym MatMulNBits zero_points unpack cache. Keyed on zero_points pointer
+// (stable across inferences -- comes from the constants blob). Avoids the
+// per-call unpack / convert kernel launches that dominate asym 8B decode.
+// Shared between wrap_matmul_nbits (this TU) and wrap_qmoe (qmoe.cpp) via
+// the lookup_or_*_zp_* helpers below.
 
 namespace hipdnn_ep_real {
 
 struct ZpUnpackState {
-  // Map keyed on zero_points GPU pointer. Value = (device buffer, byte size).
+  // Keyed on zero_points GPU pointer; value = (device buffer, byte size).
   std::unordered_map<const void *, std::pair<void *, size_t>> u8;
   std::unordered_map<const void *, std::pair<void *, size_t>> fp16;
-  // Concurrent inferences on the same RuntimeState don't run today (single
-  // stream, sequential Compute() calls) but the lock is cheap and lets us
-  // remain correct if that ever changes.
+  // Concurrent inference on one RuntimeState isn't exercised today; cheap
+  // lock kept for forward compatibility.
   std::mutex mu;
 
-  // The op-module spec uses make_op_module_spec<ZpUnpackState>, which expects
-  // a (RuntimeState*) constructor. The runtime state itself isn't needed --
-  // all per-call info arrives through lookup_or_*_zp_*'s arguments.
   explicit ZpUnpackState(RuntimeState *) {}
 
-  // RAII teardown: free every cached device buffer. The shared cleanup path
-  // synchronizes the stream before tearing down the ModuleRegistry, so any
-  // in-flight unpack/convert kernel has finished by the time we free.
   ~ZpUnpackState() {
     for (auto &kv : u8)
       hipFree(kv.second.first);
@@ -63,9 +45,6 @@ struct ZpUnpackState {
       hipFree(kv.second.first);
   }
 
-  // HIPDNN_EP_DUMP_STATE hook: report combined cached-unpacked-buffer
-  // footprint. Stable across inferences once warmup has populated every
-  // unique zero_points pointer in the model.
   size_t mem_bytes() const {
     size_t total = 0;
     for (auto &kv : u8)
@@ -79,9 +58,6 @@ struct ZpUnpackState {
 } // namespace hipdnn_ep_real
 
 namespace {
-// Slot accessor for the asym zero_points unpack cache. Single slot shared
-// between matmul_nbits and qmoe paths -- both wrap_* entry points reach this
-// state through the lookup_or_*_zp_* helpers below.
 HIPDNN_OP_MODULE(zp_unpack_module, "zp_unpack", hipdnn_ep_real::ZpUnpackState);
 } // namespace
 

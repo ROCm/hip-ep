@@ -3,33 +3,21 @@
  * Licensed under the MIT License.
  */
 
-//===- runtime_state_internal.h - RuntimeState Internal Definition -------===//
-//
-// INTERNAL HEADER - Not part of public API
-//
-// This header defines the internal structure of RuntimeState.
-// Only runtime implementation files should include this header.
-//
-// Public interface uses opaque pointer (see hipdnn_ep_runtime.h).
-//
-//===----------------------------------------------------------------------===//
+// Internal layout of RuntimeState. Runtime implementation files only.
+// Public interface uses an opaque pointer (see hipdnn_ep_runtime.h).
 
 #ifndef HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
 #include "runtime_types.h"
 
-// Forward declaration of the op-module registry. Defined in
-// module_registry.cpp; only accessed through the hipdnn_ep:: free functions.
-// Lives at the bottom of the struct so it sits next to the other "opaque
-// per-op state" pointers and the existing flat fields keep their offsets
-// (no ABI churn for already-compiled model.dlls).
+// Op-module registry; defined in module_registry.cpp. Sits at the tail of
+// RuntimeState so existing flat fields keep their offsets.
 namespace hipdnn_ep {
 struct ModuleRegistry;
 } // namespace hipdnn_ep
 
-// Internal runtime state structure
-// This struct is opaque to generated code (passed as void*)
+// Opaque to generated code (passed as void*).
 struct RuntimeState {
   hipStream_t stream;
   miopenHandle_t miopen_handle;
@@ -63,51 +51,20 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
-  // (Removed: qmoe_scratch, qmoe_host_scratch and their *_size fields.
-  //  Both now live in the QmoeState op-module (lib/Runtime/real/qmoe.cpp)
-  //  built on top of hipdnn_ep::GrowableDeviceBuffer /
-  //  GrowablePinnedBuffer in growable_buffer.h. Allocated lazily on first
-  //  wrap_qmoe call. The C-ABI getters / ensure helpers
-  //  (hipdnn_ep_state_*_qmoe_*) are preserved in hipdnn_ep_runtime.h and
-  //  now delegate through the QmoeState slot, so qmoe runtime bitcode is
-  //  unaffected.)
-
-  // (Removed: gqa_gemm_cache, causal_conv_cache, zp_unpack_cache.
-  //  All three have moved into typed op-modules:
-  //    - GqaGemmState     (lib/Runtime/real/gqa.cpp)
-  //    - CausalConvState  (lib/Runtime/real/causal_conv_with_state.cpp)
-  //    - ZpUnpackState    (lib/Runtime/real/matmul_nbits.cpp)
-  //  Slots are allocated lazily inside the ModuleRegistry below.)
-
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
-  // Allocated in state_init, freed in state_cleanup.
   void *op_profile;
 
-  // Device-side error flag used by kernels to report runtime-invalid inputs.
-  // 0 = no error, non-zero = error code (currently -1).
+  // Device-side error flag (0 = no error, non-zero = error code).
   int *device_error_flag;
 
-  // hipDNN graph execution support.
-  // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
-  // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up
-  // here) hipdnn_graph_registry: opaque GraphRegistry* (owned by EP, not
-  // cleaned up here)
-  void *hipdnn_handle;
-  void *hipdnn_graph_registry;
+  // hipDNN graph execution support. Both attached by the EP via
+  // hipdnn_graph_runtime_attach() after inference_init(); owned by the EP
+  // and not cleaned up here.
+  void *hipdnn_handle;          // hipdnnHandle_t cast to void*
+  void *hipdnn_graph_registry;  // opaque GraphRegistry*
 
-  // (Removed: seqlens_k_cached_*. The per-Compute() seqlens_k cache now
-  //  lives in the GqaSeqlensCache op-module (lib/Runtime/real/gqa.cpp).
-  //  Its begin_compute() hook fires from hipdnn_ep_runtime_begin_compute
-  //  through the module registry's begin_compute fan-out, so the
-  //  invalidation contract documented above still holds end-to-end.)
-
-  // Op-module registry. New ops add per-session state by registering through
-  // module_registry.h's HIPDNN_OP_MODULE macro instead of growing this
-  // struct. Created in initialize_state_handles; destroyed (along with every
-  // populated slot) in hipdnn_ep_state_cleanup. The per-Compute()
-  // invalidation iteration is also driven through here (see
-  // hipdnn_ep_runtime_begin_compute). Existing flat fields above stay put
-  // for now; they migrate to dedicated modules in later stages of the plan.
+  // Op-module registry. New ops add per-session state by registering
+  // through HIPDNN_OP_MODULE rather than growing this struct.
   hipdnn_ep::ModuleRegistry *modules;
 };
 

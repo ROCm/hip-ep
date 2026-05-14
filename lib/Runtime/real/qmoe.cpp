@@ -21,25 +21,12 @@
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 
-//===---------------------------------------------------------------------===//
-// QmoeState op-module
-//===---------------------------------------------------------------------===//
-//
-// Two grow-on-demand buffers used by wrap_qmoe:
-//   * scratch:      device VRAM, holds the 8 transient sub-buffers
-//                   (expert_indices, expert_weights, gather_buf, fc1_buf,
-//                   act_buf, fc2_buf, token_ids, token_wts) laid out at
-//                   fixed offsets each call.
-//   * host_scratch: pinned host memory (hipHostMallocDefault), mirror used
-//                   for D2H readback of the routing decision (a few dozen
-//                   bytes per layer at decode). Pageable host buffers
-//                   silently fall back to sync-staging on Windows -- pinned
-//                   is required for true async DMA overlap.
-//
-// Both share the GrowableDeviceBuffer / GrowablePinnedBuffer policy
-// (1.5x exponential growth, sync-then-realloc on grow, never shrink).
-// Lazily allocated by the C ABI ensure_* functions below; freed via
-// ~QmoeState through the module registry at session cleanup.
+// QmoeState owns two grow-on-demand buffers used by wrap_qmoe:
+//   scratch      - device VRAM, holds 8 transient sub-buffers laid out at
+//                  fixed offsets each call.
+//   host_scratch - pinned host memory for D2H readback of the routing
+//                  decision. Pageable host memory silently sync-stages on
+//                  Windows; pinned is required for true async DMA overlap.
 
 namespace {
 
@@ -47,19 +34,14 @@ struct QmoeState {
   hipdnn_ep::GrowableDeviceBuffer scratch;
   hipdnn_ep::GrowablePinnedBuffer host_scratch;
 
-  // Bind both buffers' stream to the live RuntimeState stream so any future
-  // grow() sees the right stream to sync on. The stream is created in
-  // initialize_state_handles before the first wrap_qmoe call, so it's safe
-  // to capture at module-construction time.
+  // Stream is created in initialize_state_handles before any wrap_qmoe
+  // call, so it's safe to capture at module-construction time.
   explicit QmoeState(RuntimeState *rs) {
     hipStream_t s = rs ? rs->stream : nullptr;
     scratch.set_stream(s);
     host_scratch.set_stream(s);
   }
 
-  // HIPDNN_EP_DUMP_STATE hook: report combined device + pinned-host
-  // footprint. SFINAE detection in make_op_module_spec picks this up
-  // automatically -- no extra registration plumbing needed.
   size_t mem_bytes() const { return scratch.size() + host_scratch.size(); }
 };
 
@@ -67,13 +49,8 @@ HIPDNN_OP_MODULE(qmoe_module, "qmoe", QmoeState);
 
 } // namespace
 
-// C-ABI getters / ensure helpers exported by the runtime DLL. The signature
-// must stay byte-compatible with the prior pre-modularization version in
-// hipdnn_ep_runtime_state.cpp (where these used to live) because they are
-// declared in the public header hipdnn_ep_runtime.h and called from
-// generated code via plain C linkage. The implementation now delegates to
-// the QmoeState op-module so the buffers move with the op rather than
-// growing the framework's RuntimeState struct.
+// C-ABI helpers declared in hipdnn_ep_runtime.h and called from generated
+// bitcode. Signatures cannot change. Delegate to the QmoeState slot.
 
 extern "C" void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state) {
   if (!state)
