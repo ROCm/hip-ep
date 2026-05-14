@@ -313,6 +313,86 @@ AddMatMulNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
   return Status::Success();
 }
 
+// Helper: Get arity (number of inputs) for a pointwise mode.
+static size_t GetPointwiseArity(hipdnn_frontend::PointwiseMode mode) {
+  using namespace hipdnn_frontend;
+
+  // Unary operations (1 input)
+  // Note: Based on hipDNN PointwiseValidation.hpp analysis:
+  // - Implemented (with engine support): RELU_FWD, SIGMOID_FWD, TANH_FWD, ABS, NEG
+  // - Defined but NOT implemented: SIN, LOGICAL_NOT, and others
+  static const std::unordered_set<PointwiseMode> unary_modes = {
+      PointwiseMode::ABS,          // Confirmed implemented
+      PointwiseMode::NEG,          // In implemented list but may fail in graph mode
+      PointwiseMode::SIN,          // NOT in implemented list - will likely fail
+      PointwiseMode::LOGICAL_NOT}; // NOT in implemented list - will likely fail
+
+  // Binary operations (2 inputs)
+  // Note: Based on hipDNN PointwiseValidation.hpp analysis:
+  // - Implemented (with engine support): ADD, SUB, MUL, RELU_BWD, SIGMOID_BWD, TANH_BWD
+  // - Defined but NOT implemented: DIV, MIN, CMP_EQ, CMP_LT, LOGICAL_AND, and others
+  static const std::unordered_set<PointwiseMode> binary_modes = {
+      PointwiseMode::DIV,         // NOT in implemented list - will likely fail
+      PointwiseMode::LOGICAL_AND, // NOT in implemented list - will likely fail
+      PointwiseMode::CMP_EQ,      // NOT in implemented list - will likely fail
+      PointwiseMode::MIN,         // NOT in implemented list - will likely fail
+      PointwiseMode::CMP_LT};     // NOT in implemented list - will likely fail
+
+  if (unary_modes.count(mode))
+    return 1;
+  if (binary_modes.count(mode))
+    return 2;
+
+  return 0; // Unknown/unsupported
+}
+
+// Add Pointwise operation from an ONNX pointwise op to hipDNN graph.
+// Supports both unary (1 input) and binary (2 inputs) pointwise operations.
+static Status
+AddPointwiseNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
+                             hipdnn_frontend::PointwiseMode mode,
+                             const std::vector<TensorAttrPtr> &input_attrs,
+                             TensorAttrPtr &output_attr, int64_t &next_uid) {
+  using namespace hipdnn_frontend::graph;
+  using namespace hipdnn_frontend;
+
+  // Determine and validate arity
+  size_t expected_inputs = GetPointwiseArity(mode);
+  if (expected_inputs == 0)
+    return Status::Failure("Unsupported pointwise mode");
+
+  if (input_attrs.size() != expected_inputs)
+    return Status::Failure("Pointwise op requires " +
+                           std::to_string(expected_inputs) + " input(s), got " +
+                           std::to_string(input_attrs.size()));
+
+  // Determine compute data type
+  auto compute_dtype = GetComputeDataType(
+      input_attrs[0]->get_data_type(),
+      expected_inputs > 1 ? input_attrs[1]->get_data_type()
+                          : input_attrs[0]->get_data_type());
+
+  if (!compute_dtype.has_value())
+    return Status::Failure(
+        "Unsupported data type combination for Pointwise compute");
+
+  // Create PointwiseAttributes and set mode and compute_data_type
+  PointwiseAttributes pw_attrs;
+  pw_attrs.set_mode(mode);
+  pw_attrs.set_compute_data_type(compute_dtype.value());
+
+  // Call hipDNN graph API based on arity
+  if (expected_inputs == 1) {
+    // Unary pointwise: y = op(x)
+    output_attr = graph.pointwise(input_attrs[0], pw_attrs);
+  } else {
+    // Binary pointwise: z = op(x, y)
+    output_attr = graph.pointwise(input_attrs[0], input_attrs[1], pw_attrs);
+  }
+
+  return Status::Success();
+}
+
 // Dispatch generic ONNX MLIR op to appropriate node builder.
 static Status AddNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
                                   mlir::Operation *op,
@@ -338,6 +418,36 @@ static Status AddNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
     if (status.failed())
       return status;
     output_attrs.push_back(c_attr);
+    return Status::Success();
+  }
+
+  // Pointwise operations - use a static map for elegant dispatch
+  // Note: Based on hipDNN PointwiseValidation.hpp, most of these are NOT in
+  // the "implemented" list and may fail with "No engine configurations available".
+  // Only ABS has confirmed implementation. Others are attempted but may fall back.
+  static const std::unordered_map<std::string, hipdnn_frontend::PointwiseMode>
+      onnx_to_pointwise = {
+          // Unary pointwise operations
+          {"onnx.Abs", hipdnn_frontend::PointwiseMode::ABS},   // Confirmed implemented
+          {"onnx.Neg", hipdnn_frontend::PointwiseMode::NEG},   // In impl list, but fails
+          {"onnx.Sin", hipdnn_frontend::PointwiseMode::SIN},   // NOT in impl list
+          {"onnx.Not", hipdnn_frontend::PointwiseMode::LOGICAL_NOT}, // NOT in impl list
+          // Binary pointwise operations
+          {"onnx.Div", hipdnn_frontend::PointwiseMode::DIV},   // NOT in impl list
+          {"onnx.And", hipdnn_frontend::PointwiseMode::LOGICAL_AND}, // NOT in impl list
+          {"onnx.Equal", hipdnn_frontend::PointwiseMode::CMP_EQ}, // NOT in impl list
+          {"onnx.Min", hipdnn_frontend::PointwiseMode::MIN},   // NOT in impl list
+          {"onnx.Less", hipdnn_frontend::PointwiseMode::CMP_LT}, // NOT in impl list
+      };
+
+  auto it = onnx_to_pointwise.find(op_name.str());
+  if (it != onnx_to_pointwise.end()) {
+    TensorAttrPtr output_attr;
+    auto status = AddPointwiseNodeFromOnnxMLIR(graph, it->second, input_attrs,
+                                               output_attr, next_uid);
+    if (status.failed())
+      return status;
+    output_attrs.push_back(output_attr);
     return Status::Success();
   }
 
