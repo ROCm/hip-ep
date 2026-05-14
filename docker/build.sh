@@ -346,31 +346,48 @@ cmake --build "$BUILD_DIR" --parallel "$NPROC"
 step "A.7  Install -> $INSTALL_DIR"
 cmake --install "$BUILD_DIR"
 
-# A.7b — Stage runtime .so deps into install/lib so the install/ tree is
-# self-contained (LD_LIBRARY_PATH=install/lib suffices to run hip-onnx-runner,
-# onnxruntime_perf_test, model_benchmark, ...). Without this step, install/lib
-# only carries libhip-compiler.so + libonnxruntime_morphizen_ep.so and the
-# caller still has to add prebuilt-local/lib (ORT) and therock-dist/lib (HIP)
-# to LD_LIBRARY_PATH.
+# A.7b — Stage runtime .so deps we BUILD ourselves (prebuilt-local sources:
+# ORT + protobuf + flatbuffers) into install/lib. Without this step,
+# install/lib only carries libhip-compiler.so +
+# libonnxruntime_morphizen_ep.so and the caller still has to add
+# prebuilt-local/lib to LD_LIBRARY_PATH.
+#
+# We deliberately do NOT stage TheRock-origin .so files (libamdhip64,
+# libhsa-runtime64, librocprofiler-register, libamd_comgr_loader,
+# librocm_sysdeps_*, ...) — matching the Windows artifact's contract
+# (gpu-perf-accuracy-test.yml downloads TheRock separately on the GPU
+# host and adds it to PATH/LIB). Reasons:
+#   1. The artifact halves in size (~310 MB -> ~150 MB) without TheRock
+#      bundles, since libamdhip64 alone is 26 MB and pulls another
+#      ~35 MB of transitive ROCm sysdeps + profiler libs.
+#   2. libamd_comgr_loader.so is a stub that dlopens the real
+#      libamd_comgr.so.3 at runtime; ldd does NOT see that runtime
+#      dlopen, so bundling the stub without the real lib silently
+#      breaks the artifact for any consumer who lacks TheRock on PATH.
+#      Not shipping the stub at all forces consumers to set up the
+#      full TheRock SDK (which then has both the stub AND its target).
+#   3. ROCm runtime is host-environment in nature — version skew
+#      between bundled libamdhip64 and the host's kernel driver / KFD
+#      ioctl ABI is a real risk. Letting the host provide both kernel
+#      and userland keeps that interface consistent.
 #
 # Implementation:
-#   Pass 1 — ldd the EP + CLI tools with the dep prefixes on LD_LIBRARY_PATH
-#            so SONAMEs without RPATH still resolve; pick up every .so that
-#            lives under THEROCK_DIST_DIR or PREBUILT_DIR and copy it (plus
-#            its readlink target so the SONAME chain stays valid) into
-#            install/lib.
-#   Pass 2 — ldd the just-staged set so transitive deps (e.g. libamdhip64 ->
-#            librocprofiler-register, libhsa-runtime64 -> librocm_sysdeps_*)
-#            are caught.
-# We deliberately do NOT copy /usr/lib/x86_64-linux-gnu/libLLVM.so.22.1 et al.
-# — those are container apt packages on the default ld.so search path; they
-# stay system-managed.
-step "A.7b  Stage runtime .so into install/lib"
+#   Pass 1 — ldd the EP + CLI tools with TheRock + prebuilt-local on
+#            LD_LIBRARY_PATH so all SONAMEs resolve; pick up every .so
+#            whose resolved path lives under PREBUILT_DIR and copy it
+#            (plus its readlink target so the SONAME chain stays
+#            valid) into install/lib.
+#   Pass 2 — ldd the just-staged set so transitive deps within
+#            prebuilt-local (e.g. onnxruntime_providers_shared.so)
+#            are caught. With TheRock excluded the pass converges in
+#            1-2 iterations.
+# /usr/lib/x86_64-linux-gnu/libLLVM.so.22.1 et al. also stay system-
+# managed (container apt packages on the default ld.so search path).
+step "A.7b  Stage runtime .so into install/lib (prebuilt-local only)"
 stage_from_ldd_pass() {
     LD_LIBRARY_PATH="$THEROCK_DIST_DIR/lib:$PREBUILT_DIR/lib:$INSTALL_DIR/lib" \
         ldd "$@" 2>/dev/null \
-        | awk -v t="$THEROCK_DIST_DIR" -v p="$PREBUILT_DIR" \
-              '$3 ~ t || $3 ~ p {print $3}' \
+        | awk -v p="$PREBUILT_DIR" '$3 ~ p {print $3}' \
         | sort -u \
         | while read -r src; do
             dst="$INSTALL_DIR/lib/$(basename "$src")"
@@ -468,21 +485,33 @@ if [ "$BUILD_OGA" = "1" ]; then
         "$INSTALL_DIR"/lib/libonnxruntime-genai.so*
 fi
 
-# Final closure check: with ONLY install/lib on LD_LIBRARY_PATH, every binary
-# under install/bin and every .so under install/lib must resolve all of its
-# DT_NEEDED entries. Runs AFTER A.9 so OGA's deps are covered.
+# Final closure check: with install/lib + therock-dist/lib on
+# LD_LIBRARY_PATH, every binary under install/bin and every .so under
+# install/lib must resolve all of its DT_NEEDED entries. Runs AFTER A.9
+# so OGA's deps are covered.
+#
+# Why include therock-dist/lib instead of just install/lib: per A.7b we
+# intentionally do NOT bundle TheRock-origin .so files into install/lib
+# (consumers are expected to set THEROCK_DIST and add it to their
+# LD_LIBRARY_PATH at runtime, matching the Windows artifact contract).
+# The check therefore reflects the actual supported invocation:
+#     LD_LIBRARY_PATH=$ROOT/lib:$THEROCK_DIST/lib
+# (documented in docs/quick_start_linux.md "Open a container shell").
 #
 # Failure here means the artifact will break on a fresh host (where the
-# build-host's apt LLVM / TheRock / ORT prefixes are absent) — better to
-# surface it now than ship a broken linux-gpu-test-package.
-step "Verify install/ closure (LD_LIBRARY_PATH=install/lib)"
+# build-host's apt LLVM / ORT prefixes are absent), or that something
+# leaked into install/lib that needed a prefix outside the supported
+# {install, therock-dist, system-apt} set — better to surface it now
+# than ship a broken linux-gpu-test-package.
+step "Verify install/ closure (LD_LIBRARY_PATH=install/lib:therock-dist/lib)"
 verify_install_closure() {
     local fail=0
     local target unresolved
     while IFS= read -r target; do
         # ldd a non-ELF file (e.g. shell wrapper script we accidentally
         # dropped into bin/) prints "not a dynamic executable" — skip those.
-        unresolved=$(LD_LIBRARY_PATH="$INSTALL_DIR/lib" ldd "$target" 2>&1 \
+        unresolved=$(LD_LIBRARY_PATH="$INSTALL_DIR/lib:$THEROCK_DIST_DIR/lib" \
+                     ldd "$target" 2>&1 \
                      | grep -F "not found" || true)
         if [ -n "$unresolved" ]; then
             echo "ERROR: unresolved deps in $target:" >&2
