@@ -1008,6 +1008,17 @@ int wrap_multi_head_attention(
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
     int64_t query_rank, int64_t element_size_bytes);
 
+// PagedAttention (com.microsoft) compilation stub. This entry preserves the
+// compiler/runtime ABI but does not compute attention yet.
+int wrap_paged_attention(
+    RuntimeState *state, void *query, void *key, void *value, void *key_cache,
+    void *value_cache, void *cumulative_sequence_length, void *past_seqlens,
+    void *block_table, void *cos_cache, void *sin_cache, void *output,
+    void *key_cache_out, void *value_cache_out, int64_t num_heads,
+    int64_t kv_num_heads, int64_t do_rotary, int64_t rotary_interleaved,
+    int64_t local_window_size, float scale, float softcap, int64_t num_tokens,
+    int64_t query_dim1, int64_t element_size_bytes);
+
 // Generic element-wise tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via the custom HIP kernels
 // (flat int kernels + hip_expand for int16/int32/int64, the native
