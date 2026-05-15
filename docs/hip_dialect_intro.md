@@ -190,8 +190,14 @@ Details of `--convert-hip-to-llvm`:
 - **`!hip.context`** is converted to `!llvm.ptr`.
 
 The `hip-compiler` tool runs this pipeline automatically, then translates
-the resulting LLVM dialect to LLVM IR, generates a native `.obj`, and links it
-with `runtime.bc` (pre-compiled bitcode) and external libraries to produce a `.dll`.
+the resulting LLVM dialect to LLVM IR, merges in `runtime.bc` (the
+pre-compiled host-side runtime) via `LLVMBackend::linkRuntimeModule`,
+and emits the result as a single LLVM bitcode `.bc` file. The EP DLL
+loads that bitcode in-process via `BitcodeJIT` (ORC LLJIT) at session
+creation — there is no native object-file or DLL link step on the
+per-model artifact path. External GPU libraries (`amdhip64`, `MIOpen`,
+`hipblaslt`) are resolved at JIT-link time by walking the symbols
+already loaded in the host process.
 
 For manual debugging, `hip-mlir-opt` can run the pass pipeline in isolation:
 `--one-shot-bufferize="bufferize-function-boundaries"`,

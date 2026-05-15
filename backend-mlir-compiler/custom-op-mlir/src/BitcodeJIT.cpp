@@ -246,10 +246,12 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
   // Stage 2a: explicitly LoadLibrary the ROCm shared libraries that the
   // per-model bitcode calls into through the merged runtime.bc (MIOpen,
   // hipBLASLt, hipDNN backend). The EP DLL itself only imports amdhip64
-  // directly -- the higher-level ROCm libs were previously loaded
-  // transitively when each model.dll imported them, but that path is
-  // gone now. We load them once at JIT-init time so subsequent symbol
-  // resolution via GetForCurrentProcess finds them.
+  // directly -- under the previous per-model-DLL build the higher-level
+  // ROCm libs came in transitively because each generated model imported
+  // them as DLL imports, but the bitcode path has no static-link step,
+  // so we load them once at JIT-init time and ORC's
+  // GetForCurrentProcess resolver picks up their symbols on subsequent
+  // lookups.
   //
   // Each Load failure is logged but tolerated: a model that doesn't
   // touch MIOpen (e.g. a pure-kernel test bitcode) should still JIT,

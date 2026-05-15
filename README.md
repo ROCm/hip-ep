@@ -100,12 +100,14 @@ These operations are handled through standard MLIR transformations without requi
 │      ↓                                                       │
 │  hip-to-llvm-pipeline                                        │
 │      convert-hip-to-llvm (HIP ops → runtime C API calls)    │
-│      generate-interface (inference_init/compute/cleanup)     │
+│      generate-interface (inference_init/compute/cleanup/    │
+│                          get_metadata_json)                  │
 │      ↓                                                       │
-│  MLIR → LLVM IR → merge runtime.bc → optimize → link        │
-│      ↓                          ↑                            │
-│  model.dll              amdhip64 / MIOpen / hipblaslt /      │
-│  + constants.bin         hip_custom_kernels.lib               │
+│  MLIR → LLVM IR → linkRuntimeModule (merges runtime.bc)     │
+│              → optimize → emit LLVM bitcode                  │
+│      ↓                                                       │
+│  model.bc + constants.bin                                    │
+│    (embedded in EPContext sidecar; no per-model link step)   │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
                      ↓
@@ -113,14 +115,28 @@ These operations are handled through standard MLIR transformations without requi
 │                          RUNTIME                               │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  Load model.dll + constants.bin                              │
+│  BitcodeJIT::create(model.bc)  ── in-process ORC LLJIT       │
+│      ↓                                                       │
+│   ORC resolves external symbols via                          │
+│   DynamicLibrarySearchGenerator::GetForCurrentProcess:       │
+│     - hip_* launchers (from the EP DLL itself, WHOLE_ARCHIVE) │
+│     - amdhip64 / MIOpen / hipblaslt entry points             │
+│     - MSVC CRT helpers (operator new/delete, emutls shims)   │
 │      ↓                                                       │
 │  inference_init   → GPU handles, upload constants, alloc pool│
 │  inference_compute → execute ops (MIOpen/hipBLASLt/kernels)  │
 │  inference_cleanup → free GPU resources                      │
 │                                                              │
-│  Dependencies: amdhip64.dll, MIOpen.dll, hipblaslt.dll       │
-│  No LLVM/MLIR needed at inference time                       │
+│  Loaded host DLLs:                                           │
+│    onnxruntime_morphizen_ep.dll (signed; hosts BitcodeJIT)   │
+│    hip-compiler.dll              (signed; only at compile)   │
+│    amdhip64.dll, MIOpen.dll, hipblaslt.dll                   │
+│                                                              │
+│  No separate LLVM / MLIR DLL on the inference path: ORC      │
+│  LLJIT is statically linked into onnxruntime_morphizen_ep.dll,│
+│  and runtime.bc was already merged into the per-model bitcode│
+│  at compile time. The MLIR passes themselves only run at     │
+│  compile time, inside hip-compiler.dll.                      │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```

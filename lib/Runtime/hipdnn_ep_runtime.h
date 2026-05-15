@@ -299,7 +299,7 @@ typedef struct {
 // / add / remove a field in one copy and forget to mirror it in the others,
 // at least one of them fails to build. Per-field offsets (not raw sizeof)
 // because trailing padding after `memory_type` is compiler-defined and not
-// part of what model.dll actually reads.
+// part of what the JIT'd bitcode actually reads.
 static_assert(offsetof(tensor_t, data) == 0,
               "tensor_t.data must remain the first field");
 static_assert(offsetof(tensor_t, shape) == sizeof(void *),

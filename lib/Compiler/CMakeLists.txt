@@ -71,8 +71,12 @@ if(NOT BUILD_MOCK_RUNTIME AND CMAKE_INSTALL_PREFIX)
     message(STATUS "Custom kernels lib path for CompilerDriver: ${_custom_kernels_lib}")
 endif()
 
-# hipDNN graph runtime import library path for model.dll linking.
-# Uses generator expression to get the actual import library location.
+# hipDNN graph runtime import library path. Defined for legacy reasons:
+# under the previous per-model-DLL flow, CompilerDriver added this path
+# to the per-model link line. The bitcode path has no per-model link
+# step (the EP JITs the .bc in-process), so the HIPDNN_GRAPH_RUNTIME_LIB_PATH
+# preprocessor symbol is currently unread; the OnnxToHipDNN link is what
+# this block actually still needs to do. Cleanup tracked separately.
 if(TARGET hipdnn_graph_runtime)
     target_compile_definitions(LibHipCompiler PRIVATE
         "HIPDNN_GRAPH_RUNTIME_LIB_PATH=\"$<TARGET_LINKER_FILE:hipdnn_graph_runtime>\""
