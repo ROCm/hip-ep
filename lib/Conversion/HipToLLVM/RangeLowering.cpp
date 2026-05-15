@@ -84,8 +84,8 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
 
 } // namespace
 
-void mlir::hip::populateRangeLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns) {
   patterns.add<RangeOpLowering>(converter);
 }
 

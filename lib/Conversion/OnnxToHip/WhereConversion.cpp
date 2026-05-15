@@ -127,8 +127,8 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateWhereConversionPatterns(RewritePatternSet &patterns,
-                                                MLIRContext *ctx) {
+void populateWhereConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx) {
   patterns.add<WhereToHip>(ctx);
 }
 
