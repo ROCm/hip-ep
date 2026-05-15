@@ -122,10 +122,27 @@ void ensureLLVMNativeTargetInitialized() {
 // (InferenceState, MlirCustomOp) don't need an LLVM include path.
 struct BitcodeJIT::Impl {
   std::unique_ptr<llvm::orc::LLJIT> jit;
+  // Whether `jit->initialize(MainJITDylib)` has run successfully. We
+  // mirror it in the destructor so we only call `deinitialize` when
+  // initialization actually completed, and so we can skip the call
+  // entirely if the JIT was torn down half-built.
+  bool initialized = false;
 };
 
 BitcodeJIT::BitcodeJIT() : impl_(std::make_unique<Impl>()) {}
-BitcodeJIT::~BitcodeJIT() = default;
+
+BitcodeJIT::~BitcodeJIT() {
+  if (impl_ && impl_->jit && impl_->initialized) {
+    // Run `@llvm.global_dtors` for the JIT'd module. Errors here are
+    // logged but not propagated -- we're in a destructor and any
+    // failure would just mean static destructors are skipped, which
+    // is no worse than what we did before this destructor existed.
+    if (auto err = impl_->jit->deinitialize(impl_->jit->getMainJITDylib())) {
+      LOG(WARNING) << "BitcodeJIT::~BitcodeJIT: deinitialize failed: "
+                   << llvm::toString(std::move(err));
+    }
+  }
+}
 
 std::unique_ptr<BitcodeJIT>
 BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
@@ -298,8 +315,36 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
     return nullptr;
   }
 
+  // Stage 5: run `@llvm.global_ctors`.
+  //
+  // The merged runtime bitcode pulls in ~8 static initializers (RNG
+  // state in hipdnn_ep_runtime_tensor.cpp, op-profile counters, MIOpen
+  // descriptor caches, gemm/matmul fast-path tables, ...). In the
+  // previous native-DLL artifact path, MSVC's linker wired these into
+  // the per-model DLL's `.CRT$XCU` section and the Windows loader ran
+  // them on `LoadLibraryW`. In the bitcode path there is no DLL load,
+  // and ORC LLJIT does NOT run constructors on its own -- the caller
+  // is required to invoke `LLJIT::initialize` on the JITDylib that
+  // owns the module.
+  //
+  // Skipping this call manifests as a hard-to-diagnose access
+  // violation deep inside compute: `inference_init` completes (it
+  // touches only zero-initialized state), then the first
+  // `inference_compute` reads from a static cache that is still
+  // zero-filled, dereferences a null vtable pointer, and crashes at
+  // a fixed offset inside a JIT'd page. Symmetrically, we run
+  // `deinitialize` in the destructor so static destructors get a
+  // chance to release resources (cudaFree-equivalent on cached
+  // descriptors, etc.) when the InferenceState is dropped.
+  if (auto err = jit->initialize(jit->getMainJITDylib())) {
+    LOG(ERROR) << "BitcodeJIT::create: initialize (global_ctors) failed: "
+               << llvm::toString(std::move(err));
+    return nullptr;
+  }
+
   std::unique_ptr<BitcodeJIT> result(new BitcodeJIT());
   result->impl_->jit = std::move(jit);
+  result->impl_->initialized = true;
   return result;
 }
 
