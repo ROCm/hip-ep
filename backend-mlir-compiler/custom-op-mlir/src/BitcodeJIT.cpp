@@ -9,9 +9,14 @@
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/ExecutionEngine/RTDyldMemoryManager.h>
+#include <llvm/ExecutionEngine/RuntimeDyld.h>
+#include <llvm/ExecutionEngine/SectionMemoryManager.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/Alignment.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
@@ -22,6 +27,11 @@
 #include <mutex>
 #include <new>
 #include <typeinfo>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace mlir_compilation::customop {
 
@@ -40,6 +50,245 @@ void ensureLLVMNativeTargetInitialized() {
     llvm::InitializeNativeTargetAsmParser();
   });
 }
+
+// `OrderedSlabMemoryManager` -- single-slab in-process allocator for
+// `RuntimeDyld` that satisfies the Windows COFF x86_64
+// `IMAGE_REL_AMD64_ADDR32NB` constraint.
+//
+// Why a custom memory manager:
+//   On x86_64 Windows, the COFF ABI emits `.pdata` / `.xdata` (Win64
+//   exception unwind info) for every non-leaf function. Those tables
+//   reference `.text` addresses via `IMAGE_REL_AMD64_ADDR32NB` (a
+//   32-bit RVA = `target - ImageBase`). The compiler emits these
+//   unconditionally -- `-fno-exceptions` does not suppress them, and
+//   neither does the Large code model -- because Windows uses
+//   `.pdata` for OS-level stack unwinding, not just C++ exceptions.
+//
+//   `RuntimeDyld`'s default allocator (`SectionMemoryManager`) calls
+//   `sys::Memory::allocateMappedMemory` independently for each
+//   section group (code / read-only / read-write). The OS may place
+//   those slabs anywhere in the 64-bit virtual address space, so the
+//   target's RVA from `ImageBase` (the lowest section's load
+//   address) can easily exceed `UINT32_MAX`. RuntimeDyld's COFF
+//   x86_64 resolver detects this and aborts the JIT with:
+//
+//       LLVM ERROR: IMAGE_REL_AMD64_ADDR32NB relocation requires an
+//                   ordered section layout
+//
+//   This reliably blocks the JIT on LLM-scale bitcode (Llama,
+//   GPT-OSS) and is intermittent on smaller graphs.
+//
+// The fix:
+//   Reserve a SINGLE contiguous virtual region big enough for all
+//   three section groups, then dole out chunks from it. Within one
+//   `VirtualAlloc` reservation every section's address is, by
+//   construction, within `requested_size` bytes of the slab base, so
+//   `target - ImageBase` always fits in 32 bits (for any per-model
+//   bitcode below ~2 GB of generated code + data, which is many
+//   orders of magnitude above what we ever produce).
+//
+// Layout inside the slab (page-aligned regions, code first to keep
+// the ABI-suggested "text < rodata < data" order):
+//
+//   +------ slab base (page-aligned, used as ImageBase) ------+
+//   | Code  (PAGE_EXECUTE_READ after finalizeMemory)          |
+//   +---------------------------------------------------------+
+//   | ROData (PAGE_READONLY after finalizeMemory)             |
+//   +---------------------------------------------------------+
+//   | RWData (PAGE_READWRITE; remains writable)               |
+//   +---------------------------------------------------------+
+//
+// On non-Windows builds this class compiles but the wiring at the
+// LLJIT level only installs it on Windows -- Linux ELF + RuntimeDyld
+// has no analogous relocation issue, so we keep the upstream
+// `SectionMemoryManager` there.
+//
+// We still inherit from `SectionMemoryManager` so we pick up the
+// default stub-allocator, EH-frame registrar, and notifyObjectLoaded
+// glue; only the section allocation path is overridden.
+class OrderedSlabMemoryManager : public llvm::SectionMemoryManager {
+public:
+  OrderedSlabMemoryManager() = default;
+
+  ~OrderedSlabMemoryManager() override {
+#ifdef _WIN32
+    if (slab_base_) {
+      ::VirtualFree(slab_base_, 0, MEM_RELEASE);
+      slab_base_ = nullptr;
+    }
+#endif
+  }
+
+  bool needsToReserveAllocationSpace() override { return true; }
+
+  void reserveAllocationSpace(uintptr_t code_size, llvm::Align code_align,
+                              uintptr_t ro_size, llvm::Align ro_align,
+                              uintptr_t rw_size,
+                              llvm::Align rw_align) override {
+#ifdef _WIN32
+    SYSTEM_INFO si{};
+    ::GetSystemInfo(&si);
+    const size_t page_size = si.dwPageSize;
+
+    // Round each group up to a page boundary so we can set page
+    // protection per group in `finalizeMemory`. Also enforce the
+    // requested per-section alignment within the group so the very
+    // first allocation in each group lands on the right boundary.
+    auto round_group_size = [&](uintptr_t size, llvm::Align align) {
+      uintptr_t with_align = llvm::alignTo(size, align);
+      return llvm::alignTo(with_align, page_size);
+    };
+    const size_t code_region = round_group_size(code_size, code_align);
+    const size_t ro_region = round_group_size(ro_size, ro_align);
+    const size_t rw_region = round_group_size(rw_size, rw_align);
+    const size_t total = code_region + ro_region + rw_region;
+    if (total == 0)
+      return;
+
+    // Reserve + commit the entire slab as RW (not RWX); RuntimeDyld
+    // writes the code bytes via plain stores, then we flip the code
+    // region to RX in `finalizeMemory`. This keeps DEP / W^X happy
+    // for the steady-state code pages.
+    slab_base_ = static_cast<uint8_t *>(::VirtualAlloc(
+        nullptr, total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    CHECK(slab_base_) << "OrderedSlabMemoryManager: VirtualAlloc(" << total
+                      << ") failed, GetLastError=" << ::GetLastError();
+    slab_size_ = total;
+
+    code_base_ = slab_base_;
+    code_end_ = code_base_ + code_region;
+    code_cursor_ = code_base_;
+    code_limit_ = code_end_;
+
+    ro_base_ = code_end_;
+    ro_end_ = ro_base_ + ro_region;
+    ro_cursor_ = ro_base_;
+    ro_limit_ = ro_end_;
+
+    rw_base_ = ro_end_;
+    rw_end_ = rw_base_ + rw_region;
+    rw_cursor_ = rw_base_;
+    rw_limit_ = rw_end_;
+#else
+    // Non-Windows: this manager isn't on the resolution path; fall
+    // back to the inherited default. We still match the override
+    // signature for ABI symmetry on platforms that include the
+    // header.
+    (void)code_size;
+    (void)code_align;
+    (void)ro_size;
+    (void)ro_align;
+    (void)rw_size;
+    (void)rw_align;
+#endif
+  }
+
+  uint8_t *allocateCodeSection(uintptr_t size, unsigned alignment,
+                               unsigned section_id,
+                               llvm::StringRef section_name) override {
+#ifdef _WIN32
+    if (slab_base_)
+      return alignedBump(code_cursor_, code_limit_, size, alignment, "code",
+                         section_name);
+#endif
+    return llvm::SectionMemoryManager::allocateCodeSection(
+        size, alignment, section_id, section_name);
+  }
+
+  uint8_t *allocateDataSection(uintptr_t size, unsigned alignment,
+                               unsigned section_id,
+                               llvm::StringRef section_name,
+                               bool is_read_only) override {
+#ifdef _WIN32
+    if (slab_base_) {
+      uint8_t *&cursor = is_read_only ? ro_cursor_ : rw_cursor_;
+      uint8_t *limit = is_read_only ? ro_limit_ : rw_limit_;
+      return alignedBump(cursor, limit, size, alignment,
+                         is_read_only ? "rodata" : "rwdata", section_name);
+    }
+#endif
+    return llvm::SectionMemoryManager::allocateDataSection(
+        size, alignment, section_id, section_name, is_read_only);
+  }
+
+  bool finalizeMemory(std::string *err_msg = nullptr) override {
+#ifdef _WIN32
+    if (slab_base_) {
+      // Tighten page protections: code is RX, rodata is R, rwdata
+      // stays RW. `VirtualProtect` requires page-aligned regions;
+      // each group's size is already rounded up to a page in
+      // reserveAllocationSpace.
+      DWORD old_protect = 0;
+      const size_t code_region = static_cast<size_t>(code_end_ - code_base_);
+      const size_t ro_region = static_cast<size_t>(ro_end_ - ro_base_);
+      if (code_region > 0 &&
+          !::VirtualProtect(code_base_, code_region, PAGE_EXECUTE_READ,
+                            &old_protect)) {
+        if (err_msg) {
+          *err_msg = "OrderedSlabMemoryManager: VirtualProtect(code, RX) "
+                     "failed, GetLastError=" +
+                     std::to_string(::GetLastError());
+        }
+        return true;
+      }
+      if (ro_region > 0 &&
+          !::VirtualProtect(ro_base_, ro_region, PAGE_READONLY, &old_protect)) {
+        if (err_msg) {
+          *err_msg = "OrderedSlabMemoryManager: VirtualProtect(ro, R) "
+                     "failed, GetLastError=" +
+                     std::to_string(::GetLastError());
+        }
+        return true;
+      }
+      // Flush the icache so freshly written code is observable.
+      ::FlushInstructionCache(::GetCurrentProcess(), code_base_, code_region);
+      return false;
+    }
+#endif
+    return llvm::SectionMemoryManager::finalizeMemory(err_msg);
+  }
+
+private:
+#ifdef _WIN32
+  uint8_t *alignedBump(uint8_t *&cursor, uint8_t *limit, uintptr_t size,
+                       unsigned alignment, const char *group_label,
+                       llvm::StringRef section_name) {
+    if (alignment == 0)
+      alignment = 16;
+    uintptr_t addr = reinterpret_cast<uintptr_t>(cursor);
+    addr = llvm::alignTo(addr, alignment);
+    uint8_t *ptr = reinterpret_cast<uint8_t *>(addr);
+    if (ptr + size > limit) {
+      // Reservation was too small. This should not happen given
+      // RuntimeDyld asks for the right totals up front, but we'd
+      // rather crash loudly here than silently corrupt the slab.
+      LOG(FATAL) << "OrderedSlabMemoryManager: " << group_label
+                 << " region exhausted (section=" << section_name.str()
+                 << ", requested=" << size << ")";
+    }
+    cursor = ptr + size;
+    return ptr;
+  }
+
+  uint8_t *slab_base_ = nullptr;
+  size_t slab_size_ = 0;
+
+  uint8_t *code_base_ = nullptr;
+  uint8_t *code_end_ = nullptr;
+  uint8_t *code_cursor_ = nullptr;
+  uint8_t *code_limit_ = nullptr;
+
+  uint8_t *ro_base_ = nullptr;
+  uint8_t *ro_end_ = nullptr;
+  uint8_t *ro_cursor_ = nullptr;
+  uint8_t *ro_limit_ = nullptr;
+
+  uint8_t *rw_base_ = nullptr;
+  uint8_t *rw_end_ = nullptr;
+  uint8_t *rw_cursor_ = nullptr;
+  uint8_t *rw_limit_ = nullptr;
+#endif
+};
 
 #ifdef _WIN32
 
@@ -222,11 +471,52 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
                    const std::string &module_name) {
   ensureLLVMNativeTargetInitialized();
 
-  // Stage 1: build a default LLJIT instance. The default builder picks a
-  // host TargetMachine (X86 on the current builds) with O2-class codegen
-  // and the legacy RuntimeDyld+ORC linking layer, which is the
-  // best-tested configuration on Windows.
-  auto jit_or_err = llvm::orc::LLJITBuilder().create();
+  // Stage 1: build an LLJIT instance using RuntimeDyld backed by our
+  // single-slab `OrderedSlabMemoryManager` so the COFF x86_64
+  // `IMAGE_REL_AMD64_ADDR32NB` resolver in RuntimeDyld can lower
+  // `.pdata` / `.xdata` references on Windows. The default
+  // `SectionMemoryManager` allocates each section group from a
+  // separate `VirtualAlloc` slab, which causes the resolver to abort
+  // with `LLVM ERROR: ... requires an ordered section layout` once
+  // any per-model bitcode emits unwind tables that span the gap.
+  // See the comment block above `OrderedSlabMemoryManager` for the
+  // full rationale.
+  //
+  // On non-Windows hosts the override is still installed for code
+  // simplicity; `reserveAllocationSpace` is a no-op there and the
+  // inherited `SectionMemoryManager` paths run as before.
+  // Mirrors `LLJIT::createObjectLinkingLayer`'s default body for the
+  // RTDyld + COFF path, but swaps `SectionMemoryManager` out for our
+  // `OrderedSlabMemoryManager`. The two `set*` calls on the layer
+  // are required on Windows COFF -- without them RTDyld treats
+  // certain hidden / weak / COMDAT symbols inconsistently and
+  // materialization on `LLJIT::initialize` spins for orders of
+  // magnitude longer than it should (matmul_1 went from a 2.6 s
+  // session create to >3 min hang while we were tracking this down).
+  auto jit_or_err =
+      llvm::orc::LLJITBuilder()
+          .setObjectLinkingLayerCreator(
+              [](llvm::orc::ExecutionSession &es)
+                  -> llvm::Expected<std::unique_ptr<llvm::orc::ObjectLayer>> {
+                auto layer =
+                    std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
+                        es, [](const llvm::MemoryBuffer &) {
+                          return std::make_unique<OrderedSlabMemoryManager>();
+                        });
+#ifdef _WIN32
+                // Match the default `LLJIT::createObjectLinkingLayer`
+                // behavior for the RTDyld + COFF path. These two
+                // flags are critical: without them RTDyld
+                // mis-handles hidden / weak / COMDAT symbols on
+                // Windows and `LLJIT::initialize` spins for orders
+                // of magnitude longer than it should.
+                layer->setOverrideObjectFlagsWithResponsibilityFlags(true);
+                layer->setAutoClaimResponsibilityForObjectSymbols(true);
+#endif
+                return std::unique_ptr<llvm::orc::ObjectLayer>(
+                    std::move(layer));
+              })
+          .create();
   if (!jit_or_err) {
     LOG(ERROR) << "BitcodeJIT::create: LLJITBuilder failed: "
                << llvm::toString(jit_or_err.takeError());
