@@ -28,7 +28,9 @@ namespace mlir_compilation::customop {
 // which walks every module already loaded in the host process. In
 // practice that means:
 //   * `hip_*` GPU kernel launchers (exported from the EP DLL itself --
-//     see `3rd-party/morphizen/morphizen-core/onnxruntime_morphizen_ep.def`)
+//     each declaration in `3rd-party/custom_kernels/include/hip_custom_kernels.h`
+//     is tagged with `HIP_KERNEL_API` (= `__declspec(dllexport)` on Windows),
+//     and the static lib is linked WHOLE_ARCHIVE into the EP DLL)
 //   * `libamdhip64.dll` HIP runtime entry points
 //   * `MIOpen.dll`, `hipblaslt.dll`
 //   * the MSVC / GNU C runtime (`memcpy`, `memset`, exception machinery, ...)

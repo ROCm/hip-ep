@@ -228,7 +228,15 @@ The `custom_kernels/CMakeLists.txt` install rules ensure that after `cmake --ins
 - `<prefix>/lib/hip_custom_kernels.lib` -- static library with compiled HIP kernels (fat binaries)
 - `<prefix>/include/hip_custom_kernels.h` -- pure C header for the kernel API
 
-`hip_custom_kernels` is statically linked into `onnxruntime_morphizen_ep.dll` (see `3rd-party/morphizen/morphizen-core/CMakeLists.txt`). The kernel launchers are exported from the EP DLL via `onnxruntime_morphizen_ep.def`, so the per-model bitcode JITted by `BitcodeJIT` resolves them as ordinary process-wide symbols. The compiler does not need to link the kernel `.lib` anymore.
+`hip_custom_kernels` is linked **WHOLE_ARCHIVE** into `onnxruntime_morphizen_ep.dll` (see `backend-mlir-compiler/custom-op-mlir/CMakeLists.txt`). Each launcher in `hip_custom_kernels.h` is declared with the `HIP_KERNEL_API` macro, which expands to `__declspec(dllexport)` on Windows (and default ELF visibility on Linux) only when the `HIP_CUSTOM_KERNELS_EXPORTS` define is set — and the static lib's `CMakeLists.txt` sets that define PRIVATE on `hip_custom_kernels` so it applies only while compiling the kernel TUs.
+
+Result:
+
+- Each kernel `.obj` carries a `/EXPORT:hip_xxx` directive in its `.drectve` section (PE/COFF) or default visibility (ELF).
+- `WHOLE_ARCHIVE` forces every kernel `.obj` into the EP DLL, firing all those directives and running every `__hipRegisterFatBinary` CRT initializer.
+- The per-model bitcode JIT'd by `BitcodeJIT` resolves `hip_*` symbols as ordinary process-wide exports via ORC's `GetForCurrentProcess` generator.
+
+**The kernel header is the single source of truth.** Adding `HIP_KERNEL_API` to a new launcher in `hip_custom_kernels.h` is the only per-kernel action required — there is no `.def` file or parallel symbol list to maintain. The compiler does not need to link the kernel `.lib` anymore either.
 
 ### 10. `custom_kernels/hip/matmul_nbits_kernel.hip`
 

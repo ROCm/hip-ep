@@ -26,7 +26,22 @@ if(NOT HIP_ARCHITECTURES)
 endif()
 message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 
-# Build the static library from HIP sources
+# Build the static library from HIP sources.
+#
+# COMPILE_DEFINITIONS HIP_CUSTOM_KERNELS_EXPORTS causes the HIP_KERNEL_API
+# macro in hip_custom_kernels.h to expand to __declspec(dllexport) on Windows
+# (or default ELF visibility on Linux) for every launcher declaration. The
+# compiler then emits a `/EXPORT:hip_xxx` directive into the `.drectve`
+# section of each kernel .obj, which is honored when the static lib is linked
+# WHOLE_ARCHIVE into onnxruntime_morphizen_ep.dll (see backend-mlir-compiler/
+# custom-op-mlir/CMakeLists.txt). The kernel-name list is therefore
+# authoritative in `include/hip_custom_kernels.h` -- no parallel .def list to
+# maintain.
+#
+# The definition is PRIVATE: only the kernel TUs of this static library see
+# it. Consumers that merely *include* the header (runtime bitcode TUs, hipcc
+# dispatch logic, tests) compile without the define, so they see the
+# launchers as ordinary `extern "C"` symbols with no attribute.
 hip_add_library(hip_custom_kernels STATIC
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
@@ -47,6 +62,8 @@ hip_add_library(hip_custom_kernels STATIC
     hip/causal_conv_step_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+    COMPILE_DEFINITIONS
+        HIP_CUSTOM_KERNELS_EXPORTS
 )
 
 # Export the library path for CompilerDriver to discover at model-compile time
