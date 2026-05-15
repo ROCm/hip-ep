@@ -1,8 +1,0 @@
-# 3rd-party dependencies
-
-package(default_visibility = ["//visibility:public"])
-
-# Export BUILD files for external dependencies
-exports_files([
-    "onnxruntime.BUILD",
-])
