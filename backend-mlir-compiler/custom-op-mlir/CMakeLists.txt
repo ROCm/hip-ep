@@ -108,22 +108,29 @@ if(DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET AND
 
   # Custom GPU kernels live inside the signed EP DLL after the bitcode
   # switch: the JIT-loaded per-model bitcode looks up `hip_*` launcher
-  # symbols (exported in onnxruntime_morphizen_ep[_with_ort_bridge].def)
-  # via ORC's GetForCurrentProcess search generator, and the hipcc-emitted
-  # CRT initializers in each kernel .obj register the embedded fatbin with
-  # libamdhip64 on EP-DLL load. The kernels lib is added by the root
-  # CMakeLists when BUILD_EP=ON and BUILD_MOCK_RUNTIME=OFF.
+  # symbols via ORC's GetForCurrentProcess search generator, and the
+  # hipcc-emitted CRT initializers in each kernel .obj register the
+  # embedded fatbin with libamdhip64 on EP-DLL load. The kernels lib is
+  # added by the root CMakeLists when BUILD_EP=ON and BUILD_MOCK_RUNTIME=OFF.
   #
-  # Plain (non-WHOLE_ARCHIVE) link is intentional: the .def file references
-  # each launcher symbol by name, which pulls in the corresponding kernel
-  # .obj along with its .CRT$XCU initializer and __hip_fatbin_wrapper
-  # rdata. WHOLE_ARCHIVE would still work but the morphizen-core-static
-  # transitivity comment above (re multiple WHOLE_ARCHIVE markers) makes
-  # the plain link the lower-risk choice.
+  # WHOLE_ARCHIVE is required: each kernel .obj is tagged with
+  # `__declspec(dllexport)` (see 3rd-party/custom_kernels/include/
+  # hip_custom_kernels.h + the `HIP_CUSTOM_KERNELS_EXPORTS` define on the
+  # static lib), but `/EXPORT` directives in `.drectve` are *not* strong
+  # references -- they only fire if the linker has already decided to
+  # pull the .obj in. Without WHOLE_ARCHIVE the linker would discard
+  # un-referenced kernel objects, dropping both the export directives and
+  # the fatbin CRT initializers. WHOLE_ARCHIVE forces every kernel .obj
+  # in, exporting all launchers and running every fatbin registration.
+  #
+  # Source of truth for the exported kernel set is therefore
+  # hip_custom_kernels.h alone: adding a launcher with HIP_KERNEL_API
+  # automatically surfaces it as an EP-DLL export, with no parallel
+  # .def list to keep in sync.
   if(TARGET hip_custom_kernels)
     target_link_libraries(
       ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
-      PRIVATE hip_custom_kernels
+      PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,hip_custom_kernels>"
     )
   endif()
 else()
