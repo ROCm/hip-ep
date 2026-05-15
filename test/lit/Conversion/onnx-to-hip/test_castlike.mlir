@@ -3,11 +3,14 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify ONNX CastLike is rewritten to a plain onnx.Cast (then to hip.cast
-// via the shared CastConversion pattern) by the convert-onnx-to-hip pass,
-// and that the now-dead type-donor function argument is dropped from the
-// function signature. The target dtype is statically known from the
-// CastLike result type, so no new Hip op is needed.
+// Verify the end-to-end CastLike lowering: hip-simplify-onnx rewrites
+// onnx.CastLike to plain onnx.Cast and drops the now-dead type-donor
+// function argument, then convert-onnx-to-hip lowers onnx.Cast to hip.cast
+// via the shared CastConversion pattern. The target dtype is statically
+// known from the CastLike result type, so no new Hip op is needed.
+//
+// (The hip-simplify-onnx pass is also tested in isolation in
+// test_simplify_onnx.mlir; this test covers the full chain to hip.cast.)
 //
 // Test cases:
 // 1. f32 → f16        (basic float narrowing; type-donor arg dropped)
@@ -16,7 +19,7 @@
 // 4. dynamic shape     (f32 → f16 with ?-dims; type-donor arg dropped)
 // ============================================================================
 
-// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --hip-simplify-onnx --convert-onnx-to-hip %s | FileCheck %s
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {
