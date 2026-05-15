@@ -1,16 +1,16 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * CumSum: y = cumulative-sum of x along `axis` (ONNX-14 attribute model:
- * exclusive / reverse flags, axis as input tensor).
- *
- * Source: onnxruntime/core/providers/cuda/math/cumsum_impl.cu @ v1.22.2.
- *
- * The axis input is a GPU scalar; we D2H-read it once per call. The lowering
- * already passes data_shape as a host int64 array, so the outer/axis/inner
- * decomposition is done on the host without inspecting GPU tensors.
  */
+
+// CumSum: y = cumulative-sum of x along `axis` (ONNX-14 attribute model:
+// exclusive / reverse flags, axis as input tensor).
+//
+// Source: onnxruntime/core/providers/cuda/math/cumsum_impl.cu @ v1.22.2.
+//
+// The axis input is a GPU scalar; we D2H-read it once per call. The lowering
+// already passes data_shape as a host int64 array, so the outer/axis/inner
+// decomposition is done on the host without inspecting GPU tensors.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -43,8 +43,8 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "r%lld:%s%s%s", (long long)data_rank,
-                 hipdnn_ep_datatype_name(data_type),
-                 exclusive ? ":excl" : "", reverse ? ":rev" : "");
+                 hipdnn_ep_datatype_name(data_type), exclusive ? ":excl" : "",
+                 reverse ? ":rev" : "");
         return std::string(b);
       },
       state);
@@ -83,8 +83,7 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
     hipError_t err = hipMemcpyAsync(&a32, axis, sizeof(int32_t),
                                     hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_cumsum: D2H axis (int32) failed: %s\n",
+      fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int32) failed: %s\n",
               hipGetErrorString(err));
       return -1;
     }
@@ -100,8 +99,7 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
     hipError_t err = hipMemcpyAsync(&axis_value, axis, sizeof(int64_t),
                                     hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_cumsum: D2H axis (int64) failed: %s\n",
+      fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int64) failed: %s\n",
               hipGetErrorString(err));
       return -1;
     }
@@ -124,8 +122,7 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
   if (axis_value < 0)
     axis_value += data_rank;
   if (axis_value < 0 || axis_value >= data_rank) {
-    fprintf(stderr,
-            "[REAL] wrap_cumsum: axis=%lld out of range [0, %lld)\n",
+    fprintf(stderr, "[REAL] wrap_cumsum: axis=%lld out of range [0, %lld)\n",
             (long long)axis_value, (long long)data_rank);
     return -1;
   }
