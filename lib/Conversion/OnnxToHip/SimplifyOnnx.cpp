@@ -4,8 +4,13 @@
  */
 //===- SimplifyOnnx.cpp - Pre-lowering ONNX graph simplifications --------===//
 //
-// Implements the hip-simplify-onnx pass. See HipSimplifyOnnxPass in
+// Implements the simplify-onnx pass. See SimplifyOnnxPass in
 // include/hip/Dialect/Transforms/Passes.td for the contract.
+//
+// The pass is pure ONNX-dialect: no HIP-dialect dependency. It is positioned
+// at the head of the pipeline (before hip-add-context-arg) so it operates in
+// the original ONNX function index space, which is also what makes it
+// straightforward to reuse from any other frontend.
 //
 // Adding a new simplifier
 // -----------------------
@@ -13,14 +18,13 @@
 //    anonymous namespace below. Its job is to rewrite the op locally and
 //    drop only its own operand uses; the shared dead-function-argument
 //    sweep at the bottom of runOnOperation handles arg-erasure.
-// 2. Call it from `HipSimplifyOnnxPass::runOnOperation` between the
+// 2. Call it from `SimplifyOnnxPass::runOnOperation` between the
 //    live-before-rewrite snapshot and the dead-arg sweep.
 // 3. Add a LIT test under test/lit/Conversion/onnx-to-hip/ exercising
-//    the new rewrite via `hip-mlir-opt --hip-simplify-onnx`.
+//    the new rewrite via `hip-mlir-opt --simplify-onnx`.
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -35,12 +39,12 @@
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallVector.h"
 
-#define DEBUG_TYPE "hip-simplify-onnx"
+#define DEBUG_TYPE "simplify-onnx"
 
 namespace mlir {
 namespace hip {
 
-#define GEN_PASS_DEF_HIPSIMPLIFYONNXPASS
+#define GEN_PASS_DEF_SIMPLIFYONNXPASS
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
@@ -103,21 +107,22 @@ static void simplifyCastLike(mlir::func::FuncOp funcOp) {
 // above). Arguments that were already dead in the input IR are deliberately
 // preserved -- generateModuleMetadata's "captures the original signature"
 // contract (asserted by test/lit/Pipeline/module-metadata.mlir) requires
-// that. The !hip.context argument is also preserved unconditionally.
+// that.
+//
+// Because this pass runs BEFORE hip-add-context-arg, no `!hip.context`
+// argument is ever present here -- the dead-arg sweep doesn't need a
+// dialect-specific "skip arg N" guard.
 static mlir::LogicalResult
 dropArgsKilledBySimplifiers(mlir::func::FuncOp funcOp,
                             llvm::ArrayRef<bool> wasLiveBeforeRewrite) {
   llvm::BitVector argsToErase(funcOp.getNumArguments());
   for (unsigned i : llvm::seq<unsigned>(0u, funcOp.getNumArguments())) {
-    mlir::Value arg = funcOp.getArgument(i);
-    if (mlir::isa<mlir::hip::ContextType>(arg.getType()))
-      continue;
-    if (wasLiveBeforeRewrite[i] && arg.use_empty())
+    if (wasLiveBeforeRewrite[i] && funcOp.getArgument(i).use_empty())
       argsToErase.set(i);
   }
   if (argsToErase.any() && mlir::failed(funcOp.eraseArguments(argsToErase)))
     return funcOp.emitError(
-        "failed to drop dead function arguments after hip-simplify-onnx");
+        "failed to drop dead function arguments after simplify-onnx");
   return mlir::success();
 }
 
@@ -125,8 +130,7 @@ dropArgsKilledBySimplifiers(mlir::func::FuncOp funcOp,
 // Pass
 //===----------------------------------------------------------------------===//
 
-struct HipSimplifyOnnxPass
-    : public impl::HipSimplifyOnnxPassBase<HipSimplifyOnnxPass> {
+struct SimplifyOnnxPass : public impl::SimplifyOnnxPassBase<SimplifyOnnxPass> {
 
   void runOnOperation() override {
     mlir::ModuleOp module = getOperation();
