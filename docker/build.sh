@@ -282,8 +282,7 @@ stage_from_ldd_pass \
     "$INSTALL_DIR/lib/libonnxruntime_morphizen_ep.so" \
     "$INSTALL_DIR/lib/libhip-compiler.so" \
     "$INSTALL_DIR/bin/hip-compiler" \
-    "$INSTALL_DIR/bin/hip-onnx-runner" \
-    "$INSTALL_DIR/bin/hip-test-dll"
+    "$INSTALL_DIR/bin/hip-onnx-runner"
 
 # Loop to a fixed point so second-level transitive deps are caught too.
 prev_count=0
