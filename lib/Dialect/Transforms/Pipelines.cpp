@@ -94,6 +94,10 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs) {
   pm.addPass(createHipAddContextArgPass());
+  // Pre-lowering ONNX-dialect simplifications (currently: CastLike -> Cast
+  // + drop dead type-donor function arguments). MUST run before
+  // convert-onnx-to-hip captures the function signatures as input metadata.
+  pm.addPass(createHipSimplifyOnnxPass());
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
@@ -114,6 +118,8 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
   pm.addPass(createHipAddContextArgPass());
+  // See sibling overload for rationale.
+  pm.addPass(createHipSimplifyOnnxPass());
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());
