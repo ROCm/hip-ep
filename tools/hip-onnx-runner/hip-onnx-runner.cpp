@@ -48,6 +48,7 @@ Options:
 #include <random>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if _WIN32
@@ -870,16 +871,45 @@ int main(int argc, char *argv[]) {
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
 
   const std::string kEpName = "MorphiZenExecutionProvider";
-  const std::string ep_dll = "onnxruntime_morphizen_ep.dll";
+#ifdef _WIN32
+  const std::string ep_lib_name = "onnxruntime_morphizen_ep.dll";
+#else
+  const std::string ep_lib_name = "libonnxruntime_morphizen_ep.so";
+#endif
 
   if (!no_ep) {
-    auto lib_path = std::filesystem::u8path(ep_dll);
-    if (!std::filesystem::exists(lib_path)) {
-      std::cerr << "EP library not found: " << ep_dll << "\n"
-                << "Set MORPHIZEN_VITISAI_EP or use -n.\n";
+    // Search order: $MORPHIZEN_EP_LIB (full path), then cwd, then sibling
+    // dirs of the runner exe (../lib for the install layout, same dir for a
+    // single-folder drop). First hit wins.
+    std::filesystem::path lib_path;
+    if (const char *env_lib = std::getenv("MORPHIZEN_EP_LIB");
+        env_lib && *env_lib) {
+      lib_path = std::filesystem::u8path(env_lib);
+    } else {
+      std::vector<std::filesystem::path> candidates{
+          std::filesystem::u8path(ep_lib_name),
+      };
+      std::error_code ec;
+      auto exe_dir = std::filesystem::weakly_canonical(
+                         std::filesystem::u8path(argv[0]), ec)
+                         .parent_path();
+      if (!ec && !exe_dir.empty()) {
+        candidates.push_back(exe_dir / ep_lib_name);
+        candidates.push_back(exe_dir.parent_path() / "lib" / ep_lib_name);
+      }
+      for (const auto &p : candidates) {
+        if (std::filesystem::exists(p)) {
+          lib_path = p;
+          break;
+        }
+      }
+    }
+    if (lib_path.empty() || !std::filesystem::exists(lib_path)) {
+      std::cerr << "EP library not found: " << ep_lib_name << "\n"
+                << "Set MORPHIZEN_EP_LIB to its full path, or use -n.\n";
       return 1;
     }
-    std::cout << "Registering EP: " << ep_dll << "\n";
+    std::cout << "Registering EP: " << lib_path.string() << "\n";
     auto *status = Ort::GetApi().RegisterExecutionProviderLibrary(
         env, kEpName.c_str(), lib_path.c_str());
     if (status) {
@@ -911,7 +941,14 @@ int main(int argc, char *argv[]) {
     }
     std::cout << "Found " << devices.size() << " EP device(s)\n";
 
-    session_opts.AppendExecutionProvider_V2(env, devices, {});
+    // ORT >=1.24 added an AppendExecutionProvider_V2 overload that accepts
+    // Ort::KeyValuePairs alongside the legacy std::unordered_map<string,string>
+    // version. Passing a brace-init `{}` is ambiguous against both candidates
+    // on the prebuilt Linux ORT package we ship here. Spell out the map type
+    // so we always bind to the original overload and stay compatible with the
+    // older ORT version we still link against on Windows.
+    session_opts.AppendExecutionProvider_V2(
+        env, devices, std::unordered_map<std::string, std::string>{});
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 

@@ -342,13 +342,18 @@ void CompilerDriver::discoverLibraries(
   libraries.push_back("amdhip64");
   libraries.push_back("MIOpen");
 
-  // hipblaslt ships as either .lib (Windows) or .dll.a (cross-compiled)
+  // hipblaslt ships as .lib (Windows), .dll.a (cross-compiled), or
+  // .so (native Linux). Bare name "hipblaslt" lets the linker resolve via
+  // -L<lib_dir> to libhipblaslt.so on Linux.
   std::string hipblaslt_lib = lib_dir + "/hipblaslt.lib";
   std::string hipblaslt_dll_a = lib_dir + "/libhipblaslt.dll.a";
+  std::string hipblaslt_so = lib_dir + "/libhipblaslt.so";
   if (llvm::sys::fs::exists(hipblaslt_lib))
     libraries.push_back("hipblaslt");
   else if (llvm::sys::fs::exists(hipblaslt_dll_a))
     libraries.push_back(hipblaslt_dll_a);
+  else if (llvm::sys::fs::exists(hipblaslt_so))
+    libraries.push_back("hipblaslt");
   else
     COMPILER_DEBUG_LOG("  WARNING: hipblaslt import library not found\n");
 

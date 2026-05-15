@@ -8,6 +8,7 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
+#include <llvm/Support/Program.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include "hip/debug_log.h"
@@ -15,12 +16,14 @@
 #include <fstream>
 #include <sstream>
 
-// LLD linker driver - use lldMain for crash recovery
+// In-process lld is only used by linkDLL_Windows (COFF). Linux uses a
+// subprocess `clang++ -shared -fuse-ld=lld` instead (see linkDLL_Linux for
+// the reason), so the ELF driver and lld::lldMain pull-in are scoped to
+// _WIN32 to keep the Linux build free of liblldELF / liblldCommon link deps.
+#ifdef _WIN32
 #include "lld/Common/Driver.h"
-
-// Still need to declare the link functions for driver registration
 LLD_HAS_DRIVER(coff)
-LLD_HAS_DRIVER(elf)
+#endif
 
 namespace hipdnn {
 
@@ -250,63 +253,75 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
                               const std::string &outputDLL,
                               const std::vector<std::string> &libraries,
                               const std::vector<std::string> &libraryPaths) {
-  // Build LLD-ELF command line arguments for shared library
-  std::vector<std::string> argStrings;
-  argStrings.push_back("ld.lld");  // Program name (required by LLD)
-  argStrings.push_back("-shared"); // Create shared library
-  argStrings.push_back("-o");
-  argStrings.push_back(outputDLL);
-  argStrings.push_back(objectFile);
-
-  // Add library paths
-  for (const auto &libPath : libraryPaths) {
-    argStrings.push_back("-L" + libPath);
-  }
-
-  // Add libraries
-  for (const auto &lib : libraries) {
-    argStrings.push_back("-l" + lib);
-  }
-
-  // Add RPATH for runtime library search
-  for (const auto &libPath : libraryPaths) {
-    argStrings.push_back("-rpath");
-    argStrings.push_back(libPath);
-  }
-
-  // Add default flags
-  argStrings.push_back("--export-dynamic"); // Export all symbols by default
-  argStrings.push_back("--no-undefined");   // Error on undefined symbols
-
-  // Convert to C-style args for LLD
-  std::vector<const char *> args;
-  for (const auto &arg : argStrings) {
-    args.push_back(arg.c_str());
-  }
-
-  // Call LLD linker library
-  std::string stdoutStr, stderrStr;
-  llvm::raw_string_ostream stdoutOS(stdoutStr);
-  llvm::raw_string_ostream stderrOS(stderrStr);
-
-  // Use lldMain for crash recovery instead of direct link() call
-  lld::Result result =
-      lld::lldMain(args, stdoutOS, stderrOS, {{lld::Gnu, &lld::elf::link}}
-                   // Register ELF driver
-      );
-
-  if (!stdoutStr.empty()) {
-    COMPILER_DEBUG_LOG(stdoutStr);
-  }
-  if (!stderrStr.empty()) {
-    llvm::errs() << stderrStr;
-  }
-
-  if (result.retCode != 0) {
-    llvm::errs() << "LLD-ELF failed with exit code: " << result.retCode << "\n";
-    if (!result.canRunAgain) {
-      llvm::errs() << "  Warning: Linker crashed, cannot run again\n";
+  // Delegate to `clang++ -shared` driver subprocess (vs in-process
+  // lld::lldMain). Driver owns crt + sysroot + multiarch -L + libgcc + the
+  // glibc 2.34 libpthread merge. Subprocess because lldMain SIGSEGVs on
+  // its post-output cleanup when libhip-compiler.so is dlopen'd into the
+  // EP host process (Windows linkDLL_Windows stays in-process — lld-link
+  // doesn't have this cleanup bug). clang++ (not bare clang) auto-links
+  // libstdc++ for the generated object's __cxa_begin_catch / __cxa_rethrow.
+  std::string clangPath;
+#ifdef HIPDNN_CLANG_PATH
+  clangPath = HIPDNN_CLANG_PATH;
+#endif
+  if (clangPath.empty() || !llvm::sys::fs::exists(clangPath)) {
+    auto found = llvm::sys::findProgramByName("clang++");
+    if (!found) {
+      // HIPDNN_LLVM_MAJOR is injected by lib/Target/LLVM/CMakeLists.txt
+      // from find_package(LLVM)'s LLVM_VERSION_MAJOR; stringify it so the
+      // apt package hint tracks the LLVM version the project actually
+      // configured against (instead of going stale on the next bump).
+#define HIPDNN_STRINGIFY_(x) #x
+#define HIPDNN_STRINGIFY(x) HIPDNN_STRINGIFY_(x)
+      llvm::errs() << "clang++ not found on PATH and HIPDNN_CLANG_PATH is "
+                      "unset or stale. Install clang (e.g. `apt install "
+                      "clang-"
+                   << HIPDNN_STRINGIFY(HIPDNN_LLVM_MAJOR)
+                   << "`) or rebuild with HIPDNN_CLANG_PATH pointing to a "
+                      "valid clang++ binary.\n";
+#undef HIPDNN_STRINGIFY
+#undef HIPDNN_STRINGIFY_
+      return false;
     }
+    clangPath = *found;
+  }
+
+  std::vector<std::string> args = {clangPath, "-shared", "-fuse-ld=lld",
+                                   "-o",      outputDLL, objectFile};
+  for (const auto &p : libraryPaths)
+    args.push_back("-L" + p);
+  // --start-group: user archives may mutually reference each other
+  // (custom_kernels.a <-> libstdc++ via another user lib).
+  args.push_back("-Wl,--start-group");
+  for (const auto &lib : libraries) {
+    // Mirror Windows: callers pass bare names or absolute paths.
+    // `-l/abs/path` is malformed for ld; abs paths go through positional.
+    if (lib.find('/') != std::string::npos)
+      args.push_back(lib);
+    else
+      args.push_back("-l" + lib);
+  }
+  args.push_back("-Wl,--end-group");
+  for (const auto &p : libraryPaths)
+    args.push_back("-Wl,-rpath," + p);
+  args.push_back("-Wl,--no-undefined");
+
+  COMPILER_DEBUG_LOG("clang -shared command (" << args.size() << " args):\n");
+  for (size_t i = 0; i < args.size(); ++i) {
+    COMPILER_DEBUG_LOG("  [" << i << "]='" << args[i] << "'\n");
+  }
+
+  std::vector<llvm::StringRef> execArgs(args.begin(), args.end());
+  std::string errMsg;
+  bool execFailed = false;
+  int rc = llvm::sys::ExecuteAndWait(clangPath, execArgs,
+                                     /*Env=*/std::nullopt,
+                                     /*Redirects=*/{},
+                                     /*SecondsToWait=*/0,
+                                     /*MemoryLimit=*/0, &errMsg, &execFailed);
+  if (execFailed || rc != 0) {
+    llvm::errs() << "clang -shared failed (rc=" << rc << "): " << errMsg
+                 << "\n";
     return false;
   }
 

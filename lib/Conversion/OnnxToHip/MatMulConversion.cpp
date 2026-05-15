@@ -60,8 +60,8 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateMatMulConversionPatterns(RewritePatternSet &patterns,
-                                                 MLIRContext *ctx) {
+void populateMatMulConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx) {
   patterns.add<MatMulToHip>(ctx);
 }
 

@@ -530,8 +530,8 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 
 } // namespace
 
-void mlir::hip::populateMemoryLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
                GetConstantOpLowering, MemRefAllocOpLowering,
                MemRefDeallocOpLowering>(converter);

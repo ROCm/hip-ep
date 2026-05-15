@@ -88,8 +88,8 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
 
 } // namespace
 
-void mlir::hip::populateCastLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns) {
   patterns.add<CastOpLowering>(converter);
 }
 

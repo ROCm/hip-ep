@@ -23,6 +23,26 @@ namespace mlir_compilation::customop {
 // Manages inference state and owns the plugin that provides inference
 // functions. Uses morphizen::Plugin infrastructure for dynamic library loading.
 class InferenceState {
+  // Passkey tag for the public constructor below: external callers cannot
+  // name this type (it is implicitly private under the `class` keyword), so
+  // the constructor is effectively unreachable from outside the class even
+  // though it is declared in the public section. Members and friends can
+  // still construct one, which is what std::make_unique<InferenceState>(
+  // PrivateTag{}, ...) needs inside create().
+  //
+  // Declaring the type here -- at the very top of the class body, before any
+  // member function signature -- means name lookup for the constructor below
+  // resolves to this inner type on both MSVC and GCC. Two earlier shapes
+  // both broke one compiler:
+  //   - Forward decl in `public:` + definition in `private:` is rejected by
+  //     GCC with `error: ... PrivateTag redeclared with different access`.
+  //   - Spelling the parameter as `struct PrivateTag` (an elaborated type
+  //     specifier) makes MSVC introduce a brand-new outer-scope type, so
+  //     the .cpp definition no longer matches the header signature and
+  //     fails with C2511.
+  // Defining it once, here, sidesteps both.
+  struct PrivateTag {};
+
 public:
   // Create inference state from DLL bytes.
   // fs: FileSystem for resolving model constants (passed to inference_init).
@@ -61,17 +81,14 @@ public:
   // Callers reinterpret_cast to hipStream_t (itself a void* on amdhip64).
   void *get_stream_raw() const;
 
-  // Public constructor gated by PrivateTag: use create() factory instead.
-  // PrivateTag is declared private below — external callers cannot form one.
-  struct PrivateTag;
+  // Public constructor gated by PrivateTag (defined at the top of this
+  // class). Use the create() factory instead -- external callers cannot
+  // construct a PrivateTag and therefore cannot call this constructor.
   InferenceState(PrivateTag, void *state,
                  std::unique_ptr<morphizen::Plugin> plugin,
                  const std::string &temp_dll_path);
 
 private:
-  // Passkey tag — only members/friends of this class can construct one,
-  // preventing direct construction while allowing std::make_unique in create().
-  struct PrivateTag {};
   // Opaque handle returned by inference_init()
   void *state_;
 

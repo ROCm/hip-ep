@@ -1,0 +1,214 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Linux Build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # CACHE_VERSION numbering resets at the Docker switch (the pre-Docker
+  # inline-yml history is no longer reachable). Bump when docker/Dockerfile
+  # or docker/build.sh meaningfully changes what lands under prebuilt-local/
+  # (ORT + protobuf + flatbuffers install trees).
+  CACHE_VERSION: "1"
+  # Pinned versions — kept in lockstep with docker/build.sh defaults.
+  ONNXRUNTIME_VERSION: "1.25.1"
+  THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
+  # OGA fork+pin matches windows-build.yml so both platforms produce
+  # ABI-compatible OGA binaries against the same ORT and tokenizer surface.
+  OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
+
+jobs:
+  build-linux:
+    # No draft-PR gate: the cache-priming strategy needs every PR push.
+    runs-on: ubuntu-latest
+    steps:
+      # ROCm/MorphiZen is private — reuse the same deploy key as windows-build.yml.
+      - name: Setup SSH key for MorphiZen submodule
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
+
+      # Check the repo into a sibling-layout subdir so the workspace root
+      # (= $github.workspace) can hold prebuilt-local/, therock-dist/,
+      # onnxruntime/, onnxruntime-genai/, build/, install/ as siblings of
+      # onnx-hipdnn-ep/. This matches the layout docker/run.sh expects
+      # (resolves WORKSPACE as $SOURCE_DIR/..).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: onnx-hipdnn-ep
+          submodules: false
+          fetch-depth: 1
+          show-progress: false
+
+      # Run `git submodule update` on the HOST with ssh-agent loaded —
+      # docker/build.sh A.2 detects the populated checkout and skips its own
+      # submodule update, so the container does NOT need SSH credentials
+      # for the private morphizen repo.
+      - name: Checkout MorphiZen submodule
+        working-directory: onnx-hipdnn-ep
+        run: |
+          set -euo pipefail
+          git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
+            "https://github.com/ROCm/MorphiZen.git"
+          git submodule update --init --recursive --depth 1
+
+      # ubuntu-latest ships ~14 GB usable SSD. Image build + cold ORT need
+      # ~25 GB; reclaim ~30 GB by pruning preinstalled toolchains we don't use.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false        # keep Python toolchain
+          docker-images: true      # ~10 GB
+          android: true            # ~10 GB
+          dotnet: true             # ~3 GB
+          haskell: true            # ~5 GB
+          large-packages: false    # skipped: very slow, marginal gain
+          swap-storage: true       # ~4 GB
+
+      # -----------------------------------------------------------------------
+      # Caches live as siblings of the source checkout (matches the layout
+      # docker/build.sh expects). Cache misses get repopulated by the Docker
+      # build step below via the idempotent A.4-A.9 pipeline.
+      # -----------------------------------------------------------------------
+      - name: Cache prebuilt-local
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ github.workspace }}/prebuilt-local
+          key: linux-deps-v${{ env.CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Cache ORT source clone
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ github.workspace }}/onnxruntime
+          key: ort-src-v${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Cache OGA source clone
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ github.workspace }}/onnxruntime-genai
+          key: oga-src-${{ env.OGA_REF }}
+
+      # Cache the OGA INSTALL outputs (not the full build/ tree). With
+      # docker/build.sh A.9's have_oga() guard, a cache hit on this key
+      # means we skip the 5-10 min OGA build entirely. ORT version is in
+      # the key because OGA's libonnxruntime-genai.so links libonnxruntime.so
+      # at its pinned ABI; an ORT version bump must invalidate the OGA
+      # outputs. ${OGA_REF} is the primary update knob — change it in env
+      # above to roll OGA forward and the cache key automatically misses.
+      - name: Cache OGA install outputs
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: |
+            ${{ github.workspace }}/install/bin/model_benchmark
+            ${{ github.workspace }}/install/lib/libonnxruntime-genai.so
+            ${{ github.workspace }}/install/lib/libonnxruntime-genai.so.0
+          key: oga-out-v${{ env.CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+
+      # -----------------------------------------------------------------------
+      # The actual build: one docker invocation runs all of A.4-A.9
+      # (TheRock + ORT + protobuf + flatbuffers + project + OGA). Each step
+      # has its own `[skip]` short-circuit when the corresponding install
+      # artifact is already in place from the cache.
+      #
+      # The same image + recipe is what local developers run via
+      # `./docker/run.sh build` — see docs/quick_start_linux.md.
+      # -----------------------------------------------------------------------
+      - name: Build via Docker
+        working-directory: onnx-hipdnn-ep
+        env:
+          # OGA_REF is the single source of truth for which OGA SHA gets
+          # cloned + built. docker/run.sh forwards it into the container
+          # and docker/build.sh A.9 reads it as the checkout target. Bump
+          # OGA_REF in this workflow's env block to roll OGA forward —
+          # nothing else needs to change.
+          OGA_REF: ${{ env.OGA_REF }}
+        run: |
+          set -euo pipefail
+          ./docker/run.sh image
+          BUILD_OGA=1 ./docker/run.sh build
+
+      # -----------------------------------------------------------------------
+      # Stage the artifact:
+      #   staging/bin/  hip-onnx-runner, hip-compiler, hip-mlir-opt,
+      #                 hip-test-dll, hip-inspect-dll, model_benchmark,
+      #                 onnxruntime_perf_test
+      #   staging/lib/  libhip-compiler.so, libonnxruntime_morphizen_ep.so,
+      #                 libonnxruntime.so*, libonnxruntime-genai.so*,
+      #                 libhip_custom_kernels.a (needed at per-model
+      #                 DLL link time)
+      #   staging/etc/  morphizen_config.json
+      #
+      # The artifact does NOT bundle TheRock (deploy host installs ROCm
+      # separately and exports THEROCK_DIST) nor the Python wheels (the
+      # Linux build deliberately omits ORT --build_wheel and OGA
+      # --skip_wheel so the wheels can't satisfy `import onnxruntime`
+      # anyway).
+      #
+      # docker/build.sh A.7b runs a 2-pass `ldd` inside the container
+      # and bundles prebuilt-local transitive .so files into install/lib/,
+      # so the bulk `cp -a install/. staging/` here is most of the work.
+      # Filter out artifact-irrelevant pieces shipped only for local
+      # developers / SDK consumers: the static archives we statically
+      # link into hip-compiler.so (libcpptrace.a, libdwarf.a, libzstd.a,
+      # libHipCInterface.a), pkgconfig descriptors, and the duplicate
+      # morphizen_config.json that the submodule's install rule drops
+      # into bin/.
+      # -----------------------------------------------------------------------
+      - name: Stage Linux GPU test package
+        run: |
+          set -euo pipefail
+          mkdir -p staging/bin staging/lib staging/etc
+
+          cp -a "${{ github.workspace }}/install/bin/." staging/bin/
+          cp -a "${{ github.workspace }}/install/lib/." staging/lib/
+
+          # ORT latency tool lives in prebuilt-local (A.5 copies it
+          # there from ORT's build dir); cmake --install of this project
+          # doesn't re-stage it into install/bin/.
+          cp "${{ github.workspace }}/prebuilt-local/bin/onnxruntime_perf_test" \
+              staging/bin/
+
+          # Repo etc/ is the canonical source for morphizen_config.json
+          # (the submodule's bin/ copy gets dropped below).
+          cp onnx-hipdnn-ep/etc/morphizen_config.json staging/etc/
+
+          # Drop artifact-irrelevant content. The static archives are
+          # already whole-archived into the shipped .so files; the .pc
+          # files are dev-time pkg-config descriptors; bin/<config> is
+          # the submodule-install duplicate of etc/<config>.
+          rm -f staging/lib/libHipCInterface.a \
+                staging/lib/libcpptrace.a \
+                staging/lib/libdwarf.a \
+                staging/lib/libzstd.a
+          rm -rf staging/lib/pkgconfig
+          rm -f staging/bin/morphizen_config.json
+
+          chmod +x staging/bin/*
+
+          echo "=== Staged package contents ==="
+          find staging/ -maxdepth 3 \( -type f -o -type l \) | sort
+          echo "=== Staged package size ==="
+          du -sh staging/
+
+      - name: Upload Linux GPU test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-gpu-test-package
+          path: staging/
+          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
