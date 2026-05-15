@@ -257,7 +257,7 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 // Today the runtime only special-cases TENSOR_MEMORY_GPU (alias path,
 // avoids the per-inference H2D / D2H copy on AMD APU iGPU mapped-pinned
 // memory). CPU / FPGA / NPU all fall through to the legacy host H2D / D2H
-// path, preserving existing behaviour for hip-test-dll, hip-onnx-runner,
+// path, preserving existing behaviour for hip-test-bc, hip-onnx-runner,
 // and any other host-input caller.
 //
 // Must match the matching enum in
@@ -279,12 +279,12 @@ enum {
 // whether to copy H2D/D2H or alias the caller's GPU-accessible buffer.
 //
 // tensor_t is the wire-protocol ABI between three components that are
-// intentionally kept decoupled (compiler-emitted model.dll, EP runtime
-// DLL, hip-test-dll harness), so we re-declare it here instead of
-// sharing a header. The static_assert block below catches any layout
-// drift at compile time. Sibling copies live at:
+// intentionally kept decoupled (compiler-emitted bitcode, EP runtime,
+// hip-test-bc harness), so we re-declare it here instead of sharing a
+// header. The static_assert block below catches any layout drift at
+// compile time. Sibling copies live at:
 //   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
-//   * `tools/hip-test-dll/hip-test-dll.cpp`                         (test
+//   * `tools/hip-test-bc/hip-test-bc.cpp`                           (test
 //   driver)
 typedef struct {
   void *data;          // Data pointer (host or GPU-accessible per memory_type)
