@@ -1,22 +1,22 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * ReduceMax: y = max(x) over the reduce axes.
- *
- * Port note: the HipToLLVM lowering for hip.reduce_* passes only
- * `data_num_elements`, `output_num_elements` and the `axes` buffer pointer.
- * The actual reduce axes are NOT inspected here -- the kernel assumes the
- * upstream lowering has arranged for the reduce dims to occupy the trailing
- * portion of `data` so that
- *      reduce_size = data_num_elements / output_num_elements
- * is correct. This mirrors how wrap_reduce_sum / hip_reduce_sum already work.
- *
- * Source: onnxruntime/core/providers/cuda/reduction/reduction_ops.cc /
- *         reduction_functions.cu @ v1.22.2 (CudaT type-min initializer +
- *         max operator) -- simplified to the block-per-output pattern that
- *         reduce_sum_kernel.hip already establishes.
  */
+
+// ReduceMax: y = max(x) over the reduce axes.
+//
+// Port note: the HipToLLVM lowering for hip.reduce_* passes only
+// `data_num_elements`, `output_num_elements` and the `axes` buffer pointer.
+// The actual reduce axes are NOT inspected here -- the kernel assumes the
+// upstream lowering has arranged for the reduce dims to occupy the trailing
+// portion of `data` so that
+//      reduce_size = data_num_elements / output_num_elements
+// is correct. This mirrors how wrap_reduce_sum / hip_reduce_sum already work.
+//
+// Source: onnxruntime/core/providers/cuda/reduction/reduction_ops.cc /
+//         reduction_functions.cu @ v1.22.2 (CudaT type-min initializer +
+//         max operator) -- simplified to the block-per-output pattern that
+//         reduce_sum_kernel.hip already establishes.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -76,11 +76,12 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_reduce_max: noop_with_empty_axes=1, copying %lld bytes\n",
         (long long)total_bytes);
-    hipError_t err = hipMemcpyAsync(output, data, total_bytes,
-                                    hipMemcpyDeviceToDevice,
-                                    static_cast<hipStream_t>(stream));
+    hipError_t err =
+        hipMemcpyAsync(output, data, total_bytes, hipMemcpyDeviceToDevice,
+                       static_cast<hipStream_t>(stream));
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_reduce_max: noop hipMemcpyAsync failed: %s\n",
+      fprintf(stderr,
+              "[REAL] wrap_reduce_max: noop hipMemcpyAsync failed: %s\n",
               hipGetErrorString(err));
       return -1;
     }
@@ -97,11 +98,11 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_reduce_max: data_num=%lld, output_num=%lld, "
-      "data_type=%s, hip_dtype=%d -> hip_reduce_max\n",
-      (long long)data_num_elements, (long long)output_num_elements,
-      hipdnn_ep_datatype_name(data_type), hip_dtype);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_max: data_num=%lld, output_num=%lld, "
+                    "data_type=%s, hip_dtype=%d -> hip_reduce_max\n",
+                    (long long)data_num_elements,
+                    (long long)output_num_elements,
+                    hipdnn_ep_datatype_name(data_type), hip_dtype);
 
   return hip_reduce_max(stream, data, output, data_num_elements,
                         output_num_elements, hip_dtype);

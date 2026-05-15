@@ -1,16 +1,16 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Not: y = !x (bool/INT8, 1 byte per element).
- *
- * Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
- *         @ v1.22.2 (UNARY_OP_NAME_EXPR(Not, !a),
- *                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL(Not, bool))
- *
- * The data_type argument is logged but otherwise ignored -- the kernel
- * always treats input/output as 1-byte streams (matching ORT's bool spec).
  */
+
+// Not: y = !x (bool/INT8, 1 byte per element).
+//
+// Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
+//         @ v1.22.2 (UNARY_OP_NAME_EXPR(Not, !a),
+//                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL(Not, bool))
+//
+// The data_type argument is logged but otherwise ignored -- the kernel
+// always treats input/output as 1-byte streams (matching ORT's bool spec).
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"

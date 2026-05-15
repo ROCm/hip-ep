@@ -1,18 +1,18 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Mod: y = a % b (element-wise, same-shape, ONNX semantics).
- *   fmod == 0 -> Python-style integer modulo (sign follows divisor)
- *   fmod == 1 -> C fmod (floating-point only)
- *
- * Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
- *         @ v1.22.2 (BINARY_OP_NAME_EXPR(Mod,  _Mod(a, b)),
- *                    BINARY_OP_NAME_EXPR(Fmod, _Fmod(a, b)))
- *         + core/providers/cuda/cu_inc/common.cuh _Mod / _Fmod
- *
- * Same-shape constraint identical to Div / Equal / Less.
  */
+
+// Mod: y = a % b (element-wise, same-shape, ONNX semantics).
+//   fmod == 0 -> Python-style integer modulo (sign follows divisor)
+//   fmod == 1 -> C fmod (floating-point only)
+//
+// Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
+//         @ v1.22.2 (BINARY_OP_NAME_EXPR(Mod,  _Mod(a, b)),
+//                    BINARY_OP_NAME_EXPR(Fmod, _Fmod(a, b)))
+//         + core/providers/cuda/cu_inc/common.cuh _Mod / _Fmod
+//
+// Same-shape constraint identical to Div / Equal / Less.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -42,8 +42,7 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "%lld:%s%s", (long long)num_elements,
-                 hipdnn_ep_datatype_name(data_type),
-                 fmod ? ":fmod" : ":pymod");
+                 hipdnn_ep_datatype_name(data_type), fmod ? ":fmod" : ":pymod");
         return std::string(b);
       },
       state);
@@ -58,8 +57,7 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 
   int hip_dtype = mod_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_mod: unsupported data_type=%s(%lld)\n",
+    fprintf(stderr, "[REAL] wrap_mod: unsupported data_type=%s(%lld)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
@@ -83,10 +81,10 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_mod: num=%lld, data_type=%s, fmod=%lld -> hip_elementwise_mod\n",
-      (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-      (long long)fmod);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_mod: num=%lld, data_type=%s, fmod=%lld -> "
+                    "hip_elementwise_mod\n",
+                    (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+                    (long long)fmod);
   return hip_elementwise_mod(stream, lhs, rhs, output, num_elements, hip_dtype,
                              fmod ? 1 : 0);
 }

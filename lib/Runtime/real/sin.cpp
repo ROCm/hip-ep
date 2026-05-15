@@ -1,14 +1,14 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Sin: y = sin(x) (element-wise).
- *
- * Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
- *         @ v1.22.2 (UNARY_OP_NAME_EXPR(Sin, _Sin(a)),
- *                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_HFD(Sin))
- *         + core/providers/cuda/cu_inc/common.cuh _Sin<half> / _Sin<float>.
  */
+
+// Sin: y = sin(x) (element-wise).
+//
+// Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
+//         @ v1.22.2 (UNARY_OP_NAME_EXPR(Sin, _Sin(a)),
+//                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_HFD(Sin))
+//         + core/providers/cuda/cu_inc/common.cuh _Sin<half> / _Sin<float>.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"

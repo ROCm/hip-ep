@@ -1,18 +1,18 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Sign: y = signum(x).
- *
- * Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
- *         @ v1.22.2 (UNARY_OP_NAME_EXPR(Sign, _Sign(a)),
- *                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_BWUZCSILHFD(Sign))
- *         and core/providers/cuda/cu_inc/common.cuh _Signum / _Sign.
- *
- * Delta from ORT: ONNX spec defines sign(NaN) = NaN for floating-point
- * inputs. ORT's _Signum returns 0 for NaN (both comparisons false). The HIP
- * kernel checks isnan() on FP paths and propagates NaN.
  */
+
+// Sign: y = signum(x).
+//
+// Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
+//         @ v1.22.2 (UNARY_OP_NAME_EXPR(Sign, _Sign(a)),
+//                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_BWUZCSILHFD(Sign))
+//         and core/providers/cuda/cu_inc/common.cuh _Signum / _Sign.
+//
+// Delta from ORT: ONNX spec defines sign(NaN) = NaN for floating-point
+// inputs. ORT's _Signum returns 0 for NaN (both comparisons false). The HIP
+// kernel checks isnan() on FP paths and propagates NaN.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"

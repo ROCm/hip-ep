@@ -1,14 +1,14 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Cos: y = cos(x) (element-wise).
- *
- * Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
- *         @ v1.22.2 (UNARY_OP_NAME_EXPR(Cos, _Cos(a)),
- *                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_HFD(Cos))
- *         + core/providers/cuda/cu_inc/common.cuh _Cos<half> / _Cos<float>.
  */
+
+// Cos: y = cos(x) (element-wise).
+//
+// Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
+//         @ v1.22.2 (UNARY_OP_NAME_EXPR(Cos, _Cos(a)),
+//                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_HFD(Cos))
+//         + core/providers/cuda/cu_inc/common.cuh _Cos<half> / _Cos<float>.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
