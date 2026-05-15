@@ -26,18 +26,25 @@
 // JIT shim for C++ runtime symbols that the bitcode references but that
 // are not exported by any DLL on the system.
 //
-// We link `runtime.bc` against the static MSVC CRT (/MT) into the EP DLL,
-// and we feed clang `-fno-threadsafe-statics -fno-sized-deallocation
-// -fno-rtti` (see `lib/Runtime/CMakeLists.txt`) so the bitcode does not
-// reference magic-static guards, sized `operator delete`, or RTTI vtables.
-// What's left is the small set of allocation helpers (operator new /
-// delete) plus the LLVM-codegen-only `__emutls_get_address` /
-// `__emutls_v.*` pair that ORC LLJIT emits on Windows when it lowers
-// `thread_local` globals via emulated TLS.
+// Windows-only: we link `runtime.bc` against the static MSVC CRT (/MT) into
+// the EP DLL, and we feed clang `-fno-threadsafe-statics
+// -fno-sized-deallocation -fno-rtti` (see `lib/Runtime/CMakeLists.txt`) so
+// the bitcode does not reference magic-static guards, sized
+// `operator delete`, or RTTI vtables. What's left is the small set of
+// allocation helpers (operator new / delete) plus the LLVM-codegen-only
+// `__emutls_get_address` / `__emutls_v.*` pair that ORC LLJIT emits on
+// Windows when it lowers `thread_local` globals via emulated TLS.
 //
 // We define `__emutls_get_address` inline below (it's a tiny stub that
 // returns a per-thread allocation), and we register operator new/delete
 // as absolute symbols pointing at the EP DLL's own static-CRT copy.
+//
+// On Linux this whole shim is unnecessary: LLVM's ORC native target uses
+// real ELF TLS (not emulated), and `DynamicLibrarySearchGenerator::
+// GetForCurrentProcess` resolves the Itanium-mangled allocation helpers
+// (`_Znwm`, `_ZdlPv`, ...) directly from the running process via
+// `dlsym(RTLD_DEFAULT, ...)`.
+#ifdef _WIN32
 extern "C" {
 
 // Emulated-TLS control block layout, matching libcompiler_rt:
@@ -97,6 +104,7 @@ __declspec(dllexport) void *__emutls_get_address(__emutls_control *ctrl) {
 }
 
 } // extern "C"
+#endif // _WIN32
 
 namespace mlir_compilation::customop {
 
@@ -161,8 +169,10 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
   }
   auto jit = std::move(*jit_or_err);
 
-  // Stage 2-pre: register MSVC C++ runtime / emulated-TLS symbols that
-  // the bitcode references but that are NOT exported by any DLL.
+#ifdef _WIN32
+  // Stage 2-pre (Windows only): register MSVC C++ runtime / emulated-TLS
+  // symbols that the bitcode references but that are NOT exported by any
+  // DLL.
   //
   // Background: the EP DLL links the static CRT (/MT), so functions like
   // `operator new`/`operator delete` live in the EP DLL's image but are
@@ -177,6 +187,11 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
   // Fix: take the addresses here, inside the EP DLL, and register them
   // as `absoluteSymbols` in the JITDylib. These addresses point at the
   // same C++ runtime the EP DLL's own code uses.
+  //
+  // On Linux this block is unnecessary: the runtime is built against
+  // glibc (whose `operator new`/`operator delete` live in libstdc++.so
+  // and are visible to `dlsym(RTLD_DEFAULT, ...)`), and ORC's ELF target
+  // uses native TLS (no emutls helper needed).
   {
     llvm::orc::SymbolMap absolute_syms;
     auto add = [&](llvm::StringRef name, void *addr) {
@@ -231,23 +246,30 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
       return nullptr;
     }
   }
+#endif // _WIN32
 
-  // Stage 2a: explicitly LoadLibrary the ROCm DLLs that the per-model
-  // bitcode calls into through the merged runtime.bc (MIOpen, hipBLASLt,
-  // hipDNN backend). The EP DLL itself only imports amdhip64 directly
-  // -- the higher-level ROCm DLLs were previously loaded transitively
-  // when each model.dll imported them, but that path is gone now. We
-  // load them once at JIT-init time so subsequent symbol resolution via
-  // GetForCurrentProcess finds them.
+  // Stage 2a: explicitly LoadLibrary the ROCm shared libraries that the
+  // per-model bitcode calls into through the merged runtime.bc (MIOpen,
+  // hipBLASLt, hipDNN backend). The EP DLL itself only imports amdhip64
+  // directly -- the higher-level ROCm libs were previously loaded
+  // transitively when each model.dll imported them, but that path is
+  // gone now. We load them once at JIT-init time so subsequent symbol
+  // resolution via GetForCurrentProcess finds them.
   //
   // Each Load failure is logged but tolerated: a model that doesn't
   // touch MIOpen (e.g. a pure-kernel test bitcode) should still JIT,
   // and the eventual symbol lookup will fail loudly with an actionable
-  // "undefined symbol" message if the DLL is truly required.
+  // "undefined symbol" message if the lib is truly required.
   const char *const rocm_libs[] = {
+#ifdef _WIN32
       "MIOpen.dll",
       "libhipblaslt.dll",
       "hipdnn_backend.dll",
+#else
+      "libMIOpen.so",
+      "libhipblaslt.so",
+      "libhipdnn_backend.so",
+#endif
   };
   const char global_prefix = jit->getDataLayout().getGlobalPrefix();
   for (const char *lib : rocm_libs) {
