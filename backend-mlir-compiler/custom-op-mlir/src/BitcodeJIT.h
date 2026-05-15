@@ -28,9 +28,10 @@ namespace mlir_compilation::customop {
 // which walks every module already loaded in the host process. In
 // practice that means:
 //   * `hip_*` GPU kernel launchers (exported from the EP DLL itself --
-//     each declaration in `3rd-party/custom_kernels/include/hip_custom_kernels.h`
-//     is tagged with `HIP_KERNEL_API` (= `__declspec(dllexport)` on Windows),
-//     and the static lib is linked WHOLE_ARCHIVE into the EP DLL)
+//     each declaration in
+//     `3rd-party/custom_kernels/include/hip_custom_kernels.h` is tagged with
+//     `HIP_KERNEL_API` (= `__declspec(dllexport)` on Windows), and the static
+//     lib is linked WHOLE_ARCHIVE into the EP DLL)
 //   * `libamdhip64.dll` HIP runtime entry points
 //   * `MIOpen.dll`, `hipblaslt.dll`
 //   * the MSVC / GNU C runtime (`memcpy`, `memset`, exception machinery, ...)
@@ -54,9 +55,8 @@ public:
   // (`Module::setSourceFileName`).
   //
   // Returns nullptr on parse / JIT-init failure (errors logged via glog).
-  static std::unique_ptr<BitcodeJIT>
-  create(const std::vector<uint8_t> &bitcode,
-         const std::string &module_name);
+  static std::unique_ptr<BitcodeJIT> create(const std::vector<uint8_t> &bitcode,
+                                            const std::string &module_name);
 
   // Resolve a symbol by name. Returns the JIT-emitted host address, or
   // nullptr if the symbol is undefined. Absent symbols are silently
