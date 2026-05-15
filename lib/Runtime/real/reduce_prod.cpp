@@ -1,17 +1,17 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * ReduceProd: y = prod(x) over the reduce axes.
- *
- * Same block-per-output structure as wrap_reduce_max / hip_reduce_max; only
- * the init value (1) and the operator (*) differ. Both are encoded in
- * reduce_sum_kernel.hip's templated `reduce_*_kernel<T, OP=OP_PROD>` path
- * added by the ReduceMax commit.
- *
- * Source: onnxruntime/core/providers/cuda/reduction/reduction_ops.cc /
- *         reduction_functions.cu @ v1.22.2.
  */
+
+// ReduceProd: y = prod(x) over the reduce axes.
+//
+// Same block-per-output structure as wrap_reduce_max / hip_reduce_max; only
+// the init value (1) and the operator (*) differ. Both are encoded in
+// reduce_sum_kernel.hip's templated `reduce_*_kernel<T, OP=OP_PROD>` path
+// added by the ReduceMax commit.
+//
+// Source: onnxruntime/core/providers/cuda/reduction/reduction_ops.cc /
+//         reduction_functions.cu @ v1.22.2.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -70,9 +70,9 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_reduce_prod: noop_with_empty_axes=1, copying %lld bytes\n",
         (long long)total_bytes);
-    hipError_t err = hipMemcpyAsync(output, data, total_bytes,
-                                    hipMemcpyDeviceToDevice,
-                                    static_cast<hipStream_t>(stream));
+    hipError_t err =
+        hipMemcpyAsync(output, data, total_bytes, hipMemcpyDeviceToDevice,
+                       static_cast<hipStream_t>(stream));
     if (err != hipSuccess) {
       fprintf(stderr,
               "[REAL] wrap_reduce_prod: noop hipMemcpyAsync failed: %s\n",
@@ -92,11 +92,11 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_reduce_prod: data_num=%lld, output_num=%lld, "
-      "data_type=%s, hip_dtype=%d -> hip_reduce_prod\n",
-      (long long)data_num_elements, (long long)output_num_elements,
-      hipdnn_ep_datatype_name(data_type), hip_dtype);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_prod: data_num=%lld, output_num=%lld, "
+                    "data_type=%s, hip_dtype=%d -> hip_reduce_prod\n",
+                    (long long)data_num_elements,
+                    (long long)output_num_elements,
+                    hipdnn_ep_datatype_name(data_type), hip_dtype);
 
   return hip_reduce_prod(stream, data, output, data_num_elements,
                          output_num_elements, hip_dtype);

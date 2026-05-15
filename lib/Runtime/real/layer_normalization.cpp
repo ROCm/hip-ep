@@ -1,20 +1,20 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * LayerNormalization (ONNX-17): full LN with optional bias / mean /
- * inv_std outputs.
- *
- *   y = (x - mean) * rsqrt(var + epsilon) * scale + bias
- *
- * One block per row HIP kernel (see layer_norm_kernel.hip). Internal math
- * is FP32 regardless of I/O dtype. The optional `mean` and `inv_std`
- * outputs are written in the dtype implied by `stash_type` (the ONNX
- * attribute, raw TensorProto enum).
- *
- * Source: onnxruntime/core/providers/cuda/nn/layer_norm_impl.cu @ v1.22.2
- *         (small-N branch -- block-per-row two-pass reduction).
  */
+
+// LayerNormalization (ONNX-17): full LN with optional bias / mean /
+// inv_std outputs.
+//
+//   y = (x - mean) * rsqrt(var + epsilon) * scale + bias
+//
+// One block per row HIP kernel (see layer_norm_kernel.hip). Internal math
+// is FP32 regardless of I/O dtype. The optional `mean` and `inv_std`
+// outputs are written in the dtype implied by `stash_type` (the ONNX
+// attribute, raw TensorProto enum).
+//
+// Source: onnxruntime/core/providers/cuda/nn/layer_norm_impl.cu @ v1.22.2
+//         (small-N branch -- block-per-row two-pass reduction).
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
@@ -26,7 +26,7 @@
 
 // ONNX TensorProto.DataType enum values for stash_type. The lowering
 // passes these through unchanged (NOT mapped through getHipdnnDataType).
-static constexpr int64_t kOnnxStashFloat = 1;   // FP32 (ONNX default)
+static constexpr int64_t kOnnxStashFloat = 1; // FP32 (ONNX default)
 static constexpr int64_t kOnnxStashFloat16 = 10;
 
 int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
@@ -39,12 +39,12 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
       "layernorm",
       [&] {
         char b[64];
-        int64_t outer =
-            scale_num_elements > 0 ? input_num_elements / scale_num_elements : 0;
+        int64_t outer = scale_num_elements > 0
+                            ? input_num_elements / scale_num_elements
+                            : 0;
         snprintf(b, sizeof(b), "%lldx%lld:%s%s%s", (long long)outer,
                  (long long)scale_num_elements,
-                 (element_size_bytes == 2) ? "f16" : "f32",
-                 bias ? ":b" : "",
+                 (element_size_bytes == 2) ? "f16" : "f32", bias ? ":b" : "",
                  (mean || inv_std) ? ":stats" : "");
         return std::string(b);
       },

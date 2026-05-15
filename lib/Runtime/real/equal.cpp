@@ -1,15 +1,15 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Equal: y = (a == b)  -- element-wise, same-shape, bool (1-byte) output.
- *
- * `data_type` refers to the INPUT type (the comparison operand type). The
- * output is always 1 byte per element.
- *
- * Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
- *         @ v1.22.2 (BINARY_OP_NAME_EXPR2(Equal, (a == b)))
  */
+
+// Equal: y = (a == b)  -- element-wise, same-shape, bool (1-byte) output.
+//
+// `data_type` refers to the INPUT type (the comparison operand type). The
+// output is always 1 byte per element.
+//
+// Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
+//         @ v1.22.2 (BINARY_OP_NAME_EXPR2(Equal, (a == b)))
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"

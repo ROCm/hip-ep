@@ -1,17 +1,17 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Neg: y = -x (element-wise).
- *
- * Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
- *         @ v1.22.2 (UNARY_OP_NAME_EXPR(Neg, -a),
- *                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_CSILHFD(Neg))
- *
- * Type coverage restricted to FP16 + INT32 + INT64 to match what
- * vision.onnx actually exercises (plus FP32 as a free side benefit of
- * the C++ template instantiation).
  */
+
+// Neg: y = -x (element-wise).
+//
+// Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
+//         @ v1.22.2 (UNARY_OP_NAME_EXPR(Neg, -a),
+//                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_CSILHFD(Neg))
+//
+// Type coverage restricted to FP16 + INT32 + INT64 to match what
+// vision.onnx actually exercises (plus FP32 as a free side benefit of
+// the C++ template instantiation).
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
