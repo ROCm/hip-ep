@@ -146,7 +146,7 @@ BitcodeJIT::~BitcodeJIT() {
 
 std::unique_ptr<BitcodeJIT>
 BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
-                  const std::string &module_name) {
+                   const std::string &module_name) {
   ensureLLVMNativeTargetInitialized();
 
   // Stage 1: build a default LLJIT instance. The default builder picks a
@@ -183,8 +183,7 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
       absolute_syms[jit->getExecutionSession().intern(name)] =
           llvm::orc::ExecutorSymbolDef(
               llvm::orc::ExecutorAddr(reinterpret_cast<uintptr_t>(addr)),
-              llvm::JITSymbolFlags::Exported |
-                  llvm::JITSymbolFlags::Absolute);
+              llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Absolute);
     };
 
     // Operator new / delete (sized + unsized). Mangled names follow the
@@ -203,7 +202,8 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
     // global `__emutls_v.<name>` is emitted by LLVM codegen into the
     // bitcode's module itself, so we don't need to provide it -- we
     // just need to satisfy the `__emutls_get_address` call.
-    add("__emutls_get_address", reinterpret_cast<void *>(&__emutls_get_address));
+    add("__emutls_get_address",
+        reinterpret_cast<void *>(&__emutls_get_address));
 
     // `??_7type_info@@6B@` is the vtable of `std::type_info`. Clang on
     // Windows MSVC emits RTTI descriptors for any catchable exception
@@ -255,8 +255,7 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
         llvm::orc::DynamicLibrarySearchGenerator::Load(lib, global_prefix);
     if (!rocm_gen_or_err) {
       LOG(WARNING) << "BitcodeJIT::create: failed to Load(" << lib
-                   << "): "
-                   << llvm::toString(rocm_gen_or_err.takeError())
+                   << "): " << llvm::toString(rocm_gen_or_err.takeError())
                    << ". Symbols from this DLL will be unavailable; "
                       "models that require it will fail at lookup.";
       continue;
@@ -294,8 +293,7 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
       llvm::StringRef(reinterpret_cast<const char *>(bitcode.data()),
                       bitcode.size()),
       module_name);
-  auto module_or_err =
-      llvm::parseBitcodeFile(buf->getMemBufferRef(), *context);
+  auto module_or_err = llvm::parseBitcodeFile(buf->getMemBufferRef(), *context);
   if (!module_or_err) {
     LOG(ERROR) << "BitcodeJIT::create: parseBitcodeFile failed: "
                << llvm::toString(module_or_err.takeError());
