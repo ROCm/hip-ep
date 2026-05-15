@@ -160,8 +160,8 @@ static bool printSummary(const char *json_str) {
 // `ConstantDataArray` -- `getAsCString` strips the trailing NUL and gives
 // us a `StringRef` we can copy into a std::string for printing.
 static bool extractMetadataJson(llvm::Module &module, std::string &out) {
-  llvm::GlobalVariable *gv = module.getGlobalVariable(
-      kMetadataGlobalName, /*AllowInternal=*/true);
+  llvm::GlobalVariable *gv =
+      module.getGlobalVariable(kMetadataGlobalName, /*AllowInternal=*/true);
   if (!gv) {
     std::cerr << "Global '" << kMetadataGlobalName
               << "' not found in bitcode -- not a hip-compiler artifact?\n";
@@ -171,8 +171,7 @@ static bool extractMetadataJson(llvm::Module &module, std::string &out) {
     std::cerr << "Global '" << kMetadataGlobalName << "' has no initializer\n";
     return false;
   }
-  auto *cda =
-      llvm::dyn_cast<llvm::ConstantDataArray>(gv->getInitializer());
+  auto *cda = llvm::dyn_cast<llvm::ConstantDataArray>(gv->getInitializer());
   if (!cda || !cda->isString()) {
     std::cerr << "Global '" << kMetadataGlobalName
               << "' is not a C string constant\n";
@@ -231,10 +230,9 @@ int main(int argc, char **argv) {
       llvm::parseBitcodeFile(bufOrErr.get()->getMemBufferRef(), ctx);
   if (!moduleOrErr) {
     std::cerr << "Failed to parse bitcode '" << bcPath << "': ";
-    llvm::handleAllErrors(moduleOrErr.takeError(),
-                          [](const llvm::ErrorInfoBase &e) {
-                            std::cerr << e.message();
-                          });
+    llvm::handleAllErrors(
+        moduleOrErr.takeError(),
+        [](const llvm::ErrorInfoBase &e) { std::cerr << e.message(); });
     std::cerr << "\n";
     return 1;
   }
