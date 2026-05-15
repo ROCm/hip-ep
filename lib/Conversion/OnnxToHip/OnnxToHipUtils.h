@@ -152,8 +152,6 @@ void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
-void populateCastLikeConversionPatterns(RewritePatternSet &patterns,
-                                        MLIRContext *ctx);
 void populateEqualConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateDivConversionPatterns(RewritePatternSet &patterns,

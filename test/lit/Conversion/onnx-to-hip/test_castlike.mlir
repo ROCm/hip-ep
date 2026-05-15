@@ -3,16 +3,17 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify ONNX CastLike is correctly lowered to hip.cast by reusing the
-// existing Cast infrastructure. CastLike casts the first input to the
-// element type of the second input; the target type is statically known
-// in MLIR, so no new Hip op is needed.
+// Verify ONNX CastLike is rewritten to a plain onnx.Cast (then to hip.cast
+// via the shared CastConversion pattern) by the convert-onnx-to-hip pass,
+// and that the now-dead type-donor function argument is dropped from the
+// function signature. The target dtype is statically known from the
+// CastLike result type, so no new Hip op is needed.
 //
 // Test cases:
-// 1. f32 → f16        (basic float narrowing)
-// 2. f16 → f32        (basic float widening)
+// 1. f32 → f16        (basic float narrowing; type-donor arg dropped)
+// 2. f16 → f32        (basic float widening; type-donor arg dropped)
 // 3. f32 → f32        (identity — should be eliminated, no hip.cast)
-// 4. dynamic shape     (f32 → f16 with ?-dims)
+// 4. dynamic shape     (f32 → f16 with ?-dims; type-donor arg dropped)
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -28,8 +29,9 @@ module {
     return %result : tensor<3x4xf16>
   }
 
+  // The dead %target argument is dropped; the remaining signature is (ctx, input).
   // CHECK-LABEL: func.func @castlike_f32_to_f16
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<3x4xf32>, %[[TARGET:.*]]: tensor<0xf16>)
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<3x4xf32>) -> tensor<3x4xf16>
   // CHECK-NOT: onnx.CastLike
   // CHECK: tensor.empty() : tensor<3x4xf16>
   // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<3x4xf32>) outs({{.*}} : tensor<3x4xf16>) {to = 10 : i64} : tensor<3x4xf16>
@@ -41,7 +43,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @castlike_f16_to_f32
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xf16>, %[[TARGET:.*]]: tensor<0xf32>)
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xf16>) -> tensor<4xf32>
   // CHECK-NOT: onnx.CastLike
   // CHECK: tensor.empty() : tensor<4xf32>
   // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<4xf16>) outs({{.*}} : tensor<4xf32>) {to = 1 : i64} : tensor<4xf32>
@@ -53,6 +55,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @castlike_identity
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xf32>) -> tensor<4xf32>
   // CHECK-NOT: onnx.CastLike
   // CHECK-NOT: hip.cast
   // CHECK: return
@@ -64,7 +67,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @castlike_dynamic
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<?x?xf32>, %[[TARGET:.*]]: tensor<0xf16>)
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<?x?xf32>) -> tensor<?x?xf16>
   // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
   // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
   // CHECK: %[[DIM0:.*]] = tensor.dim %[[IN]], %[[C0]] : tensor<?x?xf32>
