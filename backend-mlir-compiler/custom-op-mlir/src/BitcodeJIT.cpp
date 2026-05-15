@@ -23,89 +23,6 @@
 #include <new>
 #include <typeinfo>
 
-// JIT shim for C++ runtime symbols that the bitcode references but that
-// are not exported by any DLL on the system.
-//
-// Windows-only: we link `runtime.bc` against the static MSVC CRT (/MT) into
-// the EP DLL, and we feed clang `-fno-threadsafe-statics
-// -fno-sized-deallocation -fno-rtti` (see `lib/Runtime/CMakeLists.txt`) so
-// the bitcode does not reference magic-static guards, sized
-// `operator delete`, or RTTI vtables. What's left is the small set of
-// allocation helpers (operator new / delete) plus the LLVM-codegen-only
-// `__emutls_get_address` / `__emutls_v.*` pair that ORC LLJIT emits on
-// Windows when it lowers `thread_local` globals via emulated TLS.
-//
-// We define `__emutls_get_address` inline below (it's a tiny stub that
-// returns a per-thread allocation), and we register operator new/delete
-// as absolute symbols pointing at the EP DLL's own static-CRT copy.
-//
-// On Linux this whole shim is unnecessary: LLVM's ORC native target uses
-// real ELF TLS (not emulated), and `DynamicLibrarySearchGenerator::
-// GetForCurrentProcess` resolves the Itanium-mangled allocation helpers
-// (`_Znwm`, `_ZdlPv`, ...) directly from the running process via
-// `dlsym(RTLD_DEFAULT, ...)`.
-#ifdef _WIN32
-extern "C" {
-
-// Emulated-TLS control block layout, matching libcompiler_rt:
-//
-//   struct __emutls_control {
-//     size_t size;
-//     size_t align;
-//     union { uintptr_t index; void *address; } object;
-//     void *value;          // initial value (or nullptr)
-//   };
-//
-// LLVM's TLSEmulation pass replaces every `thread_local` global load
-// with `__emutls_get_address(&__emutls_v.<name>)`. We provide a single
-// implementation here -- thread-safe, lock-free, suitable for the small
-// number of TLS globals (one: `_Init_thread_epoch`) that JITted bitcode
-// can reach inside our process.
-struct __emutls_control {
-  size_t size;
-  size_t align;
-  union {
-    uintptr_t index;
-    void *address;
-  } object;
-  void *value;
-};
-
-// Per-thread allocation table. Keyed by control block pointer so we can
-// support an arbitrary number of TLS globals; in practice the JIT only
-// asks for one or two.
-__declspec(thread) static void *g_emutls_storage[8];
-__declspec(thread) static __emutls_control *g_emutls_keys[8];
-
-__declspec(dllexport) void *__emutls_get_address(__emutls_control *ctrl) {
-  // Linear scan over the small per-thread table is fine -- only a
-  // handful of TLS globals are ever live, and the per-thread cache makes
-  // subsequent calls O(1) for the same control block.
-  for (int i = 0; i < 8; ++i) {
-    if (g_emutls_keys[i] == ctrl)
-      return g_emutls_storage[i];
-  }
-  for (int i = 0; i < 8; ++i) {
-    if (g_emutls_keys[i] != nullptr)
-      continue;
-    void *p = ::operator new(ctrl->size);
-    if (ctrl->value)
-      std::memcpy(p, ctrl->value, ctrl->size);
-    else
-      std::memset(p, 0, ctrl->size);
-    g_emutls_keys[i] = ctrl;
-    g_emutls_storage[i] = p;
-    return p;
-  }
-  // Table exhausted. With the current bitcode this is unreachable; if
-  // we ever grow past 8 TLS globals, bump the array size.
-  LOG(FATAL) << "BitcodeJIT __emutls_get_address: per-thread table full";
-  return nullptr;
-}
-
-} // extern "C"
-#endif // _WIN32
-
 namespace mlir_compilation::customop {
 
 namespace {
@@ -123,6 +40,154 @@ void ensureLLVMNativeTargetInitialized() {
     llvm::InitializeNativeTargetAsmParser();
   });
 }
+
+#ifdef _WIN32
+
+// JIT shim for C++ runtime symbols that the bitcode references but that
+// are not exported by any DLL on the system.
+//
+// We link `runtime.bc` against the static MSVC CRT (/MT) into the EP DLL,
+// and we feed clang `-fno-threadsafe-statics -fno-sized-deallocation
+// -fno-rtti` (see `lib/Runtime/CMakeLists.txt`) so the bitcode does not
+// reference magic-static guards, sized `operator delete`, or RTTI
+// vtables. What's left is the small set of allocation helpers (operator
+// new / delete) plus the LLVM-codegen-only `__emutls_get_address` /
+// `__emutls_v.*` pair that ORC LLJIT emits on Windows when it lowers
+// `thread_local` globals via emulated TLS.
+//
+// We define a tiny per-thread emutls helper below and register it
+// alongside operator new/delete + the std::type_info vtable as absolute
+// symbols in the JITDylib.
+//
+// On Linux this whole shim is unnecessary: LLVM's ORC native target uses
+// real ELF TLS (not emulated), and `DynamicLibrarySearchGenerator::
+// GetForCurrentProcess` resolves the Itanium-mangled allocation helpers
+// (`_Znwm`, `_ZdlPv`, ...) directly from the running process via
+// `dlsym(RTLD_DEFAULT, ...)`. See the no-op overload at the bottom of
+// the `#else` branch.
+
+// Maximum number of distinct emulated-TLS control blocks tracked per
+// thread. The current merged runtime bitcode only ever asks for one
+// (`_Init_thread_epoch`); the headroom is for forward compatibility.
+constexpr size_t kEmutlsCapacity = 8;
+
+// Emulated-TLS control block layout, matching libcompiler_rt:
+//
+//   struct __emutls_control {
+//     size_t size;
+//     size_t align;
+//     union { uintptr_t index; void *address; } object;
+//     void *value;          // initial value (or nullptr)
+//   };
+//
+// LLVM's TLSEmulation pass replaces every `thread_local` global load
+// with `__emutls_get_address(&__emutls_v.<name>)`. We provide a single
+// implementation here -- thread-safe (per-thread storage), lock-free,
+// suitable for the small number of TLS globals JITted bitcode can
+// reach inside our process.
+struct EmutlsControl {
+  size_t size;
+  size_t align;
+  union {
+    uintptr_t index;
+    void *address;
+  } object;
+  void *value;
+};
+
+// Per-thread allocation table. Keyed by control-block pointer so we can
+// support an arbitrary number of TLS globals; in practice the JIT only
+// asks for one or two. Linear scan over kEmutlsCapacity entries is
+// trivially fast.
+thread_local void *g_emutls_storage[kEmutlsCapacity];
+thread_local EmutlsControl *g_emutls_keys[kEmutlsCapacity];
+
+void *windowsEmutlsGetAddress(EmutlsControl *ctrl) {
+  for (size_t i = 0; i < kEmutlsCapacity; ++i) {
+    if (g_emutls_keys[i] == ctrl)
+      return g_emutls_storage[i];
+  }
+  for (size_t i = 0; i < kEmutlsCapacity; ++i) {
+    if (g_emutls_keys[i] != nullptr)
+      continue;
+    void *p = ::operator new(ctrl->size);
+    if (ctrl->value)
+      std::memcpy(p, ctrl->value, ctrl->size);
+    else
+      std::memset(p, 0, ctrl->size);
+    g_emutls_keys[i] = ctrl;
+    g_emutls_storage[i] = p;
+    return p;
+  }
+  // Table exhausted. With the current bitcode this is unreachable; if
+  // we ever grow past kEmutlsCapacity TLS globals, bump the constant.
+  LOG(FATAL) << "BitcodeJIT __emutls_get_address: per-thread table full";
+  return nullptr;
+}
+
+// Register operator new/delete + emutls helper + std::type_info vtable
+// as `absoluteSymbols` in the JIT's MainJITDylib so the bitcode's
+// references resolve to addresses inside the EP DLL. See the comment
+// block above for the full rationale.
+llvm::Error installPlatformSymbolShims(llvm::orc::LLJIT &jit) {
+  llvm::orc::SymbolMap absolute_syms;
+  auto add = [&](llvm::StringRef name, void *addr) {
+    absolute_syms[jit.getExecutionSession().intern(name)] =
+        llvm::orc::ExecutorSymbolDef(
+            llvm::orc::ExecutorAddr(reinterpret_cast<uintptr_t>(addr)),
+            llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Absolute);
+  };
+
+  // Operator new / delete (sized + unsized). Mangled names follow the
+  // MSVC x64 convention so they appear verbatim in the bitcode.
+  void *op_new_sz =
+      reinterpret_cast<void *>(static_cast<void *(*)(size_t)>(::operator new));
+  void *op_delete = reinterpret_cast<void *>(
+      static_cast<void (*)(void *) noexcept>(::operator delete));
+  void *op_delete_sz = reinterpret_cast<void *>(
+      static_cast<void (*)(void *, size_t) noexcept>(::operator delete));
+  add("??2@YAPEAX_K@Z", op_new_sz);     // operator new(size_t)
+  add("??3@YAXPEAX@Z", op_delete);      // operator delete(void*)
+  add("??3@YAXPEAX_K@Z", op_delete_sz); // operator delete(void*, size_t)
+
+  // Emulated TLS shim defined above. The control-block global
+  // `__emutls_v.<name>` is emitted by LLVM codegen into the bitcode's
+  // module itself, so we don't need to provide it -- we just need to
+  // satisfy the `__emutls_get_address` call.
+  add("__emutls_get_address",
+      reinterpret_cast<void *>(&windowsEmutlsGetAddress));
+
+  // `??_7type_info@@6B@` is the vtable of `std::type_info`. Clang on
+  // Windows MSVC emits RTTI descriptors for any catchable exception
+  // type referenced in the runtime (e.g. `std::bad_alloc`,
+  // `std::exception`), and each descriptor's first field is a pointer
+  // to this vtable. `-fno-rtti` does NOT suppress the exception RTTI
+  // path, so we resolve the symbol by reading the vtable pointer from
+  // a live `std::type_info` instance in the EP DLL. `typeid(int)` is
+  // a stable polymorphic object whose vtable pointer is identical to
+  // `??_7type_info@@6B@` in the same image (MSVC ABI).
+  const std::type_info &ti = typeid(int);
+  void *type_info_vtbl =
+      *reinterpret_cast<void *const *>(static_cast<const void *>(&ti));
+  add("??_7type_info@@6B@", type_info_vtbl);
+
+  return jit.getMainJITDylib().define(
+      llvm::orc::absoluteSymbols(std::move(absolute_syms)));
+}
+
+#else // !_WIN32
+
+// On Linux the bitcode's operator new/delete come from libstdc++.so via
+// `dlsym(RTLD_DEFAULT, ...)` through the process-wide search generator
+// installed in BitcodeJIT::create. ORC's ELF target uses native TLS, so
+// `__emutls_get_address` is never referenced. `-fno-rtti` keeps the
+// MSVC `??_7type_info@@6B@` vtable out of the picture too. Nothing to
+// inject.
+inline llvm::Error installPlatformSymbolShims(llvm::orc::LLJIT & /*jit*/) {
+  return llvm::Error::success();
+}
+
+#endif // _WIN32
 
 } // namespace
 
@@ -169,84 +234,14 @@ BitcodeJIT::create(const std::vector<uint8_t> &bitcode,
   }
   auto jit = std::move(*jit_or_err);
 
-#ifdef _WIN32
-  // Stage 2-pre (Windows only): register MSVC C++ runtime / emulated-TLS
-  // symbols that the bitcode references but that are NOT exported by any
-  // DLL.
-  //
-  // Background: the EP DLL links the static CRT (/MT), so functions like
-  // `operator new`/`operator delete` live in the EP DLL's image but are
-  // not exported. ORC LLJIT lowers `thread_local` globals via emulated
-  // TLS on Windows even though the source code targets MSVC, producing
-  // calls to `__emutls_get_address(&__emutls_v.<name>)`. The process-wide
-  // `DynamicLibrarySearchGenerator::GetForCurrentProcess` resolver only
-  // sees *exported* symbols, so without these shims the JIT fails with
-  // `JIT session error: Symbols not found: [??3@YAXPEAX@Z,
-  // __emutls_get_address, ...]`.
-  //
-  // Fix: take the addresses here, inside the EP DLL, and register them
-  // as `absoluteSymbols` in the JITDylib. These addresses point at the
-  // same C++ runtime the EP DLL's own code uses.
-  //
-  // On Linux this block is unnecessary: the runtime is built against
-  // glibc (whose `operator new`/`operator delete` live in libstdc++.so
-  // and are visible to `dlsym(RTLD_DEFAULT, ...)`), and ORC's ELF target
-  // uses native TLS (no emutls helper needed).
-  {
-    llvm::orc::SymbolMap absolute_syms;
-    auto add = [&](llvm::StringRef name, void *addr) {
-      absolute_syms[jit->getExecutionSession().intern(name)] =
-          llvm::orc::ExecutorSymbolDef(
-              llvm::orc::ExecutorAddr(reinterpret_cast<uintptr_t>(addr)),
-              llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Absolute);
-    };
-
-    // Operator new / delete (sized + unsized). Mangled names follow the
-    // MSVC x64 convention so they appear verbatim in the bitcode.
-    void *op_new_sz = reinterpret_cast<void *>(
-        static_cast<void *(*)(size_t)>(::operator new));
-    void *op_delete = reinterpret_cast<void *>(
-        static_cast<void (*)(void *) noexcept>(::operator delete));
-    void *op_delete_sz = reinterpret_cast<void *>(
-        static_cast<void (*)(void *, size_t) noexcept>(::operator delete));
-    add("??2@YAPEAX_K@Z", op_new_sz);     // operator new(size_t)
-    add("??3@YAXPEAX@Z", op_delete);      // operator delete(void*)
-    add("??3@YAXPEAX_K@Z", op_delete_sz); // operator delete(void*, size_t)
-
-    // Emulated TLS shim defined above in this file. The control-block
-    // global `__emutls_v.<name>` is emitted by LLVM codegen into the
-    // bitcode's module itself, so we don't need to provide it -- we
-    // just need to satisfy the `__emutls_get_address` call.
-    add("__emutls_get_address",
-        reinterpret_cast<void *>(&__emutls_get_address));
-
-    // `??_7type_info@@6B@` is the vtable of `std::type_info`. Clang on
-    // Windows MSVC emits RTTI descriptors for any catchable exception
-    // type referenced in the runtime (e.g. `std::bad_alloc`,
-    // `std::exception`), and each descriptor's first field is a pointer
-    // to this vtable. `-fno-rtti` does NOT suppress the exception RTTI
-    // path, so we resolve the symbol by reading the vtable pointer from
-    // a live `std::type_info` instance in the EP DLL.
-    //
-    // We use `typeid(int)` here as a stable polymorphic object whose
-    // vtable pointer is identical to `??_7type_info@@6B@` in the same
-    // image (MSVC ABI).
-    {
-      const std::type_info &ti = typeid(int);
-      void *type_info_vtbl =
-          *reinterpret_cast<void *const *>(static_cast<const void *>(&ti));
-      add("??_7type_info@@6B@", type_info_vtbl);
-    }
-
-    if (auto err = jit->getMainJITDylib().define(
-            llvm::orc::absoluteSymbols(std::move(absolute_syms)))) {
-      LOG(ERROR) << "BitcodeJIT::create: failed to install CRT symbol "
-                    "shims: "
-                 << llvm::toString(std::move(err));
-      return nullptr;
-    }
+  // Stage 2-pre: install platform-specific absolute-symbol shims. No-op
+  // on Linux; see installPlatformSymbolShims for the Windows rationale.
+  if (auto err = installPlatformSymbolShims(*jit)) {
+    LOG(ERROR) << "BitcodeJIT::create: failed to install platform "
+                  "symbol shims: "
+               << llvm::toString(std::move(err));
+    return nullptr;
   }
-#endif // _WIN32
 
   // Stage 2a: explicitly LoadLibrary the ROCm shared libraries that the
   // per-model bitcode calls into through the merged runtime.bc (MIOpen,
