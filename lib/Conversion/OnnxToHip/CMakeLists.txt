@@ -27,7 +27,6 @@ add_library(OnnxToHip STATIC
   WhereConversion.cpp
   LinearAttentionConversion.cpp
   RangeConversion.cpp
-  CastLikeConversion.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp
