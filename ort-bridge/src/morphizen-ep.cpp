@@ -50,7 +50,11 @@ MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string& name,
                          const OrtKeyValuePairs* const* ep_metadata,
                          const OrtSessionOptions& session_options,
                          const OrtLogger& logger)
-    : ApiPtrs(apis), name_{name}, logger_{logger} {
+    : OrtEp{}, ApiPtrs(apis), name_{name}, logger_{logger} {
+  // OrtEp{} above zero-inits all C-API callback function pointers (incl.
+  // optional ones we don't override like GetKernelRegistry / CanRunConcurrent).
+  // Without it, ORT >=1.24 reads garbage GetKernelRegistry and segfaults in
+  // GetPluginEpKernelRegistry during session creation.
   // Initialize the execution provider.
   auto status = ort_api.Logger_LogMessage(
       &logger_, OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO,

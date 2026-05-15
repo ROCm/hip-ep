@@ -61,6 +61,21 @@ target_compile_features(${LIB_NAME}
 target_compile_options(${LIB_NAME}
   PRIVATE
   ${MORPHIZEN_COMPILER_OPTIONS})
+# GCC 13+ Linux: onnx_proto's generated *.pb.h accessors return size_t but
+# their signatures are `int`, which trips MORPHIZEN_COMPILER_OPTIONS's
+# `-Werror -Wconversion`. Keep the warning visible but stop it from being
+# a hard build error (mirrors the MSVC /wd4267 pattern in morphizen-pattern).
+#
+# TODO(linux): this is a temporary per-target opt-out. The root-cause fix
+# mirrors morphizen-core/morphizen-pattern: extract onnx_proto's
+# INTERFACE_INCLUDE_DIRECTORIES and re-apply them as SYSTEM (see the
+# onnx-handling pattern already in morphizen-core/cmake/morphizen-core-static.cmake).
+# Tracked separately because morphizen_ENABLE_ONNX_BACKEND defaults to OFF and
+# no standard CI flow exercises this target today. Remove this block once the
+# SYSTEM-include fix lands.
+if(NOT MSVC)
+  target_compile_options(${LIB_NAME} PRIVATE -Wno-error=conversion)
+endif()
 target_link_libraries(${LIB_NAME}
   PRIVATE
   onnxruntime::onnxruntime
