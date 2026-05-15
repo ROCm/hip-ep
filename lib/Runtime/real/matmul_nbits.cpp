@@ -22,12 +22,13 @@
 // ---------------------------------------------------------------------------
 // Asym MatMulNBits zero_points unpack cache.
 //
-// For each unique zero_points input pointer (which is stable for the lifetime
-// of the model.dll — the pointer comes from the constants blob), cache the
-// unpacked uint8 buffer used by GEMV/naive paths and the converted fp16
-// buffer used by the WMMA / col-major-GEMV (M>1) paths. This avoids the
-// per-call unpack/convert kernel launches that were the dominant per-call
-// overhead for asym 8B decode (~225 launches per Compute()).
+// For each unique zero_points input pointer (which is stable for the
+// lifetime of the inference session — the pointer comes from the
+// constants blob loaded by hipdnn_ep_state_init), cache the unpacked
+// uint8 buffer used by GEMV/naive paths and the converted fp16 buffer
+// used by the WMMA / col-major-GEMV (M>1) paths. This avoids the
+// per-call unpack/convert kernel launches that were the dominant
+// per-call overhead for asym 8B decode (~225 launches per Compute()).
 //
 // Lifecycle: lazily created on first asym call; freed in
 // hipdnn_ep_state_cleanup via hipdnn_ep_zp_unpack_cache_destroy.

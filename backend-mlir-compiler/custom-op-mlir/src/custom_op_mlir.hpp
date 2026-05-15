@@ -14,9 +14,9 @@ namespace mlir_compilation {
 // ============================================================================
 
 // Memory placement of a tensor's `data` pointer. Carried as an int in
-// tensor_t so the enum is forward-compatible without breaking the on-the-wire
-// ABI between marshalling (onnxruntime_morphizen_ep.dll) and the MLIR-compiled
-// model.dll.
+// tensor_t so the enum is forward-compatible without breaking the
+// on-the-wire ABI between marshalling (onnxruntime_morphizen_ep.dll)
+// and the MLIR-compiled bitcode JITted in-process by BitcodeJIT.
 //
 // IMPORTANT: values are 1:1 with ORT's OrtMemoryInfoDeviceType
 // (onnxruntime_c_api.h). MlirCustomOp can therefore write the ORT value
@@ -62,7 +62,7 @@ struct tensor_t {
 // / add / remove a field in one copy and forget to mirror it in the others,
 // at least one of them fails to build. Per-field offsets (not raw sizeof)
 // because trailing padding after `memory_type` is compiler-defined and not
-// part of what model.dll actually reads.
+// part of what the JIT'd bitcode actually reads.
 static_assert(offsetof(tensor_t, data) == 0,
               "tensor_t.data must remain the first field");
 static_assert(offsetof(tensor_t, shape) == sizeof(void *),

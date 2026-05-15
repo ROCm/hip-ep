@@ -39,19 +39,19 @@ unsigned long __stdcall GetCurrentProcessId(void);
 // NOTE: layout intentionally diverges from main: PR #109 had a `bool
 // is_host` here to support a hipHostMalloc fallback path on iGPU. We
 // dropped that path (constants blob is always hipMalloc'd VRAM), so
-// is_host is removed. Cross-DLL sharing relies on both publisher and
-// consumer using this same struct, which holds for OGA pipeline (both
-// model.dll built from the same hip-compiler).
+// is_host is removed. Cross-graph sharing relies on both publisher and
+// consumer using this same struct, which holds for the OGA pipeline
+// (both subgraph bitcodes built from the same hip-compiler).
 struct SharedConstantsMeta {
   void *blob_ptr;
   size_t blob_size;
   volatile long ref_count;
 };
 
-// Atomic ref-count helpers. Model DLL bitcode is compiled by Clang/LLVM
-// where InterlockedIncrement/Decrement are not linkable symbols (MSVC
-// intrinsics, not kernel32 exports). Use compiler builtins that lower
-// to LLVM atomicrmw.
+// Atomic ref-count helpers. The merged runtime bitcode is compiled by
+// Clang/LLVM where InterlockedIncrement/Decrement are not linkable
+// symbols (MSVC intrinsics, not kernel32 exports). Use compiler
+// builtins that lower to LLVM atomicrmw.
 #if defined(__clang__) || defined(__GNUC__)
 static inline long shm_ref_inc(volatile long *p) {
   return __sync_add_and_fetch(p, 1);
@@ -963,10 +963,12 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
 // seqlens_k cache; future per-forward-pass caches should be cleared here
 // as well so the EP-side hook stays a single call.
 //
-// __declspec(dllexport) matches the convention in real/test_hip_from_dll.cpp
-// (belt-and-suspenders with the .def export list in CompilerDriver.cpp) and
-// guarantees the symbol survives LLVM optimization in the compiled
-// model.dll, which dlsym/GetProcAddress resolves it from.
+// `__declspec(dllexport)` on Windows pins the symbol against
+// internalization when this TU is compiled to bitcode and merged into a
+// per-model module by `LLVMBackend::linkRuntimeModule`; the JIT-loaded
+// bitcode then resolves the symbol via BitcodeJIT's process-search
+// generator. The attribute also matches the convention used in
+// real/test_hip_from_dll.cpp.
 extern "C"
 #ifdef _WIN32
     __declspec(dllexport)
