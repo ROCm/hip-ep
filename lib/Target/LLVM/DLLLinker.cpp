@@ -267,10 +267,20 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
   if (clangPath.empty() || !llvm::sys::fs::exists(clangPath)) {
     auto found = llvm::sys::findProgramByName("clang++");
     if (!found) {
+      // HIPDNN_LLVM_MAJOR is injected by lib/Target/LLVM/CMakeLists.txt
+      // from find_package(LLVM)'s LLVM_VERSION_MAJOR; stringify it so the
+      // apt package hint tracks the LLVM version the project actually
+      // configured against (instead of going stale on the next bump).
+#define HIPDNN_STRINGIFY_(x) #x
+#define HIPDNN_STRINGIFY(x) HIPDNN_STRINGIFY_(x)
       llvm::errs() << "clang++ not found on PATH and HIPDNN_CLANG_PATH is "
-                      "unset or stale. Install clang (e.g. apt install "
-                      "clang-22) or rebuild with HIPDNN_CLANG_PATH "
-                      "pointing to a valid clang++ binary.\n";
+                      "unset or stale. Install clang (e.g. `apt install "
+                      "clang-"
+                   << HIPDNN_STRINGIFY(HIPDNN_LLVM_MAJOR)
+                   << "`) or rebuild with HIPDNN_CLANG_PATH pointing to a "
+                      "valid clang++ binary.\n";
+#undef HIPDNN_STRINGIFY
+#undef HIPDNN_STRINGIFY_
       return false;
     }
     clangPath = *found;
@@ -294,7 +304,6 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
   args.push_back("-Wl,--end-group");
   for (const auto &p : libraryPaths)
     args.push_back("-Wl,-rpath," + p);
-  args.push_back("-Wl,--export-dynamic");
   args.push_back("-Wl,--no-undefined");
 
   COMPILER_DEBUG_LOG("clang -shared command (" << args.size() << " args):\n");

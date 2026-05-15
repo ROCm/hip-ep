@@ -151,7 +151,8 @@ if(NOT WIN32)
     if(HIPDNN_CLANG_EXECUTABLE)
         message(STATUS "Found clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
         target_compile_definitions(HipTargetLLVM PRIVATE
-            HIPDNN_CLANG_PATH="${HIPDNN_CLANG_EXECUTABLE}")
+            HIPDNN_CLANG_PATH="${HIPDNN_CLANG_EXECUTABLE}"
+            HIPDNN_LLVM_MAJOR=${LLVM_VERSION_MAJOR})
     else()
         message(WARNING
             "clang not found at configure time; runtime DLL linking will "
