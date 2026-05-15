@@ -11,9 +11,16 @@ add_library(hip-compiler-dll SHARED
     hip-compiler.def
 )
 
-# Link against CInterface library (which pulls in all dependencies)
+# Link against CInterface library (which pulls in all dependencies).
+# WHOLE_ARCHIVE on HipCInterface: dll_main.cpp is empty outside Windows
+# (the DllMain hook is Windows-only), so nothing in this DLL references
+# the C-API symbols (hip_compile_with_fs, hip_get_version) directly.
+# Without WHOLE_ARCHIVE, ld drops the entire archive and produces an empty
+# .so — the EP then dlsym()s "hip_get_version" and aborts with
+# "no such function: hip_get_version". On Windows hip-compiler.def already
+# forces these exports, so this is Linux-specific (but harmless on Win).
 target_link_libraries(hip-compiler-dll PRIVATE
-    HipCInterface
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,HipCInterface>"
     HipSupport
 )
 
