@@ -1,0 +1,14 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+# This BUILD file makes 3rd-party/ a Bazel package so that
+# //3rd-party:onnx_extension.bzl is a valid label (used in MODULE.bazel).
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "onnx_extension.bzl",
+    "onnx.BUILD",
+])
