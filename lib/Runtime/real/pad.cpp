@@ -1,27 +1,27 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Pad: ONNX-18 Pad with optional `axes` input. Four modes (constant,
- * reflect, edge, wrap) handled by a single HIP kernel branched on the
- * `pad_mode` arg.
- *
- * Source: onnxruntime/core/providers/cuda/tensor/pad_impl.cu @ v1.22.2
- *         (_PadKernel; ONNX `wrap` mode added on top).
- *
- * Inputs that live in GPU memory (`pads`, `constant_value`, `axes`) are
- * D2H-read once per call. This adds one or two hipStreamSynchronize stalls
- * per Pad invocation -- acceptable because:
- *  - `pads` and `axes` are typically constant or initialiser-fed in vision
- *    graphs; the compile pipeline lowers them via the constants blob,
- *    so the D2H is from a stable device pointer.
- *  - Pad usually appears few times per graph.
- *
- * If the EP ever wants to avoid the stall, the right fix is to detect the
- * "pads is a graph-time constant" case in the OnnxToHip conversion and
- * fold the values into a host-side attribute (the way Reshape's shape
- * tensor is folded today). That's outside this op's scope.
  */
+
+// Pad: ONNX-18 Pad with optional `axes` input. Four modes (constant,
+// reflect, edge, wrap) handled by a single HIP kernel branched on the
+// `pad_mode` arg.
+//
+// Source: onnxruntime/core/providers/cuda/tensor/pad_impl.cu @ v1.22.2
+//         (_PadKernel; ONNX `wrap` mode added on top).
+//
+// Inputs that live in GPU memory (`pads`, `constant_value`, `axes`) are
+// D2H-read once per call. This adds one or two hipStreamSynchronize stalls
+// per Pad invocation -- acceptable because:
+//  - `pads` and `axes` are typically constant or initialiser-fed in vision
+//    graphs; the compile pipeline lowers them via the constants blob,
+//    so the D2H is from a stable device pointer.
+//  - Pad usually appears few times per graph.
+//
+// If the EP ever wants to avoid the stall, the right fix is to detect the
+// "pads is a graph-time constant" case in the OnnxToHip conversion and
+// fold the values into a host-side attribute (the way Reshape's shape
+// tensor is folded today). That's outside this op's scope.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -78,14 +78,12 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     return -1;
   }
   if (data_rank != output_rank) {
-    fprintf(stderr,
-            "[REAL] wrap_pad: data_rank(%lld) != output_rank(%lld)\n",
+    fprintf(stderr, "[REAL] wrap_pad: data_rank(%lld) != output_rank(%lld)\n",
             (long long)data_rank, (long long)output_rank);
     return -1;
   }
   if (pads_num_elements <= 0) {
-    fprintf(stderr,
-            "[REAL] wrap_pad: pads_num_elements=%lld must be > 0\n",
+    fprintf(stderr, "[REAL] wrap_pad: pads_num_elements=%lld must be > 0\n",
             (long long)pads_num_elements);
     return -1;
   }
@@ -100,8 +98,7 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   }
   int element_size = static_cast<int>(hipdnn_ep_datatype_size(data_type));
   if (element_size <= 0) {
-    fprintf(stderr,
-            "[REAL] wrap_pad: bad element size for data_type=%lld\n",
+    fprintf(stderr, "[REAL] wrap_pad: bad element size for data_type=%lld\n",
             (long long)data_type);
     return -1;
   }
@@ -113,10 +110,9 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   // ONNX-18 pads layout: [begin_0, begin_1, ..., begin_K-1, end_0, ...,
   // end_K-1] where K = num_axes_padded (= data_rank if axes is omitted).
   std::vector<int64_t> pads_host(pads_num_elements);
-  hipError_t err =
-      hipMemcpyAsync(pads_host.data(), pads,
-                     pads_num_elements * sizeof(int64_t),
-                     hipMemcpyDeviceToHost, hip_stream);
+  hipError_t err = hipMemcpyAsync(pads_host.data(), pads,
+                                  pads_num_elements * sizeof(int64_t),
+                                  hipMemcpyDeviceToHost, hip_stream);
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_pad: pads D2H failed: %s\n",
             hipGetErrorString(err));
@@ -144,8 +140,7 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     err = hipMemcpyAsync(cv_buf, constant_value, element_size,
                          hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_pad: constant_value D2H failed: %s\n",
+      fprintf(stderr, "[REAL] wrap_pad: constant_value D2H failed: %s\n",
               hipGetErrorString(err));
       return -1;
     }
@@ -172,13 +167,11 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     return -1;
   }
   for (int64_t i = 0; i < num_axes_padded; ++i) {
-    int64_t axis =
-        axes_host.empty() ? i : axes_host[i];
+    int64_t axis = axes_host.empty() ? i : axes_host[i];
     if (axis < 0)
       axis += data_rank;
     if (axis < 0 || axis >= data_rank) {
-      fprintf(stderr,
-              "[REAL] wrap_pad: axis=%lld out of range [0, %lld)\n",
+      fprintf(stderr, "[REAL] wrap_pad: axis=%lld out of range [0, %lld)\n",
               (long long)axis, (long long)data_rank);
       return -1;
     }
@@ -187,11 +180,10 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     // - lower implicitly via the out_coord >= lower + in_dim check).
   }
 
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_pad: rank=%lld, data_type=%s, mode=%lld, "
-      "num_axes_padded=%lld -> hip_pad\n",
-      (long long)data_rank, hipdnn_ep_datatype_name(data_type),
-      (long long)mode_id, (long long)num_axes_padded);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_pad: rank=%lld, data_type=%s, mode=%lld, "
+                    "num_axes_padded=%lld -> hip_pad\n",
+                    (long long)data_rank, hipdnn_ep_datatype_name(data_type),
+                    (long long)mode_id, (long long)num_axes_padded);
 
   return hip_pad(hipdnn_ep_state_get_stream(state), data, output, data_shape,
                  output_shape, lower_pads.data(), static_cast<int>(data_rank),

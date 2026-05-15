@@ -1,17 +1,17 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Expand: copy `input` to `output`, broadcasting any size-1 input dim. ONNX
- * Expand uses numpy-style right-aligned broadcasting; the kernel handles
- * the alignment internally so this wrapper just forwards shapes and ptrs.
- *
- * Source: onnxruntime/core/providers/cuda/tensor/expand.cu @ v1.22.2.
- *
- * The GPU `shape` tensor pointer is not used here -- the lowering already
- * gives us host-side output_shape, which is the broadcast result the shape
- * tensor would have produced. Avoids a per-call D2H of the shape input.
  */
+
+// Expand: copy `input` to `output`, broadcasting any size-1 input dim. ONNX
+// Expand uses numpy-style right-aligned broadcasting; the kernel handles
+// the alignment internally so this wrapper just forwards shapes and ptrs.
+//
+// Source: onnxruntime/core/providers/cuda/tensor/expand.cu @ v1.22.2.
+//
+// The GPU `shape` tensor pointer is not used here -- the lowering already
+// gives us host-side output_shape, which is the broadcast result the shape
+// tensor would have produced. Avoids a per-call D2H of the shape input.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"

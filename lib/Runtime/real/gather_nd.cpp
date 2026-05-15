@@ -1,19 +1,19 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * GatherND: gather slices of `data` along the first
- * K = indices.shape[-1] dims (after `batch_dims`), one slice per row of
- * `indices`. ONNX-13+ semantics with the `batch_dims` attribute.
- *
- * Indices must be INT64 (the most common case for ONNX vision models). The
- * `data` element type is dispatched via `data_type`. The host wrapper
- * forwards both shapes plus batch_dims to the kernel; no scratch buffer is
- * needed because the kernel reads K indices inline per output element.
- *
- * Source: onnxruntime/core/providers/cuda/tensor/gather_nd_impl.cu @
- *         v1.22.2 (ComputeSliceOffsetsImpl + _GatherNDKernel fused).
  */
+
+// GatherND: gather slices of `data` along the first
+// K = indices.shape[-1] dims (after `batch_dims`), one slice per row of
+// `indices`. ONNX-13+ semantics with the `batch_dims` attribute.
+//
+// Indices must be INT64 (the most common case for ONNX vision models). The
+// `data` element type is dispatched via `data_type`. The host wrapper
+// forwards both shapes plus batch_dims to the kernel; no scratch buffer is
+// needed because the kernel reads K indices inline per output element.
+//
+// Source: onnxruntime/core/providers/cuda/tensor/gather_nd_impl.cu @
+//         v1.22.2 (ComputeSliceOffsetsImpl + _GatherNDKernel fused).
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -45,9 +45,9 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
       "gather_nd",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "dr%lld:ir%lld:bd%lld:%s",
-                 (long long)data_rank, (long long)indices_rank,
-                 (long long)batch_dims, hipdnn_ep_datatype_name(data_type));
+        snprintf(b, sizeof(b), "dr%lld:ir%lld:bd%lld:%s", (long long)data_rank,
+                 (long long)indices_rank, (long long)batch_dims,
+                 hipdnn_ep_datatype_name(data_type));
         return std::string(b);
       },
       state);
@@ -77,11 +77,10 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_gather_nd: data_rank=%lld, indices_rank=%lld, "
-      "batch_dims=%lld, data_type=%s -> hip_gather_nd\n",
-      (long long)data_rank, (long long)indices_rank, (long long)batch_dims,
-      hipdnn_ep_datatype_name(data_type));
+  RUNTIME_DEBUG_LOG("[REAL] wrap_gather_nd: data_rank=%lld, indices_rank=%lld, "
+                    "batch_dims=%lld, data_type=%s -> hip_gather_nd\n",
+                    (long long)data_rank, (long long)indices_rank,
+                    (long long)batch_dims, hipdnn_ep_datatype_name(data_type));
 
   return hip_gather_nd(stream, data, indices, output, data_shape,
                        static_cast<int>(data_rank), indices_shape,

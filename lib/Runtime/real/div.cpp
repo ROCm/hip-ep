@@ -1,17 +1,17 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Div: y = a / b (element-wise, same-shape).
- *
- * Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
- *         @ v1.22.2 (BINARY_OP_NAME_EXPR(Div, (a / b)))
- *
- * Broadcasting is NOT supported here -- the HipToLLVM Div lowering passes
- * num_elements only (no per-input shapes). Any broadcasting must be
- * materialised upstream via Expand. This matches the
- * BinaryElementWiseNoBroadcastImpl fast-path in the CUDA EP.
  */
+
+// Div: y = a / b (element-wise, same-shape).
+//
+// Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
+//         @ v1.22.2 (BINARY_OP_NAME_EXPR(Div, (a / b)))
+//
+// Broadcasting is NOT supported here -- the HipToLLVM Div lowering passes
+// num_elements only (no per-input shapes). Any broadcasting must be
+// materialised upstream via Expand. This matches the
+// BinaryElementWiseNoBroadcastImpl fast-path in the CUDA EP.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"

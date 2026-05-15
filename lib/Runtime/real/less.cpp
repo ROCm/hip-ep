@@ -1,15 +1,15 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Less: y = (a < b)  -- element-wise, same-shape, bool (1-byte) output.
- *
- * Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
- *         @ v1.22.2 (BINARY_OP_NAME_EXPR2(Less, (a < b)))
- *
- * Same same-shape constraint as Equal / Div / Mod (broadcasting via
- * upstream Expand).
  */
+
+// Less: y = (a < b)  -- element-wise, same-shape, bool (1-byte) output.
+//
+// Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
+//         @ v1.22.2 (BINARY_OP_NAME_EXPR2(Less, (a < b)))
+//
+// Same same-shape constraint as Equal / Div / Mod (broadcasting via
+// upstream Expand).
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
