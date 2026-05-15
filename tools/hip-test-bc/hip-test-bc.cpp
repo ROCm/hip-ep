@@ -360,8 +360,7 @@ int main(int argc, char **argv) {
   std::vector<uint8_t> bc_bytes = readFileBytes(bc_path);
   if (bc_bytes.empty())
     return 1;
-  auto jit =
-      mlir_compilation::customop::BitcodeJIT::create(bc_bytes, bc_path);
+  auto jit = mlir_compilation::customop::BitcodeJIT::create(bc_bytes, bc_path);
   if (!jit) {
     std::cerr << "ERROR: BitcodeJIT::create failed for " << bc_path << "\n";
     return 1;
