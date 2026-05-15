@@ -53,6 +53,12 @@ std::string Plugin::guess_name(const char* name) {
   if (name_str.size() >= 3 && name_str.substr(name_str.size() - 3) == ".so") {
     return name_str;
   }
+  // Absolute or relative path (contains '/') — treat as a real filesystem path,
+  // append ".so" without the "lib" prefix. Otherwise dlopen("/tmp/foo") would
+  // become dlopen("lib/tmp/foo.so") which is a different (non-existent) file.
+  if (name_str.find('/') != std::string::npos) {
+    return name_str + ".so";
+  }
   if (name_str.size() >= 3 && name_str.substr(0, 3) == "lib") {
     return name_str;
   }

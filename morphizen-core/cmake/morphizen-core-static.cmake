@@ -116,12 +116,35 @@ target_include_directories(${LIB_NAME}
   PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
   $<BUILD_INTERFACE:${MORPHIZEN_ORT_API_DIR}>
   PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-  ${CMAKE_CURRENT_BINARY_DIR}  # For generated version_info_config.h
+)
+# Generated protobuf headers (morphizen/{config,anchor_point,capability,
+# pass_context,version,model_compatibility}.pb.h) live under
+# ${CMAKE_CURRENT_BINARY_DIR}/morphizen/. Mark BINARY_DIR as SYSTEM so the
+# inline accessor methods (`Map::size()` returns size_t but accessor signature
+# is `int` on protobuf >=22) do NOT trigger -Wconversion in either:
+#   - morphizen-core's own private sources (config.cpp, pass_context_imp.cpp,
+#     model_compatibility.cpp) that include "morphizen/*.pb.h" directly, OR
+#   - PUBLIC consumers (ort-bridge, morphizen-graph, etc.) that inherit
+#     INTERFACE_SYSTEM_INCLUDE_DIRECTORIES via target_link_libraries.
+# This is the root-cause fix for the per-target -Wno-error=conversion patches
+# previously applied across morphizen-core / morphizen-pattern / and that had
+# to be supplemented by a parent-project FORCE override in onnx-hipdnn-ep
+# because transitive consumers (ort-bridge / morphizen-graph) weren't covered.
+# Generator-expression SYSTEM scope is restricted to BUILD_INTERFACE because
+# the installed layout puts .pb.h under <install>/include/morphizen/ next to
+# the public ABI headers, and we want -Wconversion to fire on those (they're
+# header-only, no .pb.cc to silence with /w).
+# Side note: BINARY_DIR also contains the configure_file output
+# `version_info_config.h` (consumed by src/version_info.cpp). SYSTEM-marking
+# it is accepted collateral — that file is generated `#define` macros only,
+# no code that -Wconversion could meaningfully flag.
+target_include_directories(${LIB_NAME}
+  SYSTEM PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
 )
 
 # Link against onnxruntime::onnxruntime target directly.
@@ -169,11 +192,14 @@ target_compile_options(morphizen-core-static PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:
 if(MSVC)
   target_compile_options(morphizen-core-static PRIVATE /wd4946)
 endif()
-# Suppress C4267 (size_t → int) from protobuf-generated .pb.h headers included by
-# morphizen-core private sources (config.hpp, config.cpp, model_compatibility.cpp).
-# The generated .pb.cc files are compiled with /w via set_source_files_properties
-# in cmake/proto.cmake, but that does not protect .cpp files that #include the
-# same .pb.h headers.
+# Suppress C4267 (size_t → int) from protobuf-generated .pb.h headers
+# included by morphizen-core private sources. MSVC has no "system header"
+# concept (the /external:I family exists but is configuration-dependent),
+# so the warning still needs a per-target opt-out. The GCC/Clang equivalent
+# is handled by marking ${CMAKE_CURRENT_BINARY_DIR} as SYSTEM PUBLIC above —
+# the .pb.h headers are then processed as system headers and -Wconversion
+# is suppressed inside them automatically (and the SYSTEM marking propagates
+# to PUBLIC consumers via INTERFACE_SYSTEM_INCLUDE_DIRECTORIES).
 if(MSVC)
   target_compile_options(morphizen-core-static PRIVATE /wd4267)
 endif()

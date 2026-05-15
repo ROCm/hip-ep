@@ -76,6 +76,17 @@ target_include_directories(morphizen-pattern
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+# Generated pattern.pb.h lives at ${CMAKE_CURRENT_BINARY_DIR}/morphizen/.
+# Mark BINARY_DIR as SYSTEM PRIVATE so GCC suppresses -Wconversion when
+# resolving "morphizen/pattern.pb.h" via this path. protobuf >=22's
+# `Map::size() -> int` narrowing in the generated inline accessors is the
+# dominant offender; without SYSTEM it tripped `-Werror -Wconversion`
+# coming from MORPHIZEN_COMPILER_OPTIONS in all 7 pattern_*.cpp consumers.
+# SYSTEM PRIVATE (not PUBLIC) because pattern.pb.h is an internal detail —
+# no morphizen-pattern public consumer ever includes it.
+target_include_directories(morphizen-pattern
+    SYSTEM PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -104,9 +115,10 @@ if(MSVC)
     target_compile_options(morphizen-pattern PRIVATE /wd4946)
 endif()
 # Suppress C4267 (size_t → int) from protobuf-generated pattern.pb.h.
-# All 7 pattern source files include pattern.pb.h directly; the generated
-# .pb.cc is suppressed via /w in set_source_files_properties (lines 36-50)
-# but that does not protect the including .cpp files.
+# MSVC has no "system header" concept usable here, so the per-target opt-out
+# stays. The GCC/Clang equivalent is handled by the `SYSTEM PRIVATE` include
+# of ${CMAKE_CURRENT_BINARY_DIR} above (pattern.pb.h resolves through that
+# path; -Wconversion is automatically suppressed inside system headers).
 if(MSVC)
     target_compile_options(morphizen-pattern PRIVATE /wd4267)
 endif()
