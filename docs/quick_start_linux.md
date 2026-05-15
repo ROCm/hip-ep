@@ -59,7 +59,8 @@ git submodule update --init --recursive
 The result tree under `<workspace>/install/` is self-contained:
 
 - `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`,
-  `bin/hip-test-dll` (and `bin/model_benchmark` with `BUILD_OGA=1`)
+  `bin/hip-inspect-bc`, `bin/hip-test-bc` (and `bin/model_benchmark` with
+  `BUILD_OGA=1`)
 - `lib/libhip-compiler.so`, `lib/libonnxruntime_morphizen_ep.so`,
   `lib/libonnxruntime.so*`, `lib/libamdhip64.so*` + TheRock transitive
   (so `LD_LIBRARY_PATH=<workspace>/install/lib` is enough — see

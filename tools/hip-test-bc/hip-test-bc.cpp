@@ -4,14 +4,16 @@
  */
 
 //===----------------------------------------------------------------------===//
-// test-model-dll - E2E testing tool for compiled MLIR models
+// hip-test-bc - E2E testing tool for a compiled MLIR-model bitcode artifact
 //===----------------------------------------------------------------------===//
-// Loads a compiled DLL, discovers metadata, generates test data, runs
-// inference, and validates outputs. Supports shape overrides and performance
-// measurement.
+// Loads a .bc file via BitcodeJIT, discovers metadata, generates test data,
+// runs inference, and validates outputs. Supports shape overrides and
+// performance measurement. This is the bitcode-era replacement for the
+// retired hip-test-dll harness; same CLI surface and same JSON-metadata
+// contract, only the artifact format and loader changed.
 //===----------------------------------------------------------------------===//
 
-#include "../common/DllLoader.h"
+#include "BitcodeJIT.h"
 #include "CrashHandler.h"
 #include "hip/Support/DiskFileSystem.h"
 #ifdef _MSC_VER
@@ -28,6 +30,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -35,17 +38,11 @@
 #include <string>
 #include <vector>
 
-// Interface function types
-typedef int (*InferenceInitFunc)(void **out_state, void *fs);
-typedef int (*InferenceComputeFunc)(void *state, void *inputs, void *outputs);
-typedef int (*InferenceCleanupFunc)(void *state);
-typedef const char *(*InferenceGetMetadataJsonFunc)(void);
-
 // Local copy of the tensor_t wire-protocol ABI -- the three components
-// (compiler-emitted model.dll, EP runtime DLL, this hip-test-dll harness)
-// are intentionally kept decoupled, so we re-declare the struct here
-// instead of sharing a header. The static_assert block below catches
-// any layout drift between the three copies. Sibling copies live at:
+// (compiler-emitted bitcode, EP runtime, this hip-test-bc harness) are
+// intentionally kept decoupled, so we re-declare the struct here instead
+// of sharing a header. The static_assert block below catches any layout
+// drift between the three copies. Sibling copies live at:
 //   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
 //   * `lib/Runtime/hipdnn_ep_runtime.h`                             (EP
 //   runtime)
@@ -69,7 +66,7 @@ typedef struct {
 // / add / remove a field in one copy and forget to mirror it in the others,
 // at least one of them fails to build. Per-field offsets (not raw sizeof)
 // because trailing padding after `memory_type` is compiler-defined and not
-// part of what model.dll actually reads.
+// part of what the JIT'd bitcode actually reads.
 static_assert(offsetof(tensor_t, data) == 0,
               "tensor_t.data must remain the first field");
 static_assert(offsetof(tensor_t, shape) == sizeof(void *),
@@ -310,19 +307,32 @@ static bool parseMetadata(const char *json_str, std::vector<TensorMeta> &inputs,
   return parseTensors("inputs", inputs) && parseTensors("outputs", outputs);
 }
 
+// Read an entire file into a byte buffer. Returns empty vector on failure
+// (which BitcodeJIT::create rejects as a parse error). Streams into a
+// std::vector so we don't need to know the file size up front.
+static std::vector<uint8_t> readFileBytes(const std::string &path) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) {
+    std::cerr << "Failed to open: " << path << "\n";
+    return {};
+  }
+  return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+}
+
 int main(int argc, char **argv) {
-  hip::install_crash_handlers("hip-test-dll");
+  hip::install_crash_handlers("hip-test-bc");
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
-              << " <model.dll> [--input-shape INDEX=DIMS;...] [--iterations N] "
+              << " <model.bc> [--input-shape INDEX=DIMS;...] [--iterations N] "
                  "[--verbose] [--validate]\n";
     std::cerr << "Example: " << argv[0]
-              << " model.dll --input-shape 0=8,3,224,224 --iterations 10 "
+              << " model.bc --input-shape 0=8,3,224,224 --iterations 10 "
                  "--verbose --validate\n";
     return 1;
   }
 
-  std::string dll_path = argv[1];
+  std::string bc_path = argv[1];
   std::map<int, std::vector<int64_t>> shape_overrides;
   int iterations = 1;
   bool verbose = false;
@@ -341,20 +351,29 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Load DLL
+  // Load bitcode and JIT-compile in-process. BitcodeJIT::create copies the
+  // bytes into its own MemoryBuffer, runs `@llvm.global_ctors` for the
+  // merged runtime, and registers operator new/delete + emutls shims so
+  // host-side dispatch works identically to what the EP does at runtime.
   if (verbose)
-    std::cout << "Loading DLL: " << dll_path << "\n";
-  DllLoader dll(dll_path);
-  if (!dll.isValid()) {
+    std::cout << "Loading bitcode: " << bc_path << "\n";
+  std::vector<uint8_t> bc_bytes = readFileBytes(bc_path);
+  if (bc_bytes.empty())
+    return 1;
+  auto jit =
+      mlir_compilation::customop::BitcodeJIT::create(bc_bytes, bc_path);
+  if (!jit) {
+    std::cerr << "ERROR: BitcodeJIT::create failed for " << bc_path << "\n";
     return 1;
   }
 
-  // Load interface functions
-  auto init_func = (InferenceInitFunc)dll.getSymbol("inference_init");
-  auto compute_func = (InferenceComputeFunc)dll.getSymbol("inference_compute");
-  auto cleanup_func = (InferenceCleanupFunc)dll.getSymbol("inference_cleanup");
-  auto get_metadata_func = (InferenceGetMetadataJsonFunc)dll.getSymbol(
-      "inference_get_metadata_json");
+  // Resolve the four required entry points via the JIT's symbol search.
+  auto init_func = jit->get_method<int, void **, void *>("inference_init");
+  auto compute_func =
+      jit->get_method<int, void *, void *, void *>("inference_compute");
+  auto cleanup_func = jit->get_method<int, void *>("inference_cleanup");
+  auto get_metadata_func =
+      jit->get_method<const char *>("inference_get_metadata_json");
 
   if (!init_func || !compute_func || !cleanup_func || !get_metadata_func) {
     std::cerr << "ERROR: Missing required interface functions\n";

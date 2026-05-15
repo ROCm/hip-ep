@@ -8,12 +8,14 @@ Licensed under the MIT License.
 End-to-end tests for the HipDNN MLIR compiler. These tests previously
 verified `.mlir` -> per-model `.dll` -> execution via `hip-test-dll`.
 
-> **Status:** disabled. The DLL path has been retired -- the compiler now
-> emits LLVM bitcode that is JITted in-process by the EP DLL (see
-> `backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`). The test
-> harness needs to be re-pointed at the BitcodeJIT loader before these
-> tests can run again; the input `.mlir` fixtures in `test/lit/e2e/` are
-> preserved for that future work.
+> **Status:** disabled at the ctest layer. The DLL path has been retired
+> -- the compiler now emits LLVM bitcode that is JITted in-process by the
+> EP DLL (see `backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`),
+> and the bitcode-era replacement harness lives at `tools/hip-test-bc`
+> (loads via BitcodeJIT, same CLI as the retired tool). What's missing is
+> just the cmake glue that re-registers `.mlir` -> `hip-compiler` ->
+> `hip-test-bc` invocations with ctest; the input `.mlir` fixtures in
+> `test/lit/e2e/` are preserved for that work.
 
 For the active end-to-end coverage, run ORT integration tests against
 `onnxruntime_perf_test.exe` -- see the Performance Testing section below.

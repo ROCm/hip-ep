@@ -9,12 +9,12 @@
 # These tests used to compile MLIR -> per-model DLL and exec via
 # hip-test-dll. The DLL path is gone (see ../../docs/design/alternatives/
 # and the bitcode switchover plan): the compiler now emits LLVM bitcode
-# that the EP JITs in-process. The test harness needs to be re-pointed
-# at the BitcodeJIT loader (see backend-mlir-compiler/custom-op-mlir/
-# src/BitcodeJIT.h) before these tests can run again.
-#
-# Disabling the test registrations entirely keeps `ctest` green during
-# the transition; the .mlir test inputs in ../lit/e2e/ are preserved.
+# that the EP JITs in-process. The bitcode-era equivalent harness lives
+# at tools/hip-test-bc (loads via BitcodeJIT, same CLI surface as the
+# retired hip-test-dll). This subdirectory will be wired back up to
+# register MLIR -> .bc -> hip-test-bc invocations with ctest in a
+# follow-up; the .mlir test inputs in ../lit/e2e/ are preserved.
 
-message(STATUS "E2E integration tests disabled (pending BitcodeJIT-based "
-               "test harness rewrite)")
+message(STATUS "E2E integration tests disabled (pending hip-test-bc "
+               "ctest wiring -- the harness exists, registration is the "
+               "remaining work)")

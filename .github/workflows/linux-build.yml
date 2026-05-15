@@ -146,12 +146,13 @@ jobs:
       # -----------------------------------------------------------------------
       # Stage the artifact:
       #   staging/bin/  hip-onnx-runner, hip-compiler, hip-mlir-opt,
-      #                 hip-test-dll, hip-inspect-dll, model_benchmark,
+      #                 hip-inspect-bc, hip-test-bc, model_benchmark,
       #                 onnxruntime_perf_test
       #   staging/lib/  libhip-compiler.so, libonnxruntime_morphizen_ep.so,
       #                 libonnxruntime.so*, libonnxruntime-genai.so*,
-      #                 libhip_custom_kernels.a (needed at per-model
-      #                 DLL link time)
+      #                 libhip_custom_kernels.a (linked WHOLE_ARCHIVE into
+      #                 the EP DLL so hip_* launchers are exported for
+      #                 BitcodeJIT to resolve)
       #   staging/etc/  morphizen_config.json
       #
       # The artifact does NOT bundle TheRock (deploy host installs ROCm

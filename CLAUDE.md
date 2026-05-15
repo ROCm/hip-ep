@@ -164,10 +164,13 @@ Runtime functions called from generated code must be declared in `hipdnn_ep_runt
 | `hip-mlir-opt` | MLIR optimizer with all HIP passes registered |
 | `hip-compiler` | End-to-end ONNX MLIR → LLVM bitcode compiler CLI |
 | `hip-onnx-runner` | Run ONNX models via HIP EP |
+| `hip-inspect-bc` | Print metadata embedded in a per-model `.bc` artifact (parses IR, no JIT, no GPU dependency) |
+| `hip-test-bc` | Load a per-model `.bc` via the same BitcodeJIT path the EP uses, generate test inputs, and run inference end-to-end |
 
-`hip-test-dll` and `hip-inspect-dll` are retired: the per-model artifact
-is no longer a native DLL but LLVM bitcode JITted in-process by the EP
-(see `backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`).
+`hip-test-bc` and `hip-inspect-bc` replace the retired `hip-test-dll` /
+`hip-inspect-dll` tools — the per-model artifact is no longer a native
+DLL but LLVM bitcode JITted in-process by the EP (see
+`backend-mlir-compiler/custom-op-mlir/src/BitcodeJIT.h`).
 
 ## Adding a New Operator
 
