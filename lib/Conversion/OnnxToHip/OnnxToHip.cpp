@@ -487,7 +487,6 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateWhereConversionPatterns(patterns, ctx);
   populateLinearAttentionConversionPatterns(patterns, ctx);
   populateRangeConversionPatterns(patterns, ctx);
-  populateCastLikeConversionPatterns(patterns, ctx);
   populateEqualConversionPatterns(patterns, ctx);
   populateDivConversionPatterns(patterns, ctx);
   populateReduceMaxConversionPatterns(patterns, ctx);
@@ -517,6 +516,98 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   if (mlir::failed(
           mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
     return mlir::failure();
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// Pre-metadata graph simplification
+//===----------------------------------------------------------------------===//
+
+// onnx.CastLike's second operand is a *type donor* whose data is never read --
+// the target dtype is statically known from the result type. Rewriting
+// CastLike to a plain onnx.Cast at this point (before metadata capture) lets
+// us also drop any function argument that was wired up only to feed that
+// type-donor slot, so the compiled DLL's input_count reflects what the
+// runtime actually consumes. Without this step the generated DLL has a
+// shape-[0] placeholder input that `hipdnn_ep_tensor_prepare_input` rejects
+// as null at run time.
+//
+// Only function arguments that lose their *last* use to this rewrite are
+// dropped. Function arguments that were already dead in the input IR are
+// preserved -- generateModuleMetadata's contract is to capture the original
+// signature, and dropping unrelated dead args here would silently violate
+// that.
+//
+// Runs before generateModuleMetadata; relies on the downstream CastToHip
+// pattern (which derives the target ONNX dtype enum from the result type and
+// therefore needs no `to` attribute on the synthesized onnx.Cast).
+static mlir::LogicalResult preMetadataSimplifyCastLike(mlir::ModuleOp module) {
+  for (auto funcOp : module.getOps<mlir::func::FuncOp>()) {
+    if (funcOp.isDeclaration())
+      continue;
+
+    llvm::SmallVector<mlir::Operation *> castLikeOps;
+    funcOp.walk([&](mlir::Operation *op) {
+      if (op->getName().getStringRef() == "onnx.CastLike")
+        castLikeOps.push_back(op);
+    });
+    if (castLikeOps.empty())
+      continue;
+
+    // Snapshot which function arguments were live *before* this rewrite, so
+    // we never silently drop an arg that was already dead in the input IR.
+    llvm::SmallVector<bool> wasLiveBeforeRewrite(funcOp.getNumArguments(),
+                                                 false);
+    for (unsigned i : llvm::seq<unsigned>(0u, funcOp.getNumArguments()))
+      wasLiveBeforeRewrite[i] = !funcOp.getArgument(i).use_empty();
+
+    for (mlir::Operation *op : castLikeOps) {
+      if (op->getNumOperands() < 2 || op->getNumResults() < 1)
+        continue;
+      mlir::Value input = op->getOperand(0);
+      auto resultType =
+          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+      if (!resultType)
+        continue;
+
+      // Identity: input and result element types already match. Forward the
+      // input directly, mirroring the existing CastLikeConversion behaviour.
+      if (inputType &&
+          inputType.getElementType() == resultType.getElementType()) {
+        op->getResult(0).replaceAllUsesWith(input);
+        op->erase();
+        continue;
+      }
+
+      mlir::OpBuilder builder(op);
+      mlir::OperationState state(op->getLoc(), "onnx.Cast");
+      state.addOperands({input});
+      state.addTypes({resultType});
+      if (auto nodeName =
+              op->getAttrOfType<mlir::StringAttr>("onnx_node_name"))
+        state.addAttribute("onnx_node_name", nodeName);
+      mlir::Operation *castOp = builder.create(state);
+      op->getResult(0).replaceAllUsesWith(castOp->getResult(0));
+      op->erase();
+    }
+
+    // Drop only the args that were live before the rewrite and are now use-
+    // empty -- i.e. args whose last use was a CastLike type donor. Argument 0
+    // is always !hip.context (injected by hip-add-context-arg) and must be
+    // preserved regardless.
+    llvm::BitVector argsToErase(funcOp.getNumArguments());
+    for (unsigned i : llvm::seq<unsigned>(0u, funcOp.getNumArguments())) {
+      mlir::Value arg = funcOp.getArgument(i);
+      if (mlir::isa<mlir::hip::ContextType>(arg.getType()))
+        continue;
+      if (wasLiveBeforeRewrite[i] && arg.use_empty())
+        argsToErase.set(i);
+    }
+    if (argsToErase.any() && mlir::failed(funcOp.eraseArguments(argsToErase)))
+      return funcOp.emitError(
+          "failed to drop dead function arguments after CastLike rewrite");
+  }
   return mlir::success();
 }
 
@@ -680,6 +771,13 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // writeConstantsBinToFileSystem, after all offsets are known; no
     // writer is opened here.
   }
+
+  // Rewrite onnx.CastLike to onnx.Cast and drop now-dead type-donor function
+  // arguments. Must run before metadata capture so the dropped arguments
+  // don't end up as null-data inputs in the compiled DLL.
+  if (mlir::failed(preMetadataSimplifyCastLike(module)))
+    return signalPassFailure();
+  logSubpass("simplify-castlike");
 
   // Capture original function signatures as module metadata before lowering.
   if (mlir::failed(generateModuleMetadata(module)))
