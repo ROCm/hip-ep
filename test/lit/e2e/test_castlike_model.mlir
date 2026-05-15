@@ -3,18 +3,21 @@
 // Test CastLike E2E full pipeline
 // CastLike casts the first input to the element type of the second input.
 // The second operand is a *type donor* whose data is never read; the target
-// dtype is statically known from the result type. convert-onnx-to-hip runs a
-// pre-metadata simplification that rewrites onnx.CastLike → onnx.Cast and
-// drops the now-dead function argument, so the compiled DLL has only one
-// real input. The downstream onnx.Cast → hip.cast → wrap_cast path is
-// shared with plain ONNX Cast.
+// dtype is statically known from the result type. The standalone
+// simplify-onnx pass (a pure ONNX-dialect transform that runs at the head
+// of the pipeline, before hip-add-context-arg) rewrites onnx.CastLike →
+// onnx.Cast and drops the now-dead function argument, so the compiled DLL
+// has only one real input. The downstream onnx.Cast → hip.cast → wrap_cast
+// path is shared with plain ONNX Cast.
 //
 // Verifies the complete hipdnn-pipeline:
-// 1. convert-onnx-to-hip: onnx.CastLike → onnx.Cast (+ dead-arg drop) → hip.cast
-// 2. canonicalize: Simplify redundant operations
-// 3. memory-pooling: Pool output buffer into single allocation
-// 4. convert-hip-to-llvm: HIP ops → LLVM runtime calls
-// 5. generate-interface: Create inference_init/compute/cleanup/metadata
+// 1. simplify-onnx:           onnx.CastLike → onnx.Cast (+ dead-arg drop)
+// 2. hip-add-context-arg:     prepend !hip.context as func arg 0
+// 3. convert-onnx-to-hip:     onnx.Cast → hip.cast (shared CastConversion)
+// 4. canonicalize:            simplify redundant ops
+// 5. memory-pooling:          pool output buffer into single allocation
+// 6. convert-hip-to-llvm:     HIP ops → LLVM runtime calls
+// 7. generate-interface:      create inference_init/compute/cleanup/metadata
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1

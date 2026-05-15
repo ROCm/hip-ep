@@ -681,9 +681,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
   }
 
   // NOTE: onnx.CastLike -> onnx.Cast + dead-type-donor function-argument
-  // drop is handled by the standalone hip-simplify-onnx pass, which must
-  // run upstream of this one (see lib/Dialect/Transforms/Pipelines.cpp).
-  // We capture metadata directly from the (already-simplified) signatures.
+  // drop is handled by the standalone simplify-onnx pass, which must run
+  // upstream of this one (see lib/Dialect/Transforms/Pipelines.cpp). We
+  // capture metadata directly from the (already-simplified) signatures.
   if (mlir::failed(generateModuleMetadata(module)))
     return signalPassFailure();
   logSubpass("metadata");

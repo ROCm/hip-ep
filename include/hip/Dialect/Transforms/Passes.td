@@ -26,7 +26,7 @@ def HipAddContextArgPass : Pass<"hip-add-context-arg", "mlir::ModuleOp"> {
   ];
 }
 
-def HipSimplifyOnnxPass : Pass<"hip-simplify-onnx", "mlir::ModuleOp"> {
+def SimplifyOnnxPass : Pass<"simplify-onnx", "mlir::ModuleOp"> {
   let summary = "Pre-lowering simplification of ONNX-dialect graphs";
   let description = [{
     Runs a small fixed set of ONNX-dialect rewrites that must complete
@@ -34,8 +34,13 @@ def HipSimplifyOnnxPass : Pass<"hip-simplify-onnx", "mlir::ModuleOp"> {
     metadata. After the per-op rewrites, drops any function argument
     whose only remaining uses were eliminated by them.
 
+    The pass is pure ONNX-dialect: it does not depend on the HIP dialect
+    and is intentionally positioned at the head of the pipeline, BEFORE
+    hip-add-context-arg, so it operates in the original ONNX function
+    index space and could be reused unchanged by any other frontend.
+
     Pipeline position:
-      hip-add-context-arg -> hip-simplify-onnx -> convert-onnx-to-hip
+      simplify-onnx -> hip-add-context-arg -> convert-onnx-to-hip
 
     Per-op rewrites currently implemented:
       * onnx.CastLike -> onnx.Cast
@@ -58,11 +63,8 @@ def HipSimplifyOnnxPass : Pass<"hip-simplify-onnx", "mlir::ModuleOp"> {
         so the existing "metadata captures the original signature"
         contract asserted by test/lit/Pipeline/module-metadata.mlir
         stays intact.
-      * The !hip.context argument (always argument 0, added by
-        hip-add-context-arg) is never dropped.
   }];
   let dependentDialects = [
-    "mlir::hip::HipDialect",
     "mlir::func::FuncDialect"
   ];
 }
