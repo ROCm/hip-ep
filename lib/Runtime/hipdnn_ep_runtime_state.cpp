@@ -230,6 +230,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
+  state->loop_iter_dev_buf = nullptr;
+  state->loop_cond_dev_buf = nullptr;
+  state->loop_nesting_depth = 0;
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -853,6 +856,14 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
+  }
+
+  // Free ONNX Loop driver device buffers (if allocated)
+  if (state->loop_iter_dev_buf) {
+    HIP_CLEANUP(hipFree(state->loop_iter_dev_buf));
+  }
+  if (state->loop_cond_dev_buf) {
+    HIP_CLEANUP(hipFree(state->loop_cond_dev_buf));
   }
 
   if (state->device_error_flag) {
