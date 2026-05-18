@@ -19,7 +19,6 @@ Mechanism the runtime uses for per-session, per-operator state.
 | `lib/Runtime/real/matmul_nbits.cpp` | `ZpUnpackState` (shared with `qmoe`). |
 | `lib/Runtime/real/gqa.cpp` | `GqaGemmState`, `GqaSeqlensCache`. |
 | `lib/Runtime/real/qmoe.cpp` | `QmoeState` + C-ABI shims. |
-| `test/runtime_steady_state/runtime_steady_state.cpp` | Native CTest target `RuntimeSteadyState`. |
 
 ## Op-module contract
 
@@ -169,9 +168,6 @@ After warmup, per call:
   (currently ≤ 5). Non-null `begin_compute_fn`: one indirect call.
   Null: one load + one null branch.
 
-CTest target `RuntimeSteadyState` asserts that `init_fn` fires exactly
-once per slot across warmup + 1000 simulated inferences.
-
 ## `growable_buffer.h`
 
 Header-only RAII helpers. Two classes with the same API:
@@ -240,37 +236,6 @@ extern "C" int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
 `wrap_qmoe` itself also goes through these shims — same call path
 across host code and generated bitcode.
 
-## Smoke test
-
-`test/runtime_steady_state/runtime_steady_state.cpp` is a native
-(non-GPU, non-bitcode) test that links `module_registry.cpp` directly.
-It uses two fake state types:
-
-- `FullHooksState` — defines `begin_compute` + destructor (exercises
-  the `has_begin_compute_` SFINAE branch; absent `end_compute` keeps
-  that one null even when the rest are wired).
-- `MinimalState` — only the required constructor + destructor.
-
-It stubs `get_module_registry` locally and uses a one-int
-`::RuntimeState` (the registry never dereferences the pointer).
-
-Seven cases:
-
-1. SFINAE installs `begin_compute_fn` for `FullHooksState`, leaves
-   `end_compute_fn` null on both types.
-2. `register_op_module` assigns monotonic slot ids; out-of-range
-   `get_op_module_spec` returns null.
-3. First `op_module_get` calls the ctor once; 100 follow-up calls
-   return the same pointer without re-invoking it.
-4. Null registry / negative slot / out-of-range slot /
-   `module_registry_destroy(nullptr)` /
-   `module_registry_begin_compute(nullptr, &s)` all behave gracefully.
-5. `begin_compute` fires only for populated slots whose spec defines
-   the hook; the current `RuntimeState *` is forwarded each call.
-6. Destructors fire exactly once at `module_registry_destroy`.
-7. After warmup, 1000 simulated inferences leave the init counter at
-   1 and produce exactly 1000 `begin_compute` invocations.
-
 ## Build glue
 
 `lib/Runtime/CMakeLists.txt`:
@@ -279,12 +244,6 @@ Seven cases:
   `DEPENDS` list of `compile_to_bitcode`.
 - `module_registry.cpp` compiles to `runtime_module_registry.bc` and
   is added to both the real and mock runtime link lists.
-
-`test/runtime_steady_state/CMakeLists.txt` builds
-`test-runtime-steady-state` as a native C++17 executable linking only
-`module_registry.cpp`, and registers it as the `RuntimeSteadyState`
-CTest target. The root `CMakeLists.txt` pulls the subdirectory in via
-`add_subdirectory(test/runtime_steady_state)`.
 
 ## Threading model
 
