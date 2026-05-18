@@ -1,0 +1,44 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# Generate relu_dq_pattern_json.hpp from patterns/relu_dq.json via xxd.py.
+# Mirrors CMake's generate_pattern_inc.cmake which calls xxd.py directly.
+genrule(
+    name = "gen_relu_dq_pattern_json_hpp",
+    srcs = ["//morphizen-demo:patterns/relu_dq.json"],
+    outs = ["relu_dq_pattern_json.hpp"],
+    cmd = "$(location //tools:xxd_py)" +
+          " --column 16" +
+          " --var relu_dq_json" +
+          " --output $@" +
+          " $(location //morphizen-demo:patterns/relu_dq.json)",
+    tools = ["//tools:xxd_py"],
+)
+
+cc_library(
+    name = "morphizen-level1-pass-relu-dq",
+    srcs = ["src/pass_main.cpp"],
+    hdrs = [":relu_dq_pattern_json.hpp"],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17", "-fPIC"],
+    }),
+    # OUTPUT_NAME drives DEFINE_MORPHIZEN_PASS's StaticPluginRegister name.
+    local_defines = ['OUTPUT_NAME=\\"morphizen-level1-pass-relu-dq\\"'],
+    # includes = ["."] makes bazel-out/.../morphizen-demo/level-1-pass-relu-dq/
+    # a search path so #include "relu_dq_pattern_json.hpp" resolves.
+    includes = ["."],
+    # DEFINE_MORPHIZEN_PASS creates a static initializer in an anonymous
+    # namespace; alwayslink = True prevents MSVC from dead-stripping it.
+    alwayslink = True,
+    deps = [
+        "//morphizen-core:morphizen-core-static",
+        "//morphizen-demo/proto:relu_dq_proto",
+        "@glog",
+    ],
+    visibility = ["//visibility:public"],
+)
