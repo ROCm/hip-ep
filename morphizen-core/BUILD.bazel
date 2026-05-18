@@ -346,7 +346,9 @@ cc_binary(
         ],
     }),
     # win_def_file is only meaningful on Windows; Bazel ignores it on Linux.
-    win_def_file = ":onnxruntime_morphizen_ep.def",
+    # Use the _with_ort_bridge variant which also exports CreateEpFactories
+    # and ReleaseEpFactory (required by ORT's RegisterExecutionProviderLibrary).
+    win_def_file = ":onnxruntime_morphizen_ep_with_ort_bridge.def",
     visibility = ["//visibility:public"],
     deps = [
         ":morphizen-core-static",
