@@ -9,6 +9,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../workspace_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
@@ -239,15 +240,16 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
   size_t total_ws = skip_aligned + rstd_bytes;
 
-  if (hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
+  WorkspaceState *ws_state = workspace_module(state);
+  if (!ws_state || ws_state->ws.grow(total_ws) != 0) {
     fprintf(stderr,
             "wrap_skip_simplified_layer_norm: workspace allocation failed\n");
     return -1;
   }
-  char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+  char *ws_base = static_cast<char *>(ws_state->ws.data());
 
-  void *skip_buf = input_skip_bias_sum ? input_skip_bias_sum : ws;
-  void *rstd_buf = ws + skip_aligned;
+  void *skip_buf = input_skip_bias_sum ? input_skip_bias_sum : ws_base;
+  void *rstd_buf = ws_base + skip_aligned;
 
   int result = 0;
 

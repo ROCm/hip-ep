@@ -8,6 +8,7 @@
 #include "../module_registry.h"
 #include "../op_profile.h"
 #include "../runtime_state_internal.h"
+#include "../workspace_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -742,8 +743,11 @@ static int gqa_forward_hipblaslt(
     const size_t total_ws_bytes =
         split_bytes + rope_temp_bytes + flash_partials_bytes;
 
+    WorkspaceState *ws_state = workspace_module(state);
+    if (!ws_state)
+      return -1;
     if (total_ws_bytes > 0) {
-      if (hipdnn_ep_state_ensure_workspace(state, total_ws_bytes) != 0)
+      if (ws_state->ws.grow(total_ws_bytes) != 0)
         return -1;
     }
 
@@ -761,7 +765,7 @@ static int gqa_forward_hipblaslt(
     // flash_partials is placed strictly after rope_temp, which is placed
     // strictly after split.
     if (fused_packed_qkv) {
-      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+      char *ws = static_cast<char *>(ws_state->ws.data());
       void *d_Qsplit = ws + off_split;
       void *d_Ksplit = ws + off_split + Q_full_bytes;
       void *d_Vsplit = ws + off_split + Q_full_bytes + K_full_bytes;
@@ -776,7 +780,7 @@ static int gqa_forward_hipblaslt(
     }
 
     if (need_rope) {
-      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+      char *ws = static_cast<char *>(ws_state->ws.data());
       void *d_Qroped = ws + off_rope;
       void *d_Kroped = ws + off_rope + Q_full_bytes;
 
@@ -806,7 +810,7 @@ static int gqa_forward_hipblaslt(
       return -1;
 
     if (use_flash_decode) {
-      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+      char *ws = static_cast<char *>(ws_state->ws.data());
       void *partials = ws + off_partials;
       if (hip_gqa_flash_decode(
               stream, qSrc, present_key, present_value, output, partials,
@@ -1105,16 +1109,24 @@ static int gqa_forward_hipblaslt(
   int result = 0;
 
   // Single workspace allocation: temp buffers + GEMM workspace
+  WorkspaceState *ws_state = workspace_module(state);
+  if (!ws_state) {
+    fprintf(stderr, "wrap_gqa: failed to obtain WorkspaceState\n");
+    return -1;
+  }
   {
     size_t gemm_ws =
         std::max(scoreState->workspace_size, valueState->workspace_size);
     size_t total_needed = temp_end + gemm_ws;
-    HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, total_needed));
+    if (ws_state->ws.grow(total_needed) != 0) {
+      fprintf(stderr, "wrap_gqa: workspace.grow(%zu) failed\n", total_needed);
+      return -1;
+    }
   }
 
   {
-    char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
-    size_t ws_total = hipdnn_ep_state_get_workspace_size(state);
+    char *ws = static_cast<char *>(ws_state->ws.data());
+    size_t ws_total = ws_state->ws.size();
 
     void *d_Qtrans = need_transpose ? (ws + off_Qtrans) : nullptr;
     void *d_Kexp = use_no_expand ? nullptr : (ws + off_Kexp);

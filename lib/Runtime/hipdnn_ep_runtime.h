@@ -203,11 +203,6 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // Used by hip.get_pool lowering in generated compute kernels
 void *hipdnn_ep_get_pool_base(RuntimeState *state);
 
-// Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
-void *hipdnn_ep_state_get_workspace(RuntimeState *state);
-size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
-int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
-
 // Device-side runtime error flag (set by kernels, observed by wrappers).
 // Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
 // delta==0) and need to propagate an error code back through main_graph.

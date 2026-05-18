@@ -223,6 +223,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/module_registry.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/growable_buffer.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/workspace_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
                 ${IMPL_DEPS}
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
