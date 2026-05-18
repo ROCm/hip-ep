@@ -123,7 +123,14 @@ cc_library(
     }),
     defines = [
         "ONNX_ML=1",
-        "ONNX_NAMESPACE=morphizen_onnx",  # Define ONNX namespace for consistency
+    ],
+    # ONNX_NAMESPACE=morphizen_onnx is intentionally PRIVATE (local_defines) so it
+    # does not bleed into every target that transitively depends on @onnx.  CMake
+    # mirrors this: morphizen-core-static.cmake links onnx PRIVATE to prevent
+    # namespace pollution downstream.  Each consumer that directly includes <onnx/…>
+    # headers must declare its own local_defines = ["ONNX_NAMESPACE=morphizen_onnx"].
+    local_defines = [
+        "ONNX_NAMESPACE=morphizen_onnx",
     ],
     includes = [
         ".",
