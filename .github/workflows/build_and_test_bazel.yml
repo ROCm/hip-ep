@@ -35,6 +35,8 @@ jobs:
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
         with:
+          # Download Bazelisk 1.x and add to PATH (runner does not have it pre-installed)
+          bazelisk-version: 1.x
           # Cache Bazelisk binary based on .bazelversion
           bazelisk-cache: true
           # Cache downloaded source archives (LLVM tarball, registry modules, etc.)
