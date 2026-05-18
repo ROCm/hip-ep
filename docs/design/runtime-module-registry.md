@@ -13,12 +13,13 @@ Mechanism the runtime uses for per-session, per-operator state.
 | `lib/Runtime/module_registry.h` | `OpModuleSpec`, fn-pointer typedefs, SFINAE detectors, `make_op_module_spec<T>`, `HIPDNN_OP_MODULE` / `HIPDNN_OP_MODULE_DECLARE` / `HIPDNN_OP_MODULE_DEFINE` macros, free-function decls. |
 | `lib/Runtime/module_registry.cpp` | Process-global `spec_table()` + mutex; `SlotEntry` and `ModuleRegistry` definitions; lifecycle and lookup implementations. |
 | `lib/Runtime/growable_buffer.h` | `hipdnn_ep::GrowableDeviceBuffer` / `GrowablePinnedBuffer`. |
+| `lib/Runtime/workspace_state.h` | `WorkspaceState` struct + `HIPDNN_OP_MODULE_DECLARE(workspace_module, ...)` — the only cross-TU op-module accessor. |
 | `lib/Runtime/runtime_state_internal.h` | Forward-declares `ModuleRegistry`; `RuntimeState` ends with `hipdnn_ep::ModuleRegistry *modules;`. |
-| `lib/Runtime/hipdnn_ep_runtime_state.cpp` | Create / destroy / `begin_compute` fan-out; defines `hipdnn_ep::get_module_registry`. |
+| `lib/Runtime/hipdnn_ep_runtime_state.cpp` | Create / destroy / `begin_compute` fan-out; defines `hipdnn_ep::get_module_registry` and `workspace_module` via `HIPDNN_OP_MODULE_DEFINE`. |
 | `lib/Runtime/real/causal_conv_with_state.cpp` | `CausalConvState`. |
 | `lib/Runtime/real/matmul_nbits.cpp` | `ZpUnpackState` (shared with `qmoe`). |
 | `lib/Runtime/real/gqa.cpp` | `GqaGemmState`, `GqaSeqlensCache`. |
-| `lib/Runtime/real/qmoe.cpp` | `QmoeState` + C-ABI shims. |
+| `lib/Runtime/real/qmoe.cpp` | `QmoeState`. |
 
 ## Op-module contract
 
@@ -159,7 +160,7 @@ namespace hipdnn_ep { struct ModuleRegistry; }
 
 struct RuntimeState {
   // ... existing flat fields (stream, handles, constants, pool,
-  //     workspace, op_profile, device_error_flag, hipdnn_handle,
+  //     op_profile, device_error_flag, hipdnn_handle,
   //     hipdnn_graph_registry) ...
   hipdnn_ep::ModuleRegistry *modules;   // tail position: preserves
                                         // existing field offsets
@@ -188,7 +189,7 @@ It inlines through `llvm-link` in the bitcode build.
 | First `wrap_*` call per slot | Cold path of `op_module_get`: `new T(state)`, cache fn-pointers + state ptr. |
 | Subsequent `wrap_*` calls | Hot path: bounds + load + null branch. |
 | EP enters `Compute()` | EP calls `hipdnn_ep_runtime_begin_compute(state)` (`extern "C"`, `__declspec(dllexport)`). Fans out via `module_registry_begin_compute`. |
-| Session cleanup | After shared stream sync: `module_registry_destroy`. Library handles (`stream`, `miopen_handle`, `hipblas_handle`) are still live, so destructors may call `hipFree` / `hipblasLt*Destroy`. |
+| Session cleanup | After shared stream sync: `module_registry_destroy`. Library handles (`stream`, `miopen_handle`, `hipblas_handle`) are still live, so destructors may call `hipFree` / `hipblasLt*Destroy` / `miopenDestroy*Descriptor`. |
 
 There is no end-of-Compute hook caller today.
 
@@ -199,32 +200,45 @@ After warmup, per call:
 - `my_op_module(state)`: one bounds compare, one load, one null branch.
   No mutex, no allocation, no string op.
 - `hipdnn_ep_runtime_begin_compute`: iterate `slots.size()` entries
-  (currently ≤ 5). Non-null `begin_compute_fn`: one indirect call.
-  Null: one load + one null branch.
+  (currently up to 6 populated slots — see "The six op-modules" below).
+  Slot with non-null `begin_compute_fn`: one indirect call. Slot with
+  null hook (or unpopulated): one load + one null branch.
 
 ## `growable_buffer.h`
 
-Header-only RAII helpers. Two classes with the same API:
+Header-only RAII helper. One class template, two policies:
 
 ```cpp
 namespace hipdnn_ep {
-class GrowableDeviceBuffer {       // hipMalloc / hipFree
+template <class Policy> class GrowableBuffer {
 public:
-  explicit GrowableDeviceBuffer(hipStream_t stream = nullptr);
-  ~GrowableDeviceBuffer();
-  void   set_stream(hipStream_t stream);
-  int    grow(size_t needed);      // 0 ok, -1 alloc failure
+  GrowableBuffer() = default;
+  ~GrowableBuffer();                 // frees via Policy::free
+  // Move-only (deleted copy ctor / copy assign; defaulted move ctor / move assign).
+  int    grow(size_t needed);        // 0 ok, -1 alloc failure
   void  *data() const noexcept;
   size_t size() const noexcept;
 };
-class GrowablePinnedBuffer { /* hipHostMalloc / hipHostFree, same API */ };
+using GrowableDeviceBuffer = GrowableBuffer<detail::DevicePolicy>;  // hipMalloc / hipFree
+using GrowablePinnedBuffer = GrowableBuffer<detail::PinnedPolicy>;  // hipHostMalloc / hipHostFree
 }
 ```
 
 - 1.5× growth on `grow(needed)` (cold-start sizes to exactly `needed`).
-- `hipStreamSynchronize(stream_)` before each free (when stream is set).
-- Destructor frees without pre-sync — relies on `hipdnn_ep_state_cleanup`
-  having already synced the stream before module destruction runs.
+- No stream parameter and no `set_stream`: the previous design pre-synced
+  on the bound stream before each free, but the HIP runtime spec ("Memory
+  management", HIP 7) guarantees both `hipFree` and `hipHostFree` perform
+  an implicit `hipDeviceSynchronize()` before reclaiming the buffer.
+  Explicit `hipStreamSynchronize` on top of that would be redundant and
+  slightly narrower (stream vs device); the policy's `free` therefore
+  drains in-flight kernels referencing the old pointer on its own.
+- Destructor calls the same `Policy::free`, so module-destruction-time
+  cleanup is also implicitly synced. The module registry's outer
+  stream-sync in `hipdnn_ep_state_cleanup` is belt-and-braces, not a
+  precondition the buffer relies on.
+- Alloc failure is the only path that returns `-1`; free failures go
+  through `HIP_CLEANUP` (log and continue) because the caller has no
+  useful reaction.
 - Move-only.
 
 Used by composition. Not registered as modules themselves.
@@ -244,8 +258,9 @@ Used by composition. Not registered as modules themselves.
 
 `lib/Runtime/CMakeLists.txt`:
 
-- `module_registry.h` and `growable_buffer.h` are in the universal
-  `DEPENDS` list of `compile_to_bitcode`.
+- `module_registry.h`, `growable_buffer.h`, and `workspace_state.h`
+  are in the universal `DEPENDS` list of `compile_to_bitcode` — editing
+  any of them rebuilds every runtime bitcode TU.
 - `module_registry.cpp` compiles to `runtime_module_registry.bc` and
   is added to both the real and mock runtime link lists.
 
@@ -327,7 +342,6 @@ fields stay as direct members of `RuntimeState`:
 | `stream`, `miopen_handle`, `hipblas_handle` | Library handles used by every op. |
 | `gpu_constants_blob`, `gpu_constants`, `num_constants`, `constants_is_shared`, `shared_constants_mapping`, `shared_constants_view` | Loaded once at `inference_init`. Not op-specific. |
 | `pool_base`, `pool_size`, `buffer_offsets`, `num_buffers` | Compiled-graph memory pool emitted by the compiler. |
-| `workspace`, `workspace_size` | Shared scratch across many ops. |
 | `op_profile` | Cross-op profiling state (`HIPDNN_EP_PERF=1`). |
 | `device_error_flag` | Single `int *` used by every kernel. |
 | `hipdnn_handle`, `hipdnn_graph_registry` | Attached by the EP after `inference_init` returns; lifecycle does not match the registry's model. |
