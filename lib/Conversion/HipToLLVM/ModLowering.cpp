@@ -45,13 +45,16 @@ struct ModOpLowering : public ConvertOpToLLVMPattern<ModOp> {
     SmallVector<Type, 7> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                        i64Type, i64Type, i64Type};
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapMod, paramTypes, i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapMod, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 7> args = {statePtr,    lhsPtr, rhsPtr,
-                                  outPtr,      numElements,
+    SmallVector<Value, 7> args = {statePtr,
+                                  lhsPtr,
+                                  rhsPtr,
+                                  outPtr,
+                                  numElements,
                                   createI64Const(dataType),
                                   createI64Const(op.getFmod())};
 
@@ -63,8 +66,8 @@ struct ModOpLowering : public ConvertOpToLLVMPattern<ModOp> {
 
 } // namespace
 
-void mlir::hip::populateModLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateModLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns) {
   patterns.add<ModOpLowering>(converter);
 }
 

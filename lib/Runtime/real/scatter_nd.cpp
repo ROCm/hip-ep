@@ -32,12 +32,12 @@ static const char *reductionName(int64_t id) {
 }
 
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
-                    void *updates, void *output,
-                    const int64_t *data_shape, int64_t data_rank,
-                    const int64_t *indices_shape, int64_t indices_rank,
-                    const int64_t *updates_shape, int64_t updates_rank,
-                    const int64_t *output_shape, int64_t output_rank,
-                    int64_t reduction_id, int64_t data_type) {
+                    void *updates, void *output, const int64_t *data_shape,
+                    int64_t data_rank, const int64_t *indices_shape,
+                    int64_t indices_rank, const int64_t *updates_shape,
+                    int64_t updates_rank, const int64_t *output_shape,
+                    int64_t output_rank, int64_t reduction_id,
+                    int64_t data_type) {
   (void)state;
   (void)data;
   (void)indices;

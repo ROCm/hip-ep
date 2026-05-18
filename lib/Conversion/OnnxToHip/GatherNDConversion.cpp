@@ -56,9 +56,9 @@ struct GatherNDToHip : public mlir::RewritePattern {
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, data, dataIdx));
     }
-    mlir::Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, resultType.getShape(), resultType.getElementType(),
-        dynSizes);
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
 
     auto hipOp = mlir::hip::GatherNDOp::create(
         rewriter, loc, resultType, context, data, indices, init,

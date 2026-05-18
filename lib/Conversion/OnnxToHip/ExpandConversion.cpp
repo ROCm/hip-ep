@@ -54,8 +54,8 @@ struct ExpandToHip : public mlir::RewritePattern {
       int64_t shapeIdx = i - (resultRank - shapeLen);
       mlir::Value dim;
       if (shapeIdx >= 0) {
-        mlir::Value idx = mlir::arith::ConstantIndexOp::create(
-            rewriter, loc, shapeIdx);
+        mlir::Value idx =
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, shapeIdx);
         mlir::Value extracted = mlir::tensor::ExtractOp::create(
             rewriter, loc, shape, mlir::ValueRange{idx});
         dim = mlir::arith::IndexCastOp::create(
@@ -70,9 +70,9 @@ struct ExpandToHip : public mlir::RewritePattern {
       dynSizes.push_back(dim);
     }
 
-    mlir::Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, resultType.getShape(), resultType.getElementType(),
-        dynSizes);
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
 
     auto hipOp = mlir::hip::ExpandOp::create(rewriter, loc, resultType, context,
                                              input, shape, init);

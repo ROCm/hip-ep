@@ -28,8 +28,8 @@ struct DivOpLowering : public ConvertOpToLLVMPattern<DivOp> {
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto outputType = cast<MemRefType>(op.getOutput().getType());
-    Value numElements = computeNumElements(outputType, adaptor.getOutput(),
-                                           rewriter, loc);
+    Value numElements =
+        computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
 
     auto lhsType = cast<MemRefType>(op.getLhs().getType());
     int64_t dataType = getHipdnnDataType(lhsType.getElementType());
@@ -44,14 +44,14 @@ struct DivOpLowering : public ConvertOpToLLVMPattern<DivOp> {
     SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
                                        ptrType, i64Type, i64Type};
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapDiv, paramTypes, i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapDiv, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr, lhsPtr, rhsPtr,
-                                  outputPtr, numElements,
-                                  createI64Const(dataType)};
+    SmallVector<Value, 6> args = {statePtr,    lhsPtr,
+                                  rhsPtr,      outputPtr,
+                                  numElements, createI64Const(dataType)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -61,8 +61,8 @@ struct DivOpLowering : public ConvertOpToLLVMPattern<DivOp> {
 
 } // namespace
 
-void mlir::hip::populateDivLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateDivLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns) {
   patterns.add<DivOpLowering>(converter);
 }
 

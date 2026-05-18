@@ -95,7 +95,8 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
     Value indicesRank = createI64Const(indicesType.getRank());
     Value updatesRank = createI64Const(updatesType.getRank());
     Value outRank = createI64Const(outputType.getRank());
-    Value reductionVal = createI64Const(reductionIdFromString(op.getReduction()));
+    Value reductionVal =
+        createI64Const(reductionIdFromString(op.getReduction()));
     Value dataTypeVal = createI64Const(hipDtype);
 
     SmallVector<Type, 16> paramTypes = {
@@ -113,10 +114,9 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
       return failure();
 
     SmallVector<Value, 16> args = {
-        statePtr,     dataPtr,      indicesPtr,   updatesPtr,
-        outPtr,       dataShape,    dataRank,     indicesShape,
-        indicesRank,  updatesShape, updatesRank,  outShape,
-        outRank,      reductionVal, dataTypeVal};
+        statePtr,    dataPtr,  indicesPtr,   updatesPtr,   outPtr,
+        dataShape,   dataRank, indicesShape, indicesRank,  updatesShape,
+        updatesRank, outShape, outRank,      reductionVal, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

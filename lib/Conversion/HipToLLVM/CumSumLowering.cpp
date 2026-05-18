@@ -80,17 +80,17 @@ struct CumSumOpLowering : public ConvertOpToLLVMPattern<CumSumOp> {
     SmallVector<Type, 11> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, // state, x, axis, y
         ptrType, i64Type,                   // x_shape, x_rank
-        i64Type, i64Type, i64Type,          // num_elements, data_type, axis_dtype
-        i64Type, i64Type};                  // exclusive, reverse
+        i64Type, i64Type, i64Type, // num_elements, data_type, axis_dtype
+        i64Type, i64Type};         // exclusive, reverse
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapCumSum, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 11> args = {statePtr,    xPtr,         axisPtr,
-                                   yPtr,        shapeArr,     rankVal,
-                                   numElements, dataTypeVal,  axisDtypeVal,
+    SmallVector<Value, 11> args = {statePtr,     xPtr,        axisPtr,
+                                   yPtr,         shapeArr,    rankVal,
+                                   numElements,  dataTypeVal, axisDtypeVal,
                                    exclusiveVal, reverseVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

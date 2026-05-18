@@ -232,10 +232,9 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
           op, "hip.layer_norm requires at least one output buffer");
 
     Value outputPtr = extractContiguousMemRefPtr(outputs[0], rewriter, loc);
-    Value meanPtr = outputs.size() > 1 ? extractContiguousMemRefPtr(
-                                             outputs[1], rewriter, loc)
-                                       : LLVM::ZeroOp::create(rewriter, loc,
-                                                              ptrType);
+    Value meanPtr = outputs.size() > 1
+                        ? extractContiguousMemRefPtr(outputs[1], rewriter, loc)
+                        : LLVM::ZeroOp::create(rewriter, loc, ptrType);
     Value invStdPtr =
         outputs.size() > 2
             ? extractContiguousMemRefPtr(outputs[2], rewriter, loc)
@@ -277,24 +276,18 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
         i64Type, f32Type, i64Type  // axis, epsilon, stash_type
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapLayerNormalization, paramTypes,
-        rewriter.getI32Type());
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapLayerNormalization,
+                               paramTypes, rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,
-                               inputPtr,
-                               scalePtr,
-                               biasPtr,
-                               outputPtr,
-                               meanPtr,
-                               invStdPtr,
-                               inputNumElements,
-                               scaleNumElements,
-                               elementSizeBytesVal,
-                               axisVal,
-                               epsilonVal,
+    SmallVector<Value> args = {statePtr,         inputPtr,
+                               scalePtr,         biasPtr,
+                               outputPtr,        meanPtr,
+                               invStdPtr,        inputNumElements,
+                               scaleNumElements, elementSizeBytesVal,
+                               axisVal,          epsilonVal,
                                stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

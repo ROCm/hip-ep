@@ -149,10 +149,8 @@ struct SliceDecompose : public mlir::RewritePattern {
       stepsVec.assign(axesVec.size(), 1);
 
     if (axesVec.size() != startsVec.size() ||
-        axesVec.size() != endsVec.size() ||
-        axesVec.size() != stepsVec.size())
-      return rewriter.notifyMatchFailure(op,
-                                         "starts/ends/axes/steps mismatch");
+        axesVec.size() != endsVec.size() || axesVec.size() != stepsVec.size())
+      return rewriter.notifyMatchFailure(op, "starts/ends/axes/steps mismatch");
 
     // tensor.extract_slice only supports positive strides; negative-step
     // slices need a separate reverse pass and fall through to the native op.
@@ -247,12 +245,12 @@ struct SliceToHip : public mlir::RewritePattern {
     mlir::Value data = op->getOperand(0);
     mlir::Value starts = op->getOperand(1);
     mlir::Value ends = op->getOperand(2);
-    mlir::Value axes =
-        op->getNumOperands() >= 4 ? normaliseOptional(op->getOperand(3))
-                                   : mlir::Value();
-    mlir::Value steps =
-        op->getNumOperands() == 5 ? normaliseOptional(op->getOperand(4))
-                                   : mlir::Value();
+    mlir::Value axes = op->getNumOperands() >= 4
+                           ? normaliseOptional(op->getOperand(3))
+                           : mlir::Value();
+    mlir::Value steps = op->getNumOperands() == 5
+                            ? normaliseOptional(op->getOperand(4))
+                            : mlir::Value();
 
     auto resultType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -269,9 +267,9 @@ struct SliceToHip : public mlir::RewritePattern {
     mlir::Value init = mlir::tensor::EmptyOp::create(
         rewriter, loc, resultType.getShape(), resultType.getElementType());
 
-    auto hipOp = mlir::hip::SliceOp::create(rewriter, loc, resultType, context,
-                                            data, starts, ends, axes, steps,
-                                            init);
+    auto hipOp =
+        mlir::hip::SliceOp::create(rewriter, loc, resultType, context, data,
+                                   starts, ends, axes, steps, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

@@ -62,9 +62,9 @@ struct ScatterNDToHip : public mlir::RewritePattern {
             op, "result rank exceeds data rank — invalid ScatterND");
       dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
     }
-    mlir::Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, resultType.getShape(), resultType.getElementType(),
-        dynSizes);
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
 
     // `reduction` is optional (default "none" per ONNX spec). Preserve the
     // exact string so the runtime side can switch on it.
@@ -74,9 +74,9 @@ struct ScatterNDToHip : public mlir::RewritePattern {
     else
       reductionAttr = rewriter.getStringAttr("none");
 
-    auto hipOp = mlir::hip::ScatterNDOp::create(rewriter, loc, resultType,
-                                                context, data, indices,
-                                                updates, init, reductionAttr);
+    auto hipOp =
+        mlir::hip::ScatterNDOp::create(rewriter, loc, resultType, context, data,
+                                       indices, updates, init, reductionAttr);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

@@ -390,8 +390,8 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
       rewriter.getNamedAttr("axis", rewriter.getI64IntegerAttr(axis)));
   attrs.push_back(rewriter.getNamedAttr(
       "epsilon", rewriter.getF32FloatAttr(epsValue.convertToFloat())));
-  attrs.push_back(rewriter.getNamedAttr(
-      "stash_type", rewriter.getI64IntegerAttr(stashType)));
+  attrs.push_back(rewriter.getNamedAttr("stash_type",
+                                        rewriter.getI64IntegerAttr(stashType)));
 
   mlir::OperationState state(loc, "hip.layer_norm");
   state.addOperands(operands);
