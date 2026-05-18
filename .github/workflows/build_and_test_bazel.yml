@@ -32,15 +32,14 @@ jobs:
           fetch-depth: 0
           show-progress: false
 
-      - name: Install bazelisk
-        shell: powershell
-        run: |
-          $dir = "$env:RUNNER_TEMP\bazelisk"
-          New-Item -ItemType Directory -Force $dir | Out-Null
-          Invoke-WebRequest `
-            -Uri "https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-windows-amd64.exe" `
-            -OutFile "$dir\bazel.exe"
-          "$dir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
+        with:
+          # Cache Bazelisk binary based on .bazelversion
+          bazelisk-cache: true
+          # Cache downloaded source archives (LLVM tarball, registry modules, etc.)
+          # Keyed on MODULE.bazel — separate from Cachion RBE which caches build outputs
+          repository-cache: true
 
       - name: bazel test (mlir-imp backend)
         shell: powershell
