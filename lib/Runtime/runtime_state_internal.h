@@ -57,19 +57,6 @@ struct RuntimeState {
   size_t *buffer_offsets; // Offset for each buffer in the pool
   size_t num_buffers;     // Number of buffers in the pool
 
-  // Shared workspace, qmoe device + pinned host scratch, GQA GEMM
-  // descriptor cache, CausalConvWithState descriptor cache, MatMulNBits
-  // asym-path zero_points unpack cache, and the per-Compute() seqlens_k
-  // cache used to live as flat fields on RuntimeState. They now sit
-  // inside per-session op-modules (WorkspaceState, QmoeState, GqaGemmState,
-  // CausalConvState, ZpUnpackState, GqaSeqlensCache) reachable via the
-  // ModuleRegistry pointer at the tail of this struct. The flat C-ABI
-  // accessors used by bitcode-compiled model.dlls
-  // (hipdnn_ep_state_(get|ensure)_workspace,
-  // hipdnn_ep_state_(get|ensure)_qmoe_(scratch|host_scratch)) are kept
-  // and forward to the corresponding module so the runtime ABI is
-  // unchanged.
-
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.
   void *op_profile;
