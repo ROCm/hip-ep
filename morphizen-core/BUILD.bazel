@@ -4,7 +4,7 @@
 ##
 
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_import", "cc_library")
 load("//scripts/bazel:collect_pb.bzl", "collect_pb")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_python//python:defs.bzl", "py_binary")
@@ -359,6 +359,17 @@ cc_binary(
         "@glog",
         "@protobuf",
     ],
+)
+
+# Wraps the linkshared cc_binary so that adding it to a cc_test's deps causes
+# Bazel to stage the DLL next to the test binary (Windows PATH search) and to
+# add its directory to PATH, mirroring GHE's onnxruntime_vitisai_ep_runtime.
+# Use in deps (not data) to get DLL-search-path propagation; add the raw
+# cc_binary target to data as well so Rlocation resolves to an absolute path.
+cc_import(
+    name = "onnxruntime_morphizen_ep_runtime",
+    shared_library = ":onnxruntime_morphizen_ep",
+    visibility = ["//visibility:public"],
 )
 
 # Alias for backward compatibility
