@@ -28,14 +28,12 @@ struct ModuleRegistry;
 using OpInitFn = void *(*)(RuntimeState *);
 using OpDestroyFn = void (*)(void *);
 using OpBeginComputeFn = void (*)(void *, RuntimeState *);
-using OpEndComputeFn = void (*)(void *, RuntimeState *);
 
 struct OpModuleSpec {
   const char *name = nullptr;
   OpInitFn init_fn = nullptr;
   OpDestroyFn destroy_fn = nullptr;
   OpBeginComputeFn begin_compute_fn = nullptr;
-  OpEndComputeFn end_compute_fn = nullptr;
 };
 
 // Register a spec. Returns a stable, non-negative slot id. Aborts on
@@ -65,8 +63,8 @@ void *op_module_get(ModuleRegistry *reg, RuntimeState *state, int slot_id);
 // every user to pull in runtime_state_internal.h.
 ModuleRegistry *get_module_registry(RuntimeState *state);
 
-// SFINAE detectors for the optional hooks. Absent => false_type =>
-// make_op_module_spec leaves the corresponding fn pointer null.
+// SFINAE detector for the optional begin_compute hook. Absent => false_type
+// => make_op_module_spec leaves begin_compute_fn null.
 template <typename T, typename = void>
 struct has_begin_compute_ : std::false_type {};
 
@@ -75,17 +73,9 @@ struct has_begin_compute_<
     T, std::void_t<decltype(std::declval<T &>().begin_compute(
            std::declval<RuntimeState *>()))>> : std::true_type {};
 
-template <typename T, typename = void>
-struct has_end_compute_ : std::false_type {};
-
-template <typename T>
-struct has_end_compute_<T, std::void_t<decltype(std::declval<T &>().end_compute(
-                               std::declval<RuntimeState *>()))>>
-    : std::true_type {};
-
 // Build a spec for state type T. T must be constructible from
-// RuntimeState*. begin_compute / end_compute are wired up only when the
-// corresponding SFINAE detector is true.
+// RuntimeState*. begin_compute is wired up only when the SFINAE detector
+// is true.
 template <typename T>
 inline OpModuleSpec make_op_module_spec(const char *name) {
   OpModuleSpec spec{};
@@ -97,10 +87,6 @@ inline OpModuleSpec make_op_module_spec(const char *name) {
     spec.begin_compute_fn = +[](void *p, RuntimeState *s) {
       static_cast<T *>(p)->begin_compute(s);
     };
-  }
-  if constexpr (has_end_compute_<T>::value) {
-    spec.end_compute_fn =
-        +[](void *p, RuntimeState *s) { static_cast<T *>(p)->end_compute(s); };
   }
   return spec;
 }

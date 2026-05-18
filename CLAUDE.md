@@ -152,9 +152,8 @@ namespace {
 struct MyOpState {
   SomeCache cache;
   explicit MyOpState(RuntimeState *) {}
-  // Optional, all detected by SFINAE:
+  // Optional, SFINAE-detected:
   //   void begin_compute(RuntimeState *);  // per-Compute() invalidation
-  //   void end_compute(RuntimeState *);    // detected but no caller today
 };
 HIPDNN_OP_MODULE(my_op_module, "my_op", MyOpState);
 }

@@ -68,7 +68,6 @@ int op_module_count() {
 struct SlotEntry {
   void *state_ptr = nullptr;
   OpBeginComputeFn begin_compute_fn = nullptr;
-  OpEndComputeFn end_compute_fn = nullptr;
   OpDestroyFn destroy_fn = nullptr;
   const char *name = nullptr;
 };
@@ -129,7 +128,6 @@ void *op_module_get(ModuleRegistry *reg, RuntimeState *state, int slot_id) {
   SlotEntry &slot = reg->slots[slot_id];
   slot.state_ptr = p;
   slot.begin_compute_fn = spec->begin_compute_fn;
-  slot.end_compute_fn = spec->end_compute_fn;
   slot.destroy_fn = spec->destroy_fn;
   slot.name = spec->name;
   return p;
