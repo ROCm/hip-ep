@@ -5,6 +5,14 @@
 
 load("@rules_cc//cc:defs.bzl", "cc_test")
 
+# pt_resnet50.onnx.mlir is the MLIR text form of the ResNet-50 model.
+# unit-test needs it when MORPHIZEN_ENABLE_MLIR_BACKEND=1 because the MLIR
+# backend's Model::load() parses MLIR text, not binary ONNX.
+exports_files(
+    ["src/pt_resnet50.onnx.mlir"],
+    visibility = ["//unit-test:__pkg__"],
+)
+
 cc_test(
     name = "ort_bridge_test",
     srcs = [

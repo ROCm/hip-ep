@@ -198,6 +198,10 @@ cc_test(
     includes = [".", "unit-test/morphizen"],
     data = [
         "data/pt_resnet50.onnx",
+        # MLIR text form of the ResNet-50 model, needed when
+        # MORPHIZEN_ENABLE_MLIR_BACKEND=1 (RESNET_50_PATH resolves to .onnx.mlir).
+        # Staged at _main/ort-bridge/test/src/pt_resnet50.onnx.mlir in runfiles.
+        "//ort-bridge/test:src/pt_resnet50.onnx.mlir",
         ":hello_plugin",
         # PluginTest.DynamicHelloPlugin calls Plugin::get("hello_plugin_dll") which
         # loads hello_plugin_dll.dll by name at runtime.
