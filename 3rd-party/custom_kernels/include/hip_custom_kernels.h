@@ -697,6 +697,85 @@ int hip_gather_nd(
     int hip_dtype);
 
 /* =========================================================================
+ * Slice (ONNX-13+ — non-constant indices / negative-step fallback)
+ * =========================================================================
+ *
+ * The compile-time-constant + positive-stride case is folded to
+ * `tensor.extract_slice` upstream of the runtime, so this kernel only
+ * services slices whose `starts` / `ends` / `axes` / `steps` are NOT
+ * graph-constant (or have negative steps).
+ *
+ * The host wrapper D2Hs the (typically tiny) index tensors and resolves
+ * them into per-axis `(start, step)` pairs in INPUT-space, one entry per
+ * data dimension. Axes not listed default to `(0, 1)`. The kernel runs
+ * one thread per output element and computes:
+ *
+ *     in_offset = sum_d ( start[d] + out_coord[d] * step[d] ) * input_stride[d]
+ *     output[out_idx] = input[in_offset]
+ *
+ * `step[d]` may be negative; correctness relies on the host wrapper
+ * having already resolved start / end to absolute positions per ONNX's
+ * negative-index and clamping rules (see lib/Runtime/real/slice.cpp).
+ *
+ * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
+ *
+ * Supported dtypes: f16, f32, i32, i64.
+ */
+int hip_slice(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape_host,
+    const int64_t* output_shape_host,
+    const int64_t* starts_per_axis_host,  /* length = rank */
+    const int64_t* steps_per_axis_host,   /* length = rank */
+    int rank,
+    int hip_dtype);
+
+/* =========================================================================
+ * ScatterND (ONNX-13+ with optional `reduction`)
+ * =========================================================================
+ *
+ * Produces an output tensor with the shape of `data` whose values are
+ * `data` copied, then `updates` overwritten / reduced into at positions
+ * specified by `indices`.
+ *
+ * The host wrapper does the data->output D2D copy first (one
+ * hipMemcpyAsync). The kernel then runs one thread per (updates_slice,
+ * inner) pair = num_updates_slices * slice_size threads total. Each
+ * thread reads K = indices.shape[-1] int64 indices inline and writes
+ * one element into output.
+ *
+ *   num_updates_slices = product(indices.shape[:-1])
+ *                      = product(updates.shape[:indices_rank-1])
+ *   slice_size         = product(data.shape[K:])
+ *
+ * `reduction_id`:
+ *   0 = none ("replace")  — last-writer-wins for duplicate indices,
+ *                           matching ONNX's "undefined" guarantee.
+ *   1 = add               — atomicAdd (or CAS-emulation for fp16).
+ *   2 = mul               — CAS-emulated atomic multiply.
+ *   3 = min               — CAS-emulated atomic min.
+ *   4 = max               — CAS-emulated atomic max.
+ *
+ * Bounded to rank <= 8.
+ *
+ * Supported dtypes: f16, f32, i32, i64. INT64 indices only.
+ */
+int hip_scatter_nd(
+    void* stream,
+    const void* data,
+    const void* indices,
+    const void* updates,
+    void* output,
+    const int64_t* data_shape_host,
+    int data_rank,
+    const int64_t* indices_shape_host,
+    int indices_rank,
+    int reduction_id,
+    int hip_dtype);
+
+/* =========================================================================
  * CumSum
  * =========================================================================
  *

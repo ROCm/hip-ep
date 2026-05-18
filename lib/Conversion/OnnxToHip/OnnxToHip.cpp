@@ -692,6 +692,20 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
+    // Run ConstantOfShape folding BEFORE `lowerOnnxConstants` so it can
+    // still see the original `onnx.Constant` (or `onnx.Shape`) as the
+    // shape input.  Once `lowerOnnxConstants` externalises the constant,
+    // the IR becomes `memref.global` with a null `initial_value` (data
+    // lives in `constants.bin`) and the fold can no longer reach it.
+    {
+      mlir::RewritePatternSet preFoldPatterns(ctx);
+      populateConstantOfShapeConversionPatterns(preFoldPatterns, ctx);
+      mlir::GreedyRewriteConfig cfg;
+      cfg.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+      if (mlir::failed(mlir::applyPatternsGreedily(
+              funcOp, std::move(preFoldPatterns), cfg)))
+        return signalPassFailure();
+    }
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();

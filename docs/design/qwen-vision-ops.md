@@ -5,8 +5,8 @@ Licensed under the MIT License.
 # Qwen Vision Runtime Kernels — Design Notes
 
 This document captures the design rationale, runtime ABI conventions, and
-gotchas encountered while implementing 16 GPU runtime kernels for the
-Qwen3.5-35B-A3B vision encoder (`vision.onnx`). All 16 kernels live in
+gotchas encountered while implementing 18 GPU runtime kernels for the
+Qwen3.5-35B-A3B vision encoder (`vision.onnx`). All 18 kernels live in
 `lib/Runtime/real/*.cpp` (host wrappers) and `3rd-party/custom_kernels/hip/*.hip`
 (device code), and are dispatched from MLIR via `wrap_*` functions declared in
 `lib/Runtime/hipdnn_ep_runtime.h`.
@@ -20,12 +20,14 @@ The kernels implemented in this round are:
 | Unary EW     | Neg, Sign, Cos, Sin, Not                                  | `elementwise_unary_kernel.hip`       |
 | Binary EW    | Div, Mod, Equal, Less                                     | `elementwise_binary_kernel.hip`      |
 | Reduction    | ReduceMax, ReduceProd                                     | (extends `reduce_sum_kernel.hip`)    |
-| Shape        | Tile, Expand, GatherND                                    | `tile_kernel.hip`, `expand_kernel.hip`, `gather_nd_kernel.hip` |
+| Shape        | Tile, Expand, GatherND, **Slice**, **ScatterND**          | `tile_kernel.hip`, `expand_kernel.hip`, `gather_nd_kernel.hip`, **`slice_kernel.hip`**, **`scatter_nd_kernel.hip`** |
 | Scan / Pad   | CumSum, Pad                                               | `cumsum_kernel.hip`, `pad_kernel.hip`|
 | Norm         | LayerNormalization                                        | `layer_norm_kernel.hip`              |
+| Constant     | ConstantOfShape (compile-time fold; no kernel)            | —                                    |
 
 All kernels target FP16 / FP32 / INT32 / INT64 data types (a strict subset
-of ORT's CUDA EP support). Indices for GatherND are INT64 only.
+of ORT's CUDA EP support). Indices for GatherND, ScatterND, and Slice are
+INT64 only.
 
 Reference implementations were ported from
 `onnxruntime/core/providers/cuda/...` at tag **v1.22.2**. We deliberately
@@ -68,6 +70,8 @@ will use at runtime.
 | Tile                         | `tensor/tile.{cc,_impl.cu}`                     | **none**                                                                                                                                                  | pure custom HIP  |
 | Expand                       | `tensor/expand.{cc,_impl.cu}`                   | **none**                                                                                                                                                  | pure custom HIP  |
 | GatherND                     | `tensor/gather_nd.{cc,_impl.cu}`                | **none**                                                                                                                                                  | pure custom HIP  |
+| **Slice**                    | `tensor/slice.{cc,_impl.cu}`                    | **none**                                                                                                                                                  | pure custom HIP  |
+| **ScatterND**                | `tensor/scatter_nd.{cc,_impl.cu}` + `atomic/common.cuh` | **none** -- pure custom kernel + native `atomicAdd` / `atomicMin` / `atomicMax` where available, CAS-emulated otherwise                          | pure custom HIP  |
 | CumSum                       | `math/cumsum.{cc,_impl.cu}`                     | **none**                                                                                                                                                  | pure custom HIP  |
 | Pad                          | `tensor/pad.{cc,_impl.cu}`                      | **none**                                                                                                                                                  | pure custom HIP  |
 | LayerNormalization           | `nn/layer_norm.{cc,_impl.cu}`                   | **none** -- pure custom block-reduce; ORT does **not** call cuDNN / MIOpen LN here                                                                        | pure custom HIP  |
@@ -237,7 +241,70 @@ the existing Add/Mul/Sub family in `elementwise_kernel.hip`. If a graph
 arrives with implicit broadcasting it will fail at the lowering stage,
 not at runtime.
 
-### 3.7 No new `RuntimeState` fields
+### 3.7 Slice and ScatterND — host-side indices
+
+`Slice` and `ScatterND` both move tensor data based on small INT64
+index/control tensors:
+
+| Op        | Index-shaped inputs                                | Where they live       | What we do                                |
+|-----------|----------------------------------------------------|-----------------------|-------------------------------------------|
+| Slice     | `starts`, `ends`, optional `axes`, optional `steps` | GPU tensors (graph inputs in the non-folded case) | D2H + `hipStreamSynchronize` once per call, then resolve per ONNX clamping rules host-side and pass the per-axis `(start, step)` arrays into the kernel as host int64 vectors |
+| ScatterND | `indices`                                           | GPU tensor             | **Stay on the device** — the kernel reads them inline. No D2H at all. |
+
+Slice has to D2H because per-axis (start, step) needs ONNX clamping
+(`step > 0`: `start ∈ [0, dim]`, `end ∈ [0, dim]`; `step < 0`:
+`start ∈ [0, dim-1]`, `end ∈ [-1, dim-1]`) plus the optional `axes`
+list to know which axis each entry applies to. Doing this on the GPU
+would require either a launcher prepass or an oversized device kernel
+with the same per-axis state-machine — neither is worth it for a 4×
+int64 D2H. The matching pattern in `lib/Runtime/real/pad.cpp` and
+`lib/Runtime/real/cumsum.cpp` does the same thing (one stall per call).
+
+ScatterND keeps indices on the device because there is no clamping
+state machine to run host-side — each thread does its own
+out-of-range clamp inline (`idx >= dim ? dim-1 : idx`, etc.) and looks
+up the stride from a compact host-built `ScatterNDParams` struct. The
+index data itself is whatever shape the graph provides; we don't need
+to inspect any individual value.
+
+The compile-time `Slice` fold lives in `SliceConversion.cpp` and runs
+when all four index tensors are graph-constant AND every step is
+positive. It lowers to `tensor.extract_slice` (which becomes a
+`memref.subview` after bufferization and is zero-cost at runtime). Any
+graph that doesn't meet both conditions falls through to `wrap_slice`
+and the runtime path described above. Test `test_slice_negative_step`
+in `test/python/tests/test_shape_ops.py` covers both legs.
+
+### 3.8 ConstantOfShape and the pre-fold ordering
+
+`ConstantOfShape` is the only op in this round that produces NO
+runtime kernel — `ConstantOfShapeConversion.cpp` folds it to an
+`arith.constant` splat at compile time. The fold has two
+non-obvious requirements:
+
+1. **It must run BEFORE `lowerOnnxConstants`** (which externalises
+   any `onnx.Constant >= 1 element` into `constants.bin` via a
+   `memref.global` with `initial_value = nullptr`). After
+   externalisation the shape data is on disk, not in the IR, and the
+   fold can't reach it. `ConvertOnnxToHipPass::runOnOperation` runs
+   ConstantOfShape patterns in a dedicated "pre-fold" greedy pass
+   immediately before the externaliser loop.
+
+2. **The fold accepts `onnx.Shape(static-tensor)` as a compile-time
+   constant input**, not just `onnx.Constant`. This is what
+   transformer graphs typically emit for zero-initialised KV / mask
+   buffers: `output_shape = Shape(some_static_input);
+   buf = ConstantOfShape(output_shape)`. `getCompileTimeConstantTensor`
+   in `ConstantOfShapeConversion.cpp` handles this by reading the
+   source tensor's static shape directly, honouring the optional
+   `start` / `end` slicing attributes from ONNX-15 Shape.
+
+The result is that every gpt-oss-style "alloc-zero" pattern collapses
+to a single splat constant, which then flows through the normal
+constant-externalisation path (small splats stay inline; larger ones
+land in `constants.bin`). No runtime cost, no kernel.
+
+### 3.9 No new `RuntimeState` fields
 
 None of the 16 kernels add persistent per-session state — they're all
 stateless or use the existing shared workspace via
@@ -355,6 +422,57 @@ doesn't re-discover them:
 - **`LayerNormalization` stash_type is raw ONNX `TensorProto.DataType`**
   (1 = FLOAT, 10 = FLOAT16), **not** the HIPDNN_EP enum. The lowering
   passes `op.getStashType()` unchanged. Default is FLOAT.
+
+- **`Slice` non-constant indices / negative steps**: the graph-constant
+  + positive-stride case folds to `tensor.extract_slice` in
+  `lib/Conversion/OnnxToHip/SliceConversion.cpp` and never reaches the
+  runtime. The `hip_slice` kernel only services slices whose
+  `starts`/`ends`/`axes`/`steps` are graph inputs (D2H + sync once per
+  call) **or** that have at least one negative step. Indices are
+  INT64 only — INT32 indices would need a stride-aware ABI bump.
+
+- **`Slice` end-sentinel for "all the way down" with `step < 0`**: per
+  ONNX-13+ spec, any `end < 0` is normalised via `end += dim` **before**
+  clamping. To express "stop at index 0 inclusive" with a negative step
+  you must pass `end = -(dim + 1)` (which post-normalisation becomes
+  `-1`, the sentinel that step<0 clamping permits in `[-1, dim-1]`).
+  Passing `end = -1` literally means "stop at index `dim-1`" — i.e.
+  empty output when start ≥ dim-1. Matches ORT CPU `slice_helper.h`.
+
+- **`ScatterND` out-of-range indices**: clamped into range, not
+  rejected. `idx ≥ dim → dim-1`; `idx < -dim → 0`. This matches ORT's
+  CUDA EP (`scatter_nd_impl.cu` lines 43-53); ORT CPU treats OOB as an
+  error, but throwing from device kernels is impractical. CPU-vs-GPU
+  divergence here is documented upstream as "consistent with other GPU
+  backends".
+
+- **`ScatterND` duplicate indices + `reduction="none"`**: per ONNX spec
+  the result is undefined when multiple updates target the same
+  position. Our kernel uses last-writer-wins via a non-atomic store;
+  no thread-ordering guarantees. ORT CPU is the same.
+
+- **`ScatterND` reduction dtype matrix**: native atomics are used where
+  available (`atomicAdd` for f32/i32; `atomicAdd(unsigned long long*)`
+  for i64; `atomicMin`/`atomicMax` for i32). Everything else
+  (mul for all types, min/max for i64/f32/f16, add for f16) is
+  packed-CAS emulated in `cas_atomic_apply<T>` / `atomic_apply_f16`.
+  fp16 packed CAS rewrites the 32-bit-aligned word containing the
+  target half — relies on the standard 2-byte alignment of fp16 ONNX
+  tensors. Matches the ORT CUDA EP's `atomic_add` / `atomic_mul` /
+  `atomic_min` / `atomic_max` helpers in `atomic/common.cuh`.
+
+- **`ConstantOfShape` is folded at compile time** in
+  `lib/Conversion/OnnxToHip/ConstantOfShapeConversion.cpp`. The shape
+  input must be a recognised compile-time constant — currently:
+  `arith.constant`, `onnx.Constant` with a dense `value` attribute,
+  `onnx.Shape(static-tensor)` (with optional `start`/`end` slicing),
+  or a `bufferization.to_tensor` of an externalised
+  `memref.get_global`. The fold runs in `ConvertOnnxToHipPass`
+  **before** `lowerOnnxConstants` externalises constants, so the
+  shape's dense bytes are still reachable. After externalisation the
+  shape would be `memref.global` with null `initial_value` and the
+  fold could no longer recover the data. No runtime symbol exists —
+  the op disappears from the IR entirely.
 
 ## 8. What this leaves unfinished for `vision.onnx`
 
