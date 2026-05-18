@@ -36,7 +36,8 @@ struct GatherNDOpLowering : public ConvertOpToLLVMPattern<GatherNDOp> {
       return rewriter.notifyMatchFailure(op, "unsupported data element type");
 
     Value statePtr = adaptor.getCtx();
-    Value dataPtr = extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
+    Value dataPtr =
+        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
     Value indicesPtr =
         extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
     Value outPtr =
@@ -87,9 +88,8 @@ struct GatherNDOpLowering : public ConvertOpToLLVMPattern<GatherNDOp> {
       return failure();
 
     SmallVector<Value, 12> args = {
-        statePtr,    dataPtr,      indicesPtr, outPtr,
-        dataShape,   dataRank,     indicesShape, indicesRank,
-        outShape,    outRank,      batchDims,    dataTypeVal};
+        statePtr,     dataPtr,     indicesPtr, outPtr,  dataShape, dataRank,
+        indicesShape, indicesRank, outShape,   outRank, batchDims, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

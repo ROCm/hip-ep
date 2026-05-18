@@ -1183,11 +1183,11 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
 }
 
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output,
-               const int64_t *data_shape, int64_t data_rank,
-               const int64_t *output_shape, int64_t output_rank,
-               int64_t starts_num_elements, int64_t axes_num_elements,
-               int64_t steps_num_elements, int64_t data_type) {
+               void *axes, void *steps, void *output, const int64_t *data_shape,
+               int64_t data_rank, const int64_t *output_shape,
+               int64_t output_rank, int64_t starts_num_elements,
+               int64_t axes_num_elements, int64_t steps_num_elements,
+               int64_t data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_slice\n");
     return -1;
@@ -1210,12 +1210,12 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
 }
 
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
-                    void *updates, void *output,
-                    const int64_t *data_shape, int64_t data_rank,
-                    const int64_t *indices_shape, int64_t indices_rank,
-                    const int64_t *updates_shape, int64_t updates_rank,
-                    const int64_t *output_shape, int64_t output_rank,
-                    int64_t reduction_id, int64_t data_type) {
+                    void *updates, void *output, const int64_t *data_shape,
+                    int64_t data_rank, const int64_t *indices_shape,
+                    int64_t indices_rank, const int64_t *updates_shape,
+                    int64_t updates_rank, const int64_t *output_shape,
+                    int64_t output_rank, int64_t reduction_id,
+                    int64_t data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_scatter_nd\n");
     return -1;

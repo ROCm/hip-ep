@@ -36,8 +36,9 @@ struct ModToHip : public mlir::RewritePattern {
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("fmod"))
       fmod = attr.getValue().getSExtValue();
 
-    auto hipOp = mlir::hip::ModOp::create(rewriter, loc, resultType, context, a,
-                                          b, init, rewriter.getI64IntegerAttr(fmod));
+    auto hipOp =
+        mlir::hip::ModOp::create(rewriter, loc, resultType, context, a, b, init,
+                                 rewriter.getI64IntegerAttr(fmod));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

@@ -66,20 +66,20 @@ struct TileOpLowering : public ConvertOpToLLVMPattern<TileOp> {
     Value outRank = createI64Const(outType.getRank());
     Value dataTypeVal = createI64Const(dataType);
 
-    SmallVector<Type, 9> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, // state, in, repeats, out
-        ptrType, i64Type,                   // in_shape, in_rank
-        ptrType, i64Type,                   // out_shape, out_rank
-        i64Type};                           // data_type
+    SmallVector<Type, 9> paramTypes = {ptrType, ptrType, ptrType,
+                                       ptrType, // state, in, repeats, out
+                                       ptrType, i64Type, // in_shape, in_rank
+                                       ptrType, i64Type, // out_shape, out_rank
+                                       i64Type};         // data_type
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapTile, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 9> args = {statePtr, inPtr,    repeatsPtr, outPtr,
-                                  inShape,  inRank,   outShape,   outRank,
-                                  dataTypeVal};
+    SmallVector<Value, 9> args = {statePtr, inPtr,   repeatsPtr,
+                                  outPtr,   inShape, inRank,
+                                  outShape, outRank, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -89,8 +89,8 @@ struct TileOpLowering : public ConvertOpToLLVMPattern<TileOp> {
 
 } // namespace
 
-void mlir::hip::populateTileLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateTileLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns) {
   patterns.add<TileOpLowering>(converter);
 }
 

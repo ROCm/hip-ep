@@ -49,8 +49,7 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
         extractContiguousMemRefPtr(adaptor.getStarts(), rewriter, loc);
     Value endsPtr =
         extractContiguousMemRefPtr(adaptor.getEnds(), rewriter, loc);
-    Value axesPtr =
-        extractOptionalMemRefPtr(adaptor.getAxes(), rewriter, loc);
+    Value axesPtr = extractOptionalMemRefPtr(adaptor.getAxes(), rewriter, loc);
     Value stepsPtr =
         extractOptionalMemRefPtr(adaptor.getSteps(), rewriter, loc);
     Value outPtr =
@@ -93,8 +92,7 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Value stepsNum;
     if (op.getSteps()) {
       auto stepsT = cast<MemRefType>(op.getSteps().getType());
-      stepsNum =
-          computeNumElements(stepsT, adaptor.getSteps(), rewriter, loc);
+      stepsNum = computeNumElements(stepsT, adaptor.getSteps(), rewriter, loc);
     } else {
       stepsNum = createI64Const(0);
     }
@@ -104,24 +102,23 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Value dataTypeVal = createI64Const(hipDtype);
 
     SmallVector<Type, 16> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType,         // state, data, starts, ends
-        ptrType, ptrType, ptrType,                  // axes, steps, output
-        ptrType, i64Type,                           // data_shape, data_rank
-        ptrType, i64Type,                           // out_shape,  out_rank
-        i64Type, i64Type, i64Type,                  // starts_num, axes_num,
-                                                    // steps_num
-        i64Type};                                   // data_type
+        ptrType, ptrType, ptrType, ptrType, // state, data, starts, ends
+        ptrType, ptrType, ptrType,          // axes, steps, output
+        ptrType, i64Type,                   // data_shape, data_rank
+        ptrType, i64Type,                   // out_shape,  out_rank
+        i64Type, i64Type, i64Type,          // starts_num, axes_num,
+                                            // steps_num
+        i64Type};                           // data_type
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapSlice, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 16> args = {
-        statePtr, dataPtr,   startsPtr, endsPtr,
-        axesPtr,  stepsPtr,  outPtr,    dataShape,
-        dataRank, outShape,  outRank,   startsNum,
-        axesNum,  stepsNum,  dataTypeVal};
+    SmallVector<Value, 16> args = {statePtr, dataPtr,  startsPtr,  endsPtr,
+                                   axesPtr,  stepsPtr, outPtr,     dataShape,
+                                   dataRank, outShape, outRank,    startsNum,
+                                   axesNum,  stepsNum, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

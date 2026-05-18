@@ -837,9 +837,8 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
               int64_t cDim0, int64_t cDim1);
 
-int wrap_equal(RuntimeState *state, void *a, void *b,
-               void *output, int64_t num_elements,
-               int64_t data_type);
+int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
+               int64_t num_elements, int64_t data_type);
 
 int wrap_neg(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
@@ -850,9 +849,8 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
-int wrap_div(RuntimeState *state, void *lhs, void *rhs,
-             void *output, int64_t num_elements,
-             int64_t data_type);
+int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
+             int64_t num_elements, int64_t data_type);
 
 // CumSum operation wrapper (cumulative sum along an axis).
 // `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the
@@ -932,13 +930,14 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 //
 // axes / steps may be nullptr when the corresponding optional input is absent.
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output,
-               const int64_t *data_shape, int64_t data_rank,
-               const int64_t *output_shape, int64_t output_rank,
-               int64_t starts_num_elements, int64_t axes_num_elements,
-               int64_t steps_num_elements, int64_t data_type);
+               void *axes, void *steps, void *output, const int64_t *data_shape,
+               int64_t data_rank, const int64_t *output_shape,
+               int64_t output_rank, int64_t starts_num_elements,
+               int64_t axes_num_elements, int64_t steps_num_elements,
+               int64_t data_type);
 
-// ScatterND: output = copy(data), then output[indices[i]] (reduction) updates[i].
+// ScatterND: output = copy(data), then output[indices[i]] (reduction)
+// updates[i].
 //
 // `reduction_id` encodes the ONNX `reduction` attribute as a small enum
 // (must match ScatterNDOpLowering::reductionIdFromString):
@@ -953,12 +952,12 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
 // The runtime is responsible (when implemented) for both the initial
 // data -> output copy and the per-index scatter writes.
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
-                    void *updates, void *output,
-                    const int64_t *data_shape, int64_t data_rank,
-                    const int64_t *indices_shape, int64_t indices_rank,
-                    const int64_t *updates_shape, int64_t updates_rank,
-                    const int64_t *output_shape, int64_t output_rank,
-                    int64_t reduction_id, int64_t data_type);
+                    void *updates, void *output, const int64_t *data_shape,
+                    int64_t data_rank, const int64_t *indices_shape,
+                    int64_t indices_rank, const int64_t *updates_shape,
+                    int64_t updates_rank, const int64_t *output_shape,
+                    int64_t output_rank, int64_t reduction_id,
+                    int64_t data_type);
 
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers

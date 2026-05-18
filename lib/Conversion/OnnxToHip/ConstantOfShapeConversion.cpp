@@ -52,7 +52,8 @@ static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
   // global has a dense initial_value.  Used when the shape input came in
   // through the constant externalisation route.
   if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp)) {
-    auto bufDef = toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();
+    auto bufDef =
+        toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();
     if (!bufDef)
       return nullptr;
     auto module = bufDef->getParentOfType<mlir::ModuleOp>();
@@ -89,8 +90,8 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
     auto shapeTensorType =
         mlir::dyn_cast<mlir::RankedTensorType>(shapeAttr.getType());
     if (!shapeTensorType || shapeTensorType.getRank() != 1)
-      return rewriter.notifyMatchFailure(
-          op, "shape input must be a rank-1 tensor");
+      return rewriter.notifyMatchFailure(op,
+                                         "shape input must be a rank-1 tensor");
     if (!shapeTensorType.getElementType().isInteger(64) &&
         !shapeTensorType.getElementType().isInteger(32))
       return rewriter.notifyMatchFailure(
@@ -128,8 +129,7 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
             op, "non-dense value attribute is not supported");
       auto valueTensorType =
           mlir::dyn_cast<mlir::RankedTensorType>(valueDense.getType());
-      if (!valueTensorType ||
-          valueTensorType.getElementType() != elemType)
+      if (!valueTensorType || valueTensorType.getElementType() != elemType)
         return rewriter.notifyMatchFailure(
             op, "value attribute element type does not match result");
 
@@ -137,16 +137,14 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
       // `value`.  Element-wise reading covers both splat and non-splat 1x
       // tensors uniformly.
       if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType)) {
-        mlir::APFloat scalar =
-            *valueDense.getValues<mlir::APFloat>().begin();
+        mlir::APFloat scalar = *valueDense.getValues<mlir::APFloat>().begin();
         splatAttr = mlir::DenseElementsAttr::get(outTensorType, scalar);
       } else if (mlir::isa<mlir::IntegerType>(elemType)) {
-        mlir::APInt scalar =
-            *valueDense.getValues<mlir::APInt>().begin();
+        mlir::APInt scalar = *valueDense.getValues<mlir::APInt>().begin();
         splatAttr = mlir::DenseElementsAttr::get(outTensorType, scalar);
       } else {
-        return rewriter.notifyMatchFailure(
-            op, "unsupported result element type");
+        return rewriter.notifyMatchFailure(op,
+                                           "unsupported result element type");
       }
     } else {
       // Spec default: 0.0 fp32.  We honour the result tensor's actual element

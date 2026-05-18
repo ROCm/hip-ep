@@ -54,8 +54,9 @@ struct LessOpLowering : public ConvertOpToLLVMPattern<LessOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr, lhsPtr,      rhsPtr,
-                                  outPtr,   numElements, createI64Const(dataType)};
+    SmallVector<Value, 6> args = {statePtr,    lhsPtr,
+                                  rhsPtr,      outPtr,
+                                  numElements, createI64Const(dataType)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -65,8 +66,8 @@ struct LessOpLowering : public ConvertOpToLLVMPattern<LessOp> {
 
 } // namespace
 
-void mlir::hip::populateLessLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateLessLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns) {
   patterns.add<LessOpLowering>(converter);
 }
 

@@ -28,8 +28,8 @@ struct EqualOpLowering : public ConvertOpToLLVMPattern<EqualOp> {
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto outputType = cast<MemRefType>(op.getOutput().getType());
-    Value numElements = computeNumElements(outputType, adaptor.getOutput(),
-                                           rewriter, loc);
+    Value numElements =
+        computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
 
     auto lhsType = cast<MemRefType>(op.getLhs().getType());
     int64_t dataType = getHipdnnDataType(lhsType.getElementType());
@@ -49,9 +49,9 @@ struct EqualOpLowering : public ConvertOpToLLVMPattern<EqualOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr, lhsPtr, rhsPtr,
-                                  outputPtr, numElements,
-                                  createI64Const(dataType)};
+    SmallVector<Value, 6> args = {statePtr,    lhsPtr,
+                                  rhsPtr,      outputPtr,
+                                  numElements, createI64Const(dataType)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

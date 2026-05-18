@@ -14,11 +14,11 @@
 // path can still link and run end-to-end (with incorrect Slice output) for
 // development and IR-shape debugging.
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output,
-               const int64_t *data_shape, int64_t data_rank,
-               const int64_t *output_shape, int64_t output_rank,
-               int64_t starts_num_elements, int64_t axes_num_elements,
-               int64_t steps_num_elements, int64_t data_type) {
+               void *axes, void *steps, void *output, const int64_t *data_shape,
+               int64_t data_rank, const int64_t *output_shape,
+               int64_t output_rank, int64_t starts_num_elements,
+               int64_t axes_num_elements, int64_t steps_num_elements,
+               int64_t data_type) {
   (void)state;
   (void)data;
   (void)starts;

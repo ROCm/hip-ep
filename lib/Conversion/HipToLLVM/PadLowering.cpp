@@ -50,8 +50,10 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
       return rewriter.notifyMatchFailure(op, "unsupported data element type");
 
     Value statePtr = adaptor.getCtx();
-    Value dataPtr = extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
-    Value padsPtr = extractContiguousMemRefPtr(adaptor.getPads(), rewriter, loc);
+    Value dataPtr =
+        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
+    Value padsPtr =
+        extractContiguousMemRefPtr(adaptor.getPads(), rewriter, loc);
     Value outPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -100,21 +102,19 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
 
     SmallVector<Type, 14> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, // state + 5 ptrs
-        ptrType, i64Type,        // data_shape, data_rank
-        ptrType, i64Type,        // out_shape,  out_rank
-        i64Type, i64Type,        // pads_num,   axes_num
-        i64Type, i64Type};       // data_type,  mode_id
+        ptrType, i64Type,  // data_shape, data_rank
+        ptrType, i64Type,  // out_shape,  out_rank
+        i64Type, i64Type,  // pads_num,   axes_num
+        i64Type, i64Type}; // data_type,  mode_id
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapPad, paramTypes, i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapPad, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 14> args = {statePtr,    dataPtr,  padsPtr,
-                                   cvalPtr,     axesPtr,  outPtr,
-                                   dataShape,   dataRank, outShape,
-                                   outRank,     padsNum,  axesNum,
-                                   dataTypeVal, modeIdVal};
+    SmallVector<Value, 14> args = {
+        statePtr, dataPtr,  padsPtr, cvalPtr, axesPtr, outPtr,      dataShape,
+        dataRank, outShape, outRank, padsNum, axesNum, dataTypeVal, modeIdVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -124,8 +124,8 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
 
 } // namespace
 
-void mlir::hip::populatePadLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populatePadLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns) {
   patterns.add<PadOpLowering>(converter);
 }
 
