@@ -22,11 +22,18 @@ cc_library(
             "/DNOMINMAX",
             "/D_CRT_SECURE_NO_WARNINGS",
             "/std:c++17",
+            # Must match morphizen-graph and morphizen-core-static (also private copts).
+            # Without this, ort-bridge.lib references symbols with a literal
+            # namespace named "ONNX_NAMESPACE" while the provider libs (morphizen-graph,
+            # morphizen-core-static) compile them under namespace "onnx", causing
+            # undefined-symbol link errors when building the EP DLL.
+            "/DONNX_NAMESPACE=onnx",
         ],
         "//conditions:default": [
             "-w",  # Suppress all warnings
             "-std=c++17",
             "-fPIC",
+            "-DONNX_NAMESPACE=onnx",
         ],
     }),
     local_defines = [
