@@ -227,6 +227,9 @@ cc_test(
     deps = [
         ":test_case_config_cc_proto",
         "//morphizen-core:morphizen-core-static",
+        # cc_import: copies EP DLL next to test binary (Windows PATH search), no link dep.
+        # Mirrors GHE's //vaip-core:onnxruntime_vitisai_ep_runtime pattern.
+        "//morphizen-core:onnxruntime_morphizen_ep_runtime",
         "//mlir-imp:mlir-imp",  # mlir-imp backend (alwayslink — registers StaticPluginRegister)
         # Mirrors CMake: $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>
         # The pass registers itself via StaticPluginRegister in an anonymous namespace;
