@@ -7,6 +7,7 @@
 #include "../module_registry.h"
 #include "../op_profile.h"
 #include "../runtime_state_internal.h"
+#include "../workspace_state.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -374,13 +375,18 @@ int wrap_causal_conv_with_state(
   }
 
   const size_t total_ws = virtual_size + sigmoid_size + conv_workspace_size;
-  if (total_ws > 0 && hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
+  WorkspaceState *ws_state = workspace_module(state);
+  if (!ws_state) {
     fprintf(stderr,
-            "wrap_causal_conv_with_state: ensure_workspace(%zu) failed\n",
+            "wrap_causal_conv_with_state: failed to obtain WorkspaceState\n");
+    return -1;
+  }
+  if (total_ws > 0 && ws_state->ws.grow(total_ws) != 0) {
+    fprintf(stderr, "wrap_causal_conv_with_state: workspace.grow(%zu) failed\n",
             total_ws);
     return -1;
   }
-  char *ws_base = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+  char *ws_base = static_cast<char *>(ws_state->ws.data());
   void *virtual_buf = ws_base;
   void *sigmoid_buf =
       (activation == 1) ? static_cast<void *>(ws_base + virtual_size) : nullptr;

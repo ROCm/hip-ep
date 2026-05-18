@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../workspace_state.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -403,13 +404,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   // or the selected algorithm.
   size_t needed_ws =
       cached->tuned ? cached->workspace_size : cached->max_candidate_workspace;
-  if (needed_ws > 0) {
-    if (hipdnn_ep_state_ensure_workspace(state, needed_ws) != 0)
-      return -1;
-  }
+  WorkspaceState *ws_state = workspace_module(state);
+  if (!ws_state)
+    return -1;
+  if (needed_ws > 0 && ws_state->ws.grow(needed_ws) != 0)
+    return -1;
 
-  void *ws_ptr = hipdnn_ep_state_get_workspace(state);
-  size_t ws_size = hipdnn_ep_state_get_workspace_size(state);
+  void *ws_ptr = ws_state->ws.data();
+  size_t ws_size = ws_state->ws.size();
 
   // Auto-tune on first call: benchmark all candidates with real GPU data
   if (!cached->tuned) {

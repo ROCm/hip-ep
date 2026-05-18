@@ -3,13 +3,13 @@
  * Licensed under the MIT License.
  */
 #include "debug_log.h"
-#include "growable_buffer.h"
 #include "hip/timing.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
 #include "module_registry.h"
 #include "op_profile.h"
 #include "runtime_state_internal.h"
+#include "workspace_state.h"
 
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
@@ -1041,86 +1041,6 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state) {
   return state->pool_base;
 }
 
-//===----------------------------------------------------------------------===//
-// Shared Workspace Support
-//===----------------------------------------------------------------------===//
-//
-// The shared workspace is a single grow-on-demand device-VRAM scratch
-// region used by multiple ops (GQA, hipBLASLt-backed matmul/gemm, LayerNorm,
-// CausalConv, etc.) within one inference. Implementation lives in a
-// WorkspaceState op-module backed by GrowableDeviceBuffer, exactly like
-// QmoeState in real/qmoe.cpp -- this collapses what used to be a hand-rolled
-// 1.5x-grow / sync-then-realloc inline body into the same RAII helper used
-// elsewhere in the runtime.
-//
-// The three exported C-ABI entry points keep their signatures so the bitcode
-// embedded into compiled model.dlls links against them unchanged.
-
-namespace {
-
-struct WorkspaceState {
-  hipdnn_ep::GrowableDeviceBuffer ws;
-
-  // GrowableDeviceBuffer no longer needs a bound stream: hipFree
-  // performs an implicit hipDeviceSynchronize() per the HIP API.
-  // Constructor is declared so HIPDNN_OP_MODULE's SFINAE detects an
-  // explicit RuntimeState* hook even though we ignore it.
-  explicit WorkspaceState(RuntimeState *) {}
-};
-
-HIPDNN_OP_MODULE(workspace_module, "workspace", WorkspaceState);
-
-} // namespace
-
-void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
-  if (!state)
-    return nullptr;
-  WorkspaceState *m = workspace_module(state);
-  return m ? m->ws.data() : nullptr;
-}
-
-size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state) {
-  if (!state)
-    return 0;
-  WorkspaceState *m = workspace_module(state);
-  return m ? m->ws.size() : 0;
-}
-
-int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
-  if (!state)
-    return -1;
-  if (needed_size == 0)
-    return 0;
-  WorkspaceState *m = workspace_module(state);
-  if (!m) {
-    fprintf(
-        stderr,
-        "hipdnn_ep_state_ensure_workspace: failed to obtain WorkspaceState\n");
-    std::abort();
-  }
-  // GrowableDeviceBuffer::grow() implements the same "sync-then-realloc,
-  // 1.5x geometric, cold-start uses exact request" policy that this
-  // function used to inline. See lib/Runtime/growable_buffer.h. Workspace
-  // OOM is unrecoverable in practice -- every consumer fails the same way
-  // and there is no fallback path -- so abort, matching upstream main's
-  // #214 policy on this allocator.
-  if (m->ws.grow(needed_size) != 0) {
-    fprintf(stderr, "hipdnn_ep_state_ensure_workspace: grow(%zu) failed\n",
-            needed_size);
-    std::abort();
-  }
-  RUNTIME_DEBUG_LOG(
-      "[workspace] Allocated shared workspace: %zu bytes (requested %zu)\n",
-      m->ws.size(), needed_size);
-  return 0;
-}
-
-// hipdnn_ep_state_(get|ensure)_qmoe_(scratch|host_scratch): the C ABI is
-// preserved (still declared in hipdnn_ep_runtime.h and called from the
-// qmoe runtime bitcode), but the implementations now live in
-// lib/Runtime/real/qmoe.cpp and delegate to the QmoeState op-module's
-// GrowableDeviceBuffer / GrowablePinnedBuffer (see growable_buffer.h).
-
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
   return state ? static_cast<void *>(state->device_error_flag) : nullptr;
 }
@@ -1159,3 +1079,23 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
 }
 
 } // extern "C"
+
+//===----------------------------------------------------------------------===//
+// Shared Workspace op-module accessor
+//===----------------------------------------------------------------------===//
+//
+// `workspace_module` is the cross-TU accessor declared in workspace_state.h.
+// C++ linkage (not in the surrounding extern "C" block) because the
+// accessor returns a pointer to the C++ WorkspaceState type and is meant
+// to be called only from other runtime .cpp TUs, never from generated
+// bitcode. The function-local statics initialise the spec + slot id once
+// per process; every subsequent call is the standard op_module_get fast
+// path (bounds check + load + null branch).
+
+WorkspaceState *workspace_module(RuntimeState *state) {
+  static const hipdnn_ep::OpModuleSpec spec =
+      hipdnn_ep::make_op_module_spec<WorkspaceState>("workspace");
+  static const int slot = hipdnn_ep::register_op_module(&spec);
+  return static_cast<WorkspaceState *>(hipdnn_ep::op_module_get(
+      hipdnn_ep::get_module_registry(state), state, slot));
+}

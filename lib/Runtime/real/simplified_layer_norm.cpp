@@ -9,6 +9,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../workspace_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
@@ -201,12 +202,13 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
 
   // Use shared workspace for rstd scratch buffer (always f32)
   size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
-  if (hipdnn_ep_state_ensure_workspace(state, rstd_bytes) != 0) {
+  WorkspaceState *ws = workspace_module(state);
+  if (!ws || ws->ws.grow(rstd_bytes) != 0) {
     fprintf(stderr,
             "wrap_miopenT5LayerNormForward: workspace allocation failed\n");
     return -1;
   }
-  void *rstd_buf = hipdnn_ep_state_get_workspace(state);
+  void *rstd_buf = ws->ws.data();
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenT5LayerNormForward: calling miopenT5LayerNormForward"

@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../workspace_state.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -441,18 +442,19 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
 
   {
     const GemmCacheEntry &cached = it->second;
-    if (cached.workspace_size > 0) {
-      if (hipdnn_ep_state_ensure_workspace(state, cached.workspace_size) != 0) {
-        result = -1;
-        goto cleanup;
-      }
+    WorkspaceState *ws_state = workspace_module(state);
+    if (!ws_state) {
+      result = -1;
+      goto cleanup;
+    }
+    if (cached.workspace_size > 0 &&
+        ws_state->ws.grow(cached.workspace_size) != 0) {
+      result = -1;
+      goto cleanup;
     }
 
-    void *ws_ptr = cached.use_default_algo
-                       ? nullptr
-                       : hipdnn_ep_state_get_workspace(state);
-    size_t ws_size =
-        cached.use_default_algo ? 0 : hipdnn_ep_state_get_workspace_size(state);
+    void *ws_ptr = cached.use_default_algo ? nullptr : ws_state->ws.data();
+    size_t ws_size = cached.use_default_algo ? 0 : ws_state->ws.size();
     hipblasLtMatmulAlgo_t *algo_ptr =
         cached.use_default_algo
             ? nullptr
