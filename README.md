@@ -81,6 +81,7 @@ These operations are handled through standard MLIR transformations without requi
 | Split | tensor.extract_slice | Zero-copy tensor partitioning; creates views without data movement |
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 | Shape | arith.constant (compile-time fold) | Static-shape models make Shape a pure constant; honours optional `start`/`end` slice attrs |
+| ConstantOfShape | arith.constant (compile-time fold) | Folds to a splat constant when the shape input is itself constant; honours optional `value` attribute |
 
 ---
 

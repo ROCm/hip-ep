@@ -44,6 +44,7 @@ add_library(OnnxToHip STATIC
   SignConversion.cpp
   ModConversion.cpp
   ShapeConversion.cpp
+  ConstantOfShapeConversion.cpp
 )
 
 add_dependencies(OnnxToHip
