@@ -190,6 +190,8 @@ void populateShapeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
+void populateSliceConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

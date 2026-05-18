@@ -1182,6 +1182,33 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
+               void *axes, void *steps, void *output,
+               const int64_t *data_shape, int64_t data_rank,
+               const int64_t *output_shape, int64_t output_rank,
+               int64_t starts_num_elements, int64_t axes_num_elements,
+               int64_t steps_num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_slice\n");
+    return -1;
+  }
+  (void)data;
+  (void)starts;
+  (void)ends;
+  (void)output;
+  (void)data_shape;
+  (void)output_shape;
+  MOCK_PRINT("[MOCK] wrap_slice(data_rank=%lld, output_rank=%lld, "
+             "starts_n=%lld, axes_n=%lld (%s), steps_n=%lld (%s), "
+             "data_type=%s(%lld))\n",
+             (long long)data_rank, (long long)output_rank,
+             (long long)starts_num_elements, (long long)axes_num_elements,
+             axes ? "yes" : "null", (long long)steps_num_elements,
+             steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_sign(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type) {
   if (!state) {

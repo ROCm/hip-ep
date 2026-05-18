@@ -45,6 +45,7 @@ add_library(OnnxToHip STATIC
   ModConversion.cpp
   ShapeConversion.cpp
   ConstantOfShapeConversion.cpp
+  SliceConversion.cpp
 )
 
 add_dependencies(OnnxToHip

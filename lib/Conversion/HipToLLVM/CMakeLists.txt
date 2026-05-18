@@ -36,6 +36,7 @@ add_library(HipToLLVM STATIC
   LessLowering.cpp
   GatherNDLowering.cpp
   ModLowering.cpp
+  SliceLowering.cpp
 )
 
 add_dependencies(HipToLLVM

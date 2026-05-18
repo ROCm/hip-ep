@@ -180,6 +180,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SignOp>>(*ctx);
     mlir::hip::ModOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ModOp>>(*ctx);
+    mlir::hip::SliceOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SliceOp>>(*ctx);
   });
 }
 

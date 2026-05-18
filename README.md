@@ -79,6 +79,7 @@ These operations are handled through standard MLIR transformations without requi
 | Unsqueeze | tensor.expand_shape | Inserts size-1 axes; shape/stride reinterpretation only |
 | Squeeze | tensor.collapse_shape | Removes size-1 axes; shape/stride reinterpretation only |
 | Split | tensor.extract_slice | Zero-copy tensor partitioning; creates views without data movement |
+| Slice (constant params, positive stride) | tensor.extract_slice (compile-time decompose) | Most common case — constant starts/ends/axes/steps with positive unit/N stride. Lowers to zero-copy `memref.subview` after bufferization. Non-constant indices or negative steps fall through to a native `hip.slice` op with a runtime stub (throws today). |
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 | Shape | arith.constant (compile-time fold) | Static-shape models make Shape a pure constant; honours optional `start`/`end` slice attrs |
 | ConstantOfShape | arith.constant (compile-time fold) | Folds to a splat constant when the shape input is itself constant; honours optional `value` attribute |
