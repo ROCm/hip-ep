@@ -1209,6 +1209,35 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
   return 0;
 }
 
+int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
+                    void *updates, void *output,
+                    const int64_t *data_shape, int64_t data_rank,
+                    const int64_t *indices_shape, int64_t indices_rank,
+                    const int64_t *updates_shape, int64_t updates_rank,
+                    const int64_t *output_shape, int64_t output_rank,
+                    int64_t reduction_id, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_scatter_nd\n");
+    return -1;
+  }
+  (void)data;
+  (void)indices;
+  (void)updates;
+  (void)output;
+  (void)data_shape;
+  (void)indices_shape;
+  (void)updates_shape;
+  (void)output_shape;
+  MOCK_PRINT("[MOCK] wrap_scatter_nd(data_rank=%lld, indices_rank=%lld, "
+             "updates_rank=%lld, output_rank=%lld, reduction_id=%lld, "
+             "data_type=%s(%lld))\n",
+             (long long)data_rank, (long long)indices_rank,
+             (long long)updates_rank, (long long)output_rank,
+             (long long)reduction_id, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_sign(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type) {
   if (!state) {

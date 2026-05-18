@@ -1173,5 +1173,19 @@ void ModOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+//===----------------------------------------------------------------------===//
+// ScatterNDOp: ins(data, indices, updates), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScatterNDOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScatterNDOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.cpp.inc"

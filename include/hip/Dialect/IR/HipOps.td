@@ -2156,6 +2156,61 @@ def Hip_GatherNDOp : Hip_DpsOp<"gather_nd"> {
   }];
 }
 
+def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd"> {
+  let summary = "ScatterND: scatter updates into a data tensor using N-D index tuples";
+  let description = [{
+    Implements the standard ONNX ScatterND operator: produce an `output`
+    tensor with the same shape as `data` whose values are `data` copied,
+    then `updates` written back at positions specified by `indices`.
+
+    `indices` is an integer tensor whose last dimension `k` (with
+    `k <= rank(data)`) defines the rank of each index tuple. When
+    `k == rank(data)` each update entry is a scalar; otherwise each entry
+    is a contiguous slice of trailing shape `data.shape[k:]`.
+
+    `reduction` selects how an existing value at the target position is
+    combined with the new update value:
+
+      * `"none"` (default) — overwrite (`a = b`)
+      * `"add"` — accumulate (`a = a + b`)
+      * `"mul"` — multiply (`a = a * b`)
+      * `"min"` — minimum (`a = min(a, b)`)
+      * `"max"` — maximum (`a = max(a, b)`)
+
+    This is the inverse of GatherND.
+
+    Uses destination-passing style: the `output` buffer is provided as an
+    argument, and the runtime is responsible for both the initial
+    `data → output` copy and the subsequent scatter writes.
+
+    Example:
+    ```mlir
+    hip.scatter_nd(%ctx) ins(%data, %indices, %updates :
+                              memref<4x4x4xf32, 1>,
+                              memref<2x1xi64, 1>,
+                              memref<2x4x4xf32, 1>)
+                          outs(%out : memref<4x4x4xf32, 1>)
+                          {reduction = "none"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$updates,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedStrAttr<StrAttr, "none">:$reduction
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `,` $updates `:`
+        type($data) `,` type($indices) `,` type($updates) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SignOp : Hip_DpsOp<"sign"> {
   let summary = "Element-wise sign: y = sign(x)";
   let description = [{

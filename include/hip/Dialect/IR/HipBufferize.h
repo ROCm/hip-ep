@@ -118,6 +118,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SignOp::attachInterface<HipDstBufferizableModel<SignOp>>(*ctx);
     ModOp::attachInterface<HipDstBufferizableModel<ModOp>>(*ctx);
     SliceOp::attachInterface<HipDstBufferizableModel<SliceOp>>(*ctx);
+    ScatterNDOp::attachInterface<HipDstBufferizableModel<ScatterNDOp>>(*ctx);
   });
 }
 

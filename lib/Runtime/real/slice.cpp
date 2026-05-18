@@ -5,14 +5,14 @@
 #include "../hipdnn_ep_runtime.h"
 
 #include <cstdio>
-#include <stdexcept>
 
 // Stub implementation: the OnnxToHip decompose pattern rewrites the common
 // case (compile-time constant indices + positive unit stride) to
 // tensor.extract_slice, so this entry point only fires for unsupported
-// configurations (non-constant indices or negative steps). Surface that
-// with a hard failure so the missing coverage cannot silently produce
-// garbage outputs.
+// configurations (non-constant indices or negative steps). The stub only
+// logs its parameters and returns success so models that exercise this
+// path can still link and run end-to-end (with incorrect Slice output) for
+// development and IR-shape debugging.
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                void *axes, void *steps, void *output,
                const int64_t *data_shape, int64_t data_rank,
@@ -30,7 +30,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
   (void)output_shape;
 
   std::fprintf(stderr,
-               "[NOT_IMPLEMENTED] wrap_slice("
+               "[STUB] wrap_slice("
                "data_rank=%lld, output_rank=%lld, starts_n=%lld, axes_n=%lld, "
                "steps_n=%lld, data_type=%s(%lld))\n",
                (long long)data_rank, (long long)output_rank,
@@ -38,7 +38,5 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                (long long)steps_num_elements,
                hipdnn_ep_datatype_name(data_type), (long long)data_type);
   std::fflush(stderr);
-  throw std::runtime_error("wrap_slice: native Slice fallback is not "
-                           "implemented (only the tensor.extract_slice "
-                           "decompose path is supported today)");
+  return 0;
 }

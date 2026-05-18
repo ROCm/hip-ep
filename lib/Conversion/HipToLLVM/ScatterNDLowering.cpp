@@ -9,24 +9,35 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.slice(ctx, data, starts, ends, [axes], [steps], output)
-//   -> wrap_slice(state, data_ptr, starts_ptr, ends_ptr,
-//                 axes_ptr (or null), steps_ptr (or null), out_ptr,
-//                 data_shape_ptr, data_rank,
-//                 output_shape_ptr, output_rank,
-//                 starts_num_elements, axes_num_elements,
-//                 steps_num_elements, data_type)
+// hip.scatter_nd(ctx, data, indices, updates, output) {reduction}
+//   -> wrap_scatter_nd(state, data_ptr, indices_ptr, updates_ptr, out_ptr,
+//                      data_shape_ptr, data_rank,
+//                      indices_shape_ptr, indices_rank,
+//                      updates_shape_ptr, updates_rank,
+//                      output_shape_ptr, output_rank,
+//                      reduction_id, data_type)
 //
-// Today the runtime function is a no-op stub that only logs its parameters
-// (see lib/Runtime/real/slice.cpp). This lowering exists to keep the IR
-// pipeline (bufferize -> hip-to-llvm -> generate-interface) functional even
-// when a Slice cannot be folded to tensor.extract_slice by the OnnxToHip
-// decompose pattern.
-struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
+// `reduction_id` encodes the ONNX `reduction` string attribute as a small
+// integer enum (see ScatterNDOpLowering::reductionIdFromString below). The
+// runtime side is a stub today that only logs its parameters, but the
+// signature is shaped to match the future kernel implementation.
+struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
+  static int64_t reductionIdFromString(StringRef r) {
+    if (r == "add")
+      return 1;
+    if (r == "mul")
+      return 2;
+    if (r == "min")
+      return 3;
+    if (r == "max")
+      return 4;
+    return 0; // "none" / default
+  }
+
   LogicalResult
-  matchAndRewrite(SliceOp op, OpAdaptor adaptor,
+  matchAndRewrite(ScatterNDOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
@@ -35,7 +46,8 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Type i64Type = rewriter.getI64Type();
 
     auto dataType = cast<MemRefType>(op.getData().getType());
-    auto startsType = cast<MemRefType>(op.getStarts().getType());
+    auto indicesType = cast<MemRefType>(op.getIndices().getType());
+    auto updatesType = cast<MemRefType>(op.getUpdates().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
     int64_t hipDtype = getHipdnnDataType(dataType.getElementType());
@@ -45,14 +57,10 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Value statePtr = adaptor.getCtx();
     Value dataPtr =
         extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
-    Value startsPtr =
-        extractContiguousMemRefPtr(adaptor.getStarts(), rewriter, loc);
-    Value endsPtr =
-        extractContiguousMemRefPtr(adaptor.getEnds(), rewriter, loc);
-    Value axesPtr =
-        extractOptionalMemRefPtr(adaptor.getAxes(), rewriter, loc);
-    Value stepsPtr =
-        extractOptionalMemRefPtr(adaptor.getSteps(), rewriter, loc);
+    Value indicesPtr =
+        extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
+    Value updatesPtr =
+        extractContiguousMemRefPtr(adaptor.getUpdates(), rewriter, loc);
     Value outPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -79,49 +87,36 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     };
 
     Value dataShape = emitShapeArray(dataType, adaptor.getData());
+    Value indicesShape = emitShapeArray(indicesType, adaptor.getIndices());
+    Value updatesShape = emitShapeArray(updatesType, adaptor.getUpdates());
     Value outShape = emitShapeArray(outputType, adaptor.getOutput());
 
-    Value startsNum =
-        computeNumElements(startsType, adaptor.getStarts(), rewriter, loc);
-    Value axesNum;
-    if (op.getAxes()) {
-      auto axesT = cast<MemRefType>(op.getAxes().getType());
-      axesNum = computeNumElements(axesT, adaptor.getAxes(), rewriter, loc);
-    } else {
-      axesNum = createI64Const(0);
-    }
-    Value stepsNum;
-    if (op.getSteps()) {
-      auto stepsT = cast<MemRefType>(op.getSteps().getType());
-      stepsNum =
-          computeNumElements(stepsT, adaptor.getSteps(), rewriter, loc);
-    } else {
-      stepsNum = createI64Const(0);
-    }
-
     Value dataRank = createI64Const(dataType.getRank());
+    Value indicesRank = createI64Const(indicesType.getRank());
+    Value updatesRank = createI64Const(updatesType.getRank());
     Value outRank = createI64Const(outputType.getRank());
+    Value reductionVal = createI64Const(reductionIdFromString(op.getReduction()));
     Value dataTypeVal = createI64Const(hipDtype);
 
     SmallVector<Type, 16> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType,         // state, data, starts, ends
-        ptrType, ptrType, ptrType,                  // axes, steps, output
-        ptrType, i64Type,                           // data_shape, data_rank
-        ptrType, i64Type,                           // out_shape,  out_rank
-        i64Type, i64Type, i64Type,                  // starts_num, axes_num,
-                                                    // steps_num
-        i64Type};                                   // data_type
+        ptrType, ptrType, ptrType, ptrType, ptrType, // state, data, idx,
+                                                     // updates, out
+        ptrType, i64Type,                            // data_shape, data_rank
+        ptrType, i64Type,                            // idx_shape, idx_rank
+        ptrType, i64Type,                            // upd_shape, upd_rank
+        ptrType, i64Type,                            // out_shape, out_rank
+        i64Type, i64Type};                           // reduction_id, data_type
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapSlice, paramTypes, i32Type);
+        rewriter, module, kWrapScatterND, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
     SmallVector<Value, 16> args = {
-        statePtr, dataPtr,   startsPtr, endsPtr,
-        axesPtr,  stepsPtr,  outPtr,    dataShape,
-        dataRank, outShape,  outRank,   startsNum,
-        axesNum,  stepsNum,  dataTypeVal};
+        statePtr,     dataPtr,      indicesPtr,   updatesPtr,
+        outPtr,       dataShape,    dataRank,     indicesShape,
+        indicesRank,  updatesShape, updatesRank,  outShape,
+        outRank,      reductionVal, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -131,9 +126,9 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
 
 } // namespace
 
-void mlir::hip::populateSliceLoweringPatterns(
+void mlir::hip::populateScatterNDLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.add<SliceOpLowering>(converter);
+  patterns.add<ScatterNDOpLowering>(converter);
 }
 
 } // namespace hip
