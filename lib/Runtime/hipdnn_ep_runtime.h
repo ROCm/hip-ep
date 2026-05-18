@@ -920,6 +920,23 @@ int wrap_sign(RuntimeState *state, void *input, void *output,
 int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
              int64_t num_elements, int64_t data_type, int64_t fmod);
 
+// Slice operation wrapper (ONNX Slice native fallback).
+//
+// Today this is a stub: the OnnxToHip decompose pattern handles the common
+// case (compile-time constant starts/ends/axes/steps with positive unit
+// stride) by rewriting onnx.Slice to tensor.extract_slice, so this runtime
+// entry is only called for non-constant-indices or negative-step Slices.
+// The stub throws std::runtime_error to surface unsupported coverage rather
+// than silently returning wrong data.
+//
+// axes / steps may be nullptr when the corresponding optional input is absent.
+int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
+               void *axes, void *steps, void *output,
+               const int64_t *data_shape, int64_t data_rank,
+               const int64_t *output_shape, int64_t output_rank,
+               int64_t starts_num_elements, int64_t axes_num_elements,
+               int64_t steps_num_elements, int64_t data_type);
+
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
 //===----------------------------------------------------------------------===//

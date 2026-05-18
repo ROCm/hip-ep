@@ -1138,6 +1138,18 @@ void GatherNDOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SliceOp: ins(data, starts, ends, [axes], [steps]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SliceOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SliceOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SignOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 

@@ -2066,6 +2066,60 @@ def Hip_LessOp : Hip_DpsOp<"less"> {
   }];
 }
 
+def Hip_SliceOp : Hip_DpsOp<"slice", [AttrSizedOperandSegments]> {
+  let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";
+  let description = [{
+    Native fallback for ONNX Slice when the OnnxToHip pass cannot decompose
+    the op to `tensor.extract_slice` (e.g. non-constant slice parameters or
+    negative `steps`). Implements the standard ONNX Slice operator semantics:
+
+      output[k] = data[ start[k0]:end[k0]:step[k0],
+                         start[k1]:end[k1]:step[k1], ... ]
+
+    `starts` / `ends` are 1-D integer tensors (int32 or int64), one entry per
+    axis listed in `axes`. `axes` defaults to `[0, ..., r-1]` when absent and
+    `steps` defaults to all-ones. Per-axis negative indices and negative
+    steps follow ONNX clamping rules.
+
+    The common case (compile-time constant indices, positive unit stride) is
+    handled by an upstream decompose pattern that lowers `onnx.Slice` to
+    `tensor.extract_slice` — that path produces a zero-cost view without any
+    runtime call. This op exists only to give the fallback path a stable
+    DPS-shaped representation to bufferize and lower from.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.slice(%ctx) ins(%data, %starts, %ends : memref<3x4xf32, 1>,
+                                                  memref<2xi64, 1>,
+                                                  memref<2xi64, 1>)
+                    axes(%axes : memref<2xi64, 1>)
+                    steps(%steps : memref<2xi64, 1>)
+                    outs(%out : memref<3x2xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$starts,
+    Hip_TensorOrMemRef:$ends,
+    Optional<Hip_TensorOrMemRef>:$axes,
+    Optional<Hip_TensorOrMemRef>:$steps,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $starts `,` $ends `:`
+        type($data) `,` type($starts) `,` type($ends) `)`
+    (`axes` `(` $axes^ `:` type($axes) `)`)?
+    (`steps` `(` $steps^ `:` type($steps) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GatherNDOp : Hip_DpsOp<"gather_nd"> {
   let summary = "GatherND: gather slices using N-D index tuples";
   let description = [{
