@@ -1,0 +1,49 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: build-and-test-bazel
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  bazel-test:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Install bazelisk
+        shell: powershell
+        run: |
+          $dir = "$env:RUNNER_TEMP\bazelisk"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-windows-amd64.exe" `
+            -OutFile "$dir\bazel.exe"
+          "$dir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: bazel test (onnx backend)
+        shell: powershell
+        run: bazel test --config=remote --test_output=errors //...
+        env:
+          MORPHIZEN_ORT_BRIDGE_BACKEND: onnx
