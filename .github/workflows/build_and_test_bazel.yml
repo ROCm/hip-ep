@@ -42,8 +42,8 @@ jobs:
             -OutFile "$dir\bazel.exe"
           "$dir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: bazel test (onnx backend)
+      - name: bazel test (mlir-imp backend)
         shell: powershell
         run: bazel test --config=remote --test_output=errors //...
         env:
-          MORPHIZEN_ORT_BRIDGE_BACKEND: onnx
+          MORPHIZEN_ORT_BRIDGE_BACKEND: mlir-backend

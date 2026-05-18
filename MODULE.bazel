@@ -61,3 +61,6 @@ bazel_dep(name = "googletest", version = "1.15.2")
 # cmake/deps.txt pins 1.84.0; 1.83.0.bcr.4 is the closest patched BCR version.
 # (plain 1.83.0 has a broken BUILD: glob("src/**/*.ipp") fails with no matches)
 bazel_dep(name = "boost.program_options", version = "1.83.0.bcr.4")
+
+# LLVM/MLIR v22.1.3 — required by mlir-imp backend
+bazel_dep(name = "llvm-project-overlay", version = "22.1.3")

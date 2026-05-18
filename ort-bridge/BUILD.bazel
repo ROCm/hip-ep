@@ -32,7 +32,8 @@ cc_library(
     defines = [
         "MORPHIZEN_USER=1",
         "MORPHIZEN_USER__ORT_VITIS_AI_EP",
-        "MORPHIZEN_ENABLE_ONNX_BACKEND=1",  # enable onnx IR backend (default)
+        "MORPHIZEN_ENABLE_ONNX_BACKEND=0",
+        "MORPHIZEN_ENABLE_MLIR_BACKEND=1",  # enable mlir-imp backend
     ],
     includes = [
         "src",
@@ -45,6 +46,7 @@ cc_library(
 
         "//morphizen-graph:morphizen-graph",
         "//morphizen-core:morphizen-core-static",  # Complete morphizen-core library
+        "//mlir-imp:mlir-imp",  # mlir-imp backend (alwayslink — registers StaticPluginRegister)
         "@glog",
         "@gsl",
         "@onnx//:onnx",  # ONNX C++ library
