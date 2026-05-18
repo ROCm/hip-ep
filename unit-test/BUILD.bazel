@@ -187,6 +187,11 @@ cc_test(
         # Mirrors build_and_test.ps1 lines 30-31, set before ctest in CI.
         "MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE": "1",
         "ENABLE_CACHE_FILE_IO_IN_MEM": "1",
+        # config_reader.cpp calls Plugin::get(MORPHIZEN_CONFIG_PROVIDER_BACKEND)
+        # unconditionally. The default is "onnxruntime_morphizen_ep" which does not
+        # exist as a DLL in the GitHub Bazel build. Point to the MLIR backend plugin
+        # which IS registered statically via mlir-imp alwayslink.
+        "MORPHIZEN_CONFIG_PROVIDER_BACKEND": "mlir-backend",
     },
     # The test sources include headers from the package root (e.g. "test_environment.hpp")
     # and from the morphizen/ subdirectory (e.g. "pt_resnet50_add.h.inc" in test_pattern.cpp).
@@ -197,6 +202,10 @@ cc_test(
         # PluginTest.DynamicHelloPlugin calls Plugin::get("hello_plugin_dll") which
         # loads hello_plugin_dll.dll by name at runtime.
         ":hello_plugin_dll",
+        # config_reader.cpp unconditionally calls Plugin::get("onnxruntime_morphizen_ep")
+        # before checking the embedded config.  Stage the DLL so LoadLibrary finds it.
+        # Mirrors GHE's "//vaip-core:onnxruntime_vitisai_ep_runtime" data dep.
+        "//morphizen-core:onnxruntime_morphizen_ep",
         # TarFileTest.ReadFrom opens CMAKE_CURRENT_BINARY_PATH/"sample.src.tar".
         # CMAKE_CURRENT_BINARY_PATH = "unit-test/data" so the runfiles path is
         # _main/unit-test/data/sample.src.tar.
@@ -219,6 +228,10 @@ cc_test(
         ":test_case_config_cc_proto",
         "//morphizen-core:morphizen-core-static",
         "//mlir-imp:mlir-imp",  # mlir-imp backend (alwayslink — registers StaticPluginRegister)
+        # Mirrors CMake: $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>
+        # The pass registers itself via StaticPluginRegister in an anonymous namespace;
+        # alwayslink = True in its BUILD prevents MSVC from dead-stripping it.
+        "//morphizen-pass-init:morphizen-pass-init",
         "@onnxruntime//:onnxruntime",
         "@googletest//:gtest_main",
         "@glog",

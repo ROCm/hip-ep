@@ -4,7 +4,7 @@
 ##
 
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 load("//scripts/bazel:collect_pb.bzl", "collect_pb")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_python//python:defs.bzl", "py_binary")
@@ -320,6 +320,42 @@ cc_library(
         "@onnxruntime//:onnxruntime_headers",
         "@protobuf",
         "@zlib",
+    ],
+)
+
+# Shared library (DLL) that ORT loads as the MorphiZen Execution Provider.
+# Mirrors GHE's cc_binary(name="onnxruntime_vitisai_ep", linkshared=True).
+# The unit-test and ort-bridge/test add this as a data dep so that
+# Plugin::get("onnxruntime_morphizen_ep") can dynamically load it at runtime.
+cc_binary(
+    name = "onnxruntime_morphizen_ep",
+    srcs = ["src/main.cpp"],
+    linkshared = True,
+    copts = select({
+        "@bazel_tools//src/conditions:windows": [
+            "/std:c++17",
+            "/Zc:__cplusplus",
+            "/DONNX_NAMESPACE=onnx",
+        ],
+        "//conditions:default": [
+            "-std=c++17",
+            "-fPIC",
+            "-DONNX_NAMESPACE=onnx",
+        ],
+    }),
+    # win_def_file is only meaningful on Windows; Bazel ignores it on Linux.
+    win_def_file = ":onnxruntime_morphizen_ep.def",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":morphizen-core-static",
+        # Mirrors CMake: morphizen-pass-init and morphizen-demo passes are
+        # all linked with WHOLE_ARCHIVE into the EP DLL so their
+        # StaticPluginRegister static initializers run at DLL load time.
+        "//morphizen-pass-init:morphizen-pass-init",
+        "//morphizen-demo/level-1-pass-relu-dq:morphizen-level1-pass-relu-dq",
+        "//morphizen-demo/custom-op-relu-dq:morphizen-custom-op-relu-dq",
+        "@glog",
+        "@protobuf",
     ],
 )
 

@@ -26,10 +26,10 @@ cc_test(
         "//conditions:default": ["-std=c++17"],
     }),
     defines = [
-        # test-hello-ep.cpp references MORPHIZEN_MORPHIZEN_EP_STR.
-        # The GitHub build does not produce a shared EP DLL; HelloEpTest
-        # uses GTEST_SKIP() so the path is never accessed at runtime.
-        # Provide a placeholder so the file compiles.
+        # test-hello-ep.cpp checks std::filesystem::exists(MORPHIZEN_MORPHIZEN_EP)
+        # then registers the EP via ORT's RegisterExecutionProviderLibrary.
+        # The DLL is staged at _main/morphizen-core/onnxruntime_morphizen_ep.dll
+        # in the runfiles tree; CWD during test execution is _main/.
         'MORPHIZEN_MORPHIZEN_EP_STR=\\"morphizen-core/onnxruntime_morphizen_ep.dll\\"',
         # Enable mlir backend for the coverage wrapper default.
         "MORPHIZEN_ENABLE_ONNX_BACKEND=0",
@@ -59,6 +59,9 @@ cc_test(
     data = [
         # RESNET_50_ONNX_STR is resolved via runfiles to this file's absolute path.
         "//unit-test:data/pt_resnet50.onnx",
+        # Stage the EP DLL so Plugin::get("onnxruntime_morphizen_ep") can load it,
+        # and so std::filesystem::exists(MORPHIZEN_MORPHIZEN_EP) succeeds in SetUp.
+        "//morphizen-core:onnxruntime_morphizen_ep",
     ],
     deps = [
         "//ort-bridge",
