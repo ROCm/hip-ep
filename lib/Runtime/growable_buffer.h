@@ -25,8 +25,15 @@
 // to the caller, because that is the only failure mode the caller can
 // usefully react to.
 
-#include "hip_cleanup.h" // HIP_CLEANUP (best-effort logging wrapper)
-#include <hip/hip_runtime.h>
+// runtime_types.h supplies hipError_t, hipMalloc, hipFree, hipHostMalloc,
+// hipHostFree, hipGetErrorString, hipSuccess, and hipHostMallocDefault.
+// It resolves via the active build's -I path to either real/runtime_types.h
+// (which pulls in <hip/hip_runtime.h>) or mock/runtime_types.h (which
+// provides shim typedefs and extern "C" mock function declarations). Do NOT
+// include <hip/hip_runtime.h> directly here -- that header is absent from
+// the BUILD_MOCK_RUNTIME=ON bitcode compile and would break CI's mock job.
+#include "hip_cleanup.h"
+#include "runtime_types.h"
 
 #include <cstddef>
 #include <cstdio>
