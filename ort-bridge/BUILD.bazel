@@ -43,8 +43,9 @@ cc_library(
         # CMake never sets MORPHIZEN_USER for ort-bridge either, so this matches CMake.
         "MORPHIZEN_USER=1",
         "MORPHIZEN_USER__ORT_VITIS_AI_EP",
-    ],
-    defines = [
+        # Backend selection: PRIVATE to ort-bridge only (matches GHE local_defines pattern).
+        # These control which backend morphizen-ep.cpp selects via MORPHIZEN_DEFAULT_BACKEND.
+        # Must NOT propagate to consumers (defines would leak into mlir-imp, morphizen-core, etc.).
         "MORPHIZEN_ENABLE_ONNX_BACKEND=0",
         "MORPHIZEN_ENABLE_MLIR_BACKEND=1",  # enable mlir-imp backend
     ],
