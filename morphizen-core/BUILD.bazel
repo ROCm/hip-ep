@@ -352,6 +352,10 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":morphizen-core-static",
+        # ort-bridge provides CreateEpFactories and ReleaseEpFactory, which are
+        # declared in the _with_ort_bridge.def and required by ORT's
+        # RegisterExecutionProviderLibrary. Mirrors GHE vaip-core/BUILD.bazel.
+        "//ort-bridge",
         # Mirrors CMake: morphizen-pass-init and morphizen-demo passes are
         # all linked with WHOLE_ARCHIVE into the EP DLL so their
         # StaticPluginRegister static initializers run at DLL load time.
