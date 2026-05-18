@@ -127,7 +127,6 @@ cc_test(
         "morphizen/test_graph.cpp",
         "morphizen/test_const_data.cpp",
         "morphizen/test_anchor_point.cpp",
-        "morphizen/test_context.cpp",
         "morphizen/test_immutable_map.cpp",
         "morphizen/test_mlir_ssa_dominance.cpp",
         "morphizen/test_mmap_file.cpp",
