@@ -128,5 +128,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(cpptrace)
 set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
-# Add morphizen subdirectory (after all options are set)
+# Add morphizen subdirectory.
+#
+# GCC -Wconversion on protobuf >=22 *.pb.h accessors is suppressed at the
+# root by marking the generated-header BINARY_DIR as SYSTEM in
+# morphizen-{core-static,pattern}; the SYSTEM propagation handles all
+# transitive consumers, so no parent-side -Werror override is needed.
+# onnx-ir-imp still needs a per-target `-Wno-error=conversion` because
+# its .pb.h surface comes from external `onnx_proto` whose
+# INTERFACE_INCLUDE_DIRECTORIES we don't control (upstream onnx fix is a
+# follow-up).
 add_subdirectory(3rd-party/morphizen)

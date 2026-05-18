@@ -295,8 +295,8 @@ struct MiopenSoftmaxOpLowering
 
 } // namespace
 
-void mlir::hip::populateActivationLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns) {
   patterns.add<SigmoidOpLowering, SoftplusOpLowering, GeluOpLowering,
                SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
 }

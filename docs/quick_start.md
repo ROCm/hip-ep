@@ -489,6 +489,11 @@ tokenizer related files from original model directory to /path/to/output
 | `-r <n>` | Number of benchmark repetitions |
 | `-w <n>` | Number of warmup runs |
 
+## Linux
+
+Linux uses Docker for build and a separate path for runtime. See
+[quick_start_linux.md](quick_start_linux.md).
+
 ## ABI Note
 
 The pre-built binaries are compiled with the **Release `/MT`** runtime

@@ -546,8 +546,8 @@ struct SplitToStdTensor : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateReshapeConversionPatterns(RewritePatternSet &patterns,
-                                                  MLIRContext *ctx) {
+void populateReshapeConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx) {
   patterns.add<ReshapeToStdTensor, UnsqueezeToStdTensor, SqueezeToStdTensor,
                SplitToStdTensor>(ctx);
 }

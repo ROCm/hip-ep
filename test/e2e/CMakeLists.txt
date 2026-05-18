@@ -55,3 +55,25 @@ endforeach()
 
 list(LENGTH MLIR_E2E_TESTS num_tests)
 message(STATUS "Configured ${num_tests} E2E test(s)")
+
+# Linux-only build-stage regression check for two ELF-init bugs that
+# actually shipped during the Linux port:
+#   1. DT_INIT_ARRAY missing  -> static ctors silently never run -> SIGFPE
+#      on first emplace into a zero-init `static std::unordered_map`.
+#   2. DT_FINI_ARRAY missing  -> dlclose can't drain __cxa_finalize ->
+#      SIGSEGV at process exit walking stale dtor pointers.
+# Plus a no-`.ctors` check: a populated .ctors section means LLVM
+# regressed back to UseInitArray=false (bug 1 above).
+if(NOT WIN32)
+    set(_init_fini_check_dll
+        "${CMAKE_CURRENT_BINARY_DIR}/test_add_model/test_add_model.dll")
+    add_test(NAME E2E_DLL_HasInitFiniArrays
+        COMMAND ${CMAKE_COMMAND} -E env bash -c
+            "readelf -d '${_init_fini_check_dll}' | grep -q '(INIT_ARRAY)' && \
+             readelf -d '${_init_fini_check_dll}' | grep -q '(FINI_ARRAY)' && \
+             ! readelf -S '${_init_fini_check_dll}' | grep -q '\\.ctors '"
+    )
+    set_tests_properties(E2E_DLL_HasInitFiniArrays PROPERTIES
+        DEPENDS E2E_Compile_test_add_model
+    )
+endif()
