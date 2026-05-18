@@ -29,9 +29,15 @@ cc_library(
             "-fPIC",
         ],
     }),
-    defines = [
+    local_defines = [
+        # MORPHIZEN_USER controls which headers morphizen.hpp exposes.
+        # These are PRIVATE to ort-bridge's own sources; consumers (e.g., ort-bridge/test)
+        # should NOT inherit them — they need MORPHIZEN_USER__PASS (the default).
+        # CMake never sets MORPHIZEN_USER for ort-bridge either, so this matches CMake.
         "MORPHIZEN_USER=1",
         "MORPHIZEN_USER__ORT_VITIS_AI_EP",
+    ],
+    defines = [
         "MORPHIZEN_ENABLE_ONNX_BACKEND=0",
         "MORPHIZEN_ENABLE_MLIR_BACKEND=1",  # enable mlir-imp backend
     ],
