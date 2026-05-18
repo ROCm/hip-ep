@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/post-file-edit.py",
+            "command": "python \"$(git rev-parse --show-toplevel)/.claude/hooks/post-file-edit.py\"",
             "timeout": 5
           }
         ]
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/post-bash.py",
+            "command": "python \"$(git rev-parse --show-toplevel)/.claude/hooks/post-bash.py\"",
             "timeout": 5
           }
         ]
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/pre-bash.py",
+            "command": "python \"$(git rev-parse --show-toplevel)/.claude/hooks/pre-bash.py\"",
             "timeout": 60
           }
         ]
