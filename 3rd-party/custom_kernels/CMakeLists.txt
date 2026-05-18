@@ -26,7 +26,9 @@ if(NOT HIP_ARCHITECTURES)
 endif()
 message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 
-# Build the static library from HIP sources
+# HIP_CUSTOM_KERNELS_EXPORTS makes HIP_KERNEL_API in hip_custom_kernels.h
+# expand to __declspec(dllexport) (Windows) / default visibility (Linux)
+# for the kernel TUs only, so each .obj emits its own /EXPORT directive.
 hip_add_library(hip_custom_kernels STATIC
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
@@ -47,6 +49,8 @@ hip_add_library(hip_custom_kernels STATIC
     hip/causal_conv_step_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+    COMPILE_DEFINITIONS
+        HIP_CUSTOM_KERNELS_EXPORTS
 )
 
 # Export the library path for CompilerDriver to discover at model-compile time

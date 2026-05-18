@@ -174,9 +174,11 @@ endfunction()
 
 #------------------------------------------------------------------------------
 # Internal: Compile HIP sources to object files (Windows only)
-# For multi-config generators, creates per-config object files
+# For multi-config generators, creates per-config object files.
+# COMPILE_DEFS items become -D<def> on the hipcc command line; needed because
+# add_custom_command bypasses target_compile_definitions on Windows.
 #------------------------------------------------------------------------------
-function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS OUTPUT_OBJS)
+function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS COMPILE_DEFS OUTPUT_OBJS)
     _hip_get_arch_flags(arch_flags)
 
     # Build include flags
@@ -186,6 +188,12 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     list(APPEND include_flags "-I" "${HIP_INCLUDE_DIR}")
     foreach(dir ${INCLUDE_DIRS})
         list(APPEND include_flags "-I" "${dir}")
+    endforeach()
+
+    # Build preprocessor definition flags (`FOO` or `FOO=1` -> `-DFOO[=1]`).
+    set(define_flags "")
+    foreach(def ${COMPILE_DEFS})
+        list(APPEND define_flags "-D${def}")
     endforeach()
 
     # MSVC ABI compatibility flags
@@ -226,6 +234,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     -o "${output_obj}"
                     ${arch_flags}
                     ${include_flags}
+                    ${define_flags}
                     ${abi_flags}
                     ${warning_flags}
                     $<$<CONFIG:Debug>:-D_DEBUG>
@@ -265,6 +274,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     -o "${output_obj}"
                     ${arch_flags}
                     ${include_flags}
+                    ${define_flags}
                     ${abi_flags}
                     ${warning_flags}
                     ${build_flags}
@@ -295,7 +305,7 @@ endfunction()
 #------------------------------------------------------------------------------
 function(hip_add_executable TARGET_NAME)
     cmake_parse_arguments(ARG "" ""
-        "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;LINK_LIBRARIES;DEPENDS" ${ARGN})
+        "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;COMPILE_DEFINITIONS;LINK_LIBRARIES;DEPENDS" ${ARGN})
 
     # Remaining arguments are source files
     set(sources ${ARG_UNPARSED_ARGUMENTS})
@@ -326,7 +336,8 @@ function(hip_add_executable TARGET_NAME)
 
         # Compile HIP sources with hipcc
         _hip_compile_sources(${TARGET_NAME} "${sources}"
-            "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}" hip_objs)
+            "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}"
+            "${ARG_COMPILE_DEFINITIONS}" hip_objs)
 
         # Create custom target for HIP compilation
         add_custom_target(${TARGET_NAME}_hip_compile DEPENDS ${hip_objs})
@@ -383,7 +394,7 @@ endfunction()
 #------------------------------------------------------------------------------
 function(hip_add_library TARGET_NAME)
     cmake_parse_arguments(ARG "STATIC;SHARED" ""
-        "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;LINK_LIBRARIES;DEPENDS" ${ARGN})
+        "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;COMPILE_DEFINITIONS;LINK_LIBRARIES;DEPENDS" ${ARGN})
 
     # Determine library type
     if(ARG_SHARED)
@@ -421,7 +432,8 @@ function(hip_add_library TARGET_NAME)
 
         # Compile HIP sources with hipcc
         _hip_compile_sources(${TARGET_NAME} "${sources}"
-            "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}" hip_objs)
+            "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}"
+            "${ARG_COMPILE_DEFINITIONS}" hip_objs)
 
         # Create custom target for HIP compilation
         add_custom_target(${TARGET_NAME}_hip_compile DEPENDS ${hip_objs})
@@ -459,6 +471,13 @@ function(hip_add_library TARGET_NAME)
     # Apply user-specified options
     if(ARG_INCLUDE_DIRECTORIES)
         target_include_directories(${TARGET_NAME} PUBLIC ${ARG_INCLUDE_DIRECTORIES})
+    endif()
+
+    if(ARG_COMPILE_DEFINITIONS)
+        # PRIVATE: only the kernel TUs of this static lib should see these;
+        # they reach hipcc via `_hip_compile_sources` on Windows and via
+        # CMake's HIP language driver (this target property) on Linux.
+        target_compile_definitions(${TARGET_NAME} PRIVATE ${ARG_COMPILE_DEFINITIONS})
     endif()
 
     if(ARG_LINK_LIBRARIES)
