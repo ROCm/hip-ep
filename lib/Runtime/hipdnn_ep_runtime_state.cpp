@@ -1081,21 +1081,9 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
 } // extern "C"
 
 //===----------------------------------------------------------------------===//
-// Shared Workspace op-module accessor
+// Shared Workspace op-module accessor (cross-TU; pattern B in
+// module_registry.h). Placed outside the surrounding extern "C" block
+// because the accessor returns a pointer to a C++ struct.
 //===----------------------------------------------------------------------===//
-//
-// `workspace_module` is the cross-TU accessor declared in workspace_state.h.
-// C++ linkage (not in the surrounding extern "C" block) because the
-// accessor returns a pointer to the C++ WorkspaceState type and is meant
-// to be called only from other runtime .cpp TUs, never from generated
-// bitcode. The function-local statics initialise the spec + slot id once
-// per process; every subsequent call is the standard op_module_get fast
-// path (bounds check + load + null branch).
 
-WorkspaceState *workspace_module(RuntimeState *state) {
-  static const hipdnn_ep::OpModuleSpec spec =
-      hipdnn_ep::make_op_module_spec<WorkspaceState>("workspace");
-  static const int slot = hipdnn_ep::register_op_module(&spec);
-  return static_cast<WorkspaceState *>(hipdnn_ep::op_module_get(
-      hipdnn_ep::get_module_registry(state), state, slot));
-}
+HIPDNN_OP_MODULE_DEFINE(workspace_module, "workspace", WorkspaceState);

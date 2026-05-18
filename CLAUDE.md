@@ -163,6 +163,8 @@ int wrap_my_op(RuntimeState *state, ...) {
 }
 ```
 
+**Cross-TU variant.** When the state struct itself needs to be visible to multiple `.cpp` TUs (e.g. `WorkspaceState`, reached from six wrap_* TUs), put the struct in a small header and split the accessor across `HIPDNN_OP_MODULE_DECLARE(my_op_module, MyOpState);` in the header and `HIPDNN_OP_MODULE_DEFINE(my_op_module, "my_op", MyOpState);` in exactly one `.cpp`. Same steady-state cost; the `static` keyword in `HIPDNN_OP_MODULE` is what makes it file-local-only — invoking that macro from a header in N TUs would trigger the registry's duplicate-name `abort()`.
+
 **Invariants enforced by the registry:**
 - **Steady-state hot path**: after the first call in a session, `my_op_module(state)` is bounds-check + load + null-branch. No mutex, no allocation.
 - **Lifecycle**: `MyOpState` is constructed lazily on first access; destroyed by the registry in reverse-registration order during `hipdnn_ep_state_cleanup` (after the shared stream sync).

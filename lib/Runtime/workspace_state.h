@@ -23,6 +23,7 @@
 #define HIPDNN_EP_WORKSPACE_STATE_H
 
 #include "growable_buffer.h"
+#include "module_registry.h"
 
 struct RuntimeState;
 
@@ -38,7 +39,8 @@ struct WorkspaceState {
 // calls within a session; null only on op-module allocation failure.
 // First call in the process pays a process-global spec_table mutex; every
 // subsequent call (within any session) is a bounds check + load + null
-// branch through the ModuleRegistry.
-WorkspaceState *workspace_module(RuntimeState *state);
+// branch through the ModuleRegistry. Definition lives in
+// hipdnn_ep_runtime_state.cpp via HIPDNN_OP_MODULE_DEFINE.
+HIPDNN_OP_MODULE_DECLARE(workspace_module, WorkspaceState);
 
 #endif // HIPDNN_EP_WORKSPACE_STATE_H

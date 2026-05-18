@@ -93,13 +93,59 @@ inline OpModuleSpec make_op_module_spec(const char *name) {
 
 } // namespace hipdnn_ep
 
-// Strongly-typed accessor: two function-local statics (spec + slot id),
-// initialized once per TU; every subsequent call is one op_module_get.
-//   ACCESSOR : generated function name, e.g. `causal_conv_module`.
-//   NAME     : unique string id (logs / duplicate-detect).
-//   STATE_T  : state type; must be constructible from RuntimeState*.
+// Strongly-typed accessor generators. Three variants, used in two
+// patterns depending on whether the module's state type is touched from
+// one TU or many.
+//
+// Pattern A -- single-TU module (state struct + accessor both file-local):
+//   In the op's .cpp, inside an anonymous namespace:
+//
+//     struct MyState { explicit MyState(RuntimeState *) {}; ... };
+//     HIPDNN_OP_MODULE(my_module, "my_op", MyState);
+//
+//   This is the common case (QmoeState, GqaSeqlensCache, ZpUnpackState,
+//   ...). Generates a `static` (file-local) accessor.
+//
+// Pattern B -- cross-TU module (state struct in a header; callers in
+// multiple .cpp TUs):
+//   In a header:
+//
+//     struct MyState { ... };
+//     HIPDNN_OP_MODULE_DECLARE(my_module, MyState);
+//
+//   In exactly one .cpp:
+//
+//     HIPDNN_OP_MODULE_DEFINE(my_module, "my_op", MyState);
+//
+//   This is used by WorkspaceState, reached from six wrap_* TUs. The
+//   declaration gives an external-linkage accessor; the definition is
+//   what HIPDNN_OP_MODULE generates minus the `static` keyword.
+//
+// In both patterns the slot id is computed lazily on the first call
+// (function-local statics): one process-global spec_table mutex on
+// first call ever, then bounds check + load + null branch.
+//
+// Macro arguments:
+//   ACCESSOR : function name, e.g. `causal_conv_module`.
+//   STATE_T  : state struct; must be constructible from RuntimeState *.
+//   NAME     : unique string id used by the registry's duplicate-detect.
+
 #define HIPDNN_OP_MODULE(ACCESSOR, NAME, STATE_T)                              \
   static STATE_T *ACCESSOR(::RuntimeState *state) {                            \
+    static const ::hipdnn_ep::OpModuleSpec hipdnn_ep_module_spec_ =            \
+        ::hipdnn_ep::make_op_module_spec<STATE_T>(NAME);                       \
+    static const int hipdnn_ep_module_slot_ =                                  \
+        ::hipdnn_ep::register_op_module(&hipdnn_ep_module_spec_);              \
+    return static_cast<STATE_T *>(                                             \
+        ::hipdnn_ep::op_module_get(::hipdnn_ep::get_module_registry(state),    \
+                                   state, hipdnn_ep_module_slot_));            \
+  }
+
+#define HIPDNN_OP_MODULE_DECLARE(ACCESSOR, STATE_T)                            \
+  STATE_T *ACCESSOR(::RuntimeState *state)
+
+#define HIPDNN_OP_MODULE_DEFINE(ACCESSOR, NAME, STATE_T)                       \
+  STATE_T *ACCESSOR(::RuntimeState *state) {                                   \
     static const ::hipdnn_ep::OpModuleSpec hipdnn_ep_module_spec_ =            \
         ::hipdnn_ep::make_op_module_spec<STATE_T>(NAME);                       \
     static const int hipdnn_ep_module_slot_ =                                  \
