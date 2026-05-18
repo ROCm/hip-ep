@@ -45,54 +45,6 @@ HIPDNN_OP_MODULE(qmoe_module, "qmoe", QmoeState);
 
 } // namespace
 
-// C-ABI helpers declared in hipdnn_ep_runtime.h and called from generated
-// bitcode. Signatures cannot change. Delegate to the QmoeState slot.
-
-extern "C" void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state) {
-  if (!state)
-    return nullptr;
-  QmoeState *m = qmoe_module(state);
-  return m ? m->scratch.data() : nullptr;
-}
-
-extern "C" int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
-                                                   size_t needed_size) {
-  if (!state)
-    return -1;
-  if (needed_size == 0)
-    return 0;
-  QmoeState *m = qmoe_module(state);
-  if (!m) {
-    fprintf(stderr, "hipdnn_ep_state_ensure_qmoe_scratch: failed to obtain "
-                    "QmoeState\n");
-    return -1;
-  }
-  return m->scratch.grow(needed_size);
-}
-
-extern "C" void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state) {
-  if (!state)
-    return nullptr;
-  QmoeState *m = qmoe_module(state);
-  return m ? m->host_scratch.data() : nullptr;
-}
-
-extern "C" int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
-                                                        size_t needed_size) {
-  if (!state)
-    return -1;
-  if (needed_size == 0)
-    return 0;
-  QmoeState *m = qmoe_module(state);
-  if (!m) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_qmoe_host_scratch: failed to obtain "
-            "QmoeState\n");
-    return -1;
-  }
-  return m->host_scratch.grow(needed_size);
-}
-
 struct TokenEntry {
   int32_t token_id;
   int32_t slot;
@@ -224,13 +176,16 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
   size_t total_scratch = off_sorted_weights + sz_sorted_weights;
 
-  if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
-    fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
-            total_scratch);
+  QmoeState *qm = qmoe_module(state);
+  if (!qm) {
+    fprintf(stderr, "wrap_qmoe: failed to obtain QmoeState\n");
     return -1;
   }
-  char *scratch_base =
-      static_cast<char *>(hipdnn_ep_state_get_qmoe_scratch(state));
+  if (qm->scratch.grow(total_scratch) != 0) {
+    fprintf(stderr, "wrap_qmoe: scratch.grow(%zu) failed\n", total_scratch);
+    return -1;
+  }
+  char *scratch_base = static_cast<char *>(qm->scratch.data());
   void *d_expert_indices = scratch_base + off_expert_indices;
   void *d_expert_weights = scratch_base + off_expert_weights;
   void *d_gather_buf = scratch_base + off_gather_buf;
@@ -290,13 +245,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     size_t hsz_counts = align_up_64h(num_experts * sizeof(int32_t));
     size_t total_host = hsz_counts;
 
-    if (hipdnn_ep_state_ensure_qmoe_host_scratch(state, total_host) != 0) {
-      fprintf(stderr, "wrap_qmoe: ensure_qmoe_host_scratch(%zu) failed\n",
-              total_host);
+    if (qm->host_scratch.grow(total_host) != 0) {
+      fprintf(stderr, "wrap_qmoe: host_scratch.grow(%zu) failed\n", total_host);
       return -1;
     }
-    char *host_base =
-        static_cast<char *>(hipdnn_ep_state_get_qmoe_host_scratch(state));
+    char *host_base = static_cast<char *>(qm->host_scratch.data());
     int32_t *h_counts = reinterpret_cast<int32_t *>(host_base);
 
     // Bucket tokens on the device: count per expert (atomicAdd), exclusive

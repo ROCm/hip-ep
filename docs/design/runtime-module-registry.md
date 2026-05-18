@@ -200,37 +200,7 @@ Used by composition. Not registered as modules themselves.
 | `"zp_unpack"` | `hipdnn_ep_real::ZpUnpackState` | `real/matmul_nbits.cpp` | Two `unordered_map<const void *, std::pair<void *, size_t>>` for the asym AWQ `(u8, fp16)` unpacked zero_points buffers, plus a `std::mutex`. Destructor `hipFree`s every cached buffer. Reached by both `wrap_matmul_nbits` and `wrap_qmoe` via `lookup_or_unpack_zp_u8` / `lookup_or_convert_zp_fp16` — single slot, no duplication. |
 | `"gqa_seqlens_cache"` | `GqaSeqlensCache` | `real/gqa.cpp` | POD (`bool valid; int32_t val; const void *ptr;`). `begin_compute` resets `valid` and `ptr`. First GQA layer in a `Compute()` pays the D2H to read `seqlens_k[0]`; later layers reuse it. |
 | `"gqa_gemm_cache"` | `GqaGemmState` | `real/gqa.cpp` | `unordered_map<GqaGemmKey, GqaGemmCacheEntry, ...>`. Destructor frees the hipBLASLt matrix layouts (`layA..layD`) and matmul descriptor. |
-| `"qmoe"` | `QmoeState` | `real/qmoe.cpp` | `GrowableDeviceBuffer scratch`, `GrowablePinnedBuffer host_scratch`. Constructor calls `set_stream(rs->stream)` on both. |
-
-## C-ABI shims (`hipdnn_ep_state_*_qmoe_*`)
-
-`hipdnn_ep_runtime.h` declares four `extern "C"` functions that predate
-the registry; their signatures cannot change because pre-built
-model.dlls call them from `inference_compute` bitcode:
-
-```c
-void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state);
-int   hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state, size_t needed_size);
-void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
-int   hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state, size_t needed_size);
-```
-
-The bodies live in `real/qmoe.cpp` and delegate to the `QmoeState`
-slot:
-
-```cpp
-extern "C" int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
-                                                   size_t needed_size) {
-  if (!state) return -1;
-  if (needed_size == 0) return 0;
-  QmoeState *m = qmoe_module(state);
-  if (!m) return -1;
-  return m->scratch.grow(needed_size);
-}
-```
-
-`wrap_qmoe` itself also goes through these shims — same call path
-across host code and generated bitcode.
+| `"qmoe"` | `QmoeState` | `real/qmoe.cpp` | `GrowableDeviceBuffer scratch`, `GrowablePinnedBuffer host_scratch`. Both grow lazily on first `wrap_qmoe` call and never shrink. |
 
 ## Build glue
 
