@@ -186,8 +186,6 @@ void populateSignConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateModConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
-void populateShapeConversionPatterns(RewritePatternSet &patterns,
-                                     MLIRContext *ctx);
 void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
