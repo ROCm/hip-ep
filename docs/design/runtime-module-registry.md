@@ -30,8 +30,6 @@ A C++ struct authored by the op owner:
   silently fails):
   - `void begin_compute(RuntimeState *)` — fires at the top of every
     `Compute()`, for cache invalidation.
-  - `void end_compute(RuntimeState *)` — detected and dispatched, but
-    nothing calls it today.
 
 ## `HIPDNN_OP_MODULE` macro
 
@@ -72,7 +70,6 @@ the macro satisfies this with a function-local static.
 struct SlotEntry {
   void *state_ptr = nullptr;
   OpBeginComputeFn begin_compute_fn = nullptr;
-  OpEndComputeFn end_compute_fn = nullptr;
   OpDestroyFn destroy_fn = nullptr;
   const char *name = nullptr;
 };
@@ -111,7 +108,6 @@ void *op_module_get(ModuleRegistry *reg, RuntimeState *state, int slot_id) {
   SlotEntry &slot = reg->slots[slot_id];
   slot.state_ptr        = p;
   slot.begin_compute_fn = spec->begin_compute_fn;
-  slot.end_compute_fn   = spec->end_compute_fn;
   slot.destroy_fn       = spec->destroy_fn;
   slot.name             = spec->name;
   return p;
@@ -262,9 +258,8 @@ In the op's `.cpp` (no edits to any framework file):
 
 1. Define `MyOpState` (anonymous namespace). Constructor takes
    `RuntimeState *`. Add a destructor if needed.
-2. Optionally add `begin_compute(RuntimeState *)` or
-   `end_compute(RuntimeState *)`. Exact signature required for SFINAE
-   pickup.
+2. Optionally add `void begin_compute(RuntimeState *)`. Exact signature
+   required for SFINAE pickup.
 3. `HIPDNN_OP_MODULE(my_op_module, "my_op", MyOpState);` at namespace
    scope. The name must be unique across the DLL.
 4. Inside `wrap_*`: `auto *s = my_op_module(state);` — null only on
