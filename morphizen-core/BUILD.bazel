@@ -291,6 +291,11 @@ cc_library(
             "-fPIC",
         ],
     }),
+    defines = [
+        # Mirrors CMake: target_compile_definitions(morphizen-core-static PUBLIC MORPHIZEN_HAS_PATTERN_MATCHING=1)
+        # Propagates transitively so all consumers (unit-test, ort-bridge/test, etc.) see Pattern APIs.
+        "MORPHIZEN_HAS_PATTERN_MATCHING=1",
+    ],
     includes = [
         ".",  # For generated files in current directory
         "include",  # Public headers
