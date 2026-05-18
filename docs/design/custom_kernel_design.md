@@ -230,6 +230,8 @@ The `custom_kernels/CMakeLists.txt` install rules ensure that after `cmake --ins
 
 CompilerDriver discovers the `.lib` at model-compile time via the configured install prefix path, and passes it to DLLLinker alongside MIOpen/hipBLASLt import libs.
 
+Each launcher in `hip_custom_kernels.h` is declared with `HIP_KERNEL_API`, which expands to `__declspec(dllexport)` (Windows) / default ELF visibility (Linux) only when `HIP_CUSTOM_KERNELS_EXPORTS` is defined. The static lib's `CMakeLists.txt` sets that define PRIVATE so it applies only while compiling the kernel TUs; on Windows each kernel `.obj` therefore carries its own `/EXPORT:hip_xxx` directive in `.drectve`. The header is the single source of truth — adding `HIP_KERNEL_API` to a new launcher is the only per-kernel step needed; no `.def` file to maintain.
+
 ### 10. `custom_kernels/hip/matmul_nbits_kernel.hip`
 
 Implements MatMulNBits — fused dequant + matmul for INT4 packed weights (FP16 activations). This is the dominant operator in INT4 LLM decode (~78% of GPU time for Llama 8B).
