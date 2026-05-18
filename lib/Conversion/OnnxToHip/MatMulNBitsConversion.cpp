@@ -121,8 +121,8 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateMatMulNBitsConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx) {
   patterns.add<MatMulNBitsToHip>(ctx);
 }
 

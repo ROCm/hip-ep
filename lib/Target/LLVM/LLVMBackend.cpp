@@ -170,6 +170,17 @@ llvm::TargetMachine *LLVMBackend::createTargetMachine() {
   std::string cpu = "generic";
   std::string features = "";
   llvm::TargetOptions options;
+  // Route C++ static ctors into DT_INIT_ARRAY (LLVM's legacy default is the
+  // `.ctors` section which glibc's loader silently drops on dlopen,
+  // leaving every static unordered_map / string in the generated DLL at
+  // zero-init BSS → SIGFPE on first emplace's `hash % bucket_count(0)`).
+  //
+  // Not an LLVM bug — `UseInitArray=false` is a backwards-compat default
+  // for legacy ELF targets that lacked .init_array. clang's own driver
+  // sets this to true for modern Linux (see clang/lib/Driver/ToolChains/
+  // Gnu.cpp), but we bypass the driver and drive the TargetMachine API
+  // directly, so we have to flip it ourselves.
+  options.UseInitArray = true;
   llvm::Reloc::Model RM =
       llvm::Reloc::PIC_; // Position-independent code for DLL
 

@@ -148,8 +148,8 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateRotaryEmbeddingConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx) {
   patterns.add<RotaryEmbeddingToHip>(ctx);
 }
 

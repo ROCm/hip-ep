@@ -115,8 +115,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
 
 } // namespace
 
-void mlir::hip::populateMatMulNBitsLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns) {
   patterns.add<MatMulNBitsOpLowering>(converter);
 }
 

@@ -69,8 +69,8 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateCastConversionPatterns(RewritePatternSet &patterns,
-                                               MLIRContext *ctx) {
+void populateCastConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx) {
   patterns.add<CastToHip>(ctx);
 }
 
