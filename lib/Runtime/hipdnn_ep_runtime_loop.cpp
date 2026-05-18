@@ -82,10 +82,9 @@ struct LoopNestingGuard {
   bool ok;
   explicit LoopNestingGuard(RuntimeState *s) : state(s), ok(false) {
     if (state->loop_nesting_depth >= 1) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: nested loops not supported in v1 "
-              "(loop_iter/cond device buffers are shared across the "
-              "RuntimeState)\n");
+      fprintf(stderr, "hipdnn_ep_run_*_loop: nested loops not supported in v1 "
+                      "(loop_iter/cond device buffers are shared across the "
+                      "RuntimeState)\n");
       return;
     }
     state->loop_nesting_depth++;
@@ -105,8 +104,8 @@ struct CountedCondPolicy {
   static int initCond(RuntimeState *state, bool cond_init, void *cond_dev) {
     int8_t cond_val = cond_init ? int8_t{1} : int8_t{0};
     if (hipMemcpyAsync(cond_dev, &cond_val, sizeof(int8_t),
-                        hipMemcpyHostToDevice,
-                        static_cast<hipStream_t>(state->stream)) != hipSuccess)
+                       hipMemcpyHostToDevice,
+                       static_cast<hipStream_t>(state->stream)) != hipSuccess)
       return -1;
     return 0;
   }
@@ -122,8 +121,8 @@ struct DynamicCondPolicy {
   static int initCond(RuntimeState *state, bool cond_init, void *cond_dev) {
     int8_t cond_val = cond_init ? int8_t{1} : int8_t{0};
     if (hipMemcpyAsync(cond_dev, &cond_val, sizeof(int8_t),
-                        hipMemcpyHostToDevice,
-                        static_cast<hipStream_t>(state->stream)) != hipSuccess)
+                       hipMemcpyHostToDevice,
+                       static_cast<hipStream_t>(state->stream)) != hipSuccess)
       return -1;
     return 0;
   }
@@ -134,8 +133,8 @@ struct DynamicCondPolicy {
                        bool *out_continue) {
     int8_t cond_val = 0;
     if (hipMemcpyAsync(&cond_val, cond_dev, sizeof(int8_t),
-                        hipMemcpyDeviceToHost,
-                        static_cast<hipStream_t>(state->stream)) != hipSuccess)
+                       hipMemcpyDeviceToHost,
+                       static_cast<hipStream_t>(state->stream)) != hipSuccess)
       return -1;
     if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
         hipSuccess)
@@ -177,10 +176,10 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
       break;
     // Write the host iter value to the device iter buffer.
     if (hipMemcpyAsync(iter_dev, &i, sizeof(int64_t), hipMemcpyHostToDevice,
-                        stream) != hipSuccess)
+                       stream) != hipSuccess)
       return -1;
-    int rc = body_fn(state, iter_dev, cond_dev, loop_carried_descs,
-                     capture_descs);
+    int rc =
+        body_fn(state, iter_dev, cond_dev, loop_carried_descs, capture_descs);
     if (rc != 0)
       return rc;
     if (CondPolicy::checkCond(state, cond_dev, &keep_going) != 0)
@@ -191,25 +190,22 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
 
 } // namespace
 
-extern "C" int hipdnn_ep_run_counted_loop(
-    RuntimeState *state, HipdnnEpLoopBodyFn body_fn, int64_t max_trip_count,
-    bool cond_init, int32_t num_loop_carried, int32_t num_captures,
-    void **loop_carried_descs, void **capture_descs) {
-  return runLoopImpl<CountedCondPolicy>(state, body_fn, max_trip_count,
-                                          cond_init, num_loop_carried,
-                                          num_captures, loop_carried_descs,
-                                          capture_descs);
+extern "C" int
+hipdnn_ep_run_counted_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
+                           int64_t max_trip_count, bool cond_init,
+                           int32_t num_loop_carried, int32_t num_captures,
+                           void **loop_carried_descs, void **capture_descs) {
+  return runLoopImpl<CountedCondPolicy>(
+      state, body_fn, max_trip_count, cond_init, num_loop_carried, num_captures,
+      loop_carried_descs, capture_descs);
 }
 
-extern "C" int hipdnn_ep_run_loop(RuntimeState *state,
-                                   HipdnnEpLoopBodyFn body_fn,
-                                   int64_t max_trip_count, bool cond_init,
-                                   int32_t num_loop_carried,
-                                   int32_t num_captures,
-                                   void **loop_carried_descs,
-                                   void **capture_descs) {
-  return runLoopImpl<DynamicCondPolicy>(state, body_fn, max_trip_count,
-                                          cond_init, num_loop_carried,
-                                          num_captures, loop_carried_descs,
-                                          capture_descs);
+extern "C" int
+hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
+                   int64_t max_trip_count, bool cond_init,
+                   int32_t num_loop_carried, int32_t num_captures,
+                   void **loop_carried_descs, void **capture_descs) {
+  return runLoopImpl<DynamicCondPolicy>(
+      state, body_fn, max_trip_count, cond_init, num_loop_carried, num_captures,
+      loop_carried_descs, capture_descs);
 }

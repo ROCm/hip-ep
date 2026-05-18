@@ -37,7 +37,7 @@ constexpr const char *kRunLoop = "hipdnn_ep_run_loop";
 /// `populateFuncToLLVMConversionPatterns`: allocPtr, alignedPtr, offset,
 /// then sizes[0..rank), then strides[0..rank).
 static void expandMemRefStruct(OpBuilder &b, Location loc, Value descStruct,
-                                int64_t rank, SmallVectorImpl<Value> &out) {
+                               int64_t rank, SmallVectorImpl<Value> &out) {
   Value allocPtr = LLVM::ExtractValueOp::create(
       b, loc, descStruct, ArrayRef<int64_t>{kAllocPtrIdx});
   out.push_back(allocPtr);
@@ -45,7 +45,7 @@ static void expandMemRefStruct(OpBuilder &b, Location loc, Value descStruct,
       b, loc, descStruct, ArrayRef<int64_t>{kAlignedPtrIdx});
   out.push_back(alignedPtr);
   Value offset = LLVM::ExtractValueOp::create(b, loc, descStruct,
-                                               ArrayRef<int64_t>{kOffsetIdx});
+                                              ArrayRef<int64_t>{kOffsetIdx});
   out.push_back(offset);
   for (int64_t dim = 0; dim < rank; ++dim)
     out.push_back(LLVM::ExtractValueOp::create(
@@ -60,7 +60,7 @@ static void expandMemRefStruct(OpBuilder &b, Location loc, Value descStruct,
 /// Used by the trampoline to wrap the runtime-supplied iter / cond
 /// device pointers without round-tripping through a struct value.
 static void emitRank0DescriptorFields(OpBuilder &b, Location loc, Value rawPtr,
-                                       SmallVectorImpl<Value> &out) {
+                                      SmallVectorImpl<Value> &out) {
   Type i64Ty = b.getI64Type();
   Value zero = LLVM::ConstantOp::create(b, loc, i64Ty, b.getI64IntegerAttr(0));
   out.push_back(rawPtr); // allocPtr
@@ -105,10 +105,11 @@ static int64_t memrefRankFromStructType(Type structTy) {
 /// processes the body and the LoopOp in the same applyPartialConversion
 /// call, but our index math here assumes the unexpanded struct-per-memref
 /// form returned by `typeConverter.convertType(memref) -> struct`.
-static LLVM::LLVMFuncOp createOrGetTrampoline(
-    OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
-    func::FuncOp bodyFuncFn, const LLVMTypeConverter &typeConverter,
-    unsigned numLC, unsigned numCap) {
+static LLVM::LLVMFuncOp
+createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
+                      func::FuncOp bodyFuncFn,
+                      const LLVMTypeConverter &typeConverter, unsigned numLC,
+                      unsigned numCap) {
   StringRef bodyName = op.getBodyFunc();
   std::string trampolineName = (bodyName + "_trampoline").str();
   if (auto existing = module.lookupSymbol<LLVM::LLVMFuncOp>(trampolineName))
@@ -124,9 +125,8 @@ static LLVM::LLVMFuncOp createOrGetTrampoline(
 
   OpBuilder::InsertionGuard guard(b);
   b.setInsertionPointToEnd(module.getBody());
-  auto tramp =
-      LLVM::LLVMFuncOp::create(b, loc, trampolineName, trampType,
-                                LLVM::Linkage::Internal);
+  auto tramp = LLVM::LLVMFuncOp::create(b, loc, trampolineName, trampType,
+                                        LLVM::Linkage::Internal);
 
   Block *entry = tramp.addEntryBlock(b);
   b.setInsertionPointToStart(entry);
@@ -167,9 +167,8 @@ static LLVM::LLVMFuncOp createOrGetTrampoline(
       3 + 2 * numLC + numCap + (condIsPassthrough ? 0 : 1);
   if (bodyArgTypes.size() != expectedArgCount) {
     tramp.emitError("body arg count mismatch: expected ")
-        << expectedArgCount << " (3 + 2*" << numLC << " + " << numCap
-        << " + " << (condIsPassthrough ? 0 : 1) << "), got "
-        << bodyArgTypes.size();
+        << expectedArgCount << " (3 + 2*" << numLC << " + " << numCap << " + "
+        << (condIsPassthrough ? 0 : 1) << "), got " << bodyArgTypes.size();
     return {};
   }
   // After populateFuncToLLVMConversionPatterns, each memref arg in
@@ -194,7 +193,7 @@ static LLVM::LLVMFuncOp createOrGetTrampoline(
   // runtime and we emit their expanded fields directly.)
   auto loadDesc = [&](Value array, unsigned index, Type structTy) -> Value {
     Value idx = LLVM::ConstantOp::create(b, loc, b.getI64Type(),
-                                          b.getI64IntegerAttr(index));
+                                         b.getI64IntegerAttr(index));
     Value slotPtr =
         LLVM::GEPOp::create(b, loc, ptrTy, ptrTy, array, ValueRange{idx});
     Value descPtr = LLVM::LoadOp::create(b, loc, ptrTy, slotPtr);
@@ -220,10 +219,10 @@ static LLVM::LLVMFuncOp createOrGetTrampoline(
   emitRank0DescriptorFields(b, loc, condPtr, bodyCallArgs);
   for (Value d : lcDescs)
     expandMemRefStruct(b, loc, d, memrefRankFromStructType(d.getType()),
-                        bodyCallArgs);
+                       bodyCallArgs);
   for (Value d : capDescs)
     expandMemRefStruct(b, loc, d, memrefRankFromStructType(d.getType()),
-                        bodyCallArgs);
+                       bodyCallArgs);
   if (!condIsPassthrough) {
     // cond_out aliased with cond_in (same buffer, single-pass kernel safety).
     emitRank0DescriptorFields(b, loc, condPtr, bodyCallArgs);
@@ -231,16 +230,16 @@ static LLVM::LLVMFuncOp createOrGetTrampoline(
   // v_out_i == v_in_i (same buffer, single-pass kernel safety).
   for (Value d : lcDescs)
     expandMemRefStruct(b, loc, d, memrefRankFromStructType(d.getType()),
-                        bodyCallArgs);
+                       bodyCallArgs);
 
   // Call the body by symbol name.  The verifier checks this matches once
   // the body has been converted to LLVMFuncOp (which it will be by the
-  // end of the same partial-conversion pass, via populateFuncToLLVMConversionPatterns).
+  // end of the same partial-conversion pass, via
+  // populateFuncToLLVMConversionPatterns).
   LLVM::CallOp::create(b, loc, /*results=*/TypeRange{},
-                        FlatSymbolRefAttr::get(ctx, bodyName), bodyCallArgs);
+                       FlatSymbolRefAttr::get(ctx, bodyName), bodyCallArgs);
 
-  Value zero =
-      LLVM::ConstantOp::create(b, loc, i32Ty, b.getI32IntegerAttr(0));
+  Value zero = LLVM::ConstantOp::create(b, loc, i32Ty, b.getI32IntegerAttr(0));
   LLVM::ReturnOp::create(b, loc, ValueRange{zero});
 
   return tramp;
@@ -293,36 +292,35 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
     {
       OpBuilder modBuilder(module.getBody(), module.getBody()->end());
       tramp = createOrGetTrampoline(modBuilder, module, loc, op, bodyFuncFn,
-                                     *getTypeConverter(), numLC, numCap);
+                                    *getTypeConverter(), numLC, numCap);
       if (!tramp)
         return failure();
     }
 
     // Reference the trampoline by address-of.
-    Value trampPtr = LLVM::AddressOfOp::create(rewriter, loc, ptrTy,
-                                                tramp.getSymNameAttr());
+    Value trampPtr =
+        LLVM::AddressOfOp::create(rewriter, loc, ptrTy, tramp.getSymNameAttr());
 
     // Build a stack array of descriptor pointers for loop-carried operands.
     //   ptr[numLC]: each entry is alloca'd to hold the corresponding
     //   memref descriptor struct, with the descriptor's value stored
     //   into it.
     Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Ty,
-                                             rewriter.getI64IntegerAttr(1));
+                                            rewriter.getI64IntegerAttr(1));
     Value lcArrayPtr;
     {
       Type arrTy = LLVM::LLVMArrayType::get(ptrTy, numLC == 0 ? 1 : numLC);
-      lcArrayPtr = LLVM::AllocaOp::create(rewriter, loc, ptrTy, arrTy,
-                                           oneI64, /*alignment=*/8);
+      lcArrayPtr = LLVM::AllocaOp::create(rewriter, loc, ptrTy, arrTy, oneI64,
+                                          /*alignment=*/8);
       for (unsigned i = 0; i < numLC; ++i) {
         Value desc = adaptor.getVInit()[i];
-        Value descSlot =
-            LLVM::AllocaOp::create(rewriter, loc, ptrTy, desc.getType(),
-                                    oneI64, /*alignment=*/8);
+        Value descSlot = LLVM::AllocaOp::create(
+            rewriter, loc, ptrTy, desc.getType(), oneI64, /*alignment=*/8);
         LLVM::StoreOp::create(rewriter, loc, desc, descSlot);
-        Value idxVal = LLVM::ConstantOp::create(
-            rewriter, loc, i64Ty, rewriter.getI64IntegerAttr(i));
+        Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i64Ty,
+                                                rewriter.getI64IntegerAttr(i));
         Value slotPtr = LLVM::GEPOp::create(rewriter, loc, ptrTy, ptrTy,
-                                             lcArrayPtr, ValueRange{idxVal});
+                                            lcArrayPtr, ValueRange{idxVal});
         LLVM::StoreOp::create(rewriter, loc, descSlot, slotPtr);
       }
     }
@@ -332,18 +330,17 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
     Value capArrayPtr;
     {
       Type arrTy = LLVM::LLVMArrayType::get(ptrTy, numCap == 0 ? 1 : numCap);
-      capArrayPtr = LLVM::AllocaOp::create(rewriter, loc, ptrTy, arrTy,
-                                            oneI64, /*alignment=*/8);
+      capArrayPtr = LLVM::AllocaOp::create(rewriter, loc, ptrTy, arrTy, oneI64,
+                                           /*alignment=*/8);
       for (unsigned j = 0; j < numCap; ++j) {
         Value desc = adaptor.getCaptures()[j];
-        Value descSlot =
-            LLVM::AllocaOp::create(rewriter, loc, ptrTy, desc.getType(),
-                                    oneI64, /*alignment=*/8);
+        Value descSlot = LLVM::AllocaOp::create(
+            rewriter, loc, ptrTy, desc.getType(), oneI64, /*alignment=*/8);
         LLVM::StoreOp::create(rewriter, loc, desc, descSlot);
-        Value idxVal = LLVM::ConstantOp::create(
-            rewriter, loc, i64Ty, rewriter.getI64IntegerAttr(j));
+        Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i64Ty,
+                                                rewriter.getI64IntegerAttr(j));
         Value slotPtr = LLVM::GEPOp::create(rewriter, loc, ptrTy, ptrTy,
-                                             capArrayPtr, ValueRange{idxVal});
+                                            capArrayPtr, ValueRange{idxVal});
         LLVM::StoreOp::create(rewriter, loc, descSlot, slotPtr);
       }
     }
@@ -354,16 +351,15 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
         cast<IntegerType>(maxTripCountI64.getType()).getWidth() != 64) {
       // Index type lowers to i64 via the LLVMTypeConverter; if it's
       // something else (shouldn't happen), promote.
-      maxTripCountI64 = arith::IndexCastUIOp::create(rewriter, loc, i64Ty,
-                                                      maxTripCountI64);
+      maxTripCountI64 =
+          arith::IndexCastUIOp::create(rewriter, loc, i64Ty, maxTripCountI64);
     }
 
     // cond_init is always i1 (we made it so in the outlining pass).
     Value condInit = adaptor.getCondInit();
     if (!condInit)
-      condInit =
-          LLVM::ConstantOp::create(rewriter, loc, i1Ty,
-                                    rewriter.getBoolAttr(true));
+      condInit = LLVM::ConstantOp::create(rewriter, loc, i1Ty,
+                                          rewriter.getBoolAttr(true));
 
     Value numLCConst = LLVM::ConstantOp::create(
         rewriter, loc, i32Ty,
@@ -380,16 +376,15 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
     //   i32 (*)(state*, body_fn*, i64 M, i1 cond_init,
     //           i32 num_lc, i32 num_cap, ptr* lc_descs, ptr* cap_descs)
     SmallVector<Type, 8> paramTypes = {ptrTy, ptrTy, i64Ty, i1Ty,
-                                        i32Ty, i32Ty, ptrTy, ptrTy};
+                                       i32Ty, i32Ty, ptrTy, ptrTy};
     FailureOr<LLVM::LLVMFuncOp> runLoopFn = LLVM::lookupOrCreateFn(
         rewriter, module, runtimeSymbol, paramTypes, i32Ty);
     if (failed(runLoopFn))
       return failure();
 
-    SmallVector<Value, 8> args = {adaptor.getCtx(),  trampPtr,
-                                  maxTripCountI64,   condInit,
-                                  numLCConst,        numCapConst,
-                                  lcArrayPtr,        capArrayPtr};
+    SmallVector<Value, 8> args = {adaptor.getCtx(), trampPtr,   maxTripCountI64,
+                                  condInit,         numLCConst, numCapConst,
+                                  lcArrayPtr,       capArrayPtr};
     LLVM::CallOp::create(rewriter, loc, *runLoopFn, args);
 
     // hip.loop has no LLVM-level results post-bufferization (loop-carried
@@ -402,8 +397,8 @@ struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
 
 } // namespace
 
-void mlir::hip::populateLoopLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns) {
   patterns.add<LoopOpLowering>(converter);
 }
 
