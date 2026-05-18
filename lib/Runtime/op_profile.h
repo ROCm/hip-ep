@@ -70,30 +70,19 @@ struct OpProfileScope {
     // Pairs with the post-stop sync in the destructor to give standalone
     // per-op timings (concurrency is killed by design -- diagnostic only).
     if (hipdnn_ep_perf_isolate_enabled())
-      (void)hipStreamSynchronize(stream);
+      hipStreamSynchronize(stream);
     cpuStart = std::chrono::steady_clock::now();
-    // eventIndex < 0 means the pool failed to create events for this op
-    // (e.g. HIP out-of-resources); skip the GPU record so the rest of the
-    // inference is unaffected. The destructor mirrors the same check.
-    if (eventIndex >= 0) {
-      hipEvent_t e = op_profile_get_start_event(ps, eventIndex);
-      if (e)
-        (void)hipEventRecord(e, stream);
-    }
+    hipEventRecord(op_profile_get_start_event(ps, eventIndex), stream);
   }
 
   ~OpProfileScope() {
-    if (eventIndex >= 0) {
-      hipEvent_t e = op_profile_get_stop_event(ps, eventIndex);
-      if (e)
-        (void)hipEventRecord(e, stream);
-    }
+    hipEventRecord(op_profile_get_stop_event(ps, eventIndex), stream);
     if (hipdnn_ep_perf_isolate_enabled())
-      (void)hipStreamSynchronize(stream);
+      hipStreamSynchronize(stream);
     double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - cpuStart)
                     .count();
-    if (ps && eventIndex >= 0)
+    if (ps)
       op_profile_add_pending(ps, name, shape, eventIndex, ms);
   }
 
@@ -110,8 +99,7 @@ struct OpProfileScope {
         static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state_arg));       \
     if (_ps && _stream && op_profile_is_active(_ps)) {                         \
       int _evIdx = op_profile_acquire_event_pair(_ps);                         \
-      if (_evIdx >= 0)                                                         \
-        _opProf.emplace(_ps, opname, (shape_fn)(), _stream, _evIdx);           \
+      _opProf.emplace(_ps, opname, (shape_fn)(), _stream, _evIdx);             \
     }                                                                          \
   }
 
