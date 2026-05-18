@@ -4,6 +4,7 @@
  */
 #pragma once
 #include <filesystem>
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 #ifndef PYTHON_EXE_STR
 #  define PYTHON_EXE_STR "python"
