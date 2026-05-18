@@ -143,6 +143,16 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
     set(COMPILE_FLAGS "")
 
+    # PIC is required when this bitcode is later linked into the per-model
+    # shared library on Linux (ELF .so). Without -fPIC the IR omits dso_local
+    # markers, codegen emits R_X86_64_PC32 against statics like the Itanium
+    # guard variables for function-local statics, and lld rejects them with
+    # "relocation cannot be used against symbol; recompile with -fPIC". On
+    # Windows COFF this flag is a no-op (clang ignores it for the MSVC ABI).
+    if(NOT WIN32)
+        list(APPEND COMPILE_FLAGS "-fPIC")
+    endif()
+
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")
 

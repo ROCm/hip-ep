@@ -243,8 +243,8 @@ struct RangeToHip : public RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateRangeConversionPatterns(RewritePatternSet &patterns,
-                                                MLIRContext *ctx) {
+void populateRangeConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx) {
   patterns.add<RangeToHip>(ctx);
 }
 
