@@ -12,6 +12,3 @@
 # build --config=macos   # Auto-apply macOS config
 
 # Ensure no workspace symlinks are created
-
-
-build --config=windows   # Auto-apply windows config
