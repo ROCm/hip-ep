@@ -142,6 +142,29 @@ extern "C" int wrap_linear_attention(
   const int64_t state_bytes = dk * dv * elem_size;
   int64_t total_state_bytes = B * Hkv * state_bytes;
 
+  // Per-token stride (in bytes) for each packed [B, T, H*D] tensor. The
+  // kernel indexes into the packed layout directly using seq_len as the
+  // per-batch stride, so we only need to advance the base pointer by one
+  // token between iterations -- no intermediate gather/scatter buffers.
+  //
+  //   query  : Hq  * dk      key    : Nk   * dk (may be < Hkv*dk)
+  //   value  : Hkv * dv      output : Hout * dv (Hout = max(Hq, Hkv))
+  //   decay_per_key_dim==1 -> Hkv * dk;   ==0 -> Hkv
+  //   beta_per_head==1     -> Hkv;        ==0 -> 1
+  //
+  // Declared BEFORE the first HIP_CHECK below so the `goto cleanup` paths
+  // inside HIP_CHECK don't bypass their initialization. C++ forbids jumping
+  // past a variable's initialization to a later label (the "cannot jump from
+  // this goto statement to its label" error clang emits on linux; MSVC is
+  // historically lax about this and accepted the previous ordering).
+  const int64_t q_token_bytes = Hq * dk * elem_size;
+  const int64_t k_token_bytes = Nk * dk * elem_size;
+  const int64_t v_token_bytes = Hkv * dv * elem_size;
+  const int64_t o_token_bytes = Hout * dv * elem_size;
+  const int64_t decay_token_bytes =
+      (decay_per_key_dim ? Hkv * dk : Hkv) * elem_size;
+  const int64_t beta_token_bytes = (beta_per_head ? Hkv : 1) * elem_size;
+
   int result = 0;
 
   // Initialize present_state from past_state (or zeros)
@@ -152,23 +175,6 @@ extern "C" int wrap_linear_attention(
     HIP_CHECK(hipMemsetAsync(present_state, 0, total_state_bytes,
                              (hipStream_t)hip_stream));
   }
-
-  // Per-token stride (in bytes) for each packed [B, T, H*D] tensor. The
-  // kernel indexes into the packed layout directly using seq_len as the
-  // per-batch stride, so we only need to advance the base pointer by one
-  // token between iterations -- no intermediate gather/scatter buffers.
-  //
-  //   query  : Hq  * dk      key    : Nk   * dk (may be < Hkv*dk)
-  //   value  : Hkv * dv      output : Hout * dv (Hout = max(Hq, Hkv))
-  //   decay_per_key_dim==1 -> Hkv * dk;   ==0 -> Hkv
-  //   beta_per_head==1     -> Hkv;        ==0 -> 1
-  const int64_t q_token_bytes = Hq * dk * elem_size;
-  const int64_t k_token_bytes = Nk * dk * elem_size;
-  const int64_t v_token_bytes = Hkv * dv * elem_size;
-  const int64_t o_token_bytes = Hout * dv * elem_size;
-  const int64_t decay_token_bytes =
-      (decay_per_key_dim ? Hkv * dk : Hkv) * elem_size;
-  const int64_t beta_token_bytes = (beta_per_head ? Hkv : 1) * elem_size;
 
   RUNTIME_DEBUG_LOG(
       "[linear_attention] dispatching %lld token(s) via per-step decode "

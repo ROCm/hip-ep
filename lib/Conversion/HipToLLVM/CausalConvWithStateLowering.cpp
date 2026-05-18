@@ -150,7 +150,7 @@ struct CausalConvWithStateOpLowering
 
 } // namespace
 
-void mlir::hip::populateCausalConvWithStateLoweringPatterns(
+void populateCausalConvWithStateLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<CausalConvWithStateOpLowering>(converter);
 }
