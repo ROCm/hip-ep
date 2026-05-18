@@ -504,6 +504,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateSignConversionPatterns(patterns, ctx);
   populateModConversionPatterns(patterns, ctx);
   populateShapeConversionPatterns(patterns, ctx);
+  populateConstantOfShapeConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
