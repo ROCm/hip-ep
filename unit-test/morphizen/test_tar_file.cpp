@@ -15,7 +15,7 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 TEST(TarFileTest, ReadFrom) {
-  auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+  auto tarFileName = SAMPLE_SRC_TAR_PATH;
   auto tarStream = std::make_unique<std::fstream>(
       tarFileName, std::ios::binary | std::ios::in);
   auto tar_file_obj = morphizen::TarFile::create(std::move(tarStream));
@@ -30,7 +30,7 @@ TEST(TarFileTest, ReadFrom) {
 }
 
 TEST(TarFileTest, DoubleRead) {
-  auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+  auto tarFileName = SAMPLE_SRC_TAR_PATH;
 
   auto tarStream = std::make_unique<std::fstream>(
       tarFileName, std::ios::binary | std::ios::in);
@@ -68,7 +68,7 @@ TEST(TarFileTest, DoubleRead) {
 static void test_write_override(bool write_same_data) {
   {
     auto const_test_content = std::string("1234567890");
-    auto srcFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+    auto srcFileName = SAMPLE_SRC_TAR_PATH;
     auto destFileName =
         CMAKE_CURRENT_BINARY_PATH / "sample.src.tar.copy_for_test";
 
