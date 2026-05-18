@@ -43,6 +43,7 @@ add_library(OnnxToHip STATIC
   GatherNDConversion.cpp
   SignConversion.cpp
   ModConversion.cpp
+  ShapeConversion.cpp
 )
 
 add_dependencies(OnnxToHip
