@@ -842,13 +842,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipStreamSynchronize(state->stream));
   }
 
-  // Tear down op modules first while the stream / handles are still live --
-  // destructors may issue hipFree / hipblasLt*Destroy / miopen*Destroy.
-  // The stream sync above guarantees no in-flight kernel references the
-  // cached buffers.
-  // Module-owned state (workspace, qmoe scratch, per-op caches, ...) is
-  // freed here. Order matters: this must run before we tear down handles
-  // / pool so module destructors see a still-valid stream.
+  // Tear down op-modules (workspace, qmoe scratch, gqa GEMM cache,
+  // causal_conv cache, zp_unpack cache, ...) before destroying the
+  // miopen / hipblasLt handles and the constants pool. Module destructors
+  // may issue hipFree / hipblasLt*Destroy / miopen*Destroy and need a
+  // still-valid stream + handles. The stream sync above guarantees no
+  // in-flight kernel still references any cached buffer.
   if (state->modules) {
     hipdnn_ep::module_registry_destroy(state->modules);
     state->modules = nullptr;
@@ -949,8 +948,15 @@ ModuleRegistry *get_module_registry(RuntimeState *state) {
 }
 } // namespace hipdnn_ep
 
-// Per-Compute() entry hook resolved by EP via GetProcAddress; dllexport
-// keeps the symbol visible after LLVM optimization on Windows.
+// Per-Compute() cache invalidation hook. Fans out to every registered
+// op-module's begin_compute_fn (currently the GQA seqlens_k cache; any
+// future per-forward-pass cache participates automatically by adding a
+// begin_compute() method to its module).
+//
+// __declspec(dllexport) matches the convention in real/test_hip_from_dll.cpp
+// (belt-and-suspenders with the .def export list in CompilerDriver.cpp) and
+// guarantees the symbol survives LLVM optimization in the compiled
+// model.dll, which dlsym/GetProcAddress resolves it from.
 extern "C"
 #ifdef _WIN32
     __declspec(dllexport)

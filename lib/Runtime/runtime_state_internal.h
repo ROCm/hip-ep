@@ -3,21 +3,32 @@
  * Licensed under the MIT License.
  */
 
-// Internal layout of RuntimeState. Runtime implementation files only.
-// Public interface uses an opaque pointer (see hipdnn_ep_runtime.h).
+//===- runtime_state_internal.h - RuntimeState Internal Definition -------===//
+//
+// INTERNAL HEADER - Not part of public API
+//
+// This header defines the internal structure of RuntimeState.
+// Only runtime implementation files should include this header.
+//
+// Public interface uses opaque pointer (see hipdnn_ep_runtime.h).
+//
+//===----------------------------------------------------------------------===//
 
 #ifndef HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
 #include "runtime_types.h"
 
-// Op-module registry; defined in module_registry.cpp. Sits at the tail of
-// RuntimeState so existing flat fields keep their offsets.
+// Forward-declared so RuntimeState can carry a pointer to the registry
+// without pulling module_registry.h (and its dependencies) into every
+// translation unit that only needs the flat layout. Definition lives in
+// module_registry.cpp.
 namespace hipdnn_ep {
 struct ModuleRegistry;
 } // namespace hipdnn_ep
 
-// Opaque to generated code (passed as void*).
+// Internal runtime state structure
+// This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
   hipStream_t stream;
   miopenHandle_t miopen_handle;
@@ -46,25 +57,38 @@ struct RuntimeState {
   size_t *buffer_offsets; // Offset for each buffer in the pool
   size_t num_buffers;     // Number of buffers in the pool
 
-  // Shared workspace (MatMul GEMM ws, GQA pipeline, LayerNorm rstd, ...) is
-  // owned by the WorkspaceState op-module; accessed only through the C-ABI
-  // helpers (hipdnn_ep_state_(get|ensure)_workspace) so the bitcode-compiled
-  // model.dll is unaffected by the migration.
+  // Shared workspace, qmoe device + pinned host scratch, GQA GEMM
+  // descriptor cache, CausalConvWithState descriptor cache, MatMulNBits
+  // asym-path zero_points unpack cache, and the per-Compute() seqlens_k
+  // cache used to live as flat fields on RuntimeState. They now sit
+  // inside per-session op-modules (WorkspaceState, QmoeState, GqaGemmState,
+  // CausalConvState, ZpUnpackState, GqaSeqlensCache) reachable via the
+  // ModuleRegistry pointer at the tail of this struct. The flat C-ABI
+  // accessors used by bitcode-compiled model.dlls
+  // (hipdnn_ep_state_(get|ensure)_workspace,
+  // hipdnn_ep_state_(get|ensure)_qmoe_(scratch|host_scratch)) are kept
+  // and forward to the corresponding module so the runtime ABI is
+  // unchanged.
 
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
+  // Allocated in state_init, freed in state_cleanup.
   void *op_profile;
 
-  // Device-side error flag (0 = no error, non-zero = error code).
+  // Device-side error flag used by kernels to report runtime-invalid inputs.
+  // 0 = no error, non-zero = error code (currently -1).
   int *device_error_flag;
 
-  // hipDNN graph execution support. Both attached by the EP via
-  // hipdnn_graph_runtime_attach() after inference_init(); owned by the EP
-  // and not cleaned up here.
-  void *hipdnn_handle;         // hipdnnHandle_t cast to void*
-  void *hipdnn_graph_registry; // opaque GraphRegistry*
+  // hipDNN graph execution support.
+  // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
+  // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up
+  // here) hipdnn_graph_registry: opaque GraphRegistry* (owned by EP, not
+  // cleaned up here)
+  void *hipdnn_handle;
+  void *hipdnn_graph_registry;
 
-  // Op-module registry. New ops add per-session state by registering
-  // through HIPDNN_OP_MODULE rather than growing this struct.
+  // Per-session op-module registry. Lazily populated per slot on the first
+  // wrap_* call that touches that op. New ops add per-session state by
+  // registering through HIPDNN_OP_MODULE instead of growing this struct.
   hipdnn_ep::ModuleRegistry *modules;
 };
 
