@@ -336,11 +336,13 @@ cc_binary(
             "/std:c++17",
             "/Zc:__cplusplus",
             "/DONNX_NAMESPACE=onnx",
+            "/DMORPHIZEN_EXPORT_DLL=1",
         ],
         "//conditions:default": [
             "-std=c++17",
             "-fPIC",
             "-DONNX_NAMESPACE=onnx",
+            "-DMORPHIZEN_EXPORT_DLL=1",
         ],
     }),
     # win_def_file is only meaningful on Windows; Bazel ignores it on Linux.
