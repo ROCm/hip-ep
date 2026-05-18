@@ -215,8 +215,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->pool_size = 0;
   state->buffer_offsets = nullptr;
   state->num_buffers = 0;
-  // workspace lives in the WorkspaceState op-module (lazy-init on first
-  // hipdnn_ep_state_ensure_workspace call); no direct RuntimeState field.
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
