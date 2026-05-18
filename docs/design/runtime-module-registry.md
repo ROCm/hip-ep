@@ -10,7 +10,7 @@ Mechanism the runtime uses for per-session, per-operator state.
 
 | Path | Contents |
 |---|---|
-| `lib/Runtime/module_registry.h` | `OpModuleSpec`, fn-pointer typedefs, SFINAE detectors, `make_op_module_spec<T>`, `HIPDNN_OP_MODULE` macro, free-function decls. |
+| `lib/Runtime/module_registry.h` | `OpModuleSpec`, fn-pointer typedefs, SFINAE detectors, `make_op_module_spec<T>`, `HIPDNN_OP_MODULE` / `HIPDNN_OP_MODULE_DECLARE` / `HIPDNN_OP_MODULE_DEFINE` macros, free-function decls. |
 | `lib/Runtime/module_registry.cpp` | Process-global `spec_table()` + mutex; `SlotEntry` and `ModuleRegistry` definitions; lifecycle and lookup implementations. |
 | `lib/Runtime/growable_buffer.h` | `hipdnn_ep::GrowableDeviceBuffer` / `GrowablePinnedBuffer`. |
 | `lib/Runtime/runtime_state_internal.h` | Forward-declares `ModuleRegistry`; `RuntimeState` ends with `hipdnn_ep::ModuleRegistry *modules;`. |
@@ -31,11 +31,39 @@ A C++ struct authored by the op owner:
   - `void begin_compute(RuntimeState *)` — fires at the top of every
     `Compute()`, for cache invalidation.
 
-## `HIPDNN_OP_MODULE` macro
+## Accessor-generation macros
 
 `make_op_module_spec<T>` always installs `init_fn` (`new T(state)`) and
 `destroy_fn` (`delete`). Optional fn-pointers are installed via
 `if constexpr` on the SFINAE detectors.
+
+Three macros generate the accessor function. They share one body
+(spec + slot id as function-local statics, fast-path `op_module_get`);
+they differ only in linkage so the macro can be used in two patterns:
+
+**Pattern A — single-TU module** (`QmoeState`, `GqaSeqlensCache`,
+`ZpUnpackState`, ...). State struct and accessor both live in the op's
+`.cpp`:
+
+```cpp
+HIPDNN_OP_MODULE(my_module, "my_op", MyState);   // file-local
+```
+
+**Pattern B — cross-TU module** (`WorkspaceState`, reached from six
+`wrap_*` TUs). State struct in a header, accessor split across header
+(declaration) and one `.cpp` (definition):
+
+```cpp
+// header
+HIPDNN_OP_MODULE_DECLARE(my_module, MyState);
+
+// exactly one cpp
+HIPDNN_OP_MODULE_DEFINE(my_module, "my_op", MyState);
+```
+
+`_DECLARE` is just a function declaration; `_DEFINE` is the body —
+identical to `HIPDNN_OP_MODULE` minus the `static` keyword. Macro
+expansion:
 
 ```cpp
 #define HIPDNN_OP_MODULE(ACCESSOR, NAME, STATE_T)                              \
@@ -50,8 +78,18 @@ A C++ struct authored by the op owner:
   }
 ```
 
-The two function-local statics initialize once per TU; after that
-every call reduces to `op_module_get(reg, state, cached_slot)`.
+The two function-local statics initialize once per process (any TU
+that includes the accessor's _DECLARE only sees the function name —
+the spec / slot id live in the single _DEFINE site). After that every
+call reduces to `op_module_get(reg, state, cached_slot)`. Pattern A
+and Pattern B have identical steady-state cost.
+
+Pattern A's `static` keyword is load-bearing: it pins the accessor
+(and the function-local spec / slot id) to one TU. If `HIPDNN_OP_MODULE`
+were ever invoked in a header included by N TUs, each TU would get
+its own spec instance, and the second-and-later TUs would hit the
+spec table's duplicate-name `abort()` on first call. Use Pattern B
+the moment a state struct needs to live in a header.
 
 ## Process-global spec table
 
@@ -195,7 +233,7 @@ Used by composition. Not registered as modules themselves.
 
 | Slot name | State type | TU | Notes |
 |---|---|---|---|
-| `"workspace"` | `WorkspaceState` | declared in `workspace_state.h`, defined in `hipdnn_ep_runtime_state.cpp` | Single `GrowableDeviceBuffer ws` — the shared device-VRAM scratch used by GQA, hipBLASLt-backed MatMul/Gemm, LayerNorm, CausalConv, etc. Reached directly from caller TUs via `workspace_module(state)->ws.{grow,data,size}()`. Module-tier (rather than per-op) on purpose: it is shared cross-op scratch, but the underlying grow / free / sync policy is identical to `QmoeState::scratch`, so it reuses the same RAII helper instead of hand-rolling the loop. Header-exposed because — unlike `QmoeState` — there are six caller TUs (`gqa.cpp`, `matmul.cpp`, `gemm.cpp`, two layer_norms, `causal_conv_with_state.cpp`); the accessor is therefore a non-static function rather than the `HIPDNN_OP_MODULE`-generated file-local one. |
+| `"workspace"` | `WorkspaceState` | declared in `workspace_state.h` via `HIPDNN_OP_MODULE_DECLARE`, defined in `hipdnn_ep_runtime_state.cpp` via `HIPDNN_OP_MODULE_DEFINE` | Single `GrowableDeviceBuffer ws` — the shared device-VRAM scratch used by GQA, hipBLASLt-backed MatMul/Gemm, LayerNorm, CausalConv, etc. Reached directly from caller TUs via `workspace_module(state)->ws.{grow,data,size}()`. Module-tier (rather than per-op) on purpose: it is shared cross-op scratch, but the underlying grow / free / sync policy is identical to `QmoeState::scratch`, so it reuses the same RAII helper instead of hand-rolling the loop. Pattern B (six caller TUs: `gqa.cpp`, `matmul.cpp`, `gemm.cpp`, the two layer_norms, `causal_conv_with_state.cpp`). |
 | `"causal_conv_with_state"` | `CausalConvState` | `real/causal_conv_with_state.cpp` | `unordered_map<CausalConvKey, CausalConvCacheEntry, ...>`. Destructor frees MIOpen descriptors via the file-local `destroyEntry`. |
 | `"zp_unpack"` | `hipdnn_ep_real::ZpUnpackState` | `real/matmul_nbits.cpp` | Two `unordered_map<const void *, std::pair<void *, size_t>>` for the asym AWQ `(u8, fp16)` unpacked zero_points buffers, plus a `std::mutex`. Destructor `hipFree`s every cached buffer. Reached by both `wrap_matmul_nbits` and `wrap_qmoe` via `lookup_or_unpack_zp_u8` / `lookup_or_convert_zp_fp16` — single slot, no duplication. |
 | `"gqa_seqlens_cache"` | `GqaSeqlensCache` | `real/gqa.cpp` | POD (`bool valid; int32_t val; const void *ptr;`). `begin_compute` resets `valid` and `ptr`. First GQA layer in a `Compute()` pays the D2H to read `seqlens_k[0]`; later layers reuse it. |
@@ -226,12 +264,23 @@ model.dlls register their modules concurrently from static-init.
 
 In the op's `.cpp` (no edits to any framework file):
 
-1. Define `MyOpState` (anonymous namespace). Constructor takes
-   `RuntimeState *`. Add a destructor if needed.
+1. Define `MyOpState`. Constructor takes `RuntimeState *`. Add a
+   destructor if needed.
 2. Optionally add `void begin_compute(RuntimeState *)`. Exact signature
    required for SFINAE pickup.
-3. `HIPDNN_OP_MODULE(my_op_module, "my_op", MyOpState);` at namespace
-   scope. The name must be unique across the DLL.
+3. Generate the accessor. Pick by reach:
+   - **Pattern A (single TU).** Put the state struct in the same
+     `.cpp` (anonymous namespace) and at namespace scope write
+     `HIPDNN_OP_MODULE(my_op_module, "my_op", MyOpState);`.
+   - **Pattern B (cross-TU).** Put the state struct in a small
+     header next to the op (e.g. `my_op_state.h`); in that header
+     write `HIPDNN_OP_MODULE_DECLARE(my_op_module, MyOpState);`; in
+     exactly one `.cpp` (typically the op's primary `.cpp`, or
+     `hipdnn_ep_runtime_state.cpp` for cross-cutting modules like
+     `workspace`) write
+     `HIPDNN_OP_MODULE_DEFINE(my_op_module, "my_op", MyOpState);`.
+
+   The `"my_op"` name must be unique across the DLL.
 4. Inside `wrap_*`: `auto *s = my_op_module(state);` — null only on
    alloc failure.
 
@@ -265,7 +314,7 @@ matmul_nbits autotune convention:
 
 This keeps persistence **opt-in per op**, the on-disk format
 decoupled from in-memory state, and the framework contract minimal.
-The `HIPDNN_OP_MODULE` macro intentionally has no `save_fn` /
+The accessor-generation macros intentionally have no `save_fn` /
 `load_fn` slot.
 
 ## Fields that stay flat on `RuntimeState`
