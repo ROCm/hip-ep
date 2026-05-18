@@ -926,8 +926,9 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 // case (compile-time constant starts/ends/axes/steps with positive unit
 // stride) by rewriting onnx.Slice to tensor.extract_slice, so this runtime
 // entry is only called for non-constant-indices or negative-step Slices.
-// The stub throws std::runtime_error to surface unsupported coverage rather
-// than silently returning wrong data.
+// The stub only logs its parameters and returns success — models that
+// exercise it will produce incorrect Slice output but will still link and
+// run end-to-end for IR-shape debugging.
 //
 // axes / steps may be nullptr when the corresponding optional input is absent.
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
@@ -936,6 +937,28 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                const int64_t *output_shape, int64_t output_rank,
                int64_t starts_num_elements, int64_t axes_num_elements,
                int64_t steps_num_elements, int64_t data_type);
+
+// ScatterND: output = copy(data), then output[indices[i]] (reduction) updates[i].
+//
+// `reduction_id` encodes the ONNX `reduction` attribute as a small enum
+// (must match ScatterNDOpLowering::reductionIdFromString):
+//
+//   0 = "none" (overwrite, default)
+//   1 = "add"
+//   2 = "mul"
+//   3 = "min"
+//   4 = "max"
+//
+// Today this is a stub: it only logs its parameters and returns success.
+// The runtime is responsible (when implemented) for both the initial
+// data -> output copy and the per-index scatter writes.
+int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
+                    void *updates, void *output,
+                    const int64_t *data_shape, int64_t data_rank,
+                    const int64_t *indices_shape, int64_t indices_rank,
+                    const int64_t *updates_shape, int64_t updates_rank,
+                    const int64_t *output_shape, int64_t output_rank,
+                    int64_t reduction_id, int64_t data_type);
 
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
