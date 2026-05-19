@@ -82,6 +82,7 @@ inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
 inline constexpr const char *kWrapWhere = "wrap_where";
 inline constexpr const char *kWrapEqual = "wrap_equal";
+inline constexpr const char *kWrapAnd = "wrap_and";
 inline constexpr const char *kWrapNeg = "wrap_neg";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
@@ -360,6 +361,8 @@ void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateAndLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
 void populateDivLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
 void populateUnaryElementwiseLoweringPatterns(

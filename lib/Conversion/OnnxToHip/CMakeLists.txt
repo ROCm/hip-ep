@@ -48,6 +48,7 @@ add_library(OnnxToHip STATIC
   SliceConversion.cpp
   ScatterNDConversion.cpp
   IdentityConversion.cpp
+  AndConversion.cpp
 )
 
 add_dependencies(OnnxToHip

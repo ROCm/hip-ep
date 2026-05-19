@@ -1073,6 +1073,18 @@ void NotOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// AndOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AndOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void AndOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CosOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 

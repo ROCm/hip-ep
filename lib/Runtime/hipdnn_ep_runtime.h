@@ -878,6 +878,15 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
 int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
                int64_t num_elements, int64_t data_type);
 
+// Element-wise logical AND wrapper. Inputs / output share the same data_type
+// (HIPDNN_EP_DATATYPE_*); ONNX `And` is defined on bool tensors, which the
+// EP marshals as i8/uint8 elements (1 byte per element). Today this is a
+// stub: the function returns success without computing anything so models
+// that include And can still link and lower end-to-end while a real
+// element-wise AND kernel is being built.
+int wrap_and(RuntimeState *state, void *a, void *b, void *output,
+             int64_t num_elements, int64_t data_type);
+
 int wrap_neg(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_not(RuntimeState *state, void *input, void *output,
