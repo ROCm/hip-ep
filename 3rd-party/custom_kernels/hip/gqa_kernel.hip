@@ -1270,6 +1270,15 @@ extern "C" int hip_gqa_fused_prefill(
 // Supported HPG specializations (template param):
 //   - HPG=4  (Llama-3.x family at d=64 and d=128)
 //   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
+//   - HPG=8  (DeepSeek-R1-70B at d=128; 64 q heads / 8 kv heads)
+//
+// HPG=8 d=128 block geometry: 256 threads (8 waves x 32 lanes); LDS use is
+// 2 * 64 * 128 * 2 = 32 KB per block (out of 64 KB/CU); EPT = 128/32 = 4
+// elements per thread along d. Per-thread VGPR pressure (Q_reg + O_acc ~24
+// fp32 slots plus loop temps) is well within RDNA3 budget; waves can spread
+// across the four SIMD32s in a CU, so the workgroup fits even when one CU
+// holds two blocks. The earlier guard ("HPG=8 currently requires d=64") was
+// an instantiation-bound guard not a hardware constraint.
 //
 // Constraints (asserted at launcher):
 //   - D must be 64 or 128.
@@ -1543,8 +1552,7 @@ extern "C" int hip_gqa_flash_decode(
     int use_smooth_softmax) {
   // HPG = heads-per-group (Q heads sharing one KV head). The kernel is
   // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128) and HPG=8
-  // (gpt-oss-20b at d=64). HPG=8 with d=128 is rejected to keep template
-  // bloat bounded; no current model needs it.
+  // (gpt-oss-20b at d=64; DeepSeek-R1-Distill-Llama-70B at d=128).
   if (G <= 0 || H % G != 0) {
     fprintf(stderr, "hip_gqa_flash_decode: H=%d not divisible by G=%d\n", H, G);
     return -1;
@@ -1559,12 +1567,6 @@ extern "C" int hip_gqa_flash_decode(
   if (d != 64 && d != 128) {
     fprintf(stderr,
             "hip_gqa_flash_decode: unsupported d=%d (must be 64 or 128)\n", d);
-    return -1;
-  }
-  if (hpg == 8 && d != 64) {
-    fprintf(stderr,
-            "hip_gqa_flash_decode: HPG=8 currently requires d=64 (got d=%d)\n",
-            d);
     return -1;
   }
   if (K_SPLITS != 8) {
@@ -1593,10 +1595,16 @@ extern "C" int hip_gqa_flash_decode(
           <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
               hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
     }
-  } else { /* hpg == 8, d == 64 (asserted above) */
-    gqa_flash_decode_kernel<64, 8, 8>
-        <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
-            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+  } else { /* hpg == 8 */
+    if (d == 128) {
+      gqa_flash_decode_kernel<128, 8, 8>
+          <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+    } else { /* d == 64 */
+      gqa_flash_decode_kernel<64, 8, 8>
+          <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+    }
   }
 
   // Reduce kernel does not depend on HPG; it walks the K_SPLITS partials

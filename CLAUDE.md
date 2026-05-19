@@ -310,7 +310,9 @@ Profiling overhead (event pool): ~34 ms (+58%) per inference on 8B, from ~972 `h
 
 ### GQA flash_decode coverage by CI model
 
-Flash_decode template instantiations: `(D=64, HPG=4)`, `(D=128, HPG=4)`, `(D=64, HPG=8)`. Models outside this set fall through to `gqa_fused_decode` (LDS-tiled, short-context-tuned) for `sq==1` and to the decomposed hipBLASLt path otherwise. Use `_inspect_geom.py` to print H/G/HPG/d for every model in `models/CI/`.
+Flash_decode template instantiations: `(D=64, HPG=4)`, `(D=128, HPG=4)`, `(D=64, HPG=8)`, `(D=128, HPG=8)`. Models outside this set fall through to `gqa_fused_decode` (LDS-tiled, short-context-tuned) for `sq==1` and to the decomposed hipBLASLt path otherwise. Use `_inspect_geom.py` to print H/G/HPG/d for every model in `models/CI/`.
+
+The `(D=128, HPG=8)` instantiation runs with `THREADS = HPG*WAVE_SIZE = 256` threads/block (8 waves × 32 lanes), `EPT = D/WAVE_SIZE = 4` elements per thread along d, and LDS = `2 * BKV * D * sizeof(_Float16) = 32 KB` per block (vs 64 KB/CU budget on RDNA3 → 2 blocks per CU). The 8 waves spread across the 4 SIMD32s in the CU, so the workgroup fits even with two blocks resident. The earlier "HPG=8 currently requires d=64" guard was instantiation-bound, not hardware-bound.
 
 | Model family | H | G | HPG | d | flash_decode? |
 |---|---|---|---|---|---|
@@ -319,7 +321,7 @@ Flash_decode template instantiations: `(D=64, HPG=4)`, `(D=128, HPG=4)`, `(D=64,
 | Llama-3.2-1B | 32 | 8 | 4 | 64 | YES |
 | Phi-4-14B | 40 | 10 | 4 | 128 | YES |
 | gpt-oss-20b / gpt-oss-120b | 64 | 8 | 8 | 64 | YES (with sliding/sink/packed-QKV) |
-| DeepSeek-R1-70B | 64 | 8 | 8 | **128** | NO — would need `<128, K, 8>` (rejected today: HPG·WAVE=256 already maxes out the block) |
+| DeepSeek-R1-Distill-Llama-70B | 64 | 8 | 8 | 128 | YES |
 | Qwen2.5-14B / Qwen2.5-Coder-14B | 40 | 8 | **5** | 128 | NO — would need `<128, K, 5>` instantiation |
 | gemma3-4b | 8 | 4 | 2 | **256** | NO — D=256 not instantiated |
 
@@ -349,7 +351,7 @@ Best observed `model_benchmark.exe` numbers (`-g 32 -ml 16384 -r 5`, `-w 1` for 
 ### Known limitations (open / accepted)
 
 - **L=256+ TPS cliff on Llama-8B family** — see "L=256+ TPS cliff" gotcha. Vulkan-style adaptive K_SPLITS does not help. Likely needs a fused single-pass online-softmax kernel or per-shape K autotune.
-- **DeepSeek-R1-70B, Qwen2.5-14B, gemma3-4b** fall off flash_decode (table above). Decode at long context will use the legacy fused_decode (capped at total_seq=256 — beyond that, decomposed hipBLASLt). Adding the missing instantiations is "low-hanging fruit" but unverified.
+- **Qwen2.5-14B, gemma3-4b** fall off flash_decode (table above). Decode at long context will use the legacy fused_decode (capped at total_seq=256 — beyond that, decomposed hipBLASLt). Adding the missing instantiations is "low-hanging fruit" but unverified. (DeepSeek-R1-70B was previously here; the `<128, K, 8>` instantiation has since been added.)
 - **OGA per-token IoBinding rebind overhead** scales with `max_length`. Not fixable from the EP side; documented gotcha. Pure-ORT IoBinding benches do not see this.
 - **Compiler requires fully static shapes.** No `batch_size` / `sequence_length` symbols. `fix_shapes()` in `test/python/conftest.py` handles this for the perf tests; the dynseqlen branch (off this stage-1) is the long-term solution.
 - **Linker byproducts** (`.lib`, `.pdb`, `.exp`) accumulate in `%TEMP%` — `CompilerDriver::cleanupIntermediates()` only removes `.ll`/`.obj`. Cosmetic.
