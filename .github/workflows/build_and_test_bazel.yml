@@ -48,4 +48,4 @@ jobs:
         run: bazel test --config=remote --test_output=errors //...
         env:
           MORPHIZEN_ORT_BRIDGE_BACKEND: mlir-backend
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}
