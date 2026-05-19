@@ -1097,6 +1097,38 @@ def Hip_EqualOp : Hip_DpsOp<"equal"> {
   }];
 }
 
+def Hip_AndOp : Hip_DpsOp<"and"> {
+  let summary = "Element-wise logical AND: c = a && b";
+  let description = [{
+    Computes element-wise logical AND of two boolean tensors (i1).
+    Implements the standard ONNX And operator.
+
+    Supports multidirectional (NumPy-style) broadcasting between `lhs`
+    and `rhs`. Both inputs and the output have boolean (i1) element type.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.and(%ctx) ins(%a, %b : memref<3x4xi1, 1>, memref<3x4xi1, 1>)
+                  outs(%c : memref<3x4xi1, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NotOp : Hip_DpsOp<"not"> {
   let summary = "Element-wise logical NOT: y = !x";
   let description = [{

@@ -233,6 +233,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
   populateWhereLoweringPatterns(typeConverter, patterns);
   populateEqualLoweringPatterns(typeConverter, patterns);
+  populateAndLoweringPatterns(typeConverter, patterns);
   populateDivLoweringPatterns(typeConverter, patterns);
   populateUnaryElementwiseLoweringPatterns(typeConverter, patterns);
   populateCumSumLoweringPatterns(typeConverter, patterns);
