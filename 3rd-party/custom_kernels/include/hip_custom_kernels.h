@@ -212,6 +212,16 @@ int hip_elementwise_less(
     int64_t num_elements,
     int hip_dtype);
 
+/* And over bool (1-byte) tensors. No hip_dtype: bool is the only supported
+ * input/output type (mirrors ORT v1.22.2 SPECIALIZED_BINARY_ELEMENTWISE_IMPL(And, bool)).
+ */
+int hip_elementwise_and(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements);
+
 /* =========================================================================
  * Elementwise reciprocal (1 / x)
  * =========================================================================
