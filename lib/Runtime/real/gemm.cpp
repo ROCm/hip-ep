@@ -6,6 +6,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -22,6 +23,23 @@ static constexpr int64_t kTypeFloat16 = 0;
 static constexpr int64_t kTypeFloat32 = 1;
 static constexpr int64_t kTypeFloat64 = 2;
 static constexpr int64_t kTypeBFloat16 = 3;
+
+// Opt-in fast path: route eligible fp16 Gemm calls through the custom WMMA
+// kernel (hip_gemm_wmma_fp16) instead of hipBLASLt. The kernel today supports
+// only the no-bias, no-transpose, alpha=1, beta=0, fp16 case with K and N
+// multiples of 16; everything else falls through to the hipBLASLt path below.
+// Enabled with HIPDNN_EP_GEMM_WMMA=1 (default off).
+static bool gemm_wmma_dispatch_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_GEMM_WMMA");
+#else
+    const char *v = std::getenv("HIPDNN_EP_GEMM_WMMA");
+    return v && v[0] >= '1';
+#endif
+  }();
+  return enabled;
+}
 
 static bool resolveGemmTypes(int64_t typeCode, hipDataType &dataType,
                              hipblasComputeType_t &computeType,
@@ -269,6 +287,33 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
   if (!handle || !stream) {
     fprintf(stderr, "wrap_gemm: null handle or stream\n");
     return -1;
+  }
+
+  // Custom WMMA kernel fast path. Eligibility mirrors hip_gemm_wmma_fp16's
+  // contract (see 3rd-party/custom_kernels/hip/gemm_wmma_kernel.hip):
+  //   - fp16 only (kernel has no other template instantiations)
+  //   - no transpose (kernel assumes A[M,K] / B[K,N] row-major)
+  //   - no bias and alpha == 1 (kernel writes C = A*B, no scale, no accumulate)
+  //   - K and N multiples of 16 (kernel has no K-tail handling; N tail is
+  //     masked but the documented contract requires N % 16 == 0)
+  // Anything that doesn't match falls through to the hipBLASLt path below.
+  if (gemm_wmma_dispatch_enabled() && typeCode == kTypeFloat16 &&
+      transA == 0 && transB == 0 && C == nullptr && alpha == 1.0f &&
+      (K % 16) == 0 && (N % 16) == 0) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: dispatch=WMMA M=%lld N=%lld K=%lld\n",
+                      (long long)M, (long long)N, (long long)K);
+    int rc = hip_gemm_wmma_fp16(stream, A, B, output, static_cast<int>(M),
+                                static_cast<int>(K), static_cast<int>(N));
+    if (rc != 0) {
+      fprintf(stderr,
+              "wrap_gemm: hip_gemm_wmma_fp16 failed (rc=%d) for M=%lld N=%lld "
+              "K=%lld; falling back to hipBLASLt path\n",
+              rc, (long long)M, (long long)N, (long long)K);
+      // fall through to hipBLASLt instead of returning the error, so a kernel
+      // launch glitch doesn't take down the whole inference.
+    } else {
+      return 0;
+    }
   }
 
   hipDataType dataType;
