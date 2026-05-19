@@ -474,6 +474,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateCastConversionPatterns(patterns, ctx);
   populateReduceSumConversionPatterns(patterns, ctx);
   populateGatherConversionPatterns(patterns, ctx);
+  populateShapeConversionPatterns(patterns, ctx);
   populateConvConversionPatterns(patterns, ctx);
   populateNormConversionPatterns(patterns, ctx);
   populateRotaryEmbeddingConversionPatterns(patterns, ctx);
@@ -706,6 +707,21 @@ void ConvertOnnxToHipPass::runOnOperation() {
               funcOp, std::move(preFoldPatterns), cfg)))
         return signalPassFailure();
     }
+    // Fold Gather(Shape(x), const_idx) -> tensor.dim BEFORE constants are
+    // externalized; once the index constant is moved into the constants blob
+    // we can no longer see its value at compile time. This collapses the
+    // dynseqlen runtime-shape arithmetic chain to a single 0-D / 1-element
+    // result, narrowing the host-store-into-pool footprint that the late
+    // hip.scalar_to_gpu_buf rewrite must clean up.
+    if (mlir::failed(foldGatherShapeBeforeLowering(funcOp)))
+      return signalPassFailure();
+    // Collapse ORT's inlined FastGelu primitive chain (Pow / Mul / Sum /
+    // Tanh) back into onnx.Gelu BEFORE constants are lowered — the matcher
+    // needs the literal float values still inline in onnx.Constant attrs
+    // (post-lowering, constants become arith.constant / memref.get_global
+    // and value-based pattern matching breaks). See FastGeluFusion.cpp.
+    if (mlir::failed(fuseInlinedFastGelu(funcOp)))
+      return signalPassFailure();
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
@@ -725,13 +741,25 @@ void ConvertOnnxToHipPass::runOnOperation() {
     logSubpass("constants + compute ops");
   }
 
-  // Clean up onnx.NoValue and onnx.EntryPoint ops
+  // Clean up onnx.NoValue and onnx.EntryPoint, plus any other unregistered
+  // onnx.* op that ended up with no uses after conversion. The latter case
+  // is the dead-shape-arithmetic pattern shipped by some HF ONNX exports
+  // (e.g. Phi-4's `pos_ids_reformat/Concat` chain whose result is consumed
+  // by a Reshape that lowered to tensor.expand_shape via static type info).
+  // Without this DCE, one-shot-bufferize trips on the unregistered op
+  // because it has tensor-typed operands but no bufferization interface,
+  // and the whole pipeline aborts with "op was not bufferized" — which is
+  // silent (CPU fallback) at the EP level.
+  //
+  // FastGelu chains left dead by `fuseInlinedFastGelu` are removed inside
+  // the fusion itself (in reverse-topological order), so this DCE only
+  // needs to handle the simpler single-layer `use_empty` cases.
   llvm::SmallVector<mlir::Operation *> toErase;
   module.walk([&](mlir::Operation *op) {
     llvm::StringRef name = op->getName().getStringRef();
-    if (name == "onnx.NoValue" && op->use_empty())
+    if (name == "onnx.EntryPoint")
       toErase.push_back(op);
-    else if (name == "onnx.EntryPoint")
+    else if (name.starts_with("onnx.") && op->use_empty())
       toErase.push_back(op);
   });
   for (auto *op : toErase)

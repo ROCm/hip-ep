@@ -150,6 +150,28 @@ def Hip_LoopOp : Hip_Op<"loop",
   let hasVerifier = 1;
 }
 
+def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Get the runtime-owned host-mapped scratch buffer (grow-on-demand)";
+  let description = [{
+    Returns a reference to the runtime-managed host-mapped scratch buffer.
+    Memory is hipHostMalloc(hipHostMallocMapped) — host-writable AND
+    GPU-readable. Used by hip-materialize-host-scalars to redirect tiny
+    host-fed memref.alloc ops away from the GPU pool (which on gfx1151 is
+    real device memory and SEGVs on host stores). Grow-on-demand semantics
+    mirror hip.get_pool.
+
+    Example:
+    ```mlir
+    %scratch = hip.get_host_scratch(%ctx, %size) : memref<?xi8>
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Index:$scratch_size);
+  let results = (outs AnyMemRef:$scratch);
+  let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
+}
+
 def Hip_FreeOp : Hip_Op<"free",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";

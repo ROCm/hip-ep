@@ -86,13 +86,15 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   if (rotaryDimVal == 0) {
     auto cosCacheType =
         mlir::dyn_cast<mlir::RankedTensorType>(cosCache.getType());
-    if (cosCacheType && cosCacheType.hasStaticShape() &&
-        cosCacheType.getRank() >= 2) {
-      rotaryDimVal = cosCacheType.getShape().back() * 2;
+    // Only the last dim (rotary_dim/2) is needed — it's always a static
+    // architecture constant even when batch/seq dims are dynamic.
+    if (cosCacheType && cosCacheType.getRank() >= 2 &&
+        !cosCacheType.isDynamicDim(cosCacheType.getRank() - 1)) {
+      rotaryDimVal = cosCacheType.getDimSize(cosCacheType.getRank() - 1) * 2;
     } else {
       return rewriter.notifyMatchFailure(
           op, "Cannot infer rotary_embedding_dim: "
-              "cos_cache must have static shape with rank >= 2");
+              "cos_cache last dim must be static with rank >= 2");
     }
   }
 
@@ -112,12 +114,15 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
           op, "Cannot infer num_heads: 4D input has dynamic num_heads dim "
               "and no num_heads attribute");
   } else if (numHeadsVal == 0 && rotaryDimVal > 0) {
-    if (inputType && inputType.hasStaticShape() && inputType.getRank() >= 1) {
-      int64_t hidden = inputType.getShape().back();
+    // Only the last dim (hidden_size) is needed — it's always a static
+    // architecture constant even when batch/seq dims are dynamic.
+    if (inputType && inputType.getRank() >= 1 &&
+        !inputType.isDynamicDim(inputType.getRank() - 1)) {
+      int64_t hidden = inputType.getDimSize(inputType.getRank() - 1);
       numHeadsVal = hidden / rotaryDimVal;
     } else {
-      return rewriter.notifyMatchFailure(op, "Cannot infer num_heads: "
-                                             "input must have static shape");
+      return rewriter.notifyMatchFailure(
+          op, "Cannot infer num_heads: input last dim must be static");
     }
   }
 
