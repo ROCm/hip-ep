@@ -86,6 +86,13 @@ See [test/lit/README.md](lit/) for detailed test writing guide and debugging tip
 
 See [test/e2e/README.md](e2e/) for model generation and environment setup.
 
+### Numeric Tests (`test/numeric/`)
+- **Per-operator correctness**: Single-op ONNX models (Sigmoid, MatMul, ...) run on the MorphiZen EP and compared against an ORT CPU reference.
+- **Pluggable backends**: New backends register in `conftest.py::_BACKENDS`.
+- **Reference cache**: Expensive CPU references (Llama Q/O / gate / up projections) are cached on disk, keyed by sanitised test name with a sha256 drift tripwire.
+
+See [test/numeric/README.md](numeric/) for backends, CLI options, and the "Bring your own ONNX" pattern.
+
 ## Common Issues
 
 ### LIT Tests
