@@ -185,7 +185,10 @@ cc_test(
     }),
     env = {
         # Mirrors build_and_test.ps1 lines 30-31, set before ctest in CI.
-        "MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE": "1",
+        # DEF_ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE, "0") is in
+        # ort-bridge/src/morphizen-ep-factory.cpp; enables CPU debug mode so
+        # GetEpDevices() accepts CPU devices on machines without an AMD GPU.
+        "MORPHIZEN_EP_ENABLE_CPU_DEVICE": "1",
         "ENABLE_CACHE_FILE_IO_IN_MEM": "1",
         # config_reader.cpp calls Plugin::get(MORPHIZEN_CONFIG_PROVIDER_BACKEND)
         # unconditionally. The default is "onnxruntime_morphizen_ep" which does not
