@@ -25,6 +25,13 @@ jobs:
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: [self-hosted, Windows, X64]
     steps:
+      - name: Add git-lfs to PATH
+        # git-lfs.exe lives in C:\Program Files\Git\cmd which is not in the runner's
+        # system PATH (only C:\Program Files\Git\bin is). actions/checkout needs git-lfs
+        # as a standalone binary for lfs: true. GITHUB_PATH is job-scoped, no machine change.
+        shell: powershell
+        run: echo "C:\Program Files\Git\cmd" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
