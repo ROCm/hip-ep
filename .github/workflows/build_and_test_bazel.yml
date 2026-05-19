@@ -41,6 +41,17 @@ jobs:
           show-progress: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Smudge LFS files
+        # On persistent self-hosted runners, actions/checkout resets the workspace to the
+        # prior HEAD *before* installing the LFS smudge filter. When it then checks out the
+        # target SHA, git only smudges files that changed between the two commits — files
+        # like pt_resnet50.onnx that are identical in both are skipped, leaving LFS pointer
+        # files (134 bytes) on disk instead of the real content. This does not affect
+        # ephemeral GitHub-hosted runners where every checkout starts from an empty workspace.
+        # Fix: git lfs checkout force-smudges all pointer files regardless of what changed.
+        shell: powershell
+        run: git lfs checkout
+
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
         with:
