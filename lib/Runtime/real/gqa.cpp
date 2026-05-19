@@ -232,7 +232,7 @@ static constexpr int kFlashDecodeKSplits = 8;
 // Geometry gate for the flash_decode kernel. The launcher has template
 // instantiations for:
 //   - HPG=4, D in {64, 128}  (Llama-3.x family)
-//   - HPG=8, D == 64         (gpt-oss-20b)
+//   - HPG=8, D in {64, 128}  (gpt-oss family at d=64; DeepSeek-R1-70B at d=128)
 // Any other (HPG, D) combination must fall back to fused_decode /
 // hipBLASLt-decomposed.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
@@ -241,9 +241,7 @@ static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   int64_t hpg = H / G;
   if (hpg * G != H)
     return false;
-  if (hpg == 4 && (d == 64 || d == 128))
-    return true;
-  if (hpg == 8 && d == 64)
+  if ((hpg == 4 || hpg == 8) && (d == 64 || d == 128))
     return true;
   return false;
 }
@@ -659,7 +657,8 @@ static int gqa_forward_hipblaslt(
     // Flash-decode path is taken when:
     //   - depth threshold met (default skv >= 256)
     //   - geometry matches a kernel template instantiation
-    //     (HPG=4 with d in {64,128}, or HPG=8 with d=64 for gpt-oss-20b)
+    //     (HPG in {4,8} with d in {64,128} — covers Llama-3.x, gpt-oss,
+    //      DeepSeek-R1-70B; see flash_decode_geometry_ok)
     //   - not disabled via env var
     // Below threshold the existing one-block-per-head fused_decode is faster
     // because its single-kernel cost amortizes better than flash_decode's
