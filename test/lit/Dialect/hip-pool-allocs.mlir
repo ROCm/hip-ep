@@ -270,3 +270,38 @@ func.func @dynamic_metadata(
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
   return %alloc1 : memref<?x8xf32>
 }
+
+// ===== Recursive hoist of dynamic-size def chain =====
+//
+// The dynamic-size operand %scaled of the SECOND alloc is computed in the
+// block AFTER the first alloc, and itself depends on memref.dim + constant +
+// muli — all of which appear after the first alloc.  The pass must walk the
+// chain transitively and hoist EVERY whitelisted producer before the first
+// alloc so the pool-size arithmetic in get_pool dominates its uses.
+//
+// A 1-level hoist (the previous behavior) would have moved only the muli,
+// leaving its operands behind and producing an SSA-dominance verifier error.
+//
+// CHECK-LABEL: func.func @recursive_hoist_dyn_size_chain
+// CHECK-DAG:     %[[DIM:.*]] = memref.dim
+// CHECK-DAG:     %[[CST:.*]] = arith.constant 2 : index
+// CHECK:         %[[SCALED:.*]] = arith.muli %[[DIM]], %[[CST]]
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
+// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
+// CHECK:         return
+func.func @recursive_hoist_dyn_size_chain(
+    %ctx: !hip.context,
+    %a: memref<?x8xf32>,
+    %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,
+    %n: index) -> memref<?x8xf32> {
+  %alloc0 = memref.alloc(%n) : memref<?x8xf32>
+  hip.matmul(%ctx) ins(%a, %b : memref<?x8xf32>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x8xf32>)
+  %c0 = arith.constant 0 : index
+  %dim = memref.dim %a, %c0 : memref<?x8xf32>
+  %two = arith.constant 2 : index
+  %scaled = arith.muli %dim, %two : index
+  %alloc1 = memref.alloc(%scaled) : memref<?x8xf32>
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
+  return %alloc1 : memref<?x8xf32>
+}

@@ -27,6 +27,7 @@
 
 #include "hip/debug_log.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <sstream>
@@ -226,9 +227,23 @@ bool CompilerDriver::runMLIRPasses(
   mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
 
   std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;
-  if (const char *dumpPath = std::getenv("HIPDNN_EP_IR_DUMP_PATH")) {
+  // hip_get_env, not std::getenv: this code may be linked into the static-CRT
+  // EP DLL where std::getenv cannot see host-process env vars.
+  std::string dumpPath = hip_get_env("HIPDNN_EP_IR_DUMP_PATH");
+  if (!dumpPath.empty()) {
+    // ORT can invoke the EP compiler multiple times per session (shape sub-
+    // graphs, prefill specialization, decode specialization). A single sink
+    // file gets overwritten on each call, masking divergence between
+    // invocations. Append a process-wide monotonic counter so each compile
+    // dumps to its own file (e.g. /tmp/ir.dump -> /tmp/ir.dump.0,
+    // /tmp/ir.dump.1, ...). When HIPDNN_EP_IR_DUMP_SINGLE=1 the legacy
+    // single-file behaviour is restored.
+    static std::atomic<unsigned> sCompileSeq{0};
+    std::string finalPath = dumpPath;
+    if (hip_get_env("HIPDNN_EP_IR_DUMP_SINGLE").empty())
+      finalPath += "." + std::to_string(sCompileSeq.fetch_add(1));
     std::error_code ec;
-    irDumpStream = std::make_unique<llvm::raw_fd_ostream>(dumpPath, ec);
+    irDumpStream = std::make_unique<llvm::raw_fd_ostream>(finalPath, ec);
     if (!ec) {
       module.getContext()->disableMultithreading();
       pm.enableIRPrinting([](mlir::Pass *, mlir::Operation *) { return true; },
@@ -248,6 +263,21 @@ bool CompilerDriver::runMLIRPasses(
       llvm::errs() << "\n=== Failed Module IR ===\n";
       module.print(llvm::errs());
       llvm::errs() << "\n========================\n";
+    }
+    // Strict mode (opt-in): when HIPDNN_EP_STRICT=1 is set, abort so the
+    // cpptrace SIGABRT handler prints a backtrace pinpointing the failing
+    // pass. Use this when verifying that a model is fully offloaded — any
+    // graph MorphiZenEP claims but cannot compile is a regression, and
+    // catching it as a crash beats silent CPU fallback masking the bug
+    // (e.g. accuracy tests passing cosine=1.0 because they compare CPU vs
+    // CPU). Default behaviour returns false so ORT's CPU fallback handles
+    // the graph normally — required for multi-session pipelines where
+    // MorphiZenEP is registered only for HipDataTransferImpl visibility
+    // (e.g. OGA's gemma3 embedding/vision sub-sessions).
+    if (!hip_get_env("HIPDNN_EP_STRICT").empty()) {
+      llvm::errs() << "[CompilerDriver] aborting on pass failure "
+                      "(HIPDNN_EP_STRICT=1).\n";
+      std::abort();
     }
     return false;
   }
@@ -329,11 +359,14 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
 void CompilerDriver::discoverLibraries(
     std::vector<std::string> &libraries,
     std::vector<std::string> &library_paths) {
-  const char *therock = std::getenv("THEROCK_DIST");
-  if (!therock)
+  // hip_get_env, not std::getenv: this code runs inside the static-CRT EP DLL
+  // when invoked from the EP. std::getenv there has its own (empty) CRT env
+  // table and silently returned NULL, leaving library_paths empty — lld then
+  // failed with "could not open 'amdhip64.lib'" and the EP fell back to CPU.
+  std::string dist = hip_get_env("THEROCK_DIST");
+  if (dist.empty())
     return;
 
-  std::string dist(therock);
   std::string lib_dir = dist + "/lib";
   library_paths.push_back(lib_dir);
   COMPILER_DEBUG_LOG("THEROCK_DIST detected: " << dist << "\n");
@@ -373,9 +406,9 @@ void CompilerDriver::discoverLibraries(
   {
     bool found = false;
 
-    const char *custom_dir_env = std::getenv("HIP_CUSTOM_KERNELS_DIR");
-    if (custom_dir_env && custom_dir_env[0] != '\0') {
-      std::string custom_dir(custom_dir_env);
+    // hip_get_env, not std::getenv: see THEROCK_DIST comment above.
+    std::string custom_dir = hip_get_env("HIP_CUSTOM_KERNELS_DIR");
+    if (!custom_dir.empty()) {
       library_paths.push_back(custom_dir);
       libraries.push_back("hip_custom_kernels");
       found = true;

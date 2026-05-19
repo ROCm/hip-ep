@@ -26,6 +26,7 @@ struct hipDeviceProp_t {
 #define hipMemcpyHostToDevice 0
 #define hipMemcpyDeviceToHost 1
 #define hipHostMallocDefault 0
+#define hipHostMallocMapped 0
 
 // MIOpen tensor layout enum (subset used by the runtime)
 typedef int miopenTensorLayout_t;

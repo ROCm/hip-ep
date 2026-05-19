@@ -9,6 +9,25 @@ package mlir_metadata;
 message Metadata {
   string artifact_filename = 1;
   repeated Output outputs = 2;
+  repeated Input inputs = 3;
+}
+
+// Tracks which input tensor dimension provides a dynamic output dimension's
+// runtime value. `resolved` disambiguates the {input_idx=0, dim_idx=0}
+// default — a real (input 0, dim 0) source has resolved=true; an
+// unresolved dim (or a static dim with no source needed) has resolved=false.
+// Consumers MUST treat resolved=false as "do not use input_idx/dim_idx".
+message DimSource {
+  int32 input_idx = 1;
+  int32 dim_idx = 2;
+  bool resolved = 3;
+}
+
+message Input {
+  string name = 1;
+  int32 rank = 2;
+  int32 elem_type = 3;
+  repeated int64 shape = 4;
 }
 
 message Output {
@@ -16,4 +35,7 @@ message Output {
   int32 rank = 2;
   int32 elem_type = 3;
   repeated int64 shape = 4;
+  // One per dimension. For dynamic dims (shape[i] == -1), specifies which
+  // input tensor + dimension provides the runtime value.
+  repeated DimSource dim_sources = 5;
 }
