@@ -2,11 +2,10 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Llama-3.1-8B-Instruct AWQ INT4 g128 symmetric test suite.
+"""Mistral-7B-Instruct-v0.3 test suite.
 
-Model: amd/Llama-3.1-8B-Instruct-awq-g128-int4-onnx-directml
-(MatMulNBits block_size=128, **symmetric** — no zero_points,
-32 layers, 8 KV heads, head_dim=128).
+Model: EmbeddedLLM/mistral-7b-instruct-v0.3-int4-onnx-directml.
+32 layers, 8 KV heads, head_dim=128. SentencePiece tokenizer (BOS=<s>=1).
 
 Test coverage is provided by `BaseORTTests` (5 tests) + `BaseOGATests`
 (4 tests) in conftest.py — see CLAUDE.md "Python Performance Tests".
@@ -23,24 +22,25 @@ from conftest import (
 # ruff: noqa: F811
 
 
-LLAMA8B = ModelSpec(
-    name="llama8b",
-    model_dir=REPO_ROOT / "models" / "Llama-3.1-8B-Instruct-awq-g128-int4",
+MISTRAL7B = ModelSpec(
+    name="mistral7b_v3",
+    model_dir=REPO_ROOT / "models" / "mistral-7b-instruct-v0.3-int4-onnx-directml",
     onnx_file="model.onnx",
     data_files=["model.onnx.data"],
     hf_base=(
-        "https://huggingface.co/amd/"
-        "Llama-3.1-8B-Instruct-awq-g128-int4-onnx-directml/resolve/main"
+        "https://huggingface.co/EmbeddedLLM/"
+        "mistral-7b-instruct-v0.3-int4-onnx-directml/resolve/main"
     ),
     num_layers=32,
     num_kv_heads=8,
     head_dim=128,
     has_position_ids=True,
-    bos_token=128000,
-    filler_tokens=[9906, 11, 1268, 527, 499, 30],
+    bos_token=1,
+    filler_tokens=[1234, 5678, 9012, 3456, 7890, 12345],
     oga_files=[
         "genai_config.json",
         "tokenizer.json",
+        "tokenizer.model",
         "tokenizer_config.json",
         "special_tokens_map.json",
     ],
@@ -55,12 +55,12 @@ LLAMA8B = ModelSpec(
     ep_fixed_decode_session,
     ep_fixed_prefill_128_session,
     oga_default_model,
-) = register_model_fixtures(LLAMA8B)
+) = register_model_fixtures(MISTRAL7B)
 
 
-class TestLlama8BORT(BaseORTTests):
-    spec = LLAMA8B
+class TestMistral7BV3ORT(BaseORTTests):
+    spec = MISTRAL7B
 
 
-class TestLlama8BOGA(BaseOGATests):
-    spec = LLAMA8B
+class TestMistral7BV3OGA(BaseOGATests):
+    spec = MISTRAL7B

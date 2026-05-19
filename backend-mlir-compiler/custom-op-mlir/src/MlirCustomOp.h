@@ -47,6 +47,19 @@ private:
   // output index. Precomputed at construction to handle ordering differences
   // between the metadata (DLL-order) and the fused node (ORT-order).
   std::vector<int> output_index_map_;
+
+  // For each metadata output index, the compiler-input index of the matching
+  // past_key_values input (or -1 if this output is not a `present.*` tensor).
+  // Precomputed so the per-inference shape-override loop is O(1) per output
+  // instead of an O(N×M) name-string scan.
+  // TODO: replace the underlying name-based heuristic in
+  // build_present_to_past_input_idx() by emitting explicit past↔present pairs
+  // from the compiler (Level-1 pass walks GqaOp operands which carry the
+  // pairing directly). Today's helper relies on the convention that present
+  // outputs are named "present.N.{key,value}" and past inputs are named
+  // "past_key_values.N.{key,value}"; an upstream rename would silently break
+  // the share-buffer override (KV cache corruption with no crash).
+  std::vector<int> present_to_past_input_idx_;
 };
 
 } // namespace mlir_compilation

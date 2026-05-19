@@ -22,6 +22,8 @@ add_library(OnnxToHip STATIC
   GqaConversion.cpp
   MultiHeadAttentionConversion.cpp
   GatherConversion.cpp
+  GatherShapeFold.cpp
+  ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
@@ -52,6 +54,7 @@ add_library(OnnxToHip STATIC
   SizeConversion.cpp
   NonZeroConversion.cpp
   LoopOutline.cpp
+  FastGeluFusion.cpp
 )
 
 add_dependencies(OnnxToHip

@@ -49,8 +49,11 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
     //
     // 3D input: [batch, seq_len, num_heads * head_dim] (BSNH-equivalent)
     // 4D input: [batch, num_heads, seq_len, head_dim] (BNSH; ONNX default)
-    int64_t batchVal = 0;
-    int64_t seqLenVal = 0;
+    //
+    // batch and seq_len may be dynamic (symbolic dimensions in a dynamic-shape
+    // model). num_heads and head_dim must be static (architecture constants).
+    // Use getMemRefDimSize so dynamic dims read from the memref descriptor at
+    // runtime instead of failing with a compile-time sentinel.
     int64_t numHeadsVal = numHeadsAttr;
     int64_t headDimVal = 0;
     int64_t isBnshVal = 0;
@@ -58,8 +61,6 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
 
     if (inputRank == 3) {
       isBnshVal = 0;
-      batchVal = inputShape[0];
-      seqLenVal = inputShape[1];
       int64_t hidden = inputShape[2];
       if (numHeadsVal <= 0) {
         if (rotaryDimAttr <= 0)
@@ -81,9 +82,7 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
     } else {
       // 4D BNSH layout: [B, num_heads, S, head_dim]
       isBnshVal = 1;
-      batchVal = inputShape[0];
       int64_t shapeNumHeads = inputShape[1];
-      seqLenVal = inputShape[2];
       headDimVal = inputShape[3];
       if (numHeadsVal <= 0)
         numHeadsVal = shapeNumHeads;
@@ -93,26 +92,31 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
             op, "hip.rope: num_heads attribute disagrees with 4D input shape");
     }
 
+    if (headDimVal == ShapedType::kDynamic ||
+        numHeadsVal == ShapedType::kDynamic)
+      return rewriter.notifyMatchFailure(
+          op, "hip.rope: dynamic num_heads/head_dim not supported");
+
     if (rotaryDimAttr <= 0)
       rotaryDimAttr = headDimVal;
     if (rotaryDimAttr > headDimVal)
       return rewriter.notifyMatchFailure(
           op, "hip.rope: rotary_embedding_dim must be <= head_dim");
 
-    if (batchVal == ShapedType::kDynamic || seqLenVal == ShapedType::kDynamic ||
-        headDimVal == ShapedType::kDynamic ||
-        numHeadsVal == ShapedType::kDynamic)
-      return rewriter.notifyMatchFailure(
-          op, "hip.rope: dynamic batch/seq/heads/head_dim not yet supported");
+    // batch and seq_len: use getMemRefDimSize so dynamic dims read from the
+    // runtime memref descriptor rather than emitting a broken compile-time
+    // kDynamic sentinel.
+    Value batchSize =
+        getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value seqLen =
+        (inputRank == 3)
+            ? getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc)
+            : getMemRefDimSize(inputType, 2, adaptor.getInput(), rewriter, loc);
 
-    // Build i64 constants for the runtime call.
+    // Build i64 constants for the static dims and attributes.
     Value interleaved = LLVM::ConstantOp::create(
         rewriter, loc, i64Type,
         rewriter.getI64IntegerAttr(op.getInterleaved()));
-    Value batchSize = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(batchVal));
-    Value seqLen = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(seqLenVal));
     Value numHeads = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(numHeadsVal));
     Value headDim = LLVM::ConstantOp::create(

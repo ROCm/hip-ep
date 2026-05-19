@@ -102,7 +102,11 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value rhs = op->getOperand(1);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, lhs);
+  // Use the operand whose rank matches the result for dynamic dim extraction
+  // (the other may be a broadcast scalar with fewer dims).
+  auto lhsType = mlir::cast<mlir::RankedTensorType>(lhs.getType());
+  mlir::Value source = (lhsType.getRank() == resultType.getRank()) ? lhs : rhs;
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
   auto hipOp = mlir::hip::SubOp::create(rewriter, loc, resultType, context, lhs,
                                         rhs, init);
   rewriter.replaceOp(op, hipOp->getResult(0));

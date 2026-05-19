@@ -136,3 +136,4 @@ install/
 
 # ONNX model files (large, downloaded on demand)
 models/
+_local/

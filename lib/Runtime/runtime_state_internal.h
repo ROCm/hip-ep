@@ -54,6 +54,16 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
+  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
+  // GPU pool by hip-materialize-host-scalars.
+  // hipHostMalloc(hipHostMallocMapped): host-writable AND GPU-readable.
+  // Grow-on-demand via hipdnn_ep_get_host_scratch_base(); never shrinks.
+  // hipHostFree'd in cleanup. Why: on gfx1151 the regular GPU pool is real
+  // device memory; host stores into it SEGV. gfx1150 silently worked because
+  // hipMalloc returned UMA there.
+  void *host_scratch_base;
+  size_t host_scratch_size;
+
   // Per-state scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
   // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).

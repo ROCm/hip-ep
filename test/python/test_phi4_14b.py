@@ -2,11 +2,11 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Llama-3.1-8B-Instruct AWQ INT4 g128 symmetric test suite.
+"""Phi-4 (14B) test suite.
 
-Model: amd/Llama-3.1-8B-Instruct-awq-g128-int4-onnx-directml
-(MatMulNBits block_size=128, **symmetric** — no zero_points,
-32 layers, 8 KV heads, head_dim=128).
+Model: microsoft/phi-4-onnx (gpu/gpu-int4-rtn-block-32 variant).
+INT4 RTN MatMulNBits block_size=32, 40 layers, 10 KV heads, head_dim=128
+(GQA HPG=4). tiktoken cl100k-style BPE tokenizer; <|endoftext|>=100257 = BOS.
 
 Test coverage is provided by `BaseORTTests` (5 tests) + `BaseOGATests`
 (4 tests) in conftest.py — see CLAUDE.md "Python Performance Tests".
@@ -23,21 +23,21 @@ from conftest import (
 # ruff: noqa: F811
 
 
-LLAMA8B = ModelSpec(
-    name="llama8b",
-    model_dir=REPO_ROOT / "models" / "Llama-3.1-8B-Instruct-awq-g128-int4",
+PHI4 = ModelSpec(
+    name="phi4_14b",
+    model_dir=REPO_ROOT / "models" / "phi-4-onnx-gpu-int4-rtn-block-32",
     onnx_file="model.onnx",
     data_files=["model.onnx.data"],
     hf_base=(
-        "https://huggingface.co/amd/"
-        "Llama-3.1-8B-Instruct-awq-g128-int4-onnx-directml/resolve/main"
+        "https://huggingface.co/microsoft/phi-4-onnx/resolve/main/"
+        "gpu/gpu-int4-rtn-block-32"
     ),
-    num_layers=32,
-    num_kv_heads=8,
+    num_layers=40,
+    num_kv_heads=10,
     head_dim=128,
     has_position_ids=True,
-    bos_token=128000,
-    filler_tokens=[9906, 11, 1268, 527, 499, 30],
+    bos_token=100257,
+    filler_tokens=[1234, 5678, 9012, 3456, 7890, 12345],
     oga_files=[
         "genai_config.json",
         "tokenizer.json",
@@ -55,12 +55,12 @@ LLAMA8B = ModelSpec(
     ep_fixed_decode_session,
     ep_fixed_prefill_128_session,
     oga_default_model,
-) = register_model_fixtures(LLAMA8B)
+) = register_model_fixtures(PHI4)
 
 
-class TestLlama8BORT(BaseORTTests):
-    spec = LLAMA8B
+class TestPhi4ORT(BaseORTTests):
+    spec = PHI4
 
 
-class TestLlama8BOGA(BaseOGATests):
-    spec = LLAMA8B
+class TestPhi4OGA(BaseOGATests):
+    spec = PHI4
