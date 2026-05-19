@@ -6,7 +6,7 @@ name: build-and-test-bazel
 
 on:
   workflow_dispatch:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   push:
@@ -14,8 +14,8 @@ on:
       - main
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 
 permissions:
   contents: read
@@ -31,6 +31,7 @@ jobs:
           submodules: true
           fetch-depth: 0
           show-progress: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
