@@ -51,19 +51,8 @@ module {
     return %r : tensor<3xi64>
   }
 
-  // Test 4: shape comes from an onnx.Constant (folded by the same pipeline
-  // run because the Shape and ConstantOfShape folds compose under the greedy
-  // rewriter). This mirrors the canonical "Shape -> ConstantOfShape" pattern
-  // emitted by transformers when allocating a zero KV/mask tensor.
-  func.func @test_shape_then_constant_of_shape(%data: tensor<2x4xf32>) -> tensor<2x4xf32> {
-    // CHECK-LABEL: func.func @test_shape_then_constant_of_shape
-    %shape = "onnx.Shape"(%data) : (tensor<2x4xf32>) -> tensor<2xi64>
-    %zeros = "onnx.ConstantOfShape"(%shape) : (tensor<2xi64>) -> tensor<2x4xf32>
-
-    // CHECK-NOT: onnx.Shape
-    // CHECK-NOT: onnx.ConstantOfShape
-    // CHECK: arith.constant dense<0.000000e+00> : tensor<2x4xf32>
-
-    return %zeros : tensor<2x4xf32>
-  }
+  // Note: the canonical "Shape -> ConstantOfShape" composition test
+  // (transformer-style allocation of a zero KV/mask tensor) lives with
+  // the Shape conversion in a separate PR. Once that PR lands, re-add a
+  // composed test here.
 }
