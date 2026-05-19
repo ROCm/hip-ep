@@ -75,6 +75,7 @@ include_patterns = [
     '**/*.mm',
 ]
 exclude_patterns = [
+    '3rd-party/**',  # vendored third-party code, not subject to project style
     'java/**', # FIXME: Enable clang-format for java
     'onnxruntime/contrib_ops/cuda/bert/tensorrt_fused_multihead_attention/**', # Contains data chunks
     'onnxruntime/core/flatbuffers/schema/*.fbs.h', # Generated code

@@ -1,0 +1,263 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_shared_library", "cc_test")
+
+# wide-string.hpp is included by ort-bridge/test via a relative path
+# (../../../unit-test/morphizen-e2e-test/wide-string.hpp).
+exports_files(
+    ["morphizen-e2e-test/wide-string.hpp"],
+    visibility = ["//ort-bridge/test:__pkg__"],
+)
+
+exports_files(
+    ["data/pt_resnet50.onnx"],
+    visibility = ["//ort-bridge/test:__pkg__"],
+)
+
+# Shared library loaded at runtime by test_plugin.cpp.
+cc_shared_library(
+    name = "hello_plugin",
+    deps = [":hello_plugin_lib"],
+    shared_lib_name = select({
+        "@bazel_tools//src/conditions:windows": "hello_plugin.dll",
+        "//conditions:default": "libhello_plugin.so",
+    }),
+)
+
+# CMake also builds hello_plugin_dll (add_library(hello_plugin_dll SHARED ...)) which
+# is loaded by PluginTest.DynamicHelloPlugin via Plugin::get("hello_plugin_dll").
+# The plugin name maps to the DLL filename: hello_plugin_dll.dll on Windows.
+cc_shared_library(
+    name = "hello_plugin_dll",
+    deps = [":hello_plugin_lib"],
+    shared_lib_name = select({
+        "@bazel_tools//src/conditions:windows": "hello_plugin_dll.dll",
+        "//conditions:default": "libhello_plugin_dll.so",
+    }),
+)
+
+cc_library(
+    name = "hello_plugin_lib",
+    srcs = ["morphizen/hello_plugin.cpp"],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17", "-fPIC"],
+    }),
+    deps = ["//morphizen-core:morphizen-core-static"],
+)
+
+# Proto for e2e test configuration.
+# CMake generates into ${CMAKE_CURRENT_BINARY_DIR}/e2e_config_proto/ so that
+# sources can use #include "e2e_config_proto/test_case_config.pb.h".
+# We replicate that with a genrule targeting the e2e_config_proto/ subdir.
+genrule(
+    name = "gen_test_case_config_proto",
+    srcs = ["morphizen-e2e-test/test_case_config.proto"],
+    outs = [
+        "e2e_config_proto/test_case_config.pb.cc",
+        "e2e_config_proto/test_case_config.pb.h",
+    ],
+    cmd = "$(location @protobuf//:protoc)" +
+          " --cpp_out=$(@D)/e2e_config_proto" +
+          " -I $$(dirname $(location morphizen-e2e-test/test_case_config.proto))" +
+          " $(location morphizen-e2e-test/test_case_config.proto)",
+    tools = ["@protobuf//:protoc"],
+)
+
+cc_library(
+    name = "test_case_config_cc_proto",
+    srcs = [":e2e_config_proto/test_case_config.pb.cc"],
+    hdrs = [":e2e_config_proto/test_case_config.pb.h"],
+    # includes = ["."] makes the package's bazel-out dir a search path so
+    # #include "e2e_config_proto/test_case_config.pb.h" resolves correctly.
+    includes = ["."],
+    deps = ["@protobuf//:protobuf"],
+)
+
+# Replicate CMake's tgt_sample_src_tar custom target (test_data.cmake).
+# TarFileTest.ReadFrom opens CMAKE_CURRENT_BINARY_PATH/"sample.src.tar"
+# = "unit-test/data/sample.src.tar" relative to the runfiles root.
+# The genrule output lands in bazel-out/.../unit-test/data/sample.src.tar
+# which Bazel stages at _main/unit-test/data/sample.src.tar in the runfiles tree.
+# --config=remote sets shell_executable=C:/PROGRA~1/Git/bin/bash.exe (Git Bash),
+# so tar is available on Windows via Git Bash's built-in tar.
+genrule(
+    name = "sample_src_tar",
+    outs = ["data/sample.src.tar"],
+    # Mirror CMake's tgt_sample_src_tar (unit-test/cmake/test_data.cmake lines 13-19):
+    #   mkdir sample_src_tar/
+    #   echo hello > sample_src_tar/hello.txt
+    #   echo "tar file" > sample_src_tar/tar_file.txt
+    #   tar cvf sample.src.tar sample_src_tar/hello.txt sample_src_tar/tar_file.txt
+    # The entries in the tar must have the sample_src_tar/ prefix so that
+    # TarFileTest.WriteOverride can open "sample_src_tar/hello.txt".
+    cmd = (
+        "mkdir -p $(@D)/sample_src_tar && " +
+        "echo hello > $(@D)/sample_src_tar/hello.txt && " +
+        "echo 'tar file' > $(@D)/sample_src_tar/tar_file.txt && " +
+        "tar cf $@ -C $(@D) sample_src_tar/hello.txt sample_src_tar/tar_file.txt"
+    ),
+)
+
+load("@rules_python//python:defs.bzl", "py_binary")
+
+py_binary(
+    name = "gen_e2e_tests_config_py",
+    srcs = ["morphizen-e2e-test/etc/gen_e2e_tests_config.py"],
+    main = "morphizen-e2e-test/etc/gen_e2e_tests_config.py",
+)
+
+genrule(
+    name = "gen_e2e_tests_config",
+    outs = ["data/morphizen_e2e_tests_config.json"],
+    cmd = "$(location :gen_e2e_tests_config_py) $@",
+    tools = [":gen_e2e_tests_config_py"],
+)
+
+cc_test(
+    name = "morphizen_unit_tests",
+    srcs = [
+        "test_environment.hpp",
+        "morphizen_unit_test_main.cpp",
+        "morphizen/test_config.cpp",
+        "morphizen/test_model.cpp",
+        "morphizen/test_graph.cpp",
+        "morphizen/test_const_data.cpp",
+        "morphizen/test_anchor_point.cpp",
+        "morphizen/test_immutable_map.cpp",
+        "morphizen/test_mlir_ssa_dominance.cpp",
+        "morphizen/test_mmap_file.cpp",
+        "morphizen/test_mmap_tmphandle.cpp",
+        "morphizen/test_node_builder.cpp",
+        "morphizen/test_onnx_custom.cpp",
+        "morphizen/test_onnx_return.cpp",
+        "morphizen/test_onnx_schema.cpp",
+        "morphizen/test_op_invoker.cpp",
+        "morphizen/test_pass_context.cpp",
+        "morphizen/test_pattern.cpp",
+        "morphizen/test_plugin.cpp",
+        "morphizen/test_tar_entry.cpp",
+        "morphizen/test_tar_file.cpp",
+        "morphizen/test_file_stream.cpp",
+        "morphizen/test_ep_shared_context_workspace.cpp",
+        "morphizen-e2e-test/config.cpp",
+        "morphizen-e2e-test/config.hpp",
+        "morphizen-e2e-test/env.cpp",
+        "morphizen-e2e-test/env.hpp",
+        "morphizen-e2e-test/session-options.cpp",
+        "morphizen-e2e-test/session-options.hpp",
+        "morphizen-e2e-test/session.cpp",
+        "morphizen-e2e-test/session.hpp",
+        "morphizen-e2e-test/session-run.cpp",
+        "morphizen-e2e-test/session-run.hpp",
+        "morphizen-e2e-test/morphizen-e2e-test-main.cpp",
+        "morphizen-e2e-test/wide-string.hpp",
+        # test_pattern.cpp uses #include "pt_resnet50_add.h.inc" (bare textual include).
+        "morphizen/pt_resnet50_add.h.inc",
+    ],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17"],
+    }),
+    defines = [
+        "ONNX_NAMESPACE=onnx",
+        "ONNX_ML=1",
+        # CMake sets TEST_CWD_STR to CMAKE_CURRENT_BINARY_DIR and copies
+        # pt_resnet50.onnx there. In Bazel, data files land in the runfiles
+        # tree under their source package path. CWD during test execution is
+        # <runfiles>/_main/, so "unit-test/data" resolves to
+        # <runfiles>/_main/unit-test/data/ where pt_resnet50.onnx is staged.
+        'TEST_CWD_STR=\\"unit-test/data\\"',
+        # Point source-dir macros to the unit-test package root where .py
+        # scripts and other source-tree files live in the runfiles tree.
+        'TEST_SRC_DIR_STR=\\"unit-test\\"',
+        # Mirrors CMake: target_compile_definitions(... PRIVATE MORPHIZEN_ENABLE_MLIR_BACKEND=1)
+        # (set when morphizen_ENABLE_MLIR_BACKEND is ON, which is the default).
+        # Controls the #ifdef in morphizen_unit_test_main.cpp so it calls
+        # setup_global_morphizen_ort_api(kMLIRBackend) instead of kONNXIRBackend.
+        "MORPHIZEN_ENABLE_MLIR_BACKEND=1",
+    ] + select({
+        "@bazel_tools//src/conditions:windows": ["_WIN32_WINNT=0x0601"],
+        "//conditions:default": [],
+    }),
+    env = {
+        # Mirrors build_and_test.ps1 lines 30-31, set before ctest in CI.
+        # DEF_ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE, "0") is in
+        # ort-bridge/src/morphizen-ep-factory.cpp; enables CPU debug mode so
+        # GetEpDevices() accepts CPU devices on machines without an AMD GPU.
+        "MORPHIZEN_EP_ENABLE_CPU_DEVICE": "1",
+        "ENABLE_CACHE_FILE_IO_IN_MEM": "1",
+        # config_reader.cpp calls Plugin::get(MORPHIZEN_CONFIG_PROVIDER_BACKEND)
+        # unconditionally. The default is "onnxruntime_morphizen_ep" which does not
+        # exist as a DLL in the GitHub Bazel build. Point to the MLIR backend plugin
+        # which IS registered statically via mlir-imp alwayslink.
+        "MORPHIZEN_CONFIG_PROVIDER_BACKEND": "mlir-backend",
+        # Bypass ORT logger adapter (onnxruntime_morphizen_ep.cpp:251) so glog
+        # INFO output from inside compile_onnx_model_morphizen_ep_v4 is not
+        # suppressed by the session's ort_log_level="warning" filter.
+        "DEBUG_LOG_LEVEL": "info",
+        # Pass framework execution log (pass_imp.cpp:31 DEF_ENV_PARAM).
+        "DEBUG_MORPHIZEN_PASS": "1",
+        # EP-level debug log (morphizen-ep.cpp:31 DEF_ENV_PARAM).
+        "MORPHIZEN_DEBUG_MORPHIZEN_EP": "1",
+        # Verbose pass/compile log (morphizen_compile_model.cpp:44 DEF_ENV_PARAM).
+        "XLNX_ONNX_EP_VERBOSE": "2",
+    },
+    # The test sources include headers from the package root (e.g. "test_environment.hpp")
+    # and from the morphizen/ subdirectory (e.g. "pt_resnet50_add.h.inc" in test_pattern.cpp).
+    includes = [".", "unit-test/morphizen"],
+    data = [
+        "data/pt_resnet50.onnx",
+        # MLIR text form of the ResNet-50 model, needed when
+        # MORPHIZEN_ENABLE_MLIR_BACKEND=1 (RESNET_50_PATH resolves to .onnx.mlir).
+        # Staged at _main/ort-bridge/test/src/pt_resnet50.onnx.mlir in runfiles.
+        "//ort-bridge/test:src/pt_resnet50.onnx.mlir",
+        ":hello_plugin",
+        # PluginTest.DynamicHelloPlugin calls Plugin::get("hello_plugin_dll") which
+        # loads hello_plugin_dll.dll by name at runtime.
+        ":hello_plugin_dll",
+        # config_reader.cpp unconditionally calls Plugin::get("onnxruntime_morphizen_ep")
+        # before checking the embedded config.  Stage the DLL so LoadLibrary finds it.
+        # Mirrors GHE's "//vaip-core:onnxruntime_vitisai_ep_runtime" data dep.
+        "//morphizen-core:onnxruntime_morphizen_ep",
+        # TarFileTest.ReadFrom opens CMAKE_CURRENT_BINARY_PATH/"sample.src.tar".
+        # CMAKE_CURRENT_BINARY_PATH = "unit-test/data" so the runfiles path is
+        # _main/unit-test/data/sample.src.tar.
+        ":sample_src_tar",
+        ":gen_e2e_tests_config",
+        # test_anchor_point.data and test_pass_context.data are directories
+        "morphizen/test_anchor_point.data/case0.prototxt",
+        "morphizen/test_anchor_point.data/case1.prototxt",
+        "morphizen/test_anchor_point.data/case2.prototxt",
+        "morphizen/test_anchor_point.data/case3.prototxt",
+        "morphizen/test_anchor_point.data/case4.prototxt",
+        "morphizen/test_pass_context.data/sample_config_1.json",
+        "morphizen/test_pass_context.data/sample_config_for_target_disovery_not_valid_target.json",
+        "morphizen/test_pass_context.data/sample_config_for_target_disovery_valid_target.json",
+        "morphizen/test_pass_context.data/sample_context.json",
+        "morphizen/test_pass_context.data/sample_context_1.json",
+    ],
+    shard_count = 4,
+    deps = [
+        ":test_case_config_cc_proto",
+        "//morphizen-core:morphizen-core-static",
+        # cc_import: copies EP DLL next to test binary (Windows PATH search), no link dep.
+        # Mirrors GHE's //vaip-core:onnxruntime_vitisai_ep_runtime pattern.
+        "//morphizen-core:onnxruntime_morphizen_ep_runtime",
+        "//mlir-imp:mlir-imp",  # mlir-imp backend (alwayslink — registers StaticPluginRegister)
+        # Mirrors CMake: $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>
+        # The pass registers itself via StaticPluginRegister in an anonymous namespace;
+        # alwayslink = True in its BUILD prevents MSVC from dead-stripping it.
+        "//morphizen-pass-init:morphizen-pass-init",
+        "@onnxruntime//:onnxruntime",
+        "@googletest//:gtest_main",
+        "@glog",
+        "@protobuf//:protobuf",
+        # Provides BAZEL_CURRENT_REPOSITORY and the C++ runfiles library used
+        # in test_environment.hpp to resolve pt_resnet50.onnx via Rlocation.
+        "@bazel_tools//tools/cpp/runfiles",
+    ],
+)

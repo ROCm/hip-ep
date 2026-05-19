@@ -1,0 +1,30 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "morphizen-custom-op-relu-dq",
+    srcs = [
+        "src/custom_op.cpp",
+        "src/custom_op.hpp",
+        "src/main.cpp",
+    ],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17", "-fPIC"],
+    }),
+    local_defines = ["MORPHIZEN_CUSTOM_OP=1"],
+    # StaticPluginRegister in src/main.cpp is in an anonymous namespace;
+    # alwayslink = True prevents MSVC from dead-stripping the registration.
+    alwayslink = True,
+    deps = [
+        "//morphizen-core:morphizen-core-static",
+        "//morphizen-demo/proto:relu_dq_proto",
+        "@glog",
+        "@onnxruntime//:onnxruntime_headers",
+    ],
+    visibility = ["//visibility:public"],
+)

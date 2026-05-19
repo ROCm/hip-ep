@@ -1,0 +1,1 @@
+exports_files(["xclbin.h"], visibility = ["//visibility:public"])

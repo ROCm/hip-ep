@@ -1,0 +1,35 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# Compile relu_dq.proto → relu_dq.pb.cc + relu_dq.pb.h.
+# CMake puts them under ${CMAKE_CURRENT_BINARY_DIR}/relu_dq_proto/ and exposes
+# that directory as PUBLIC include; we output them flat into $(@D) and use
+# includes = ["."] so consumers can #include "relu_dq.pb.h" directly.
+genrule(
+    name = "gen_relu_dq_proto",
+    srcs = ["relu_dq.proto"],
+    outs = [
+        "relu_dq.pb.cc",
+        "relu_dq.pb.h",
+    ],
+    cmd = "$(location @protobuf//:protoc)" +
+          " --cpp_out=$(@D)" +
+          " -I $$(dirname $(location relu_dq.proto))" +
+          " $(location relu_dq.proto)",
+    tools = ["@protobuf//:protoc"],
+)
+
+cc_library(
+    name = "relu_dq_proto",
+    srcs = [":relu_dq.pb.cc"],
+    hdrs = [":relu_dq.pb.h"],
+    # includes = ["."] adds bazel-out/.../morphizen-demo/proto/ to the search
+    # path so downstream code can use #include "relu_dq.pb.h".
+    includes = ["."],
+    deps = ["@protobuf//:protobuf"],
+    visibility = ["//visibility:public"],
+)

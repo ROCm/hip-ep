@@ -1,0 +1,93 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+# pt_resnet50.onnx.mlir is the MLIR text form of the ResNet-50 model.
+# unit-test needs it when MORPHIZEN_ENABLE_MLIR_BACKEND=1 because the MLIR
+# backend's Model::load() parses MLIR text, not binary ONNX.
+exports_files(
+    ["src/pt_resnet50.onnx.mlir"],
+    visibility = ["//unit-test:__pkg__"],
+)
+
+cc_test(
+    name = "ort_bridge_test",
+    srcs = [
+        "src/ort-bridge-test.cpp",
+        "src/test-environment.hpp",
+        "src/test-hello-ep.cpp",
+        "src/test-compile-model.cpp",
+        "src/test-coverage-wrapper.cpp",
+        "src/test-coverage-wrapper.hpp",
+        "src/test-api-coverage-checker.hpp",
+        "src/test-morphizen-ort-implementation.cpp",
+        # test-hello-ep.cpp and test-compile-model.cpp include
+        # "../../../unit-test/morphizen-e2e-test/wide-string.hpp"
+        # via a relative path. Declare it as an input so Bazel tracks the dependency.
+        "//unit-test:morphizen-e2e-test/wide-string.hpp",
+    ],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17"],
+    }),
+    defines = [
+        # CMake sets this to $<TARGET_FILE:onnxruntime_morphizen_ep>. In Bazel,
+        # the DLL is staged in the runfiles tree at _main/morphizen-core/
+        # (matching its package path). test-environment.hpp resolves this to an
+        # absolute path via the C++ runfiles library (Rlocation).
+        'MORPHIZEN_MORPHIZEN_EP_STR=\\"morphizen-core/onnxruntime_morphizen_ep.dll\\"',
+        # Enable mlir backend for the coverage wrapper default.
+        "MORPHIZEN_ENABLE_ONNX_BACKEND=0",
+        "MORPHIZEN_ENABLE_MLIR_BACKEND=1",
+        # Rlocation path (without _main/ prefix) for pt_resnet50.onnx.
+        'RESNET_50_ONNX_STR=\\"unit-test/data/pt_resnet50.onnx\\"',
+        # Override the morphizen_onnx namespace that @onnx transitively injects.
+        # morphizen-core-static is compiled with ONNX_NAMESPACE=onnx (ORT's namespace),
+        # so the test must match to avoid mangled-name mismatches at link time.
+        "ONNX_NAMESPACE=onnx",
+    ] + select({
+        "@bazel_tools//src/conditions:windows": ["_WIN32_WINNT=0x0601"],
+        "//conditions:default": [],
+    }),
+    # With -I ort-bridge/test/src the relative include
+    # "../../../unit-test/morphizen-e2e-test/wide-string.hpp" resolves to
+    # unit-test/morphizen-e2e-test/wide-string.hpp at workspace root.
+    includes = ["ort-bridge/test/src"],
+    env = {
+        "MORPHIZEN_ORT_BRIDGE_BACKEND": "mlir-backend",
+        "MORPHIZEN_DEBUG_PLUGIN": "1",
+        "MORPHIZEN_DEBUG_VITISAI_EP": "1",
+        "MORPHIZEN_DEBUG_ORT_EP_API": "1",
+        "MORPHIZEN_DEBUG_VITISAI_EP_FACTORY": "1",
+        "DEBUG_LOG_LEVEL": "info",
+    },
+    data = [
+        # RESNET_50_ONNX_STR is resolved via runfiles to this file's absolute path.
+        "//unit-test:data/pt_resnet50.onnx",
+        # Stage the EP DLL at _main/morphizen-core/onnxruntime_morphizen_ep.dll
+        # so that Rlocation(MORPHIZEN_MORPHIZEN_EP_STR) resolves to an absolute path.
+        "//morphizen-core:onnxruntime_morphizen_ep",
+    ],
+    deps = [
+        "//ort-bridge",
+        "//morphizen-core:morphizen-core-static",
+        # cc_import: copies EP DLL next to test binary (Windows PATH search), no link dep.
+        # Mirrors GHE's //vaip-core:onnxruntime_vitisai_ep_runtime pattern.
+        "//morphizen-core:onnxruntime_morphizen_ep_runtime",
+        "//morphizen-ort-api-ext",
+        "//mlir-imp:mlir-imp",  # mlir-imp backend (alwayslink — registers StaticPluginRegister)
+        # Mirrors CMake: EP target's LINK_LIBRARIES includes morphizen-pass-init,
+        # morphizen-level1-pass-relu-dq, morphizen-custom-op-relu-dq (all alwayslink).
+        # Without them the test binary's get_store() lacks those plugins.
+        "//morphizen-pass-init:morphizen-pass-init",
+        "@onnxruntime//:onnxruntime",
+        "@googletest//:gtest_main",
+        "@glog",
+        # Provides BAZEL_CURRENT_REPOSITORY and the C++ runfiles library used
+        # in test-environment.hpp to resolve the EP DLL to an absolute path at runtime.
+        "@bazel_tools//tools/cpp/runfiles",
+    ],
+)

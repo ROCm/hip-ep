@@ -42,7 +42,6 @@
 __pycache__/
 *.pyc
 /.vscode/
-/MODULE.bazel.lock
 /bazel-*
 /.clwb
 /.idea

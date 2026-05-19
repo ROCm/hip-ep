@@ -1,4 +1,13 @@
 {
-  "targets": [],
-  "passes": []
+    "passes": [
+        { "name": "init",         "plugin": "morphizen-pass-init" },
+        { "name": "fuse-relu-dq", "plugin": "morphizen-level1-pass-relu-dq" }
+    ],
+    "target": "relu-dq-target",
+    "targets": [
+        {
+            "name": "relu-dq-target",
+            "pass": ["init", "fuse-relu-dq"]
+        }
+    ]
 }

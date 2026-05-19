@@ -1,63 +1,44 @@
 # Bazel configuration for MorphiZen
-#
-# Note: Some packages are temporarily excluded from builds:
-# - onnx-ir-imp: BUILD.bazel.disabled (glob pattern issues)
-# See doc/excluded-packages.md for details.
 
-# Import platform-specific configs if they exist
+# Enable Bzlmod
+common --enable_bzlmod
+
+# Registry: bazel-registry (ROCm/bazel-registry) first, BCR as fallback.
+# Credential helper (tools/github-credential-helper.sh) supplies the Bearer token.
+# For local development with a local registry, override in .bazelrc.local:
+#   common --registry=file:///C:/Develop/w/source/bazel-registry-1
+common --registry=https://raw.githubusercontent.com/ROCm/bazel-registry/refs/heads/main
+common --registry=https://bcr.bazel.build
+
+# Repository cache (reuses downloads across registry URL changes)
+common --repository_cache=C:/bazel_cache/repository_cache
+
+# Import local overrides (gitignored — for --override_module, local registry tweaks, etc.)
 try-import %workspace%/.bazelrc.local
 
+# GitHub credential helper
+# Reads GITHUB_TOKEN env var (CI) or falls back to `gh auth token` (local dev)
+common --credential_helper=github.com=%workspace%/tools/github-credential-helper.cmd
+common --credential_helper=raw.githubusercontent.com=%workspace%/tools/github-credential-helper.cmd
+common --credential_helper=codeload.github.com=%workspace%/tools/github-credential-helper.cmd
 
-startup --host_jvm_args="-Djavax.net.ssl.trustStore=none" --host_jvm_args="-Djavax.net.ssl.trustStorePassword=none"
+# Modern C++ toolchain resolution
+build --incompatible_enable_cc_toolchain_resolution
 
-# Cache configuration - platform specific
-build:windows --disk_cache=C:/Develop/temp/bazel-cache
-build:linux --disk_cache=/tmp/bazel-cache
-build:macos --disk_cache=/tmp/bazel-cache
-
-# Disable workspace symlinks (bazel-morphizen, bazel-bin, etc.) to keep workspace clean
-# no it  does not work on Windows, update .gignore instead
-# build:windows --symlink_prefix=C:/Develop/temp/bazel-symlinks
-# Output root - defaults to Windows, override in .bazelrc.local for Linux/macOS
-startup --output_user_root=C:/Develop/temp/bazel-user-root
-
-# C++ standard and compilation flags
-build:windows --cxxopt=/std:c++17
-build:windows --host_cxxopt=/std:c++17
-build:linux --cxxopt=-std=c++17
-build:linux --host_cxxopt=-std=c++17
-build:macos --cxxopt=-std=c++17
-build:macos --host_cxxopt=-std=c++17
-
-# Additional C++17 enforcement
+# C++ standard (applied globally; toolchain may override per target)
 build --cxxopt=/std:c++17
 build --host_cxxopt=/std:c++17
 
-# Clang-cl configuration for Windows
-build:clang-cl --extra_toolchains=@llvm_toolchain//:all
-build:clang-cl --cxxopt=/std:c++17
-build:clang-cl --host_cxxopt=/std:c++17
-build:clang-cl --copt=-DWIN32_LEAN_AND_MEAN
-build:clang-cl --copt=-DNOMINMAX
-build:clang-cl --host_copt=-DWIN32_LEAN_AND_MEAN
-build:clang-cl --host_copt=-DNOMINMAX
+# Allow protobuf to work with MSVC / clang-cl
+build --define=protobuf_allow_msvc=true
 
-# Use clang-cl by default on Windows
-# build:windows --config=clang-cl  # Commented out to avoid double expansion when using --config=clang-cl explicitly
+# Disk cache (Windows path; override in .bazelrc.local for Linux/macOS dev)
+build --disk_cache=C:/Develop/temp/bazel-cache
 
-# Enable bzlmod
-common --enable_bzlmod
-
-# Platform-specific configurations
-build:windows --copt=-DWIN32_LEAN_AND_MEAN
-build:windows --host_copt=-DWIN32_LEAN_AND_MEAN
-build:windows --copt=-DNOMINMAX
-build:windows --host_copt=-DNOMINMAX
-build:linux --copt=-D_GNU_SOURCE
-build:linux --host_copt=-D_GNU_SOURCE
-
-build:macos --copt=-D_DARWIN_C_SOURCE
-build:macos --host_copt=-D_DARWIN_C_SOURCE
+# Output user root (override in .bazelrc.local for non-Windows dev)
+startup --output_user_root=C:/Develop/temp/bazel-user-root
+startup --host_jvm_args=-Djavax.net.ssl.trustStore=none
+startup --host_jvm_args=-Djavax.net.ssl.trustStorePassword=none
 
 # Debug configuration
 build:debug --compilation_mode=dbg
@@ -67,33 +48,20 @@ build:debug --strip=never
 build:release --compilation_mode=opt
 build:release --strip=always
 
-# Clang-cl specific debug configuration
-build:clang-cl-debug --config=clang-cl
-build:clang-cl-debug --compilation_mode=dbg
-build:clang-cl-debug --copt=-gline-tables-only
-build:clang-cl-debug --copt=-fstandalone-debug
+# -----------------------------------------------------------------------------
+# Remote Execution Configuration (--config=remote)
+# Uses Cachion RBE and bazel_cpp_toolchain for consistent builds
+# -----------------------------------------------------------------------------
+build:remote --remote_executor=grpc://172.20.158.244:50051
+build:remote --remote_cache=grpc://172.20.158.244:50051
+build:remote --remote_upload_local_results=true
+build:remote --remote_download_outputs=minimal
+build:remote --remote_timeout=600
+build:remote --jobs=1000
+build:remote --spawn_strategy=remote
 
-# Clang-cl specific release configuration
-build:clang-cl-release --config=clang-cl
-build:clang-cl-release --compilation_mode=opt
-build:clang-cl-release --copt=-O2
-build:clang-cl-release --linkopt=-OPT:REF
-build:clang-cl-release --linkopt=-OPT:ICF
-
-# Add ONNX namespace definition (all platforms)
-build --copt=-DONNX_NAMESPACE=morphizen_onnx
-build --host_copt=-DONNX_NAMESPACE=morphizen_onnx
-
-# Allow protobuf to work with MSVC (required for clang-cl builds)
-build --define=protobuf_allow_msvc=true
-
-# Auto-detect platform and apply appropriate config
-# Usage:
-#   Windows: bazel build --config=windows <target>
-#   Linux:   bazel build --config=linux <target>
-#   macOS:   bazel build --config=macos <target>
-#
-# Or create .bazelrc.local with:
-#   build --config=linux   # for Linux auto-config
-#   build --config=macos   # for macOS auto-config
-#   startup --output_user_root=/tmp/bazel-user-root  # for Unix systems
+build:remote --platforms=@bazel_cpp_toolchain//toolchain/platforms:windows_x64
+build:remote --extra_execution_platforms=@bazel_cpp_toolchain//toolchain/platforms:windows_x64
+build:remote --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+build:remote --shell_executable=C:/PROGRA~1/Git/bin/bash.exe
+build:remote --noincompatible_validate_top_level_header_inclusions

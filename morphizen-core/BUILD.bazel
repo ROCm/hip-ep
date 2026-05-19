@@ -4,22 +4,16 @@
 ##
 
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_import", "cc_library")
 load("//scripts/bazel:collect_pb.bzl", "collect_pb")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_python//python:defs.bzl", "py_binary")
 
-py_binary(
-    name = "compress_binary_py",
-    srcs = ["src/binary/compress_binary.py"],
-    main = "src/binary/compress_binary.py",
-)
-
 genrule(
     name = "generate_mem_binary_file",
     outs = ["mem_binary_file.hpp.inc"],
-    cmd = "$(location :compress_binary_py) $@",
-    tools = [":compress_binary_py"],
+    cmd = "$(location //morphizen-foundation:compress_binary_py) 0 $@",
+    tools = ["//morphizen-foundation:compress_binary_py"],
 )
 # # Proto libraries for morphizen-core
 # No, it's **not a good practice** to combine all proto files into a single `proto_library` rule. Here's why:
@@ -64,7 +58,7 @@ proto_library(
 proto_library(
     name = "config_proto",
     srcs = ["src/config.proto"],
-    deps = [ ":version_proto"] ,
+    deps = [":version_proto", "@protobuf//:struct_proto"],
     strip_import_prefix = "src",
     visibility = ["//visibility:public"],
 )
@@ -72,16 +66,10 @@ proto_library(
     name = "pass_context_proto",
     strip_import_prefix = "src",
     srcs = [":src/pass_context.proto"],
-    deps = [":capability_proto", ":config_proto", ":anchor_point_proto"],
+    deps = [":capability_proto", ":config_proto", ":anchor_point_proto", ":version_proto"],
     visibility = ["//visibility:public"],
 )
 
-proto_library(
-    name = "pattern_proto",
-    srcs = [":src/pattern.proto"],
-    strip_import_prefix = "src",
-    visibility = ["//visibility:public"],
-)
 
 proto_library(
     name = "version_proto",
@@ -91,10 +79,10 @@ proto_library(
 )
 
 proto_library(
-    name = "dpu_sg_report_proto",
-    srcs = [":src/dpu_sg_report.proto"],
+    name = "model_compatibility_proto",
+    srcs = ["src/model_compatibility.proto"],
+    strip_import_prefix = "src",
     visibility = ["//visibility:public"],
-    deps = [":anchor_point_proto"],
 )
 
 # C++ proto libraries
@@ -120,7 +108,7 @@ cc_proto_library(
 
 cc_proto_library(
     name = "pattern_cc_proto",
-    deps = [":pattern_proto"],
+    deps = ["//morphizen-pattern:pattern_proto"],
 )
 
 cc_proto_library(
@@ -129,9 +117,10 @@ cc_proto_library(
 )
 
 cc_proto_library(
-    name = "dpu_sg_report_cc_proto",
-    deps = [":dpu_sg_report_proto"],
+    name = "model_compatibility_cc_proto",
+    deps = [":model_compatibility_proto"],
 )
+
 
 # Convenience target to group all proto dependencies
 collect_pb(
@@ -141,7 +130,7 @@ collect_pb(
         ":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
-        ":dpu_sg_report_cc_proto",
+        ":model_compatibility_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
         ":version_cc_proto",
@@ -157,7 +146,7 @@ collect_pb(
         ":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
-        ":dpu_sg_report_cc_proto",
+        ":model_compatibility_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
         ":version_cc_proto",
@@ -168,13 +157,15 @@ collect_pb(
 cc_library(
     name = "morphizen_proto_lib",
     visibility = ["//visibility:public"],
-    deps = [":anchor_point_cc_proto",
+    deps = [
+        ":anchor_point_cc_proto",
         ":capability_cc_proto",
         ":config_cc_proto",
-        ":dpu_sg_report_cc_proto",
+        ":model_compatibility_cc_proto",
         ":pass_context_cc_proto",
         ":pattern_cc_proto",
-        ":version_cc_proto",],
+        ":version_cc_proto",
+    ],
 )
 # Generated files that would normally be created by CMake custom commands
 # Based on morphizen-core-static.cmake configuration
@@ -188,29 +179,12 @@ genrule(
     """,
 )
 
-# Downloaded files from external repositories (defined in MODULE.bazel)
-# The tar.h file is downloaded and patched automatically by the repository rule
-# We can directly reference external files without copying them
-# generate file using patch_wrapper.py
-# pass the file from @freebsd_tar_h//file to patch_wrapper.py
-genrule(
-    name = "generate_tar_h",
-    srcs = [
-        "@freebsd_tar_h//file",
-        "patches/tar.h.force_align_1.patch",
-    ],
-    outs = ["tar.h"],
-    # Use the hello binary to generate the tar.h file
-    cmd = "$(location //scripts/bazel:patch_wrapper) $(location patches/tar.h.force_align_1.patch) $(location @freebsd_tar_h//file) $(@D) -- --debug -v -p1 -d $(@D)",
-    tools = ["//scripts/bazel:patch_wrapper"],
-    visibility = ["//visibility:public"],
-)
 
-## test xclbin.h
+## xclbin.h (vendored)
 genrule(
     name = "test_xclbin.h",
     srcs = [
-        "@xclbin_h//file",
+        "//3rd-party/xclbin:xclbin.h",
     ],
     outs = ["xclbin.h"],
     cmd = "cp $(SRCS)  $@",
@@ -226,7 +200,7 @@ py_binary(
     ],
     main = "src/binary/config_json_binary.hpp.bazel.py",
     deps = [
-        "//scripts/bazel:xxd",
+        "//tools:xxd",
     ],
 )
 
@@ -242,7 +216,7 @@ genrule(
         "morphizen_config.json",
     ],
     cmd = """
-    $(location :config_json_binary_py) --in_morphizen_config_json $(location :label_morphizen_config.json) --out_morphizen_config_json $(location :morphizen_config.json) --morphizen_config_binary_hpp $(location :config_json_binary.hpp) --is_trim_config OFF --xclbin_path "" --enable_default_config ON
+    $(location :config_json_binary_py) --in_morphizen_config_json $(location :label_morphizen_config.json) --out_morphizen_config_json $(location :morphizen_config.json) --morphizen_config_binary_hpp $(location :config_json_binary.hpp) --is_trim_config OFF --enable_default_config ON
     """,
     tools = [
         ":config_json_binary_py",
@@ -260,85 +234,31 @@ genrule(
 # Maintenance issues: When files are added/removed, the build behavior changes implicitly
 cc_library(
     name = "morphizen-core-static",
-    srcs = [
-        # Generated version files (from CMake custom commands)
-        "src/version_info.cpp",
-        "src/version_info.hpp",
-        # Core implementation files
-        "src/pass_context_imp.hpp",
-        "src/pass_context_imp.cpp",
-        "src/anchor_point.cpp",
-        "src/anchor_point_imp.cpp",
-        "src/anchor_point_imp.hpp",
-        "src/pass_imp.hpp",
-        "src/pass_imp.cpp",
-        "src/tar_ball.cpp",
-        "src/tar_ball.hpp",
-        "src/tar_file.cpp",
-        "src/tar_file.hpp",
-        "src/tar_header.hpp",
-        "src/tar_header.cpp",
-        "src/tar_entry.cpp",
-        "src/tar_entry.hpp",
-        "src/mmap_file.hpp",
-        "src/mmap_file.cpp",
-        "src/mem_stream_buffer.hpp",
-        "src/pass.cpp",
-        "src/model.cpp",
-        "src/graph.cpp",
-        "src/node_attr.cpp",
-        "src/node_arg.cpp",
-        "src/tensor_proto.cpp",
-        "src/node_input.cpp",
-        "src/node.cpp",
-        "src/profile_utils.hpp",
-        "src/profile_utils.cpp",
-        "src/binary/mem_binary.cpp",
-        "src/binary/xclbin_file.cpp",
-        "src/util.cpp",
-        "src/config.hpp",
-        "src/config.cpp",
-        "src/custom_op.cpp",
-        # Pattern-related files
-        "src/pattern/pattern.cpp",
-        "src/pattern/pattern_node.cpp",
-        "src/pattern/pattern_node.hpp",
-        "src/pattern/pattern_commutable_node.cpp",
-        "src/pattern/pattern_commutable_node.hpp",
-        "src/pattern/pattern_or.cpp",
-        "src/pattern/pattern_or.hpp",
-        "src/pattern/pattern_wildcard.cpp",
-        "src/pattern/pattern_wildcard.hpp",
-        "src/pattern/pattern_sequence.cpp",
-        "src/pattern/pattern_sequence.hpp",
-        "src/pattern/pattern_constant.cpp",
-        "src/pattern/pattern_constant.hpp",
-        "src/pattern/pattern_graph_input.cpp",
-        "src/pattern/pattern_graph_input.hpp",
-        "src/pattern/pattern_where.cpp",
-        "src/pattern/pattern_where.hpp",
-        "src/pattern/immutable_map.hpp",
-        "src/pattern/pattern_log.hpp",
-        "src/pattern/pattern_parser.cpp",
-        "src/rewrite_rule.cpp",
-        # Utility files
-        "src/file_lock.hpp",
-        "src/file_lock.cpp",
-        "src/guess_reshape.cpp",
-        "src/binary/config_reader.cpp",
-        "src/vitisai_compile_model.cpp",
-        "src/onnxruntime_vitisai_ep.cpp",
-        "src/file_stream.hpp",
-        "src/file_stream.cpp",
-        "src/cleanup.hpp",
-        "src/cleanup.cpp",
-        "src/ep_shared_context_workspace.cpp",
-        "src/ep_shared_context_workspace.hpp",
-        # Generated files (from genrules)
-    ] + select({
+    srcs = glob(
+        [
+            "src/*.cpp",
+            "src/*.hpp",
+            "src/binary/*.cpp",
+            "src/binary/*.hpp",  # includes onnx_schema_json_binary.hpp (static file)
+        ],
+        exclude = [
+            # Platform-specific files handled by select() below
+            "src/util_mswin.cpp",
+            "src/util_linux.cpp",
+            "src/util_unknown.cpp",
+            "src/mmap_file_win.cpp",
+            "src/mmap_file_win.hpp",
+            "src/mmap_file_tmphandle_win.cpp",
+            "src/mmap_file_tmphandle_win.hpp",
+            # Entry point, not part of the library
+            "src/main.cpp",
+        ],
+    ) + select({
         "@bazel_tools//src/conditions:windows": [
             "src/mmap_file_win.cpp",
             "src/mmap_file_win.hpp",
+            "src/mmap_file_tmphandle_win.cpp",
+            "src/mmap_file_tmphandle_win.hpp",
             "src/util_mswin.cpp",
         ],
         "@bazel_tools//src/conditions:linux_x86_64": [
@@ -351,7 +271,7 @@ cc_library(
     hdrs = [
         ":config_json_binary.hpp",
         ":mem_binary_file.hpp.inc",
-        ":tar.h",
+        "include/morphizen/tar.h",
         ":morphizen_version_info.hpp.inc",
         ":xclbin.h",
     ],
@@ -359,18 +279,23 @@ cc_library(
         "@bazel_tools//src/conditions:windows": [
             "/W0",  # Suppress all warnings
             "/DONNX_NAMESPACE=onnx",
-            "/DMORPHIZEN_USE_DLL=1",
-            "/DMORPHIZEN_EXPORT_DLL=1",
+            "/DMORPHIZEN_EXPORT_DLL=1",  # Allow internal headers (satisfies _sanity_check.hpp)
+            "/UUNICODE",  # Undefine UNICODE (toolchain sets it; util_mswin.cpp uses LPCSTR)
+            "/U_UNICODE",
             "/Zc:__cplusplus",
         ],
         "//conditions:default": [
             "-w",  # Suppress all warnings
             "-DONNX_NAMESPACE=onnx",
-            "-DMORPHIZEN_USE_DLL=1",
             "-DMORPHIZEN_EXPORT_DLL=1",
             "-fPIC",
         ],
     }),
+    defines = [
+        # Mirrors CMake: target_compile_definitions(morphizen-core-static PUBLIC MORPHIZEN_HAS_PATTERN_MATCHING=1)
+        # Propagates transitively so all consumers (unit-test, ort-bridge/test, etc.) see Pattern APIs.
+        "MORPHIZEN_HAS_PATTERN_MATCHING=1",
+    ],
     includes = [
         ".",  # For generated files in current directory
         "include",  # Public headers
@@ -383,59 +308,86 @@ cc_library(
         ":morphizen-core-headers",
         ":morphizen-core-proto-headers",
         ":morphizen_proto_lib",
-        "//encryption",
+        "//morphizen-foundation",
+        "//morphizen-graph:morphizen-graph",
+        "//morphizen-pattern:morphizen-pattern",
         "//morphizen-utils:morphizen_utils",
         "//morphizen-ort-api-ext",
-        "//3rd-party:hash-library",
+        "@hash-library//:hash-library",
         "@glog",
         "@gsl",
+        "@onnx//:onnx",
         "@onnxruntime//:onnxruntime_headers",
         "@protobuf",
         "@zlib",
     ],
 )
 
+# Shared library (DLL) that ORT loads as the MorphiZen Execution Provider.
+# Mirrors GHE's cc_binary(name="onnxruntime_vitisai_ep", linkshared=True).
+# The unit-test and ort-bridge/test add this as a data dep so that
+# Plugin::get("onnxruntime_morphizen_ep") can dynamically load it at runtime.
+cc_binary(
+    name = "onnxruntime_morphizen_ep",
+    srcs = ["src/main.cpp"],
+    linkshared = True,
+    copts = select({
+        "@bazel_tools//src/conditions:windows": [
+            "/std:c++17",
+            "/Zc:__cplusplus",
+            "/DONNX_NAMESPACE=onnx",
+            "/DMORPHIZEN_EXPORT_DLL=1",
+        ],
+        "//conditions:default": [
+            "-std=c++17",
+            "-fPIC",
+            "-DONNX_NAMESPACE=onnx",
+            "-DMORPHIZEN_EXPORT_DLL=1",
+        ],
+    }),
+    # win_def_file is only meaningful on Windows; Bazel ignores it on Linux.
+    # Use the _with_ort_bridge variant which also exports CreateEpFactories
+    # and ReleaseEpFactory (required by ORT's RegisterExecutionProviderLibrary).
+    win_def_file = ":onnxruntime_morphizen_ep_with_ort_bridge.def",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":morphizen-core-static",
+        # ort-bridge provides CreateEpFactories and ReleaseEpFactory, which are
+        # declared in the _with_ort_bridge.def and required by ORT's
+        # RegisterExecutionProviderLibrary. Mirrors GHE vaip-core/BUILD.bazel.
+        "//ort-bridge",
+        # Mirrors CMake: morphizen-pass-init and morphizen-demo passes are
+        # all linked with WHOLE_ARCHIVE into the EP DLL so their
+        # StaticPluginRegister static initializers run at DLL load time.
+        "//morphizen-pass-init:morphizen-pass-init",
+        "//morphizen-demo/level-1-pass-relu-dq:morphizen-level1-pass-relu-dq",
+        "//morphizen-demo/custom-op-relu-dq:morphizen-custom-op-relu-dq",
+        "@glog",
+        "@protobuf",
+    ],
+)
+
+# Wraps the linkshared cc_binary so that adding it to a cc_test's deps causes
+# Bazel to stage the DLL next to the test binary (Windows PATH search) and to
+# add its directory to PATH, mirroring GHE's onnxruntime_vitisai_ep_runtime.
+# Use in deps (not data) to get DLL-search-path propagation; add the raw
+# cc_binary target to data as well so Rlocation resolves to an absolute path.
+cc_import(
+    name = "onnxruntime_morphizen_ep_runtime",
+    shared_library = ":onnxruntime_morphizen_ep",
+    visibility = ["//visibility:public"],
+)
+
 # Alias for backward compatibility
 cc_library(
     name = "morphizen-core-headers",
-    hdrs = [
-        # Public headers from include/morphizen/
-        "include/morphizen/_sanity_check.hpp",
-        "include/morphizen/anchor_point.hpp",
-        "include/morphizen/config_reader.hpp",
-        "include/morphizen/custom_op_imp.hpp",
-        "include/morphizen/env_config.hpp",
-        "include/morphizen/graph.hpp",
-        "include/morphizen/guess_reshape.hpp",
-        "include/morphizen/model.hpp",
-        "include/morphizen/node.hpp",
-        "include/morphizen/mem_binary.hpp",
-        "include/morphizen/node_arg.hpp",
-        "include/morphizen/node_attr.hpp",
-        "include/morphizen/node_input.hpp",
-        "include/morphizen/onnxruntime_api.hpp",
-        "include/morphizen/onnxruntime_vitisai_ep.hpp",
-        "include/morphizen/op_def.hpp",
-        "include/morphizen/parse_value.hpp",
-        "include/morphizen/pass.hpp",
-        "include/morphizen/pass_context.hpp",
-        "include/morphizen/pattern.hpp",
-        "include/morphizen/provider_option_keys.hpp",
-        "include/morphizen/rewrite_rule.hpp",
-        "include/morphizen/tensor_proto.hpp",
-        "include/morphizen/util.hpp",
-        "include/morphizen/morphizen.hpp",
-        "include/morphizen/morphizen_core.hpp",
-        "include/morphizen/plugin.hpp",
-        "include/morphizen/weak.hpp",
-        "include/morphizen/with_current_graph.hpp",
-        "include/morphizen/xclbin_file.hpp",
-    ],
+    hdrs = glob(["include/morphizen/*.hpp", "include/morphizen/*.h"]),
     strip_include_prefix = "include",
     visibility = ["//visibility:public"],
 )
 cc_library(
     name = "morphizen-core-proto-headers",
     hdrs = [":morphizen_proto_pb_h"],
+    includes = ["."],  # exposes bazel-out/.../morphizen-core/ so morphizen/*.pb.h resolves
     visibility = ["//visibility:public"],
 )

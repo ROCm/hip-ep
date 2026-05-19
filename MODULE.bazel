@@ -4,12 +4,11 @@ module(
 )
 
 # Core C++ rules
-bazel_dep(name = "rules_cc", version = "0.1.1")
-bazel_dep(name = "rules_foreign_cc", version = "0.12.0")
+bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "rules_proto", version = "7.0.2")
 bazel_dep(name = "rules_python", version = "1.5.0")
 
-# setup for Python 3.9
+# setup for Python 3.10
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.defaults(
     # Use python.defaults if you have defined multiple toolchain versions.
@@ -30,56 +29,38 @@ pip.parse(
 )
 use_repo(pip, "my_pip_deps")
 
-bazel_dep(name = "platforms", version = "0.0.11")
-bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "platforms", version = "1.0.0")
 
-# Toolchain configuration for clang-cl
-bazel_dep(name = "toolchains_llvm", version = "1.2.0")
-
-# Configure LLVM toolchain for clang-cl on Windows
-llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
-llvm.toolchain(
-    name = "llvm_toolchain",
-    llvm_version = "18.1.8",
-)
-use_repo(llvm, "llvm_toolchain")
-
-# Register the LLVM toolchain - let Bazel choose the right one
-register_toolchains("@llvm_toolchain//:all")
+# bazel_cpp_toolchain: provides clang-cl toolchain + platform targets used by --config=remote.
+# Sourced from bazel-registry (ROCm/bazel-registry v1.0.0).
+bazel_dep(name = "bazel_cpp_toolchain", version = "1.0.0")
 
 # External dependencies
-bazel_dep(name = "glog", version = "0.7.1")
-bazel_dep(name = "protobuf", version = "29.0") #rules_cc@0.1.1 → protobuf@29.0 rules_proto@7.0.2 → protobuf@29.0 rules_python@1.5.0 → protobuf@29.0
+# glog 0.6.0 — must match cmake/deps.txt (which pins v0.6.0).
+# glog 0.7.1 changed google::Symbolize from 3 to 4 parameters;
+# morphizen-core/src/vitisai_compile_model.cpp forward-declares the 3-parameter
+# signature, so 0.7.1 causes an undefined symbol linker error.
+bazel_dep(name = "glog", version = "0.6.0")
+bazel_dep(name = "protobuf", version = "29.0") #rules_cc@0.2.17 → protobuf@29.0 rules_proto@7.0.2 → protobuf@29.0 rules_python@1.5.0 → protobuf@29.0
 bazel_dep(name = "gsl", version = "4.0.0")  # Needed by ONNXRuntime
 bazel_dep(name = "zlib", version = "1.3.1.bcr.6")
-bazel_dep(name = "openssl", version = "3.3.1.bcr.3")
-
-# ONNXRuntime external dependency (needed at top-level for visibility)
-# Commit: ae7c54113ed103ca279b638bdb07f49b51611f5e
-onnxruntime_extension = use_extension("//3rd-party:onnxruntime_extension.bzl", "onnxruntime_extension")
-use_repo(onnxruntime_extension, "onnxruntime")
+bazel_dep(name = "openssl", version = "3.3.1.bcr.9")
+bazel_dep(name = "onnxruntime", version = "1.24.4")
 
 # ONNX v1.18.0 external dependency
 onnx_extension = use_extension("//3rd-party:onnx_extension.bzl", "onnx_extension")
 use_repo(onnx_extension, "onnx")
 
-# download freebsd_tar_h
-http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
-http_file(
-    name = "freebsd_tar_h",
-    urls = ["https://raw.githubusercontent.com/freebsd/freebsd-src/refs/heads/stable/12/bin/pax/tar.h"],
-    sha256 = "0613167f5ebd5c8a42c7e97018ab9f95e47ab8038549ee3cb540e9b386ceb215",
-    # save it to another name
-    downloaded_file_path = "tar.h",
-    visibility = ["//visibility:public"],
-)
+# hash-library external dependency
+bazel_dep(name = "hash-library", version = "8.0.0")
 
-# download xclbin.h
-http_file(
-    name = "xclbin_h",
-    urls = ["https://raw.githubusercontent.com/Xilinx/XRT/347acbd5e2b2d658ecd21d024547703fccc5572c/src/runtime_src/core/include/xclbin.h"],
-    sha256 = "1a90ef24327e719325a4eea33d5462409136ac49fc13b33f1c2e092cbab1569f",
-    # save it to another name
-    downloaded_file_path = "xclbin.h",
-    visibility = ["//visibility:public"],
-)
+# googletest — required by unit-test
+bazel_dep(name = "googletest", version = "1.15.2")
+
+# Boost — required by various tools
+# cmake/deps.txt pins 1.84.0; 1.83.0.bcr.4 is the closest patched BCR version.
+# (plain 1.83.0 has a broken BUILD: glob("src/**/*.ipp") fails with no matches)
+bazel_dep(name = "boost.program_options", version = "1.83.0.bcr.4")
+
+# LLVM/MLIR v22.1.3 — required by mlir-imp backend
+bazel_dep(name = "llvm-project-overlay", version = "22.1.3")
