@@ -49,7 +49,6 @@ E2ETestConfig::create(const std::filesystem::path& config_path) {
               << " Status : " << status.ToString() << std::endl;
     return {};
   }
-
   auto ret = std::vector<std::unique_ptr<E2ETestConfig>>();
 
   for (const auto proto : root.test_configs()) {
