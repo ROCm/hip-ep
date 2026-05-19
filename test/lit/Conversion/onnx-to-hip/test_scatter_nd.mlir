@@ -14,6 +14,9 @@ module {
   }
 
   // 1-D ScatterND, default reduction ("none"), scalar updates.
+  // Note: `reduction = "none"` is the default value of a
+  // `DefaultValuedStrAttr` and is therefore elided by MLIR's pretty
+  // printer — the absence of the attribute in IR IS the "none" case.
   func.func @test_scatter_nd_1d_default(
       %data: tensor<8xf32>,
       %indices: tensor<4x1xi64>,
@@ -27,12 +30,13 @@ module {
     // CHECK: hip.scatter_nd({{.*}}) ins(
     // CHECK-SAME: : tensor<8xf32>, tensor<4x1xi64>, tensor<4xf32>)
     // CHECK-SAME: outs({{.*}} : tensor<8xf32>)
-    // CHECK-SAME: {reduction = "none"}
+    // CHECK-NOT: reduction
 
     return %r : tensor<8xf32>
   }
 
-  // 3-D ScatterND with k=1: each update is a 2-D slice.
+  // 3-D ScatterND with k=1: each update is a 2-D slice (default reduction
+  // is elided — see note in @test_scatter_nd_1d_default above).
   func.func @test_scatter_nd_3d_slice(
       %data: tensor<4x4x4xf32>,
       %indices: tensor<2x1xi64>,
@@ -46,7 +50,7 @@ module {
     // CHECK: hip.scatter_nd({{.*}}) ins(
     // CHECK-SAME: : tensor<4x4x4xf32>, tensor<2x1xi64>, tensor<2x4x4xf32>)
     // CHECK-SAME: outs({{.*}} : tensor<4x4x4xf32>)
-    // CHECK-SAME: {reduction = "none"}
+    // CHECK-NOT: reduction
 
     return %r : tensor<4x4x4xf32>
   }
