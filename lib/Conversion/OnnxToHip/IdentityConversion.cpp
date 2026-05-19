@@ -53,8 +53,8 @@ struct IdentityForward : public mlir::RewritePattern {
     // diverge, that's a frontend bug rather than something we want to
     // paper over by inserting a cast here.
     if (input.getType() != op->getResult(0).getType())
-      return rewriter.notifyMatchFailure(
-          op, "Identity input/output type mismatch");
+      return rewriter.notifyMatchFailure(op,
+                                         "Identity input/output type mismatch");
 
     rewriter.replaceOp(op, input);
     return mlir::success();

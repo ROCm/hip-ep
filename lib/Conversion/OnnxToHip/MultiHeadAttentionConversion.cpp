@@ -110,8 +110,7 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
   // ONNX spec defaults: mask_filter_value = -10000.0, scale = 1/sqrt(head_size)
   // (we pass 0.0 as a runtime sentinel meaning "auto-compute at runtime",
   // matching the GQA convention).
-  auto maskFilterValueAttr =
-      getFloatAttr("mask_filter_value", -10000.0f);
+  auto maskFilterValueAttr = getFloatAttr("mask_filter_value", -10000.0f);
   auto scaleAttr = getFloatAttr("scale", 0.0f);
   auto unidirectionalAttr = getI64Attr("unidirectional", 0);
 
@@ -148,13 +147,12 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
   mlir::Value presentValueInit = nullptr;
   mlir::Value qkInit = nullptr;
   if (presentKeyType)
-    presentKeyInit = createEmptyTensor(
-        rewriter, loc, presentKeyType,
-        pastKey ? pastKey : (key ? key : query));
+    presentKeyInit = createEmptyTensor(rewriter, loc, presentKeyType,
+                                       pastKey ? pastKey : (key ? key : query));
   if (presentValueType)
-    presentValueInit = createEmptyTensor(
-        rewriter, loc, presentValueType,
-        pastValue ? pastValue : (value ? value : query));
+    presentValueInit =
+        createEmptyTensor(rewriter, loc, presentValueType,
+                          pastValue ? pastValue : (value ? value : query));
   if (qkType)
     qkInit = createEmptyTensor(rewriter, loc, qkType, query);
 
@@ -205,8 +203,7 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
   attrs.push_back(
       rewriter.getNamedAttr("mask_filter_value", maskFilterValueAttr));
   attrs.push_back(rewriter.getNamedAttr("scale", scaleAttr));
-  attrs.push_back(
-      rewriter.getNamedAttr("unidirectional", unidirectionalAttr));
+  attrs.push_back(rewriter.getNamedAttr("unidirectional", unidirectionalAttr));
 
   auto state = mlir::OperationState(loc, "hip.multi_head_attention");
   state.addOperands(operands);
