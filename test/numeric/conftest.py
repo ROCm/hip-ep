@@ -101,10 +101,18 @@ def pytest_addoption(parser):
         help="Path to the EP DLL. Required; tests SKIP if absent.",
     )
     parser.addoption(
-        "--ep-config",
-        default=None,
-        help="Path to the EP config file. Optional; absent means the EP "
-        "runs with its built-in defaults.",
+        "--ep-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Pass-through entry for ORT's per-provider `provider_options` "
+        "dict (the `Dict[str, str]` ORT hands to the EP's "
+        "`OrtEpFactory::CreateEp`). Repeatable. Both KEY and VALUE are "
+        "EP-specific -- consult your EP's docs for the keys it accepts. "
+        "Examples: `--ep-option device_id=0` (CUDA / DirectML), "
+        "`--ep-option config_file=/path/to/morphizen_config.json` "
+        "(MorphiZen / VitisAI). Values containing '=' are preserved: "
+        "only the first '=' is treated as the separator.",
     )
     parser.addoption(
         "--ep-name",

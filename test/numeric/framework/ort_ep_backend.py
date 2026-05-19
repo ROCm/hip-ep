@@ -8,9 +8,12 @@
 This module is wired up by `conftest.py` as the ``ort_ep`` backend and
 loads a single, specific EP via ORT's CAPI. The EP's identity (the
 name the C++ side registers as) is supplied at runtime via
-``--ep-name`` so this module stays generic across EPs. See the
-"Example: MorphiZen EP" section of ``test/numeric/README.md`` for a
-canonical end-to-end recipe (DLL path, config, name, PATH-prep).
+``--ep-name``, and any per-provider configuration is forwarded
+verbatim to ORT's ``provider_options`` dict via one or more
+``--ep-option KEY=VALUE`` flags, so this module stays generic across
+EPs. See the "Example: MorphiZen EP" section of
+``test/numeric/README.md`` for a canonical end-to-end recipe (DLL
+path, EP name, provider options, PATH-prep).
 """
 
 from __future__ import annotations
@@ -25,17 +28,26 @@ from .backend import Backend
 
 # Layering rule for this module:
 #
-#   * Knobs Python itself consumes (EP DLL path, EP config path)
-#     are taken from pytest CLI flags only -- no env-var fallback.
-#     Defaults belong to the caller's wrapper, not to this module,
-#     so the framework stays portable across CI tarballs, system
-#     installs, and arbitrary artefact directories.
+#   * Knobs Python itself consumes (EP DLL path) are taken from pytest
+#     CLI flags only -- no env-var fallback. Defaults belong to the
+#     caller's wrapper, not to this module, so the framework stays
+#     portable across CI tarballs, system installs, and arbitrary
+#     artefact directories.
 #
-#   * Knobs the EP DLL itself consumes (PATH for dependent DLL lookup,
-#     any debug/profile env vars the EP recognises) stay as environment
-#     variables only. We never expose a CLI flag whose only job would
-#     be to copy a value into os.environ for the DLL to read -- that
-#     surface already exists at the shell layer.
+#   * Per-provider configuration is forwarded verbatim into ORT's
+#     `provider_options` dict via repeating `--ep-option KEY=VALUE`
+#     flags. The framework does NOT know about any specific provider
+#     key (e.g. MorphiZen's "config_file", CUDA's "device_id"); it just
+#     copies the strings the caller supplied into the dict ORT hands
+#     to the EP's `OrtEpFactory::CreateEp`. Consult your EP's docs
+#     for the keys it accepts.
+#
+#   * Knobs the EP DLL itself consumes via the *environment* (PATH for
+#     dependent DLL lookup, any debug/profile env vars the EP
+#     recognises) stay as environment variables only. We never expose
+#     a CLI flag whose only job would be to copy a value into
+#     os.environ for the DLL to read -- that surface already exists at
+#     the shell layer.
 #
 # The single piece of implicit PATH manipulation this module does is
 # prepending dirname(--ep-dll). That covers the common case where the
@@ -60,11 +72,11 @@ class OrtEpBackend(Backend):
         self,
         ep_name: str,
         ep_dll_path: str,
-        config_path: str | None,
+        provider_options: dict[str, str] | None = None,
     ) -> None:
         self._ep_name = ep_name
         self._ep_dll = Path(ep_dll_path)
-        self._config = Path(config_path) if config_path else None
+        self._provider_options: dict[str, str] = dict(provider_options or {})
         self._ep_device = self._register_ep()
 
     @property
@@ -78,7 +90,12 @@ class OrtEpBackend(Backend):
         tag = f"[{self._ep_name}]"
         print(f"{tag} ORT version : {ort.__version__}")
         print(f"{tag} EP DLL      : {self._ep_dll}")
-        print(f"{tag} Config      : {self._config or '<none>'}")
+        if self._provider_options:
+            print(f"{tag} provider_options ({len(self._provider_options)}):")
+            for k, v in self._provider_options.items():
+                print(f"{tag}   {k} = {v}")
+        else:
+            print(f"{tag} provider_options: <none>")
 
         # The first arg to register_execution_provider_library becomes
         # the EP's advertised ep_name in get_ep_devices(). Any non-empty
@@ -119,10 +136,7 @@ class OrtEpBackend(Backend):
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
         opts.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
-        provider_options = {}
-        if self._config is not None:
-            provider_options["config_file"] = str(self._config)
-        opts.add_provider_for_devices([self._ep_device], provider_options)
+        opts.add_provider_for_devices([self._ep_device], dict(self._provider_options))
         sess = ort.InferenceSession(model_path, sess_options=opts)
         input_dict = {sess.get_inputs()[i].name: inp for i, inp in enumerate(inputs)}
         outputs = sess.run(None, input_dict)
@@ -140,6 +154,38 @@ def _prepend_path(directory: Path) -> None:
     os.environ["PATH"] = str(directory) + os.pathsep + current
 
 
+def _parse_ep_options(raw: list[str]) -> dict[str, str]:
+    """Parse repeating ``--ep-option KEY=VALUE`` strings into a dict.
+
+    Only the first ``=`` separates key from value, so values containing
+    ``=`` (e.g. a path with an ``=`` in it, or a JSON-ish blob) are
+    preserved verbatim. Empty keys, duplicate keys, and entries without
+    ``=`` are rejected loudly via ``pytest.skip`` -- silently dropping
+    them would hide config errors that the EP would otherwise notice
+    at session-create time.
+    """
+    import pytest
+
+    out: dict[str, str] = {}
+    for entry in raw:
+        if "=" not in entry:
+            pytest.skip(
+                f"--ep-option entry {entry!r} is malformed: expected KEY=VALUE."
+            )
+        key, value = entry.split("=", 1)
+        key = key.strip()
+        if not key:
+            pytest.skip(f"--ep-option entry {entry!r} has an empty key.")
+        if key in out:
+            pytest.skip(
+                f"--ep-option key {key!r} given more than once "
+                f"(values {out[key]!r} and {value!r}); ORT's "
+                "provider_options dict only stores one value per key."
+            )
+        out[key] = value
+    return out
+
+
 def create(pytest_config=None) -> OrtEpBackend:
     """Create an :class:`OrtEpBackend` from pytest CLI flags.
 
@@ -147,12 +193,16 @@ def create(pytest_config=None) -> OrtEpBackend:
       ``--ep-dll <path>``  Path to the EP DLL.
 
     Optional:
-      ``--ep-config <path>``  Path to an EP-specific config file. If
-      omitted, the EP runs with its built-in defaults.
-      ``--ep-name <name>``   Alias the EP DLL gets registered under;
-      ORT then advertises the device with this name. Any non-empty
-      string works -- pick something meaningful for log clarity (the
-      default ``"ExecutionProvider"`` is a generic placeholder).
+      ``--ep-name <name>``       Alias the EP DLL gets registered
+      under; ORT then advertises the device with this name. Any
+      non-empty string works -- pick something meaningful for log
+      clarity (the default ``"ExecutionProvider"`` is a generic
+      placeholder).
+      ``--ep-option KEY=VALUE``  Repeatable. Each entry is forwarded
+      verbatim into the ``provider_options`` dict ORT passes to the
+      EP's ``OrtEpFactory::CreateEp``. Both KEY and VALUE are
+      EP-specific; the framework has no knowledge of any particular
+      provider key.
 
     Skips the suite cleanly (rather than failing) when ``--ep-dll`` is
     not supplied, so the framework stays runnable on machines without
@@ -168,14 +218,15 @@ def create(pytest_config=None) -> OrtEpBackend:
     import pytest
 
     ep_dll = pytest_config.getoption("--ep-dll") if pytest_config is not None else None
-    ep_config = (
-        pytest_config.getoption("--ep-config") if pytest_config is not None else None
-    )
     ep_name = (
         pytest_config.getoption("--ep-name")
         if pytest_config is not None
         else "ExecutionProvider"
     )
+    raw_options: list[str] = (
+        pytest_config.getoption("--ep-option") if pytest_config is not None else []
+    )
+    provider_options = _parse_ep_options(raw_options)
 
     if not ep_dll:
         pytest.skip(
@@ -193,14 +244,8 @@ def create(pytest_config=None) -> OrtEpBackend:
     # packaged, not a user choice.
     _prepend_path(ep_dll_path.parent)
 
-    config_path: Path | None = None
-    if ep_config:
-        config_path = Path(ep_config)
-        if not config_path.exists():
-            pytest.skip(f"EP config not found at {config_path}.")
-
     return OrtEpBackend(
         ep_name=ep_name,
         ep_dll_path=str(ep_dll_path),
-        config_path=str(config_path) if config_path else None,
+        provider_options=provider_options,
     )
