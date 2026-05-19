@@ -18,6 +18,19 @@ canonical wiring used by this repo's build.
 The suite is independent of the perf tests in [test/python/](../python/):
 different goal, different runner, different fixtures.
 
+## Install
+
+The suite has four Python dependencies: `numpy`, `onnx`,
+`onnxruntime`, and `pytest`. Two paths:
+
+- **Already on the repo's canonical conda env** (set up via
+  `conda env create -f environment.yml && conda activate hipdnn-ep`,
+  see [CLAUDE.md](../../CLAUDE.md)) -- nothing to install,
+  `environment.yml` already pulls in all four (as a superset, with
+  `onnxruntime-directml` instead of plain `onnxruntime`).
+- **Fresh venv / CI worker / outside this repo** --
+  `pip install -r test/numeric/requirements.txt`.
+
 ## Quick Start
 
 The framework has no repo-relative defaults; you always invoke pytest
@@ -355,6 +368,7 @@ projection holds a ~115 MB fp16 weight).
 test/numeric/
 ├── README.md               this file
 ├── pytest.ini
+├── requirements.txt        pip install -r ...  (numpy, onnx, onnxruntime, pytest)
 ├── conftest.py             --backend / --output-dir / --no-cache / ... + fixtures
 ├── framework/
 │   ├── backend.py          Backend ABC
