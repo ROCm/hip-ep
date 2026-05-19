@@ -29,7 +29,8 @@ E2ETestSessionOptions::E2ETestSessionOptions(
       auto ctx_path = std::filesystem::u8path(session_config.second);
       if (ctx_path.is_relative()) {
         auto abs_path = (TEST_CWD / ctx_path).u8string();
-        LOG(INFO) << "Session config (abs): ep.context_file_path = " << abs_path;
+        LOG(INFO) << "Session config (abs): ep.context_file_path = "
+                  << abs_path;
         ort_session_options_->AddConfigEntry(session_config.first.c_str(),
                                              abs_path.c_str());
         continue;

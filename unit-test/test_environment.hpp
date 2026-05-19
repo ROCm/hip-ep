@@ -55,17 +55,16 @@ static const std::filesystem::path RESNET_50_PATH = []() {
   auto rf = bazel::tools::cpp::runfiles::Runfiles::CreateForTest(
       BAZEL_CURRENT_REPOSITORY, &err);
   CHECK(rf != nullptr) << "Runfiles not available: " << err;
-#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+#  ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
   // The MLIR backend's Model::load() parses MLIR text, not binary ONNX.
   // pt_resnet50.onnx.mlir lives in ort-bridge/test/src/ and is exported
   // via exports_files for use here.
-  auto p = rf->Rlocation(
-      "_main/ort-bridge/test/src/pt_resnet50.onnx.mlir");
+  auto p = rf->Rlocation("_main/ort-bridge/test/src/pt_resnet50.onnx.mlir");
   CHECK(!p.empty()) << "pt_resnet50.onnx.mlir not found in runfiles";
-#else
+#  else
   auto p = rf->Rlocation("_main/unit-test/data/pt_resnet50.onnx");
   CHECK(!p.empty()) << "pt_resnet50.onnx not found in runfiles";
-#endif
+#  endif
   return std::filesystem::u8path(p);
 }();
 
