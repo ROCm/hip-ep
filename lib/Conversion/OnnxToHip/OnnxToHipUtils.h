@@ -194,6 +194,8 @@ void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateIdentityConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

@@ -84,6 +84,7 @@ These operations are handled through standard MLIR transformations without requi
 | ScatterND | `hip.scatter_nd` (runtime stub) | Native DPS op carrying the ONNX `reduction` attribute (`none` / `add` / `mul` / `min` / `max`). Runtime currently logs its parameters only — models exercising ScatterND will produce uninitialised output until the kernel is implemented. |
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 | ConstantOfShape | arith.constant (compile-time fold) | Folds to a splat constant when the shape input is itself constant; honours optional `value` attribute |
+| Identity | SSA value forwarding | Pass-through op; the input value is wired directly to every user (equivalent to a full-range `memref.subview` view, but cheaper — no view op is materialised in the IR) |
 
 ---
 
