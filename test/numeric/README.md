@@ -33,9 +33,10 @@ The suite has four Python dependencies: `numpy`, `onnx`,
 
 ## Quick Start
 
-The framework has no repo-relative defaults; you always invoke pytest
-with at least `--ep-dll`, and any per-provider settings via repeating
-`--ep-option KEY=VALUE`. Skeleton:
+The framework has no repo-relative defaults. To actually exercise an
+EP you supply `--ep-dll` (plus any `--ep-option KEY=VALUE` entries the
+EP needs); without `--ep-dll` every test SKIPs cleanly, so the suite
+is harmless to run on machines that haven't built the EP. Skeleton:
 
 ```bash
 # Put the EP's runtime DLL dependencies on the loader search path --
@@ -111,9 +112,10 @@ test/numeric/python_test_output/
 
 ### `cache/` -- persistent reference-output cache
 
-- `<sample-name>` is the sanitised pytest node id (e.g.
-  `test_matmul_qo_proj_llama_shape_seq_len_128`), so the directory
-  tells you which test owns it.
+- `<sample-name>` is the sanitised pytest node id (e.g. the
+  parametrised test `test_matmul_qo_proj_llama_shape[128]` becomes
+  `test_matmul_qo_proj_llama_shape_128`), so the directory tells you
+  which test owns it.
 - The sha256 of `(model_bytes + each input as contiguous bytes)` is
   stored *inside* `manifest.json` -- never in the path. On every cache
   read the runner recomputes the hash and rebuilds the entry if it no

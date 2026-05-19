@@ -5,14 +5,16 @@
 
 """On-disk cache for ORT CPU reference outputs.
 
-The cache lives at ``<work_dir>/_cache/<sample-name>/`` -- one directory
-per sanitized pytest node id, ever. The sha256 of (model_bytes ++
-inputs.tobytes()) is stored *inside* ``manifest.json`` rather than in
-the path, so the layout stays human-readable and disk usage is bounded
-by the number of distinct test names. On every cache read the runner
-recomputes the hash and invalidates the entry if it no longer matches --
-this is the drift tripwire that catches edits to the test model or the
-input distribution without requiring the contributor to bump a version.
+The cache lives at ``<cache_dir>/<sample-name>/`` -- one directory per
+sanitized pytest node id, ever. ``<cache_dir>`` defaults to
+``<output_dir>/cache/`` (configurable via ``--cache-dir``; see
+``conftest.py``). The sha256 of ``(model_bytes ++ inputs.tobytes())`` is
+stored *inside* ``manifest.json`` rather than in the path, so the layout
+stays human-readable and disk usage is bounded by the number of
+distinct test names. On every cache read the runner recomputes the
+hash and invalidates the entry if it no longer matches -- this is the
+drift tripwire that catches edits to the test model or the input
+distribution without requiring the contributor to bump a version.
 """
 
 from __future__ import annotations
@@ -42,10 +44,12 @@ _OUTPUTS_DIR = "outputs"
 def sanitize_name(name: str) -> str:
     """Make a pytest node id safe for use as a filesystem directory name.
 
-    Equivalent to the helper used by model_runner.ModelRunner for work
-    directory tagging. Pytest parametrization tokens like ``[seq_len=128]``
-    become ``_seq_len_128`` so each parametrization gets its own cache
-    directory.
+    Also used by ``ModelRunner`` for per-test work-directory tagging, so
+    both layouts stay aligned (one test name -> one sanitized form
+    everywhere). Pytest parametrization tokens like
+    ``test_matmul_qo_proj[128]`` become ``test_matmul_qo_proj_128``: the
+    brackets are turned into underscores, runs of underscores collapse,
+    and the leading/trailing underscores are stripped.
     """
     name = re.sub(r"[\[\](){}]", "_", name)
     name = re.sub(r"[^a-zA-Z0-9_\-.]", "_", name)
