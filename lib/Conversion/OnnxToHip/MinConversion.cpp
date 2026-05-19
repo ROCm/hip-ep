@@ -67,8 +67,8 @@ MinToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateMinConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx) {
+void populateMinConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx) {
   patterns.add<MinToHip>(ctx);
 }
 

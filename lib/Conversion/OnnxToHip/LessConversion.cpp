@@ -41,8 +41,8 @@ struct LessToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateLessConversionPatterns(RewritePatternSet &patterns,
-                                               MLIRContext *ctx) {
+void populateLessConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx) {
   patterns.add<LessToHip>(ctx);
 }
 

@@ -61,8 +61,8 @@ struct EqualOpLowering : public ConvertOpToLLVMPattern<EqualOp> {
 
 } // namespace
 
-void mlir::hip::populateEqualLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns) {
   patterns.add<EqualOpLowering>(converter);
 }
 

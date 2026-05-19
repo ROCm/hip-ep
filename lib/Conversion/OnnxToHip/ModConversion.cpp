@@ -46,8 +46,8 @@ struct ModToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateModConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx) {
+void populateModConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx) {
   patterns.add<ModToHip>(ctx);
 }
 

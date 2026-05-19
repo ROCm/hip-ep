@@ -40,8 +40,8 @@ struct CosToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateCosConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx) {
+void populateCosConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx) {
   patterns.add<CosToHip>(ctx);
 }
 

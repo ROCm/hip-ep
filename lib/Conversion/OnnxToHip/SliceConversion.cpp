@@ -277,8 +277,8 @@ struct SliceToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateSliceConversionPatterns(RewritePatternSet &patterns,
-                                                MLIRContext *ctx) {
+void populateSliceConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx) {
   patterns.add<SliceDecompose, SliceToHip>(ctx);
 }
 

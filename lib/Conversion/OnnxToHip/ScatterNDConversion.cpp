@@ -84,8 +84,8 @@ struct ScatterNDToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateScatterNDConversionPatterns(RewritePatternSet &patterns,
-                                                    MLIRContext *ctx) {
+void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx) {
   patterns.add<ScatterNDToHip>(ctx);
 }
 

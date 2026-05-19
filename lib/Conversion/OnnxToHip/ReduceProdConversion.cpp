@@ -86,8 +86,8 @@ ReduceProdToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateReduceProdConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+void populateReduceProdConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx) {
   patterns.add<ReduceProdToHip>(ctx);
 }
 

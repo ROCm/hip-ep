@@ -298,8 +298,8 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
 
 } // namespace
 
-void mlir::hip::populateNormLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns) {
   patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering>(
       converter);
 }

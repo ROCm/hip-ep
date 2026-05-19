@@ -40,8 +40,8 @@ struct NotToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateNotConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx) {
+void populateNotConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx) {
   patterns.add<NotToHip>(ctx);
 }
 

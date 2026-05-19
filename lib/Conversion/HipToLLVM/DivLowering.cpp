@@ -61,8 +61,8 @@ struct DivOpLowering : public ConvertOpToLLVMPattern<DivOp> {
 
 } // namespace
 
-void mlir::hip::populateDivLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns) {
+void populateDivLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns) {
   patterns.add<DivOpLowering>(converter);
 }
 

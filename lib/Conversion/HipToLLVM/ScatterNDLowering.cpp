@@ -126,8 +126,8 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
 
 } // namespace
 
-void mlir::hip::populateScatterNDLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
+                                       RewritePatternSet &patterns) {
   patterns.add<ScatterNDOpLowering>(converter);
 }
 

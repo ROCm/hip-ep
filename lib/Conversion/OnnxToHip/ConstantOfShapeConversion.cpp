@@ -171,8 +171,8 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateConstantOfShapeConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx) {
   patterns.add<ConstantOfShapeFold>(ctx);
 }
 

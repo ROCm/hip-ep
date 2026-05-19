@@ -83,8 +83,8 @@ struct ExpandToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateExpandConversionPatterns(RewritePatternSet &patterns,
-                                                 MLIRContext *ctx) {
+void populateExpandConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx) {
   patterns.add<ExpandToHip>(ctx);
 }
 

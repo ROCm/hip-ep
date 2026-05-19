@@ -81,8 +81,8 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
-                                                    MLIRContext *ctx) {
+void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx) {
   patterns.add<ReduceMaxToHip>(ctx);
 }
 

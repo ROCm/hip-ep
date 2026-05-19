@@ -87,7 +87,7 @@ struct UnaryElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 } // namespace
 
-void mlir::hip::populateUnaryElementwiseLoweringPatterns(
+void populateUnaryElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.insert<UnaryElementwiseOpLowering<NegOp>>(converter, kWrapNeg,
                                                      "neg");

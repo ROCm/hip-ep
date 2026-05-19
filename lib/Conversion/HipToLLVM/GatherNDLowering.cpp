@@ -99,8 +99,8 @@ struct GatherNDOpLowering : public ConvertOpToLLVMPattern<GatherNDOp> {
 
 } // namespace
 
-void mlir::hip::populateGatherNDLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateGatherNDLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns) {
   patterns.add<GatherNDOpLowering>(converter);
 }
 
