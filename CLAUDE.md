@@ -50,8 +50,9 @@ ctest --test-dir install/build -C RelWithDebInfo -R MorphizenMLIRLitTests
 # Python tests (performance benchmarks, integration)
 pytest test/python -v -s
 
-# Numeric tests (per-op correctness vs ORT CPU; in-tree)
-# (set THEROCK_DIST + PATH first; see "Example: MorphiZen EP" in test/numeric/README.md)
+# Numeric tests (per-op correctness vs ORT CPU; in-tree). Windows cmd shown;
+# bash equivalent is in test/numeric/README.md "Example: MorphiZen EP".
+# (set THEROCK_DIST + PATH first; see same section for the env setup.)
 pytest test/numeric --backend ort_ep ^
        --ep-name   MorphiZenExecutionProvider ^
        --ep-dll    install\dist\bin\onnxruntime_morphizen_ep.dll ^

@@ -292,8 +292,11 @@ def _resolve_inputs(inputs: Iterable[InputLike]) -> list[np.ndarray]:
     """Normalise *inputs* to a list of numpy arrays.
 
     Path / str entries are loaded as ``.npy`` files. Numpy arrays are
-    forwarded as-is (the runner copies them when persisting to the cache,
-    so we don't need a defensive copy here).
+    forwarded by reference. The downstream consumers (ORT ``Run``, the
+    cache serialiser, the artifact snapshotter) all treat their input
+    as read-only -- ORT does not mutate session inputs and the
+    serialisers always go through ``np.save(np.ascontiguousarray(...))``
+    -- so no defensive copy is needed.
     """
     result: list[np.ndarray] = []
     for i, item in enumerate(inputs):
