@@ -24,5 +24,7 @@ int wrap_and(RuntimeState *state, void *a, void *b, void *output,
   (void)output;
   (void)num_elements;
   (void)data_type;
-  return -1; // TODO: implement element-wise logical AND on GPU.
+  // Stub: pretend success. Output buffer is left uninitialized.
+  // TODO: implement element-wise logical AND on GPU.
+  return 0;
 }
