@@ -101,15 +101,16 @@ E2ETestSession::E2ETestSession(Ort::Env& env,
     std::string err;
     auto rf = bazel::tools::cpp::runfiles::Runfiles::CreateForTest(
         BAZEL_CURRENT_REPOSITORY, &err);
-    auto resolved = rf ? rf->Rlocation("_main/unit-test/data/" +
-                                       session_proto.model_path())
-                       : std::string{};
+    auto resolved =
+        rf ? rf->Rlocation("_main/unit-test/data/" + session_proto.model_path())
+           : std::string{};
     if (!resolved.empty() &&
         std::filesystem::exists(std::filesystem::u8path(resolved))) {
       model_path = std::filesystem::u8path(resolved);
     } else {
       // Generated model (e.g. EP context .onnx): falls back to TEST_CWD.
-      model_path = TEST_CWD / std::filesystem::u8path(session_proto.model_path());
+      model_path =
+          TEST_CWD / std::filesystem::u8path(session_proto.model_path());
     }
   }
 #else
