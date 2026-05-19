@@ -2,128 +2,121 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Compare single-token decode latency: MorphiZen EP vs DirectML vs CPU.
+"""Llama-3.2-1B-Instruct test suite.
 
-Model: Llama-3.2-1B-Instruct (q4f16) — 16 layers, 8 KV heads, head_dim 64.
-Uses IOBinding with shared KV cache buffers (past==present) to match OGA behavior.
+Model: q4f16, 16 layers, 8 KV heads, head_dim=64. No `position_ids` input.
+The HF repo lacks `genai_config.json` so we ship one in
+`_GENAI_CONFIG_TEMPLATE`; tokenizer files are downloaded from the repo root.
+
+Test coverage is provided by `BaseORTTests` (5 tests) + `BaseOGATests`
+(4 tests) in conftest.py — see CLAUDE.md "Python Performance Tests".
 """
 
-import onnxruntime as ort
-import pytest
-
 from conftest import (
+    BaseOGATests,
+    BaseORTTests,
+    ModelSpec,
     REPO_ROOT,
-    LlamaModelConfig,
-    compare_outputs,
-    download,
-    fix_shapes,
-    get_amd_dml_providers,
-    make_llama_inputs,
-    register_morphizen_ep,
-    report,
-    run_timed,
-    run_timed_iobinding,
+    register_model_fixtures,
 )
 
-# ── Model config ─────────────────────────────────────────────────────────────
+# ruff: noqa: F811  # pytest fixtures shadow function names
 
-_MODEL_DIR = REPO_ROOT / "models" / "Llama-3.2-1B-Instruct"
-_ONNX_FILE = "model_q4f16.onnx"
-_DATA_FILE = "model_q4f16.onnx_data"
-_FIXED_FILE = "model_q4f16_fixed_kv128.onnx"
-_HF_BASE = (
-    "https://huggingface.co/onnx-community/Llama-3.2-1B-Instruct-ONNX/resolve/main/onnx"
-)
-
-_CFG = LlamaModelConfig(
-    num_kv_layers=16,
-    num_kv_heads=8,
-    head_dim=64,
-    max_seq_len=128,
-)
-_DIM_MAP = {
-    "batch_size": 1,
-    "sequence_length": 1,
-    "past_sequence_length": _CFG.max_seq_len,
-    "total_sequence_length": _CFG.max_seq_len,
+# 1B repo has no genai_config.json on HF — we generate this template on first
+# OGA test. Kept inline rather than fetched.
+_GENAI_CONFIG_TEMPLATE = {
+    "model": {
+        "bos_token_id": 128000,
+        "context_length": 131072,
+        "decoder": {
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": [],
+            },
+            "filename": "model_q4f16.onnx",
+            "head_size": 64,
+            "hidden_size": 2048,
+            "inputs": {
+                "input_ids": "input_ids",
+                "attention_mask": "attention_mask",
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value",
+            },
+            "outputs": {
+                "logits": "logits",
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value",
+            },
+            "num_attention_heads": 32,
+            "num_hidden_layers": 16,
+            "num_key_value_heads": 8,
+        },
+        "eos_token_id": [128001, 128008, 128009],
+        "pad_token_id": 128001,
+        "type": "llama",
+        "vocab_size": 128256,
+    },
+    "search": {
+        "chunk_size": 1024,
+        "diversity_penalty": 0.0,
+        "do_sample": True,
+        "early_stopping": True,
+        "length_penalty": 1.0,
+        "max_length": 131072,
+        "min_length": 0,
+        "no_repeat_ngram_size": 0,
+        "num_beams": 1,
+        "num_return_sequences": 1,
+        "past_present_share_buffer": True,
+        "repetition_penalty": 1.0,
+        "temperature": 0.6,
+        "top_k": 1,
+        "top_p": 0.9,
+    },
 }
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────────
+LLAMA1B = ModelSpec(
+    name="llama1b",
+    model_dir=REPO_ROOT / "models" / "Llama-3.2-1B-Instruct",
+    onnx_file="model_q4f16.onnx",
+    data_files=["model_q4f16.onnx_data"],
+    hf_base=(
+        "https://huggingface.co/onnx-community/Llama-3.2-1B-Instruct-ONNX/"
+        "resolve/main/onnx"
+    ),
+    num_layers=16,
+    num_kv_heads=8,
+    head_dim=64,
+    has_position_ids=False,
+    bos_token=128000,
+    filler_tokens=[9906, 11, 1268, 527, 499, 30],
+    oga_files=[
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ],
+    genai_config_template=_GENAI_CONFIG_TEMPLATE,
+    hf_root_for_tokenizer=(
+        "https://huggingface.co/onnx-community/Llama-3.2-1B-Instruct-ONNX/resolve/main"
+    ),
+)
 
 
-@pytest.fixture(scope="session")
-def fixed_model_path():
-    _MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    onnx_path = _MODEL_DIR / _ONNX_FILE
-    data_path = _MODEL_DIR / _DATA_FILE
-    fixed_path = _MODEL_DIR / _FIXED_FILE
-
-    if not onnx_path.exists():
-        download(f"{_HF_BASE}/{_ONNX_FILE}", onnx_path)
-    if not data_path.exists():
-        download(f"{_HF_BASE}/{_DATA_FILE}", data_path)
-    if not fixed_path.exists():
-        fix_shapes(onnx_path, fixed_path, _DIM_MAP)
-
-    return str(fixed_path)
+(
+    dynamic_model_path,
+    fixed_decode_path,
+    fixed_prefill_128_path,
+    ep_dynamic_session,
+    ep_fixed_decode_session,
+    ep_fixed_prefill_128_session,
+    oga_default_model,
+) = register_model_fixtures(LLAMA1B)
 
 
-# ── Tests ────────────────────────────────────────────────────────────────────
+class TestLlama1BORT(BaseORTTests):
+    spec = LLAMA1B
 
 
-class TestLlama1BPerformance:
-    def test_dml_inference(self, fixed_model_path):
-        """Single-token decode latency — DirectML EP (AMD GPU)."""
-        providers = get_amd_dml_providers()
-        if providers is None:
-            pytest.skip("DmlExecutionProvider not available")
-
-        sess = ort.InferenceSession(fixed_model_path, providers=providers)
-        times = run_timed(sess, make_llama_inputs(_CFG))
-        report("DirectML", times)
-
-    def test_morphizen_ep_inference(self, fixed_model_path, repo_root):
-        """Single-token decode latency — MorphiZen (HIP DNN) EP."""
-        devices = register_morphizen_ep(repo_root)
-        if not devices:
-            pytest.skip("MorphiZen EP not found — run build.py first")
-
-        so = ort.SessionOptions()
-        so.add_provider_for_devices(devices, {})
-        sess = ort.InferenceSession(fixed_model_path, sess_options=so)
-
-        times = run_timed_iobinding(
-            sess, make_llama_inputs(_CFG), _CFG, use_device_memory=True
-        )
-        report("MorphiZen EP", times)
-
-    def test_morphizen_ep_accuracy(self, fixed_model_path, repo_root):
-        """MorphiZen EP output accuracy vs CPU reference."""
-        devices = register_morphizen_ep(repo_root)
-        if not devices:
-            pytest.skip("MorphiZen EP not found — run build.py first")
-
-        inputs = make_llama_inputs(_CFG)
-
-        cpu_sess = ort.InferenceSession(
-            fixed_model_path, providers=["CPUExecutionProvider"]
-        )
-        ref = cpu_sess.run(None, inputs)
-        output_names = [o.name for o in cpu_sess.get_outputs()]
-
-        so = ort.SessionOptions()
-        so.add_provider_for_devices(devices, {})
-        ep_sess = ort.InferenceSession(fixed_model_path, sess_options=so)
-        test = ep_sess.run(None, inputs)
-
-        ok, _ = compare_outputs(ref, test, output_names, "MorphiZen EP (1B)")
-        assert ok, "MorphiZen EP accuracy check failed — see report above"
-
-    def test_cpu_inference(self, fixed_model_path):
-        """Single-token decode latency — CPU baseline."""
-        sess = ort.InferenceSession(
-            fixed_model_path, providers=["CPUExecutionProvider"]
-        )
-        times = run_timed(sess, make_llama_inputs(_CFG))
-        report("CPU (baseline)", times)
+class TestLlama1BOGA(BaseOGATests):
+    spec = LLAMA1B

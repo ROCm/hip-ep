@@ -38,6 +38,8 @@ namespace hip {
 inline constexpr const char *kHipMalloc = "hip_device_malloc";
 inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
+inline constexpr const char *kHipGetHostScratch =
+    "hipdnn_ep_get_host_scratch_base";
 
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";

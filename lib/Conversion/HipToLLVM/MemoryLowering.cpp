@@ -147,6 +147,60 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
   }
 };
 
+// --- GetHostScratchOp: hip.get_host_scratch(%ctx, %scratch_size) :memref<?xi8>
+//     -> llvm.call @hipdnn_ep_get_host_scratch_base(state, size) + descriptor.
+// The runtime returns hipHostMalloc(hipHostMallocMapped) memory, which is
+// accessible from both host and device. The result memref uses the default
+// address space (AS 0) — so host stores from materialized scalars work, and
+// downstream GPU ops that consume it via hip-promote-strided-hip-operands /
+// memref.view see the same pointer.
+struct GetHostScratchOpLowering
+    : public ConvertOpToLLVMPattern<GetHostScratchOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GetHostScratchOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    MemRefType memRefType = cast<MemRefType>(op.getScratch().getType());
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipGetHostScratch, {ptrType, i64Type}, ptrType);
+    if (failed(funcOp))
+      return failure();
+
+    Value scratchSize = adaptor.getScratchSize();
+    Value rawPtr =
+        LLVM::CallOp::create(rewriter, loc, *funcOp,
+                             ValueRange{adaptor.getCtx(), scratchSize})
+            .getResult();
+
+    FailureOr<unsigned> addrSpace =
+        getTypeConverter()->getMemRefAddressSpace(memRefType);
+    if (failed(addrSpace))
+      return failure();
+
+    Value hostPtr = rawPtr;
+    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
+        *addrSpace)
+      hostPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+          rawPtr);
+
+    Value stride1 = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(1));
+
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, memRefType, hostPtr, hostPtr, {scratchSize}, {stride1}, rewriter);
+    rewriter.replaceOp(op, {desc});
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // GetConstantOp Lowering
 //===----------------------------------------------------------------------===//
@@ -533,8 +587,8 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
-               GetConstantOpLowering, MemRefAllocOpLowering,
-               MemRefDeallocOpLowering>(converter);
+               GetHostScratchOpLowering, GetConstantOpLowering,
+               MemRefAllocOpLowering, MemRefDeallocOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 

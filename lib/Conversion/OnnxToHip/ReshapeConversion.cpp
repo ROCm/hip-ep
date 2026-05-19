@@ -184,10 +184,143 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       return mlir::success();
     }
 
-    // Same rank, different shape: collapse to 1-D then expand.
-    if (!inputType.hasStaticShape() || !outputType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "same-rank dynamic reshape not supported");
+    // Same rank, dynamic — decompose to expand_shape + collapse_shape when
+    // the difference can be explained by ONE static dim splitting a factor K
+    // and an adjacent dynamic dim absorbing it. Canonical Gemma-3 q/k_norm
+    // reshape:
+    //   Reshape_1 (split):   <?x?xH*D> -> <?x?xD>      (last dim shrinks K=H)
+    //   Reshape_2 (combine): <?x?xD>   -> <?x?xH*D>    (last dim grows K=H)
+    // Both decompose without a kernel; the bufferized expand/collapse are
+    // pure descriptor (offset/stride) edits.
+    //
+    // Pattern requirements (otherwise fall through to the 1-D-flatten path
+    // which only works for fully-static shapes):
+    //   1. Exactly ONE static dim differs between input and output, with
+    //      sizes related by an integer factor K (= max/min, exact divide).
+    //   2. The factor-bearing static position is adjacent to a position
+    //      that is dynamic in BOTH input and output (the "absorber").
+    //   3. All other positions match exactly (static==static same size,
+    //      dyn==dyn).
+    if (!inputType.hasStaticShape() || !outputType.hasStaticShape()) {
+      // (a) Locate the unique static-different position and validate the rest.
+      int64_t staticIdx = -1;
+      bool valid = true;
+      for (int64_t i = 0; i < inputRank && valid; ++i) {
+        bool inDyn = inputType.isDynamicDim(i);
+        bool outDyn = outputType.isDynamicDim(i);
+        if (inDyn != outDyn) {
+          valid = false; // dyn↔static at the same position — unsupported
+          break;
+        }
+        if (inDyn)
+          continue;
+        if (inputType.getDimSize(i) == outputType.getDimSize(i))
+          continue;
+        if (staticIdx >= 0) {
+          valid = false; // more than one static-different position
+          break;
+        }
+        staticIdx = i;
+      }
+      if (!valid || staticIdx < 0)
+        return rewriter.notifyMatchFailure(
+            op, "same-rank dynamic reshape: pattern not recognised");
+
+      int64_t inStatic = inputType.getDimSize(staticIdx);
+      int64_t outStatic = outputType.getDimSize(staticIdx);
+      int64_t k = 0;
+      bool splitDir = false;
+      if (inStatic > outStatic && inStatic % outStatic == 0) {
+        k = inStatic / outStatic;
+        splitDir = true;
+      } else if (outStatic > inStatic && outStatic % inStatic == 0) {
+        k = outStatic / inStatic;
+        splitDir = false;
+      }
+      if (k <= 1)
+        return rewriter.notifyMatchFailure(
+            op, "same-rank dynamic reshape: static dims not factor-related");
+
+      // (b) Find the absorber: an adjacent position that is dynamic in both.
+      auto isDynBoth = [&](int64_t i) {
+        return i >= 0 && i < inputRank && inputType.isDynamicDim(i) &&
+               outputType.isDynamicDim(i);
+      };
+      int64_t dynIdx = -1;
+      if (isDynBoth(staticIdx - 1))
+        dynIdx = staticIdx - 1;
+      else if (isDynBoth(staticIdx + 1))
+        dynIdx = staticIdx + 1;
+      if (dynIdx < 0)
+        return rewriter.notifyMatchFailure(
+            op, "same-rank dynamic reshape: no adjacent dynamic absorber");
+
+      // (c) Build the rank-(N+1) intermediate shape and the expand
+      // reassociation. The "split" position is the input dim that grows from
+      // 1 sub-dim to 2:
+      //   * split direction:  splitInputDim = staticIdx (K*small -> K, small)
+      //   * combine direction: splitInputDim = dynIdx   (dyn   -> dyn/K, K)
+      int64_t splitInputDim = splitDir ? staticIdx : dynIdx;
+      llvm::SmallVector<int64_t> intShape;
+      intShape.reserve(inputRank + 1);
+      llvm::SmallVector<mlir::ReassociationIndices> expandReassoc;
+      int64_t cursor = 0;
+      for (int64_t i = 0; i < inputRank; ++i) {
+        if (i == splitInputDim) {
+          if (splitDir) {
+            intShape.push_back(k);         // outer (K)
+            intShape.push_back(outStatic); // inner (smaller static)
+          } else {
+            intShape.push_back(mlir::ShapedType::kDynamic); // outer (dyn/K)
+            intShape.push_back(k);                          // inner (K)
+          }
+          expandReassoc.push_back({cursor, cursor + 1});
+          cursor += 2;
+        } else {
+          intShape.push_back(inputType.isDynamicDim(i)
+                                 ? mlir::ShapedType::kDynamic
+                                 : inputType.getDimSize(i));
+          expandReassoc.push_back({cursor});
+          cursor += 1;
+        }
+      }
+      auto intType =
+          mlir::RankedTensorType::get(intShape, inputType.getElementType());
+
+      // (d) Reuse the existing helper to compute output_shape values for the
+      // expand. It emits tensor.dim for dynamic dims and arith.divui when a
+      // dynamic input dim is split into (dyn, static_factor) — exactly the
+      // combine direction here. (PoolAllocs's hoistable whitelist must
+      // include arith.divui for the resulting dim arithmetic to survive
+      // pool-base hoisting.)
+      auto intOutShape = buildExpandShapeOutputShape(rewriter, loc, data,
+                                                     intType, expandReassoc);
+
+      auto expanded = mlir::tensor::ExpandShapeOp::create(
+          rewriter, loc, intType, data, expandReassoc, intOutShape);
+
+      // (e) Collapse: the OUTPUT dim that absorbs the factor pair maps to the
+      // two intermediate dims; everything else is identity.
+      //   * split direction:  collapse target = dynIdx (absorbs K into dyn)
+      //   * combine direction: collapse target = staticIdx (forms K*small)
+      int64_t collapseTarget = splitDir ? dynIdx : staticIdx;
+      llvm::SmallVector<mlir::ReassociationIndices> collapseReassoc;
+      cursor = 0;
+      for (int64_t i = 0; i < outputRank; ++i) {
+        if (i == collapseTarget) {
+          collapseReassoc.push_back({cursor, cursor + 1});
+          cursor += 2;
+        } else {
+          collapseReassoc.push_back({cursor});
+          cursor += 1;
+        }
+      }
+
+      auto collapsed = mlir::tensor::CollapseShapeOp::create(
+          rewriter, loc, outputType, expanded.getResult(), collapseReassoc);
+      rewriter.replaceOp(op, collapsed.getResult());
+      return mlir::success();
+    }
 
     int64_t numElems = inputType.getNumElements();
     if (numElems != outputType.getNumElements())

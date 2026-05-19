@@ -20,12 +20,15 @@ add_library(OnnxToHip STATIC
   RotaryEmbeddingConversion.cpp
   GqaConversion.cpp
   GatherConversion.cpp
+  GatherShapeFold.cpp
+  ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
   WhereConversion.cpp
   LinearAttentionConversion.cpp
   RangeConversion.cpp
+  FastGeluFusion.cpp
 )
 
 add_dependencies(OnnxToHip
