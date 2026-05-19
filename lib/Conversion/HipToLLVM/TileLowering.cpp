@@ -89,8 +89,8 @@ struct TileOpLowering : public ConvertOpToLLVMPattern<TileOp> {
 
 } // namespace
 
-void mlir::hip::populateTileLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void populateTileLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns) {
   patterns.add<TileOpLowering>(converter);
 }
 

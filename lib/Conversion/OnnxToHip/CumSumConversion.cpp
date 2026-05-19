@@ -49,8 +49,8 @@ struct CumSumToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateCumSumConversionPatterns(RewritePatternSet &patterns,
-                                                 MLIRContext *ctx) {
+void populateCumSumConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx) {
   patterns.add<CumSumToHip>(ctx);
 }
 

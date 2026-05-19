@@ -41,8 +41,8 @@ struct EqualToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateEqualConversionPatterns(RewritePatternSet &patterns,
-                                                MLIRContext *ctx) {
+void populateEqualConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx) {
   patterns.add<EqualToHip>(ctx);
 }
 

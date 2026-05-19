@@ -426,8 +426,8 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateNormConversionPatterns(RewritePatternSet &patterns,
-                                               MLIRContext *ctx) {
+void populateNormConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx) {
   patterns.add<SimplifiedLayerNormToHip, SkipSimplifiedLayerNormToHip,
                LayerNormToHip>(ctx);
 }

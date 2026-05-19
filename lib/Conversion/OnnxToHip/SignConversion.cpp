@@ -42,8 +42,8 @@ struct SignToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateSignConversionPatterns(RewritePatternSet &patterns,
-                                               MLIRContext *ctx) {
+void populateSignConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx) {
   patterns.add<SignToHip>(ctx);
 }
 

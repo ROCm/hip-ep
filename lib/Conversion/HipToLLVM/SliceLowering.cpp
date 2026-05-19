@@ -128,8 +128,8 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
 
 } // namespace
 
-void mlir::hip::populateSliceLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns) {
   patterns.add<SliceOpLowering>(converter);
 }
 

@@ -124,8 +124,8 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
 
 } // namespace
 
-void mlir::hip::populatePadLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns) {
+void populatePadLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns) {
   patterns.add<PadOpLowering>(converter);
 }
 

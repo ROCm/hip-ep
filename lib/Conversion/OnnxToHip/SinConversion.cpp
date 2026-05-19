@@ -40,8 +40,8 @@ struct SinToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateSinConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx) {
+void populateSinConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx) {
   patterns.add<SinToHip>(ctx);
 }
 

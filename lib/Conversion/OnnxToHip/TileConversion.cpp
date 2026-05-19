@@ -42,8 +42,8 @@ struct TileToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateTileConversionPatterns(RewritePatternSet &patterns,
-                                               MLIRContext *ctx) {
+void populateTileConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx) {
   patterns.add<TileToHip>(ctx);
 }
 

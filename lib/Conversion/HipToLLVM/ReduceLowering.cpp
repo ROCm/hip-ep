@@ -100,8 +100,8 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 } // namespace
 
-void mlir::hip::populateReduceLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns) {
   patterns.insert<ReduceOpLowering<ReduceSumOp>>(converter, kWrapReduceSum,
                                                  "reduce_sum");
   patterns.insert<ReduceOpLowering<ReduceMaxOp>>(converter, kWrapReduceMax,

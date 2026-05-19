@@ -93,8 +93,8 @@ struct PadToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populatePadConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx) {
+void populatePadConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx) {
   patterns.add<PadToHip>(ctx);
 }
 

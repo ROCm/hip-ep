@@ -66,8 +66,8 @@ struct LessOpLowering : public ConvertOpToLLVMPattern<LessOp> {
 
 } // namespace
 
-void mlir::hip::populateLessLoweringPatterns(const LLVMTypeConverter &converter,
-                                             RewritePatternSet &patterns) {
+void populateLessLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns) {
   patterns.add<LessOpLowering>(converter);
 }
 

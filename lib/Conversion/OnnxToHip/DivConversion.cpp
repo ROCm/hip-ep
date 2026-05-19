@@ -41,8 +41,8 @@ struct DivToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateDivConversionPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *ctx) {
+void populateDivConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx) {
   patterns.add<DivToHip>(ctx);
 }
 

@@ -66,8 +66,8 @@ struct ModOpLowering : public ConvertOpToLLVMPattern<ModOp> {
 
 } // namespace
 
-void mlir::hip::populateModLoweringPatterns(const LLVMTypeConverter &converter,
-                                            RewritePatternSet &patterns) {
+void populateModLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns) {
   patterns.add<ModOpLowering>(converter);
 }
 
