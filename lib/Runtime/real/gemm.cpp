@@ -297,9 +297,9 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
   //   - K and N multiples of 16 (kernel has no K-tail handling; N tail is
   //     masked but the documented contract requires N % 16 == 0)
   // Anything that doesn't match falls through to the hipBLASLt path below.
-  if (gemm_wmma_dispatch_enabled() && typeCode == kTypeFloat16 &&
-      transA == 0 && transB == 0 && C == nullptr && alpha == 1.0f &&
-      (K % 16) == 0 && (N % 16) == 0) {
+  if (gemm_wmma_dispatch_enabled() && typeCode == kTypeFloat16 && transA == 0 &&
+      transB == 0 && C == nullptr && alpha == 1.0f && (K % 16) == 0 &&
+      (N % 16) == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: dispatch=WMMA M=%lld N=%lld K=%lld\n",
                       (long long)M, (long long)N, (long long)K);
     int rc = hip_gemm_wmma_fp16(stream, A, B, output, static_cast<int>(M),
