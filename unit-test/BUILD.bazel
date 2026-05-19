@@ -195,6 +195,16 @@ cc_test(
         # exist as a DLL in the GitHub Bazel build. Point to the MLIR backend plugin
         # which IS registered statically via mlir-imp alwayslink.
         "MORPHIZEN_CONFIG_PROVIDER_BACKEND": "mlir-backend",
+        # Bypass ORT logger adapter (onnxruntime_morphizen_ep.cpp:251) so glog
+        # INFO output from inside compile_onnx_model_morphizen_ep_v4 is not
+        # suppressed by the session's ort_log_level="warning" filter.
+        "DEBUG_LOG_LEVEL": "info",
+        # Pass framework execution log (pass_imp.cpp:31 DEF_ENV_PARAM).
+        "DEBUG_MORPHIZEN_PASS": "1",
+        # EP-level debug log (morphizen-ep.cpp:31 DEF_ENV_PARAM).
+        "MORPHIZEN_DEBUG_MORPHIZEN_EP": "1",
+        # Verbose pass/compile log (morphizen_compile_model.cpp:44 DEF_ENV_PARAM).
+        "XLNX_ONNX_EP_VERBOSE": "2",
     },
     # The test sources include headers from the package root (e.g. "test_environment.hpp")
     # and from the morphizen/ subdirectory (e.g. "pt_resnet50_add.h.inc" in test_pattern.cpp).
