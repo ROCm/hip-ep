@@ -29,6 +29,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
+          lfs: true
           fetch-depth: 0
           show-progress: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -40,9 +41,11 @@ jobs:
           bazelisk-version: 1.x
           # Cache Bazelisk binary based on .bazelversion
           bazelisk-cache: true
-          # Cache downloaded source archives (LLVM tarball, registry modules, etc.)
-          # Keyed on MODULE.bazel — separate from Cachion RBE which caches build outputs
-          repository-cache: true
+          # Explicitly disable repository-cache (default is true). The self-hosted runner
+          # has a persistent local disk cache at C:/bazel_cache/repository_cache
+          # (configured in .bazelrc). Restoring the GitHub Actions cache (~1.5 GB) over
+          # the network is slower than reading from local disk.
+          repository-cache: false
 
       - name: bazel test (mlir-imp backend)
         shell: powershell
