@@ -41,6 +41,13 @@ struct AndOpLowering : public ConvertOpToLLVMPattern<AndOp> {
 
     auto lhsType = cast<MemRefType>(op.getLhs().getType());
     int64_t dataType = getHipdnnDataType(lhsType.getElementType());
+    // Boolean (i1) inputs are stored as i8 on device but i1 is not part of the
+    // HIPDNN_EP_DATATYPE_* enum. Mirror the NotOpLowering fallback: pass a
+    // sentinel value (0) since wrap_and's runtime path doesn't dispatch on
+    // dtype for boolean AND. See UnaryElementwiseLowering.cpp for the same
+    // pattern used by hip.not.
+    if (dataType < 0 && lhsType.getElementType().isInteger(1))
+      dataType = 0;
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported input element type");
 
