@@ -557,6 +557,44 @@ int wrap_group_query_attention(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
 
+// MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
+// Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
+//
+// Today this is a stub: the function only logs its parameters and throws a
+// std::runtime_error indicating the op is not yet implemented. The full MS
+// MultiHeadAttention spec covers 1-10 inputs (query, optional key/value,
+// bias, key_padding_mask, attention_bias, past_key/value, past_seq_len,
+// cache_indirection) and 1-4 outputs (output, optional present_key/value,
+// qk). See lib/Conversion/OnnxToHip/MultiHeadAttentionConversion.cpp for
+// the input layout the compiler emits.
+//
+// Optional pointer args: pass nullptr if the corresponding input/output is
+// absent. Shape parameters describe the query layout the compiler observed:
+//   query_rank      = 3 (standard [B, S, hidden]) or
+//                     5 (packed QKV [B, S_kv, num_heads, 3, head_size])
+//   query_hidden    = query.shape[2] when rank==3 (else 0)
+//   head_size       = query.shape[-1] when rank==5 (else 0; runtime derives
+//                                                   from hidden / num_heads)
+//   seq_len_kv      = key.shape[1] when key is provided else 0
+//                     (self-attention: == seq_len_q at runtime)
+//   v_hidden        = value.shape[2] when value is provided else 0
+int wrap_multi_head_attention(
+    RuntimeState *state,
+    // Inputs 1-10 (10 pointers - some may be nullptr)
+    void *query, void *key, void *value, void *bias, void *key_padding_mask,
+    void *attention_bias, void *past_key, void *past_value,
+    void *past_sequence_length, void *cache_indirection,
+    // Outputs 1-4 (last 3 may be nullptr)
+    void *output, void *present_key, void *present_value, void *qk,
+    // Attributes (4)
+    int64_t num_heads, float mask_filter_value, float scale,
+    int64_t unidirectional,
+    // Shape info (8: batch, seq_q, seq_kv, query_hidden, v_hidden, head_size,
+    //              query_rank, element_size_bytes)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t query_hidden, int64_t v_hidden, int64_t head_size,
+    int64_t query_rank, int64_t element_size_bytes);
+
 // Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
 // Each operand is described by 4D shape (N, C, H, W) to enable MIOpen-native

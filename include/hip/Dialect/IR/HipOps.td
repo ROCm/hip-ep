@@ -1710,6 +1710,152 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
   }];
 }
 
+// ===== Multi-Head Attention =================================================
+
+def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
+    [AttrSizedOperandSegments]> {
+  let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
+  let description = [{
+    Implements the com.microsoft.MultiHeadAttention operator (opset v1).
+
+    Multi-Head Self/Cross Attention with optional bias from input projection.
+    Supports packed QKV in `query`, packed KV in `key`, separate Q/K/V,
+    optional key padding mask, optional additive attention bias, KV cache
+    (past_key/past_value) with optional buffer-sharing
+    (past_sequence_length), unidirectional (causal) masking, and an optional
+    cache_indirection buffer for beam-search decoding.
+
+    Inputs (1-10, MS spec order):
+      1. query                 (required, T) - either:
+                                  * (batch, seq_q, hidden)         standard
+                                  * (batch, seq_kv, num_heads, 3, head_size)
+                                                                   packed QKV
+      2. key                   (optional, T) - either:
+                                  * (batch, seq_kv, hidden)
+                                  * (batch, seq_kv, num_heads, 2, head_size)
+                                                                   packed KV
+                                  * (batch, num_heads, seq_kv, head_size)
+                                                                   past_key
+      3. value                 (optional, T) - (batch, seq_kv, v_hidden) or
+                                                past_value layout
+      4. bias                  (optional, T) - 1-D (hidden + hidden + v_hidden)
+      5. key_padding_mask      (optional, M) - 1-D / 2-D / 3-D mask
+      6. attention_bias        (optional, T) - bias added to QxK'
+      7. past_key              (optional, T) - past KV cache for key
+      8. past_value            (optional, T) - past KV cache for value
+      9. past_sequence_length  (optional, M) - used with buffer sharing
+     10. cache_indirection     (optional, M) - beam-search cache routing
+
+    DPS output buffers (1-4):
+      output         (required, T) - (batch, seq_q, v_hidden)
+      present_key    (optional, T) - present KV cache for key
+      present_value  (optional, T) - present KV cache for value
+      qk             (optional, QK) - debug QK matrix
+
+    Attributes:
+      num_heads          (required) - number of attention heads
+      mask_filter_value  (optional, default -10000.0) - value to fill masked
+                                                       positions
+      scale              (optional, default 0.0) - 0.0 means
+                                                  1/sqrt(head_size) at runtime
+      unidirectional     (optional, default 0) - 1 = causal mask
+
+    Example (basic self-attention with separate Q/K/V):
+    ```mlir
+    hip.multi_head_attention(%ctx)
+        ins(%query, %key, %value :
+            memref<1x128x4096xf16, 1>, memref<1x128x4096xf16, 1>,
+            memref<1x128x4096xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {num_heads = 32 : i64, scale = 0.0 : f32,
+         mask_filter_value = -1.000000e+04 : f32, unidirectional = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    // Internal context (HIP-specific, not ONNX spec)
+    Hip_ContextType:$ctx,
+
+    // === MS MultiHeadAttention spec inputs 1-10 ===
+
+    // Input 1: query (required)
+    Hip_TensorOrMemRef:$query,
+
+    // Inputs 2-3: key/value (optional - packed QKV in query when both absent)
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
+
+    // Input 4: bias (optional - input-projection bias)
+    Optional<Hip_TensorOrMemRef>:$bias,
+
+    // Input 5: key_padding_mask (optional)
+    Optional<Hip_TensorOrMemRef>:$key_padding_mask,
+
+    // Input 6: attention_bias (optional - added to Q*K')
+    Optional<Hip_TensorOrMemRef>:$attention_bias,
+
+    // Inputs 7-8: past_key / past_value (optional - KV cache)
+    Optional<Hip_TensorOrMemRef>:$past_key,
+    Optional<Hip_TensorOrMemRef>:$past_value,
+
+    // Input 9: past_sequence_length (optional - used with buffer sharing)
+    Optional<Hip_TensorOrMemRef>:$past_sequence_length,
+
+    // Input 10: cache_indirection (optional - beam-search cache routing)
+    Optional<Hip_TensorOrMemRef>:$cache_indirection,
+
+    // === DPS output buffers (1-4) ===
+    Hip_TensorOrMemRef:$output,
+    Optional<Hip_TensorOrMemRef>:$present_key,
+    Optional<Hip_TensorOrMemRef>:$present_value,
+    Optional<Hip_TensorOrMemRef>:$qk,
+
+    // === Attributes ===
+    I64Attr:$num_heads,
+    DefaultValuedAttr<F32Attr, "-1.000000e+04">:$mask_filter_value,
+    DefaultValuedAttr<F32Attr, "0.0">:$scale,
+    DefaultValuedAttr<I64Attr, "0">:$unidirectional
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query
+        ( `,` $key^ )?
+        ( `,` $value^ )?
+        ( `,` $bias^ )?
+        ( `,` $key_padding_mask^ )?
+        ( `,` $attention_bias^ )?
+        ( `,` $past_key^ )?
+        ( `,` $past_value^ )?
+        ( `,` $past_sequence_length^ )?
+        ( `,` $cache_indirection^ )?
+        `:`
+        type($query)
+        ( `,` type($key)^ )?
+        ( `,` type($value)^ )?
+        ( `,` type($bias)^ )?
+        ( `,` type($key_padding_mask)^ )?
+        ( `,` type($attention_bias)^ )?
+        ( `,` type($past_key)^ )?
+        ( `,` type($past_value)^ )?
+        ( `,` type($past_sequence_length)^ )?
+        ( `,` type($cache_indirection)^ )?
+    `)`
+    `outs` `(`
+        $output
+        ( `,` $present_key^ )?
+        ( `,` $present_value^ )?
+        ( `,` $qk^ )?
+        `:`
+        type($output)
+        ( `,` type($present_key)^ )?
+        ( `,` type($present_value)^ )?
+        ( `,` type($qk)^ )?
+    `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
     [AttrSizedOperandSegments]> {
   let summary = "Linear attention with recurrent state (com.microsoft.LinearAttention)";
