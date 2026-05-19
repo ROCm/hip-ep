@@ -595,6 +595,57 @@ int wrap_group_query_attention(
   return 0;
 }
 
+int wrap_multi_head_attention(
+    RuntimeState *state,
+    // Inputs (10)
+    void *query, void *key, void *value, void *bias, void *key_padding_mask,
+    void *attention_bias, void *past_key, void *past_value,
+    void *past_sequence_length, void *cache_indirection,
+    // Outputs (4)
+    void *output, void *present_key, void *present_value, void *qk,
+    // Attributes (4)
+    int64_t num_heads, float mask_filter_value, float scale,
+    int64_t unidirectional,
+    // Shape info (8)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t query_hidden, int64_t v_hidden, int64_t head_size,
+    int64_t query_rank, int64_t element_size_bytes) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_multi_head_attention\n");
+    return -1;
+  }
+
+  (void)query;
+  (void)bias;
+  (void)key_padding_mask;
+  (void)attention_bias;
+  (void)past_key;
+  (void)past_value;
+  (void)past_sequence_length;
+  (void)cache_indirection;
+  (void)output;
+  (void)present_key;
+  (void)present_value;
+  (void)qk;
+
+  MOCK_PRINT("[MOCK] wrap_multi_head_attention(\n");
+  MOCK_PRINT("[MOCK]   num_heads=%lld, mask_filter_value=%f, scale=%f, "
+             "unidirectional=%lld,\n",
+             (long long)num_heads, (double)mask_filter_value, (double)scale,
+             (long long)unidirectional);
+  MOCK_PRINT("[MOCK]   key=%s, value=%s,\n", key ? "yes" : "null",
+             value ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld,\n",
+             (long long)batch_size, (long long)seq_len_q,
+             (long long)seq_len_kv);
+  MOCK_PRINT("[MOCK]   query_hidden=%lld, v_hidden=%lld, head_size=%lld, "
+             "query_rank=%lld, elem_size=%lld)\n",
+             (long long)query_hidden, (long long)v_hidden, (long long)head_size,
+             (long long)query_rank, (long long)element_size_bytes);
+
+  return 0;
+}
+
 int wrap_linear_attention(RuntimeState *state, const void *query,
                           const void *key, const void *value,
                           const void *past_state, const void *decay,

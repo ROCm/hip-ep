@@ -64,6 +64,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | SkipSimplifiedLayerNormalization (com.microsoft) | MIOpen |
 | RotaryEmbedding (com.microsoft) | Custom HIP Kernel |
 | GroupQueryAttention (com.microsoft) | Custom HIP Kernel |
+| MultiHeadAttention (com.microsoft) | Runtime stub (not yet GPU-accelerated) |
 | MatMulNBits (com.microsoft) | Custom HIP Kernel |
 | QMoE (com.microsoft) | Custom HIP Kernel |
 | LinearAttention (com.microsoft) | Custom HIP Kernel |

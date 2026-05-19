@@ -119,6 +119,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ModOp::attachInterface<HipDstBufferizableModel<ModOp>>(*ctx);
     SliceOp::attachInterface<HipDstBufferizableModel<SliceOp>>(*ctx);
     ScatterNDOp::attachInterface<HipDstBufferizableModel<ScatterNDOp>>(*ctx);
+    MultiHeadAttentionOp::attachInterface<
+        HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
   });
 }
 

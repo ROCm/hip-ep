@@ -281,6 +281,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/mod.cpp runtime_mod.bc)
     compile_to_bitcode(real/slice.cpp runtime_slice.bc)
     compile_to_bitcode(real/scatter_nd.cpp runtime_scatter_nd.bc)
+    compile_to_bitcode(real/multi_head_attention.cpp runtime_multi_head_attention.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -329,6 +330,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mod.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_slice.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_nd.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
     )
 else()
     # Mock runtime for testing without GPU

@@ -829,6 +829,55 @@ void LinearAttentionOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// MultiHeadAttentionOp:
+//   ins(query, [key, value, bias, key_padding_mask, attention_bias,
+//                past_key, past_value, past_sequence_length, cache_indirection])
+//   outs(output, [present_key, present_value, qk])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MultiHeadAttentionOp::getDpsInitsMutable() {
+  // Count actual inputs (skip ctx which is always first)
+  unsigned numInputs = 1; // ctx
+  if (getQuery())
+    ++numInputs;
+  if (getKey())
+    ++numInputs;
+  if (getValue())
+    ++numInputs;
+  if (getBias())
+    ++numInputs;
+  if (getKeyPaddingMask())
+    ++numInputs;
+  if (getAttentionBias())
+    ++numInputs;
+  if (getPastKey())
+    ++numInputs;
+  if (getPastValue())
+    ++numInputs;
+  if (getPastSequenceLength())
+    ++numInputs;
+  if (getCacheIndirection())
+    ++numInputs;
+
+  // DPS inits: output (always), [present_key, present_value, qk] (optional)
+  unsigned numInits = 1;
+  if (getPresentKey())
+    ++numInits;
+  if (getPresentValue())
+    ++numInits;
+  if (getQk())
+    ++numInits;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
+}
+
+void MultiHeadAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GqaOp: ins(query, [key, value, past_key, past_value,]
 //             seqlens_k, total_seq_len, [cos_cache, ...])
 //        outs(output, present_key, present_value, [output_qk])
