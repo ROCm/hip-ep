@@ -51,8 +51,7 @@ struct MultiHeadAttentionOpLowering
     Value keyPtr = getMemRefPtrOrNull(adaptor.getKey());
     Value valuePtr = getMemRefPtrOrNull(adaptor.getValue());
     Value biasPtr = getMemRefPtrOrNull(adaptor.getBias());
-    Value keyPaddingMaskPtr =
-        getMemRefPtrOrNull(adaptor.getKeyPaddingMask());
+    Value keyPaddingMaskPtr = getMemRefPtrOrNull(adaptor.getKeyPaddingMask());
     Value attentionBiasPtr = getMemRefPtrOrNull(adaptor.getAttentionBias());
     Value pastKeyPtr = getMemRefPtrOrNull(adaptor.getPastKey());
     Value pastValuePtr = getMemRefPtrOrNull(adaptor.getPastValue());
@@ -193,19 +192,19 @@ struct MultiHeadAttentionOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        statePtr,
-        // Inputs (10)
-        queryPtr, keyPtr, valuePtr, biasPtr, keyPaddingMaskPtr,
-        attentionBiasPtr, pastKeyPtr, pastValuePtr, pastSequenceLengthPtr,
-        cacheIndirectionPtr,
-        // Outputs (4)
-        outputPtr, presentKeyPtr, presentValuePtr, qkPtr,
-        // Attributes (4)
-        numHeads, maskFilterValue, scale, unidirectional,
-        // Shape info (7)
-        batchSize, seqLenQ, seqLenKV, queryHidden, vHidden, headSize,
-        queryRankVal, elemSizeVal};
+    SmallVector<Value> args = {statePtr,
+                               // Inputs (10)
+                               queryPtr, keyPtr, valuePtr, biasPtr,
+                               keyPaddingMaskPtr, attentionBiasPtr, pastKeyPtr,
+                               pastValuePtr, pastSequenceLengthPtr,
+                               cacheIndirectionPtr,
+                               // Outputs (4)
+                               outputPtr, presentKeyPtr, presentValuePtr, qkPtr,
+                               // Attributes (4)
+                               numHeads, maskFilterValue, scale, unidirectional,
+                               // Shape info (7)
+                               batchSize, seqLenQ, seqLenKV, queryHidden,
+                               vHidden, headSize, queryRankVal, elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

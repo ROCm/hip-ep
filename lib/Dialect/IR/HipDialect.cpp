@@ -831,7 +831,8 @@ void LinearAttentionOp::getEffects(
 //===----------------------------------------------------------------------===//
 // MultiHeadAttentionOp:
 //   ins(query, [key, value, bias, key_padding_mask, attention_bias,
-//                past_key, past_value, past_sequence_length, cache_indirection])
+//                past_key, past_value, past_sequence_length,
+//                cache_indirection])
 //   outs(output, [present_key, present_value, qk])
 //===----------------------------------------------------------------------===//
 

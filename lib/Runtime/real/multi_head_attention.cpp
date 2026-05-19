@@ -54,15 +54,13 @@ int wrap_multi_head_attention(
       query, key ? "yes" : "null", value ? "yes" : "null",
       bias ? "yes" : "null", key_padding_mask ? "yes" : "null",
       attention_bias ? "yes" : "null", past_key ? "yes" : "null",
-      past_value ? "yes" : "null",
-      past_sequence_length ? "yes" : "null",
-      cache_indirection ? "yes" : "null", output,
-      present_key ? "yes" : "null", present_value ? "yes" : "null",
-      qk ? "yes" : "null", (long long)num_heads, (double)mask_filter_value,
-      (double)scale, (long long)unidirectional, (long long)batch_size,
-      (long long)seq_len_q, (long long)seq_len_kv, (long long)query_hidden,
-      (long long)v_hidden, (long long)head_size, (long long)query_rank,
-      (long long)element_size_bytes);
+      past_value ? "yes" : "null", past_sequence_length ? "yes" : "null",
+      cache_indirection ? "yes" : "null", output, present_key ? "yes" : "null",
+      present_value ? "yes" : "null", qk ? "yes" : "null", (long long)num_heads,
+      (double)mask_filter_value, (double)scale, (long long)unidirectional,
+      (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
+      (long long)query_hidden, (long long)v_hidden, (long long)head_size,
+      (long long)query_rank, (long long)element_size_bytes);
   std::fflush(stderr);
 
   throw std::runtime_error(
