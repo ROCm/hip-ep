@@ -9,9 +9,15 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include <cstdint>
 
 namespace morphizen {
 namespace mlir_impl {
+
+// Double-underscore prefix avoids collision with ONNX attribute names;
+// add_node filters this key out so it never appears in dumped IR.
+static constexpr llvm::StringLiteral kSubgraphRefKey =
+    "__morphizen_subgraph_ref";
 
 // Factory method to create integer array attribute
 std::unique_ptr<mlir::NamedAttribute>
@@ -125,6 +131,38 @@ MLIRNamedAttribute::create_tensor(const std::string& name,
   int64_t tensor_id = reinterpret_cast<int64_t>(tensor_ptr);
   mlir::IntegerAttr tensor_ptr_attr = builder.getI64IntegerAttr(tensor_id);
   return std::make_unique<mlir::NamedAttribute>(name, tensor_ptr_attr);
+}
+
+std::unique_ptr<mlir::NamedAttribute>
+MLIRNamedAttribute::create_subgraph_ref(const std::string& name,
+                                        MLIRGraph& sub) {
+  static_assert(sizeof(void*) <= sizeof(int64_t),
+                "raw MLIRGraph* must fit in int64 to embed in IntegerAttr");
+  auto& context = MLIRContextManager::getInstance().getContext();
+  auto i64_type = mlir::IntegerType::get(&context, 64);
+  auto ptr_attr = mlir::IntegerAttr::get(
+      i64_type, static_cast<int64_t>(reinterpret_cast<intptr_t>(&sub)));
+  mlir::NamedAttribute marker(mlir::StringAttr::get(&context, kSubgraphRefKey),
+                              ptr_attr);
+  auto ref_dict = mlir::DictionaryAttr::get(&context, {marker});
+  return std::make_unique<mlir::NamedAttribute>(
+      mlir::StringAttr::get(&context, name), ref_dict);
+}
+
+MLIRGraph* MLIRNamedAttribute::get_subgraph_ref() const {
+  auto dict = mlir::dyn_cast<mlir::DictionaryAttr>(getValue());
+  if (!dict) {
+    return nullptr;
+  }
+  auto entry = dict.getNamed(kSubgraphRefKey);
+  if (!entry) {
+    return nullptr;
+  }
+  auto int_attr = mlir::dyn_cast<mlir::IntegerAttr>(entry->getValue());
+  if (!int_attr) {
+    return nullptr;
+  }
+  return reinterpret_cast<MLIRGraph*>(static_cast<intptr_t>(int_attr.getInt()));
 }
 
 int64_t MLIRNamedAttribute::get_int() const {
@@ -243,6 +281,10 @@ int MLIRNamedAttribute::get_onnx_type() const {
 
   if (auto dense_attr = mlir::dyn_cast<mlir::DenseElementsAttr>(getValue())) {
     return 4; // TENSOR
+  }
+
+  if (get_subgraph_ref() != nullptr) {
+    return 5; // GRAPH
   }
 
   // Unknown or unsupported attribute type

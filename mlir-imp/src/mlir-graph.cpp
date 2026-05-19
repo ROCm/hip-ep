@@ -4,11 +4,11 @@
  */
 #include "mlir-graph.hpp"
 #include "./mlir-constants.hpp"
+#include "./mlir-context-manager.hpp"
 #include "./mlir-graph-store.hpp"
 #include "./mlir-node-arg.hpp"
 
 #include "./mlir-node.hpp"
-#include "mlir-constants.hpp"
 #include "mlir-model.hpp"
 #include "mlir-named-attribute.hpp"
 #include "mlir-node-attributes.hpp"
@@ -18,6 +18,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/IRMapping.h" // for IRMapping
 #include "mlir/IR/Verifier.h"
 #include "morphizen-foundation/env_config.hpp"
 #include "llvm/ADT/STLExtras.h"       // for map_range, to_vector
@@ -36,33 +37,34 @@ DEF_ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT, "0")
 namespace morphizen {
 namespace mlir_impl {
 
-static mlir::Operation* get_or_create_terminator(mlir::func::FuncOp func) {
-  // Get the function's entry block
-  auto& entryBlock = func.getBody().front();
-  mlir::Operation* terminator = nullptr;
-  // Find the existing terminator (should be an onnx.Return operation)
-  auto has_terminator = entryBlock.mightHaveTerminator();
-
-  if (!has_terminator) {
-    // No terminator exists, create a new onnx.Return operation
-    auto* context = func->getContext();
-    mlir::OpBuilder builder(context);
-    builder.setInsertionPointToEnd(&entryBlock);
-
-    // Create onnx.Return operation (dialect-specific return for ONNX)
-    mlir::OperationState state(builder.getUnknownLoc(), onnx_mlir::ONNX_RETURN);
-    // onnx.Return has Terminator trait, no results needed
-    terminator = builder.create(state);
-  } else {
-    terminator = entryBlock.getTerminator();
-  }
-  return terminator;
+// Resolve the MLIRContext for a (possibly orphan) Block. Orphan blocks
+// have no parent op; fall back to the shared MLIRContextManager singleton.
+static mlir::MLIRContext* context_for(mlir::Block& block) {
+  auto* parent_op = block.getParentOp();
+  return parent_op != nullptr ? parent_op->getContext()
+                              : &MLIRContextManager::getInstance().getContext();
 }
 
-static mlir::Operation* get_or_create_none(mlir::func::FuncOp func) {
-  // First, try to find an existing NoneOp in the function
+static mlir::Operation* get_or_create_terminator(mlir::Block& entryBlock,
+                                                 bool is_subgraph) {
+  if (entryBlock.mightHaveTerminator()) {
+    return entryBlock.getTerminator();
+  }
+  mlir::OpBuilder builder(context_for(entryBlock));
+  builder.setInsertionPointToEnd(&entryBlock);
+
+  llvm::StringRef op_name =
+      is_subgraph ? onnx_mlir::ONNX_YIELD : onnx_mlir::ONNX_RETURN;
+  mlir::OperationState state(builder.getUnknownLoc(), op_name);
+  // onnx.Return / onnx.Yield have Terminator trait, no results needed
+  return builder.create(state);
+}
+
+static mlir::Operation* get_or_create_none(mlir::Block& entryBlock) {
+  // First, try to find an existing NoneOp in the block (was func.walk).
+  // Block::walk does not include the parent op, so we walk only block contents.
   mlir::Operation* existing_none = nullptr;
-  func.walk([&](mlir::Operation* op) {
+  entryBlock.walk([&](mlir::Operation* op) {
     if (op->getName().getStringRef() == onnx_mlir::ONNX_NONE) {
       existing_none = op;
       return mlir::WalkResult::interrupt();
@@ -74,9 +76,8 @@ static mlir::Operation* get_or_create_none(mlir::func::FuncOp func) {
     return existing_none;
   }
 
-  // No existing NoneOp found, create a new one
-  mlir::OpBuilder builder(func->getContext());
-  builder.setInsertionPointToStart(&func.getBody().front());
+  mlir::OpBuilder builder(context_for(entryBlock));
+  builder.setInsertionPointToStart(&entryBlock);
   mlir::OperationState state(builder.getUnknownLoc(), onnx_mlir::ONNX_NONE);
   state.addTypes(builder.getNoneType());
   // onnx.NoValue requires a 'value' UnitAttr
@@ -85,16 +86,96 @@ static mlir::Operation* get_or_create_none(mlir::func::FuncOp func) {
 }
 MLIRGraph::MLIRGraph(MLIRModel& model, mlir::func::FuncOp func,
                      uint32_t proposed_graph_id)
-    : model_(model), func_(func),
+    : model_(model), entry_block_(&func.getBody().front()),
       graph_id_(proposed_graph_id > 0
                     ? GraphStore::allocate_graph_id(this, proposed_graph_id)
                     : GraphStore::allocate_graph_id(this)),
-      terminator_{get_or_create_terminator(func)},
-      none_{get_or_create_none(func)}, value_map_() {
+      terminator_{
+          get_or_create_terminator(*entry_block_, /*is_subgraph=*/false)},
+      none_{get_or_create_none(*entry_block_)}, value_map_() {
   initialize();
 }
 
-MLIRGraph::~MLIRGraph() { GraphStore::release_graph_id(this, graph_id_); }
+MLIRGraph::MLIRGraph(MLIRModel& model, mlir::Block& entry_block,
+                     uint32_t proposed_graph_id)
+    : model_(model), entry_block_(&entry_block),
+      graph_id_(proposed_graph_id > 0
+                    ? GraphStore::allocate_graph_id(this, proposed_graph_id)
+                    : GraphStore::allocate_graph_id(this)),
+      terminator_{
+          get_or_create_terminator(*entry_block_, /*is_subgraph=*/true)},
+      none_{get_or_create_none(*entry_block_)}, value_map_() {
+  // No initialize() here -- body ops / initializers / outputs do not exist
+  // yet. The caller is responsible for:
+  //   1. setting parent_graph_ via set_parent_graph (so is_subgraph()
+  //      returns true and the get_node_arg_index fallback can walk up),
+  //   2. filling the body via emit_body / convert_graph, and
+  //   3. for the orphan-block path (new_subgraph), having add_node
+  //      transplant entry_block_ into a parent op region before calling
+  //      resolve(true).
+}
+
+MLIRGraph* MLIRGraph::parent_graph() const { return parent_graph_; }
+
+void MLIRGraph::set_parent_graph(MLIRGraph* p) { parent_graph_ = p; }
+
+mlir::func::FuncOp MLIRGraph::func() const {
+  return llvm::dyn_cast<mlir::func::FuncOp>(entry_block_->getParentOp());
+}
+
+bool MLIRGraph::is_subgraph() const { return parent_graph_ != nullptr; }
+
+mlir::Block* MLIRGraph::take_orphan_block() {
+  CHECK(entry_block_->getParent() == nullptr)
+      << "take_orphan_block: block is not orphan (already transplanted?)";
+  return entry_block_;
+}
+
+MLIRGraph& MLIRGraph::new_subgraph() {
+  auto* orphan_block = new mlir::Block();
+  // Block& ctor is private; std::make_unique cannot reach it.
+  auto sub = std::unique_ptr<MLIRGraph>(new MLIRGraph(model_, *orphan_block));
+  sub->set_parent_graph(this);
+  // unique_ptr keeps MLIRGraph's address stable across vector growth, so
+  // the raw pointer that attr_proto_new_graph encodes stays valid.
+  auto* raw = sub.get();
+  add_subgraph(std::move(sub));
+  return *raw;
+}
+
+MLIRGraph::~MLIRGraph() {
+  // Free the orphan block if graph_new_subgraph created one and add_node
+  // never transplanted it (error / exception path). Transplanted blocks
+  // and top-level FuncOp blocks both have a non-null parent region.
+  if (entry_block_ != nullptr && entry_block_->getParent() == nullptr) {
+    delete entry_block_;
+  }
+  GraphStore::release_graph_id(this, graph_id_);
+}
+
+void MLIRGraph::register_captured_alias(const std::string& name,
+                                        mlir::Value outer_value) {
+  CHECK(is_subgraph()) << "register_captured_alias is subgraph-only";
+  CHECK(outer_value) << "register_captured_alias: null Value for '" << name
+                     << "'";
+  CHECK(node_args_map_.find(name) == node_args_map_.end())
+      << "register_captured_alias: name '" << name
+      << "' already registered in subgraph node_args_map_";
+
+  // Shadow NodeArg aliasing the outer Value; in-body op emission picks
+  // it up by name and uses outer_value directly as the operand.
+  auto shadow = std::make_unique<MLIRNodeArg>(name, outer_value);
+  all_node_args_.push_back(std::move(shadow));
+  auto idx =
+      MLIRNodeArgIndex::node_output((int32_t)all_node_args_.size() - 1,
+                                    GraphId::create_main_graph(graph_id_));
+  node_args_map_.emplace(name, idx);
+
+  // Also seed value_map_ for extract_value_name's Value -> name reverse
+  // lookup; in-body ops that consume the outer value will resolve back
+  // to the captured name through this map.
+  value_map_.insert(name, outer_value);
+}
 
 std::string MLIRGraph::extract_value_name(const mlir::Value value) {
   // As defined in the language reference,
@@ -104,9 +185,17 @@ std::string MLIRGraph::extract_value_name(const mlir::Value value) {
 
   // Try to get the name from onnx.name attribute if it's a block argument
   if (auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(value)) {
-    // Get name from onnx.name attribute on function argument
+    // Subgraph BlockArguments have no FuncOp arg-attr owner; names live in
+    // value_map_ (populated by register_captured_alias / set_inputs).
+    if (is_subgraph()) {
+      if (auto name = value_map_.lookup(value)) {
+        return *name;
+      }
+      return "input_" + std::to_string(blockArg.getArgNumber());
+    }
+    // Top-level: name lives on the FuncOp via setArgAttr (see ONNX_NAME).
     if (auto nameAttr =
-            func_.getArgAttr(blockArg.getArgNumber(), attr_names::ONNX_NAME)) {
+            func().getArgAttr(blockArg.getArgNumber(), attr_names::ONNX_NAME)) {
       if (auto stringAttr = mlir::dyn_cast<mlir::StringAttr>(nameAttr)) {
         return stringAttr.getValue().str();
       }
@@ -151,12 +240,9 @@ void MLIRGraph::initialize() {
 
 void MLIRGraph::initialize_node_args_map() {
   MY_LOG(1) << "Initializing node args map and constant initializers";
-  // Walk all operations and extract their results
-  func_.walk([&](mlir::Operation* op) {
-    // Skip the function operation itself
-    if (op == func_.getOperation()) {
-      return;
-    }
+  // Walk all operations and extract their results. Block::walk does not
+  // include the parent op, so no need to skip the FuncOp self-visit anymore.
+  entry_block_->walk([&](mlir::Operation* op) {
     // Skip return operations (terminators) - both onnx.Return and func.return
     if (onnx_mlir::isReturnOp(op)) {
       return;
@@ -192,8 +278,7 @@ void MLIRGraph::initialize_node_args_map() {
 void MLIRGraph::initialize_constant_initializers() {
   MY_LOG(1) << "Initializing constant initializers";
   // Filter operations by name to find all onnx.Constant
-  auto& block = func_.getBody().front();
-  for (auto& op : block.getOperations()) {
+  for (auto& op : entry_block_->getOperations()) {
     if (op.getName().getStringRef() == "onnx.Constant") {
       // attr :  NODE_OUTPUTS
       // constant op has a single result
@@ -216,8 +301,11 @@ void MLIRGraph::initialize_constant_initializers() {
 void MLIRGraph::initialize_graph_inputs() {
   MY_LOG(1) << "Initializing graph inputs";
 
-  // Also extract from function arguments
-  auto arguments = func_.getArguments();
+  // Extract entry block arguments. For top-level this is equivalent to
+  // func().getArguments(); for subgraph regions this picks up the
+  // block args created lazily by the subgraph branch of set_inputs as
+  // ort-bridge drives convert_graph_inputs -> node_arg_new + set_inputs.
+  auto arguments = entry_block_->getArguments();
   for (auto arg : arguments) {
     // Get the argument name from the onnx.name attribute
     auto name = extract_value_name(arg);
@@ -269,12 +357,13 @@ void MLIRGraph::maintain_morphizen_attributes() {
                "attributes";
 
   // Get MLIR context and builder
-  auto* context = func_->getContext();
+  auto* context = entry_block_->getParentOp()->getContext();
   mlir::OpBuilder builder(context);
-  func_.walk([&](mlir::Operation* op) {
-    // Skip function operation itself, return operations, constant operations,
-    // and our custom onnx.None operations
-    if (op != func_.getOperation() && !onnx_mlir::isReturnOp(op) &&
+  // Pre-order so the nested-region skip below can stop descent.
+  entry_block_->walk<mlir::WalkOrder::PreOrder>([&](mlir::Operation* op) {
+    // Skip return operations, constant operations, and our custom onnx.None
+    // operations
+    if (!onnx_mlir::isReturnOp(op) &&
         op->getName().getStringRef() != "onnx.Constant" &&
         op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
       // Collect input NodeArg pointers for this operation
@@ -301,15 +390,29 @@ void MLIRGraph::maintain_morphizen_attributes() {
       op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
                   builder.getArrayAttr(outputIndexes));
     }
+    // Region contents belong to their own subgraph MLIRGraph; their bookkeeping
+    // is not ours. Descending here would also reach extract_value_name with a
+    // region BlockArgument, which only works for an entry-block FuncOp arg.
+    // Use getNumRegions() rather than an op-name allow-list so future
+    // region-bearing ONNX ops cannot slip through.
+    if (op->getNumRegions() > 0) {
+      return mlir::WalkResult::skip();
+    }
+    return mlir::WalkResult::advance();
   });
 
   MY_LOG(1) << "Completed maintaining morphizen attributes";
 }
 
 const std::string& MLIRGraph::get_name() const {
-  // get attribute attr_names::ONNX_GRAPH_NAME from func_
-  CHECK(func_) << "func_ must not be null when retrieving graph name";
-  if (auto attr = func_->getAttr(attr_names::ONNX_GRAPH_NAME)) {
+  if (is_subgraph()) {
+    // Regions have no name; parent op encodes the slot ("then_branch"/...).
+    // Sentinel keeps log call sites that touch graph_.name() safe.
+    static const std::string subgraph_name = "subgraph_region";
+    return subgraph_name;
+  }
+  auto f = func();
+  if (auto attr = f->getAttr(attr_names::ONNX_GRAPH_NAME)) {
     if (auto string_attr = mlir::dyn_cast<mlir::StringAttr>(attr)) {
       static thread_local std::string graph_name;
       graph_name = string_attr.getValue().str();
@@ -323,28 +426,36 @@ const std::string& MLIRGraph::get_name() const {
 }
 
 void MLIRGraph::set_name(const char* name) {
-  // Set the onnx.graph.name attribute on the function
-  CHECK(func_) << "func_ must not be null when setting graph name";
-  auto* context = func_->getContext();
+  if (is_subgraph()) {
+    // No-op: subgraph regions have no FuncOp symbol to attach onnx.graph.name
+    // to. ort-bridge calls set_name unconditionally inside convert_graph;
+    // silently accept and move on.
+    MY_LOG(1) << "Skipping set_name on subgraph region: " << name;
+    return;
+  }
+  auto f = func();
+  auto* context = f->getContext();
   mlir::OpBuilder builder(context);
-  func_->setAttr(attr_names::ONNX_GRAPH_NAME, builder.getStringAttr(name));
+  f->setAttr(attr_names::ONNX_GRAPH_NAME, builder.getStringAttr(name));
   MY_LOG(1) << "Set graph name to: " << name;
 }
 const MLIRModel& MLIRGraph::get_model() const { return model_; }
 
 std::string MLIRGraph::get_symbol_name() const {
-  return const_cast<mlir::func::FuncOp&>(func_).getSymName().str();
+  CHECK(!is_subgraph()) << "get_symbol_name is top-level only "
+                           "(subgraph regions have no symbol)";
+  return func().getSymName().str();
 }
 
 std::vector<mlir::Operation*> MLIRGraph::nodes_unsafe() const {
   std::vector<mlir::Operation*> nodes;
 
-  // Iterate over all operations in the function body
-  const_cast<mlir::func::FuncOp&>(func_).walk([&](mlir::Operation* op) {
-    // Skip function operation itself, return operations, constant operations,
-    // and our custom onnx.None operations
-    if (op != const_cast<mlir::func::FuncOp&>(func_).getOperation() &&
-        !onnx_mlir::isReturnOp(op) &&
+  // Iterate over all operations in the entry block. Block::walk does not
+  // include the parent op, so no FuncOp self-skip is needed.
+  entry_block_->walk([&](mlir::Operation* op) {
+    // Skip return operations, constant operations, and our custom onnx.None
+    // operations
+    if (!onnx_mlir::isReturnOp(op) &&
         op->getName().getStringRef() != "onnx.Constant" &&
         op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
       // Add operation as node
@@ -366,9 +477,6 @@ llvm::SmallVector<MLIRNodeArgIndex> MLIRGraph::get_outputs() const {
 
 void MLIRGraph::set_outputs(
     const llvm::SmallVector<MLIRNodeArgIndex>& outputs) {
-
-  CHECK(func_) << "func_ must not be null when setting outputs";
-
   llvm::SmallVector<MLIRNodeArgIndex> valid_outputs;
   llvm::SmallVector<mlir::Value> mlir_outputs;
   valid_outputs.reserve(outputs.size());
@@ -395,6 +503,24 @@ void MLIRGraph::set_outputs(
   }
   graph_outputs_ = valid_outputs;
 
+  if (is_subgraph()) {
+    // Subgraph terminator is onnx.Yield; rewrite its operands. Parent op's
+    // result types are already fixed when add_node consumed the marker
+    // AttributeProto -- do NOT mutate them via setType (no FuncOp to
+    // mutate anyway).
+    CHECK(onnx_mlir::isReturnOrYieldOp(terminator_))
+        << "subgraph terminator must be onnx.Yield (or onnx.Return for "
+           "top-level), got: "
+        << (terminator_ ? terminator_->getName().getStringRef().str()
+                        : std::string("<null>"));
+    terminator_->setOperands(
+        llvm::ArrayRef<mlir::Value>(mlir_outputs.data(), mlir_outputs.size()));
+    MY_LOG(1) << "Updated subgraph "
+              << terminator_->getName().getStringRef().str()
+              << " terminator with " << mlir_outputs.size() << " outputs";
+    return;
+  }
+
   // Handle both onnx.Return and func.return terminators
   if (onnx_mlir::isReturnOp(terminator_)) {
     terminator_->setOperands(
@@ -409,22 +535,23 @@ void MLIRGraph::set_outputs(
                << ", expected onnx.Return or func.return";
   }
 
-  // Update func_ type to reflect the new output types
-  auto* context = func_->getContext();
+  // Update the FuncOp type to reflect the new output types.
+  auto f = func();
+  auto* context = f->getContext();
   mlir::OpBuilder builder(context);
 
-  auto argTypes = func_.getArgumentTypes();
+  auto argTypes = f.getArgumentTypes();
   llvm::SmallVector<mlir::Type> resultTypes;
   resultTypes.reserve(mlir_outputs.size());
   for (const auto& output : mlir_outputs) {
     resultTypes.push_back(output.getType());
   }
 
-  func_.setType(builder.getFunctionType(argTypes, resultTypes));
+  f.setType(builder.getFunctionType(argTypes, resultTypes));
   for (size_t i = 0; i < valid_outputs.size(); ++i) {
     auto name = valid_outputs[i].get_name();
-    func_.setResultAttr((unsigned int)i, mlir_impl::attr_names::ONNX_NAME,
-                        mlir::StringAttr::get(func_.getContext(), name));
+    f.setResultAttr((unsigned int)i, mlir_impl::attr_names::ONNX_NAME,
+                    mlir::StringAttr::get(f.getContext(), name));
   }
 
   MY_LOG(1) << "Updated function type with " << resultTypes.size()
@@ -433,14 +560,40 @@ void MLIRGraph::set_outputs(
 
 void MLIRGraph::set_inputs(const llvm::SmallVector<MLIRNodeArgIndex>& inputs) {
   graph_inputs_ = inputs;
+
+  if (is_subgraph()) {
+    // Bind slot i to its block_arg, growing a new one if the orphan block
+    // doesn't have one yet. Safe to grow at this point: the parent op's
+    // signature (set later by add_node) does not track block_arg count.
+    mlir::OpBuilder builder(context_for(*entry_block_));
+    auto loc = builder.getUnknownLoc();
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      auto* nodeArg = get_node_arg(inputs[i]);
+      CHECK(nodeArg != nullptr)
+          << "subgraph set_inputs: null NodeArg at slot " << i;
+      mlir::Value bound_value;
+      if (i < entry_block_->getNumArguments()) {
+        bound_value = entry_block_->getArgument(static_cast<unsigned>(i));
+      } else {
+        bound_value = entry_block_->addArgument(nodeArg->getType(builder), loc);
+      }
+      nodeArg->setValue(bound_value);
+      // value_map_ insert silently no-ops on duplicate name; safe even if
+      // a prior call already bound this name (idempotent contract).
+      value_map_.insert(nodeArg->getName(), bound_value);
+    }
+    return;
+  }
+
   // for now, we only support set_inputs when the graph has no inputs.
-  auto arguments = func_.getArguments();
+  auto f = func();
+  auto arguments = f.getArguments();
   if (!arguments.empty()) {
     LOG(FATAL) << "Graph already has inputs, cannot set new inputs.";
   }
-  auto builder = mlir::OpBuilder(func_.getContext());
+  auto builder = mlir::OpBuilder(f.getContext());
   // Get the function's entry block and add arguments to it
-  auto& entryBlock = func_.getBody().front();
+  auto& entryBlock = *entry_block_;
   auto loc = builder.getUnknownLoc();
   for (auto& input : inputs) {
     // For inputs, we typically don't have shape information at this point
@@ -449,17 +602,17 @@ void MLIRGraph::set_inputs(const llvm::SmallVector<MLIRNodeArgIndex>& inputs) {
     node_arg->setValue(entryBlock.addArgument(node_arg->getType(builder), loc));
   }
 
-  arguments = func_.getArguments();
-  auto retTys = func_.getResultTypes();
+  arguments = f.getArguments();
+  auto retTys = f.getResultTypes();
   llvm::SmallVector<mlir::Type, 4> argTypes;
   for (size_t i = 0; i < inputs.size(); ++i) {
     argTypes.push_back(arguments[i].getType());
   }
-  func_.setType(builder.getFunctionType(argTypes, retTys));
+  f.setType(builder.getFunctionType(argTypes, retTys));
   for (size_t i = 0; i < inputs.size(); ++i) {
     auto name = inputs[i].get_name();
-    func_.setArgAttr((unsigned int)i, mlir_impl::attr_names::ONNX_NAME,
-                     mlir::StringAttr::get(func_.getContext(), name));
+    f.setArgAttr((unsigned int)i, mlir_impl::attr_names::ONNX_NAME,
+                 mlir::StringAttr::get(f.getContext(), name));
   }
   return;
 }
@@ -492,10 +645,24 @@ MLIRGraph::producer_node(const std::string& node_arg_name) const {
 }
 
 MLIRNodeArgIndex MLIRGraph::get_node_arg_index(const std::string& name) const {
-  // Look up the MLIR value by name in our SymbolTable
-  auto node_arg = node_args_map_.find(name);
-  if (node_arg != node_args_map_.end()) {
-    return node_arg->second;
+  // Local hit: top-level graphs and subgraphs both go through this path
+  // first.
+  auto it = node_args_map_.find(name);
+  if (it != node_args_map_.end()) {
+    return it->second;
+  }
+  // Mirror ORT::Graph::GetNodeArgIncludingParentGraphs: first ancestor that
+  // knows the name wins. On hit we lazy-register a captured alias locally so
+  // the local map answers next time and resolve(true) sees the binding.
+  // const_cast: the lazy alias mutates node_args_map_ / value_map_ behind a
+  // logically-const view.
+  if (parent_graph_ != nullptr) {
+    auto outer = parent_graph_->get_node_arg_index(name);
+    if (outer.is_valid()) {
+      auto outer_value = outer.get_node_arg().getValue();
+      const_cast<MLIRGraph*>(this)->register_captured_alias(name, outer_value);
+      return node_args_map_.at(name);
+    }
   }
   return MLIRNodeArgIndex::invalid();
 }
@@ -525,9 +692,6 @@ MLIRGraph::node_arg_new(const std::string& name,
     // to LOG(FATAL))
     return MLIRNodeArgIndex::invalid();
   }
-  // Create MLIR type for the node argument
-  auto* context = func_->getContext();
-  mlir::OpBuilder builder(context);
   auto nodeArg = std::make_unique<MLIRNodeArg>(name, *shape, element_type);
   all_node_args_.push_back(std::move(nodeArg));
   auto ret =
@@ -549,28 +713,49 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
                     const std::string& domain) {
   (void)description; // description is not used in this implementation
 
-  // Get MLIR context and builder
-  auto* context = func_->getContext();
-  mlir::OpBuilder builder(context);
+  // Pick out the variant subgraph-ref markers; they encode the regions
+  // to create and must not land on the real op's attribute dict.
+  mlir::DictionaryAttr mlir_attrs_full = attributes.get_mlir_dictionary();
+  std::vector<std::pair<std::string, MLIRGraph*>> sub_refs;
+  for (const auto& na : mlir_attrs_full) {
+    if (auto* sub =
+            static_cast<const MLIRNamedAttribute&>(na).get_subgraph_ref()) {
+      sub_refs.emplace_back(na.getName().str(), sub);
+    }
+  }
+  // DictionaryAttr is alphabetically sorted by name, but onnx.If wants
+  // region(0)=then_branch, region(1)=else_branch -- force that order.
+  if (op_type == "If") {
+    std::stable_partition(sub_refs.begin(), sub_refs.end(), [](const auto& p) {
+      return p.first == "then_branch";
+    });
+  }
+  const size_t total_regions = sub_refs.size();
+
+  mlir::OpBuilder builder(context_for(*entry_block_));
   CHECK(terminator_ != nullptr);
 
   // Set insertion point - default to before terminator
   builder.setInsertionPoint(terminator_);
 
   mlir::Operation* latestInputOp = nullptr;
-  bool hasConstantInput = false;
 
   if (input_args.empty()) {
-    // Insert at the beginning of the function body when no input arguments
-    auto& entryBlock = func_.getBody().front();
-    builder.setInsertionPointToStart(&entryBlock);
+    // Insert at the beginning of the entry block when no input arguments
+    builder.setInsertionPointToStart(entry_block_);
   } else {
     for (const auto& arg : input_args) {
       if (auto* input_node_arg = get_node_arg(arg)) {
         if (auto& value = input_node_arg->getValue()) {
           if (auto* definingOp = value.getDefiningOp()) {
-            if (definingOp->getName().getStringRef() == "onnx.Constant") {
-              hasConstantInput = true;
+            // Captured outer value: isBeforeInBlock is UB across blocks, and
+            // a defining op in an enclosing block cannot anchor entry_block_'s
+            // insertion point. Treat as graph-input-equivalent.
+            if (definingOp->getBlock() != entry_block_) {
+              if (!latestInputOp) {
+                builder.setInsertionPointToStart(entry_block_);
+              }
+              continue;
             }
 
             if (!latestInputOp || latestInputOp->isBeforeInBlock(definingOp)) {
@@ -581,29 +766,23 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
             // means graph input
             if (!latestInputOp) {
               // Only handle cases where InsertionPoint is not set
-              auto& entryBlock = func_.getBody().front();
-              builder.setInsertionPointToStart(&entryBlock);
+              builder.setInsertionPointToStart(entry_block_);
             }
           }
         }
       }
     }
 
-    // If any input is from onnx.Constant, find the last onnx.Constant in the
-    // block and use it as reference point to ensure all constants stay at the
-    // beginning
-    if (hasConstantInput) {
-      auto& entryBlock = func_.getBody().front();
+    // Always insert after the last onnx.Constant. Region-bearing ops
+    // (If/Loop/Scan) may implicitly capture initializers from inside their
+    // regions; placing the parent op before those constants breaks dominance.
+    {
       mlir::Operation* lastConstantOp = nullptr;
-
-      for (auto& op : entryBlock.getOperations()) {
+      for (auto& op : entry_block_->getOperations()) {
         if (op.getName().getStringRef() == "onnx.Constant") {
           lastConstantOp = &op;
         }
       }
-
-      // Use the last constant operation as reference if it's after our current
-      // insertion point
       if (lastConstantOp &&
           (!latestInputOp || latestInputOp->isBeforeInBlock(lastConstantOp))) {
         latestInputOp = lastConstantOp;
@@ -653,8 +832,23 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // Create operation location
   auto loc = builder.getUnknownLoc();
 
-  // Get attributes as MLIR dictionary
-  mlir::DictionaryAttr mlir_attrs = attributes.get_mlir_dictionary();
+  // Strip subgraph-ref markers from the attribute dictionary that lands on
+  // the real op. When no markers are present this is the no-op same-pointer
+  // assignment; only the variant-AttributeProto path pays the rebuild cost.
+  mlir::DictionaryAttr mlir_attrs;
+  if (sub_refs.empty()) {
+    mlir_attrs = mlir_attrs_full;
+  } else {
+    llvm::SmallVector<mlir::NamedAttribute> filtered;
+    filtered.reserve(mlir_attrs_full.size() - sub_refs.size());
+    for (const auto& na : mlir_attrs_full) {
+      if (static_cast<const MLIRNamedAttribute&>(na).get_subgraph_ref()) {
+        continue;
+      }
+      filtered.push_back(na);
+    }
+    mlir_attrs = mlir::DictionaryAttr::get(builder.getContext(), filtered);
+  }
 
   // Determine if this operation should use onnx.Custom representation.
   // Two cases require onnx.Custom:
@@ -678,6 +872,9 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     mlir::OperationState state(loc, "onnx.Custom");
     state.addOperands(mlir_input_args);
     state.addTypes(result_types);
+    for (size_t r = 0; r < total_regions; ++r) {
+      state.addRegion();
+    }
 
     // Add function_name and domain_name as properties (inside <{}>)
     llvm::SmallVector<mlir::NamedAttribute> props;
@@ -707,6 +904,9 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     mlir::OperationState state(loc, "onnx." + full_op_name);
     state.addOperands(mlir_input_args);
     state.addTypes(result_types);
+    for (size_t r = 0; r < total_regions; ++r) {
+      state.addRegion();
+    }
 
     if (op_type == "Cast") {
       // onnx.Cast requires 'to' as a TypeAttr property, not an IntegerAttr.
@@ -772,8 +972,8 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // Set the "onnx_node_name" attribute on the operation
   op->setAttr(attr_names::ONNX_NODE_NAME, builder.getStringAttr(name));
 
-  // Register the operation results in the symbol table
-  mlir::IRRewriter rewriter(func_->getContext());
+  // Register the operation results in the symbol table.
+  mlir::IRRewriter rewriter(context_for(*entry_block_));
   for (const auto& [output, result] :
        llvm::zip(output_args, op->getResults())) {
     if (!output.is_valid() || !get_node_arg(output))
@@ -793,6 +993,18 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   //
   // This replaces all uses of the old operation's output value with the new
   // operation's result
+
+  // Transplant each sub's orphan block into the matching parent region
+  // (slot i = sub_refs[i]). The sub is already owned by subgraphs_cache_.
+  for (size_t i = 0; i < sub_refs.size(); ++i) {
+    MLIRGraph* sub = sub_refs[i].second;
+    CHECK(sub != nullptr) << "subgraph-ref marker for attr '"
+                          << sub_refs[i].first << "' decoded to null";
+    mlir::Region& region = op->getRegion(static_cast<unsigned>(i));
+    mlir::Block* orphan = sub->take_orphan_block();
+    region.push_back(orphan);
+    sub->resolve(/*force=*/true);
+  }
 
   // For now, return a placeholder - in a real implementation this would
   // be converted to a proper morphizen::Node representation
@@ -832,13 +1044,11 @@ void MLIRGraph::add_constant_initialized_tensor(
             << " with data type: " << node_arg->getElementType()
             << " and data size: " << node_arg->getDataSize();
 
-  // Get MLIR context and builder
-  auto* context = func_->getContext();
-  mlir::OpBuilder builder(context);
+  mlir::OpBuilder builder(context_for(*entry_block_));
 
   // Find the last onnx.Constant operation to insert after it
   // Order should be: onnx.None -> onnx.Constant ops -> other ops -> return
-  auto& block = func_.getBody().front();
+  auto& block = *entry_block_;
   mlir::Operation* lastConstantOp = nullptr;
   mlir::Operation* noneOp = nullptr;
 
@@ -929,6 +1139,9 @@ MLIRGraph::get_all_initialized_tensors() const {
 void MLIRGraph::save(const std::string& filename,
                      const std::string& dat_filename,
                      size_t external_data_threshold) const {
+  CHECK(!is_subgraph())
+      << "save is top-level only "
+         "(subgraph embedded in parent op; dump module instead)";
   (void)dat_filename;            // Currently unused in MLIR implementation
   (void)external_data_threshold; // Currently unused in MLIR implementation
 
@@ -957,10 +1170,13 @@ void MLIRGraph::save(const std::string& filename,
 }
 
 std::string MLIRGraph::save_string() const {
+  CHECK(!is_subgraph())
+      << "save_string is top-level only "
+         "(subgraph embedded in parent op; dump module instead)";
   MY_LOG(1) << "Serializing MLIR graph to string";
 
   // Get the parent module containing this function
-  mlir::ModuleOp module = func_->getParentOfType<mlir::ModuleOp>();
+  mlir::ModuleOp module = func()->getParentOfType<mlir::ModuleOp>();
   if (!module) {
     LOG(ERROR)
         << "Cannot serialize graph: function is not contained in a module";
@@ -1200,10 +1416,11 @@ void MLIRGraph::canonicalize_optional_outputs() {
   // that has no users (not consumed by other ops, not in onnx.Return) is an
   // unused optional output and should be typed as `none`.
   // This avoids allocating dummy buffers for unused intermediate values.
-  auto noneType = mlir::NoneType::get(func_->getContext());
-  mlir::OpBuilder builder(func_->getContext());
+  auto* ctx = entry_block_->getParentOp()->getContext();
+  auto noneType = mlir::NoneType::get(ctx);
+  mlir::OpBuilder builder(ctx);
 
-  // Collect the set of values used by the terminator (onnx.Return)
+  // Collect the set of values used by the terminator (onnx.Return / onnx.Yield)
   llvm::DenseSet<mlir::Value> terminator_operands;
   if (terminator_) {
     for (auto operand : terminator_->getOperands())
@@ -1211,8 +1428,9 @@ void MLIRGraph::canonicalize_optional_outputs() {
   }
 
   llvm::SmallVector<mlir::Operation*> ops_to_process;
-  func_.walk([&](mlir::Operation* op) {
-    if (op == func_.getOperation() || op == terminator_ || op == none_)
+  // Block::walk does not visit the parent op, so no FuncOp self-skip needed.
+  entry_block_->walk([&](mlir::Operation* op) {
+    if (op == terminator_ || op == none_)
       return;
     if (op->getNumResults() <= 1)
       return;
@@ -1269,6 +1487,14 @@ void MLIRGraph::canonicalize_optional_outputs() {
 
 int MLIRGraph::resolve(bool force) {
   MY_LOG(1) << "MLIRGraph::resolve called with force=" << force;
+  // The entry block must be attached to a region by the time resolve runs
+  // (top-level FuncOp blocks are always attached; sub graphs created by
+  // graph_new_subgraph become attached when add_node transplants them).
+  CHECK(entry_block_ != nullptr && entry_block_->getParent() != nullptr)
+      << "MLIRGraph::resolve called with an orphan entry block: "
+         "graph_new_subgraph must be paired with attr_proto_new_graph + "
+         "graph_add_node before resolve(true) runs.";
+
   // In MLIR, the IR is always in a consistent state
   // Unlike ONNX which has staging graphs, MLIR operations are immediately
   // consistent when created. However, we can still perform validation
@@ -1279,12 +1505,18 @@ int MLIRGraph::resolve(bool force) {
 
   // Perform MLIR-specific graph validation and consistency checks
   try {
-    // Verify that the function is well-formed
-    if (failed(mlir::verify(func_))) {
-      if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH))
-        save("resolve_fatal.onnx", "", 10000);
-      LOG(FATAL) << "MLIRGraph verification failed";
-      return -1; // Verification failure
+    // Subgraphs have no FuncOp; verification is the parent (top-level)
+    // MLIRGraph::resolve()'s responsibility (mlir::verify on the top-level
+    // func walks nested regions transitively). Skip the FuncOp-typed check
+    // here for subgraphs and proceed straight to canonicalize + re-init.
+    if (!is_subgraph()) {
+      // Verify that the function is well-formed
+      if (failed(mlir::verify(func()))) {
+        if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH))
+          save("resolve_fatal.onnx", "", 10000);
+        LOG(FATAL) << "MLIRGraph verification failed";
+        return -1; // Verification failure
+      }
     }
 
     // TODO : shape inference
@@ -1327,7 +1559,7 @@ void MLIRGraph::remove_node(mlir::Operation* op) {
 }
 
 void MLIRGraph::remove_initialized_tensor(const std::string& name) {
-  func_.walk([&](mlir::Operation* op) -> mlir::WalkResult {
+  entry_block_->walk([&](mlir::Operation* op) -> mlir::WalkResult {
     if (op->getName().getStringRef() != "onnx.Constant") {
       return mlir::WalkResult::advance();
     }
@@ -1352,6 +1584,8 @@ MLIRGraph::fuse(const std::string& name, const std::string& /* op_type*/,
                 const std::vector<MLIRNodeArgIndex>& inputs,
                 const std::vector<MLIRNodeArgIndex>& outputs,
                 const std::vector<MLIRNodeArgIndex>& constant_initializers) {
+  CHECK(!is_subgraph()) << "fuse is top-level only "
+                           "(EP partition does not descend into subgraphs)";
   // Core implementation of fusion operation: fuse multiple nodes into a single
   // func.call operation
   // Step 1: Create a fused subgraph function (func.func) containing all nodes
@@ -1372,7 +1606,9 @@ MLIRGraph::create_func_func(
     const std::vector<MLIRNodeArgIndex>& outputs,
     const std::vector<const mlir::Operation*>& nodes,
     const std::vector<MLIRNodeArgIndex>& constant_initializers) {
-  auto context = func_->getContext();
+  CHECK(!is_subgraph()) << "create_func_func is top-level only";
+  auto parent_func = func();
+  auto context = parent_func->getContext();
   mlir::OpBuilder builder(context);
   auto loc = builder.getUnknownLoc();
 
@@ -1387,7 +1623,7 @@ MLIRGraph::create_func_func(
 
   auto func_type = mlir::FunctionType::get(context, input_types, output_types);
 
-  auto parent_module = func_->getParentOfType<mlir::ModuleOp>();
+  auto parent_module = parent_func->getParentOfType<mlir::ModuleOp>();
   mlir::SymbolTable symbolTable(parent_module);
 
   // Generate unique function name using MLIR SymbolTable
@@ -1440,7 +1676,7 @@ MLIRGraph::create_func_func(
 
   // Walk through the function in order and collect operations that need to be
   // fused
-  func_.walk([&](mlir::Operation* walk_op) {
+  parent_func.walk([&](mlir::Operation* walk_op) {
     if (node_set.count(walk_op)) {
       sorted_ops.push_back(walk_op);
     }
@@ -1482,7 +1718,8 @@ mlir::Operation* MLIRGraph::create_func_call(
     const std::string& name, const std::vector<MLIRNodeArgIndex>& inputs,
     const std::vector<MLIRNodeArgIndex>& outputs, mlir::func::FuncOp fused_func,
     const std::stack<mlir::Operation*>& /* cloned_ops_cache */) {
-  mlir::IRRewriter rewriter(func_->getContext());
+  CHECK(!is_subgraph()) << "create_func_call is top-level only";
+  mlir::IRRewriter rewriter(func()->getContext());
 
   // Set insertion point based on inputs
   mlir::Operation* latestInputOp = nullptr;
@@ -1504,7 +1741,7 @@ mlir::Operation* MLIRGraph::create_func_call(
   // If any input is from onnx.Constant, find the last onnx.Constant in the
   // block
   if (hasConstantInput) {
-    auto& entryBlock = func_.getBody().front();
+    auto& entryBlock = func().getBody().front();
     mlir::Operation* lastConstantOp = nullptr;
 
     for (auto& op : entryBlock.getOperations()) {
@@ -1621,6 +1858,7 @@ mlir::Operation* MLIRGraph::create_func_call(
 }
 void MLIRGraph::remove_func_ops(
     std::stack<mlir::Operation*>& cloned_ops_cache) {
+  CHECK(!is_subgraph()) << "remove_func_ops is top-level only";
   // Delete cloned operations in LIFO order using stack
   // This ensures proper deletion order since later operations may depend on
   // earlier ones

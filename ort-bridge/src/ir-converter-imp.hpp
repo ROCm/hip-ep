@@ -40,6 +40,13 @@ public:
                        morphizen::Graph& graph) const;
 
 private:
+  // Build a variant GRAPH AttributeProto for an ORT_OP_ATTR_GRAPH attr:
+  // look up the sub graph by attr_name via Node_GetSubgraphs, recurse,
+  // wrap the resulting sub Graph. Throws on error.
+  morphizen::AttributeProtoPtr
+  make_subgraph_attribute(morphizen::Graph& parent_graph, const OrtNode& node,
+                          const std::string& attr_name) const;
+
   OrtGraphWrapper graph_;
   IRConverterConfig config_;
 };

@@ -17,6 +17,7 @@ namespace mlir_impl {
 
 // Forward declarations
 class MLIRNodeArg;
+class MLIRGraph;
 
 /**
  * @brief MLIR-based implementation of a named attribute
@@ -50,6 +51,11 @@ public:
   create_string(const std::string& name, const std::string& value);
   static std::unique_ptr<mlir::NamedAttribute>
   create_tensor(const std::string& name, const MLIRNodeArg& value);
+  // mlir-imp backend of attr_proto_new_graph; see ext header for the
+  // caller contract. Encodes the raw MLIRGraph* in a DictionaryAttr
+  // marker that add_node identifies and drops from the real op attrs.
+  static std::unique_ptr<mlir::NamedAttribute>
+  create_subgraph_ref(const std::string& name, MLIRGraph& sub);
   // clang-format on
 
   // gets
@@ -60,6 +66,7 @@ public:
   const std::vector<float>& get_floats() const;
   std::vector<std::string> get_strings() const;
   const MLIRNodeArg* get_tensor() const;
+  MLIRGraph* get_subgraph_ref() const;
 
   /**
    * @brief Get the ONNX attribute type for this MLIR attribute

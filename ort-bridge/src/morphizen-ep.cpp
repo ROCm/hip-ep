@@ -296,11 +296,19 @@ OrtStatus*
 MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
                            OrtEpGraphSupportInfo& graph_support_info) {
   auto is_subgraph = graph_viewer.is_subgraph();
-  // TODO: ORT does not support Graph_IsSubgraph API yet, so we cannot check if
-  // the graph is a subgraph.
-  // ort_api.Graph_IsSubgraph(graph, &is_subgraph);
+  const char* gname_for_log = nullptr;
+  try {
+    gname_for_log = graph_viewer.name();
+  } catch (...) {
+    gname_for_log = "<unknown>";
+  }
+  MY_LOG(1) << "GetCapability graph='"
+            << (gname_for_log ? gname_for_log : "<null>")
+            << "', is_subgraph=" << is_subgraph;
   if (is_subgraph) {
-    // VITIS AI EP not support sungraph. Assigned to CPU.
+    // MorphiZen EP does not lower control-flow body subgraphs; let ORT
+    // partition them onto the CPU EP.
+    MY_LOG(1) << "Skip GetCapability for subgraph; leave to ORT/CPU.";
     return nullptr;
   }
   // setup API environment

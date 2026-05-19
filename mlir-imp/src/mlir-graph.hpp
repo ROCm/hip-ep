@@ -40,6 +40,12 @@ public:
                      uint32_t proposed_graph_id = 0);
   ~MLIRGraph();
 
+  MLIRGraph* parent_graph() const;
+
+  // mlir-imp backend of graph_new_subgraph. The orphan block is cleaned
+  // up by ~MLIRGraph if add_node never consumes the matching attribute.
+  MLIRGraph& new_subgraph();
+
   // Delete copy operations since MLIRSymbolTable is non-copyable
   MLIRGraph(const MLIRGraph&) = delete;
   MLIRGraph& operator=(const MLIRGraph&) = delete;
@@ -129,6 +135,14 @@ public:
                                const mlir::Operation* /*to*/)>& stop) const;
 
 private:
+  explicit MLIRGraph(MLIRModel& model, mlir::Block& entry_block,
+                     uint32_t proposed_graph_id = 0);
+
+  void set_parent_graph(MLIRGraph* p);
+  mlir::Block* take_orphan_block();
+  void register_captured_alias(const std::string& name,
+                               mlir::Value outer_value);
+
   void initialize();
   void initialize_graph_inputs();
   void initialize_graph_outputs();
@@ -155,14 +169,27 @@ private:
                    const std::stack<mlir::Operation*>& cloned_ops_cache);
   void remove_func_ops(std::stack<mlir::Operation*>& cloned_ops_cache);
 
-private:
+  mlir::func::FuncOp func() const;
+  bool is_subgraph() const;
+
   MLIRModel& model_;
-  mlir::func::FuncOp func_;
+  // entry_block_ is what an MLIRGraph IS. Always valid.
+  // Top-level:  &func.getBody().front() where the parent op is func::FuncOp.
+  // Subgraph:   &parent_op.getRegion(i).front() once transplanted, or an
+  //             orphan Block (getParent() == nullptr) during the
+  //             lazy-valid IR window between new_subgraph and add_node.
+  mlir::Block* entry_block_;
+
   uint32_t graph_id_;
   mlir::Operation* terminator_;
   mlir::Operation* none_;
   MLIRSymbolTable value_map_;
 
+  // Sub MLIRGraphs owned by this graph. Entries come from:
+  //   - new_subgraph()     — ONNX If/Loop/Scan body regions
+  //   - getFunctionBody()  — func.call lookups cached for fused custom ops
+  // unique_ptr keeps each MLIRGraph's address stable across vector growth,
+  // so raw pointers encoded by attr_proto_new_graph remain valid.
   std::vector<std::unique_ptr<MLIRGraph>> subgraphs_cache_;
 
   // Map from node argument names to their indices
@@ -200,6 +227,8 @@ private:
   // - Best practice: Use NodeBuilder to avoid these traversal issues and other problems
   // clang-format on
   std::unordered_set<const mlir::Operation*> staging_nodes_;
+
+  MLIRGraph* parent_graph_ = nullptr;
 };
 
 } // namespace mlir_impl

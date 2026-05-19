@@ -5,6 +5,8 @@
 #pragma once
 
 #include <morphizen/morphizen_ort_api.h>
+#include <string>
+#include <vector>
 
 namespace morphizen {
 
@@ -17,6 +19,18 @@ uint32_t get_morphizen_version_minor();
 uint32_t get_morphizen_version_patch();
 
 struct MorphizenOrtApiExt : public morphizen::OrtApiForMorphizen {
+  // Create a sub Graph owned by `parent_graph`. The returned reference is
+  // valid for the parent's lifetime. The sub Graph is unattached until
+  // graph_add_node consumes the corresponding attr_proto_new_graph.
+  morphizen::Graph& (*graph_new_subgraph)(morphizen::Graph& parent_graph);
+
+  // Wrap a sub Graph (from graph_new_subgraph) as a GRAPH-typed
+  // AttributeProto. graph_add_node uses it as the body of the resulting
+  // node (e.g. onnx.If then_branch / else_branch, onnx.Loop / Scan body).
+  morphizen::AttributeProto* (*attr_proto_new_graph)(
+      const std::string& name, //
+      morphizen::Graph& sub_graph);
+
   morphizen::TensorProto* (*tensor_proto_new_with_external_data)(
       const std::string& name,           //
       const std::vector<int64_t>& shape, //
