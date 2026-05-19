@@ -1,0 +1,52 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: build-and-test-bazel
+
+on:
+  workflow_dispatch:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+permissions:
+  contents: read
+
+jobs:
+  bazel-test:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+          fetch-depth: 0
+          show-progress: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
+        with:
+          # Download Bazelisk 1.x and add to PATH (runner does not have it pre-installed)
+          bazelisk-version: 1.x
+          # Cache Bazelisk binary based on .bazelversion
+          bazelisk-cache: true
+          # Cache downloaded source archives (LLVM tarball, registry modules, etc.)
+          # Keyed on MODULE.bazel — separate from Cachion RBE which caches build outputs
+          repository-cache: true
+
+      - name: bazel test (mlir-imp backend)
+        shell: powershell
+        run: bazel test --config=remote --test_output=errors //...
+        env:
+          MORPHIZEN_ORT_BRIDGE_BACKEND: mlir-backend
+          GITHUB_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}

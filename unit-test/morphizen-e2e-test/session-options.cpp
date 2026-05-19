@@ -4,6 +4,7 @@
  */
 #include "./session-options.hpp"
 #include "./env.hpp"
+#include "test_environment.hpp"
 #include <glog/logging.h>
 
 namespace morphizen_e2e_test {
@@ -20,6 +21,22 @@ E2ETestSessionOptions::E2ETestSessionOptions(
   for (const auto& session_config : proto_.session_configs()) {
     LOG(INFO) << "Session config: " << session_config.first << " = "
               << session_config.second;
+#ifdef BAZEL_CURRENT_REPOSITORY
+    // In Bazel, the test CWD is read-only runfiles. Prefix relative
+    // ep.context_file_path with TEST_CWD (TEST_TMPDIR) so ORT writes the
+    // generated EP context model to the writable scratch directory.
+    if (session_config.first == "ep.context_file_path") {
+      auto ctx_path = std::filesystem::u8path(session_config.second);
+      if (ctx_path.is_relative()) {
+        auto abs_path = (TEST_CWD / ctx_path).u8string();
+        LOG(INFO) << "Session config (abs): ep.context_file_path = "
+                  << abs_path;
+        ort_session_options_->AddConfigEntry(session_config.first.c_str(),
+                                             abs_path.c_str());
+        continue;
+      }
+    }
+#endif
     ort_session_options_->AddConfigEntry(session_config.first.c_str(),
                                          session_config.second.c_str());
   }

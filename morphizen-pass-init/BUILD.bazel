@@ -1,0 +1,25 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "morphizen-pass-init",
+    srcs = ["src/morphizen_pass_init.cpp"],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17", "-fPIC"],
+    }),
+    local_defines = ['OUTPUT_NAME=\\"morphizen-pass-init\\"'],
+    # DEFINE_MORPHIZEN_PASS creates a static initializer in an anonymous namespace.
+    # Without alwayslink, MSVC dead-strips the object from the static library when no
+    # symbol is directly referenced, so the pass is never registered at runtime.
+    alwayslink = True,
+    deps = [
+        "//morphizen-core:morphizen-core-static",
+        "@glog",
+    ],
+    visibility = ["//visibility:public"],
+)

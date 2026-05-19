@@ -186,7 +186,7 @@ v2_single_session_gen_and_run_embed_ctx = {
         "registration": [
             {
                 "name": "MorphiZenExecutionProvider",
-                "library": "onnxruntime_vitisai_ep.dll",
+                "library": "onnxruntime_morphizen_ep.dll",
             },
         ],
         "session_options": [
@@ -237,13 +237,9 @@ v2_single_session_gen_and_run_embed_ctx = {
     },
 }
 
-config = [
-    single_session_gen_and_run_embed_ctx,
-    multiple_session_gen_and_run_embed_ctx,
-    single_session_gen_and_run_non_embed_no_prefix_ctx,
-]
-## only add v2_single_session_gen_and_run_embed_ctx if running on Windows
-if is_windows():
-    config.append(v2_single_session_gen_and_run_embed_ctx)
+## Only enable the V2 API path (AppendExecutionProvider_V2 + RegisterExecutionProviderLibrary).
+## The legacy morphizen_ep_param path (AppendExecutionProvider_VitisAI) is not supported
+## on the GitHub side.
+config = [v2_single_session_gen_and_run_embed_ctx]
 
 json.dump(config, open(sys.argv[1], "w"), indent=4)

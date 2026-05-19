@@ -1,0 +1,8 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+# patterns/relu_dq.json has no BUILD.bazel of its own so it lives in this
+# package.  Export it so //morphizen-demo/level-1-pass-relu-dq can reference it.
+exports_files(["patterns/relu_dq.json"])

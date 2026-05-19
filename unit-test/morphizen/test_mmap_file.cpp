@@ -34,7 +34,7 @@ template <typename T> static void show_entry(const T& entry) {
             << " size=" << entry->size();
 }
 TEST(MMapfileTest, CreateTar) {
-  auto tarFileName1 = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+  auto tarFileName1 = SAMPLE_SRC_TAR_PATH;
   auto tarFileName2 =
       CMAKE_CURRENT_BINARY_PATH / "sample.src.tar.MMapfileTest.CreateTar";
   // Fix: Remove update_existing to ensure file is always overwritten
@@ -52,7 +52,7 @@ TEST(MMapfileTest, CreateTar) {
 }
 
 TEST(MMapfileTest, CreateTarNoMMap) {
-  auto tarFileName1 = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+  auto tarFileName1 = SAMPLE_SRC_TAR_PATH;
   auto tarFileName2 =
       CMAKE_CURRENT_BINARY_PATH / "sample.src.tar.MMapfileTest.CreateTarNoMMap";
   // Fix: Remove update_existing to ensure file is always overwritten

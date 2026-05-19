@@ -1,0 +1,56 @@
+##
+# Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_python//python:defs.bzl", "py_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+py_binary(
+    name = "compress_binary_py",
+    srcs = ["src/compress_binary.py"],
+    main = "src/compress_binary.py",
+)
+
+# Generate the embedded binary data header (empty resource for default builds).
+# mem_binary.cpp uses #include "mem_binary_file.hpp.inc" (bare include), so the
+# generated file must live in this package's output directory. includes = ["."]
+# below adds the package root of bazel-out to the include search path.
+genrule(
+    name = "generate_mem_binary_file",
+    outs = ["mem_binary_file.hpp.inc"],
+    cmd = "$(location :compress_binary_py) 0 $@",
+    tools = [":compress_binary_py"],
+)
+
+cc_library(
+    name = "morphizen-foundation",
+    srcs = [
+        "src/encryption.cpp",
+        "src/env_config.cpp",
+        "src/mem_binary.cpp",
+        ":mem_binary_file.hpp.inc",
+    ],
+    hdrs = [
+        "include/morphizen-foundation/encryption.hpp",
+        "include/morphizen-foundation/env_config.hpp",
+        "include/morphizen-foundation/file_io.hpp",
+        "include/morphizen-foundation/mem_binary.hpp",
+        "include/morphizen-foundation/parse_value.hpp",
+    ],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17"],
+    }),
+    # includes = ["."] exposes the package's bazel-out directory so the compiler
+    # can find mem_binary_file.hpp.inc via the bare #include "mem_binary_file.hpp.inc".
+    includes = ["."],
+    strip_include_prefix = "include",
+    deps = [
+        "@glog",
+        "@gsl",
+        "@zlib",
+    ],
+)

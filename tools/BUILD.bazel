@@ -1,0 +1,19 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+
+py_library(
+    name = "xxd",
+    srcs = ["xxd.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "xxd_py",
+    srcs = ["xxd.py"],
+    main = "xxd.py",
+    visibility = ["//visibility:public"],
+)
