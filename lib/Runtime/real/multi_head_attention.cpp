@@ -201,11 +201,9 @@ const MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
     MHA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, key.strideB));
 
     hipDataType outType = key.outputFp32 ? HIP_R_32F : HIP_R_16F;
-    MHA_CACHE_CHECK(
-        hipblasLtMatrixLayoutCreate(&entry.layC, outType, m, n, m));
+    MHA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, outType, m, n, m));
     MHA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, key.strideC));
-    MHA_CACHE_CHECK(
-        hipblasLtMatrixLayoutCreate(&entry.layD, outType, m, n, m));
+    MHA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, outType, m, n, m));
     MHA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, key.strideC));
   }
   MHA_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
@@ -238,12 +236,18 @@ const MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
   goto cache_done;
 
 cache_fail:
-  if (pref) hipblasLtMatmulPreferenceDestroy(pref);
-  if (entry.layD) hipblasLtMatrixLayoutDestroy(entry.layD);
-  if (entry.layC) hipblasLtMatrixLayoutDestroy(entry.layC);
-  if (entry.layB) hipblasLtMatrixLayoutDestroy(entry.layB);
-  if (entry.layA) hipblasLtMatrixLayoutDestroy(entry.layA);
-  if (entry.desc) hipblasLtMatmulDescDestroy(entry.desc);
+  if (pref)
+    hipblasLtMatmulPreferenceDestroy(pref);
+  if (entry.layD)
+    hipblasLtMatrixLayoutDestroy(entry.layD);
+  if (entry.layC)
+    hipblasLtMatrixLayoutDestroy(entry.layC);
+  if (entry.layB)
+    hipblasLtMatrixLayoutDestroy(entry.layB);
+  if (entry.layA)
+    hipblasLtMatrixLayoutDestroy(entry.layA);
+  if (entry.desc)
+    hipblasLtMatmulDescDestroy(entry.desc);
   return nullptr;
 
 cache_done:
@@ -263,11 +267,16 @@ extern "C" void hipdnn_ep_mha_gemm_cache_destroy(void *cache_ptr) {
     return;
   for (auto &kv : cache->entries) {
     auto &e = kv.second;
-    if (e.layD) hipblasLtMatrixLayoutDestroy(e.layD);
-    if (e.layC) hipblasLtMatrixLayoutDestroy(e.layC);
-    if (e.layB) hipblasLtMatrixLayoutDestroy(e.layB);
-    if (e.layA) hipblasLtMatrixLayoutDestroy(e.layA);
-    if (e.desc) hipblasLtMatmulDescDestroy(e.desc);
+    if (e.layD)
+      hipblasLtMatrixLayoutDestroy(e.layD);
+    if (e.layC)
+      hipblasLtMatrixLayoutDestroy(e.layC);
+    if (e.layB)
+      hipblasLtMatrixLayoutDestroy(e.layB);
+    if (e.layA)
+      hipblasLtMatrixLayoutDestroy(e.layA);
+    if (e.desc)
+      hipblasLtMatmulDescDestroy(e.desc);
   }
   delete cache;
 }
@@ -278,16 +287,14 @@ extern "C" void hipdnn_ep_mha_gemm_cache_destroy(void *cache_ptr) {
 //===----------------------------------------------------------------------===//
 
 extern "C" int wrap_multi_head_attention(
-    RuntimeState *state,
-    void *query, void *key, void *value, void *bias, void *key_padding_mask,
-    void *attention_bias, void *past_key, void *past_value,
-    void *past_sequence_length, void *cache_indirection,
+    RuntimeState *state, void *query, void *key, void *value, void *bias,
+    void *key_padding_mask, void *attention_bias, void *past_key,
+    void *past_value, void *past_sequence_length, void *cache_indirection,
     void *output, void *present_key, void *present_value, void *qk,
     int64_t num_heads, float mask_filter_value, float scale,
-    int64_t unidirectional,
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t query_hidden, int64_t v_hidden, int64_t head_size,
-    int64_t query_rank, int64_t element_size_bytes) {
+    int64_t unidirectional, int64_t batch_size, int64_t seq_len_q,
+    int64_t seq_len_kv, int64_t query_hidden, int64_t v_hidden,
+    int64_t head_size, int64_t query_rank, int64_t element_size_bytes) {
   (void)mask_filter_value; // currently unused (causal mask uses the -inf/-65504
                            // sentinel from hip_gqa_causal_mask_f32)
 
@@ -295,8 +302,7 @@ extern "C" int wrap_multi_head_attention(
       "multi_head_attention",
       [&] {
         char b[80];
-        snprintf(b, sizeof(b),
-                 "b=%lld,sq=%lld,skv=%lld,n=%lld,h=%lld%s",
+        snprintf(b, sizeof(b), "b=%lld,sq=%lld,skv=%lld,n=%lld,h=%lld%s",
                  (long long)batch_size, (long long)seq_len_q,
                  (long long)seq_len_kv, (long long)num_heads,
                  (long long)head_size, unidirectional ? ",causal" : "");
@@ -323,8 +329,7 @@ extern "C" int wrap_multi_head_attention(
 
   // ---- Validate inputs against the implemented (Q_K_V_BSNH fp16) subset ----
   if (!query || !output) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: query or output is null\n");
+    fprintf(stderr, "[multi_head_attention] ERROR: query or output is null\n");
     return -1;
   }
   if (element_size_bytes != 2) {
@@ -369,14 +374,13 @@ extern "C" int wrap_multi_head_attention(
             present_key, present_value, qk);
     return -1;
   }
-  if (num_heads <= 0 || batch_size <= 0 || seq_len_q <= 0 ||
-      seq_len_kv <= 0 || query_hidden <= 0) {
+  if (num_heads <= 0 || batch_size <= 0 || seq_len_q <= 0 || seq_len_kv <= 0 ||
+      query_hidden <= 0) {
     fprintf(stderr,
             "[multi_head_attention] ERROR: invalid shape (B=%lld sq=%lld "
             "skv=%lld N=%lld query_hidden=%lld)\n",
-            (long long)batch_size, (long long)seq_len_q,
-            (long long)seq_len_kv, (long long)num_heads,
-            (long long)query_hidden);
+            (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
+            (long long)num_heads, (long long)query_hidden);
     return -1;
   }
 
@@ -429,8 +433,7 @@ extern "C" int wrap_multi_head_attention(
   hipStream_t stream =
       reinterpret_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: failed to get HIP stream\n");
+    fprintf(stderr, "[multi_head_attention] ERROR: failed to get HIP stream\n");
     return -1;
   }
   hipblasLtHandle_t ltHandle = reinterpret_cast<hipblasLtHandle_t>(
@@ -466,9 +469,8 @@ extern "C" int wrap_multi_head_attention(
   const size_t sz_p_f16 = align_up(B * N * Sq * Skv * 2);
   const size_t sz_o_bnsh = need_o_trans ? align_up(B * N * Sq * H * 2) : 0;
   const size_t sz_gemm_ws = align_up(kMaxWorkspaceBytes);
-  const size_t total_ws =
-      sz_q_bnsh + sz_k_bnsh + sz_v_bnsh + sz_s_f32 + sz_p_f16 + sz_o_bnsh +
-      sz_gemm_ws;
+  const size_t total_ws = sz_q_bnsh + sz_k_bnsh + sz_v_bnsh + sz_s_f32 +
+                          sz_p_f16 + sz_o_bnsh + sz_gemm_ws;
 
   if (hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
     fprintf(stderr,
@@ -489,12 +491,34 @@ extern "C" int wrap_multi_head_attention(
   void *d_Kbnsh = nullptr;
   void *d_Vbnsh = nullptr;
   void *d_O_bnsh = nullptr;
-  if (sz_q_bnsh) { d_Qbnsh = ws + off; off += sz_q_bnsh; } else { d_Qbnsh = query; }
-  if (sz_k_bnsh) { d_Kbnsh = ws + off; off += sz_k_bnsh; } else { d_Kbnsh = key; }
-  if (sz_v_bnsh) { d_Vbnsh = ws + off; off += sz_v_bnsh; } else { d_Vbnsh = value; }
-  void *d_S_f32 = ws + off; off += sz_s_f32;
-  void *d_P_f16 = ws + off; off += sz_p_f16;
-  if (sz_o_bnsh) { d_O_bnsh = ws + off; off += sz_o_bnsh; } else { d_O_bnsh = output; }
+  if (sz_q_bnsh) {
+    d_Qbnsh = ws + off;
+    off += sz_q_bnsh;
+  } else {
+    d_Qbnsh = query;
+  }
+  if (sz_k_bnsh) {
+    d_Kbnsh = ws + off;
+    off += sz_k_bnsh;
+  } else {
+    d_Kbnsh = key;
+  }
+  if (sz_v_bnsh) {
+    d_Vbnsh = ws + off;
+    off += sz_v_bnsh;
+  } else {
+    d_Vbnsh = value;
+  }
+  void *d_S_f32 = ws + off;
+  off += sz_s_f32;
+  void *d_P_f16 = ws + off;
+  off += sz_p_f16;
+  if (sz_o_bnsh) {
+    d_O_bnsh = ws + off;
+    off += sz_o_bnsh;
+  } else {
+    d_O_bnsh = output;
+  }
   void *gemm_ws = ws + off;
   const size_t gemm_ws_bytes = sz_gemm_ws;
 
@@ -502,9 +526,8 @@ extern "C" int wrap_multi_head_attention(
       "[multi_head_attention] workspace=%zu bytes (q=%zu k=%zu v=%zu "
       "s=%zu p=%zu o=%zu gemm=%zu); need_q_trans=%d need_kv_trans=%d "
       "need_o_trans=%d\n",
-      total_ws, sz_q_bnsh, sz_k_bnsh, sz_v_bnsh, sz_s_f32, sz_p_f16,
-      sz_o_bnsh, sz_gemm_ws, (int)need_q_trans, (int)need_kv_trans,
-      (int)need_o_trans);
+      total_ws, sz_q_bnsh, sz_k_bnsh, sz_v_bnsh, sz_s_f32, sz_p_f16, sz_o_bnsh,
+      sz_gemm_ws, (int)need_q_trans, (int)need_kv_trans, (int)need_o_trans);
 
   int result = 0;
 
@@ -550,8 +573,7 @@ extern "C" int wrap_multi_head_attention(
       fprintf(stderr,
               "[multi_head_attention] ERROR: failed to build Score GEMM "
               "state for B*N=%lld Skv=%lld Sq=%lld H=%lld\n",
-              (long long)(B * N), (long long)Skv, (long long)Sq,
-              (long long)H);
+              (long long)(B * N), (long long)Skv, (long long)Sq, (long long)H);
       result = -1;
       goto cleanup;
     }
@@ -560,11 +582,9 @@ extern "C" int wrap_multi_head_attention(
     float beta = 0.0f;
     hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
     HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, scoreState->desc, &scoreAlpha,
-        d_Kbnsh, scoreState->layA,
-        d_Qbnsh, scoreState->layB, &beta,
-        d_S_f32, scoreState->layC,
-        d_S_f32, scoreState->layD, &sAlgo, gemm_ws, gemm_ws_bytes, stream));
+        ltHandle, scoreState->desc, &scoreAlpha, d_Kbnsh, scoreState->layA,
+        d_Qbnsh, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
+        scoreState->layD, &sAlgo, gemm_ws, gemm_ws_bytes, stream));
   }
 
   // ---- Step 5: Optional causal mask (fp32) ------------------------------
@@ -609,8 +629,7 @@ extern "C" int wrap_multi_head_attention(
       fprintf(stderr,
               "[multi_head_attention] ERROR: failed to build Value GEMM "
               "state for B*N=%lld Sq=%lld Skv=%lld H=%lld\n",
-              (long long)(B * N), (long long)Sq, (long long)Skv,
-              (long long)H);
+              (long long)(B * N), (long long)Sq, (long long)Skv, (long long)H);
       result = -1;
       goto cleanup;
     }
@@ -619,11 +638,9 @@ extern "C" int wrap_multi_head_attention(
     float beta = 0.0f;
     hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
     HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, valueState->desc, &valAlpha,
-        d_Vbnsh, valueState->layA,
-        d_P_f16, valueState->layB, &beta,
-        d_O_bnsh, valueState->layC,
-        d_O_bnsh, valueState->layD, &vAlgo, gemm_ws, gemm_ws_bytes, stream));
+        ltHandle, valueState->desc, &valAlpha, d_Vbnsh, valueState->layA,
+        d_P_f16, valueState->layB, &beta, d_O_bnsh, valueState->layC, d_O_bnsh,
+        valueState->layD, &vAlgo, gemm_ws, gemm_ws_bytes, stream));
   }
 
   // ---- Step 8: Transpose O from BNSH [B,N,Sq,H] back to BSHD [B,Sq,N,H]
@@ -636,8 +653,8 @@ extern "C" int wrap_multi_head_attention(
   RUNTIME_DEBUG_LOG(
       "[multi_head_attention] success: B=%lld N=%lld Sq=%lld Skv=%lld "
       "H=%lld scale=%.6f causal=%d\n",
-      (long long)B, (long long)N, (long long)Sq, (long long)Skv,
-      (long long)H, (double)scale, (int)(unidirectional == 1));
+      (long long)B, (long long)N, (long long)Sq, (long long)Skv, (long long)H,
+      (double)scale, (int)(unidirectional == 1));
 
 cleanup:
   return result;
