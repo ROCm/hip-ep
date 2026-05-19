@@ -47,6 +47,7 @@ add_library(OnnxToHip STATIC
   ConstantOfShapeConversion.cpp
   SliceConversion.cpp
   ScatterNDConversion.cpp
+  IdentityConversion.cpp
 )
 
 add_dependencies(OnnxToHip
