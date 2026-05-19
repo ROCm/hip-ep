@@ -50,9 +50,11 @@ module {
     // CHECK: tensor.empty() : tensor<1x128x4096xf16>
     // CHECK: hip.multi_head_attention(%[[CTX]])
     // CHECK-SAME: ins(
-    // CHECK-SAME: mask_filter_value = -1.000000e+04
     // CHECK-SAME: num_heads = 32
-    // CHECK-SAME: unidirectional = 0
+    // Note: mask_filter_value=-1e4 and unidirectional=0 are DefaultValuedAttr in
+    // HipOps.td, so MLIR's auto-generated printer omits them when they equal the
+    // default. Their semantic correctness is covered by Test 4 (unidirectional=1
+    // explicit, non-default) and by hip-to-llvm/test_multi_head_attention.mlir.
     // CHECK-NOT: hip.alloc
 
     return %out : tensor<1x128x4096xf16>
@@ -162,7 +164,10 @@ module {
 
     // CHECK-LABEL: func.func @test_dynamic_shape
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
-    // CHECK-SAME: %[[Q:.*]]: tensor<?x?x4096xf16>,
+    // Use a restricted SSA-name regex for Q so the greedy `.*` doesn't capture
+    // across multiple matching `: tensor<?x?x4096xf16>,` suffixes (3 args have
+    // the same type here).
+    // CHECK-SAME: %[[Q:[a-zA-Z0-9_]+]]: tensor<?x?x4096xf16>,
 
     %out = "onnx.Custom"(%query, %key, %value)
         <{function_name = "MultiHeadAttention"}>
