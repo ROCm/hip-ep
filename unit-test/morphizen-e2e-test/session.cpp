@@ -91,9 +91,30 @@ E2ETestSession::E2ETestSession(Ort::Env& env,
     : env_(env), session_options_(session_options),
       session_proto_(session_proto) {
 
-  // TEST_CWD
+  // Resolve model path.
+  // In Bazel: source models live in runfiles → use Rlocation.
+  // Generated EP context models are not in runfiles → fall back to TEST_CWD.
+  // In CMake: model_path is already relative to TEST_CWD (CMAKE_BINARY_DIR).
+#ifdef BAZEL_CURRENT_REPOSITORY
+  std::filesystem::path model_path;
+  {
+    std::string err;
+    auto rf = bazel::tools::cpp::runfiles::Runfiles::CreateForTest(
+        BAZEL_CURRENT_REPOSITORY, &err);
+    auto resolved = rf ? rf->Rlocation("_main/unit-test/data/" +
+                                       session_proto.model_path())
+                       : std::string{};
+    if (!resolved.empty() &&
+        std::filesystem::exists(std::filesystem::u8path(resolved))) {
+      model_path = std::filesystem::u8path(resolved);
+    } else {
+      // Generated model (e.g. EP context .onnx): falls back to TEST_CWD.
+      model_path = TEST_CWD / std::filesystem::u8path(session_proto.model_path());
+    }
+  }
+#else
   auto model_path = std::filesystem::u8path(session_proto.model_path());
-  // check model_path exists
+#endif
   CHECK(std::filesystem::exists(model_path))
       << "Model path does not exist: " << model_path;
   LOG(INFO) << "Creating ORT session with model: " << model_path;

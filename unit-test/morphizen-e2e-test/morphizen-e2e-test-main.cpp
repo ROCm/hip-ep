@@ -37,10 +37,12 @@ protected:
 };
 
 TEST_P(MorphizenE2ETest, RunE2ETests) {
-  // Skip E2E tests - multiple issues: EP context generation failure, duplicate
-  // registration (see Issue #032, #033)
-  GTEST_SKIP() << "Test skipped: EP context model generation failure (see "
-                  "Issue #032, #033)";
+#ifndef BAZEL_CURRENT_REPOSITORY
+  // Skip E2E tests in CMake builds: Issues #032 and #033 are not yet resolved
+  // outside the Bazel environment (model path resolution, config loading).
+  GTEST_SKIP() << "Test skipped: only enabled for Bazel builds (see Issue "
+                  "#032, #033)";
+#endif
   const auto* config = GetParam();
   LOG(INFO) << "Running E2E tests with " << config->proto().name()
             << " configurations.";
