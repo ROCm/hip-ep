@@ -55,7 +55,7 @@ pytest test/python -v -s
 pytest test/numeric --backend ort_ep ^
        --ep-name   MorphiZenExecutionProvider ^
        --ep-dll    install\dist\bin\onnxruntime_morphizen_ep.dll ^
-       --ep-config install\dist\bin\morphizen_config.json -s
+       --ep-option config_file=install\dist\bin\morphizen_config.json -s
 pytest test/numeric -v -s --no-cache               # manual (skip the disk cache)
 ```
 

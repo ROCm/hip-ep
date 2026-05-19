@@ -34,7 +34,8 @@ The suite has four Python dependencies: `numpy`, `onnx`,
 ## Quick Start
 
 The framework has no repo-relative defaults; you always invoke pytest
-with explicit `--ep-dll` / `--ep-config` flags. Skeleton:
+with at least `--ep-dll`, and any per-provider settings via repeating
+`--ep-option KEY=VALUE`. Skeleton:
 
 ```bash
 # Put the EP's runtime DLL dependencies on the loader search path --
@@ -46,7 +47,8 @@ cd test/numeric
 pytest --backend ort_ep \
        --ep-name   YourExecutionProviderName \
        --ep-dll    /path/to/ep.dll \
-       --ep-config /path/to/ep_config.json \
+       --ep-option some_key=some_value \
+       --ep-option other_key=other_value \
        -s
 ```
 
@@ -68,8 +70,8 @@ Makefile target, ...) to suit their setup.
 | `--no-cache` | off | Disable the cache; always run ORT CPU as the reference. |
 | `--refresh-cache` | off | Invalidate matching entries and re-run CPU (writes the new value back). |
 | `--ep-dll <path>` | -- | EP DLL path. Required; tests SKIP if absent. |
-| `--ep-config <path>` | -- | EP config file path. Optional; absent means the EP runs with its built-in defaults. |
 | `--ep-name <name>` | `ExecutionProvider` | Alias the EP DLL is registered under; ORT advertises the device with this exact name. Any non-empty string works -- pick a meaningful one for log clarity. |
+| `--ep-option KEY=VALUE` | (empty) | Repeatable. Pass-through into ORT's per-provider `provider_options` dict. Both key and value are EP-specific (see your EP's docs). Examples: `device_id=0` (CUDA/DirectML), `config_file=/path/to/conf.json` (MorphiZen/VitisAI). |
 | `-s`, `-x`, `-k`, etc. | -- | All standard pytest flags work. |
 
 ## Output Layout
@@ -148,8 +150,8 @@ pytest invocation.
 | Flag | Required? | Purpose |
 |---|---|---|
 | `--ep-dll <path>` | Yes -- tests SKIP if absent | Path to the EP DLL. Registered with ORT at session start. |
-| `--ep-config <path>` | No | Path to the EP config file. Absent means the EP runs with its built-in defaults. |
 | `--ep-name <name>` | No (defaults to `ExecutionProvider`) | Alias passed as the first argument to `register_execution_provider_library`; ORT then advertises the registered EP under this exact name in `get_ep_devices()`. The framework filters on it after registration, so any non-empty value is accepted -- pick a meaningful one for log clarity. |
+| `--ep-option KEY=VALUE` | No -- repeatable | Pass-through entry into ORT's per-provider `provider_options` dict (the `Dict[str, str]` ORT hands to the EP's `OrtEpFactory::CreateEp`). Both KEY and VALUE are EP-specific -- the framework has no knowledge of any particular key. Only the first `=` separates key from value, so values containing `=` are preserved verbatim. Malformed entries, empty keys, and duplicate keys raise a clean SKIP rather than being silently dropped. |
 
 The directory containing `--ep-dll` is automatically prepended to
 `PATH` for any small co-located dependencies the EP needs at
@@ -179,9 +181,9 @@ for the env vars it recognises.
   target). Re-use it for every invocation.
 - **CI / shared shell** -- export the EP's runtime env vars (any
   dependent-DLL `PATH` additions, debug toggles, etc.) in your job
-  setup, then invoke pytest with `--ep-dll` / `--ep-config` pointing
-  at your install. The pytest line itself is identical to the local
-  case.
+  setup, then invoke pytest with `--ep-dll` (plus any `--ep-option`
+  flags your EP needs) pointing at your install. The pytest line
+  itself is identical to the local case.
 - **One-off experiment with a different DLL** -- just change the
   `--ep-dll` value on the command line (or append a second `--ep-dll`
   to your wrapper; pytest's argparse uses last-occurrence for
@@ -217,7 +219,7 @@ cd test\numeric
 pytest --backend ort_ep ^
        --ep-name      MorphiZenExecutionProvider ^
        --ep-dll       "..\..\install\dist\bin\onnxruntime_morphizen_ep.dll" ^
-       --ep-config    "..\..\install\dist\bin\morphizen_config.json"
+       --ep-option    config_file=..\..\install\dist\bin\morphizen_config.json
 ```
 
 **Linux (bash):**
@@ -230,7 +232,7 @@ cd test/numeric
 pytest --backend ort_ep \
        --ep-name      MorphiZenExecutionProvider \
        --ep-dll       ../../install/dist/bin/libonnxruntime_morphizen_ep.so \
-       --ep-config    ../../install/dist/bin/morphizen_config.json
+       --ep-option    config_file=../../install/dist/bin/morphizen_config.json
 ```
 
 What each piece does:
@@ -245,7 +247,14 @@ What each piece does:
 - **`--ep-dll`** -- the registered EP DLL. The framework
   auto-prepends its parent directory to `PATH` so co-located
   dependencies (`hip-compiler.dll`) are found at registration time.
-- **`--ep-config`** -- optional EP config file.
+- **`--ep-option config_file=...`** -- forwards the key/value into
+  ORT's `provider_options` dict for this EP. **`config_file` is
+  MorphiZen's own convention** (the EP's
+  [`config_reader.cpp`](../../3rd-party/morphizen/morphizen-core/src/binary/config_reader.cpp)
+  reads this key, treats the value as a path to a protobuf-JSON
+  config, and uses it to drive its pass pipeline). Other EPs use
+  different keys -- e.g. CUDA/DirectML expose `device_id`, TensorRT
+  uses `trt_engine_cache_path`. Consult your EP's docs.
 
 The MorphiZen EP additionally honours these env vars when set in the
 shell before invoking pytest:
