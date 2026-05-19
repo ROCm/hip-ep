@@ -5,9 +5,12 @@ common --enable_bzlmod
 
 # Registry: bazel-registry (ROCm/bazel-registry) first, BCR as fallback.
 # Credential helper (tools/github-credential-helper.sh) supplies the Bearer token.
+# Pinned to a specific commit SHA so MODULE.bazel.lock never goes stale due to
+# registry updates. To upgrade: update the SHA, run `bazel build //...`, commit
+# both .bazelrc and MODULE.bazel.lock. See docs/workflows/bazel-registry-upgrade.md.
 # For local development with a local registry, override in .bazelrc.local:
 #   common --registry=file:///C:/Develop/w/source/bazel-registry-1
-common --registry=https://raw.githubusercontent.com/ROCm/bazel-registry/refs/heads/main
+common --registry=https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c
 common --registry=https://bcr.bazel.build
 
 # Repository cache (reuses downloads across registry URL changes)
@@ -31,9 +34,6 @@ build --host_cxxopt=/std:c++17
 
 # Allow protobuf to work with MSVC / clang-cl
 build --define=protobuf_allow_msvc=true
-
-# Disk cache (Windows path; override in .bazelrc.local for Linux/macOS dev)
-build --disk_cache=C:/Develop/temp/bazel-cache
 
 # Output user root (override in .bazelrc.local for non-Windows dev)
 startup --output_user_root=C:/Develop/temp/bazel-user-root

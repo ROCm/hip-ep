@@ -51,7 +51,7 @@ cc_library(
                 "-Wno-deprecated-declarations",
             ],
         }),
-    defines = [
+    local_defines = [
         "ONNX_NAMESPACE=morphizen_onnx",  # Define ONNX namespace for consistency
     ],
     strip_include_prefix = "src",
