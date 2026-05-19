@@ -102,8 +102,13 @@ static const std::filesystem::path ENV_CONFIG_JSON_PATH =
 static const std::filesystem::path TEST_CWD =
     std::filesystem::u8path(TEST_CWD_STR);
 static const std::filesystem::path CMAKE_CURRENT_BINARY_PATH = TEST_CWD;
+#  ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+static const std::filesystem::path RESNET_50_PATH =
+    TEST_CWD / "pt_resnet50.onnx.mlir";
+#  else
 static const std::filesystem::path RESNET_50_PATH =
     TEST_CWD / "pt_resnet50.onnx";
+#  endif
 static const std::filesystem::path SAMPLE_SRC_TAR_PATH =
     TEST_CWD / "sample.src.tar";
 static const std::filesystem::path ENV_CONFIG_JSON_PATH =
