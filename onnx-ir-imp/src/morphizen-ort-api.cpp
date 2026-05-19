@@ -1405,6 +1405,29 @@ static void initialize_dummy_api() {
     morphizen_onnx::shape_inference::InferShapes(*morphizen_model_proto);
   };
 
+  // Stubs: onnx-ir-imp does not run control-flow models (Loop/If/Scan) in
+  // this project. The MLIR backend is the only path that exercises the
+  // variant AttributeProto subgraph machinery; these stubs abort the
+  // session if someone tries to run a control-flow model through
+  // onnx-ir-imp.
+  the_instance_of_morphizen_ort_api.graph_new_subgraph =
+      [](morphizen::Graph& parent) -> morphizen::Graph& {
+    LOG(FATAL) << "graph_new_subgraph is not implemented in onnx-ir-imp "
+                  "backend; switch to mlir-backend to run control-flow "
+                  "models";
+    return parent; // unreachable; LOG(FATAL) aborts
+  };
+  the_instance_of_morphizen_ort_api.attr_proto_new_graph =
+      [](const std::string& name,
+         morphizen::Graph& /*sub*/) -> morphizen::AttributeProto* {
+    LOG(FATAL) << "attr_proto_new_graph is not implemented in onnx-ir-imp "
+                  "backend (attr='"
+               << name
+               << "'); switch to mlir-backend to run control-flow "
+                  "models";
+    return nullptr; // unreachable; LOG(FATAL) aborts
+  };
+
   the_instance_of_morphizen_ort_api.tensor_proto_new_with_external_data =
       [](const std::string& name, const std::vector<int64_t>& shape,
          int element_type, const std::string& external_data_file, size_t size,

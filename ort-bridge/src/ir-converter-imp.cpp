@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
+#include <limits>
 #include <morphizen-utils/morphizen-utils.hpp>
 #include <morphizen/graph.hpp>
 #include <morphizen/morphizen-ort-api-ext.hpp>
@@ -57,6 +58,10 @@ OrtStatus* IRConverterImp::convert_to_model(morphizen::Model& model) const {
 
   throw_if_error(convert_metadata(main_graph, model));
   throw_if_error(convert_graph(main_graph));
+  // Top-level graph drives its own resolve(true); sub graphs are
+  // resolved by the backend when graph_add_node consumes their
+  // attr_proto_new_graph attribute.
+  morphizen_cxx::GraphRef(main_graph).resolve(true);
 
   // Save converted model to file for debugging if enabled
   save_model_for_debugging(model);
@@ -113,8 +118,8 @@ OrtStatus* IRConverterImp::convert_graph(morphizen::Graph& graph) const {
   throw_if_error(convert_graph_nodes(graph));
   // - Converting outputs
   throw_if_error(convert_graph_outputs(graph));
-  // - Resolve the graph
-  morphizen_cxx::GraphRef(graph).resolve(true);
+  // Caller drives resolve(true): top-level via convert_to_model, sub
+  // graphs by the backend inside graph_add_node.
   MY_LOG(2) << "Graph conversion completed";
   return nullptr;
 }
@@ -549,6 +554,34 @@ static std::vector<std::string> get_attr_value_strings(const OrtApi& ort_api,
   }
 }
 
+morphizen::AttributeProtoPtr
+IRConverterImp::make_subgraph_attribute(morphizen::Graph& parent_graph,
+                                        const OrtNode& node,
+                                        const std::string& attr_name) const {
+  // OpAttr surface exposes name + type for GRAPH attributes but not the
+  // embedded sub graph; resolve it via Node_GetSubgraphs.
+  const OrtGraph* ort_sub = nullptr;
+  for (const auto& p : Ort::ConstNode(&node).GetSubgraphs()) {
+    if (p.attr_name == attr_name) {
+      ort_sub = p.sub_graph;
+      break;
+    }
+  }
+  if (ort_sub == nullptr) {
+    throw_if_error(ort_api.CreateStatus(
+        ORT_INVALID_ARGUMENT,
+        "GRAPH attribute has no matching subgraph from Node_GetSubgraphs"));
+  }
+  morphizen::Graph& sub =
+      MORPHIZEN_ORT_API_EXT(graph_new_subgraph)(parent_graph);
+  IRConverterConfig sub_config = config_;
+  sub_config.external_data_threshold = std::numeric_limits<size_t>::max();
+  IRConverterImp sub_converter(*this, *ort_sub, sub_config);
+  sub_converter.throw_if_error(sub_converter.convert_graph(sub));
+  return morphizen::AttributeProtoPtr(
+      MORPHIZEN_ORT_API_EXT(attr_proto_new_graph)(attr_name, sub));
+}
+
 OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting graph nodes to ONNX format";
   // Get nodes from the ORT graph
@@ -647,6 +680,11 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
       }
       case OrtOpAttrType::ORT_OP_ATTR_STRINGS: {
         attrs_builder.add(attr_name, get_attr_value_strings(ort_api, attr));
+        break;
+      }
+      case OrtOpAttrType::ORT_OP_ATTR_GRAPH: {
+        attrs_builder.add(attr_name,
+                          make_subgraph_attribute(graph, *node, attr_name));
         break;
       }
       default: {

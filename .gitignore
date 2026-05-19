@@ -39,7 +39,8 @@
 /compile_commands.json
 /config.log
 /*.log
-/tools/__pycache__/
+__pycache__/
+*.pyc
 /.vscode/
 /MODULE.bazel.lock
 /bazel-*

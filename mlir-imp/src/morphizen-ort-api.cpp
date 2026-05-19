@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-// NOTE: MLIR implementatio
+// NOTE: MLIR implementation
 // the_mlir_instance_of_morphizen_ort_api.graph_get_inputs_unsafe = This
 // provides an MLIR-based implementation of the same API interface used by the
 // ONNX implementation, allowing MLIR dialects to be used as an alternative IR
@@ -48,6 +48,7 @@
 #include <glog/logging.h>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 // String constants
@@ -62,13 +63,47 @@ static_assert(sizeof(morphizen::AttributeProto*) ==
               "morphizen::AttributeProto* and MLIRNamedAttribute* must have "
               "the same size for safe reinterpret_cast");
 
+// The variant AttributeProto encoding embeds a raw MLIRGraph* in an
+// IntegerAttr as int64 (see MLIRNamedAttribute::create_subgraph_ref).
+// Replicate the invariant at the api boundary so the surface itself
+// documents the pointer-width assumption.
+static_assert(sizeof(void*) <= sizeof(int64_t),
+              "raw MLIRGraph* must fit in int64 for the variant "
+              "AttributeProto encoding");
+
+// ONNX ↔ MLIR shape sentinel translation. ONNX uses -1 (and occasionally
+// other negatives) for unknown / dynamic dims; MLIR's RankedTensorType
+// verifier only accepts mlir::ShapedType::kDynamic (= INT64_MIN). These
+// helpers live here at the api boundary; MLIR-internal code never sees raw
+// ONNX negatives and ONNX-external code never sees kDynamic.
+namespace mlir_impl {
+namespace {
+llvm::SmallVector<int64_t> to_mlir_dims(llvm::ArrayRef<int64_t> onnx_dims) {
+  llvm::SmallVector<int64_t> dims;
+  dims.reserve(onnx_dims.size());
+  for (int64_t d : onnx_dims) {
+    dims.push_back(d < 0 ? mlir::ShapedType::kDynamic : d);
+  }
+  return dims;
+}
+std::vector<int64_t> to_onnx_dims(llvm::ArrayRef<int64_t> mlir_dims) {
+  std::vector<int64_t> dims;
+  dims.reserve(mlir_dims.size());
+  for (int64_t d : mlir_dims) {
+    dims.push_back(d == mlir::ShapedType::kDynamic ? -1 : d);
+  }
+  return dims;
+}
+} // namespace
+} // namespace mlir_impl
+
 // Helper function to create MLIRTensor and return as TensorProto*
 // Similar to tensor_proto_new_with_raw_data in ONNX implementation
 morphizen::TensorProto* tensor_proto_new_with_raw_data_mlir(
     const std::string& name, const std::vector<int64_t>& shape,
     const void* data, size_t size, int data_type) {
-  // Convert std::vector<int64_t> to llvm::SmallVector<int64_t>
-  llvm::SmallVector<int64_t> mlir_shape(shape.begin(), shape.end());
+  // ONNX→MLIR boundary: translate negative (dynamic) dims to kDynamic once.
+  auto mlir_shape = mlir_impl::to_mlir_dims(shape);
 
   // Create MLIRTensor and return as TensorProto*
   auto* mlir_node_arg =
@@ -388,8 +423,8 @@ static void initialize_mlir_api() {
       [](const std::string& name, const std::vector<int64_t>& shape,
          int element_type, const std::string& external_data_file, size_t size,
          size_t offset) -> morphizen::TensorProto* {
-    // Convert std::vector<int64_t> to llvm::SmallVector<int64_t>
-    llvm::SmallVector<int64_t> mlir_shape(shape.begin(), shape.end());
+    // ONNX→MLIR boundary: translate negative (dynamic) dims to kDynamic once.
+    auto mlir_shape = mlir_impl::to_mlir_dims(shape);
 
     auto* mlir_node_arg = new mlir_impl::MLIRNodeArg(
         name, mlir_shape, element_type, external_data_file, offset, size);
@@ -414,9 +449,9 @@ static void initialize_mlir_api() {
     auto* mlir_tensor =
         reinterpret_cast<const morphizen::mlir_impl::MLIRTensor*>(
             &tensor_proto);
-    auto shape = mlir_tensor->getShape();
-    auto result =
-        std::make_unique<std::vector<int64_t>>(shape.begin(), shape.end());
+    // MLIR→ONNX boundary: translate kDynamic back to -1.
+    auto result = std::make_unique<std::vector<int64_t>>(
+        mlir_impl::to_onnx_dims(mlir_tensor->getShape()));
     return morphizen::DllSafe<std::vector<int64_t>>(result.release());
   };
 
@@ -923,10 +958,10 @@ static void initialize_mlir_api() {
          int element_type) -> morphizen::NodeArg& {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
 
-    // Convert std::vector to SmallVector
+    // ONNX→MLIR boundary: translate negative (dynamic) dims to kDynamic once.
     llvm::SmallVector<int64_t> small_shape;
     if (shape) {
-      small_shape.assign(shape->begin(), shape->end());
+      small_shape = mlir_impl::to_mlir_dims(*shape);
     }
 
     auto MLIRNodeArgIndex = mlir_graph->node_arg_new(
@@ -946,10 +981,8 @@ static void initialize_mlir_api() {
         mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
             &node_arg);
 
-    // Use the get_shape_i64_unsafe() member function to get the shape
-    auto shape = node_arg_index.get_shape_i64();
-    auto vec_shape = std::vector<int64_t>(shape.begin(), shape.end());
-    // Return the shape wrapped in DllSafe
+    // MLIR→ONNX boundary: translate kDynamic back to -1.
+    auto vec_shape = mlir_impl::to_onnx_dims(node_arg_index.get_shape_i64());
     return morphizen::DllSafe<std::vector<int64_t>>(vec_shape);
   };
 
@@ -968,8 +1001,8 @@ static void initialize_mlir_api() {
     auto node_arg_index =
         mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
             &node_arg);
-    node_arg_index.set_shape_i64(
-        llvm::SmallVector<int64_t, 4>(shape.begin(), shape.end()));
+    // ONNX→MLIR boundary: translate negative (dynamic) dims to kDynamic once.
+    node_arg_index.set_shape_i64(mlir_impl::to_mlir_dims(shape));
   };
 
   the_mlir_instance_of_morphizen_ort_api.node_arg_set_denotation =
@@ -1094,6 +1127,24 @@ static void initialize_mlir_api() {
         mlir_impl::MLIRNamedAttribute::create_tensor(name, *mlir_tensor);
     return reinterpret_cast<morphizen::AttributeProto*>(
         mlir_named_attr.release());
+  };
+
+  // Business logic lives in MLIRGraph::new_subgraph and
+  // MLIRNamedAttribute::create_subgraph_ref; these are boundary
+  // translators only.
+  the_mlir_instance_of_morphizen_ort_api.graph_new_subgraph =
+      [](morphizen::Graph& parent_graph) -> morphizen::Graph& {
+    auto& mlir_parent = *reinterpret_cast<mlir_impl::MLIRGraph*>(&parent_graph);
+    return reinterpret_cast<morphizen::Graph&>(mlir_parent.new_subgraph());
+  };
+
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_new_graph =
+      [](const std::string& name,
+         morphizen::Graph& sub) -> morphizen::AttributeProto* {
+    auto& mlir_sub = *reinterpret_cast<mlir_impl::MLIRGraph*>(&sub);
+    auto attr =
+        mlir_impl::MLIRNamedAttribute::create_subgraph_ref(name, mlir_sub);
+    return reinterpret_cast<morphizen::AttributeProto*>(attr.release());
   };
 
   the_mlir_instance_of_morphizen_ort_api.attr_proto_delete =

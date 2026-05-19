@@ -75,8 +75,8 @@ constexpr const char* ONNX_NODE_NAME = "onnx_node_name";
 // -> (tensor<1x1000xf32> {onnx.name = "1327"}) {
 //
 // Implementation:
-//   - Set on arguments via `func_.setArgAttr(i, "onnx.name", ...)`
-//   - Set on results via  `func_.setResultAttr(i, "onnx.name", ...)`
+//   - Set on arguments via `func().setArgAttr(i, "onnx.name", ...)`
+//   - Set on results via  `func().setResultAttr(i, "onnx.name", ...)`
 //===--------------------------------------===//
 constexpr const char* ONNX_NAME = "onnx.name";
 
@@ -97,6 +97,12 @@ constexpr const char* ONNX_NONE = "onnx.NoValue";
 // compatibility with onnx-mlir's MLIR representation.
 constexpr const char* ONNX_RETURN = "onnx.Return";
 
+// "onnx.Yield" is the region terminator used inside If/Loop/Scan op regions
+// in onnx-mlir style. ONNX itself has no Yield op (subgraph outputs are
+// declared via GraphProto.output[]), but MLIR requires every region to end
+// with a terminator op; onnx-mlir introduced ONNXYieldOp for this purpose.
+constexpr const char* ONNX_YIELD = "onnx.Yield";
+
 // Helper function to check if an operation is an onnx.Return operation
 inline bool isOnnxReturn(mlir::Operation* op) {
   return op && op->getName().getStringRef() == ONNX_RETURN;
@@ -110,11 +116,27 @@ inline bool isReturnOp(mlir::Operation* op) {
   auto name = op->getName().getStringRef();
   return name == ONNX_RETURN || name == "func.return";
 }
+
+// Helper for terminator detection across top-level (onnx.Return / func.return)
+// and subgraph (onnx.Yield) MLIRGraph instances. Used by set_outputs and any
+// other code path that needs to identify either kind of terminator without
+// caring which.
+inline bool isReturnOrYieldOp(mlir::Operation* op) {
+  if (!op)
+    return false;
+  auto name = op->getName().getStringRef();
+  return name == ONNX_RETURN || name == "func.return" || name == ONNX_YIELD;
+}
 } // namespace onnx_mlir
 
 // Utility function to convert ONNX element types to MLIR types
 // If shape is provided, creates a tensor type (ranked or unranked)
 // If shape is not provided, returns just the element type
+//
+// NOTE: when a shape is supplied it is expected to already be in MLIR-canonical
+// form (any dynamic dims represented as mlir::ShapedType::kDynamic). ONNX ↔
+// MLIR sentinel translation happens at the api boundary (see to_mlir_dims /
+// to_onnx_dims in morphizen-ort-api.cpp).
 mlir::Type
 onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
                           const llvm::SmallVector<int64_t>* shape = nullptr);

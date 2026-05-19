@@ -13,8 +13,7 @@ const OrtGraph& OrtGraphWrapper::get() const {
   return *static_cast<const OrtGraph*>(this->p_);
 }
 bool OrtGraphWrapper::is_subgraph() const {
-  // TODO: ORT does not provide a way to check if a graph is a subgraph.
-  return false;
+  return Ort::ConstGraph(p_).GetParentNode() != nullptr;
 }
 const char* OrtGraphWrapper::name() const {
   const char* ret = nullptr;

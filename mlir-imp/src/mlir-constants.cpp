@@ -83,7 +83,7 @@ mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
   if (shape->empty()) {
     return mlir::RankedTensorType::get({}, elementType);
   } else {
-    // Create ranked tensor type with shape
+    // Shape must already be in MLIR-canonical form (see header note).
     return mlir::RankedTensorType::get(*shape, elementType);
   }
 }
