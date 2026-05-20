@@ -72,6 +72,7 @@ inline void registerAllPasses() {
   mlir::registerCanonicalizerPass();
   mlir::hip::registerOptimizeMemRefsPass();
   mlir::hip::registerPoolAllocsPass();
+  mlir::hip::registerSimplifyOnnxPass();
   registerConversionPasses();
 }
 

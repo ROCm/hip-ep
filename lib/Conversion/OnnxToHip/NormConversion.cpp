@@ -3,11 +3,51 @@
  * Licensed under the MIT License.
  */
 
+//===----------------------------------------------------------------------===//
+// Norm conversions (ONNX -> HIP dialect).
+//
+// All Norm-family operators live here so they share helpers and so the file
+// layout makes it obvious where to plug in future variants (BatchNorm,
+// GroupNorm, InstanceNorm, ...).
+//
+// Currently implemented:
+//   - onnx.Custom(SimplifiedLayerNormalization)         -> hip.rms_norm
+//   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
+//   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
+//===----------------------------------------------------------------------===//
+
 #include "OnnxToHipUtils.h"
 
 namespace mlir {
 namespace hip {
 namespace {
+
+//===----------------------------------------------------------------------===//
+// Shared helpers
+//===----------------------------------------------------------------------===//
+
+/// Returns \p op's operand at \p idx if it exists and is not a NoneType,
+/// otherwise nullptr. Useful for extracting ONNX optional inputs (which appear
+/// either as missing operands or as values with `none` type).
+inline mlir::Value getOptionalOperand(mlir::Operation *op, size_t idx) {
+  if (idx >= op->getNumOperands())
+    return nullptr;
+  mlir::Value v = op->getOperand(idx);
+  if (mlir::isa<mlir::NoneType>(v.getType()))
+    return nullptr;
+  return v;
+}
+
+/// Returns \p op's result at \p idx if it exists and is not a NoneType,
+/// otherwise nullptr. Mirror of getOptionalOperand for results.
+inline mlir::Value getOptionalResult(mlir::Operation *op, unsigned idx) {
+  if (idx >= op->getNumResults())
+    return nullptr;
+  mlir::Value v = op->getResult(idx);
+  if (mlir::isa<mlir::NoneType>(v.getType()))
+    return nullptr;
+  return v;
+}
 
 /// onnx.Custom(SimplifiedLayerNormalization) -> hip.rms_norm
 struct SimplifiedLayerNormToHip : public mlir::RewritePattern {
@@ -114,22 +154,13 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "SkipSimplifiedLayerNormalization expects 3-4 operands");
 
-  auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
-    if (idx >= numOps)
-      return nullptr;
-    mlir::Value val = op->getOperand(idx);
-    if (mlir::isa<mlir::NoneType>(val.getType()))
-      return nullptr;
-    return val;
-  };
-
   // Input 1-3: required
   mlir::Value input = op->getOperand(0);
   mlir::Value skip = op->getOperand(1);
   mlir::Value gamma = op->getOperand(2);
 
   // Input 4: bias (optional)
-  mlir::Value bias = getOptionalOperand(3);
+  mlir::Value bias = getOptionalOperand(op, 3);
 
   // Extract epsilon attribute
   auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
@@ -240,11 +271,165 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   return mlir::success();
 }
 
+//===----------------------------------------------------------------------===//
+// onnx.LayerNormalization (standard ONNX opset 17+) -> hip.layer_norm
+//===----------------------------------------------------------------------===//
+
+/// Standard ONNX LayerNormalization to hip.layer_norm.
+///
+/// ONNX spec (opset 17+):
+///   inputs:  X (required), Scale (required), B (optional)
+///   outputs: Y (required), Mean (optional), InvStdDev (optional)
+///   attrs:   axis (default -1), epsilon (default 1e-5), stash_type (default 1)
+///
+/// Mean and InvStdDev are training-only outputs. We model them faithfully
+/// (so frontends that legitimately request them keep round-tripping) but the
+/// runtime is allowed to skip computing them when the corresponding output
+/// tensor is omitted -- the lowering passes nullptr in that case.
+struct LayerNormToHip : public mlir::RewritePattern {
+  LayerNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.LayerNormalization", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+LayerNormToHip::matchAndRewrite(mlir::Operation *op,
+                                mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  size_t numOps = op->getNumOperands();
+  if (numOps < 2 || numOps > 3)
+    return rewriter.notifyMatchFailure(
+        op, "LayerNormalization expects 2 or 3 operands (X, Scale, [B])");
+
+  // Required inputs.
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+  // Optional bias.
+  mlir::Value bias = getOptionalOperand(op, 2);
+
+  // Attributes (all default-valued in the ONNX spec).
+  int64_t axis = -1;
+  if (auto a = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+    axis = a.getSInt();
+
+  llvm::APFloat epsValue(9.99999974E-6f);
+  if (auto a = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = a.getValue();
+
+  int64_t stashType = 1;
+  if (auto a = op->getAttrOfType<mlir::IntegerAttr>("stash_type"))
+    stashType = a.getSInt();
+
+  // First output (Y) is required and dictates the result shape.
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+
+  // Optional Mean (output 1) and InvStdDev (output 2). Each is real iff the
+  // corresponding ONNX result is a non-None ranked tensor.
+  mlir::Value meanResult = getOptionalResult(op, 1);
+  mlir::Value invStdResult = getOptionalResult(op, 2);
+
+  mlir::Value meanInit, invStdInit;
+  mlir::RankedTensorType meanType, invStdType;
+  if (meanResult) {
+    meanType = mlir::cast<mlir::RankedTensorType>(meanResult.getType());
+    meanInit = createEmptyTensor(rewriter, loc, meanType, input);
+  }
+  if (invStdResult) {
+    invStdType = mlir::cast<mlir::RankedTensorType>(invStdResult.getType());
+    invStdInit = createEmptyTensor(rewriter, loc, invStdType, input);
+  }
+
+  // hip.layer_norm uses AttrSizedOperandSegments for [ctx, input, scale,
+  // bias?, outputs*]. The Variadic outputs region must be contiguous, so we
+  // collapse [output, mean?, inv_std?] into a single trailing run.
+  llvm::SmallVector<mlir::Value> hipOutputs;
+  llvm::SmallVector<mlir::Type> hipResultTypes;
+  hipOutputs.push_back(outputInit);
+  hipResultTypes.push_back(outputType);
+  if (meanInit) {
+    hipOutputs.push_back(meanInit);
+    hipResultTypes.push_back(meanType);
+  }
+  if (invStdInit) {
+    hipOutputs.push_back(invStdInit);
+    hipResultTypes.push_back(invStdType);
+  }
+
+  // Build operands list.
+  llvm::SmallVector<mlir::Value> operands;
+  operands.push_back(context);
+  operands.push_back(input);
+  operands.push_back(scale);
+  if (bias)
+    operands.push_back(bias);
+  for (mlir::Value v : hipOutputs)
+    operands.push_back(v);
+
+  // Operand segment sizes for AttrSizedOperandSegments: [ctx, input, scale,
+  // bias, outputs].
+  llvm::SmallVector<int32_t> segmentSizes;
+  segmentSizes.push_back(/*ctx=*/1);
+  segmentSizes.push_back(/*input=*/1);
+  segmentSizes.push_back(/*scale=*/1);
+  segmentSizes.push_back(bias ? 1 : 0);
+  segmentSizes.push_back(static_cast<int32_t>(hipOutputs.size()));
+
+  llvm::SmallVector<mlir::NamedAttribute> attrs;
+  attrs.push_back(
+      rewriter.getNamedAttr("axis", rewriter.getI64IntegerAttr(axis)));
+  attrs.push_back(rewriter.getNamedAttr(
+      "epsilon", rewriter.getF32FloatAttr(epsValue.convertToFloat())));
+  attrs.push_back(rewriter.getNamedAttr("stash_type",
+                                        rewriter.getI64IntegerAttr(stashType)));
+
+  mlir::OperationState state(loc, "hip.layer_norm");
+  state.addOperands(operands);
+  state.addAttributes(attrs);
+  state.addTypes(hipResultTypes);
+  state.addAttribute("operand_segment_sizes",
+                     rewriter.getDenseI32ArrayAttr(segmentSizes));
+
+  mlir::Operation *hipOp = rewriter.create(state);
+
+  // Map HIP results back to the ONNX result list, preserving Mean / InvStdDev
+  // None slots when they were not requested.
+  llvm::SmallVector<mlir::Value> replacements;
+  unsigned hipResultIdx = 0;
+  replacements.push_back(hipOp->getResult(hipResultIdx++)); // Y
+  if (op->getNumResults() >= 2) {
+    if (meanResult)
+      replacements.push_back(hipOp->getResult(hipResultIdx++));
+    else
+      replacements.push_back(mlir::Value{}); // None -> drop
+  }
+  if (op->getNumResults() >= 3) {
+    if (invStdResult)
+      replacements.push_back(hipOp->getResult(hipResultIdx++));
+    else
+      replacements.push_back(mlir::Value{}); // None -> drop
+  }
+
+  rewriter.replaceOp(op, replacements);
+  return mlir::success();
+}
+
 } // namespace
 
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
-  patterns.add<SimplifiedLayerNormToHip, SkipSimplifiedLayerNormToHip>(ctx);
+  patterns.add<SimplifiedLayerNormToHip, SkipSimplifiedLayerNormToHip,
+               LayerNormToHip>(ctx);
 }
 
 } // namespace hip
