@@ -50,6 +50,7 @@ add_library(OnnxToHip STATIC
   IdentityConversion.cpp
   AndConversion.cpp
   SizeConversion.cpp
+  NonZeroConversion.cpp
 )
 
 add_dependencies(OnnxToHip

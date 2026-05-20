@@ -1106,6 +1106,24 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_nonzero(RuntimeState *state, void *input, void *output,
+                 int64_t input_num_elements, int64_t input_rank,
+                 int64_t output_capacity, int64_t input_data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_nonzero\n");
+    return -1;
+  }
+  (void)input;
+  (void)output;
+  MOCK_PRINT("[MOCK] wrap_nonzero(input_num_elements=%lld, input_rank=%lld, "
+             "output_capacity=%lld, input_data_type=%s(%lld))\n",
+             (long long)input_num_elements, (long long)input_rank,
+             (long long)output_capacity,
+             hipdnn_ep_datatype_name(input_data_type),
+             (long long)input_data_type);
+  return 0;
+}
+
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {
