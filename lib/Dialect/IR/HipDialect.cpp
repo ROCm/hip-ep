@@ -902,6 +902,48 @@ LogicalResult GqaOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// PagedAttentionOp: com.microsoft.PagedAttention (stub runtime)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PagedAttentionOp::getDpsInitsMutable() {
+  unsigned numInputs = 1; // ctx
+  if (getQuery())
+    ++numInputs;
+  if (getKey())
+    ++numInputs;
+  if (getValue())
+    ++numInputs;
+  if (getKeyCache())
+    ++numInputs;
+  if (getValueCache())
+    ++numInputs;
+  if (getCumulativeSequenceLength())
+    ++numInputs;
+  if (getPastSeqlens())
+    ++numInputs;
+  if (getBlockTable())
+    ++numInputs;
+  if (getCosCache())
+    ++numInputs;
+  if (getSinCache())
+    ++numInputs;
+
+  unsigned numInits = 1;
+  if (getKeyCacheOut())
+    ++numInits;
+  if (getValueCacheOut())
+    ++numInits;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
+}
+
+void PagedAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // HipDNNGraphOp: ins(variadic), outs(variadic)
 //===----------------------------------------------------------------------===//
 

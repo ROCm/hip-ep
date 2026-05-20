@@ -1258,6 +1258,81 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+// ===== Paged Attention (com.microsoft) =======================================
+//
+// Placeholder lowering for com.microsoft.PagedAttention: end-to-end MLIR
+// plumbing with a stub runtime (wrap_paged_attention). Full CUDA-style
+// paged KV attention is not implemented in this EP yet.
+
+def Hip_PagedAttentionOp : Hip_DpsOp<"paged_attention", [AttrSizedOperandSegments]> {
+  let summary = "PagedAttention (com.microsoft) — stub runtime";
+  let description = [{
+    Maps `onnx.Custom` with `function_name = "PagedAttention"` and domain
+    `com.microsoft` to a single HIP op lowered to `wrap_paged_attention`.
+
+    MS spec reference:
+    https://github.com/microsoft/onnxruntime/blob/main/docs/ContribOperators.md
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    Hip_TensorOrMemRef:$query,
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
+    Hip_TensorOrMemRef:$key_cache,
+    Hip_TensorOrMemRef:$value_cache,
+    Hip_TensorOrMemRef:$cumulative_sequence_length,
+    Hip_TensorOrMemRef:$past_seqlens,
+    Hip_TensorOrMemRef:$block_table,
+    Optional<Hip_TensorOrMemRef>:$cos_cache,
+    Optional<Hip_TensorOrMemRef>:$sin_cache,
+
+    Hip_TensorOrMemRef:$output,
+    Optional<Hip_TensorOrMemRef>:$key_cache_out,
+    Optional<Hip_TensorOrMemRef>:$value_cache_out,
+
+    I64Attr:$num_heads,
+    I64Attr:$kv_num_heads,
+    DefaultValuedAttr<I64Attr, "0">:$do_rotary,
+    DefaultValuedAttr<I64Attr, "0">:$rotary_interleaved,
+    DefaultValuedAttr<I64Attr, "-1">:$local_window_size,
+    DefaultValuedAttr<F32Attr, "0.0">:$scale,
+    DefaultValuedAttr<F32Attr, "0.0">:$softcap
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query
+        ( `,` $key^ )?
+        ( `,` $value^ )?
+        `,` $key_cache `,` $value_cache `,` $cumulative_sequence_length `,`
+        $past_seqlens `,` $block_table
+        ( `,` $cos_cache^ )?
+        ( `,` $sin_cache^ )?
+        `:`
+        type($query)
+        ( `,` type($key)^ )?
+        ( `,` type($value)^ )?
+        `,` type($key_cache) `,` type($value_cache) `,`
+        type($cumulative_sequence_length) `,` type($past_seqlens) `,`
+        type($block_table)
+        ( `,` type($cos_cache)^ )?
+        ( `,` type($sin_cache)^ )?
+    `)`
+    `outs` `(`
+        $output
+        ( `,` $key_cache_out^ )?
+        ( `,` $value_cache_out^ )?
+        `:`
+        type($output)
+        ( `,` type($key_cache_out)^ )?
+        ( `,` type($value_cache_out)^ )?
+    `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // ===== hipDNN Graph Outlining + Execution ====================================
 
 def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,

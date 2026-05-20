@@ -67,6 +67,7 @@ inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
+inline constexpr const char *kWrapPagedAttention = "wrap_paged_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
@@ -316,6 +317,8 @@ void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
+void populatePagedAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
