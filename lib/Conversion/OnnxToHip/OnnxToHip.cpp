@@ -474,6 +474,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateCastConversionPatterns(patterns, ctx);
   populateReduceSumConversionPatterns(patterns, ctx);
   populateGatherConversionPatterns(patterns, ctx);
+  populateShapeConversionPatterns(patterns, ctx);
   populateConvConversionPatterns(patterns, ctx);
   populateNormConversionPatterns(patterns, ctx);
   populateRotaryEmbeddingConversionPatterns(patterns, ctx);
@@ -706,6 +707,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
               funcOp, std::move(preFoldPatterns), cfg)))
         return signalPassFailure();
     }
+    // Fold the Gather(Shape(x), const_idx) idiom BEFORE constant lowering
+    // externalizes the index value (the fold needs to see the inline
+    // DenseElementsAttr on the onnx.Constant index operand).
+    if (mlir::failed(foldGatherShapeBeforeLowering(funcOp)))
+      return signalPassFailure();
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
@@ -725,13 +731,21 @@ void ConvertOnnxToHipPass::runOnOperation() {
     logSubpass("constants + compute ops");
   }
 
-  // Clean up onnx.NoValue and onnx.EntryPoint ops
+  // Clean up onnx.NoValue and onnx.EntryPoint, plus any other unregistered
+  // onnx.* op that ended up with no uses after conversion. The latter case
+  // is the dead-shape-arithmetic pattern shipped by some HF ONNX exports
+  // (e.g. Phi-4's `pos_ids_reformat/Concat` chain whose result is consumed
+  // by a Reshape that lowered to tensor.expand_shape via static type info).
+  // Without this DCE, one-shot-bufferize trips on the unregistered op
+  // because it has tensor-typed operands but no bufferization interface,
+  // and the whole pipeline aborts with "op was not bufferized" -- which is
+  // silent (CPU fallback) at the EP level.
   llvm::SmallVector<mlir::Operation *> toErase;
   module.walk([&](mlir::Operation *op) {
     llvm::StringRef name = op->getName().getStringRef();
-    if (name == "onnx.NoValue" && op->use_empty())
+    if (name == "onnx.EntryPoint")
       toErase.push_back(op);
-    else if (name == "onnx.EntryPoint")
+    else if (name.starts_with("onnx.") && op->use_empty())
       toErase.push_back(op);
   });
   for (auto *op : toErase)
