@@ -92,10 +92,9 @@ static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
     Value indexVal = arith::ConstantIndexOp::create(builder, loc, *folded);
     return indexVal;
   }
-  Value i64Val =
-      tensor::ExtractOp::create(builder, loc, mTensor, ValueRange{});
-  Value indexVal = arith::IndexCastOp::create(
-      builder, loc, builder.getIndexType(), i64Val);
+  Value i64Val = tensor::ExtractOp::create(builder, loc, mTensor, ValueRange{});
+  Value indexVal =
+      arith::IndexCastOp::create(builder, loc, builder.getIndexType(), i64Val);
   return indexVal;
 }
 
@@ -178,16 +177,14 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
            << yieldOp->getName().getStringRef();
   if (yieldOp->getNumOperands() != 1 + numLoopCarried)
     return loopOp->emitOpError(
-        "onnx.Loop scan outputs not yet supported (expected ")
-           << (1 + numLoopCarried) << " yield operands for "
-           << numLoopCarried << " loop-carried, got "
-           << yieldOp->getNumOperands() << ")";
+               "onnx.Loop scan outputs not yet supported (expected ")
+           << (1 + numLoopCarried) << " yield operands for " << numLoopCarried
+           << " loop-carried, got " << yieldOp->getNumOperands() << ")";
 
   // Block-arg layout in the body: (iter_t, cond_in_t, v_in_1, ..., v_in_N).
   // Validate the arg count matches what the operands imply.
   if (bodyBlock.getNumArguments() != 2 + numLoopCarried)
-    return loopOp->emitOpError(
-        "onnx.Loop body arg count mismatch: expected ")
+    return loopOp->emitOpError("onnx.Loop body arg count mismatch: expected ")
            << (2 + numLoopCarried) << ", got " << bodyBlock.getNumArguments();
 
   // Detect cond passthrough BEFORE we touch the body. The check is SSA-
@@ -234,15 +231,20 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   auto fnType = FunctionType::get(ctx, argTypes, resultTypes);
 
   // Generate a unique symbol name. Use the parent function's name as a
-  // prefix to keep the symbol table readable in multi-graph modules.
+  // prefix to keep the symbol table readable in multi-graph modules. On
+  // collision, retry with the same prefix (don't drop it) and bump the
+  // suffix until lookupSymbol returns null. `counter` ends one past the
+  // suffix actually used so consecutive outlineLoop calls don't collide.
+  auto parentFn = loopOp->getParentOfType<func::FuncOp>();
+  auto buildName = [&](unsigned n) -> std::string {
+    if (parentFn)
+      return (parentFn.getName() + "_loop_body_n" + Twine(n)).str();
+    return ("loop_body_n" + Twine(n)).str();
+  };
   std::string fnName;
-  if (auto parentFn = loopOp->getParentOfType<func::FuncOp>())
-    fnName = (parentFn.getName() + "_loop_body_n" + Twine(counter)).str();
-  else
-    fnName = ("loop_body_n" + Twine(counter)).str();
-  while (module.lookupSymbol(fnName))
-    fnName = ("loop_body_n" + Twine(++counter)).str();
-  ++counter;
+  do {
+    fnName = buildName(counter++);
+  } while (module.lookupSymbol(fnName));
 
   // Create the new func.func at the module level.
   OpBuilder modBuilder(module.getBodyRegion());
@@ -286,8 +288,8 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   OpBuilder outerBuilder(loopOp);
 
   // Look up the !hip.context value: must be arg 0 of the parent function
-  // (AddHipContextArg has already run by pipeline ordering).
-  auto parentFn = loopOp->getParentOfType<func::FuncOp>();
+  // (AddHipContextArg has already run by pipeline ordering).  `parentFn`
+  // was captured earlier for the symbol-name builder.
   if (!parentFn || parentFn.getNumArguments() == 0 ||
       !isa<ContextType>(parentFn.getArgument(0).getType()))
     return loopOp->emitOpError(
@@ -321,8 +323,8 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
       /*captures=*/ValueRange(captureVals),
       /*body_func=*/FlatSymbolRefAttr::get(ctx, fnName),
       /*num_loop_carried=*/outerBuilder.getI32IntegerAttr(numLoopCarried),
-      /*cond_is_passthrough=*/condIsPassthrough ? outerBuilder.getUnitAttr()
-                                                : nullptr);
+      /*cond_is_passthrough=*/
+      condIsPassthrough ? outerBuilder.getUnitAttr() : nullptr);
 
   // Splice the hip.loop's results into the old op's use sites and erase.
   loopOp->replaceAllUsesWith(hipLoopOp.getResults());

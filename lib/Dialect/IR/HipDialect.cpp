@@ -11,6 +11,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
+#include "mlir/IR/SymbolTable.h"
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -129,15 +130,18 @@ LogicalResult LoopOp::verify() {
              << getNumResults();
   }
 
-  // body_func must reference an existing func.func in the symbol table.
-  auto module = (*this)->getParentOfType<ModuleOp>();
-  if (!module)
-    return success(); // Cannot verify symbol resolution outside a module.
-  auto bodyFunc = module.lookupSymbol<func::FuncOp>(getBodyFunc());
+  // body_func symbol resolution is checked in verifySymbolUses() so the
+  // verifier driver can share a SymbolTableCollection across all
+  // symbol-user ops in the module.
+  return success();
+}
+
+LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto bodyFunc = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getBodyFuncAttr());
   if (!bodyFunc)
     return emitOpError("body_func '")
            << getBodyFunc() << "' does not reference a func.func";
-
   return success();
 }
 

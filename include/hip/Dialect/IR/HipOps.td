@@ -11,6 +11,7 @@ include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpBase.td"
+include "mlir/IR/SymbolInterfaces.td"
 
 class Hip_Op<string mnemonic, list<Trait> traits = []> :
     Op<Hip_Dialect, mnemonic, traits>;
@@ -80,7 +81,8 @@ def Hip_LoopOp : Hip_Op<"loop",
     [AttrSizedOperandSegments,
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
      DeclareOpInterfaceMethods<DestinationStyleOpInterface,
-                               ["getDpsInitsMutable"]>]> {
+                               ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Outlined-body counted/conditional loop";
   let description = [{
     Runtime-driven loop with an outlined body function. Each iteration
