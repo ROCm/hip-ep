@@ -49,7 +49,18 @@ ctest --test-dir install/build -C RelWithDebInfo -R MorphizenMLIRLitTests
 
 # Python tests (performance benchmarks, integration)
 pytest test/python -v -s
+
+# Numeric tests (per-op correctness vs ORT CPU; in-tree). Windows cmd shown;
+# bash equivalent is in test/numeric/README.md "Example: MorphiZen EP".
+# (set THEROCK_DIST + PATH first; see same section for the env setup.)
+pytest test/numeric --backend ort_ep ^
+       --ep-name   MorphiZenExecutionProvider ^
+       --ep-dll    install\dist\bin\onnxruntime_morphizen_ep.dll ^
+       --ep-option config_file=install\dist\bin\morphizen_config.json -s
+pytest test/numeric -v -s --no-cache               # manual (skip the disk cache)
 ```
+
+The in-tree `test/numeric/` suite replaces the external `onnx-numeric-tests` reference for everyday correctness checks. Each test builds a single-op ONNX model, runs it on the MorphiZen EP, and compares against an ORT CPU reference. Expensive CPU references (e.g. Llama 4096x4096 / 4096x14336 MatMuls) are cached on disk keyed by sanitised pytest node id — `manifest.json` stores a sha256 of `(model_bytes + inputs)` as a drift tripwire so any edit to seeds / shapes / scales auto-invalidates the entry. Flags: `--no-cache` (always CPU), `--refresh-cache` (rebuild then cache), `--keep-artifacts`. See [test/numeric/README.md](test/numeric/README.md) for the full backend / "bring your own ONNX" / new-op recipes, including a copy-pasteable "Example: MorphiZen EP" recipe.
 
 ### Lint / format
 
