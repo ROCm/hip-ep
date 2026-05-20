@@ -1071,9 +1071,8 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
 //                        captured value. Treated read-only by the body.
 // Returns 0 on success, non-zero on body failure.
 typedef int (*HipdnnEpLoopBodyFn)(RuntimeState *state, void *iter_dev_ptr,
-                                   void *cond_dev_ptr,
-                                   void **loop_carried_descs,
-                                   void **capture_descs);
+                                  void *cond_dev_ptr, void **loop_carried_descs,
+                                  void **capture_descs);
 
 // Fast-path: counted loop. Selected by the HipToLLVM lowering when the
 // outlining pass proves cond_out == cond_in (SSA-equality, i.e. the body's
@@ -1084,22 +1083,19 @@ typedef int (*HipdnnEpLoopBodyFn)(RuntimeState *state, void *iter_dev_ptr,
 // cheapest possible CPU-driven loop. Inspired by counted-loop hoisting in
 // classic optimizing compilers; no analogue in ORT CUDA EP or MIGraphX
 // (both always read cond_out every iter, even for trivially-counted loops).
-int hipdnn_ep_run_counted_loop(RuntimeState *state,
-                                HipdnnEpLoopBodyFn body_fn,
-                                int64_t max_trip_count, bool cond_init,
-                                int32_t num_loop_carried,
-                                int32_t num_captures,
-                                void **loop_carried_descs,
-                                void **capture_descs);
+int hipdnn_ep_run_counted_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
+                               int64_t max_trip_count, bool cond_init,
+                               int32_t num_loop_carried, int32_t num_captures,
+                               void **loop_carried_descs, void **capture_descs);
 
 // Slow-path: dynamic-cond loop. Reads cond_out each iter via D2H sync
 // (matches the behavior of ORT CUDA EP `LoopImpl::Execute` and MIGraphX
 // `run_loop`). Used when the body's returned cond is the result of a body-
 // internal computation rather than a passthrough of cond_in.
 int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
-                        int64_t max_trip_count, bool cond_init,
-                        int32_t num_loop_carried, int32_t num_captures,
-                        void **loop_carried_descs, void **capture_descs);
+                       int64_t max_trip_count, bool cond_init,
+                       int32_t num_loop_carried, int32_t num_captures,
+                       void **loop_carried_descs, void **capture_descs);
 
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
