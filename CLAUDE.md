@@ -399,11 +399,17 @@ set "HIPDNN_EP_CONV=miopen" && python bench\bench_conv.py
 set "HIPDNN_EP_CONV=ck"     && python bench\bench_conv.py
 ```
 
-`test/python/test_op_conv.py` is the correctness sibling: same shape matrix
-(7 representative entries: tiny smoke, RN50 stem + 3x3 mid, 1x1 pointwise,
-ViT-L/14 patch, SDXL UNet bottom block, 2K image patchify) plus a depthwise
-xfail row, fp16 ONNX, asserts CPU EP vs MorphiZen EP. Both backends pass
-7/7 + 1 xfail (depthwise: MIOpen rejects, CK handles -> shows as xpass).
+`test/numeric/tests/test_conv.py` is the correctness sibling, written
+against the per-op numeric framework (see "Numeric tests" under Run
+tests above and [test/numeric/README.md](test/numeric/README.md)). Same
+shape matrix as `bench/bench_conv.py` (7 representative entries: tiny
+smoke, 1x1 pointwise, RN50 stem + 3x3 mid, ViT-L/14 patch, SDXL UNet
+bottom block, 2K image patchify) plus a depthwise xfail row, fp16 ONNX,
+asserts MorphiZen EP vs ORT CPU reference (cached on disk for the
+expensive shapes -- first run computes once, subsequent runs are
+instant). Both backends pass 7/7 + 1 xfail (depthwise: MIOpen rejects,
+CK handles -> shows as xpass). Switch backends with `set HIPDNN_EP_CONV=miopen`
+/ `=ck` in the shell before invoking pytest.
 
 ### Known limitations (open / accepted)
 
