@@ -323,6 +323,14 @@ def _detect_gpu_arch():
             text=True,
             timeout=10,
         )
+        # Recent TheRock builds emit an informational "HIP Library Path: ..."
+        # line on stdout before the arch line; pick the first line that
+        # actually looks like a gfx target.
+        for line in r.stdout.strip().splitlines():
+            tok = line.strip()
+            if tok.startswith("gfx"):
+                return tok
+        # Fallback: legacy single-line output.
         lines = r.stdout.strip().splitlines()
         return lines[0].strip() if lines else None
     except Exception:

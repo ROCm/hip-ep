@@ -26,6 +26,49 @@ def HipAddContextArgPass : Pass<"hip-add-context-arg", "mlir::ModuleOp"> {
   ];
 }
 
+def SimplifyOnnxPass : Pass<"simplify-onnx", "mlir::ModuleOp"> {
+  let summary = "Pre-lowering simplification of ONNX-dialect graphs";
+  let description = [{
+    Runs a small fixed set of ONNX-dialect rewrites that must complete
+    BEFORE convert-onnx-to-hip captures the function signatures as input
+    metadata. After the per-op rewrites, drops any function argument
+    whose only remaining uses were eliminated by them.
+
+    The pass is pure ONNX-dialect: it does not depend on the HIP dialect
+    and is intentionally positioned at the head of the pipeline, BEFORE
+    hip-add-context-arg, so it operates in the original ONNX function
+    index space and could be reused unchanged by any other frontend.
+
+    Pipeline position:
+      simplify-onnx -> hip-add-context-arg -> convert-onnx-to-hip
+
+    Per-op rewrites currently implemented:
+      * onnx.CastLike -> onnx.Cast
+          CastLike's second operand is a *type donor* whose data is never
+          read -- the target dtype is statically known from the result
+          type. Rewriting to a plain onnx.Cast lets the shared
+          CastConversion pattern in convert-onnx-to-hip do the rest, AND
+          frees up any function argument that was wired up only to feed
+          that type-donor slot.
+
+    Future-friendly: additional simplifiers (e.g. onnx.EyeLike /
+    onnx.RandomNormalLike, which are similar shape/type-donor patterns)
+    can be added by writing one `static void simplify<Op>(func::FuncOp)`
+    helper in SimplifyOnnx.cpp and calling it from the pass dispatcher,
+    between the live-before-rewrite snapshot and the shared
+    dead-function-argument sweep.
+
+    Invariants:
+      * Arguments that were already dead in the input IR are preserved,
+        so the existing "metadata captures the original signature"
+        contract asserted by test/lit/Pipeline/module-metadata.mlir
+        stays intact.
+  }];
+  let dependentDialects = [
+    "mlir::func::FuncDialect"
+  ];
+}
+
 def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
   let summary = "Convert ONNX dialect to HIP dialect (tensor DPS)";
   let description = [{
