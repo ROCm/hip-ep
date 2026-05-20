@@ -7,10 +7,10 @@
 
 The ``ModelRunner`` is backend-agnostic: it delegates actual inference
 to a pluggable :class:`~framework.backend.Backend` and resolves the
-reference outputs from one of three sources -- a live ORT CPU run, a
-per-test cache (default), or a pre-baked directory of ``.npy`` goldens.
-Sessions are created sequentially (never at the same time) so peak
-memory stays low when models carry large weight initializers.
+reference outputs from one of two sources -- a live ORT CPU run or a
+per-test cache (default; backed by ORT CPU on miss). Sessions are
+created sequentially (never at the same time) so peak memory stays low
+when models carry large weight initializers.
 """
 
 from __future__ import annotations
@@ -26,11 +26,7 @@ import onnx
 from .backend import Backend
 from .comparator import print_output_summary, sizeof_fmt, tensor_desc
 from .ort_cpu_backend import OrtCpuBackend
-from .reference_cache import (
-    ReferenceCache,
-    load_outputs_from_dir,
-    sanitize_name,
-)
+from .reference_cache import ReferenceCache, sanitize_name
 
 _TAG = "[ModelRunner]"
 
@@ -39,7 +35,7 @@ _TAG = "[ModelRunner]"
 # >= 3.9.
 ModelLike = Union[bytes, "onnx.ModelProto", Path, str]
 InputLike = Union[np.ndarray, Path, str]
-ReferenceMode = str  # "cpu" | "cache" | "disk"
+ReferenceMode = str  # "cpu" | "cache"
 
 
 class ModelRunner:
@@ -119,7 +115,6 @@ class ModelRunner:
         *,
         name: str | None = None,
         reference: ReferenceMode = "cache",
-        reference_dir: Path | str | None = None,
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
         """Run *model* on the configured backend and return (actual, expected).
 
@@ -141,17 +136,9 @@ class ModelRunner:
             * ``"cpu"`` -- always run ORT CPU as the reference.
             * ``"cache"`` (default) -- read from the on-disk cache; on
               miss, run CPU and write it back.
-            * ``"disk"`` -- load ``out_*.npy`` from *reference_dir* (no
-              CPU fallback; missing files raise).
-        reference_dir:
-            Required iff ``reference="disk"``.
         """
-        if reference not in ("cpu", "cache", "disk"):
-            raise ValueError(
-                f"reference must be one of cpu|cache|disk, got {reference!r}"
-            )
-        if reference == "disk" and reference_dir is None:
-            raise ValueError("reference='disk' requires reference_dir=")
+        if reference not in ("cpu", "cache"):
+            raise ValueError(f"reference must be one of cpu|cache, got {reference!r}")
 
         sample_name = name or self._current_test_name or "unnamed"
         sub = self._next_subdir(sample_name)
@@ -179,13 +166,7 @@ class ModelRunner:
         # 2. Reference resolution ----------------------------------------
         ref_elapsed = 0.0
         ref_source = reference
-        if reference == "disk":
-            expected = load_outputs_from_dir(reference_dir)
-            print(
-                f"{_TAG} Loaded {len(expected)} reference output(s) from "
-                f"{reference_dir}"
-            )
-        elif reference == "cache":
+        if reference == "cache":
             cached = self.cache.load(sample_name, model_bytes, np_inputs)
             if cached is not None:
                 expected = cached
@@ -244,7 +225,7 @@ class ModelRunner:
         Writes three subdirectories into ``self._last_subdir``:
           * ``inputs/in_<i>.npy``           -- exactly what the backend received
           * ``outputs_actual/out_<i>.npy``  -- what the backend produced
-          * ``outputs_expected/out_<i>.npy`` -- reference (cache / cpu / disk)
+          * ``outputs_expected/out_<i>.npy`` -- reference (cache / cpu)
 
         Called unconditionally at the end of ``run_sample``. Passing
         tests get cleaned up by the conftest fixture so this is free;

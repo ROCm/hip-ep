@@ -88,7 +88,7 @@ test/numeric/python_test_output/
 │       ├── model.onnx                     # exactly what the backend saw
 │       ├── inputs/in_0.npy ...
 │       ├── outputs_actual/out_0.npy ...   # what the backend produced
-│       └── outputs_expected/out_0.npy ... # reference (cache / cpu / disk)
+│       └── outputs_expected/out_0.npy ... # reference (cache / cpu)
 └── cache/                                 # persistent across runs
     └── <sample-name>/                     # one dir per sanitised node id
         ├── manifest.json                  # { content_hash, shapes, ... }
@@ -332,8 +332,7 @@ class TestMyOp:
   `bytes | onnx.ModelProto | Path | str` for `model` and a list of
   `np.ndarray | Path | str` for `inputs`.
 - `reference` defaults to `"cache"`. Pass `reference="cpu"` for cheap
-  ops (no cache write needed) or `reference="disk"` with a
-  `reference_dir=` for pre-baked goldens captured elsewhere.
+  ops where caching is not worth the disk traffic.
 
 ## Bring Your Own ONNX
 
@@ -347,16 +346,14 @@ def test_external_op(model_runner):
     actual, expected = model_runner.run_sample(
         model=Path("D:/captures/my_op/model.onnx"),
         inputs=[Path("D:/captures/my_op/in_0.npy")],
-        reference="disk",
-        reference_dir=Path("D:/captures/my_op/"),
     )
     compare_outputs(actual, expected, atol=1e-3)
 ```
 
-`reference="disk"` skips the CPU run entirely -- the suite asserts
-that the listed `out_*.npy` files exist next to the inputs and uses
-them as the reference, which is exactly what you want when the
-reference was captured from a trusted source other than ORT CPU.
+The model and any number of `.npy` input files are loaded straight
+from disk; the reference is still resolved through the cache (with an
+implicit ORT CPU run on first miss), so an externally-captured sample
+gets the same drift-tripwire and zero-cost replay as an in-suite one.
 
 ## Memory Strategy
 
