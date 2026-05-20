@@ -58,6 +58,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Expand | Custom HIP Kernel |
 | GatherND | Custom HIP Kernel |
 | Range | Custom HIP kernel |
+| NonZero | Runtime stub (not yet GPU-accelerated) |
 | Gather | Custom HIP Kernel |
 | LayerNormalization | MIOpen |
 | SimplifiedLayerNormalization | MIOpen |

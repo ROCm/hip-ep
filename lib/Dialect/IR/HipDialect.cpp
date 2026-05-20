@@ -1249,5 +1249,17 @@ void ScatterNDOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+//===----------------------------------------------------------------------===//
+// NonZeroOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NonZeroOp::getDpsInitsMutable() { return getYMutable(); }
+
+void NonZeroOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.cpp.inc"

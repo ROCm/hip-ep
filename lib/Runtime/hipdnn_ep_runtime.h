@@ -891,6 +891,23 @@ int wrap_neg(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_not(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+
+// ONNX NonZero wrapper.
+// Returns the indices of the non-zero elements of `input` in row-major
+// order, packed into `output` as a [R, N] int64 tensor where R is the
+// input rank and N is the (data-dependent) number of non-zero entries.
+// The caller pre-allocates the output buffer with capacity `output_capacity`
+// elements along the N dim (the OnnxToHip pass uses `input_num_elements`
+// as the upper bound).
+//
+// `input_data_type` is the HIPDNN_EP_DATATYPE_* value of the input tensor.
+// Bool (ONNX `tensor(bool)`) is marshalled as 1-byte uint8 by the EP and
+// reuses the INT8 slot here. Today this is a stub: it logs its parameters
+// and throws std::runtime_error so an inference path that actually
+// reaches NonZero fails loudly instead of producing uninitialised output.
+int wrap_nonzero(RuntimeState *state, void *input, void *output,
+                 int64_t input_num_elements, int64_t input_rank,
+                 int64_t output_capacity, int64_t input_data_type);
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,

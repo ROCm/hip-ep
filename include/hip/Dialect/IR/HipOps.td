@@ -2454,4 +2454,43 @@ def Hip_ModOp : Hip_DpsOp<"mod"> {
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
+  let summary = "Indices of non-zero elements (ONNX NonZero)";
+  let description = [{
+    Implements the standard ONNX NonZero operator (opset 13+):
+    returns the indices of the elements that are non-zero in row-major
+    order (by dimension), behaving similarly to `numpy.nonzero`.
+
+    Input `x` is a ranked tensor of shape `[D0, D1, ..., D(R-1)]`. Output
+    `y` has shape `[R, N]` of element type `i64`, where `R` is the input
+    rank and `N` is the (data-dependent) number of non-zero elements.
+    The `N` dimension is represented as `?` in MLIR; the compiler
+    over-allocates using `numel(x)` as the upper bound (since the input
+    has fully static shape).
+
+    Uses destination-passing style: the output buffer is provided as
+    argument.
+
+    Example:
+    ```mlir
+    hip.nonzero(%ctx) ins(%x : memref<3x4xf16, 1>)
+                      outs(%y : memref<2x?xi64, 1>)
+                      {input_data_type = 1 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y,
+    I64Attr:$input_data_type
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS
