@@ -138,6 +138,8 @@ void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateGqaConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,
+                                                  MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
@@ -154,6 +156,52 @@ void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populateEqualConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+void populateDivConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateMinConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+void populateNotConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateCosConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateSinConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateCumSumConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populatePadConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateTileConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateExpandConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populateReduceProdConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
+void populateLessConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateGatherNDConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
+void populateSignConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateModConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+void populateSliceConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+void populateIdentityConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
+void populateAndConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateSizeConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
