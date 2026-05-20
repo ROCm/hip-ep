@@ -100,4 +100,50 @@ module {
     // CHECK: hip.slice({{.*}}) ins(
     return %r : tensor<4xf32>
   }
+
+  // Test 6: SliceDecompose on a tensor with a dynamic non-sliced axis.
+  // axis 0 is sliced (input dim is static = 4), axis 1 is left alone
+  // (input dim is ? -> the corresponding extract_slice size is a
+  // tensor.dim Value, not a constant).
+  func.func @test_slice_decompose_dyn_untouched(%input: tensor<4x?xf32>) -> tensor<2x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_decompose_dyn_untouched
+    %starts = arith.constant dense<[1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[3]> : tensor<1xi64>
+    %axes   = arith.constant dense<[0]> : tensor<1xi64>
+    %steps  = arith.constant dense<[1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<4x?xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<2x?xf32>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK-NOT: hip.slice
+    // CHECK-DAG: %[[A1:.*]] = arith.constant 1 : index
+    // CHECK-DAG: %[[DIM:.*]] = tensor.dim %{{.*}}, %[[A1]] : tensor<4x?xf32>
+    // The first dim's slice is [start=1, size=2, step=1]; the second
+    // dim is untouched and uses the runtime dim value.
+    // CHECK: tensor.extract_slice %{{.*}}[1, 0] [2, %[[DIM]]] [1, 1]
+    return %r : tensor<2x?xf32>
+  }
+
+  // Test 7: SliceDecompose bails when a sliced axis has a dynamic
+  // input dim (ONNX clamping rules need the static dim size); falls
+  // through to hip.slice. The data dim is forwarded as an upper-bound
+  // tensor.dim for the dynamic output dim.
+  func.func @test_slice_native_dyn_axis(%input: tensor<?xf32>) -> tensor<?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_dyn_axis
+    %starts = arith.constant dense<[1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[3]> : tensor<1xi64>
+    %axes   = arith.constant dense<[0]> : tensor<1xi64>
+    %steps  = arith.constant dense<[1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<?xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<?xf32>
+
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
+    // CHECK-DAG: %[[DIM:.*]] = tensor.dim %{{.*}}, %[[A0]] : tensor<?xf32>
+    // CHECK: tensor.empty(%[[DIM]]) : tensor<?xf32>
+    // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<?xf32>, tensor<1xi64>, tensor<1xi64>)
+    return %r : tensor<?xf32>
+  }
 }

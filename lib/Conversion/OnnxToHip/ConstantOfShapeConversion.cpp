@@ -16,21 +16,31 @@ namespace hip {
 namespace {
 
 //===----------------------------------------------------------------------===//
-// ConstantOfShape -> arith.constant (compile-time fold)
+// ConstantOfShape lowering
 //===----------------------------------------------------------------------===//
 //
-// `onnx.ConstantOfShape` takes a rank-1 int64 tensor describing the output
+// `onnx.ConstantOfShape` takes a rank-1 int tensor describing the output
 // shape and produces a tensor of that shape filled with the optional `value`
 // attribute (defaulting to a single fp32 zero).
 //
-// Static-shape models always feed a compile-time constant into the shape
-// input (most commonly an `onnx.Constant` that has already been lowered to
-// `arith.constant` by the time this pattern runs), so the whole op collapses
-// to a single splat `arith.constant`.  No runtime support is needed.
+// Two paths are provided, in benefit order:
 //
-// If the shape input is not a recognised compile-time constant we bail out
-// via `notifyMatchFailure`; in production this should never happen for
-// static-shape models, but failing safely lets unit tests detect regressions.
+//   1. ConstantOfShapeFold (benefit=2): when the shape input is a recognised
+//      compile-time constant AND the result type is fully static, the op
+//      collapses to a single splat `arith.constant`. No runtime work; the
+//      whole computation is materialised at compile time. This is the
+//      common case for transformer-style "allocate a zero KV/mask tensor"
+//      patterns once shape inference + constant folding have run.
+//
+//   2. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
+//      input OR a result type with at least one dynamic dim. Each dynamic
+//      dim is materialised from the shape input via `tensor.extract` +
+//      `arith.index_cast`, the fill value is built as a scalar
+//      `arith.constant`, and the output tensor is produced via
+//      `tensor.splat` (which broadcasts a scalar to a ranked tensor with
+//      arbitrary static + dynamic dims). No HIP dialect op or runtime
+//      function is needed -- `tensor.splat` bufferizes naturally and lowers
+//      through the standard MLIR pipeline.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time (the same forms recognised by ReshapeConversion
@@ -70,9 +80,60 @@ static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
   return nullptr;
 }
 
+/// Build the scalar fill value for ConstantOfShape, respecting the optional
+/// `value` ONNX attribute and the spec default (fp32 zero, retyped to the
+/// result element type when they differ).
+static mlir::LogicalResult buildScalarFillValue(mlir::Operation *op,
+                                                mlir::PatternRewriter &rewriter,
+                                                mlir::Location loc,
+                                                mlir::Type elemType,
+                                                mlir::Value &scalarOut) {
+  if (auto valueAttr = op->getAttrOfType<mlir::ElementsAttr>("value")) {
+    auto valueDense = mlir::dyn_cast<mlir::DenseElementsAttr>(valueAttr);
+    if (!valueDense)
+      return rewriter.notifyMatchFailure(
+          op, "non-dense value attribute is not supported");
+    auto valueTensorType =
+        mlir::dyn_cast<mlir::RankedTensorType>(valueDense.getType());
+    if (!valueTensorType || valueTensorType.getElementType() != elemType)
+      return rewriter.notifyMatchFailure(
+          op, "value attribute element type does not match result");
+
+    if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType)) {
+      mlir::APFloat scalar = *valueDense.getValues<mlir::APFloat>().begin();
+      scalarOut =
+          mlir::arith::ConstantFloatOp::create(rewriter, loc, floatTy, scalar);
+      return mlir::success();
+    }
+    if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
+      mlir::APInt scalar = *valueDense.getValues<mlir::APInt>().begin();
+      scalarOut =
+          mlir::arith::ConstantIntOp::create(rewriter, loc, intTy, scalar);
+      return mlir::success();
+    }
+    return rewriter.notifyMatchFailure(op, "unsupported result element type");
+  }
+
+  // Spec default: 0.0 fp32, retyped to the result element type to keep the
+  // IR well-typed even when shape inference picked a different default.
+  if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType)) {
+    mlir::APFloat zero(floatTy.getFloatSemantics(), 0);
+    scalarOut =
+        mlir::arith::ConstantFloatOp::create(rewriter, loc, floatTy, zero);
+    return mlir::success();
+  }
+  if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
+    mlir::APInt zero(intTy.getWidth(), 0);
+    scalarOut = mlir::arith::ConstantIntOp::create(rewriter, loc, intTy, zero);
+    return mlir::success();
+  }
+  return rewriter.notifyMatchFailure(op,
+                                     "unsupported default result element type");
+}
+
 struct ConstantOfShapeFold : public mlir::RewritePattern {
   ConstantOfShapeFold(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.ConstantOfShape", /*benefit=*/1, ctx) {}
+      : RewritePattern("onnx.ConstantOfShape", /*benefit=*/2, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -85,7 +146,8 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
         getCompileTimeConstantTensor(shapeInput);
     if (!shapeAttr)
       return rewriter.notifyMatchFailure(
-          op, "shape input must be a compile-time constant tensor");
+          op, "shape input is not a compile-time constant; "
+              "falling back to ConstantOfShapeDynamic");
 
     auto shapeTensorType =
         mlir::dyn_cast<mlir::RankedTensorType>(shapeAttr.getType());
@@ -107,18 +169,22 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
       outShape.push_back(d);
     }
 
-    // Resolve the fill value.  The ONNX `value` attribute is a single-element
-    // tensor; default is fp32 zero when absent.
     auto resultType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
     mlir::Type elemType = resultType.getElementType();
 
-    // Synthesize the splat attribute matching the result element type.  The
-    // ONNX `value` attribute, when present, is itself a DenseElementsAttr
-    // holding the single fill value; we copy its scalar splat into the new
-    // shape.  When absent the default per the spec is +0.0 fp32.
+    // The fold path replaces the op with a `arith.constant` whose type
+    // is `tensor<outShape x elemType>`. If the original result type has
+    // dynamic dims, the SSA value type would mismatch its uses and IR
+    // verification would fail. Defer to the dynamic-shape pattern in
+    // that case.
+    if (!resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(
+          op, "result type has dynamic dims; "
+              "falling back to ConstantOfShapeDynamic");
+
     auto outTensorType = mlir::RankedTensorType::get(outShape, elemType);
     mlir::DenseElementsAttr splatAttr;
 
@@ -133,9 +199,6 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
         return rewriter.notifyMatchFailure(
             op, "value attribute element type does not match result");
 
-      // Splat-construct an attribute of the output shape from the scalar in
-      // `value`.  Element-wise reading covers both splat and non-splat 1x
-      // tensors uniformly.
       if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType)) {
         mlir::APFloat scalar = *valueDense.getValues<mlir::APFloat>().begin();
         splatAttr = mlir::DenseElementsAttr::get(outTensorType, scalar);
@@ -147,9 +210,6 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
                                            "unsupported result element type");
       }
     } else {
-      // Spec default: 0.0 fp32.  We honour the result tensor's actual element
-      // type to keep the IR well-typed even if upstream shape inference picked
-      // a different default.
       if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType)) {
         mlir::APFloat zero(floatTy.getFloatSemantics(), 0);
         splatAttr = mlir::DenseElementsAttr::get(outTensorType, zero);
@@ -169,11 +229,75 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
   }
 };
 
+/// Dynamic-shape fallback: produce a `tensor.splat` whose dynamic dim sizes
+/// are read out of the shape input at runtime via `tensor.extract`.
+/// Handles either (a) a non-constant shape input or (b) a result type with
+/// at least one dynamic dim.
+struct ConstantOfShapeDynamic : public mlir::RewritePattern {
+  ConstantOfShapeDynamic(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.ConstantOfShape", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected 1 input and 1 output");
+
+    mlir::Value shapeInput = op->getOperand(0);
+    auto shapeTensorType =
+        mlir::dyn_cast<mlir::RankedTensorType>(shapeInput.getType());
+    if (!shapeTensorType || shapeTensorType.getRank() != 1)
+      return rewriter.notifyMatchFailure(op,
+                                         "shape input must be a rank-1 tensor");
+    if (!shapeTensorType.getElementType().isInteger(64) &&
+        !shapeTensorType.getElementType().isInteger(32))
+      return rewriter.notifyMatchFailure(
+          op, "shape input must have int32 or int64 element type");
+
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
+    mlir::Type elemType = resultType.getElementType();
+
+    mlir::Location loc = op->getLoc();
+
+    // For each dynamic result dim, read the corresponding entry from the
+    // shape tensor and cast to `index`. The shape tensor's length must
+    // equal the result rank; we trust shape inference and only emit an
+    // extract per dynamic dim (static dims are encoded directly in the
+    // result type).
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t i = 0; i < resultType.getRank(); ++i) {
+      if (!resultType.isDynamicDim(i))
+        continue;
+      mlir::Value idx = mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
+      mlir::Value extracted = mlir::tensor::ExtractOp::create(
+          rewriter, loc, shapeInput, mlir::ValueRange{idx});
+      mlir::Value asIndex = mlir::arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), extracted);
+      dynSizes.push_back(asIndex);
+    }
+
+    mlir::Value scalar;
+    if (mlir::failed(buildScalarFillValue(op, rewriter, loc, elemType, scalar)))
+      return mlir::failure();
+
+    // tensor.splat broadcasts a scalar to a ranked (possibly dynamic) shape;
+    // dynamic dims must be supplied positionally in the same order they
+    // appear in the result type.
+    mlir::Value splat = mlir::tensor::SplatOp::create(rewriter, loc, scalar,
+                                                      resultType, dynSizes);
+    rewriter.replaceOp(op, splat);
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
-  patterns.add<ConstantOfShapeFold>(ctx);
+  patterns.add<ConstantOfShapeFold, ConstantOfShapeDynamic>(ctx);
 }
 
 } // namespace hip

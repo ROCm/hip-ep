@@ -47,4 +47,49 @@ module {
   // CHECK: %[[UB3:.*]] = arith.constant 8 : index
   // CHECK: %[[INIT3:.*]] = tensor.empty(%[[UB3]]) : tensor<1x?xi64>
   // CHECK: hip.nonzero(%[[CTX3]]) ins(%[[IN3]] : tensor<8xi64>) outs(%[[INIT3]] : tensor<1x?xi64>) {input_data_type = 4 : i64}
+
+  // --- Case 4: dynamic input shape, rank 2 ---
+  // Per-dim chain: upper bound = 1 * dim(input,0) * dim(input,1). The
+  // running product feeds the dynsize of the rank-2 NonZero output.
+  // Sequential CHECKs (NOT CHECK-DAG). Note: the running-product init
+  // constant `1` and the per-dim index constant `1` (used by
+  // `tensor.dim %input, 1`) collapse to a single SSA value because
+  // `tensor::DimOp::build(..., int64_t)` materialises its index via
+  // `createOrFold<arith::ConstantIndexOp>` and folds against the existing
+  // index-1 constant. So we only see one `arith.constant 1 : index`.
+  func.func @nonzero_dynamic_input(%input: tensor<?x?xf32>) -> tensor<2x?xi64> {
+    %result = "onnx.NonZero"(%input) : (tensor<?x?xf32>) -> tensor<2x?xi64>
+    return %result : tensor<2x?xi64>
+  }
+
+  // CHECK-LABEL: func.func @nonzero_dynamic_input
+  // CHECK-SAME: (%[[CTX4:.*]]: !hip.context, %[[IN4:.*]]: tensor<?x?xf32>)
+  // CHECK: arith.constant 1 : index
+  // CHECK: arith.constant 0 : index
+  // CHECK: tensor.dim %[[IN4]], %{{.*}} : tensor<?x?xf32>
+  // CHECK: arith.muli %{{.*}}, %{{.*}} : index
+  // CHECK: tensor.dim %[[IN4]], %{{.*}} : tensor<?x?xf32>
+  // CHECK: arith.muli %{{.*}}, %{{.*}} : index
+  // CHECK: tensor.empty(%{{.*}}) : tensor<2x?xi64>
+  // CHECK: hip.nonzero(%[[CTX4]]) ins(%[[IN4]] : tensor<?x?xf32>) outs(%{{.*}} : tensor<2x?xi64>) {input_data_type = 0 : i64}
+
+  // --- Case 5: partially dynamic input (mix of static + dynamic dims).
+  // Static dims contribute a compile-time arith.constant; dynamic dims
+  // contribute tensor.dim. Both feed the same muli chain. Same
+  // constant-folding caveat as Case 4: the running-product init `1` and
+  // the dim-1 index `1` share one SSA value.
+  func.func @nonzero_partial_dynamic(%input: tensor<4x?xi32>) -> tensor<2x?xi64> {
+    %result = "onnx.NonZero"(%input) : (tensor<4x?xi32>) -> tensor<2x?xi64>
+    return %result : tensor<2x?xi64>
+  }
+
+  // CHECK-LABEL: func.func @nonzero_partial_dynamic
+  // CHECK-SAME: (%[[CTX5:.*]]: !hip.context, %[[IN5:.*]]: tensor<4x?xi32>)
+  // CHECK: arith.constant 1 : index
+  // CHECK: arith.constant 4 : index
+  // CHECK: arith.muli %{{.*}}, %{{.*}} : index
+  // CHECK: tensor.dim %[[IN5]], %{{.*}} : tensor<4x?xi32>
+  // CHECK: arith.muli %{{.*}}, %{{.*}} : index
+  // CHECK: tensor.empty(%{{.*}}) : tensor<2x?xi64>
+  // CHECK: hip.nonzero
 }

@@ -25,13 +25,18 @@ namespace {
 //     is rewritten to a `tensor.extract_slice`, which bufferizes to a
 //     zero-copy `memref.subview`. This is the by-far most common case in
 //     transformer models (slicing a fixed prefix off a static-shape KV / mask
-//     tensor) and avoids any runtime call.
+//     tensor) and avoids any runtime call. Dynamic input/output dims are
+//     supported as long as either the dim is NOT touched by `axes` (in
+//     which case we forward the data dim via `tensor.dim`), or the input
+//     dim is static so the per-axis ONNX clamping rules can be evaluated
+//     at compile time.
 //
 //   * SliceToHip (benefit=1) — fallback for non-constant indices or negative
 //     steps. Produces a native `hip.slice` DPS op whose runtime function is
 //     a stub today (throws); models that hit this path are unsupported until
 //     the runtime is implemented, but the conversion / bufferization pipeline
-//     can still verify and link the IR.
+//     can still verify and link the IR. Dynamic output dims are sourced from
+//     `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time. Matches the patterns produced by
@@ -111,9 +116,6 @@ struct SliceDecompose : public mlir::RewritePattern {
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
     if (!dataType || !outType)
       return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
-    if (!dataType.hasStaticShape() || !outType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "decompose requires static input/output shapes");
 
     int64_t rank = dataType.getRank();
 
@@ -159,16 +161,11 @@ struct SliceDecompose : public mlir::RewritePattern {
         return rewriter.notifyMatchFailure(
             op, "negative or zero step is not supported by extract_slice");
 
-    // Default: full range, unit stride on every dim.
-    llvm::SmallVector<mlir::OpFoldResult> offsets, sizes, strides;
-    offsets.assign(rank, rewriter.getIndexAttr(0));
-    sizes.reserve(rank);
-    strides.assign(rank, rewriter.getIndexAttr(1));
-    for (int64_t i : llvm::seq<int64_t>(rank))
-      sizes.push_back(rewriter.getIndexAttr(dataType.getDimSize(i)));
+    mlir::Location loc = op->getLoc();
 
-    // Apply per-axis (start, end, step), implementing the ONNX spec's
-    // negative-index and clamping rules.
+    // Build the set of axes touched by slice and validate the input is
+    // static on each of those axes (we need the static dim size to apply
+    // the ONNX clamping rules at compile time).
     llvm::SmallSet<int64_t, 8> seenAxes;
     for (size_t k = 0; k < axesVec.size(); ++k) {
       int64_t axis = axesVec[k];
@@ -178,6 +175,38 @@ struct SliceDecompose : public mlir::RewritePattern {
         return rewriter.notifyMatchFailure(op, "axis out of range");
       if (!seenAxes.insert(axis).second)
         return rewriter.notifyMatchFailure(op, "duplicate axis");
+      // ONNX clamps start/end against `dim`. If dim is dynamic we cannot
+      // resolve the slice size at compile time -- fall through to the
+      // hip.slice runtime op.
+      if (dataType.isDynamicDim(axis))
+        return rewriter.notifyMatchFailure(
+            op, "slice axis has dynamic input dim; "
+                "cannot apply ONNX clamping at compile time");
+    }
+
+    // Default: full range, unit stride on every dim. Untouched dynamic
+    // dims forward through as `tensor.dim` so the extract_slice's size
+    // operands are well-defined; untouched static dims become attrs.
+    llvm::SmallVector<mlir::OpFoldResult> offsets, sizes, strides;
+    offsets.assign(rank, rewriter.getIndexAttr(0));
+    sizes.reserve(rank);
+    strides.assign(rank, rewriter.getIndexAttr(1));
+    for (int64_t i : llvm::seq<int64_t>(rank)) {
+      if (dataType.isDynamicDim(i)) {
+        mlir::Value dimVal =
+            mlir::tensor::DimOp::create(rewriter, loc, data, i);
+        sizes.push_back(dimVal);
+      } else {
+        sizes.push_back(rewriter.getIndexAttr(dataType.getDimSize(i)));
+      }
+    }
+
+    // Apply per-axis (start, end, step), implementing the ONNX spec's
+    // negative-index and clamping rules.
+    for (size_t k = 0; k < axesVec.size(); ++k) {
+      int64_t axis = axesVec[k];
+      if (axis < 0)
+        axis += rank;
 
       int64_t dim = dataType.getDimSize(axis);
       int64_t start = startsVec[k];
@@ -203,10 +232,15 @@ struct SliceDecompose : public mlir::RewritePattern {
       strides[axis] = rewriter.getIndexAttr(step);
     }
 
-    // Sanity check: computed sizes must match the IR-inferred output type.
-    // If they diverge we have an unsupported corner case and should fall
-    // through to the native op rather than silently produce wrong shapes.
+    // Sanity check (only meaningful for static output dims): computed
+    // sizes must match the IR-inferred output type. If they diverge we
+    // have an unsupported corner case and should fall through to the
+    // native op rather than silently produce wrong shapes. Dynamic output
+    // dims are intentionally skipped -- the IR cannot tell us what value
+    // to compare against.
     for (int64_t i : llvm::seq<int64_t>(rank)) {
+      if (outType.isDynamicDim(i))
+        continue;
       auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(sizes[i]);
       auto intAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(attr);
       if (!intAttr || intAttr.getInt() != outType.getDimSize(i))
@@ -214,7 +248,6 @@ struct SliceDecompose : public mlir::RewritePattern {
             op, "computed slice size does not match inferred output");
     }
 
-    mlir::Location loc = op->getLoc();
     mlir::OperationState state(
         loc, mlir::tensor::ExtractSliceOp::getOperationName());
     mlir::tensor::ExtractSliceOp::build(rewriter, state, outType, data, offsets,
@@ -257,15 +290,29 @@ struct SliceToHip : public mlir::RewritePattern {
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
 
-    // The native runtime is a stub today; supporting dynamic output shapes
-    // would require runtime-side computation of the result extent which the
-    // stub cannot provide. Static-shape models always satisfy this.
-    if (!resultType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "native hip.slice fallback requires static output shape");
+    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
 
-    mlir::Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, resultType.getShape(), resultType.getElementType());
+    // For each dynamic output dim, source an upper bound from the data
+    // dim at the same position. This is sound because ONNX Slice can
+    // never widen any axis -- output dim i is at most data dim i. The
+    // runtime stub honours `output_shape[i]` as the actual extent so the
+    // over-allocation is benign.
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t i = 0; i < resultType.getRank(); ++i) {
+      if (!resultType.isDynamicDim(i))
+        continue;
+      if (i >= dataType.getRank())
+        return rewriter.notifyMatchFailure(
+            op, "result rank exceeds data rank — invalid Slice");
+      if (dataType.isDynamicDim(i))
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
+      else
+        dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
+            rewriter, loc, dataType.getDimSize(i)));
+    }
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
 
     auto hipOp =
         mlir::hip::SliceOp::create(rewriter, loc, resultType, context, data,
