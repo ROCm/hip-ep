@@ -10,8 +10,17 @@
 // runtime's fixed-arity callback contract to the body's variable-arity
 // memref-descriptor signature.
 //
-// See `.cursor/plans/onnx-loop-support.plan.md` (sections P4/P5) for the
-// trampoline ABI rationale.
+// Trampoline ABI:
+//   Receives  : (state*, iter_dev*, cond_dev*, lc_descs*, cap_descs*)
+//   Builds    : rank-0 memref descriptors for iter and cond from the raw
+//               device pointers; loads each loop-carried / capture
+//               descriptor struct from its slot in the *_descs array.
+//   Calls body: (state, iter, cond_in, v_in..., captures...,
+//                [cond_out if !cond_is_passthrough], v_out...).
+// Aliasing invariant: each v_in_i shares its buffer with v_out_i, and
+// cond_in shares with cond_out when not passthrough. Safe under v1
+// single-pass-per-kernel body semantics; the runtime driver enforces
+// non-nesting so the shared per-state iter/cond buffers cannot race.
 //
 //===----------------------------------------------------------------------===//
 
@@ -97,7 +106,7 @@ static int64_t memrefRankFromStructType(Type structTy) {
 /// Aliasing invariant: cond_in and cond_out share the same buffer, and
 /// each v_in_i shares its buffer with the corresponding v_out_i.  This
 /// matches the runtime driver's per-iter buffer management and the body's
-/// single-pass-per-kernel safety (see plan P4/P5 design notes).
+/// single-pass-per-kernel safety (see file header).
 ///
 /// Precondition: the body has not yet been converted to LLVMFuncOp.  The
 /// LoopOpLowering caller enforces this by failing if `module.lookupSymbol
