@@ -35,9 +35,11 @@
 // usage, and the same readback shape as the seqlens_k optimization in
 // gqa.cpp.
 //
-// See `.cursor/plans/onnx-loop-support.plan.md` (P4/P5) for the trampoline
-// ABI rationale and the aliasing invariant that allows v_in and v_out
-// (resp. cond_in and cond_out) to share the same buffer.
+// Aliasing invariant: each v_in_i and v_out_i (and, on the dynamic path,
+// cond_in and cond_out) refer to the same memref slot in the body's call.
+// Safe under the v1 body semantics where each kernel touches each cell at
+// most once per launch; the LoopNestingGuard below enforces single-level
+// nesting so the shared per-state iter/cond buffers cannot race.
 //
 //===----------------------------------------------------------------------===//
 
