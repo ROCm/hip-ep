@@ -98,21 +98,78 @@ static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
   return indexVal;
 }
 
-/// Materialize an `i1` scalar from a 0-D `tensor<i1>` operand. Same
-/// constant-folding rationale as `unboxTripCount`.
+/// Materialize an `i1` scalar from a 0-D BOOL-like tensor operand.
+///
+/// ONNX `BOOL` is canonical 1-byte storage (0x00=false, non-zero=true).
+/// Different importers spell that in MLIR three different ways:
+///
+///   * `tensor<i1>`  -- canonical MLIR bool (what hand-written test
+///                      fixtures under SimpleTestModels/*.preoutline.mlir
+///                      use, and what the ONNX-MLIR style importer emits).
+///   * `tensor<ui8>` -- what the morphizen importer emits (it deliberately
+///                      preserves ONNX's physical 1-byte storage layout
+///                      so subsequent passes / runtime see the same
+///                      byte-level encoding as ORT).
+///   * `tensor<i8>`  -- signless 8-bit; accepted for safety so callers
+///                      don't need to know which morphizen variant they
+///                      got.
+///
+/// Same constant-folding rationale as `unboxTripCount`: when the cond is
+/// produced by an `onnx.Constant` we fold the byte directly into an
+/// `arith.constant i1` so the hip.loop op's `cond_init` operand doesn't
+/// sit on a `tensor.extract` that would later bufferize to a host load
+/// from device-resident memory. For non-constant cond (rare; future
+/// extension), we extract and reduce to i1 via `cmpi ne 0`, bridging
+/// `ui8`/`si8` -> signless `i8` with an `unrealized_conversion_cast`
+/// since `arith.cmpi` requires signless operands.
 static FailureOr<Value> unboxCondInit(OpBuilder &builder, Location loc,
                                       Value condTensor) {
   auto t = dyn_cast<RankedTensorType>(condTensor.getType());
-  if (!t || t.getRank() != 0 || !t.getElementType().isInteger(1))
+  if (!t || t.getRank() != 0)
     return failure();
-  if (auto folded = readOnnxConstantScalar<bool>(condTensor, 1)) {
-    Value i1Val = arith::ConstantIntOp::create(
-        builder, loc, builder.getI1Type(), *folded ? 1 : 0);
-    return i1Val;
+  auto intTy = dyn_cast<IntegerType>(t.getElementType());
+  if (!intTy)
+    return failure();
+  unsigned width = intTy.getWidth();
+  if (width != 1 && width != 8)
+    return failure();
+
+  // Constant-fold path. Read the raw bit pattern via APInt (signedness-
+  // agnostic) and convert to bool by comparison to zero.
+  if (Operation *defOp = condTensor.getDefiningOp()) {
+    if (defOp->getName().getStringRef() == "onnx.Constant") {
+      if (auto attr = defOp->getAttrOfType<DenseElementsAttr>("value")) {
+        auto at = dyn_cast<RankedTensorType>(attr.getType());
+        if (at && at.getRank() == 0 && at.getElementType() == intTy) {
+          bool truthy = (*attr.getValues<APInt>().begin()).getZExtValue() != 0;
+          Value i1Val = arith::ConstantIntOp::create(
+              builder, loc, builder.getI1Type(), truthy ? 1 : 0);
+          return i1Val;
+        }
+      }
+    }
   }
-  Value i1Val =
+
+  // Non-constant fallback.
+  Value extracted =
       tensor::ExtractOp::create(builder, loc, condTensor, ValueRange{});
-  return i1Val;
+  if (width == 1)
+    return extracted; // already an i1 scalar
+
+  // width == 8: reduce to i1 by comparing to zero. arith.cmpi requires
+  // signless operands; bridge ui8/si8 -> signless i8 with an
+  // unrealized_conversion_cast (legal at this pipeline stage, eliminated
+  // by downstream type conversion since the bit patterns are identical).
+  Type signlessI8 = builder.getIntegerType(8);
+  if (!intTy.isSignless()) {
+    extracted = UnrealizedConversionCastOp::create(
+                    builder, loc, TypeRange{signlessI8}, ValueRange{extracted})
+                    .getResult(0);
+  }
+  Value zero = arith::ConstantIntOp::create(builder, loc, signlessI8, 0);
+  return arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne,
+                               extracted, zero)
+      .getResult();
 }
 
 //===----------------------------------------------------------------------===//
@@ -188,10 +245,26 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
            << (2 + numLoopCarried) << ", got " << bodyBlock.getNumArguments();
 
   // Detect cond passthrough BEFORE we touch the body. The check is SSA-
-  // equality between yield.operand(0) and the body's cond_in block arg.
-  Value yieldCondOut = yieldOp->getOperand(0);
+  // equality between the yield's cond_out operand and the body's cond_in
+  // block arg.
+  //
+  // We walk through any leading `onnx.Identity` ops on the yield's
+  // cond_out because the morphizen importer (and the ONNX exporter it
+  // mirrors) materializes "cond passes through unchanged" as an explicit
+  // `%cond_out = onnx.Identity(%cond_in)` rather than yielding the block
+  // arg directly. Without this, every morphizen-produced loop would be
+  // misclassified as non-passthrough and end up with a dead `onnx.Identity`
+  // in the outlined body that has no `ConvertOnnxToHip` pattern and would
+  // later fail bufferization ("op was not bufferized").
+  Value yieldCondOutSrc = yieldOp->getOperand(0);
+  while (Operation *defOp = yieldCondOutSrc.getDefiningOp()) {
+    if (defOp->getName().getStringRef() != "onnx.Identity" ||
+        defOp->getNumOperands() != 1)
+      break;
+    yieldCondOutSrc = defOp->getOperand(0);
+  }
   BlockArgument condInArg = bodyBlock.getArgument(1);
-  bool condIsPassthrough = (yieldCondOut == condInArg);
+  bool condIsPassthrough = (yieldCondOutSrc == condInArg);
   LLVM_DEBUG(llvm::dbgs() << "[onnx-loop-outline] cond_is_passthrough = "
                           << condIsPassthrough << "\n");
 
@@ -276,6 +349,28 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     bodyBuilder.clone(op, mapping);
   }
 
+  // In passthrough mode the yield's cond_out came from a chain of
+  // `onnx.Identity` ops (detected above). Those cloned Identity ops are
+  // now dead in the new body, but standard DCE won't remove them because
+  // `onnx.Identity` is unregistered and MLIR conservatively assumes
+  // unregistered ops have side effects. Manually erase the cloned copies
+  // from leaf back to the block arg.
+  if (condIsPassthrough) {
+    Value chainV = yieldOp->getOperand(0);
+    while (Operation *defOp = chainV.getDefiningOp()) {
+      if (defOp->getName().getStringRef() != "onnx.Identity")
+        break;
+      Value clonedRes = mapping.lookupOrNull(defOp->getResult(0));
+      if (!clonedRes)
+        break;
+      Operation *clonedOp = clonedRes.getDefiningOp();
+      if (!clonedOp || !clonedOp->use_empty())
+        break;
+      chainV = defOp->getOperand(0);
+      clonedOp->erase();
+    }
+  }
+
   // Build the func.return from the (mapped) yield operands.  Cond is
   // skipped when cond_is_passthrough (see resultTypes computation above).
   SmallVector<Value> returnVals;
@@ -306,7 +401,8 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   FailureOr<Value> condI1 = unboxCondInit(outerBuilder, loc, condInitTensor);
   if (failed(condI1))
     return loopOp->emitOpError("could not unbox cond_init to i1 (expected "
-                               "tensor<i1>, got ")
+                               "0-D tensor<i1>, tensor<i8>, or tensor<ui8>, "
+                               "got ")
            << condInitTensor.getType() << ")";
 
   // hip.loop result types: same as the (loop-carried portion of) yield ops
