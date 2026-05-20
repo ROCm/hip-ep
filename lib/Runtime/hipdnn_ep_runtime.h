@@ -908,6 +908,16 @@ int wrap_not(RuntimeState *state, void *input, void *output,
 int wrap_nonzero(RuntimeState *state, void *input, void *output,
                  int64_t input_num_elements, int64_t input_rank,
                  int64_t output_capacity, int64_t input_data_type);
+
+// ONNX Size wrapper (dynamic-shape path only).
+//
+// Static-shape Size ops are folded into arith.constant at OnnxToHip time
+// and never reach this symbol. For inputs with at least one dynamic dim
+// the HipToLLVM lowering computes `num_elements = prod(input.shape)` as
+// a runtime i64 value (compile-time constants for static dims, MemRef
+// descriptor `sizes[]` for dynamic dims) and calls this wrapper, which
+// stores the 8-byte value into the rank-0 i64 output buffer on the GPU.
+int wrap_size(RuntimeState *state, void *output, int64_t num_elements);
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,

@@ -190,6 +190,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::MultiHeadAttentionOp>>(*ctx);
     mlir::hip::NonZeroOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::NonZeroOp>>(*ctx);
+    mlir::hip::SizeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SizeOp>>(*ctx);
   });
 }
 
