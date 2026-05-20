@@ -59,4 +59,50 @@ module {
 
   // CHECK-LABEL: func.func @pad_axes
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<2xi64>) axes({{.*}} : tensor<1xi64>) outs({{.*}} : tensor<3x6xf32>)
+
+  // Dynamic output dims with a compile-time constant `pads`: the
+  // pattern resolves each padded axis's output extent to
+  //   data_dim[i] + pads[i] + pads[i + N]
+  // entirely at IR-build time. data dim 0 is dynamic so its
+  // contribution is a tensor.dim; both pad amounts are arith.constants
+  // sourced from the constant `pads` vector.
+  func.func @pad_dyn_output_const_pads(%data: tensor<?x4xf32>) -> tensor<?x6xf32> {
+    %pads = arith.constant dense<[1, 1, 2, 1]> : tensor<4xi64>
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %none, %none) {mode = "constant"} : (tensor<?x4xf32>, tensor<4xi64>, none, none) -> tensor<?x6xf32>
+    return %r : tensor<?x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_dyn_output_const_pads
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x4xf32>)
+  // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[D0:.*]] = tensor.dim %[[D]], %[[A0]] : tensor<?x4xf32>
+  // CHECK-DAG: %[[B0:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[E0:.*]] = arith.constant 2 : index
+  // CHECK: %[[S0:.*]] = arith.addi %[[D0]], %[[B0]] : index
+  // CHECK: %[[OUT0:.*]] = arith.addi %[[S0]], %[[E0]] : index
+  // CHECK: tensor.empty(%[[OUT0]]) : tensor<?x6xf32>
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
+
+  // Dynamic output dims with a non-constant `pads` (function arg):
+  // the per-axis padding amounts are extracted at runtime via
+  // tensor.extract + arith.index_cast.
+  func.func @pad_dyn_output_dyn_pads(%data: tensor<?x?xf32>, %pads: tensor<4xi64>) -> tensor<?x?xf32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %none, %none) {mode = "constant"} : (tensor<?x?xf32>, tensor<4xi64>, none, none) -> tensor<?x?xf32>
+    return %r : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_dyn_output_dyn_pads
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x?xf32>, %[[P:.*]]: tensor<4xi64>)
+  // For each dynamic output dim we should see:
+  //   tensor.dim(data) + index_cast(extract pads) + index_cast(extract pads)
+  // The exact order is implementation-defined, so just assert that
+  // both axes were visited and that the muli/addi chain feeds tensor.empty.
+  // CHECK: tensor.extract %[[P]]{{\[}}%{{.*}}{{\]}} : tensor<4xi64>
+  // CHECK: arith.index_cast %{{.*}} : i64 to index
+  // CHECK: tensor.extract %[[P]]{{\[}}%{{.*}}{{\]}} : tensor<4xi64>
+  // CHECK: arith.index_cast %{{.*}} : i64 to index
+  // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+  // CHECK: hip.pad
 }

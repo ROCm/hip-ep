@@ -11,14 +11,18 @@ namespace {
 
 /// onnx.ScatterND -> hip.scatter_nd
 ///
-/// Output shape matches `data` exactly, so the destination buffer can be
-/// allocated from the data shape directly. We do NOT split the op into
-/// `copy(data -> output)` + `scatter_inplace(output, indices, updates)` at
-/// this level — the runtime takes the original `data` as an input operand
-/// and is responsible for both the initial copy and the per-index writes.
-/// This keeps the IR symmetric with `hip.gather_nd` and avoids spawning
-/// extra `linalg.copy` ops that the buffer-pooling pass would have to fuse
-/// back together.
+/// Output shape matches `data` exactly (per ONNX spec), so the destination
+/// buffer can be allocated from the data shape directly. We do NOT split the
+/// op into `copy(data -> output)` + `scatter_inplace(output, indices,
+/// updates)` at this level — the runtime takes the original `data` as an
+/// input operand and is responsible for both the initial copy and the
+/// per-index writes. This keeps the IR symmetric with `hip.gather_nd` and
+/// avoids spawning extra `linalg.copy` ops that the buffer-pooling pass
+/// would have to fuse back together.
+///
+/// Dynamic shape support: any dynamic dim of the output is sourced from
+/// the corresponding `data` dim via `tensor.dim` at runtime. ScatterND's
+/// `out.rank == data.rank` invariant means the mapping is identity.
 ///
 /// `reduction` is forwarded as a string attribute (`"none"` by default).
 /// The runtime stub today only logs its parameters, so any reduction mode
@@ -50,6 +54,12 @@ struct ScatterNDToHip : public mlir::RewritePattern {
     if (!resultType || !dataType)
       return rewriter.notifyMatchFailure(
           op, "expected ranked tensor types for data and output");
+    // ScatterND's defining invariant: output and data have identical
+    // shapes (and therefore identical ranks). Reject any mismatch loudly
+    // rather than silently producing a malformed `tensor.empty`.
+    if (resultType.getRank() != dataType.getRank())
+      return rewriter.notifyMatchFailure(
+          op, "ScatterND requires result rank == data rank");
 
     // Output shape == data shape; reuse data's dim values for any dynamic
     // dims of the destination empty.
@@ -57,9 +67,6 @@ struct ScatterNDToHip : public mlir::RewritePattern {
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))
         continue;
-      if (i >= dataType.getRank())
-        return rewriter.notifyMatchFailure(
-            op, "result rank exceeds data rank — invalid ScatterND");
       dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
     }
     mlir::Value init =

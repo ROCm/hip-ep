@@ -36,10 +36,12 @@ static int64_t getHipdnnInputDataType(mlir::Type elemType) {
 
 // onnx.NonZero -> hip.nonzero
 //
-// Input  X: ranked tensor of shape [D0, ..., D{R-1}] (static shape required
-//           by this EP, see CLAUDE.md "Models must have static shapes").
-// Output Y: tensor<R x ? x i64>. The N dimension is data-dependent (number
-//           of non-zero elements at runtime); the upper bound is numel(X)
+// Input  X: ranked tensor of shape [D0, ..., D{R-1}]. Static dims are
+//           used directly; dynamic dims are read via `tensor.dim` at
+//           runtime and multiplied into the upper-bound capacity for the
+//           output `N` dim.
+// Output Y: tensor<R x ? x i64>. The N dim is data-dependent (number of
+//           non-zero elements at runtime); the upper bound is numel(X)
 //           and is materialised as the runtime `dynSize` of the
 //           `tensor.empty` init operand so the buffer is large enough to
 //           hold the worst case.
@@ -57,10 +59,6 @@ struct NonZeroToHip : public mlir::RewritePattern {
         mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
     if (!inputType)
       return rewriter.notifyMatchFailure(op, "input must be a ranked tensor");
-    if (!inputType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "NonZero requires static input shape (this EP rejects dynamic "
-              "shapes)");
 
     int64_t inputDataType = getHipdnnInputDataType(inputType.getElementType());
     if (inputDataType < 0)
@@ -86,10 +84,6 @@ struct NonZeroToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "NonZero result first dim must equal input rank");
 
-    int64_t numel = 1;
-    for (int64_t d : inputType.getShape())
-      numel *= d;
-
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();
@@ -97,11 +91,34 @@ struct NonZeroToHip : public mlir::RewritePattern {
 
     mlir::Location loc = op->getLoc();
 
-    // Materialise the upper-bound size for the dynamic N dim. `numel` is a
-    // compile-time constant under the static-shape invariant; the runtime
-    // receives it as the worst-case capacity.
-    mlir::Value upperBound =
-        mlir::arith::ConstantIndexOp::create(rewriter, loc, numel);
+    // Materialise the upper-bound size for the dynamic N dim. When every
+    // input dim is static we fold `numel` to a single `arith.constant`
+    // (matches the legacy fast path so LIT tests stay intact). With at
+    // least one dynamic dim we emit `tensor.dim` per dim and chain the
+    // running product as `index` math. The resulting value is the worst
+    // case `N` (every element non-zero) and becomes the dynsize operand
+    // of the destination `tensor.empty`.
+    mlir::Value upperBound;
+    if (inputType.hasStaticShape()) {
+      int64_t numel = 1;
+      for (int64_t d : inputType.getShape())
+        numel *= d;
+      upperBound = mlir::arith::ConstantIndexOp::create(rewriter, loc, numel);
+    } else {
+      mlir::Value input = op->getOperand(0);
+      upperBound = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+      for (int64_t i = 0; i < inputRank; ++i) {
+        mlir::Value dim;
+        if (inputType.isDynamicDim(i)) {
+          dim = mlir::tensor::DimOp::create(rewriter, loc, input, i);
+        } else {
+          dim = mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                     inputType.getDimSize(i));
+        }
+        upperBound =
+            mlir::arith::MulIOp::create(rewriter, loc, upperBound, dim);
+      }
+    }
     mlir::Value init = mlir::tensor::EmptyOp::create(
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
         mlir::ValueRange{upperBound});

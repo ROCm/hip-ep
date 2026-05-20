@@ -40,4 +40,38 @@ module {
   // CHECK-LABEL: func.func @reduce_prod_axes_attr
   // CHECK: arith.constant dense<1> : tensor<1xi64>
   // CHECK: hip.reduce_prod({{.*}}) ins({{.*}}, {{.*}} : tensor<3x2x2xf32>, tensor<1xi64>) outs({{.*}} : tensor<3x1x2xf32>)
+
+  // Dynamic input with keepdims=1: axis 1 is reduced -> output dim
+  // for that axis is the constant 1; the non-reduced dims (0 and 2)
+  // forward through via tensor.dim where input is dynamic.
+  func.func @reduce_prod_dyn_keepdims(%data: tensor<?x2x?xf32>) -> tensor<?x1x?xf32> {
+    %r = "onnx.ReduceProd"(%data) {axes = [1 : si64], keepdims = 1 : si64} : (tensor<?x2x?xf32>) -> tensor<?x1x?xf32>
+    return %r : tensor<?x1x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @reduce_prod_dyn_keepdims
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x2x?xf32>)
+  // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[D0:.*]] = tensor.dim %[[D]], %[[A0]] : tensor<?x2x?xf32>
+  // CHECK-DAG: %[[A2:.*]] = arith.constant 2 : index
+  // CHECK-DAG: %[[D2:.*]] = tensor.dim %[[D]], %[[A2]] : tensor<?x2x?xf32>
+  // CHECK: tensor.empty(%[[D0]], %[[D2]]) : tensor<?x1x?xf32>
+  // CHECK: hip.reduce_prod
+
+  // Dynamic input with keepdims=0: axis 1 is reduced and dropped from
+  // the output. Output rank = 2; output[0] <- input[0], output[1] <-
+  // input[2] (the outIdx -> inIdx mapping skips the reduced axis).
+  func.func @reduce_prod_dyn_drop_dim(%data: tensor<?x2x?xf32>) -> tensor<?x?xf32> {
+    %r = "onnx.ReduceProd"(%data) {axes = [1 : si64], keepdims = 0 : si64} : (tensor<?x2x?xf32>) -> tensor<?x?xf32>
+    return %r : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @reduce_prod_dyn_drop_dim
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x2x?xf32>)
+  // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[D0:.*]] = tensor.dim %[[D]], %[[A0]] : tensor<?x2x?xf32>
+  // CHECK-DAG: %[[A2:.*]] = arith.constant 2 : index
+  // CHECK-DAG: %[[D2:.*]] = tensor.dim %[[D]], %[[A2]] : tensor<?x2x?xf32>
+  // CHECK: tensor.empty(%[[D0]], %[[D2]]) : tensor<?x?xf32>
+  // CHECK: hip.reduce_prod({{.*}}) ins({{.*}}, {{.*}} : tensor<?x2x?xf32>, tensor<1xi64>) outs({{.*}} : tensor<?x?xf32>) {keepdims = 0 : i64
 }
