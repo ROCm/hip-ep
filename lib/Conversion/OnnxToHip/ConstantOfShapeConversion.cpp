@@ -53,6 +53,46 @@ static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
   if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
     return mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
 
+  // `onnx.Shape(static-tensor)` is itself a compile-time constant -- the
+  // transformer-emitted `Shape -> ConstantOfShape` pattern (zero-initialised
+  // KV / mask buffers) relies on this fold to collapse to a single splat
+  // constant when the source tensor has fully static shape.
+  if (defOp->getName().getStringRef() == "onnx.Shape") {
+    if (defOp->getNumOperands() != 1)
+      return nullptr;
+    auto srcType =
+        mlir::dyn_cast<mlir::RankedTensorType>(defOp->getOperand(0).getType());
+    if (!srcType || !srcType.hasStaticShape())
+      return nullptr;
+    // ONNX Shape supports start/end attributes for slicing the shape vector.
+    int64_t rank = srcType.getRank();
+    int64_t start = 0;
+    int64_t end = rank;
+    if (auto a = defOp->getAttrOfType<mlir::IntegerAttr>("start"))
+      start = a.getInt();
+    if (auto a = defOp->getAttrOfType<mlir::IntegerAttr>("end"))
+      end = a.getInt();
+    if (start < 0)
+      start += rank;
+    if (end < 0)
+      end += rank;
+    start = std::max<int64_t>(0, std::min<int64_t>(rank, start));
+    end = std::max<int64_t>(0, std::min<int64_t>(rank, end));
+    if (end < start)
+      end = start;
+    llvm::SmallVector<int64_t> dims;
+    dims.reserve(end - start);
+    for (int64_t i = start; i < end; ++i)
+      dims.push_back(srcType.getDimSize(i));
+    auto i64 = mlir::IntegerType::get(value.getContext(), 64);
+    auto outTy = mlir::RankedTensorType::get({end - start}, i64);
+    llvm::SmallVector<mlir::APInt> apDims;
+    apDims.reserve(dims.size());
+    for (int64_t d : dims)
+      apDims.emplace_back(64, d);
+    return mlir::DenseElementsAttr::get(outTy, apDims);
+  }
+
   // onnx.Constant carrying a dense `value` attribute (pre-lowerOnnxConstants).
   if (auto attr = defOp->getAttr("value"))
     if (auto dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr))

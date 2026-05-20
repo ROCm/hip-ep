@@ -11,6 +11,14 @@ if(DEFINED _HIP_UTILS_INCLUDED)
 endif()
 set(_HIP_UTILS_INCLUDED TRUE)
 
+# Path to the MSVC 14.51 <cmath> compatibility shim (see _hip_compile_sources).
+# Resolved at include time so it doesn't depend on CMAKE_CURRENT_SOURCE_DIR at
+# call time -- hip_add_library can be invoked from any subdir.
+get_filename_component(_HIP_UTILS_DIR "${CMAKE_CURRENT_LIST_FILE}" DIRECTORY)
+set(_MSVC_HIP_CMATH_WORKAROUND_HEADER
+    "${_HIP_UTILS_DIR}/../include/msvc_hip_cmath_workaround.h"
+    CACHE INTERNAL "MSVC 14.51 <cmath> shim for HIP compilation")
+
 #------------------------------------------------------------------------------
 # Configuration
 #------------------------------------------------------------------------------
@@ -194,6 +202,17 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
         -fms-compatibility
         -fexceptions
     )
+
+    # MSVC 14.51 <cmath> compatibility shim.
+    #
+    # MSVC 14.51's `<cmath>` adds `inline` / `constexpr` overloads of
+    # `isless` / `islessequal` / etc. that clang in HIP mode treats as
+    # implicitly `__host__ __device__`, colliding with the `__device__`
+    # overloads in clang-hip's bundled `__clang_hip_cmath.h`. Force-include
+    # a tiny shim that neutralises the MS STL macros producing them.
+    if(EXISTS "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
+        list(APPEND abi_flags -include "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
+    endif()
 
     # Warning suppression flags
     set(warning_flags

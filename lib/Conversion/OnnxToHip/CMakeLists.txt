@@ -5,6 +5,7 @@
 
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
+  SimplifyOnnx.cpp
   ConstantsIO.cpp
   MatMulConversion.cpp
   TransposeConversion.cpp
@@ -27,7 +28,6 @@ add_library(OnnxToHip STATIC
   WhereConversion.cpp
   LinearAttentionConversion.cpp
   RangeConversion.cpp
-  CastLikeConversion.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp
