@@ -37,6 +37,7 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
 #define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
 #define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
+#define HIPDNN_EP_DATATYPE_UINT8 7    // ui8, 1 byte
 
 //===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
@@ -80,6 +81,8 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 8;
   case HIPDNN_EP_DATATYPE_INT8:
     return 1;
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return 1;
   case HIPDNN_EP_DATATYPE_DOUBLE:
     return 8;
   default:
@@ -101,6 +104,8 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "i64";
   case HIPDNN_EP_DATATYPE_INT8:
     return "i8";
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return "ui8";
   case HIPDNN_EP_DATATYPE_DOUBLE:
     return "f64";
   default:

@@ -131,7 +131,9 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return 3; // HIPDNN_EP_DATATYPE_INT32
   if (elemType.isInteger(64))
     return 4; // HIPDNN_EP_DATATYPE_INT64
-  if (elemType.isInteger(8))
+  if (elemType.isUnsignedInteger(8))
+    return 7; // HIPDNN_EP_DATATYPE_UINT8
+  if (elemType.isSignedInteger(8) || elemType.isSignlessInteger(8))
     return 5; // HIPDNN_EP_DATATYPE_INT8
   if (elemType.isF64())
     return 6; // HIPDNN_EP_DATATYPE_DOUBLE
