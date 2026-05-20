@@ -1,0 +1,77 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_python//python:defs.bzl", "py_binary")
+load(":compile_to_bc.bzl", "compile_to_bc")
+
+# ============================================================================
+# Runtime bitcode pipeline (mock runtime only)
+# ============================================================================
+# Mirrors CMakeLists.txt: compile .cpp → .bc via the CC toolchain (clang-cl
+# on Windows, clang on Linux/macOS), llvm-link → runtime.bc,
+# xxd.py → runtime_ir_data.cpp, wrap in cc_library.
+# ============================================================================
+
+py_binary(
+    name = "xxd_py",
+    srcs = ["//cmake:xxd.py"],
+    main = "//cmake:xxd.py",
+)
+
+# Header-only library exposing lib/Runtime and lib/Runtime/mock as include roots.
+# cc_library.includes paths are relative to the package, prepended with the
+# workspace root automatically — they flow into CcInfo.system_includes and
+# are picked up by cc_common.compile() via compilation_contexts.
+cc_library(
+    name = "runtime_headers",
+    hdrs = glob(["*.h"]) + glob(["mock/*.h"]),
+    includes = [
+        ".",      # → lib/Runtime (package dir)
+        "mock",   # → lib/Runtime/mock
+    ],
+)
+
+# Compile all mock runtime sources to LLVM bitcode in one step.
+# cc_common.compile() handles include paths, system headers, and toolchain
+# flags automatically. -emit-llvm is the only addition.
+compile_to_bc(
+    name = "runtime_bc_objects",
+    srcs = [
+        "hipdnn_ep_runtime_state.cpp",
+        "hipdnn_ep_runtime_tensor.cpp",
+        "mock/mock_gpu.cpp",
+        "mock/memory.cpp",
+        "mock/test_hip_from_dll.cpp",
+    ],
+    deps = [
+        ":runtime_headers",
+        "//schemas:HipSchemasLib",
+        "//include:foundation_headers",
+        "//include:hip_headers",
+    ],
+    copts = [
+        "-D_CRT_SECURE_NO_WARNINGS",
+        "-DNDEBUG",
+        "-O2",
+    ],
+)
+
+genrule(
+    name = "runtime_bc",
+    srcs = [":runtime_bc_objects"],
+    outs = ["runtime.bc"],
+    cmd = "$(location @bazel_cpp_toolchain//thirdparty/clang:llvm_link) $(locations :runtime_bc_objects) -o $@",
+    tools = ["@bazel_cpp_toolchain//thirdparty/clang:llvm_link"],
+)
+
+genrule(
+    name = "runtime_ir_data_cpp",
+    srcs = [":runtime_bc"],
+    outs = ["runtime_ir_data.cpp"],
+    cmd = "$(location :xxd_py) $(location :runtime_bc) --var kRuntimeIRData --output $@",
+    tools = [":xxd_py"],
+)
+
+cc_library(
+    name = "HipRuntimeBitcode",
+    srcs = [":runtime_ir_data_cpp"],
+    visibility = ["//visibility:public"],
+)
