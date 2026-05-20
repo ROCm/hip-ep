@@ -32,20 +32,28 @@
 // tolerance to absorb fp32→fp16 round-trip drift. Constants may be wrapped
 // in `onnx.Cast` (f32 → f16); we peek through one level of Cast.
 //
-// Operates as a function-level walk run inside ConvertOnnxToHipPass, BEFORE
-// `lowerOnnxConstants` so the constant values are still inline `onnx.Constant`
-// attributes (post-lowering, constants become arith.constant /
-// memref.get_global, defeating value-based matching). The intermediate ops
-// become dead and are removed by the existing unused-onnx-op DCE in
-// `ConvertOnnxToHipPass::runOnOperation`.
+// Implemented as a RewritePattern rooted on `onnx.Tanh` and run BEFORE
+// `lowerOnnxConstants` so the literal float values are still inline in
+// `onnx.Constant` `value` attributes (post-lowering, constants become
+// `arith.constant` / `memref.get_global`, defeating value-based matching).
+// Per-Tanh failure diagnostics flow through MLIR's standard
+// `notifyMatchFailure` mechanism (toggle via `-debug-only=fast-gelu-fusion`
+// or `-debug-only=greedy-rewriter`).
 //
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
-#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 
 #include <cmath>
+
+#define DEBUG_TYPE "fast-gelu-fusion"
+
+STATISTIC(NumFastGeluFused,
+          "Number of inlined FastGelu primitive chains folded back to "
+          "onnx.Gelu(approximate=tanh)");
 
 namespace mlir {
 namespace hip {
@@ -153,222 +161,180 @@ static bool isBinaryOpWithConst(mlir::Operation *op, llvm::StringRef opName,
   return true;
 }
 
-/// One-line description of why a `tryFuseFastGeluAt` call gave up. Used only
-/// for diagnostics when fused < total.
-struct FuseAttemptResult {
-  bool success = false;
-  const char *failedStep = "ok";
-  std::string
-      observed; // op name we actually saw at the failed step (when useful)
-};
+struct InlinedFastGeluToGelu : public mlir::RewritePattern {
+  InlinedFastGeluToGelu(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Tanh", /*benefit=*/1, ctx) {}
 
-static FuseAttemptResult fail(const char *step, llvm::StringRef obs = "") {
-  FuseAttemptResult r;
-  r.success = false;
-  r.failedStep = step;
-  r.observed = obs.str();
-  return r;
-}
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *tanhOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (tanhOp->getNumOperands() != 1 || tanhOp->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(tanhOp, "tanh.arity");
 
-/// Try to recognise the FastGelu identity rooted at `tanhOp`. On success,
-/// replaces the final output Mul with `onnx.Gelu(x){approximate="tanh"}`.
-static FuseAttemptResult tryFuseFastGeluAt(mlir::Operation *tanhOp,
-                                           mlir::OpBuilder &builder) {
-  if (tanhOp->getNumOperands() != 1 || tanhOp->getNumResults() != 1)
-    return fail("tanh.arity");
+    // ── back-walk ────────────────────────────────────────────────────────
+    // tanh_in = Mul(sqrt(2/π), inner)
+    mlir::Operation *tanhInputMul = tanhOp->getOperand(0).getDefiningOp();
+    if (!tanhInputMul)
+      return rewriter.notifyMatchFailure(tanhOp, "tanh.in.defop_null");
+    mlir::Value c2pi, innerSum;
+    if (!isBinaryOpWithConst(tanhInputMul, "onnx.Mul",
+                             /*sqrt(2/π)*/ 0.7978845608, c2pi, innerSum))
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "tanh.in.mul_sqrt2pi (observed: " << tanhInputMul->getName()
+          << ")";
+      });
 
-  // ── back-walk ──────────────────────────────────────────────────────────
-  // tanh_in = Mul(sqrt(2/π), inner)
-  mlir::Operation *tanhInputMul = tanhOp->getOperand(0).getDefiningOp();
-  if (!tanhInputMul)
-    return fail("tanh.in.defop_null");
-  llvm::StringRef tanhInName = tanhInputMul->getName().getStringRef();
-  mlir::Value c2pi, innerSum;
-  if (!isBinaryOpWithConst(tanhInputMul, "onnx.Mul",
-                           /*sqrt(2/π)*/ 0.7978845608, c2pi, innerSum))
-    return fail("tanh.in.mul_sqrt2pi", tanhInName);
+    // inner = Sum(x, scaled_pow)  (commutative; scaled_pow is the
+    // Mul-of-Pow leg)
+    mlir::Operation *innerSumOp = innerSum.getDefiningOp();
+    if (!innerSumOp)
+      return rewriter.notifyMatchFailure(tanhOp, "inner.defop_null");
+    if (innerSumOp->getName().getStringRef() != "onnx.Sum" ||
+        innerSumOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "inner.sum (observed: " << innerSumOp->getName() << ")";
+      });
 
-  // inner = Sum(x, scaled_pow)  (commutative; scaled_pow is the Mul-of-Pow leg)
-  mlir::Operation *innerSumOp = innerSum.getDefiningOp();
-  if (!innerSumOp)
-    return fail("inner.defop_null");
-  llvm::StringRef innerName = innerSumOp->getName().getStringRef();
-  if (innerName != "onnx.Sum" || innerSumOp->getNumOperands() != 2)
-    return fail("inner.sum", innerName);
-
-  // Find which operand of innerSum is the `0.044715 * x³` leg.
-  mlir::Value scaledPow, x;
-  for (mlir::Value cand : innerSumOp->getOperands()) {
-    if (mlir::Operation *def = cand.getDefiningOp()) {
-      if (def->getName().getStringRef() == "onnx.Mul" &&
-          def->getNumOperands() == 2) {
-        auto [c, other] = matchCommutativeConst(def, 0.044715);
-        if (c) {
-          scaledPow = cand;
-          // The other innerSum operand is `x`.
-          x = (cand == innerSumOp->getOperand(0)) ? innerSumOp->getOperand(1)
-                                                  : innerSumOp->getOperand(0);
-          break;
+    // Find which operand of innerSum is the `0.044715 * x³` leg.
+    mlir::Value scaledPow, x;
+    for (mlir::Value cand : innerSumOp->getOperands()) {
+      if (mlir::Operation *def = cand.getDefiningOp()) {
+        if (def->getName().getStringRef() == "onnx.Mul" &&
+            def->getNumOperands() == 2) {
+          auto [c, other] = matchCommutativeConst(def, 0.044715);
+          if (c) {
+            scaledPow = cand;
+            // The other innerSum operand is `x`.
+            x = (cand == innerSumOp->getOperand(0)) ? innerSumOp->getOperand(1)
+                                                    : innerSumOp->getOperand(0);
+            break;
+          }
         }
       }
     }
-  }
-  if (!scaledPow || !x)
-    return fail("scaled_pow.044715");
+    if (!scaledPow || !x)
+      return rewriter.notifyMatchFailure(tanhOp, "scaled_pow.044715");
 
-  // scaled_pow = Mul(0.044715, pow); pow = Pow(x, 3)
-  mlir::Operation *scaledPowOp = scaledPow.getDefiningOp();
-  mlir::Value c044715, powVal;
-  if (!isBinaryOpWithConst(scaledPowOp, "onnx.Mul", 0.044715, c044715, powVal))
-    return fail("scaled_pow.mul");
+    // scaled_pow = Mul(0.044715, pow); pow = Pow(x, 3)
+    mlir::Operation *scaledPowOp = scaledPow.getDefiningOp();
+    mlir::Value c044715, powVal;
+    if (!isBinaryOpWithConst(scaledPowOp, "onnx.Mul", 0.044715, c044715,
+                             powVal))
+      return rewriter.notifyMatchFailure(tanhOp, "scaled_pow.mul");
 
-  mlir::Operation *powOp = powVal.getDefiningOp();
-  if (!powOp)
-    return fail("pow.defop_null");
-  llvm::StringRef powName = powOp->getName().getStringRef();
-  if (powName != "onnx.Pow" || powOp->getNumOperands() != 2)
-    return fail("pow.op", powName);
-  if (powOp->getOperand(0) != x)
-    return fail("pow.base_neq_x");
-  if (!isScalarFloatNear(powOp->getOperand(1), 3.0)) {
-    auto v = getScalarFloatConstant(powOp->getOperand(1));
-    return fail("pow.exponent_not_3", v ? std::to_string(*v) : "<not_const>");
-  }
+    mlir::Operation *powOp = powVal.getDefiningOp();
+    if (!powOp)
+      return rewriter.notifyMatchFailure(tanhOp, "pow.defop_null");
+    if (powOp->getName().getStringRef() != "onnx.Pow" ||
+        powOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "pow.op (observed: " << powOp->getName() << ")";
+      });
+    if (powOp->getOperand(0) != x)
+      return rewriter.notifyMatchFailure(tanhOp, "pow.base_neq_x");
+    if (!isScalarFloatNear(powOp->getOperand(1), 3.0))
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        auto v = getScalarFloatConstant(powOp->getOperand(1));
+        d << "pow.exponent_not_3 (observed: "
+          << (v ? std::to_string(*v) : std::string("<not_const>")) << ")";
+      });
 
-  // ── forward-walk ───────────────────────────────────────────────────────
-  // tanh.result must feed exactly one Sum: phi = Sum(1, tanh)
-  mlir::Value tanhRes = tanhOp->getResult(0);
-  if (!tanhRes.hasOneUse())
-    return fail("tanh.not_one_use");
-  mlir::Operation *phiOp = *tanhRes.getUsers().begin();
-  llvm::StringRef phiName = phiOp->getName().getStringRef();
-  mlir::Value c1, tanhInPhi;
-  if (!isBinaryOpWithConst(phiOp, "onnx.Sum", 1.0, c1, tanhInPhi))
-    return fail("phi.sum_one", phiName);
-  if (tanhInPhi != tanhRes)
-    return fail("phi.tanh_mismatch");
+    // ── forward-walk ─────────────────────────────────────────────────────
+    // tanh.result must feed exactly one Sum: phi = Sum(1, tanh)
+    mlir::Value tanhRes = tanhOp->getResult(0);
+    if (!tanhRes.hasOneUse())
+      return rewriter.notifyMatchFailure(tanhOp, "tanh.not_one_use");
+    mlir::Operation *phiOp = *tanhRes.getUsers().begin();
+    mlir::Value c1, tanhInPhi;
+    if (!isBinaryOpWithConst(phiOp, "onnx.Sum", 1.0, c1, tanhInPhi))
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "phi.sum_one (observed: " << phiOp->getName() << ")";
+      });
+    if (tanhInPhi != tanhRes)
+      return rewriter.notifyMatchFailure(tanhOp, "phi.tanh_mismatch");
 
-  // phi must feed exactly one Mul: y = Mul(half_x, phi)
-  if (!phiOp->getResult(0).hasOneUse())
-    return fail("phi.not_one_use");
-  mlir::Operation *finalMulOp = *phiOp->getResult(0).getUsers().begin();
-  llvm::StringRef finalName = finalMulOp->getName().getStringRef();
-  if (finalName != "onnx.Mul" || finalMulOp->getNumOperands() != 2)
-    return fail("final.mul", finalName);
+    // phi must feed exactly one Mul: y = Mul(half_x, phi)
+    if (!phiOp->getResult(0).hasOneUse())
+      return rewriter.notifyMatchFailure(tanhOp, "phi.not_one_use");
+    mlir::Operation *finalMulOp = *phiOp->getResult(0).getUsers().begin();
+    if (finalMulOp->getName().getStringRef() != "onnx.Mul" ||
+        finalMulOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "final.mul (observed: " << finalMulOp->getName() << ")";
+      });
 
-  // The non-phi operand of finalMul is half_x = Mul(0.5, x).
-  mlir::Value halfX;
-  for (mlir::Value cand : finalMulOp->getOperands()) {
-    if (cand != phiOp->getResult(0)) {
-      halfX = cand;
-      break;
+    // The non-phi operand of finalMul is half_x = Mul(0.5, x).
+    mlir::Value halfX;
+    for (mlir::Value cand : finalMulOp->getOperands()) {
+      if (cand != phiOp->getResult(0)) {
+        halfX = cand;
+        break;
+      }
     }
+    if (!halfX)
+      return rewriter.notifyMatchFailure(tanhOp, "half_x.missing");
+    mlir::Operation *halfXOp = halfX.getDefiningOp();
+    mlir::Value cHalf, xInHalf;
+    if (!isBinaryOpWithConst(halfXOp, "onnx.Mul", 0.5, cHalf, xInHalf))
+      return rewriter.notifyMatchFailure(tanhOp, "half_x.mul_half");
+    if (xInHalf != x)
+      return rewriter.notifyMatchFailure(tanhOp, "half_x.x_mismatch");
+
+    // ── all matched; rewrite final Mul to onnx.Gelu(x, "tanh") ───────────
+    mlir::Location loc = finalMulOp->getLoc();
+    mlir::OperationState state(loc, "onnx.Gelu");
+    state.addOperands(x);
+    state.addTypes(finalMulOp->getResult(0).getType());
+    state.addAttribute("approximate", rewriter.getStringAttr("tanh"));
+    // Preserve the original output name attribute so downstream IR dumps
+    // and metadata stay readable.
+    if (auto outputs =
+            finalMulOp->getAttrOfType<mlir::ArrayAttr>("node.outputs"))
+      state.addAttribute("node.outputs", outputs);
+    if (auto nodeName =
+            finalMulOp->getAttrOfType<mlir::StringAttr>("onnx_node_name"))
+      state.addAttribute("onnx_node_name", nodeName);
+    rewriter.setInsertionPoint(finalMulOp);
+    mlir::Operation *geluOp = rewriter.create(state);
+
+    // replaceOp transfers all uses of finalMulOp to the new Gelu and
+    // erases finalMulOp. In the canonical FastGelu chain each remaining
+    // intermediate has exactly one user, so erasure cascades in
+    // reverse-topological order: halfXOp and phiOp lose their last user
+    // immediately, phi's removal makes tanh use-empty, then tanhInputMul,
+    // innerSum, scaledPow, and powOp follow. The `eraseIfDead` guard is
+    // defensive — if upstream CSE has merged any of these intermediates
+    // across multiple FastGelu sites, the not-yet-dead op is silently
+    // skipped here and picked up later when the last sibling fires (or by
+    // the post-conversion `onnx.* use_empty` DCE walk in
+    // ConvertOnnxToHipPass). The shared `x` activation and any shared
+    // constants (0.044715, sqrt(2/π), 0.5, 1.0, exponent 3) are not
+    // erased here at all — they fall to that same global sweep.
+    rewriter.replaceOp(finalMulOp, geluOp->getResult(0));
+    auto eraseIfDead = [&rewriter](mlir::Operation *op) {
+      if (op && op->use_empty())
+        rewriter.eraseOp(op);
+    };
+    eraseIfDead(halfXOp);
+    eraseIfDead(phiOp);
+    eraseIfDead(tanhOp);
+    eraseIfDead(tanhInputMul);
+    eraseIfDead(innerSumOp);
+    eraseIfDead(scaledPowOp);
+    eraseIfDead(powOp);
+
+    LLVM_DEBUG(llvm::dbgs()
+               << "[" DEBUG_TYPE "] fused chain at " << loc << "\n");
+    ++NumFastGeluFused;
+    return mlir::success();
   }
-  if (!halfX)
-    return fail("half_x.missing");
-  mlir::Operation *halfXOp = halfX.getDefiningOp();
-  mlir::Value cHalf, xInHalf;
-  if (!isBinaryOpWithConst(halfXOp, "onnx.Mul", 0.5, cHalf, xInHalf))
-    return fail("half_x.mul_half");
-  if (xInHalf != x)
-    return fail("half_x.x_mismatch");
-
-  // ── all matched; rewrite final Mul to onnx.Gelu(x, "tanh") ────────────
-  builder.setInsertionPoint(finalMulOp);
-  mlir::OperationState state(finalMulOp->getLoc(), "onnx.Gelu");
-  state.addOperands(x);
-  state.addTypes(finalMulOp->getResult(0).getType());
-  state.addAttribute("approximate", builder.getStringAttr("tanh"));
-  // Preserve the original output name attribute so downstream IR dumps and
-  // metadata stay readable.
-  if (auto outputs = finalMulOp->getAttrOfType<mlir::ArrayAttr>("node.outputs"))
-    state.addAttribute("node.outputs", outputs);
-  if (auto nodeName =
-          finalMulOp->getAttrOfType<mlir::StringAttr>("onnx_node_name"))
-    state.addAttribute("onnx_node_name", nodeName);
-  mlir::Operation *geluOp = builder.create(state);
-  finalMulOp->getResult(0).replaceAllUsesWith(geluOp->getResult(0));
-
-  // Erase the matched chain in reverse-topological order so each op is
-  // `use_empty` when we erase it. Avoids relying on a cascade of post-pass
-  // DCE iterations to clean up the dead chain (relevant when the chain
-  // mixes onnx.* and other dialects after later conversions). Constants
-  // shared across many Gelu instances become dead naturally only when the
-  // last instance is fused; any leftover dead onnx.* op is picked up by
-  // the per-pass `onnx.*` use-empty DCE walk in ConvertOnnxToHipPass.
-  auto eraseIfDead = [](mlir::Operation *op) {
-    if (op && op->use_empty())
-      op->erase();
-  };
-  finalMulOp->erase();
-  eraseIfDead(halfXOp);
-  eraseIfDead(phiOp);
-  eraseIfDead(tanhOp);
-  eraseIfDead(tanhInputMul);
-  eraseIfDead(innerSumOp);
-  eraseIfDead(scaledPowOp);
-  eraseIfDead(powOp);
-
-  FuseAttemptResult ok;
-  ok.success = true;
-  return ok;
-}
+};
 
 } // namespace
 
-mlir::LogicalResult fuseInlinedFastGelu(mlir::func::FuncOp funcOp) {
-  // Snapshot Tanh ops first (don't mutate during the walk).
-  llvm::SmallVector<mlir::Operation *> tanhOps;
-  funcOp.walk([&](mlir::Operation *op) {
-    if (op->getName().getStringRef() == "onnx.Tanh")
-      tanhOps.push_back(op);
-  });
-
-  mlir::OpBuilder builder(funcOp.getContext());
-  int fused = 0;
-  llvm::SmallVector<FuseAttemptResult> failures;
-  for (mlir::Operation *tanh : tanhOps) {
-    // The op may have been erased by an earlier fusion in this loop (for
-    // structurally overlapping chains — not expected for FastGelu but cheap
-    // to guard against).
-    if (tanh->use_empty() && tanh->getNumResults() > 0)
-      continue;
-    auto r = tryFuseFastGeluAt(tanh, builder);
-    if (r.success)
-      ++fused;
-    else
-      failures.push_back(std::move(r));
-  }
-
-  // Diagnostic — only when at least one Tanh failed to fuse. Quiet on the
-  // expected "0 of 0" tiny-shape-graph compile pass and on full-success.
-  // The histogram tells us at a glance whether all 34 layer Tanhs failed at
-  // the same step (structural mismatch at a known node) or fanned out across
-  // multiple steps (e.g. some constants encoded differently). Remove this
-  // block when the matcher is known to be complete for all production
-  // models in CI.
-  if (!failures.empty()) {
-    llvm::StringMap<int> stepHist;
-    llvm::StringMap<int> detailHist;
-    for (auto &f : failures) {
-      ++stepHist[f.failedStep];
-      if (!f.observed.empty()) {
-        std::string key = std::string(f.failedStep) + " :: " + f.observed;
-        ++detailHist[key];
-      }
-    }
-    llvm::errs() << "[FastGeluFusion] @" << funcOp.getName() << ": fused "
-                 << fused << " of " << tanhOps.size()
-                 << " Tanh chains; failure step histogram:\n";
-    for (auto &kv : stepHist)
-      llvm::errs() << "  " << kv.second << "x  " << kv.first() << "\n";
-    if (!detailHist.empty()) {
-      llvm::errs() << "  detail (step :: observed):\n";
-      for (auto &kv : detailHist)
-        llvm::errs() << "    " << kv.second << "x  " << kv.first() << "\n";
-    }
-  }
-  return mlir::success();
+void populateFastGeluFusionPatterns(mlir::RewritePatternSet &patterns,
+                                    mlir::MLIRContext *ctx) {
+  patterns.add<InlinedFastGeluToGelu>(ctx);
 }
 
 } // namespace hip
