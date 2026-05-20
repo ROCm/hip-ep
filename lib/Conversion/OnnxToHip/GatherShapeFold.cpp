@@ -4,7 +4,7 @@
  */
 //===- GatherShapeFold.cpp - Pre-lowering Gather(Shape) folding ----------===//
 //
-// Pre-lowering walk that recognizes the common transformer-shape-arithmetic
+// Pre-lowering pattern that recognizes the common transformer-shape-arithmetic
 // idiom
 //
 //   %shape = onnx.Shape(%x)                  : tensor<Nxi64>
@@ -27,13 +27,17 @@
 //   the pool is real device memory and the host stores SEGV.
 //
 // Folding here shrinks `memref<Nxi64>` to `memref<i64>` (one host store)
-// AND localizes the boundary, so the late hip.scalar_to_gpu_buf rewrite can
-// match the residual `memref.alloc + single store + GPU consumer` pattern
-// and replace it with an explicit H2D copy.
+// AND localizes the boundary, so the late `--hip-materialize-host-scalars`
+// pass (lib/Dialect/Transforms/MaterializeHostScalars.cpp) can match the
+// residual `memref.alloc + host store + GPU consumer` pattern and divert
+// the alloc out of the GPU pool into a `hipHostMalloc(hipHostMallocMapped)`
+// scratch buffer (`hip.get_host_scratch` view) that is host-writable AND
+// GPU-readable on UMA — avoiding the host-store-into-device-memory SEGV.
 //
-// Runs BEFORE lowerOnnxConstants so the index value is still inline in the
-// onnx.Constant `value` attribute (after externalization it would be hidden
-// behind memref.get_global pointing into the constants blob).
+// Implemented as a RewritePattern rooted on `onnx.Gather` and run BEFORE
+// `lowerOnnxConstants` so the index value is still inline in the
+// `onnx.Constant` `value` attribute (after externalization it would be
+// hidden behind `memref.get_global` pointing into the constants blob).
 //
 // Non-goals
 // ---------
@@ -62,6 +66,14 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "gather-shape-fold"
+
+STATISTIC(NumGatherShapeFolds,
+          "Number of Gather(Shape(x), const_idx) idioms folded to "
+          "tensor.from_elements(tensor.dim(x, k))");
 
 namespace mlir {
 namespace hip {
@@ -84,27 +96,24 @@ static std::optional<int64_t> getInlineScalarIndex(mlir::Operation *constOp) {
   return (*valueAttr.getValues<mlir::APInt>().begin()).getSExtValue();
 }
 
-} // namespace
+struct GatherOfShapeToDim : public mlir::RewritePattern {
+  GatherOfShapeToDim(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Gather", /*benefit=*/1, ctx) {}
 
-mlir::LogicalResult foldGatherShapeBeforeLowering(mlir::func::FuncOp funcOp) {
-  // Collect Gather ops first; rewriting in place during walk is unsafe.
-  llvm::SmallVector<mlir::Operation *> gathers;
-  funcOp.walk([&](mlir::Operation *op) {
-    if (op->getName().getStringRef() == "onnx.Gather")
-      gathers.push_back(op);
-  });
-
-  for (mlir::Operation *gatherOp : gathers) {
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *gatherOp,
+                  mlir::PatternRewriter &rewriter) const override {
     if (gatherOp->getNumOperands() != 2)
-      continue;
+      return rewriter.notifyMatchFailure(gatherOp, "gather.arity");
+
     mlir::Operation *shapeOp = gatherOp->getOperand(0).getDefiningOp();
     mlir::Operation *constOp = gatherOp->getOperand(1).getDefiningOp();
     if (!shapeOp || shapeOp->getName().getStringRef() != "onnx.Shape")
-      continue;
+      return rewriter.notifyMatchFailure(gatherOp, "data.not_shape");
 
     auto idxOpt = getInlineScalarIndex(constOp);
     if (!idxOpt)
-      continue;
+      return rewriter.notifyMatchFailure(gatherOp, "index.not_inline_scalar");
 
     // ONNX Gather has `axis` attribute; for Shape (1-D) only axis 0 is
     // meaningful. Older exporters omit the attribute (default 0).
@@ -112,13 +121,13 @@ mlir::LogicalResult foldGatherShapeBeforeLowering(mlir::func::FuncOp funcOp) {
     if (auto axisAttr = gatherOp->getAttrOfType<mlir::IntegerAttr>("axis"))
       axis = axisAttr.getSInt();
     if (axis != 0)
-      continue;
+      return rewriter.notifyMatchFailure(gatherOp, "gather.axis_nonzero");
 
     mlir::Value shapeInput = shapeOp->getOperand(0);
     auto inputType =
         mlir::dyn_cast<mlir::RankedTensorType>(shapeInput.getType());
     if (!inputType)
-      continue;
+      return rewriter.notifyMatchFailure(gatherOp, "shape.input_unranked");
     int64_t rank = inputType.getRank();
 
     // Normalize Shape's start/end per ONNX Shape-15 spec.  The Gather index
@@ -140,54 +149,61 @@ mlir::LogicalResult foldGatherShapeBeforeLowering(mlir::func::FuncOp funcOp) {
     end = std::min(end, rank);
     int64_t rangeLen = std::max(end - start, int64_t(0));
     if (rangeLen == 0)
-      continue;
+      return rewriter.notifyMatchFailure(gatherOp, "shape.empty_range");
 
     int64_t k = *idxOpt;
     if (k < 0)
       k += rangeLen; // ONNX Gather: normalize against TARGET tensor length.
     if (k < 0 || k >= rangeLen)
-      continue;
+      return rewriter.notifyMatchFailure(gatherOp, "index.out_of_range");
     int64_t absDim = start + k;
 
     auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(
         gatherOp->getResult(0).getType());
     if (!resultType)
-      continue;
+      return rewriter.notifyMatchFailure(gatherOp, "result.not_ranked");
     if (!resultType.getElementType().isInteger(64))
-      continue;
-    // Result must be 0-D (scalar Gather) or 1-D with one element
-    // (1-element-tensor Gather). Anything else is not the pattern we fold.
-    if (resultType.getRank() == 0) {
-      // OK, scalar.
-    } else if (resultType.getRank() == 1 && resultType.getDimSize(0) == 1) {
-      // OK, 1xi64.
-    } else {
-      continue;
-    }
+      return rewriter.notifyMatchFailure(gatherOp, "result.not_i64");
+    // Result must be 0-D (scalar Gather) or 1-D with one element (1xi64).
+    // Anything else is not the pattern we fold.
+    bool resultShapeOK =
+        (resultType.getRank() == 0) ||
+        (resultType.getRank() == 1 && resultType.getDimSize(0) == 1);
+    if (!resultShapeOK)
+      return rewriter.notifyMatchFailure(gatherOp, "result.shape_unsupported");
 
     mlir::Location loc = gatherOp->getLoc();
-    mlir::OpBuilder builder(gatherOp);
-    auto i64Type = builder.getI64Type();
+    auto i64Type = rewriter.getI64Type();
 
     mlir::Value dimI64;
     if (inputType.isDynamicDim(absDim)) {
       mlir::Value dimVal =
-          mlir::tensor::DimOp::create(builder, loc, shapeInput, absDim);
-      dimI64 = mlir::arith::IndexCastOp::create(builder, loc, i64Type, dimVal);
+          mlir::tensor::DimOp::create(rewriter, loc, shapeInput, absDim);
+      dimI64 = mlir::arith::IndexCastOp::create(rewriter, loc, i64Type, dimVal);
     } else {
       dimI64 = mlir::arith::ConstantOp::create(
-          builder, loc,
-          builder.getI64IntegerAttr(inputType.getDimSize(absDim)));
+          rewriter, loc,
+          rewriter.getI64IntegerAttr(inputType.getDimSize(absDim)));
     }
 
     mlir::Value newResult = mlir::tensor::FromElementsOp::create(
-        builder, loc, resultType, mlir::ValueRange{dimI64});
-    gatherOp->getResult(0).replaceAllUsesWith(newResult);
-    gatherOp->erase();
-    // Leave shapeOp/constOp in place; they may have other uses, and a later
-    // canonicalization pass / DCE will remove them if not.
+        rewriter, loc, resultType, mlir::ValueRange{dimI64});
+
+    LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] folded " << gatherOp->getName()
+                            << " on dim " << absDim << "\n");
+    ++NumGatherShapeFolds;
+    rewriter.replaceOp(gatherOp, newResult);
+    // Leave shapeOp/constOp in place; they may have other uses, and a
+    // later canonicalization pass / DCE will remove them if not.
+    return mlir::success();
   }
-  return mlir::success();
+};
+
+} // namespace
+
+void populateGatherShapeFoldPatterns(mlir::RewritePatternSet &patterns,
+                                     mlir::MLIRContext *ctx) {
+  patterns.add<GatherOfShapeToDim>(ctx);
 }
 
 } // namespace hip
