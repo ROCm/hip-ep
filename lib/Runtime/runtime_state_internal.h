@@ -151,11 +151,15 @@ struct RuntimeState {
   //
   // Host-mapped (hipHostMalloc(hipHostMallocMapped)) rather than hipMalloc:
   //   * iter: host writes the index per iter with a plain store; the GPU
-  //     reads via loop_iter_dev (HIP stream ordering guarantees visibility
-  //     to subsequent kernels on the same stream). This replaces the
-  //     per-iter hipMemcpyAsync(H2D, 8B) the pre-host-mapped driver issued
-  //     -- one fewer stream submission per iter, and removes the host-
-  //     stack-source race the original `&i` argument exposed.
+  //     reads via loop_iter_dev. A std::atomic_thread_fence(release) in
+  //     the driver between the store and the body launch makes the store
+  //     globally visible to the subsequent stream submission -- HIP does
+  //     not order plain host stores against later stream ops, and driver
+  //     mappings vary (cacheable+snoop on AMD APUs, write-combining on
+  //     some dGPU configs). This replaces the per-iter hipMemcpyAsync(H2D,
+  //     8B) the pre-host-mapped driver issued -- one fewer stream
+  //     submission per iter, and removes the host-stack-source race the
+  //     original `&i` argument exposed.
   //   * cond: GPU writes cond_out through loop_cond_dev; after the body the
   //     dynamic-path driver records `loop_event` on the stream and
   //     hipEventSynchronizes before reading loop_cond_host. Cheaper than
