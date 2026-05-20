@@ -92,4 +92,25 @@ module {
   // CHECK: arith.muli %{{.*}}, %{{.*}} : index
   // CHECK: tensor.empty(%{{.*}}) : tensor<2x?xi64>
   // CHECK: hip.nonzero
+
+  // --- Case 6: ui8 input (ORT-imported bool convention) ---
+  // ORT imports ONNX bool as `ui8`, not signless `i1`. MLIR's `isInteger(W)`
+  // only matches signless integers, so without explicit unsigned-integer
+  // checks the pattern silently fails and `onnx.NonZero` leaks past
+  // `convert-onnx-to-hip`, breaking one-shot-bufferize downstream with
+  // `op was not bufferized`. Keep this case forever — it's the only thing
+  // a real ORT-imported model exercises (the other cases use synthetic i1).
+  func.func @nonzero_ui8(%input: tensor<2x4x8xui8>) -> tensor<3x?xi64> {
+    %result = "onnx.NonZero"(%input) : (tensor<2x4x8xui8>) -> tensor<3x?xi64>
+    return %result : tensor<3x?xi64>
+  }
+
+  // CHECK-LABEL: func.func @nonzero_ui8
+  // CHECK-SAME: (%[[CTX6:.*]]: !hip.context, %[[IN6:.*]]: tensor<2x4x8xui8>)
+  // CHECK: %[[UB6:.*]] = arith.constant 64 : index
+  // CHECK: %[[INIT6:.*]] = tensor.empty(%[[UB6]]) : tensor<3x?xi64>
+  // ui8 maps to the dedicated UINT8 slot (7), NOT INT8 (5) — the runtime
+  // enum keeps signed/unsigned distinct so any future ordered-comparison
+  // or arithmetic backend can dispatch correctly.
+  // CHECK: hip.nonzero(%[[CTX6]]) ins(%[[IN6]] : tensor<2x4x8xui8>) outs(%[[INIT6]] : tensor<3x?xi64>) {input_data_type = 7 : i64}
 }

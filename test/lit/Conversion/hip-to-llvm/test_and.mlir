@@ -41,4 +41,22 @@ module {
     // CHECK: llvm.call @wrap_and({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
     return
   }
+
+  // ORT imports ONNX bool as `ui8`, not signless `i1`. Make sure the
+  // lowering accepts the ui8 variant too — without this, any real model
+  // chaining Equal/Less/And/Not before NonZero or another bool consumer
+  // segfaults at the lowering stage with "unsupported input element type".
+  func.func @and_static_1d_ui8(
+      %ctx: !hip.context,
+      %a: memref<64xui8, 1>,
+      %b: memref<64xui8, 1>,
+      %c: memref<64xui8, 1>) {
+    // CHECK-LABEL: llvm.func @and_static_1d_ui8
+
+    hip.and(%ctx) ins(%a, %b : memref<64xui8, 1>, memref<64xui8, 1>)
+                  outs(%c : memref<64xui8, 1>)
+
+    // CHECK: llvm.call @wrap_and({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    return
+  }
 }

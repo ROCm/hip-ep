@@ -26,11 +26,11 @@ static int64_t getHipdnnInputDataType(mlir::Type elemType) {
     return 3; // HIPDNN_EP_DATATYPE_INT32
   if (elemType.isInteger(64))
     return 4; // HIPDNN_EP_DATATYPE_INT64
-  // ONNX bool tensors are marshalled as i1 in MLIR and as 1-byte uint8 by
-  // the EP. Reuse the INT8 slot so the runtime sees a consistent 1-byte
-  // element size; the stub does not interpret the bytes.
-  if (elemType.isInteger(1))
-    return 5; // HIPDNN_EP_DATATYPE_INT8 (bool, 1 byte)
+  if (elemType.isUnsignedInteger(8))
+    return 7; // HIPDNN_EP_DATATYPE_UINT8 (ORT bool, ui8)
+  if (elemType.isInteger(1) || elemType.isSignedInteger(8) ||
+      elemType.isSignlessInteger(8))
+    return 5; // HIPDNN_EP_DATATYPE_INT8 (bool/i1, signed/signless i8)
   return -1;
 }
 
@@ -64,7 +64,7 @@ struct NonZeroToHip : public mlir::RewritePattern {
     if (inputDataType < 0)
       return rewriter.notifyMatchFailure(
           op, "unsupported NonZero input element type (allowed: f16, f32, "
-              "i32, i64, bool/i1)");
+              "i32, i64, i1, i8, ui8)");
 
     auto resultType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
