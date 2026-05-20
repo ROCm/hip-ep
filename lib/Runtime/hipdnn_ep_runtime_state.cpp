@@ -230,8 +230,11 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
-  state->loop_iter_dev_buf = nullptr;
-  state->loop_cond_dev_buf = nullptr;
+  state->loop_iter_host = nullptr;
+  state->loop_iter_dev = nullptr;
+  state->loop_cond_host = nullptr;
+  state->loop_cond_dev = nullptr;
+  state->loop_event = nullptr;
   state->loop_nesting_depth = 0;
 
   int device_count = 0;
@@ -858,12 +861,18 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
   }
 
-  // Free ONNX Loop driver device buffers (if allocated)
-  if (state->loop_iter_dev_buf) {
-    HIP_CLEANUP(hipFree(state->loop_iter_dev_buf));
+  // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
+  // allocated). The stream sync at the top of cleanup has already drained
+  // any in-flight kernel that may have been holding loop_*_dev pointers,
+  // so hipHostFree is safe here.
+  if (state->loop_event) {
+    HIP_CLEANUP(hipEventDestroy(static_cast<hipEvent_t>(state->loop_event)));
   }
-  if (state->loop_cond_dev_buf) {
-    HIP_CLEANUP(hipFree(state->loop_cond_dev_buf));
+  if (state->loop_iter_host) {
+    HIP_CLEANUP(hipHostFree(state->loop_iter_host));
+  }
+  if (state->loop_cond_host) {
+    HIP_CLEANUP(hipHostFree(state->loop_cond_host));
   }
 
   if (state->device_error_flag) {
@@ -989,7 +998,7 @@ extern "C"
 #ifdef _WIN32
     __declspec(dllexport)
 #endif
-        void hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
+    void hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
   if (!state) {
     return;
   }

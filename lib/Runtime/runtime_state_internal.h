@@ -144,20 +144,46 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
-  // ONNX Loop driver state: tiny device buffers holding the current iter
+  // ONNX Loop driver state: host-mapped buffers holding the current iter
   // index (int64) and condition (1-byte bool) that the trampoline passes
   // to the outlined body. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
   //
-  // Sharing one buffer per state is safe for non-nested Loops only -- nested
+  // Host-mapped (hipHostMalloc(hipHostMallocMapped)) rather than hipMalloc:
+  //   * iter: host writes the index per iter with a plain store; the GPU
+  //     reads via loop_iter_dev (HIP stream ordering guarantees visibility
+  //     to subsequent kernels on the same stream). This replaces the
+  //     per-iter hipMemcpyAsync(H2D, 8B) the pre-host-mapped driver issued
+  //     -- one fewer stream submission per iter, and removes the host-
+  //     stack-source race the original `&i` argument exposed.
+  //   * cond: GPU writes cond_out through loop_cond_dev; after the body the
+  //     dynamic-path driver records `loop_event` on the stream and
+  //     hipEventSynchronizes before reading loop_cond_host. Cheaper than
+  //     hipStreamSynchronize + hipMemcpyAsync(D2H, 1B) and mirrors the
+  //     event-based readback pattern used elsewhere in the runtime.
+  //
+  // The same allocation backs both pointers: loop_*_dev is obtained via
+  // hipHostGetDevicePointer(loop_*_host). Both refer to the same system-
+  // memory page; the names track which pointer to use from which side.
+  //
+  // `loop_event` is reused across iters (hipEventCreateWithFlags +
+  // hipEventDisableTiming -- we don't need timestamps, just synchronization)
+  // to avoid hipEventCreate/Destroy per iter.
+  //
+  // Sharing one slot per state is safe for non-nested Loops only -- nested
   // Loops would race on the inner driver overwriting the outer's iter while
   // the outer body still expects to read its own iter after the inner
   // returns. `loop_nesting_depth` enforces the v1 single-level constraint:
   // the driver increments it on entry, hard-fails on re-entry, and
   // decrements on exit. A future P-extension can replace the single buffer
   // with a small per-depth stack and remove the check.
-  void *loop_iter_dev_buf;
-  void *loop_cond_dev_buf;
+  void *loop_iter_host; // hipHostMalloc-allocated, host-side view (int64*)
+  void
+      *loop_iter_dev; // hipHostGetDevicePointer(loop_iter_host), passed to body
+  void *loop_cond_host; // hipHostMalloc-allocated, host-side view (int8*)
+  void
+      *loop_cond_dev; // hipHostGetDevicePointer(loop_cond_host), passed to body
+  void *loop_event;   // hipEvent_t cast to void*; reused for cond-readback sync
   int32_t loop_nesting_depth;
 };
 

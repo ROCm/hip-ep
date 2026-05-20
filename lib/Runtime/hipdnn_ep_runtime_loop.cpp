@@ -12,16 +12,23 @@
 //   * hipdnn_ep_run_counted_loop : fast path. Used by the HipToLLVM
 //                                  lowering when the outlining pass proves
 //                                  cond_out == cond_in (SSA-equality).
-//                                  Skips per-iter D2H cond sync; the loop
+//                                  Skips per-iter cond readback; the loop
 //                                  reduces to `for (i = 0; i < M; ++i)`.
 //   * hipdnn_ep_run_loop         : slow path. Mirrors ORT CUDA EP +
-//                                  MIGraphX behavior: D2H-syncs cond_out
-//                                  every iter to decide whether to
-//                                  continue.
+//                                  MIGraphX behavior: reads the body's
+//                                  cond_out every iter to decide whether
+//                                  to continue.
 //
-// Both drivers reuse a pair of tiny per-state device buffers (one int64
-// for iter, one int8 for cond) so we don't hipMalloc/hipFree on every
-// inference. Lazily allocated; freed in hipdnn_ep_state_cleanup.
+// Both drivers reuse a pair of host-mapped per-state buffers (int64 iter,
+// int8 cond) so the host can write iter and read cond with zero DMA.
+// Stream-ordering between the host store of iter and the body kernels
+// keeps the GPU view consistent without an explicit sync. For the
+// dynamic path's cond readback, a reusable hipEvent_t (created with
+// hipEventDisableTiming) is recorded on the stream after each body call
+// and synchronized on before the host reads cond -- lower latency than
+// hipStreamSynchronize for the small-body case that dominates ONNX-Loop
+// usage, and the same readback shape as the seqlens_k optimization in
+// gqa.cpp.
 //
 // See `.cursor/plans/onnx-loop-support.plan.md` (P4/P5) for the trampoline
 // ABI rationale and the aliasing invariant that allows v_in and v_out
@@ -40,40 +47,69 @@
 
 namespace {
 
-// Lazily allocate the per-state iter / cond device buffers on first loop
-// call. Both are tiny (8 + 1 bytes) so we don't bother with grow-on-demand
-// -- they're freed once in hipdnn_ep_state_cleanup.
+// Lazily allocate the per-state iter / cond host-mapped buffers + reusable
+// sync event on first loop call. Both buffers are tiny (8 + 1 bytes); the
+// event is allocator-managed and reused across iters. All three are freed
+// once in hipdnn_ep_state_cleanup.
 //
-// Partial-allocation policy: if iter succeeds but cond fails, we leave
-// `state->loop_iter_dev_buf` non-null so the next call's null-check skips
-// re-allocating it -- the iter buffer is correctly freed in
-// `hipdnn_ep_state_cleanup` regardless. This is intentional; do not "clean
-// up" by nullifying iter on cond failure, or repeated transient failures
-// will leak.
-int ensureLoopDeviceBuffers(RuntimeState *state) {
-  if (!state->loop_iter_dev_buf) {
-    if (hipMalloc(&state->loop_iter_dev_buf, sizeof(int64_t)) != hipSuccess) {
+// Partial-allocation policy: if any later step fails, earlier successful
+// allocations stay live on the RuntimeState so the next call's null-check
+// skips re-allocating them -- they are correctly freed in
+// hipdnn_ep_state_cleanup regardless. This is intentional; do not "clean
+// up" by nullifying earlier slots on a later failure, or repeated transient
+// failures will leak.
+int ensureLoopBuffers(RuntimeState *state) {
+  if (!state->loop_iter_host) {
+    if (hipHostMalloc(&state->loop_iter_host, sizeof(int64_t),
+                      hipHostMallocMapped) != hipSuccess) {
       fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipMalloc for iter buffer failed\n");
-      state->loop_iter_dev_buf = nullptr;
+              "hipdnn_ep_run_*_loop: hipHostMalloc for iter buffer failed\n");
+      state->loop_iter_host = nullptr;
+      return -1;
+    }
+    if (hipHostGetDevicePointer(&state->loop_iter_dev, state->loop_iter_host,
+                                0) != hipSuccess) {
+      fprintf(stderr, "hipdnn_ep_run_*_loop: hipHostGetDevicePointer for iter "
+                      "buffer failed\n");
+      hipHostFree(state->loop_iter_host);
+      state->loop_iter_host = nullptr;
+      state->loop_iter_dev = nullptr;
       return -1;
     }
   }
-  if (!state->loop_cond_dev_buf) {
+  if (!state->loop_cond_host) {
     // Bool stored as 1 byte (matches LLVM bool ABI and memref<i1> layout).
-    if (hipMalloc(&state->loop_cond_dev_buf, sizeof(int8_t)) != hipSuccess) {
+    if (hipHostMalloc(&state->loop_cond_host, sizeof(int8_t),
+                      hipHostMallocMapped) != hipSuccess) {
       fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipMalloc for cond buffer failed\n");
-      state->loop_cond_dev_buf = nullptr;
+              "hipdnn_ep_run_*_loop: hipHostMalloc for cond buffer failed\n");
+      state->loop_cond_host = nullptr;
       return -1;
     }
+    if (hipHostGetDevicePointer(&state->loop_cond_dev, state->loop_cond_host,
+                                0) != hipSuccess) {
+      fprintf(stderr, "hipdnn_ep_run_*_loop: hipHostGetDevicePointer for cond "
+                      "buffer failed\n");
+      hipHostFree(state->loop_cond_host);
+      state->loop_cond_host = nullptr;
+      state->loop_cond_dev = nullptr;
+      return -1;
+    }
+  }
+  if (!state->loop_event) {
+    hipEvent_t evt = nullptr;
+    if (hipEventCreateWithFlags(&evt, hipEventDisableTiming) != hipSuccess) {
+      fprintf(stderr, "hipdnn_ep_run_*_loop: hipEventCreateWithFlags failed\n");
+      return -1;
+    }
+    state->loop_event = static_cast<void *>(evt);
   }
   return 0;
 }
 
 // RAII guard that enforces the single-level loop nesting invariant. The
-// driver shares one iter/cond device buffer pair per RuntimeState, so a
-// loop body that itself launches a hip.loop would silently overwrite the
+// driver shares one iter/cond buffer pair per RuntimeState, so a loop
+// body that itself launches a hip.loop would silently overwrite the
 // outer driver's buffers before the outer reads them on its next iter.
 // Hard-fail at entry rather than corrupt silently. v1 limit; a future
 // extension can replace the shared buffers with a per-depth stack.
@@ -83,7 +119,7 @@ struct LoopNestingGuard {
   explicit LoopNestingGuard(RuntimeState *s) : state(s), ok(false) {
     if (state->loop_nesting_depth >= 1) {
       fprintf(stderr, "hipdnn_ep_run_*_loop: nested loops not supported in v1 "
-                      "(loop_iter/cond device buffers are shared across the "
+                      "(loop iter/cond buffers are shared across the "
                       "RuntimeState)\n");
       return;
     }
@@ -97,57 +133,44 @@ struct LoopNestingGuard {
 };
 
 // Policy: each iter, decide whether to continue. The counted policy never
-// reads cond from the device (trivial true while iter < M). The dynamic
-// policy issues a D2H + stream-sync to read the body's cond_out.
+// reads cond from the device. The dynamic policy records an event on the
+// stream after the body and synchronizes on it before reading cond_host.
+//
+// consultsCond() is constexpr so `if constexpr` at the call sites elides
+// the entire cond-handling branch in the counted-path instantiation --
+// including the indirect call to checkCond -- without relying on cross-TU
+// LTO to inline through the runtime DLL boundary.
 struct CountedCondPolicy {
-  // Pre-loop: just write the initial cond once.
-  static int initCond(RuntimeState *state, bool cond_init, void *cond_dev) {
-    int8_t cond_val = cond_init ? int8_t{1} : int8_t{0};
-    if (hipMemcpyAsync(cond_dev, &cond_val, sizeof(int8_t),
-                       hipMemcpyHostToDevice,
-                       static_cast<hipStream_t>(state->stream)) != hipSuccess)
-      return -1;
-    return 0;
-  }
-  // Post-body: counted loop never reads cond.
-  static int checkCond(RuntimeState * /*state*/, void * /*cond_dev*/,
+  static int checkCond(RuntimeState * /*state*/, int8_t * /*cond_host*/,
                        bool * /*out_continue*/) {
     return 0;
   }
-  static bool consultsCond() { return false; }
+  static constexpr bool consultsCond() { return false; }
 };
 
 struct DynamicCondPolicy {
-  static int initCond(RuntimeState *state, bool cond_init, void *cond_dev) {
-    int8_t cond_val = cond_init ? int8_t{1} : int8_t{0};
-    if (hipMemcpyAsync(cond_dev, &cond_val, sizeof(int8_t),
-                       hipMemcpyHostToDevice,
-                       static_cast<hipStream_t>(state->stream)) != hipSuccess)
-      return -1;
-    return 0;
-  }
-  // Post-body: D2H the body's cond_out and stream-sync so the host bool
-  // is visible. This is the cost ONNX-Loop slow path always pays; ORT
-  // CUDA EP `LoopImpl::Execute` and MIGraphX `run_loop` are equivalent.
-  static int checkCond(RuntimeState *state, void *cond_dev,
+  // Post-body: record + sync on a reusable event, then read the host-mapped
+  // cond byte directly. This is ONNX-Loop slow-path cost; ORT CUDA EP
+  // `LoopImpl::Execute` and MIGraphX `run_loop` are equivalent (and pre-
+  // host-mapped MIGraphX also paid hipMemcpyAsync(D2H) + hipStreamSync per
+  // iter on top of this).
+  static int checkCond(RuntimeState *state, int8_t *cond_host,
                        bool *out_continue) {
-    int8_t cond_val = 0;
-    if (hipMemcpyAsync(&cond_val, cond_dev, sizeof(int8_t),
-                       hipMemcpyDeviceToHost,
-                       static_cast<hipStream_t>(state->stream)) != hipSuccess)
+    hipEvent_t evt = static_cast<hipEvent_t>(state->loop_event);
+    hipStream_t stream = static_cast<hipStream_t>(state->stream);
+    if (hipEventRecord(evt, stream) != hipSuccess)
       return -1;
-    if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
-        hipSuccess)
+    if (hipEventSynchronize(evt) != hipSuccess)
       return -1;
-    *out_continue = (cond_val != 0);
+    *out_continue = (*cond_host != 0);
     return 0;
   }
-  static bool consultsCond() { return true; }
+  static constexpr bool consultsCond() { return true; }
 };
 
 // Backend-agnostic templated driver. The policy resolves the cond-handling
-// strategy at compile time so the counted path emits zero D2H syncs and
-// has no per-iter branch on the policy.
+// strategy at compile time so the counted path emits zero per-iter sync
+// and has no per-iter branch on the policy.
 template <class CondPolicy>
 int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                 int64_t max_trip_count, bool cond_init,
@@ -160,30 +183,43 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
   LoopNestingGuard nestGuard(state);
   if (!nestGuard.ok)
     return -1;
-  if (ensureLoopDeviceBuffers(state) != 0)
+  if (ensureLoopBuffers(state) != 0)
     return -1;
 
-  void *iter_dev = state->loop_iter_dev_buf;
-  void *cond_dev = state->loop_cond_dev_buf;
-  hipStream_t stream = static_cast<hipStream_t>(state->stream);
+  void *iter_dev = state->loop_iter_dev;
+  void *cond_dev = state->loop_cond_dev;
+  int64_t *iter_host = static_cast<int64_t *>(state->loop_iter_host);
+  int8_t *cond_host = static_cast<int8_t *>(state->loop_cond_host);
 
-  if (CondPolicy::initCond(state, cond_init, cond_dev) != 0)
-    return -1;
+  // Initialize cond with a direct host store -- the kernel's cond_in arg
+  // may be read by the body even on the counted path (no per-iter readback,
+  // but a single read at body entry is still legal SSA), so initialize
+  // unconditionally. No memcpy: the GPU sees the value via the mapped
+  // pointer once any subsequent kernel launches on the same stream.
+  *cond_host = cond_init ? int8_t{1} : int8_t{0};
 
   bool keep_going = cond_init;
   for (int64_t i = 0; i < max_trip_count; ++i) {
-    if (CondPolicy::consultsCond() && !keep_going)
-      break;
-    // Write the host iter value to the device iter buffer.
-    if (hipMemcpyAsync(iter_dev, &i, sizeof(int64_t), hipMemcpyHostToDevice,
-                       stream) != hipSuccess)
-      return -1;
+    if constexpr (CondPolicy::consultsCond()) {
+      if (!keep_going)
+        break;
+    }
+    // Direct host store; the GPU reads via iter_dev (the device-mapped
+    // alias of loop_iter_host). HIP stream ordering guarantees the host
+    // store is visible to any kernel launched on `state->stream` after
+    // this point -- no hipMemcpyAsync(H2D, 8B) per iter, and no host
+    // -stack-source race that the previous `&i`-based memcpy exposed
+    // (small-size copies are usually staged synchronously by the driver
+    // in practice, but the spec allows the read to be deferred).
+    *iter_host = i;
     int rc =
         body_fn(state, iter_dev, cond_dev, loop_carried_descs, capture_descs);
     if (rc != 0)
       return rc;
-    if (CondPolicy::checkCond(state, cond_dev, &keep_going) != 0)
-      return -1;
+    if constexpr (CondPolicy::consultsCond()) {
+      if (CondPolicy::checkCond(state, cond_host, &keep_going) != 0)
+        return -1;
+    }
   }
   return 0;
 }
