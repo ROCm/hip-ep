@@ -246,9 +246,14 @@ What each piece does:
   at runtime; everything else is a CLI flag or optional toggle.
 - **`--ep-name MorphiZenExecutionProvider`** -- matches the string
   the EP's C++ side passes to `OrtEpFactory::CreateEpFactories`.
-- **`--ep-dll`** -- the registered EP DLL. The framework
-  auto-prepends its parent directory to `PATH` so co-located
-  dependencies (`hip-compiler.dll`) are found at registration time.
+- **`--ep-dll`** -- the registered EP DLL. The framework resolves
+  the path to absolute before handing it to ORT (because
+  `register_execution_provider_library` resolves relative paths
+  against the onnxruntime *package* directory, not cwd -- so the
+  relative recipe above would otherwise need to live inside the ORT
+  install) and auto-prepends the resolved parent directory to `PATH`
+  so co-located dependencies (`hip-compiler.dll`) are found at
+  registration time.
 - **`--ep-option config_file=...`** -- forwards the key/value into
   ORT's `provider_options` dict for this EP. **`config_file` is
   MorphiZen's own convention** (the EP's
