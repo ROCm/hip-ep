@@ -707,21 +707,33 @@ void ConvertOnnxToHipPass::runOnOperation() {
               funcOp, std::move(preFoldPatterns), cfg)))
         return signalPassFailure();
     }
-    // Fold Gather(Shape(x), const_idx) -> tensor.dim BEFORE constants are
-    // externalized; once the index constant is moved into the constants blob
-    // we can no longer see its value at compile time. This collapses the
-    // dynseqlen runtime-shape arithmetic chain to a single 0-D / 1-element
-    // result, narrowing the host-store-into-pool footprint that the late
-    // hip.scalar_to_gpu_buf rewrite must clean up.
-    if (mlir::failed(foldGatherShapeBeforeLowering(funcOp)))
-      return signalPassFailure();
-    // Collapse ORT's inlined FastGelu primitive chain (Pow / Mul / Sum /
-    // Tanh) back into onnx.Gelu BEFORE constants are lowered — the matcher
-    // needs the literal float values still inline in onnx.Constant attrs
-    // (post-lowering, constants become arith.constant / memref.get_global
-    // and value-based pattern matching breaks). See FastGeluFusion.cpp.
-    if (mlir::failed(fuseInlinedFastGelu(funcOp)))
-      return signalPassFailure();
+    // Pre-lowering ONNX rewrites that must run BEFORE constants are
+    // externalized:
+    //   * Gather(Shape(x), const_idx) -> tensor.from_elements(tensor.dim),
+    //     collapsing the dynseqlen runtime-shape arithmetic chain to a
+    //     single 0-D / 1-element result (narrows the host-store-into-pool
+    //     footprint the late `--hip-materialize-host-scalars` pass must
+    //     redirect out of the GPU pool).
+    //   * Inlined FastGelu primitive chain (Pow/Mul/Sum/Tanh) ->
+    //     onnx.Gelu(approximate="tanh"), restoring the MorphiZen-supported
+    //     form for ORT paths that inline the Gelu function body.
+    // Both patterns are value-based and require the literal constants to
+    // still be inline in `onnx.Constant` `value` attributes — once the
+    // constants are externalized to memref.get_global the matchers break.
+    // ExistingOps strictness is sufficient: neither pattern produces an
+    // op the other root-matches on (Gather rewrites to tensor.*; FastGelu
+    // rewrites to onnx.Gelu, never producing a fresh onnx.Tanh).
+    {
+      mlir::RewritePatternSet preLoweringPatterns(ctx);
+      populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
+      populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
+      mlir::GreedyRewriteConfig preLoweringConfig;
+      preLoweringConfig.setStrictness(
+          mlir::GreedyRewriteStrictness::ExistingOps);
+      if (mlir::failed(mlir::applyPatternsGreedily(
+              funcOp, std::move(preLoweringPatterns), preLoweringConfig)))
+        return signalPassFailure();
+    }
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
@@ -751,9 +763,13 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // and the whole pipeline aborts with "op was not bufferized" — which is
   // silent (CPU fallback) at the EP level.
   //
-  // FastGelu chains left dead by `fuseInlinedFastGelu` are removed inside
-  // the fusion itself (in reverse-topological order), so this DCE only
-  // needs to handle the simpler single-layer `use_empty` cases.
+  // The FastGelu fusion erases its primitive chain inline in
+  // reverse-topological order via the rewriter, and the Gather/Shape
+  // fold leaves its now-unused `onnx.Shape` and `onnx.Constant` operands
+  // alive on purpose (they may be shared across many Gather sites). This
+  // walk catches all those single-layer `use_empty` survivors — Shape
+  // ops shared across Gather instances that all folded, index constants,
+  // and the dead-shape-arithmetic patterns from HF exports.
   llvm::SmallVector<mlir::Operation *> toErase;
   module.walk([&](mlir::Operation *op) {
     llvm::StringRef name = op->getName().getStringRef();
