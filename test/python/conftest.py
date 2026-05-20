@@ -4,7 +4,6 @@
 #
 """Shared fixtures and helpers for Python performance tests."""
 
-import gc
 import os
 import pathlib
 import time
@@ -291,18 +290,6 @@ def run_timed_iobinding(
         sess.run_with_iobinding(io)
         times.append(time.perf_counter() - t0)
     return times
-
-
-def cleanup(*args):
-    """Drop refs to ORT sessions / numpy arrays and force a GC sweep.
-
-    Used by per-shape tests that iterate many sessions in a single
-    pytest invocation; gc.collect() bounds the high-water RAM, which
-    matters for the larger conv shapes (e.g. 4K image patchify).
-    """
-    for obj in args:
-        del obj
-    gc.collect()
 
 
 # ── Shared fixtures ──────────────────────────────────────────────────────────
