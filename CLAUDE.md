@@ -393,6 +393,37 @@ Always enabled — no environment variable needed. The `CrashHandler.h` header i
 
 **Dependency:** cpptrace v0.8.3 fetched via FetchContent (in `CMakeLists.txt` for `BUILD_HIP_TOOLS`, in `cmake/deps.cmake` for `BUILD_EP`).
 
+## Vulkan baseline (llama.cpp)
+
+`build.py --build-vulkan` fetches the LunarG Vulkan SDK and builds llama.cpp with `GGML_VULKAN=ON` for collecting Vulkan baseline numbers. Pinned versions for reproducibility: llama.cpp commit `683c5acb`, Vulkan SDK `1.4.341.1`. Idempotent — `.ok` sentinels, shares `install/_cache/` with the rest of `build.py`.
+
+```bash
+python build.py --build-vulkan   # full project build + Vulkan baseline
+```
+
+Outputs (under `install/`): `vulkan-sdk/` (silent install, user-writable, no admin), `llama.cpp/` (pinned source), `llama.cpp-build/` (Ninja build dir), `llama-vulkan/bin/` (`llama-bench.exe`, `llama-cli.exe`, `llama-server.exe`, `ggml-vulkan.dll`).
+
+**LunarG download URL gotcha.** The installer is `vulkansdk-windows-X64-{ver}.exe` (lowercase `vulkansdk`, `X64` token), NOT `VulkanSDK-{ver}-Installer.exe` — the latter returns 404. Append `?Human=true` to bypass LunarG's download-token throttling. The CDN also rejects the default Python `urllib` User-Agent — `_download_with_browser_ua()` in `build.py` installs a `Mozilla/5.0` opener for the Vulkan download only (other downloads keep the default UA).
+
+### Fair Vulkan benchmarking with llama-bench
+
+`-p N` runs prefill at length N; `-n M` runs decode of M tokens **starting from an empty KV cache regardless of `-p`**. So `llama-bench -p 4096 -n 128` reports pp4096 and tg128 as **two independent benchmarks** — the decode number is NOT "decode after a 4096-token prompt". Decode tps is essentially flat across `-p` values (44.7 t/s at both `-p 128` and `-p 4096` on the 8B Q4_K_M).
+
+To measure decode at realistic depth, use `-d N` / `--n-depth N` which pre-populates the KV cache with N tokens before the test runs. Multi-value works: `-n 128 -d 0,4096` reports tg128 @ d=0 and tg128 @ d=4096 in one invocation. Alternative: `-pg pp,tg` runs prefill-then-generation back-to-back as a single combined timing.
+
+### Llama 3.1 8B Q4_K_M Vulkan baseline (gfx1151, AMD Radeon 8060S Graphics, 2026-05-05)
+
+llama.cpp build `683c5acb`, AMD proprietary Vulkan driver, KHR_coopmat matrix cores, fp16+bf16, UMA. Model: `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` (4.58 GiB, 8.03 B params).
+
+| Test | t/s |
+|------|----:|
+| pp128 | 903.04 ± 4.08 |
+| pp4096 | 748.93 ± 0.30 |
+| tg128 @ d=0 | 44.71 ± 0.02 |
+| tg128 @ d=4096 | 30.87 ± 0.01 |
+
+Decode at d=4096 is ~31% slower than at d=0 due to attention cost scaling with KV cache depth.
+
 ## Code Conventions
 
 - C++ 17, formatted with clang-format 16. Python formatted with ruff.
