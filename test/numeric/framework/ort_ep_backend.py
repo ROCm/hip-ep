@@ -238,10 +238,26 @@ def create(pytest_config=None) -> OrtEpBackend:
     if not ep_dll_path.exists():
         pytest.skip(f"EP DLL not found at {ep_dll_path}.")
 
+    # Absolutise BEFORE handing the path to ORT. ORT's
+    # `register_execution_provider_library` resolves a relative DLL
+    # path against the onnxruntime *package* directory (e.g.
+    # `<site-packages>/onnxruntime/capi/<ep_dll>`), NOT against the
+    # process cwd. A user who copy-pastes the README recipe from
+    # `test/numeric/` (where `--ep-dll ..\..\install\dist\bin\foo.dll`
+    # is the natural form) would otherwise get a confusing
+    # `Error 126: The specified module could not be found` from ORT
+    # even though our own `.exists()` check above (which DOES go
+    # through cwd) had just succeeded. `.resolve()` is non-strict so
+    # this is safe even when the file is gone -- the explicit
+    # skip-on-missing above is what catches that case.
+    ep_dll_path = ep_dll_path.resolve()
+
     # Prepend the EP DLL's own directory to PATH so the Windows loader
     # finds any small co-located dependencies the EP needs at
     # registration time. This is an invariant of how an EP is
-    # packaged, not a user choice.
+    # packaged, not a user choice. Use the resolved path so the PATH
+    # entry is an absolute directory (relative PATH entries on Windows
+    # are looked up against cwd at every call, which is fragile).
     _prepend_path(ep_dll_path.parent)
 
     return OrtEpBackend(
