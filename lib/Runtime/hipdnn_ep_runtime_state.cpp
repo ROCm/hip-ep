@@ -231,6 +231,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
   state->gqa_gemm_cache = nullptr;
+  state->mha_gemm_cache = nullptr;
   state->causal_conv_cache = nullptr;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
@@ -1016,6 +1017,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->gqa_gemm_cache) {
     hipdnn_ep_gqa_gemm_cache_destroy(state->gqa_gemm_cache);
     state->gqa_gemm_cache = nullptr;
+  }
+
+  // Free MultiHeadAttention GEMM descriptor cache
+  if (state->mha_gemm_cache) {
+    hipdnn_ep_mha_gemm_cache_destroy(state->mha_gemm_cache);
+    state->mha_gemm_cache = nullptr;
   }
 
   // Free CausalConvWithState descriptor/algo cache

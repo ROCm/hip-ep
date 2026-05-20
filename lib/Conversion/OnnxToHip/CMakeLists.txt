@@ -5,6 +5,7 @@
 
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
+  SimplifyOnnx.cpp
   ConstantsIO.cpp
   MatMulConversion.cpp
   TransposeConversion.cpp
@@ -19,6 +20,7 @@ add_library(OnnxToHip STATIC
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
   GqaConversion.cpp
+  MultiHeadAttentionConversion.cpp
   GatherConversion.cpp
   GatherShapeFold.cpp
   ShapeConversion.cpp
@@ -29,6 +31,29 @@ add_library(OnnxToHip STATIC
   LinearAttentionConversion.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
+  EqualConversion.cpp
+  DivConversion.cpp
+  ReduceMaxConversion.cpp
+  MinConversion.cpp
+  NotConversion.cpp
+  CosConversion.cpp
+  SinConversion.cpp
+  CumSumConversion.cpp
+  PadConversion.cpp
+  TileConversion.cpp
+  ExpandConversion.cpp
+  ReduceProdConversion.cpp
+  LessConversion.cpp
+  GatherNDConversion.cpp
+  SignConversion.cpp
+  ModConversion.cpp
+  ConstantOfShapeConversion.cpp
+  SliceConversion.cpp
+  ScatterNDConversion.cpp
+  IdentityConversion.cpp
+  AndConversion.cpp
+  SizeConversion.cpp
+  NonZeroConversion.cpp
 )
 
 add_dependencies(OnnxToHip

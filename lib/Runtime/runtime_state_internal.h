@@ -92,6 +92,12 @@ struct RuntimeState {
   // Caches hipBLASLt descriptors + algorithms by GEMM shape.
   void *gqa_gemm_cache;
 
+  // MultiHeadAttention GEMM descriptor cache (MhaGemmCache*) for the
+  // decomposed Score + Value path. Same shape-keyed hipBLASLt descriptor
+  // cache as gqa_gemm_cache, distinct so concurrent MHA + GQA sessions
+  // do not contend on a single map.
+  void *mha_gemm_cache;
+
   // CausalConvWithState MIOpen descriptor + algorithm cache
   // (CausalConvCache*). Caches MIOpen tensor / convolution / bias / activation
   // descriptors and the heuristic-selected forward algorithm by shape, so that
