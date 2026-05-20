@@ -1,0 +1,90 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# ============================================================================
+# FlatBuffers schema compilation
+# ============================================================================
+# flatc flags mirror CMakeLists.txt: --cpp --gen-object-api --scoped-enums
+# Outputs per schema:
+#   <name>_generated.h  — full C++ bindings (flatc)
+#   <name>_schema.h     — inline schema text as a C++ string constant (genrule)
+
+# --- compilation_options ---
+
+genrule(
+    name = "gen_compilation_options",
+    srcs = ["compilation_options.fbs"],
+    outs = ["compilation_options_generated.h"],
+    cmd = "$(location @flatbuffers//:flatc) --cpp --gen-object-api --scoped-enums -o $(@D) $(location compilation_options.fbs)",
+    tools = ["@flatbuffers//:flatc"],
+)
+
+genrule(
+    name = "gen_compilation_options_schema",
+    srcs = ["compilation_options.fbs"],
+    outs = ["compilation_options_schema.h"],
+    cmd = r"""
+python3 - <<'PYEOF' $(location compilation_options.fbs) $(location compilation_options_schema.h)
+import sys
+fbs_path, out_path = sys.argv[1], sys.argv[2]
+schema = open(fbs_path).read()
+with open(out_path, 'w') as f:
+    f.write("// Auto-generated from compilation_options.fbs -- do not edit manually.\n")
+    f.write("#pragma once\n")
+    f.write("namespace mlir {\nnamespace hip {\n")
+    f.write("inline const char* k_compilation_options_schema() {\n")
+    f.write('  static const char kSchema[] = R"fbs(\n')
+    f.write(schema)
+    f.write(')fbs";\n')
+    f.write("  return kSchema;\n}\n} // namespace hip\n} // namespace mlir\n")
+PYEOF
+""",
+)
+
+# --- model_metadata ---
+
+genrule(
+    name = "gen_model_metadata",
+    srcs = ["model_metadata.fbs"],
+    outs = ["model_metadata_generated.h"],
+    cmd = "$(location @flatbuffers//:flatc) --cpp --gen-object-api --scoped-enums -o $(@D) $(location model_metadata.fbs)",
+    tools = ["@flatbuffers//:flatc"],
+)
+
+genrule(
+    name = "gen_model_metadata_schema",
+    srcs = ["model_metadata.fbs"],
+    outs = ["model_metadata_schema.h"],
+    cmd = r"""
+python3 - <<'PYEOF' $(location model_metadata.fbs) $(location model_metadata_schema.h)
+import sys
+fbs_path, out_path = sys.argv[1], sys.argv[2]
+schema = open(fbs_path).read()
+with open(out_path, 'w') as f:
+    f.write("// Auto-generated from model_metadata.fbs -- do not edit manually.\n")
+    f.write("#pragma once\n")
+    f.write("namespace mlir {\nnamespace hip {\n")
+    f.write("inline const char* k_model_metadata_schema() {\n")
+    f.write('  static const char kSchema[] = R"fbs(\n')
+    f.write(schema)
+    f.write(')fbs";\n')
+    f.write("  return kSchema;\n}\n} // namespace hip\n} // namespace mlir\n")
+PYEOF
+""",
+)
+
+# ============================================================================
+# HipSchemasLib — interface library consumed by all lib/ targets
+# Provides generated headers + flatbuffers include path.
+# ============================================================================
+cc_library(
+    name = "HipSchemasLib",
+    hdrs = [
+        ":gen_compilation_options",
+        ":gen_compilation_options_schema",
+        ":gen_model_metadata",
+        ":gen_model_metadata_schema",
+    ],
+    includes = ["."],
+    deps = ["@flatbuffers//:runtime_cc"],
+    visibility = ["//visibility:public"],
+)

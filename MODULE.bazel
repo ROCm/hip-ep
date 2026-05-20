@@ -16,6 +16,7 @@ bazel_dep(name = "rules_proto", version = "7.1.0")
 # External dependencies for backend-mlir-compiler
 bazel_dep(name = "glog", version = "0.7.1")
 bazel_dep(name = "protobuf", version = "33.4")
+bazel_dep(name = "flatbuffers", version = "25.12.19")
 
 bazel_dep(name = "llvm-project-overlay", version = "22.1.3")
 bazel_dep(name = "morphizen", version = "1.0")
