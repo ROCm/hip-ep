@@ -7,9 +7,8 @@
 
 Each test builds (or loads) a small ONNX model, runs it through a pluggable
 backend, and compares the output against an ORT CPU reference value. The
-reference value may be computed on demand, loaded from a pre-baked file, or
-served from a per-test cache so large CPU MatMuls are not re-run on every
-test invocation.
+reference value is either computed on demand or served from a per-test cache
+so large CPU MatMuls are not re-run on every test invocation.
 
 The framework is EP-agnostic; the canonical wiring for this repo's
 build of the MorphiZen EP lives in ``test/numeric/README.md`` under
