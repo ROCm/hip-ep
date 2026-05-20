@@ -31,9 +31,3 @@ python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
     python_version = "3.10",
 )
-
-# llvm-project: expose @llvm-project targets via the llvm-project-overlay module extension.
-# Unlike openssl (which uses use_repo_rule), llvm-project-overlay uses a module extension
-# that the root module must invoke to make @llvm-project visible.
-llvm_repos = use_extension("@llvm-project-overlay//:llvm_repo.bzl", "llvm_extension")
-use_repo(llvm_repos, "llvm-project")
