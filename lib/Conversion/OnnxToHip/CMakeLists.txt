@@ -51,6 +51,8 @@ add_library(OnnxToHip STATIC
   AndConversion.cpp
   SizeConversion.cpp
   NonZeroConversion.cpp
+  GatherShapeFold.cpp
+  ShapeConversion.cpp
 )
 
 add_dependencies(OnnxToHip

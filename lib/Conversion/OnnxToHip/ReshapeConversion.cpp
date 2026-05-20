@@ -291,6 +291,105 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Scalar fold: tensor.extract through reshape from tensor.from_elements
+//===----------------------------------------------------------------------===//
+//
+// Upstream MLIR folds `tensor.extract(tensor.from_elements)` directly into the
+// corresponding element value (see `ExtractOp::fold` in
+// `mlir/lib/Dialect/Tensor/IR/TensorOps.cpp`).  It does *not* look through
+// `tensor.collapse_shape` or `tensor.expand_shape` to reach `from_elements`.
+//
+// That one-hop gap matters here because morphizen's ONNX Loop importer emits a
+// `tensor.collapse_shape` (typically `tensor<1xi64> -> tensor<i64>`) to
+// rank-reduce the trip-count tensor coming out of `onnx.Shape`, and the
+// `ShapeToTensorDims` pattern (in `ShapeConversion.cpp`) emits
+// `tensor.from_elements(tensor.dim ...)` for `onnx.Shape`. Without this
+// fold the chain
+//
+//   %scalar = arith.index_cast %dim_index : index to i64
+//   %t1     = tensor.from_elements %scalar : tensor<1xi64>
+//   %t0     = tensor.collapse_shape %t1 [] : tensor<1xi64> into tensor<i64>
+//   %v      = tensor.extract %t0[] : tensor<i64>
+//   %trip   = arith.index_cast %v : i64 to index
+//
+// survives bufferization as
+//
+//   %a = memref.alloc() : memref<1xi64>
+//   memref.store %scalar, %a[0]
+//   %b = memref.collapse_shape %a [] : memref<1xi64> into memref<i64>
+//   %v = memref.load %b[]
+//
+// which post-OnnxToHip becomes a `hip.alloc(memref<1xi64>) ... hip.free` pair
+// around the `hip.loop` -- a heap roundtrip whose only purpose is to read back
+// an SSA `index` value that was already in hand.  Other MLIR-based ONNX
+// compilers paper over this with full scalarization passes (torch-mlir's
+// `ScalarizeShapes`, onnx-mlir's `IndexExpr` framework); this pattern is the
+// minimal version: extend the upstream fold one hop.
+//
+// Algorithm: both `tensor.collapse_shape` and `tensor.expand_shape` preserve
+// the row-major linearization of elements, so the flat row-major index of an
+// extract in the reshaped result equals the index into the `from_elements`
+// operand list (which is itself row-major over the source shape).  Requires
+// the reshape result type to have a static shape and the extract indices to
+// be compile-time constants.
+struct ExtractThroughReshapeFromElements
+    : public mlir::OpRewritePattern<mlir::tensor::ExtractOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::tensor::ExtractOp extractOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    mlir::Operation *reshapeOp = extractOp.getTensor().getDefiningOp();
+    if (!reshapeOp ||
+        !mlir::isa<mlir::tensor::CollapseShapeOp, mlir::tensor::ExpandShapeOp>(
+            reshapeOp))
+      return rewriter.notifyMatchFailure(
+          extractOp, "tensor source not a collapse/expand_shape");
+
+    auto fromElementsOp =
+        reshapeOp->getOperand(0).getDefiningOp<mlir::tensor::FromElementsOp>();
+    if (!fromElementsOp)
+      return rewriter.notifyMatchFailure(
+          extractOp, "reshape source not a tensor.from_elements");
+
+    auto reshapeResultType =
+        mlir::cast<mlir::RankedTensorType>(reshapeOp->getResult(0).getType());
+    if (!reshapeResultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(extractOp,
+                                         "reshape result has dynamic shape");
+
+    llvm::SmallVector<int64_t> indices;
+    indices.reserve(extractOp.getIndices().size());
+    for (mlir::Value idx : extractOp.getIndices()) {
+      llvm::APInt val;
+      if (!mlir::matchPattern(idx, mlir::m_ConstantInt(&val)))
+        return rewriter.notifyMatchFailure(extractOp,
+                                           "non-constant extract index");
+      indices.push_back(val.getSExtValue());
+    }
+    if (static_cast<int64_t>(indices.size()) != reshapeResultType.getRank())
+      return rewriter.notifyMatchFailure(extractOp,
+                                         "extract rank / index count mismatch");
+
+    int64_t flatIndex = 0;
+    int64_t stride = 1;
+    for (int64_t i = reshapeResultType.getRank() - 1; i >= 0; --i) {
+      flatIndex += indices[i] * stride;
+      stride *= reshapeResultType.getDimSize(i);
+    }
+
+    auto elements = fromElementsOp.getElements();
+    if (flatIndex < 0 || flatIndex >= static_cast<int64_t>(elements.size()))
+      return rewriter.notifyMatchFailure(extractOp,
+                                         "flat index out of range for "
+                                         "from_elements operand list");
+
+    rewriter.replaceOp(extractOp, elements[flatIndex]);
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Split -> standard tensor ops (zero-cost slice views)
 //===----------------------------------------------------------------------===//
 
@@ -549,7 +648,7 @@ struct SplitToStdTensor : public mlir::RewritePattern {
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx) {
   patterns.add<ReshapeToStdTensor, UnsqueezeToStdTensor, SqueezeToStdTensor,
-               SplitToStdTensor>(ctx);
+               ExtractThroughReshapeFromElements, SplitToStdTensor>(ctx);
 }
 
 } // namespace hip
