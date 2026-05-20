@@ -6,7 +6,8 @@ module(
 # Common dependencies needed by .bazelrc
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_cc", version = "0.2.17")
-bazel_dep(name = "bazel_cpp_toolchain", version = "0.1.0")
+bazel_dep(name = "bazel_cpp_toolchain", version = "1.0.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
 
 # Build system dependencies
 bazel_dep(name = "rules_python", version = "1.7.0")
@@ -18,7 +19,11 @@ bazel_dep(name = "protobuf", version = "33.4")
 
 bazel_dep(name = "llvm-project-overlay", version = "22.1.3")
 bazel_dep(name = "morphizen", version = "1.0")
-bazel_dep(name = "onnxruntime", version = "1.1")
+local_path_override(
+    module_name = "morphizen",
+    path = "3rd-party/morphizen",
+)
+bazel_dep(name = "onnxruntime", version = "1.24.4")
 
 # Python toolchain for hermetic builds
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")

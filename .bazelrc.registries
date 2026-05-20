@@ -1,2 +1,0 @@
-common --registry=file:///C:/Develop/m/source/bazel-registry-1
-common --registry=file:///C:/Develop/m/source/xmc-registry

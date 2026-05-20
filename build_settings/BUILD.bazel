@@ -1,0 +1,12 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+
+package(default_visibility = ["//visibility:public"])
+
+# Mock runtime flag (default: True — no GPU required for CI and local dev)
+# Set to false with --//build_settings:mock_runtime=false to build the real
+# GPU runtime (requires TheRock SDK and THEROCK_DIST env var).
+# Convenience alias: --config=real_runtime (defined in .bazelrc)
+bool_flag(
+    name = "mock_runtime",
+    build_setting_default = True,
+)

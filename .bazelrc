@@ -15,18 +15,22 @@ common --repo_env=PATH
 # -----------------------------------------------------------------------------
 # Module Registry
 # -----------------------------------------------------------------------------
-# Local registry overrides for registry development and testing (gitignored).
-# Must be imported HERE — before the remote registries — so that any
-# local file:// registry is checked first and takes precedence.
-#
-# Workflow: create .bazelrc.registries with one line per local registry, e.g.:
-#   common --registry=file:///path/to/local/registry
-try-import %workspace%/.bazelrc.registries
-
 # ROCm Bazel registry for AMD/ROCm modules (openssl, llvm-project-overlay,
-# onnxruntime, toolchain-probe). Falls back to BCR for public modules.
-common --registry=https://raw.githubusercontent.com/ROCm/bazel-registry/main
+# onnxruntime, bazel_cpp_toolchain). Falls back to BCR for public modules.
+# Pinned to a specific commit SHA for reproducible builds — mutable /main
+# invalidates MODULE.bazel.lock when registry content changes.
+# To upgrade: gh api repos/ROCm/bazel-registry/commits/main --jq '.sha'
+common --registry=https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c
 common --registry=https://bcr.bazel.build
+
+# Credential helper: supplies Bearer token for private ROCm GitHub registry.
+# Reads GITHUB_TOKEN env var (CI) or falls back to `gh auth token` (local dev).
+common --credential_helper=raw.githubusercontent.com=%workspace%/tools/github-credential-helper.cmd
+common --credential_helper=github.com=%workspace%/tools/github-credential-helper.cmd
+common --credential_helper=codeload.github.com=%workspace%/tools/github-credential-helper.cmd
+
+# Local overrides: override registry, --override_module, etc. (gitignored)
+try-import %workspace%/.bazelrc.local
 
 # Workspace status stamping — inject git hash into stamped build targets.
 # Only active when --stamp is passed (e.g. release builds).
@@ -128,9 +132,9 @@ build:remote-debug --output_groups=+pdb_file
 build:remote-debug --compilation_mode=dbg
 
 # -----------------------------------------------------------------------------
-# Local Overrides
+# Feature Flags
 # -----------------------------------------------------------------------------
-# Machine-specific settings (gitignored). Create .bazelrc.user with e.g.:
-#   common --repository_cache=/path/to/bazel-cache
-#   startup --output_user_root=/path/to/bazel-user-root
-try-import %workspace%/.bazelrc.user
+# Real GPU runtime (requires TheRock SDK + THEROCK_DIST env var + GPU runner)
+# Usage: bazel build --config=remote --config=real_runtime //...
+build:real_runtime --//build_settings:mock_runtime=false
+

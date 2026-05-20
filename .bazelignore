@@ -1,0 +1,4 @@
+# Morphizen git submodule — managed as a Bazel module via local_path_override
+# in MODULE.bazel. Ignored here so Bazel does not crawl its BUILD files as part
+# of the root workspace package namespace.
+3rd-party/morphizen
