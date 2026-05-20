@@ -21,9 +21,14 @@
 //
 // Both drivers reuse a pair of host-mapped per-state buffers (int64 iter,
 // int8 cond) so the host can write iter and read cond with zero DMA.
-// Stream-ordering between the host store of iter and the body kernels
-// keeps the GPU view consistent without an explicit sync. For the
-// dynamic path's cond readback, a reusable hipEvent_t (created with
+// A `std::atomic_thread_fence(memory_order_release)` between the host
+// store of iter and the body launch makes the store globally visible
+// to subsequent kernels on the stream -- HIP does not contractually
+// order plain host stores against subsequent stream submissions, and
+// driver mappings vary (cacheable + snoop on AMD APUs, write-combining
+// on some dGPU configs). The fence lowers to a single sfence on x86
+// (~5 cycles) and is negligible vs the body itself. For the dynamic
+// path's cond readback, a reusable hipEvent_t (created with
 // hipEventDisableTiming) is recorded on the stream after each body call
 // and synchronized on before the host reads cond -- lower latency than
 // hipStreamSynchronize for the small-body case that dominates ONNX-Loop
@@ -42,6 +47,7 @@
 #include "runtime_state_internal.h"
 #include "runtime_types.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 
@@ -180,6 +186,14 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
     return -1;
   if (max_trip_count < 0)
     return -1;
+  // ONNX Loop: when cond_init is false the body must execute zero times,
+  // regardless of M. On the dynamic path this falls out of the per-iter
+  // cond check, but on the counted path consultsCond() is false and the
+  // body would otherwise execute M times -- the outlining pass detected
+  // cond_out == cond_in at SSA level, which doesn't constrain the runtime
+  // cond_init value. Short-circuit here so both paths honor the spec.
+  if (!cond_init)
+    return 0;
   LoopNestingGuard nestGuard(state);
   if (!nestGuard.ok)
     return -1;
@@ -191,27 +205,26 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
   int64_t *iter_host = static_cast<int64_t *>(state->loop_iter_host);
   int8_t *cond_host = static_cast<int8_t *>(state->loop_cond_host);
 
-  // Initialize cond with a direct host store -- the kernel's cond_in arg
-  // may be read by the body even on the counted path (no per-iter readback,
-  // but a single read at body entry is still legal SSA), so initialize
-  // unconditionally. No memcpy: the GPU sees the value via the mapped
-  // pointer once any subsequent kernel launches on the same stream.
-  *cond_host = cond_init ? int8_t{1} : int8_t{0};
+  // Initialize cond_in for the body to read. cond_init is guaranteed true
+  // here (false case short-circuited above); the release fence inside the
+  // loop below orders this store globally visible before iter 0 launches.
+  *cond_host = int8_t{1};
 
-  bool keep_going = cond_init;
+  bool keep_going = true;
   for (int64_t i = 0; i < max_trip_count; ++i) {
     if constexpr (CondPolicy::consultsCond()) {
       if (!keep_going)
         break;
     }
-    // Direct host store; the GPU reads via iter_dev (the device-mapped
-    // alias of loop_iter_host). HIP stream ordering guarantees the host
-    // store is visible to any kernel launched on `state->stream` after
-    // this point -- no hipMemcpyAsync(H2D, 8B) per iter, and no host
-    // -stack-source race that the previous `&i`-based memcpy exposed
-    // (small-size copies are usually staged synchronously by the driver
-    // in practice, but the spec allows the read to be deferred).
     *iter_host = i;
+    // Make the host stores of iter (and, on iter 0, of cond above) globally
+    // visible before the body launches kernels that read iter_dev/cond_dev.
+    // HIP does NOT contractually order plain host stores against subsequent
+    // stream submissions; cacheable+snoop mappings on AMD APUs happen to
+    // make the stores visible without a fence, but write-combining mappings
+    // on some dGPU configs need an sfence to flush. Lowers to one sfence on
+    // x86 / dmb ishst on aarch64 (~5 cycles), negligible vs the body.
+    std::atomic_thread_fence(std::memory_order_release);
     int rc =
         body_fn(state, iter_dev, cond_dev, loop_carried_descs, capture_descs);
     if (rc != 0)
