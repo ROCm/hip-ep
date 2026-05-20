@@ -123,6 +123,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MultiHeadAttentionOp::attachInterface<
         HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
+    SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
   });
 }
 

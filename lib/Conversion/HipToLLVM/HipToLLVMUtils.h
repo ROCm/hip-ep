@@ -100,6 +100,7 @@ inline constexpr const char *kWrapMod = "wrap_mod";
 inline constexpr const char *kWrapSlice = "wrap_slice";
 inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
+inline constexpr const char *kWrapSize = "wrap_size";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -388,6 +389,8 @@ void populateScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
+void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

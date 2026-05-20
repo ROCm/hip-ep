@@ -1261,5 +1261,17 @@ void NonZeroOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+//===----------------------------------------------------------------------===//
+// SizeOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SizeOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.cpp.inc"

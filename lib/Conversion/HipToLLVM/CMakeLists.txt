@@ -41,6 +41,7 @@ add_library(HipToLLVM STATIC
   SliceLowering.cpp
   ScatterNDLowering.cpp
   NonZeroLowering.cpp
+  SizeLowering.cpp
 )
 
 add_dependencies(HipToLLVM

@@ -2455,6 +2455,47 @@ def Hip_ModOp : Hip_DpsOp<"mod"> {
   }];
 }
 
+def Hip_SizeOp : Hip_DpsOp<"size"> {
+  let summary = "Total element count of a tensor (ONNX Size, dynamic-shape path)";
+  let description = [{
+    Implements the runtime path of the standard ONNX Size operator
+    (opset 1+) for inputs whose shape is not fully static.
+
+    Statically-shaped Size ops are folded to a single `arith.constant` at
+    OnnxToHip time (see SizeConversion.cpp::SizeToConstant), so this op
+    is only emitted when at least one input dimension is `?`. The
+    HipToLLVM lowering computes `prod(input.shape)` as a runtime i64
+    value (using compile-time constants for static dims and descriptor
+    `sizes[]` for dynamic dims) and stores it into the rank-0 i64
+    output buffer.
+
+    Input  x: ranked tensor / memref of any element type, any rank,
+              with at least one dynamic dim.
+    Output y: rank-0 i64 tensor / memref (`tensor<i64>` / `memref<i64, 1>`).
+
+    Uses destination-passing style: the output buffer is provided as
+    argument.
+
+    Example:
+    ```mlir
+    hip.size(%ctx) ins(%x : memref<?x?xf16, 1>)
+                    outs(%y : memref<i64, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
   let description = [{
