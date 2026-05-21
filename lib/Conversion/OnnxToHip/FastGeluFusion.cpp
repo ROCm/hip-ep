@@ -12,14 +12,24 @@
 //
 // expressed as primitive onnx ops:
 //
-//   pow      = onnx.Pow(x, 3)
-//   scaled   = onnx.Mul(0.044715, pow)
-//   inner    = onnx.Sum(x, scaled)
-//   tanh_in  = onnx.Mul(sqrt(2/π), inner)
-//   tanh     = onnx.Tanh(tanh_in)
-//   phi      = onnx.Sum(1, tanh)
-//   half_x   = onnx.Mul(0.5, x)
-//   y        = onnx.Mul(half_x, phi)
+//   Before (inlined chain rooted on onnx.Tanh, leaves to root):
+//     %three     = onnx.Constant{value=3}              : tensor<i64>
+//     %pow       = onnx.Pow(%x, %three)                : tensor<...xf16>
+//     %c044715   = onnx.Constant{value=0.044715}       : tensor<f16>
+//     %scaled    = onnx.Mul(%c044715, %pow)            : tensor<...xf16>
+//     %inner     = onnx.Sum(%x, %scaled)               : tensor<...xf16>
+//     %cSqrt2pi  = onnx.Constant{value=0.7978845608}   : tensor<f16>
+//     %tanh_in   = onnx.Mul(%cSqrt2pi, %inner)         : tensor<...xf16>
+//     %tanh      = onnx.Tanh(%tanh_in)                 : tensor<...xf16>
+//     %one       = onnx.Constant{value=1.0}            : tensor<f16>
+//     %phi       = onnx.Sum(%one, %tanh)               : tensor<...xf16>
+//     %half      = onnx.Constant{value=0.5}            : tensor<f16>
+//     %half_x    = onnx.Mul(%half, %x)                 : tensor<...xf16>
+//     %y         = onnx.Mul(%half_x, %phi)             : tensor<...xf16>
+//
+//   After (entire chain replaced; primitive constants left dangling for the
+//   downstream DCE walk in OnnxToHip.cpp to clean up):
+//     %y = onnx.Gelu(%x) {approximate = "tanh"} : tensor<...xf16>
 //
 // MorphiZen has a converter for `onnx.Gelu(approximate="tanh")` (lowered to
 // `hip.gelu`) but **no converters for the primitive ops** (onnx.Pow, onnx.Sum,

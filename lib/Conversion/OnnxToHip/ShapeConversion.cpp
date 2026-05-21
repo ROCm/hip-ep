@@ -9,13 +9,26 @@
 // shape-inference and bufferization machinery instead of surviving as an
 // opaque ONNX-dialect op into the lowering passes.
 //
+// IR example
+// ----------
+//   Before (input has one dynamic batch dim):
+//     %x : tensor<?x128x32xf16>
+//     %s = onnx.Shape(%x) : tensor<3xi64>
+//
+//   After (start = 0, end = 3 — full shape):
+//     %d0      = tensor.dim %x, %c0 : tensor<?x128x32xf16>
+//     %d0_i64  = arith.index_cast %d0 : index to i64
+//     %c128    = arith.constant 128 : i64
+//     %c32     = arith.constant 32 : i64
+//     %s       = tensor.from_elements %d0_i64, %c128, %c32 : tensor<3xi64>
+//
 // Why this pass exists
 // --------------------
-// Pre-dynseqlen, every input was statically shaped and `onnx.Shape` folded
-// to a compile-time `onnx.Constant` that GenerateInterface placed in the
-// constants blob (already on GPU at init -- no per-step work).  Dynseqlen
-// breaks the constant fold for inputs whose dims are symbolic, so `Shape`
-// now needs an actual runtime lowering.
+// With fully static shapes, `onnx.Shape` folds to a compile-time
+// `onnx.Constant` that GenerateInterface places in the constants blob
+// (already on GPU at init -- no per-step work).  Dynamic input dims break
+// the constant fold for any shape that references a symbolic dim, so
+// `Shape` then needs an actual runtime lowering.
 //
 // Lowering to `tensor.dim + tensor.from_elements` keeps the result in the
 // tensor world long enough that one-shot-bufferize converts the chain into

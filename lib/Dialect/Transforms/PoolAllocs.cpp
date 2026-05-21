@@ -312,8 +312,35 @@ struct PoolAllocsPass : public impl::PoolAllocsPassBase<PoolAllocsPass> {
 /// every dim query down to the chain root, where the source is hoistable
 /// (function arg, alloc, or memref.view).
 ///
+/// IR example (collapse case — dim of a collapse_shape becomes a product
+/// of dims of the source memref):
+///
+///   Before:
+///     %c = memref.collapse_shape %src [[0], [1, 2]]
+///             : memref<?x?x4xf16> into memref<?x?xf16>
+///     %d = memref.dim %c, %c1 : memref<?x?xf16>     // i = 1
+///
+///   After (one step of the recursion, with K = 4 absorbed from the source):
+///     %d_src = memref.dim %src, %c1 : memref<?x?x4xf16>
+///     %k     = arith.constant 4 : index
+///     %d     = arith.muli %d_src, %k : index
+///
+/// IR example (expand case — dynamic output dim becomes div of the input
+/// dim by the static partner factor):
+///
+///   Before:
+///     %e = memref.expand_shape %src [[0, 1]] output_shape [%n, %k]
+///             : memref<?xf16> into memref<?x4xf16>     // K = 4
+///     %d = memref.dim %e, %c0 : memref<?x4xf16>        // i = 0 (dynamic)
+///
+///   After:
+///     %d_src = memref.dim %src, %c0 : memref<?xf16>
+///     %k     = arith.constant 4 : index
+///     %d     = arith.divui %d_src, %k : index
+///
 /// Bounded recursion: each step strips one reshape layer, so depth equals the
-/// reshape-chain depth. In practice ≤ 2 (Gemma-3 q/k_norm).
+/// reshape-chain depth. In practice ≤ 2 (typical case: a same-rank dynamic
+/// Reshape pair around a per-head norm op).
 static Value resolveDimAtSource(OpBuilder &b, Location loc, Value src,
                                 int64_t i) {
   Operation *def = src.getDefiningOp();
@@ -397,8 +424,8 @@ static Value resolveDimAtSource(OpBuilder &b, Location loc, Value src,
 /// Fold `memref.dim(memref.collapse_shape(src), i)` and
 /// `memref.dim(memref.expand_shape(src), i)` into pure arithmetic on
 /// `memref.dim(root, ...)`. Required for PoolAllocs's hoisting to succeed
-/// when dim queries originate from reshape chains (e.g. Gemma-3 q/k_norm
-/// same-rank Reshape decomposition: expand_shape + collapse_shape).
+/// when dim queries originate from reshape chains produced by the same-rank
+/// dynamic Reshape decomposition (expand_shape + collapse_shape).
 ///
 /// MLIR's stock canonicalizer leaves these alone for dynamic dims; without
 /// this fold the surviving `memref.dim %some_reshape` would be hoisted (it's
@@ -447,8 +474,8 @@ void PoolAllocsPass::runOnOperation() {
   // Pre-pass: simplify `memref.dim` of `memref.collapse_shape`/
   // `memref.expand_shape` so the hoist worklist below can ascend through to
   // the original source memref. Without this, a surviving dim-of-collapse
-  // breaks Phase 4's SSA dominance for any decomposed Reshape (Gemma-3
-  // q/k_norm).
+  // breaks Phase 4's SSA dominance for any same-rank dynamic Reshape
+  // decomposed into expand_shape + collapse_shape.
   foldDimOfReshape(funcOp);
   // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
   // instead of sequential op indices.

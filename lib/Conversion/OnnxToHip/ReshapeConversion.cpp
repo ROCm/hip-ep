@@ -186,12 +186,40 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 
     // Same rank, dynamic — decompose to expand_shape + collapse_shape when
     // the difference can be explained by ONE static dim splitting a factor K
-    // and an adjacent dynamic dim absorbing it. Canonical Gemma-3 q/k_norm
-    // reshape:
+    // and an adjacent dynamic dim absorbing it. Canonical case (a same-rank
+    // dynamic Reshape pair around a per-head norm op):
     //   Reshape_1 (split):   <?x?xH*D> -> <?x?xD>      (last dim shrinks K=H)
     //   Reshape_2 (combine): <?x?xD>   -> <?x?xH*D>    (last dim grows K=H)
     // Both decompose without a kernel; the bufferized expand/collapse are
     // pure descriptor (offset/stride) edits.
+    //
+    // IR example (split direction, H = 8 absorbed by the leading dyn dim):
+    //
+    //   Before:
+    //     %r = onnx.Reshape %x : tensor<?x?x40xf16> to tensor<?x?x5xf16>
+    //
+    //   After:
+    //     %e = tensor.expand_shape %x [[0], [1], [2, 3]]
+    //              : tensor<?x?x40xf16> into tensor<?x?x8x5xf16>
+    //     %r = tensor.collapse_shape %e [[0], [1, 2], [3]]
+    //              : tensor<?x?x8x5xf16> into tensor<?x?x5xf16>
+    //
+    // IR example (combine direction, K = 8 reabsorbed back into the static
+    // dim — requires an arith.divui in the expand `output_shape`):
+    //
+    //   Before:
+    //     %r = onnx.Reshape %x : tensor<?x?x5xf16> to tensor<?x?x40xf16>
+    //
+    //   After:
+    //     %d   = tensor.dim %x, %c1 : tensor<?x?x5xf16>
+    //     %k   = arith.constant 8 : index
+    //     %d8  = arith.divui %d, %k : index
+    //     %d0  = tensor.dim %x, %c0 : tensor<?x?x5xf16>
+    //     %e   = tensor.expand_shape %x [[0], [1, 2], [3]]
+    //              output_shape [%d0, %d8, 8, 5]
+    //              : tensor<?x?x5xf16> into tensor<?x?x8x5xf16>
+    //     %r   = tensor.collapse_shape %e [[0], [1], [2, 3]]
+    //              : tensor<?x?x8x5xf16> into tensor<?x?x40xf16>
     //
     // Pattern requirements (otherwise fall through to the 1-D-flatten path
     // which only works for fully-static shapes):

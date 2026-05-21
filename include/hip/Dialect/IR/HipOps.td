@@ -157,8 +157,8 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
     Returns a reference to the runtime-managed host-mapped scratch buffer.
     Memory is hipHostMalloc(hipHostMallocMapped) — host-writable AND
     GPU-readable. Used by hip-materialize-host-scalars to redirect tiny
-    host-fed memref.alloc ops away from the GPU pool (which on gfx1151 is
-    real device memory and SEGVs on host stores). Grow-on-demand semantics
+    host-fed memref.alloc ops away from the GPU pool (which on some targets
+    is real device memory and SEGVs on host stores). Grow-on-demand semantics
     mirror hip.get_pool.
 
     Example:
@@ -1528,7 +1528,7 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
 
-    Used by Gated DeltaNet (Qwen3.5) and Mamba (Jamba, FalconMamba) as a
+    Used by Gated DeltaNet and Mamba-style state-space architectures as a
     preprocessing step. Replaces the 3-op pattern (Concat + Conv + Slice)
     with a single fused operation.
 
@@ -1604,7 +1604,7 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
     - KV cache (BNSH format, supports past/present buffer sharing)
     - RoPE (rotary position embedding, supports cos/sin cache + position_ids)
     - Attention bias (ALiBi, T5 relative position bias, etc.)
-    - Local attention (Mistral sliding window)
+    - Local / sliding-window attention
     - KV cache quantization (float8/int8/int4, per-tensor/per-channel)
     - Smooth softmax (numerical stability optimization)
     - Debug output (QK matrix visualization)

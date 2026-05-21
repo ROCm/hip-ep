@@ -755,13 +755,14 @@ void ConvertOnnxToHipPass::runOnOperation() {
 
   // Clean up onnx.NoValue and onnx.EntryPoint, plus any other unregistered
   // onnx.* op that ended up with no uses after conversion. The latter case
-  // is the dead-shape-arithmetic pattern shipped by some HF ONNX exports
-  // (e.g. Phi-4's `pos_ids_reformat/Concat` chain whose result is consumed
-  // by a Reshape that lowered to tensor.expand_shape via static type info).
-  // Without this DCE, one-shot-bufferize trips on the unregistered op
-  // because it has tensor-typed operands but no bufferization interface,
-  // and the whole pipeline aborts with "op was not bufferized" — which is
-  // silent (CPU fallback) at the EP level.
+  // is the dead-shape-arithmetic pattern shipped by some HF ONNX exports:
+  // a Shape/Gather/Unsqueeze/Concat chain whose computed shape feeds a
+  // Reshape that lowered to tensor.expand_shape via static type info, so
+  // the computed-shape operand is never read. Without this DCE,
+  // one-shot-bufferize trips on the unregistered op because it has
+  // tensor-typed operands but no bufferization interface, and the whole
+  // pipeline aborts with "op was not bufferized" — which is silent (CPU
+  // fallback) at the EP level.
   //
   // The FastGelu fusion erases its primitive chain inline in
   // reverse-topological order via the rewriter, and the Gather/Shape
@@ -769,7 +770,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // alive on purpose (they may be shared across many Gather sites). This
   // walk catches all those single-layer `use_empty` survivors — Shape
   // ops shared across Gather instances that all folded, index constants,
-  // and the dead-shape-arithmetic patterns from HF exports.
+  // and dead-shape-arithmetic survivors from upstream exports.
   llvm::SmallVector<mlir::Operation *> toErase;
   module.walk([&](mlir::Operation *op) {
     llvm::StringRef name = op->getName().getStringRef();
