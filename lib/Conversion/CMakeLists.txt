@@ -5,6 +5,7 @@
 
 message(STATUS "Building Conversion Libraries")
 
+add_subdirectory(Common)
 add_subdirectory(OnnxToHip)
 add_subdirectory(OnnxToHipDNN)
 add_subdirectory(HipToLLVM)

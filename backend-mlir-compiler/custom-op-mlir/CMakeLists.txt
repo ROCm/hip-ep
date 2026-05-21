@@ -25,6 +25,7 @@ add_library(${LIB_NAME} STATIC
   src/plugin_registration.cpp
   src/MlirCustomOp.cpp
   src/InferenceState.cpp
+  src/DimSpecResolver.cpp
 )
 
 # Define MORPHIZEN_CUSTOM_OP for conditional compilation
@@ -39,6 +40,11 @@ target_link_libraries(${LIB_NAME} PRIVATE
   morphizen::morphizen-core-static
   glog::glog
   mlir_compilation_proto  # Shared protobuf metadata library
+  # Generated FlatBuffers headers + embedded schema string. Used by the
+  # InferenceState to parse the DLL-emitted `inference_get_metadata_json()`
+  # output (FB-JSON) into a HipModelMetaInfoT for dynamic-output-shape
+  # resolution.
+  HipSchemasLib
 )
 if(NOT BUILD_MOCK_RUNTIME)
   target_link_libraries(${LIB_NAME} PRIVATE hip::host)

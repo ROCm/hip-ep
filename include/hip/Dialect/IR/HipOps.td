@@ -927,6 +927,12 @@ def Hip_RangeOp : Hip_DpsOp<"range"> {
 
     start/limit/delta are scalar tensors (rank-0), output is rank-1.
     Uses destination-passing style: output buffer is provided as argument.
+
+    Optional `output_dim_specs` records the per-output, per-dim DimSpec tree
+    (see `include/hip/Dialect/IR/HipShapeInterface.h`). Optional `slot_id`
+    is set for the Category-C path (intermediate operands; the wrap_range
+    publishes the slot at runtime). Both are read by `ComposeDimSpecs` and
+    `GenerateInterface` for the runtime ABI.
   }];
 
   let arguments = (ins
@@ -934,7 +940,9 @@ def Hip_RangeOp : Hip_DpsOp<"range"> {
     Hip_TensorOrMemRef:$start,
     Hip_TensorOrMemRef:$limit,
     Hip_TensorOrMemRef:$delta,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<ArrayAttr>:$output_dim_specs,
+    OptionalAttr<I32Attr>:$slot_id
   );
 
   let assemblyFormat = [{
@@ -2572,6 +2580,48 @@ def Hip_SizeOp : Hip_DpsOp<"size"> {
   }];
 }
 
+def Hip_ConstantOfShapeOp : Hip_DpsOp<"constant_of_shape"> {
+  let summary = "Tensor of given shape filled with a scalar (ONNX ConstantOfShape)";
+  let description = [{
+    Implements the ONNX ConstantOfShape operator: produces a tensor whose
+    shape is given by `shape` (rank-1 int tensor) filled with `fill_value`
+    (encoded i64-bitcast — interpreted per result element type).
+
+    Two MLIR paths reach this op:
+      - Category B (func-arg shape input): the EP can read the shape tensor
+        host-side, so `output_dim_specs` of this op describes each result
+        dim as `InputValueI64(input_index, i)`. No `slot_id` is needed; the
+        EP allocates the output up front.
+      - Category C (intermediate shape input): the shape tensor is GPU-
+        resident at compute time (e.g. produced by `hip.range` whose
+        operands were themselves intermediates). The wrapper publishes a
+        slot per result dim and allocates from the per-state pool.
+
+    The dynamic-MLIR-shape `tensor.splat` path used today only covers
+    Category B and breaks when the shape input cannot be read host-side.
+    This op replaces that path on GPU-resident shape operands.
+
+    Uses destination-passing style: the output buffer is the `output`
+    operand.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$shape,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$fill_value,
+    I64Attr:$output_data_type,
+    OptionalAttr<ArrayAttr>:$output_dim_specs,
+    OptionalAttr<DenseI32ArrayAttr>:$slot_ids
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $shape `:` type($shape) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
   let description = [{
@@ -2582,9 +2632,19 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
     Input `x` is a ranked tensor of shape `[D0, D1, ..., D(R-1)]`. Output
     `y` has shape `[R, N]` of element type `i64`, where `R` is the input
     rank and `N` is the (data-dependent) number of non-zero elements.
-    The `N` dimension is represented as `?` in MLIR; the compiler
-    over-allocates using `numel(x)` as the upper bound (since the input
-    has fully static shape).
+    The `N` dimension is represented as `?` in MLIR.
+
+    NonZero is the canonical Category-C op: `N` is only known after the
+    counting kernel completes. The wrapper publishes the actual N into the
+    runtime slot specified by `slot_id`; the EP-side resolver reads the
+    slot post-compute and only then allocates the output OrtValue.
+
+    Optional `output_dim_specs` and `slot_id`:
+      - `slot_id` is the index of the dynamic-dimension slot this op
+        publishes (always set for NonZero — it has Category-C semantics).
+      - `output_dim_specs` is the per-output, per-dim DimSpec tree (one
+        ArrayAttr per result, each containing one inner ArrayAttr per dim).
+        For NonZero: dim 0 is `R` (Static), dim 1 is `slot[slot_id]`.
 
     Uses destination-passing style: the output buffer is provided as
     argument.
@@ -2593,7 +2653,7 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
     ```mlir
     hip.nonzero(%ctx) ins(%x : memref<3x4xf16, 1>)
                       outs(%y : memref<2x?xi64, 1>)
-                      {input_data_type = 1 : i64}
+                      {input_data_type = 1 : i64, slot_id = 0 : i32}
     ```
   }];
 
@@ -2601,7 +2661,9 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$x,
     Hip_TensorOrMemRef:$y,
-    I64Attr:$input_data_type
+    I64Attr:$input_data_type,
+    OptionalAttr<ArrayAttr>:$output_dim_specs,
+    OptionalAttr<I32Attr>:$slot_id
   );
 
   let assemblyFormat = [{

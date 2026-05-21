@@ -55,6 +55,8 @@ hip_add_library(hip_custom_kernels STATIC
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
+    hip/nonzero_kernel.hip
+    hip/constant_of_shape_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

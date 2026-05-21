@@ -6,6 +6,7 @@
 #define INFERENCE_STATE_H
 
 #include "custom_op_mlir.hpp"
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -17,6 +18,12 @@ struct Plugin; // Must match definition in morphizen_plugin.hpp (struct, not
                // class)
 class FileSystem;
 } // namespace morphizen
+
+// Forward-declare the FlatBuffers-generated metadata struct so the InferenceState
+// header doesn't have to pull the full generated header into every consumer.
+namespace mlir::hip {
+struct HipModelMetaInfoT;
+} // namespace mlir::hip
 
 namespace mlir_compilation::customop {
 
@@ -81,12 +88,39 @@ public:
   // Callers reinterpret_cast to hipStream_t (itself a void* on amdhip64).
   void *get_stream_raw() const;
 
+  // ---------------------------------------------------------------------------
+  // Dynamic-output-shape support (Category C)
+  // ---------------------------------------------------------------------------
+  //
+  // When the compiled DLL is built with dynamic-output-shape support, it
+  // exports:
+  //   * inference_get_metadata_json -> FB-JSON of HipModelMetaInfo
+  //   * inference_dyn_slot_get_dim, _get_buffer, _reset (only when
+  //     dyn_dim_slots_count > 0)
+  //
+  // `metadata()` returns the parsed FB struct (rebuilt from the JSON in
+  // create()). Always non-null for new DLLs; nullptr for legacy DLLs that
+  // predate metadata-JSON export entirely.
+  //
+  // `dyn_dim_slots_count()` returns 0 for legacy / all-static DLLs.
+  //
+  // `read_dim` / `read_buffer` / `reset_dyn_slots` are thin wrappers around
+  // the inference_dyn_slot_* shim exports. They are no-ops returning -1 /
+  // nullptr when the symbol is missing (older DLL) -- callers MUST check
+  // dyn_dim_slots_count() before relying on them.
+  const mlir::hip::HipModelMetaInfoT *metadata() const;
+  int32_t dyn_dim_slots_count() const;
+  int64_t read_dim(int32_t slot_id) const;
+  void *read_buffer(int32_t slot_id) const;
+  void reset_dyn_slots() const;
+
   // Public constructor gated by PrivateTag (defined at the top of this
   // class). Use the create() factory instead -- external callers cannot
   // construct a PrivateTag and therefore cannot call this constructor.
   InferenceState(PrivateTag, void *state,
                  std::unique_ptr<morphizen::Plugin> plugin,
-                 const std::string &temp_dll_path);
+                 const std::string &temp_dll_path,
+                 std::unique_ptr<mlir::hip::HipModelMetaInfoT> metadata);
 
 private:
   // Opaque handle returned by inference_init()
@@ -104,6 +138,24 @@ private:
   // predates the export.
   using BeginComputeFn = void (*)(void *);
   BeginComputeFn begin_compute_fn_;
+
+  // Cached dynamic-output-shape shim function pointers. Resolved once in
+  // create() so the per-Compute() invocations are simple indirect calls.
+  // All three null when the model.dll predates the dynamic-output-shape
+  // ABI (legacy DLL with no Category-C outputs). See InferenceState.cpp
+  // for the warning path that detects mismatches.
+  using DynSlotGetDimFn = int64_t (*)(void *, int32_t);
+  using DynSlotGetBufferFn = void *(*)(void *, int32_t);
+  using DynSlotResetFn = void (*)(void *);
+  DynSlotGetDimFn dyn_slot_get_dim_fn_;
+  DynSlotGetBufferFn dyn_slot_get_buffer_fn_;
+  DynSlotResetFn dyn_slot_reset_fn_;
+
+  // Parsed metadata blob from inference_get_metadata_json(). Held as a
+  // unique_ptr so the InferenceState header doesn't have to include the
+  // full generated FlatBuffers header (forward-declared above). Null when
+  // the DLL predates the metadata-JSON export.
+  std::unique_ptr<mlir::hip::HipModelMetaInfoT> metadata_;
 };
 
 } // namespace mlir_compilation::customop

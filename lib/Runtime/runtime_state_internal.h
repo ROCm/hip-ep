@@ -198,6 +198,64 @@ struct RuntimeState {
   void
       *loop_cond_dev; // hipHostGetDevicePointer(loop_cond_host), passed to body
   void *loop_event;   // hipEvent_t cast to void*; reused for cond-readback sync
+
+  // ── Data-dependent dynamic output shapes (Category C support) ────────────
+  //
+  // `dyn_dim_slots_count` is set at inference_init time from
+  // HipModelMetaInfo.dyn_dim_slots_count (0 for legacy / static-output
+  // models). When > 0, RuntimeState owns one int64 size + one device
+  // buffer pointer per slot. Both arrays live in a single grow-on-demand
+  // host-side allocation, never freed during the session.
+  //
+  // A "slot" is a pair (size_t bytes_published, void* gpu_buf_published)
+  // owned by exactly one Category-C runtime wrapper (e.g. wrap_nonzero,
+  // wrap_range with intermediate operands). The wrapper:
+  //   1. Runs its count/probe kernel, syncs, reads the count host-side.
+  //   2. Calls publish_dim(slot_id, count).
+  //   3. Calls dyn_pool_alloc(count * elem_size) to get an exact-sized
+  //      buffer from the per-state grow-only multi-segment pool.
+  //   4. Calls publish_buffer(slot_id, gpu_buf).
+  //   5. Runs its fill kernel writing to gpu_buf.
+  //
+  // The EP-side resolver then reads (publish_dim, publish_buffer) for
+  // every Category-C output dim, builds the full output shape, asks ORT
+  // for the OrtValue, and either aliases (when the EP-side OrtValue is
+  // GPU-resident) or hipMemcpyAsync(D2H)s out of gpu_buf at finalize
+  // time.
+  //
+  // `dyn_slot_sizes[slot_id]` initialises to kDynSlotUnpublishedSize
+  // (-1); reading -1 from the EP fires LOG(FATAL) ("Category-C op did
+  // not publish slot N"). `dyn_slot_bufs[slot_id]` initialises to
+  // nullptr; same fatal contract.
+  //
+  // Reset between Compute() calls by hipdnn_ep_state_dyn_slots_reset
+  // (called from MlirCustomOp::Compute() entry alongside the seqlens_k
+  // cache invalidation). The dyn pool is also reset at the same time:
+  // every Compute() reclaims all per-call dyn allocations and reuses
+  // the contiguous pool storage. The pool itself is NEVER freed during
+  // the session (mirrors the workspace policy).
+  int32_t dyn_dim_slots_count;
+  int64_t *dyn_slot_sizes;
+  void **dyn_slot_bufs;
+
+  // Multi-segment growable GPU pool used by dyn_pool_alloc.
+  //
+  // Layout: dyn_pool_segments[0..dyn_pool_segment_count) is a vector of
+  // (gpu_base, capacity_bytes, used_bytes) records. Allocation bumps
+  // `used_bytes` of the current segment; on overflow we either pick the
+  // next segment that fits or hipMalloc a fresh segment sized to
+  // max(2 * largest_existing, requested). dyn_pool_reset() sets every
+  // segment's used_bytes back to 0 without freeing the GPU memory.
+  // hipMalloc failure inside dyn_pool_alloc is treated as
+  // unrecoverable (LOG(FATAL) — the model can't run without the
+  // expected buffer).
+  void *dyn_pool_segments;        // SmallVector-of-DynPoolSegment, opaque
+  int32_t dyn_pool_segment_count; // mirrored for debugging / asserts
+  int32_t dyn_pool_active_segment;
 };
+
+// Sentinel returned by read_dim before a Category-C op has published.
+// Kept as a public symbol because debug_log.h needs it for assertions.
+inline constexpr int64_t kDynSlotUnpublishedSize = -1;
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

@@ -6,7 +6,10 @@
 
 // CRITICAL: morphizen.hpp must be included before other morphizen headers
 #include "../../common/temp_path.hpp"
+#include "hip/flatbuffers_json.h"
 #include "hip/timing.h"
+#include "model_metadata_generated.h"
+#include "model_metadata_schema.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
@@ -39,11 +42,14 @@ std::string artifactExtension() {
 
 namespace mlir_compilation::customop {
 
-InferenceState::InferenceState(PrivateTag, void *state,
-                               std::unique_ptr<morphizen::Plugin> plugin,
-                               const std::string &temp_dll_path)
+InferenceState::InferenceState(
+    PrivateTag, void *state, std::unique_ptr<morphizen::Plugin> plugin,
+    const std::string &temp_dll_path,
+    std::unique_ptr<mlir::hip::HipModelMetaInfoT> metadata)
     : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path),
-      begin_compute_fn_(nullptr) {
+      begin_compute_fn_(nullptr), dyn_slot_get_dim_fn_(nullptr),
+      dyn_slot_get_buffer_fn_(nullptr), dyn_slot_reset_fn_(nullptr),
+      metadata_(std::move(metadata)) {
   // Cache the begin_compute symbol so the per-Compute() invocation is a
   // single indirect call. Older model.dlls do not export this symbol; in
   // that case we leave begin_compute_fn_ null and begin_compute() becomes
@@ -53,6 +59,40 @@ InferenceState::InferenceState(PrivateTag, void *state,
         plugin_->get_method<void, void *>("hipdnn_ep_runtime_begin_compute");
     MY_LOG(2) << "begin_compute symbol "
               << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
+
+    // Cache the dynamic-output-shape shim symbols. All three are only
+    // emitted by GenerateInterface when dyn_dim_slots_count > 0, so for
+    // legacy / all-static-output DLLs the lookups silently fall back to
+    // null and the read_* / reset_dyn_slots accessors become no-ops.
+    dyn_slot_get_dim_fn_ =
+        plugin_->get_method<int64_t, void *, int32_t>(
+            "inference_dyn_slot_get_dim");
+    dyn_slot_get_buffer_fn_ =
+        plugin_->get_method<void *, void *, int32_t>(
+            "inference_dyn_slot_get_buffer");
+    dyn_slot_reset_fn_ =
+        plugin_->get_method<void, void *>("inference_dyn_slot_reset");
+    MY_LOG(2) << "dyn_slot ABI: get_dim="
+              << (dyn_slot_get_dim_fn_ ? "yes" : "no")
+              << " get_buffer=" << (dyn_slot_get_buffer_fn_ ? "yes" : "no")
+              << " reset=" << (dyn_slot_reset_fn_ ? "yes" : "no");
+  }
+  // Sanity check: when the metadata says we have N slots, all three shim
+  // symbols MUST be present. The two should always be set together by
+  // GenerateInterface; a mismatch indicates a stale DLL that predates the
+  // dynamic-output-shape implementation. Log fatal so the user gets a
+  // concrete signal instead of segfaulting on the first NonZero call.
+  const int32_t dyn_slots = dyn_dim_slots_count();
+  if (dyn_slots > 0 &&
+      (!dyn_slot_get_dim_fn_ || !dyn_slot_get_buffer_fn_ ||
+       !dyn_slot_reset_fn_)) {
+    LOG(FATAL) << "model.dll metadata declares " << dyn_slots
+               << " dynamic dim slot(s) but is missing the "
+                  "inference_dyn_slot_* ABI exports -- this DLL was built "
+                  "with an older compiler / runtime that predates the "
+                  "dynamic output shape support. Rebuild and clear the "
+                  "model.dll cache (`del %TEMP%\\morphizen_mlir_*` on "
+                  "Windows).";
   }
   // Safety net: warn loudly when the seqlens_k cache is effectively on
   // but the model.dll predates the begin_compute export. Without the
@@ -141,13 +181,49 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
   }
 
   TIMING_LOG("[Session] inference_init: %.3fs\n", record_elapsed(t_prev));
+
+  // Parse the FB-JSON metadata blob from the DLL. The DLL exports
+  // inference_get_metadata_json() which returns a NUL-terminated string of
+  // JSON serialized from HipModelMetaInfoT. We deserialize it back so the
+  // EP can introspect output shapes, dim_specs (dynamic-output-shape
+  // resolver), and dyn_dim_slots_count.
+  //
+  // Legacy DLLs that predate the metadata-JSON export will not have this
+  // symbol; metadata_ stays null and the dynamic-output-shape path is
+  // effectively disabled (legacy DLLs only support static shapes anyway).
+  std::unique_ptr<mlir::hip::HipModelMetaInfoT> metadata;
+  auto get_metadata_json_fn =
+      plugin->get_method<const char *>("inference_get_metadata_json");
+  if (get_metadata_json_fn) {
+    const char *json_cstr = get_metadata_json_fn();
+    if (json_cstr && *json_cstr) {
+      std::string json_str(json_cstr);
+      auto parsed = std::make_unique<mlir::hip::HipModelMetaInfoT>();
+      std::string error;
+      if (!mlir::hip::fromJson<mlir::hip::HipModelMetaInfoT>(
+              json_str, mlir::hip::k_model_metadata_schema(), *parsed,
+              error)) {
+        LOG(FATAL) << "Failed to parse inference_get_metadata_json output: "
+                   << error;
+      }
+      metadata = std::move(parsed);
+      MY_LOG(2) << "Parsed model metadata: " << metadata->outputs.size()
+                << " outputs, dyn_dim_slots_count="
+                << metadata->dyn_dim_slots_count;
+    }
+  } else {
+    MY_LOG(1) << "Legacy DLL: inference_get_metadata_json not exported";
+  }
+
+  TIMING_LOG("[Session] parse metadata JSON: %.3fs\n", record_elapsed(t_prev));
   TIMING_LOG("[Session] InferenceState::create total: %.3fs\n",
              elapsed_since(t0));
 
   MY_LOG(1) << "Inference state initialized";
 
   return std::make_unique<InferenceState>(PrivateTag{}, state,
-                                          std::move(plugin), dll_path);
+                                          std::move(plugin), dll_path,
+                                          std::move(metadata));
 }
 
 InferenceState::~InferenceState() {
@@ -215,6 +291,36 @@ static_assert(offsetof(RuntimeStateHead, stream) == 0,
 void *InferenceState::get_stream_raw() const {
   return state_ ? reinterpret_cast<RuntimeStateHead *>(state_)->stream
                 : nullptr;
+}
+
+const mlir::hip::HipModelMetaInfoT *InferenceState::metadata() const {
+  return metadata_.get();
+}
+
+int32_t InferenceState::dyn_dim_slots_count() const {
+  return metadata_ ? metadata_->dyn_dim_slots_count : 0;
+}
+
+int64_t InferenceState::read_dim(int32_t slot_id) const {
+  // Mirrors the runtime's kDynSlotUnpublishedSize sentinel. We don't
+  // include the runtime header here to avoid pulling HIP through; the
+  // value MUST stay in sync with runtime_state_internal.h.
+  constexpr int64_t kUnpublished = -1;
+  if (!dyn_slot_get_dim_fn_ || !state_)
+    return kUnpublished;
+  return dyn_slot_get_dim_fn_(state_, slot_id);
+}
+
+void *InferenceState::read_buffer(int32_t slot_id) const {
+  if (!dyn_slot_get_buffer_fn_ || !state_)
+    return nullptr;
+  return dyn_slot_get_buffer_fn_(state_, slot_id);
+}
+
+void InferenceState::reset_dyn_slots() const {
+  if (dyn_slot_reset_fn_ && state_) {
+    dyn_slot_reset_fn_(state_);
+  }
 }
 
 } // namespace mlir_compilation::customop

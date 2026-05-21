@@ -793,6 +793,62 @@ int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
   return 0;
 }
 
+int wrap_range_dyn(RuntimeState *state, void *start, void *limit, void *delta,
+                   int64_t hip_dtype, int32_t slot_id) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_range_dyn\n");
+    return -1;
+  }
+  // Mock has no GPU buffers to D2H from -- publish an arbitrary positive
+  // length and a null buffer so post-compute paths exercise the same
+  // codepaths. Tests against the mock runtime do not check tensor values
+  // for the Category-C path.
+  MOCK_PRINT("[MOCK] wrap_range_dyn(hip_dtype=%lld, slot_id=%d)\n",
+             (long long)hip_dtype, slot_id);
+  hipdnn_ep_state_publish_dim(state, slot_id, 1);
+  hipdnn_ep_state_publish_buffer(state, slot_id, nullptr);
+  return 0;
+}
+
+int wrap_constant_of_shape(RuntimeState *state, void *output,
+                           int64_t output_num_elements, int64_t value_bits,
+                           int64_t hip_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_constant_of_shape\n");
+    return -1;
+  }
+  MOCK_PRINT(
+      "[MOCK] wrap_constant_of_shape(num_elements=%lld, value_bits=%lld, "
+      "hip_dtype=%lld)\n",
+      (long long)output_num_elements, (long long)value_bits,
+      (long long)hip_dtype);
+  return 0;
+}
+
+int wrap_constant_of_shape_dyn(RuntimeState *state, const void *shape_dev,
+                               int64_t shape_dtype, int64_t output_rank,
+                               const int32_t *slot_ids, int64_t value_bits,
+                               int64_t output_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_constant_of_shape_dyn\n");
+    return -1;
+  }
+  MOCK_PRINT(
+      "[MOCK] wrap_constant_of_shape_dyn(rank=%lld, value_bits=%lld, "
+      "out_dtype=%lld)\n",
+      (long long)output_rank, (long long)value_bits, (long long)output_dtype);
+  // Mirror NonZero/Range: publish placeholder dims (1) and null buffer
+  // for every slot so downstream post-compute resolvers do not LOG(FATAL).
+  // The mock does not need to actually compute -- there is no GPU.
+  if (slot_ids) {
+    for (int64_t i = 0; i < output_rank; ++i) {
+      hipdnn_ep_state_publish_dim(state, slot_ids[i], 1);
+    }
+    hipdnn_ep_state_publish_buffer(state, slot_ids[0], nullptr);
+  }
+  return 0;
+}
+
 int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
@@ -1130,21 +1186,27 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
-int wrap_nonzero(RuntimeState *state, void *input, void *output,
+int wrap_nonzero(RuntimeState *state, const void *input,
                  int64_t input_num_elements, int64_t input_rank,
-                 int64_t output_capacity, int64_t input_data_type) {
+                 int64_t input_data_type, int32_t slot_id,
+                 const int64_t *input_shape_host) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_nonzero\n");
     return -1;
   }
   (void)input;
-  (void)output;
-  MOCK_PRINT("[MOCK] wrap_nonzero(input_num_elements=%lld, input_rank=%lld, "
-             "output_capacity=%lld, input_data_type=%s(%lld))\n",
-             (long long)input_num_elements, (long long)input_rank,
-             (long long)output_capacity,
-             hipdnn_ep_datatype_name(input_data_type),
-             (long long)input_data_type);
+  (void)input_shape_host;
+  MOCK_PRINT(
+      "[MOCK] wrap_nonzero(input_num_elements=%lld, input_rank=%lld, "
+      "input_data_type=%s(%lld), slot_id=%d)\n",
+      (long long)input_num_elements, (long long)input_rank,
+      hipdnn_ep_datatype_name(input_data_type), (long long)input_data_type,
+      (int)slot_id);
+  // Mock semantics: publish N=0 + an empty buffer so the EP-side resolver
+  // doesn't trip an unpublished-slot fatal. Real wrappers would run the
+  // count + fill kernels; without HIP we have no input data to inspect.
+  hipdnn_ep_state_publish_dim(state, slot_id, 0);
+  hipdnn_ep_state_publish_buffer(state, slot_id, nullptr);
   return 0;
 }
 

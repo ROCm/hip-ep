@@ -63,31 +63,30 @@ module {
   // the Shape conversion in a separate PR. Once that PR lands, re-add a
   // composed test here.
 
-  // Test 4: dynamic result shape with a non-constant shape input -- the
-  // fold path bails (no compile-time shape attr AND result is dynamic)
-  // and the dynamic pattern emits tensor.splat with per-dim
-  // tensor.extract + index_cast for each dynamic result dim.
+  // Test 4: dynamic result shape with a non-constant shape input from a
+  // func-arg -- the fold path bails (no compile-time shape attr AND
+  // result is dynamic). The dynamic pattern now emits hip.constant_of_shape
+  // with an `output_dim_specs` attribute encoding each dynamic dim as a
+  // Category-B InputValueI64 leaf (no slot_ids).
   func.func @test_constant_of_shape_dynamic(%shape: tensor<2xi64>) -> tensor<?x?xf32> {
     // CHECK-LABEL: func.func @test_constant_of_shape_dynamic
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[SHAPE:.*]]: tensor<2xi64>)
     %r = "onnx.ConstantOfShape"(%shape) : (tensor<2xi64>) -> tensor<?x?xf32>
 
     // CHECK-NOT: onnx.ConstantOfShape
-    // CHECK-DAG: %[[ZERO:.*]] = arith.constant 0.000000e+00 : f32
-    // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
-    // CHECK-DAG: %[[E0:.*]] = tensor.extract %[[SHAPE]][%[[C0]]] : tensor<2xi64>
-    // CHECK-DAG: %[[D0:.*]] = arith.index_cast %[[E0]] : i64 to index
-    // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-    // CHECK-DAG: %[[E1:.*]] = tensor.extract %[[SHAPE]][%[[C1]]] : tensor<2xi64>
-    // CHECK-DAG: %[[D1:.*]] = arith.index_cast %[[E1]] : i64 to index
-    // CHECK: tensor.splat %[[ZERO]]{{\[}}%{{.*}}, %{{.*}}{{\]}} : tensor<?x?xf32>
+    // CHECK-NOT: tensor.splat
+    // CHECK: hip.constant_of_shape({{.*}})
+    // CHECK-SAME: fill_value = 0
+    // CHECK-SAME: output_data_type = 0
+    // CHECK-SAME: output_dim_specs =
+    // CHECK-NOT: slot_ids
 
     return %r : tensor<?x?xf32>
   }
 
   // Test 5: partially dynamic result with custom int value attribute --
-  // the static dim is encoded in the result type and only the dynamic
-  // dim gets a tensor.extract.
+  // the static dim becomes a Static DimSpec leaf and the dynamic dim
+  // becomes an InputValueI64(input_index=1) leaf (Category B).
   func.func @test_constant_of_shape_partial_dynamic(%shape: tensor<2xi64>) -> tensor<3x?xi64> {
     // CHECK-LABEL: func.func @test_constant_of_shape_partial_dynamic
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[SHAPE:.*]]: tensor<2xi64>)
@@ -96,12 +95,36 @@ module {
     } : (tensor<2xi64>) -> tensor<3x?xi64>
 
     // CHECK-NOT: onnx.ConstantOfShape
-    // CHECK-DAG: %[[VAL:.*]] = arith.constant 42 : i64
-    // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-    // CHECK-DAG: %[[E1:.*]] = tensor.extract %[[SHAPE]][%[[C1]]] : tensor<2xi64>
-    // CHECK-DAG: %[[D1:.*]] = arith.index_cast %[[E1]] : i64 to index
-    // CHECK: tensor.splat %[[VAL]]{{\[}}%{{.*}}{{\]}} : tensor<3x?xi64>
+    // CHECK-NOT: tensor.splat
+    // CHECK: hip.constant_of_shape({{.*}})
+    // CHECK-SAME: fill_value = 42
+    // CHECK-SAME: output_data_type = 4
+    // CHECK-SAME: output_dim_specs =
+    // CHECK-NOT: slot_ids
 
     return %r : tensor<3x?xi64>
+  }
+
+  // Test 6 (Category C): the shape tensor is an intermediate value (here
+  // we synthesise one via an onnx.Range whose `start` operand goes
+  // through an onnx.Add so RangeConversion rejects Category B and falls
+  // back to Category C). The dynamic pattern emits hip.constant_of_shape
+  // with RuntimeSlot DimSpecs and a `slot_ids` attribute; slot IDs are
+  // allocated per-module from `hipdnn.next_dyn_slot_id`.
+  func.func @test_constant_of_shape_category_c(
+      %a: tensor<i64>, %b: tensor<i64>, %c: tensor<i64>) -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_constant_of_shape_category_c
+    %z = arith.constant dense<0> : tensor<i64>
+    %a_intermediate = "onnx.Add"(%a, %z) : (tensor<i64>, tensor<i64>) -> tensor<i64>
+    %shape = "onnx.Range"(%a_intermediate, %b, %c) : (tensor<i64>, tensor<i64>, tensor<i64>) -> tensor<?xi64>
+    %r = "onnx.ConstantOfShape"(%shape) {
+      value = dense<7> : tensor<1xi64>
+    } : (tensor<?xi64>) -> tensor<?x?xi64>
+
+    // CHECK: hip.constant_of_shape({{.*}})
+    // CHECK-SAME: fill_value = 7
+    // CHECK-SAME: slot_ids = array<i32:
+
+    return %r : tensor<?x?xi64>
   }
 }

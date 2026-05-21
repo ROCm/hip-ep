@@ -15,10 +15,13 @@
 #include "metadata.pb.h"
 
 // Component headers
+#include "DimSpecResolver.h"
 #include "InferenceState.h"
+#include "model_metadata_generated.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
 #ifndef BUILD_MOCK_RUNTIME
+#include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
 #endif
 #include <algorithm>
@@ -41,6 +44,7 @@ struct TensorData {
   std::vector<std::vector<int64_t>> shapes; // Storage for shape arrays
   span_t span;
 };
+
 
 static size_t ort_element_size(ONNXTensorElementDataType dtype) {
   switch (dtype) {
@@ -249,6 +253,84 @@ TensorData marshal_output_tensors(
 
   return data;
 }
+
+namespace {
+
+// Tries to resolve the full pre-compute shape for output `i` using its
+// DimSpec tree. Returns true iff every dim resolved (Category A / B / D
+// only); false signals "this output has at least one RuntimeSlot dim, so
+// it must be deferred until post-compute".
+bool tryResolveOutputShapePreCompute(
+    const mlir::hip::HipModelMetaInfoT &fb_meta, size_t out_idx,
+    const std::vector<std::vector<int64_t>> &input_shapes,
+    const std::vector<const void *> &input_data,
+    std::vector<int64_t> &out_shape) {
+  if (out_idx >= fb_meta.outputs.size())
+    return false;
+  const auto &ti = fb_meta.outputs[out_idx];
+  if (!ti)
+    return false;
+  if (ti->dim_specs.empty()) {
+    // Legacy / all-static output. Fall back to the static shape array
+    // verbatim.
+    out_shape.assign(ti->shape.begin(), ti->shape.end());
+    return true;
+  }
+  out_shape.assign(ti->dim_specs.size(), 0);
+  for (size_t d = 0; d < ti->dim_specs.size(); ++d) {
+    const auto &spec = ti->dim_specs[d];
+    if (!spec || spec->nodes.empty()) {
+      // No spec for this dim -- trust the legacy static value.
+      if (d >= ti->shape.size())
+        return false;
+      out_shape[d] = ti->shape[d];
+      continue;
+    }
+    int64_t v = 0;
+    // Pre-compute pass: pass null state so RuntimeSlot leaves resolve to
+    // "false" (deferred) without crashing.
+    if (!customop::resolve(*spec, input_shapes, input_data,
+                           /*state=*/nullptr, v)) {
+      // Hit a RuntimeSlot leaf -- the whole output is deferred.
+      return false;
+    }
+    out_shape[d] = v;
+  }
+  return true;
+}
+
+// Resolve a single Category-C output dim post-compute using the published
+// slot value. LOG(FATAL) if the slot wasn't published. dim_index is the
+// output dim that was the RuntimeSlot leaf; all other dims are assumed to
+// have been resolved already pre-compute and live in `static_shape`.
+std::vector<int64_t> resolveOutputShapePostCompute(
+    const mlir::hip::HipModelMetaInfoT &fb_meta, size_t out_idx,
+    const std::vector<std::vector<int64_t>> &input_shapes,
+    const std::vector<const void *> &input_data,
+    const customop::InferenceState &state) {
+  CHECK_LT(out_idx, fb_meta.outputs.size());
+  const auto &ti = fb_meta.outputs[out_idx];
+  CHECK(ti);
+  CHECK(!ti->dim_specs.empty()) << "Post-compute resolver called on output "
+                                << out_idx << " but it has no dim_specs";
+  std::vector<int64_t> resolved(ti->dim_specs.size(), 0);
+  for (size_t d = 0; d < ti->dim_specs.size(); ++d) {
+    const auto &spec = ti->dim_specs[d];
+    CHECK(spec && !spec->nodes.empty());
+    int64_t v = 0;
+    if (!customop::resolve(*spec, input_shapes, input_data, &state, v)) {
+      LOG(FATAL) << "Output " << out_idx << " dim " << d
+                 << " is a RuntimeSlot that the wrap_* failed to publish "
+                    "before inference_compute returned -- runtime invariant "
+                    "violation. Check that the corresponding wrap_* "
+                    "implementation calls hipdnn_ep_state_publish_dim().";
+    }
+    resolved[d] = v;
+  }
+  return resolved;
+}
+
+} // namespace
 
 namespace {
 
@@ -470,6 +552,62 @@ MlirCustomOp::MlirCustomOp(
   inference_state_ = customop::InferenceState::create(
       load_artifact_from_epcontext(context, metadata_.artifact_filename()),
       fs.get());
+
+  // Build per-output dynamic-shape metadata cache.
+  // Populated only when the DLL carries FB-JSON metadata (new DLLs) AND
+  // declares dyn_dim_slots_count > 0. Legacy / all-static models leave the
+  // vector empty -- Compute() then takes the fast path.
+  output_dyn_info_.resize(metadata_.outputs_size());
+  if (auto *fb_meta = inference_state_->metadata()) {
+    const size_t n_fb = fb_meta->outputs.size();
+    if (n_fb != static_cast<size_t>(metadata_.outputs_size())) {
+      LOG(FATAL) << "FB metadata output count " << n_fb
+                 << " does not match proto metadata count "
+                 << metadata_.outputs_size();
+    }
+    for (size_t i = 0; i < n_fb; ++i) {
+      const auto &ti = fb_meta->outputs[i];
+      if (!ti)
+        continue;
+      for (size_t d = 0; d < ti->dim_specs.size(); ++d) {
+        const auto &spec = ti->dim_specs[d];
+        if (!spec)
+          continue;
+        if (!customop::containsRuntimeSlot(*spec))
+          continue;
+        // Find the (unique) RuntimeSlot leaf. Multi-slot trees are not
+        // supported today -- bail loudly so a future op exercising the
+        // path doesn't silently mis-resolve the dim.
+        int32_t found_slot = -1;
+        for (const auto &node : spec->nodes) {
+          if (node && node->kind == mlir::hip::DimSpecKind::RuntimeSlot) {
+            if (found_slot >= 0) {
+              LOG(FATAL) << "Output " << i << " dim " << d
+                         << " contains multiple RuntimeSlot leaves; the EP "
+                            "host-side resolver only supports one slot per "
+                            "dim today";
+            }
+            found_slot = node->slot_id;
+          }
+        }
+        CHECK_GE(found_slot, 0)
+            << "containsRuntimeSlot returned true but no RuntimeSlot leaf "
+               "was found in the tree";
+        if (output_dyn_info_[i].has_runtime_slot) {
+          LOG(FATAL)
+              << "Output " << i
+              << " has more than one dim driven by a RuntimeSlot; the EP "
+                 "host-side resolver only supports a single slot-driven dim "
+                 "per output today";
+        }
+        output_dyn_info_[i].has_runtime_slot = true;
+        output_dyn_info_[i].slot_id = found_slot;
+        output_dyn_info_[i].slot_dim_index = static_cast<int32_t>(d);
+        MY_LOG(2) << "Output " << i << ": Category-C, dim " << d
+                  << " <- slot " << found_slot;
+      }
+    }
+  }
 }
 
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
@@ -485,7 +623,25 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   // leaving it on the fast path costs ~1 ns.
   inference_state_->begin_compute();
 
-  if (!perf_enabled()) {
+  // Reset per-Compute() dyn-slot publishers so wrap_* can publish into a
+  // clean slate. No-op on legacy DLLs (the symbol is absent and the cached
+  // function pointer is null). Cheap (~1 ns indirect call).
+  inference_state_->reset_dyn_slots();
+
+  // Detect whether any output of this graph is Category-C
+  // (data-dependent shape published via runtime slot). When no output is
+  // dynamic the legacy fast path runs unchanged -- this preserves the
+  // existing perf characteristics for every model that doesn't include
+  // NonZero / Range / ConstantOfShape on intermediate values.
+  bool any_dynamic_output = false;
+  for (const auto &info : output_dyn_info_) {
+    if (info.has_runtime_slot) {
+      any_dynamic_output = true;
+      break;
+    }
+  }
+
+  if (!perf_enabled() && !any_dynamic_output) {
     // --- Fast path: original behaviour, no timing overhead. ---
     auto inputs = marshal_input_tensors(context, input_index_map_);
     auto outputs =
@@ -498,6 +654,11 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     }
 
     MY_LOG(2) << "Compute completed successfully";
+    return;
+  }
+
+  if (any_dynamic_output) {
+    computeDynamic(context);
     return;
   }
 
@@ -558,6 +719,187 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   perf_collector().record(s);
 
   MY_LOG(2) << "Compute completed successfully";
+#endif // BUILD_MOCK_RUNTIME
+}
+
+void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
+#ifdef BUILD_MOCK_RUNTIME
+  // The mock build has no HIP runtime; the dynamic-output path requires
+  // hipMemcpyAsync / hipStreamSynchronize to finalize Category-C outputs.
+  // Fail loudly so models with NonZero etc. don't silently produce empty
+  // outputs against the mock runtime.
+  (void)context;
+  LOG(FATAL) << "MlirCustomOp::computeDynamic() requires the real GPU "
+                "runtime; rebuild without BUILD_MOCK_RUNTIME";
+#else
+  MY_LOG(2) << "MlirCustomOp::computeDynamic() called";
+
+  const auto *fb_meta = inference_state_->metadata();
+  CHECK(fb_meta) << "Dynamic-output path requires DLL FB metadata "
+                    "(inference_get_metadata_json must be exported)";
+
+  Ort::KernelContext ctx(context);
+
+  // ===== Phase 1: marshal inputs and capture data ptrs for B-leaf reads =====
+  auto inputs = marshal_input_tensors(context, input_index_map_);
+
+  std::vector<std::vector<int64_t>> input_shapes;
+  std::vector<const void *> input_data;
+  input_shapes.reserve(inputs.tensors.size());
+  input_data.reserve(inputs.tensors.size());
+  for (size_t i = 0; i < inputs.tensors.size(); ++i) {
+    input_shapes.push_back(inputs.shapes[i]);
+    // InputValueI64 leaves expect a host-readable i64 buffer. CPU-memory
+    // inputs are fine (the EP marshal already exposes the host ptr); GPU
+    // (memory_type == TENSOR_MEMORY_GPU) inputs would need an explicit
+    // D2H stage. Today we only generate B-leaves for func-arg inputs whose
+    // OnnxToHip provenance proves they live in host memory (Range starts
+    // / ConstantOfShape shape), so a GPU input feeding a B-leaf is a
+    // compiler bug. Stash the pointer either way; the resolver
+    // LOG(FATAL)s on null when it actually needs to read.
+    input_data.push_back(inputs.tensors[i].data);
+  }
+
+  // ===== Phase 2: marshal outputs (resolved + Category-C sentinels) =====
+  TensorData outputs;
+  outputs.tensors.resize(metadata_.outputs_size());
+  outputs.shapes.resize(metadata_.outputs_size());
+  // Per-output cached resolved shape (filled either pre- or post-compute).
+  // Indexed identically to metadata_.outputs().
+  std::vector<std::vector<int64_t>> resolved_shapes(metadata_.outputs_size());
+  // Sentinel shape array for Category-C outputs. We give the runtime a
+  // valid shape ptr (so buildMemrefDescriptor can GEP it) but the values
+  // are placeholder -1s; main_graph's hip.nonzero etc. ignore the
+  // descriptor since the lowered wrap_* drops the output buffer pointer.
+  // The per-output entry lives inside resolved_shapes for the resolved
+  // case; for the deferred case we allocate a sibling sentinel shape.
+  std::vector<std::vector<int64_t>> sentinel_shapes(metadata_.outputs_size());
+  for (int i = 0; i < metadata_.outputs_size(); ++i) {
+    const auto &output_meta = metadata_.outputs(i);
+    const auto &dyn_info = output_dyn_info_[i];
+
+    if (!dyn_info.has_runtime_slot) {
+      // Try resolving pre-compute -- works for both legacy static outputs
+      // and Category A/B/D outputs whose tree is RuntimeSlot-free.
+      bool ok = tryResolveOutputShapePreCompute(*fb_meta, i, input_shapes,
+                                                input_data, resolved_shapes[i]);
+      if (!ok) {
+        // Should not happen -- the static fallback path always populates
+        // resolved_shapes[i] from the legacy `shape:` array when no spec
+        // is available, and dyn_info.has_runtime_slot would have been
+        // true otherwise.
+        LOG(FATAL) << "Output " << i
+                   << " failed pre-compute resolution despite having no "
+                      "RuntimeSlot in its dim_specs";
+      }
+      outputs.shapes[i] = resolved_shapes[i];
+      int ort_idx = output_index_map_[i];
+      auto t = ctx.GetOutput(ort_idx, outputs.shapes[i]);
+      outputs.tensors[i].data = t.GetTensorMutableRawData();
+      outputs.tensors[i].shape = outputs.shapes[i].data();
+      outputs.tensors[i].rank = outputs.shapes[i].size();
+      outputs.tensors[i].element_size =
+          onnx_elem_type_size(output_meta.elem_type());
+      outputs.tensors[i].memory_type =
+          static_cast<int>(t.GetTensorMemoryInfo().GetDeviceType());
+      MY_LOG(3) << "Output[" << i << "] resolved pre-compute, rank="
+                << outputs.tensors[i].rank;
+    } else {
+      // Category-C deferred sentinel. Build a shape array of length rank
+      // filled with -1 (so any code path that mistakenly inspects it gets
+      // an obvious "uninitialized" pattern). The runtime's prepare_output
+      // sees data==null and skips GPU allocation + D2H; the lowered
+      // wrap_* publishes the actual buffer into a slot, which we read in
+      // phase 4 below.
+      const size_t rank =
+          fb_meta->outputs[i] ? fb_meta->outputs[i]->shape.size() : 0;
+      CHECK_GT(rank, 0u) << "Category-C output " << i
+                         << " has rank 0 -- not supported";
+      sentinel_shapes[i].assign(rank, -1);
+      outputs.tensors[i].data = nullptr;
+      outputs.tensors[i].shape = sentinel_shapes[i].data();
+      outputs.tensors[i].rank = rank;
+      outputs.tensors[i].element_size =
+          onnx_elem_type_size(output_meta.elem_type());
+      outputs.tensors[i].memory_type = TENSOR_MEMORY_CPU;
+      MY_LOG(3) << "Output[" << i << "] Category-C sentinel, rank=" << rank
+                << " slot_id=" << dyn_info.slot_id;
+    }
+  }
+  outputs.span.data = outputs.tensors.data();
+  outputs.span.count = outputs.tensors.size();
+
+  // ===== Phase 3: run inference_compute =====
+  int ret = inference_state_->compute(&inputs.span, &outputs.span);
+  if (ret != 0) {
+    LOG(ERROR) << "inference_compute() failed with code: " << ret;
+    // Still attempt to read slots so we surface as much info as possible.
+  }
+
+  // The runtime's inference_compute already stream-syncs (stream_sync
+  // step) before returning, so any wrap_* publish_dim+publish_buffer is
+  // visible at this point. No extra sync needed.
+
+  // ===== Phase 4: resolve Category-C outputs post-compute and D2H =====
+  auto stream_v = inference_state_->get_stream_raw();
+  hipStream_t stream = static_cast<hipStream_t>(stream_v);
+  bool any_async_d2h = false;
+  for (int i = 0; i < metadata_.outputs_size(); ++i) {
+    const auto &dyn_info = output_dyn_info_[i];
+    if (!dyn_info.has_runtime_slot)
+      continue;
+
+    // Re-resolve the shape with the inference_state available -- now
+    // RuntimeSlot leaves return their published value.
+    auto resolved = resolveOutputShapePostCompute(*fb_meta, i, input_shapes,
+                                                  input_data, *inference_state_);
+    // Allocate the actual-sized ORT OrtValue. ctx.GetOutput is idempotent
+    // per ort_idx, but for Category-C outputs we deliberately did NOT
+    // call it pre-compute, so this is the first (and only) call.
+    int ort_idx = output_index_map_[i];
+    auto out_t = ctx.GetOutput(ort_idx, resolved);
+    void *host_dst = out_t.GetTensorMutableRawData();
+    void *gpu_src = inference_state_->read_buffer(dyn_info.slot_id);
+    int64_t numel = 1;
+    for (int64_t d : resolved)
+      numel *= d;
+    const size_t elem_size = onnx_elem_type_size(
+        metadata_.outputs(i).elem_type());
+    const size_t bytes = static_cast<size_t>(numel) * elem_size;
+
+    MY_LOG(3) << "Output[" << i << "] Category-C resolved: numel=" << numel
+              << " bytes=" << bytes << " slot=" << dyn_info.slot_id
+              << " gpu_src=" << gpu_src << " host_dst=" << host_dst;
+
+    if (bytes == 0) {
+      // Empty result (e.g. NonZero returns no non-zero elements). The
+      // OrtValue is already allocated with the right shape; nothing to
+      // copy.
+      continue;
+    }
+    CHECK(gpu_src) << "Output " << i
+                   << " is Category-C with non-empty result but the wrap_* "
+                      "did not publish a GPU buffer for slot "
+                   << dyn_info.slot_id;
+    CHECK(host_dst);
+    hipError_t herr = hipMemcpyAsync(host_dst, gpu_src, bytes,
+                                     hipMemcpyDeviceToHost, stream);
+    if (herr != hipSuccess) {
+      LOG(ERROR) << "Category-C output " << i << " D2H failed: "
+                 << hipGetErrorString(herr);
+      continue;
+    }
+    any_async_d2h = true;
+  }
+  if (any_async_d2h) {
+    hipError_t herr = hipStreamSynchronize(stream);
+    if (herr != hipSuccess) {
+      LOG(ERROR) << "Category-C post-compute stream sync failed: "
+                 << hipGetErrorString(herr);
+    }
+  }
+
+  MY_LOG(2) << "Compute (dynamic-output path) completed successfully";
 #endif // BUILD_MOCK_RUNTIME
 }
 

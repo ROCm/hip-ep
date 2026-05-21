@@ -5,6 +5,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "hip/Dialect/IR/HipShapeInterface.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -233,9 +234,88 @@ struct RangeToHip : public RewritePattern {
                                      elemTy, ValueRange{});
     }
 
+    // ----------------------------------------------------------------------
+    // Operand-provenance dispatch for dynamic output dim 0:
+    // ----------------------------------------------------------------------
+    // Range with i64 element type and dynamic output dim 0: when all three
+    // operands (start, limit, delta) trace to host-readable func.func
+    // entry-block args (i.e. EP inputs) we can encode dim 0 as a Category
+    // B DimSpec:
+    //
+    //     CeilDiv(Sub(limit, start), delta)
+    //
+    // using operand-relative InputValueI64 leaves; ComposeDimSpecs walks
+    // operand → func-arg to rewrite them into EP-relative leaves. The EP
+    // resolves the dim BEFORE inference_compute, allocates the ORT
+    // OrtValue with the resolved shape, and the existing wrap_range path
+    // is used unchanged (no slot needed).
+    //
+    // When any operand is an intermediate value the dim falls back to a
+    // RuntimeSlot (Category C). The wrap_range path in
+    // lib/Runtime/real/range.cpp will inspect the slot_id attribute to
+    // decide between the static-output legacy launch and the slot-
+    // publishing variant.
+    mlir::ArrayAttr outputDimSpecsAttr;
+    mlir::IntegerAttr slotIdAttr;
+    if (resultType.isDynamicDim(0)) {
+      // Category B is only legal when:
+      //   1. all three operands resolve to func-arg entry-block values
+      //      (host-readable in the EP marshal), AND
+      //   2. the element type is i64 -- the EP resolver reads
+      //      InputValueI64 leaves as int64_t (see
+      //      backend-mlir-compiler/.../DimSpecResolver.cpp::readInputI64).
+      //      Other element types (i32, fp16/fp32) would silently
+      //      reinterpret bytes.
+      bool allFuncArgs = operandIsFuncEntryBlockArg(op->getOperand(0)) &&
+                         operandIsFuncEntryBlockArg(op->getOperand(1)) &&
+                         operandIsFuncEntryBlockArg(op->getOperand(2));
+      if (allFuncArgs && elemTy.isInteger(64)) {
+        // Category B: build operand-relative DimSpec.
+        // Operand indices on hip.range: 0=ctx, 1=start, 2=limit, 3=delta,
+        // 4=output (DPS). The per-op-attached spec uses the OP's operand
+        // indices, which matches how ComposeDimSpecs walks
+        // op->getOperand(idx). The leaves get rewritten to EP-relative
+        // InputValueI64 by ComposeDimSpecs.
+        DimSpec startSpec =
+            DimSpec::makeInputValueI64(/*input_index=*/1, /*flat_offset=*/0);
+        DimSpec limitSpec =
+            DimSpec::makeInputValueI64(/*input_index=*/2, 0);
+        DimSpec deltaSpec =
+            DimSpec::makeInputValueI64(/*input_index=*/3, 0);
+        DimSpec diff =
+            DimSpec::makeBinary(DimSpecKind::Sub, limitSpec, startSpec);
+        DimSpec dim0 =
+            DimSpec::makeBinary(DimSpecKind::CeilDiv, diff, deltaSpec);
+        auto *ctxRaw = rewriter.getContext();
+        outputDimSpecsAttr = rewriter.getArrayAttr(
+            {rewriter.getArrayAttr({dim0.serializeAsArrayAttr(ctxRaw)})});
+      } else {
+        // Category C: either at least one operand is an intermediate
+        // value, or the element type is not i64 (the EP resolver only
+        // knows how to read i64). Allocate a unique module-level
+        // slot_id, attach a RuntimeSlot leaf, and let wrap_range publish
+        // into that slot at runtime. Matches the bookkeeping pattern
+        // used by NonZeroConversion.
+        auto moduleOp = op->getParentOfType<mlir::ModuleOp>();
+        int32_t slot_id_v = 0;
+        if (auto a = moduleOp->getAttrOfType<mlir::IntegerAttr>(
+                "hipdnn.next_dyn_slot_id"))
+          slot_id_v = static_cast<int32_t>(a.getInt());
+        moduleOp->setAttr("hipdnn.next_dyn_slot_id",
+                          rewriter.getI32IntegerAttr(slot_id_v + 1));
+        slotIdAttr = rewriter.getI32IntegerAttr(slot_id_v);
+        DimSpec dim0 = DimSpec::makeRuntimeSlot(slot_id_v);
+        auto *ctxRaw = rewriter.getContext();
+        outputDimSpecsAttr = rewriter.getArrayAttr(
+            {rewriter.getArrayAttr({dim0.serializeAsArrayAttr(ctxRaw)})});
+      }
+    }
+
     auto rangeOp = mlir::hip::RangeOp::create(
         rewriter, loc, resultType, ctx, op->getOperand(0), op->getOperand(1),
-        op->getOperand(2), init);
+        op->getOperand(2), init,
+        /*output_dim_specs=*/outputDimSpecsAttr,
+        /*slot_id=*/slotIdAttr);
     rewriter.replaceOp(op, rangeOp->getResult(0));
     return success();
   }

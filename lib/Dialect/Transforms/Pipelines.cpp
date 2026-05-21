@@ -150,6 +150,12 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
 void mlir::hip::buildHipToLLVMPipeline(
     OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
+  // Compose per-op output DimSpecs into model-output DimSpecs and attach
+  // as a module attribute. Runs while the IR is still in func.func / hip
+  // / memref form so the walker can traverse SSA values; the result is
+  // pure metadata, no IR rewriting.
+  pm.addPass(mlir::hip::createComposeDimSpecsPass());
+
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.
   // populateFinalizeMemRefToLLVMConversionPatterns (used by ConvertHipToLLVM)
