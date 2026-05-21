@@ -1,0 +1,29 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "HipTargetLLVM",
+    srcs = glob(["*.cpp"]),
+    deps = [
+        "//include:hip_headers",
+        "//lib/Runtime:HipRuntimeBitcode",
+        "@llvm-project-overlay//mlir:IR",
+        "@llvm-project-overlay//mlir:Support",
+        "@llvm-project-overlay//mlir:TargetLLVM",
+        "@llvm-project-overlay//mlir:LLVMToLLVMIRTranslation",
+        "@llvm-project-overlay//mlir:BuiltinToLLVMIRTranslation",
+        "@llvm-project-overlay//llvm:Support",
+        "@llvm-project-overlay//llvm:Core",
+        "@llvm-project-overlay//llvm:IRReader",
+        "@llvm-project-overlay//llvm:BitWriter",
+        "@llvm-project-overlay//llvm:Passes",
+        "@llvm-project-overlay//llvm:Target",
+        "@llvm-project-overlay//llvm:CodeGen",
+        "@llvm-project-overlay//llvm:Linker",
+        "@llvm-project-overlay//llvm:X86CodeGen",
+        "@llvm-project-overlay//llvm:X86AsmParser",
+        "@llvm-project-overlay//lld:COFF",
+        "@llvm-project-overlay//lld:ELF",
+        "@llvm-project-overlay//lld:Common",
+    ],
+    visibility = ["//visibility:public"],
+)

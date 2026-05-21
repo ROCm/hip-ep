@@ -1,0 +1,14 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "HipCInterface",
+    srcs = glob(["*.cpp"]),
+    local_defines = ["HIP_COMPILER_EXPORTS"],
+    deps = [
+        "//include:hip_headers",
+        "//include:foundation_headers",
+        "//lib/Compiler:LibHipCompiler",
+        "//schemas:HipSchemasLib",
+    ],
+    visibility = ["//visibility:public"],
+)
