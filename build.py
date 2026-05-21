@@ -46,9 +46,8 @@ DIST = INSTALL / "dist"
 OGA_SOURCE = INSTALL / "oga-source"
 OGA_BUILD = INSTALL / "oga-build"
 
-THEROCK_URL = (
-    "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1151-7.11.0.tar.gz"
-)
+# TheRock base URL — architecture will be auto-detected and inserted
+THEROCK_BASE_URL = "https://repo.amd.com/rocm/tarball/therock-dist-windows-{arch}-7.11.0.tar.gz"
 
 # Prebuilt deps — keep in sync with scripts/setup-prebuilt.sh
 _PREBUILT_BASE = "https://github.com/wcy123/llvm-mlir-prebuilt/releases/download"
@@ -159,19 +158,171 @@ def _read_ci_env(*keys):
 # ---------------------------------------------------------------------------
 
 
+def _map_device_id_to_arch(device_id):
+    """Map AMD device ID to GPU architecture.
+
+    Args:
+        device_id: PCI device ID string (e.g., "PCI\\VEN_1002&DEV_150E&...")
+
+    Returns:
+        Architecture string (e.g., 'gfx1150') or None if unknown
+    """
+    device_id = device_id.upper()
+
+    # Strix Halo: gfx1151
+    if 'DEV_15DC' in device_id or 'DEV_15DD' in device_id:
+        return 'gfx1151'
+
+    # Strix Point / Strix: gfx1150
+    if 'DEV_1900' in device_id or 'DEV_1901' in device_id or 'DEV_150E' in device_id:
+        return 'gfx1150'
+
+    # Add more mappings as needed
+    return None
+
+
+def _detect_gpu_via_wmic():
+    """Detect AMD GPU architecture using wmic command-line tool.
+
+    This is a fallback that doesn't require the WMI Python package.
+    Uses the built-in wmic.exe utility available on all Windows systems.
+    """
+    try:
+        r = subprocess.run(
+            ['wmic', 'path', 'win32_VideoController', 'get', 'PNPDeviceID'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if r.returncode != 0:
+            return None
+
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            # Look for AMD vendor ID (VEN_1002)
+            if 'VEN_1002' in line.upper():
+                arch = _map_device_id_to_arch(line)
+                if arch:
+                    log(f"  Detected AMD GPU with device ID: {line} to {arch}")
+                    return arch
+                # Found AMD GPU but couldn't map device ID
+                log(f"  Detected AMD GPU with device ID: {line}")
+                log("  WARNING: Could not auto-detect gfx architecture from device ID.")
+                return None
+
+        return None
+    except Exception as e:
+        log(f"  WARNING: wmic detection failed: {e}")
+        return None
+
+
+def _detect_gpu_via_wmi():
+    """Detect AMD GPU architecture via Windows Management Instrumentation Python module.
+
+    Requires: pip install wmi
+    Falls back to _detect_gpu_via_wmic() if the module is not available.
+    """
+    try:
+        import wmi
+        w = wmi.WMI()
+        for video in w.Win32_VideoController():
+            # AMD vendor IDs: 0x1002 (ATI/AMD), sometimes also 0x1022
+            if "AMD" in video.Name or "Radeon" in video.Name or "ATI" in video.Name:
+                device_id = getattr(video, 'PNPDeviceID', '').upper()
+                arch = _map_device_id_to_arch(device_id)
+                if arch:
+                    return arch
+
+                # Found AMD GPU but couldn't map device ID
+                log(f"  Detected AMD GPU: {video.Name} (device: {device_id})")
+                log("  WARNING: Could not auto-detect gfx architecture from device ID.")
+                return None
+
+        log("  No AMD GPU detected via WMI.")
+        return None
+    except ImportError:
+        # WMI module not installed — fall back to wmic command
+        return None
+    except Exception as e:
+        log(f"  WARNING: WMI Python detection failed: {e}")
+        return None
+
+
+def _probe_therock_architectures(therock_path):
+    """Probe TheRock installation for supported GPU architectures.
+
+    Returns list of supported architectures (e.g., ['gfx1150', 'gfx1151']).
+    """
+    hipblaslt_lib = therock_path / "bin" / "hipblaslt" / "library"
+    if not hipblaslt_lib.exists():
+        log(f"  WARNING: hipblaslt library directory not found: {hipblaslt_lib}")
+        return []
+
+    supported = set()
+    for dat_file in hipblaslt_lib.glob("TensileLibrary_lazy_gfx*.dat"):
+        # Extract gfx architecture from filename
+        # e.g., TensileLibrary_lazy_gfx1150.dat -> gfx1150
+        match = re.search(r'gfx\d+', dat_file.name)
+        if match:
+            supported.add(match.group(0))
+
+    return sorted(supported)
+
+
 def fetch_therock():
+    """Download and extract TheRock ROCm SDK.
+
+    Logic:
+    1. If THEROCK_DIST env var is set, use that path (skip download)
+    2. Otherwise, detect GPU architecture and download matching TheRock
+    3. Probe TheRock for supported architectures
+    4. Return the path to TheRock and detected/selected architecture
+    """
     log("Setting up TheRock ROCm SDK ...")
+
+    # Check if user provided custom TheRock path
+    custom_therock = os.environ.get('THEROCK_DIST')
+    if custom_therock:
+        therock_path = Path(custom_therock)
+        if not therock_path.exists():
+            log(f"  ERROR: THEROCK_DIST points to non-existent path: {therock_path}")
+            sys.exit(1)
+        log(f"  Using custom TheRock from THEROCK_DIST: {therock_path}")
+        return therock_path
+
+    # Standard path
     sentinel = THEROCK / ".ok"
     if sentinel.exists():
         log("  Already installed.")
-        return
-    archive = CACHE / Path(THEROCK_URL).name
-    download(THEROCK_URL, archive)
+        return THEROCK
+
+    # Detect GPU architecture — try WMI Python module first, then wmic command
+    log("  Detecting GPU architecture ...")
+    gpu_arch = _detect_gpu_via_wmi()
+
+    # If WMI Python module failed/unavailable, try wmic command-line tool
+    if not gpu_arch:
+        gpu_arch = _detect_gpu_via_wmic()
+
+    if not gpu_arch:
+        log("  WARNING: Could not auto-detect GPU. Defaulting to gfx1151.")
+        log("  To override, set THEROCK_DIST environment variable.")
+        gpu_arch = 'gfx1151'
+    else:
+        log(f"  Detected GPU architecture: {gpu_arch}")
+
+    # Download TheRock for detected architecture
+    therock_url = THEROCK_BASE_URL.format(arch=gpu_arch)
+    archive = CACHE / Path(therock_url).name
+    download(therock_url, archive)
+
     if THEROCK.exists():
         shutil.rmtree(THEROCK)
     _tar_extract(archive, THEROCK, strip=1)
     sentinel.touch()
     log("  TheRock SDK ready.")
+
+    return THEROCK
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +463,16 @@ def _ensure_dia_sdk_junction():
         log("  WARNING: mklink failed (may need admin). See docs/quick_start.md.")
 
 
-def _detect_gpu_arch():
-    exe = THEROCK / "lib" / "llvm" / "bin" / "amdgpu-arch.exe"
+def _detect_gpu_arch(therock_path):
+    """Detect GPU architecture using amdgpu-arch.exe from TheRock.
+
+    Args:
+        therock_path: Path to TheRock installation
+
+    Returns:
+        Detected architecture string (e.g., 'gfx1150') or None if detection fails
+    """
+    exe = therock_path / "lib" / "llvm" / "bin" / "amdgpu-arch.exe"
     if not exe.exists():
         return None
     try:
@@ -380,7 +539,12 @@ def _ensure_msvc_env():
     log("  MSVC environment ready.")
 
 
-def configure_and_build():
+def configure_and_build(therock_path):
+    """Configure and build the project.
+
+    Args:
+        therock_path: Path to TheRock installation (from fetch_therock())
+    """
     log("Building onnx-hipdnn-ep ...")
 
     _ensure_msvc_env()
@@ -424,23 +588,55 @@ def configure_and_build():
 
     cmake_args.append(f"-DPython3_EXECUTABLE={sys.executable}")
 
-    # Real runtime (TheRock + detected GPU) vs mock
-    therock_ready = (THEROCK / ".ok").exists()
-    if therock_ready:
-        gpu_arch = _detect_gpu_arch()
-        if gpu_arch:
-            log(f"  GPU architecture: {gpu_arch}")
+    # Probe TheRock for supported architectures
+    log("  Probing TheRock for supported GPU architectures ...")
+    supported_archs = _probe_therock_architectures(therock_path)
+    if supported_archs:
+        log(f"  TheRock supports: {', '.join(supported_archs)}")
+    else:
+        log("  WARNING: Could not probe TheRock for supported architectures.")
+
+    # Detect actual hardware
+    gpu_arch = _detect_gpu_arch(therock_path)
+
+    if gpu_arch and supported_archs:
+        # Verify hardware is supported by this TheRock build
+        if gpu_arch in supported_archs:
+            log(f"  GPU architecture: {gpu_arch} (supported by TheRock)")
             cmake_args += [
-                f"-DTHEROCK_DIST={THEROCK}",
+                f"-DTHEROCK_DIST={therock_path}",
                 "-DHIP_PLATFORM=amd",
                 f"-DHIP_ARCHITECTURES={gpu_arch}",
                 "-DBUILD_MOCK_RUNTIME=OFF",
             ]
         else:
-            log("  No GPU detected — using mock runtime.")
-            cmake_args.append("-DBUILD_MOCK_RUNTIME=ON")
+            log(f"  ERROR: Detected GPU architecture '{gpu_arch}' is not supported by this TheRock build.")
+            log(f"         TheRock supports: {', '.join(supported_archs)}")
+            log(f"         Set THEROCK_DIST to a TheRock build that supports {gpu_arch}")
+            sys.exit(1)
+    elif gpu_arch:
+        # Hardware detected but couldn't probe TheRock — trust the detection
+        log(f"  GPU architecture: {gpu_arch} (unable to verify TheRock support)")
+        cmake_args += [
+            f"-DTHEROCK_DIST={therock_path}",
+            "-DHIP_PLATFORM=amd",
+            f"-DHIP_ARCHITECTURES={gpu_arch}",
+            "-DBUILD_MOCK_RUNTIME=OFF",
+        ]
+    elif supported_archs:
+        # No hardware detected but TheRock has supported archs — use first available
+        selected_arch = supported_archs[0]
+        log(f"  No GPU detected via amdgpu-arch — using first supported architecture: {selected_arch}")
+        log("  WARNING: This may not match your actual hardware.")
+        cmake_args += [
+            f"-DTHEROCK_DIST={therock_path}",
+            "-DHIP_PLATFORM=amd",
+            f"-DHIP_ARCHITECTURES={selected_arch}",
+            "-DBUILD_MOCK_RUNTIME=OFF",
+        ]
     else:
-        log("  TheRock not installed — using mock runtime.")
+        # Fallback to mock runtime
+        log("  No GPU detected — using mock runtime.")
         cmake_args.append("-DBUILD_MOCK_RUNTIME=ON")
 
     # -- configure --
@@ -688,7 +884,7 @@ def main():
         log("Clean complete.")
         return
 
-    fetch_therock()
+    therock_path = fetch_therock()
     fetch_prebuilt_deps()
     fetch_onnxruntime()
 
@@ -696,14 +892,14 @@ def main():
         log("")
         log("Setup complete (build skipped).")
     else:
-        configure_and_build()
+        configure_and_build(therock_path)
         log("")
         log("Setup + build complete!")
 
     if args.build_oga:
         build_oga()
 
-    log(f"  TheRock SDK:    {THEROCK}")
+    log(f"  TheRock SDK:    {therock_path}")
     log(f"  Dependencies:   {DEPS}")
     log(f"  ONNX Runtime:   {ORT}")
     if not args.skip_build:
@@ -712,6 +908,13 @@ def main():
     if args.build_oga:
         log(f"  OGA source:     {OGA_SOURCE}")
         log(f"  OGA build:      {OGA_BUILD}")
+
+    # Print reminder to set THEROCK_DIST for runtime (tests, model compilation)
+    if not args.skip_build:
+        log("")
+        log("Reminder: Before running tests or compiling models, set:")
+        log(f'  set "THEROCK_DIST={therock_path}"')
+        log(f'  set "PATH=%THEROCK_DIST%\\bin;{DIST}\\bin;%PATH%"')
 
 
 if __name__ == "__main__":
