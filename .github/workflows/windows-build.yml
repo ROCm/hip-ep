@@ -80,7 +80,12 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/prebuilt-local
-          key: prebuilt-v${{ env.PREBUILT_CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
+          # hashFiles() over patches/onnxruntime/*.patch is appended so any
+          # change to a locally-maintained ORT patch (see patches/onnxruntime/
+          # README.md) auto-invalidates the cached install prefix. Without
+          # this, bumping a patch but leaving ONNXRUNTIME_VERSION fixed would
+          # silently keep the previous-patch ORT artifacts in the cache.
+          key: prebuilt-v${{ env.PREBUILT_CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpatch${{ hashFiles('patches/onnxruntime/*.patch') }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
 
       # -----------------------------------------------------------------------
       # Cache: TheRock HIP SDK for Windows (separate cache – large tarball)
@@ -152,6 +157,35 @@ jobs:
           submodules: true
           fetch-depth: 1
           show-progress: false
+
+      # Apply any patches we maintain locally on top of the pinned ORT tag
+      # (see patches/onnxruntime/README.md). Cache key on `prebuilt-local`
+      # incorporates hashFiles('patches/onnxruntime/*.patch') so changing a
+      # patch forces a rebuild; the source-onnxruntime tree itself is not
+      # cached, so a fresh checkout always lands here clean and patches
+      # apply directly. No idempotency needed.
+      - name: Apply ONNX Runtime patches
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}\source-onnxruntime
+        run: |
+          $patchDir = "${{ github.workspace }}\patches\onnxruntime"
+          if (-not (Test-Path $patchDir)) {
+            Write-Host "No patches/onnxruntime directory; skipping"
+            exit 0
+          }
+          $patches = Get-ChildItem "$patchDir\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name
+          if (-not $patches) {
+            Write-Host "patches/onnxruntime/ is empty; nothing to apply"
+            exit 0
+          }
+          foreach ($p in $patches) {
+            Write-Host "Applying $($p.Name)"
+            git apply --whitespace=nowarn $p.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Patch $($p.Name) failed to apply (exit $LASTEXITCODE)"
+            }
+          }
 
       - name: Build ONNX Runtime
         if: steps.cache-prebuilt.outputs.cache-hit != 'true'
