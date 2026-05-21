@@ -273,7 +273,8 @@ bool CompilerDriver::runMLIRPasses(
     // CPU). Default behaviour returns false so ORT's CPU fallback handles
     // the graph normally — required for multi-session pipelines where
     // MorphiZenEP is registered only for HipDataTransferImpl visibility
-    // (e.g. OGA's gemma3 embedding/vision sub-sessions).
+    // (e.g. multi-stage VLM pipelines where embedding / vision sub-sessions
+    // are intentionally not claimed by the EP).
     if (!hip_get_env("HIPDNN_EP_STRICT").empty()) {
       llvm::errs() << "[CompilerDriver] aborting on pass failure "
                       "(HIPDNN_EP_STRICT=1).\n";

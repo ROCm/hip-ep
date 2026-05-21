@@ -17,14 +17,14 @@
 //   %dim64 = arith.index_cast %dim           : index to i64
 //   %res   = tensor.from_elements %dim64     : tensor<...xi64>
 //
-// Why this matters (gfx1151 dynseqlen regression):
-//   Pre-dynseqlen, all shapes were static and this whole chain folded to a
-//   compile-time constant that GenerateInterface placed in constants.bin
-//   (already on GPU at init -- no per-step host store).  Dynseqlen broke the
+// Why this matters (dynamic-sequence-length regression):
+//   With fully static shapes, this whole chain folds to a compile-time
+//   constant that GenerateInterface places in constants.bin (already on GPU
+//   at init -- no per-step host store).  Dynamic sequence length breaks the
 //   constant fold, so the same arithmetic now happens at runtime.  The
 //   bufferized form of the full Shape result is `memref<Nxi64>` written by N
-//   host stores, then absorbed by PoolAllocs into the GPU pool.  On gfx1151
-//   the pool is real device memory and the host stores SEGV.
+//   host stores, then absorbed by PoolAllocs into the GPU pool.  On targets
+//   where the pool is real device memory, the host stores SEGV.
 //
 // Folding here shrinks `memref<Nxi64>` to `memref<i64>` (one host store)
 // AND localizes the boundary, so the late `--hip-materialize-host-scalars`
