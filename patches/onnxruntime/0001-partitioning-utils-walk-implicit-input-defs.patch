@@ -1,4 +1,4 @@
-﻿From dd7a077d144807d4d27e74ed32b0b6618deb0a5e Mon Sep 17 00:00:00 2001
+From dd7a077d144807d4d27e74ed32b0b6618deb0a5e Mon Sep 17 00:00:00 2001
 From: zhenzew <zhenzew@amd.com>
 Date: Thu, 21 May 2026 02:15:17 -0500
 Subject: [PATCH] fix(partitioning_utils): include Loop/If/Scan implicit inputs
