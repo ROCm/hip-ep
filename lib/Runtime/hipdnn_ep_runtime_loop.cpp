@@ -43,8 +43,9 @@
 // Aliasing invariant: each v_in_i and v_out_i (and, on the dynamic path,
 // cond_in and cond_out) refer to the same memref slot in the body's call.
 // Safe under the v1 body semantics where each kernel touches each cell at
-// most once per launch; the LoopNestingGuard below enforces single-level
-// nesting so the shared per-state iter/cond buffers cannot race.
+// most once per launch. Single-level nesting is enforced at compile time
+// by OnnxLoopOutlinePass (rejects nested onnx.Loop), so the shared
+// per-state iter/cond buffers cannot race here.
 //
 //===----------------------------------------------------------------------===//
 
@@ -151,31 +152,6 @@ int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
   return 0;
 }
 
-// RAII guard that enforces the single-level loop nesting invariant. The
-// driver shares one iter/cond buffer pair per RuntimeState, so a loop
-// body that itself launches a hip.loop would silently overwrite the
-// outer driver's buffers before the outer reads them on its next iter.
-// Hard-fail at entry rather than corrupt silently. v1 limit; a future
-// extension can replace the shared buffers with a per-depth stack.
-struct LoopNestingGuard {
-  RuntimeState *state;
-  bool ok;
-  explicit LoopNestingGuard(RuntimeState *s) : state(s), ok(false) {
-    if (state->loop_nesting_depth >= 1) {
-      fprintf(stderr, "hipdnn_ep_run_*_loop: nested loops not supported in v1 "
-                      "(loop iter/cond buffers are shared across the "
-                      "RuntimeState)\n");
-      return;
-    }
-    state->loop_nesting_depth++;
-    ok = true;
-  }
-  ~LoopNestingGuard() {
-    if (ok)
-      state->loop_nesting_depth--;
-  }
-};
-
 // Policy: each iter, decide whether to continue. The counted policy never
 // reads cond from the device. The dynamic policy records an event on the
 // stream after the body and synchronizes on it before reading cond_host.
@@ -232,9 +208,6 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
   // cond_init value. Short-circuit here so both paths honor the spec.
   if (!cond_init)
     return 0;
-  LoopNestingGuard nestGuard(state);
-  if (!nestGuard.ok)
-    return -1;
   if (ensureLoopBuffers(state, max_trip_count) != 0)
     return -1;
 

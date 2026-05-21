@@ -186,10 +186,11 @@ struct RuntimeState {
   // Sharing one device iter slot per state is safe for non-nested Loops
   // only -- nested Loops would race on the inner driver overwriting the
   // outer's iter while the outer body still expects to read its own iter
-  // after the inner returns. `loop_nesting_depth` enforces the v1 single-
-  // level constraint: the driver increments it on entry, hard-fails on
-  // re-entry, and decrements on exit. A future P-extension can replace the
-  // single buffer with a small per-depth stack and remove the check.
+  // after the inner returns. OnnxLoopOutlinePass walks each onnx.Loop
+  // body for an inner onnx.Loop and emits a two-location error before
+  // outlining runs, so any nested case is rejected at compile time.
+  // A future P-extension can replace the single buffer with a small
+  // per-depth stack and lift the constraint.
   void *loop_iter_cpu_buf; // hipHostMalloc(default)-allocated, int64[capacity]
   size_t loop_iter_capacity; // current size of loop_iter_cpu_buf (in int64s)
   void *loop_iter_dev;       // hipMalloc'd, sizeof(int64), passed to body
@@ -197,7 +198,6 @@ struct RuntimeState {
   void
       *loop_cond_dev; // hipHostGetDevicePointer(loop_cond_host), passed to body
   void *loop_event;   // hipEvent_t cast to void*; reused for cond-readback sync
-  int32_t loop_nesting_depth;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
