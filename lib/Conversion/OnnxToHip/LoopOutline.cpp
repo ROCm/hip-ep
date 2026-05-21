@@ -431,13 +431,50 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
 void OnnxLoopOutlinePass::runOnOperation() {
   ModuleOp module = getOperation();
 
+  // Pre-scan: reject nested onnx.Loop before any outlining happens. The
+  // HIP runtime drivers share a single iter/cond buffer pair per
+  // RuntimeState (see runtime_state_internal.h), so an inner hip.loop
+  // would race with the outer's not-yet-consumed iter on the next outer
+  // iteration. Has to run here, not inside outlineLoop, because the
+  // post-order walk below visits the inner onnx.Loop first -- by the
+  // time the outer is outlined, the inner has already become a hip.loop
+  // and a per-outlineLoop "scan my body for onnx.Loop" check would miss
+  // it.
+  WalkResult nestedFound = module.walk([&](Operation *outerLoop) {
+    if (outerLoop->getName().getStringRef() != "onnx.Loop")
+      return WalkResult::advance();
+    if (outerLoop->getNumRegions() != 1)
+      return WalkResult::advance();
+    // Region::walk visits ops *inside* the region only, never the region's
+    // owner -- safe to check for "onnx.Loop" without excluding outerLoop.
+    Operation *innerLoop = nullptr;
+    outerLoop->getRegion(0).walk([&](Operation *inner) {
+      if (inner->getName().getStringRef() == "onnx.Loop") {
+        innerLoop = inner;
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (innerLoop) {
+      InFlightDiagnostic diag = outerLoop->emitOpError(
+          "nested onnx.Loop is not supported by the MorphiZen EP "
+          "(the loop runtime shares a single iter/cond buffer pair per "
+          "RuntimeState across all hip.loop instances)");
+      diag.attachNote(innerLoop->getLoc()) << "inner onnx.Loop is here";
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (nestedFound.wasInterrupted())
+    return signalPassFailure();
+
   // Collect all onnx.Loop ops first; mutating during the walk would
   // invalidate iterators (we erase the loop op and insert a new func.func
-  // at module scope). Outer-first walk preorder ensures we outline the
-  // outer loop first; the inner loop, originally nested, is moved verbatim
-  // into the outer's body function as part of the cloning, and a SECOND
-  // pass of the walk discovers it in its new (still-onnx.Loop) home.
-  // To keep the algorithm simple, we re-walk until no more ops are found.
+  // at module scope). With the nested-loop pre-scan above, every onnx.Loop
+  // is a sibling at top level, so this loop terminates after one outlining
+  // pass plus one trailing empty walk. The while/changed structure is
+  // retained from the original pre-rejection algorithm; cheap to keep and
+  // a no-op for the supported single-level case.
   unsigned counter = 0;
   bool changed = true;
   while (changed) {

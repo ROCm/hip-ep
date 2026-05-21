@@ -236,7 +236,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->loop_cond_host = nullptr;
   state->loop_cond_dev = nullptr;
   state->loop_event = nullptr;
-  state->loop_nesting_depth = 0;
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
