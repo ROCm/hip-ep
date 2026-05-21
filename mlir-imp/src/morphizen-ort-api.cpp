@@ -814,6 +814,26 @@ static void initialize_mlir_api() {
     return morphizen::DllSafe<std::vector<morphizen::NodeInput>>(result);
   };
 
+  the_mlir_instance_of_morphizen_ort_api.node_get_implicit_inputs_unsafe =
+      [](const morphizen::Node& node)
+      -> morphizen::DllSafe<std::vector<morphizen::NodeInput>> {
+    auto result = new std::vector<morphizen::NodeInput>();
+
+    auto mlir_node = mlir_impl::MLIRNode(reinterpret_cast<mlir::Operation*>(
+        const_cast<morphizen::Node*>(&node)));
+    auto implicit_args = mlir_node.getImplicitInputNodeArgs();
+    result->reserve(implicit_args.size());
+
+    for (const auto& arg_index : implicit_args) {
+      result->push_back({reinterpret_cast<const morphizen::Node*>(
+                             arg_index.get_producer_node()),
+                         reinterpret_cast<const morphizen::NodeArg*>(
+                             arg_index.to_morphizen_core_node_arg_ptr())});
+    }
+
+    return morphizen::DllSafe<std::vector<morphizen::NodeInput>>(result);
+  };
+
   the_mlir_instance_of_morphizen_ort_api.node_get_output_node_args_unsafe =
       [](const morphizen::Node& node)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {

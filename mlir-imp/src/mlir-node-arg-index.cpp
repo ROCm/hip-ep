@@ -67,6 +67,12 @@ MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(const void* ptr) {
   return ret;
 }
 
+MLIRNodeArgIndex MLIRNodeArgIndex::from_uint64(uint64_t v) {
+  auto ret = MLIRNodeArgIndex::invalid();
+  ret.value_ = v;
+  return ret;
+}
+
 // Getter methods
 unsigned int MLIRNodeArgIndex::get_index() const { return fields_.index_; }
 
@@ -213,6 +219,8 @@ const void* MLIRNodeArgIndex::to_morphizen_core_node_arg_ptr() const {
   // This reverses the mapping done in from_morphizen_core_node_arg_ptr
   return reinterpret_cast<const void*>(static_cast<uintptr_t>(value_));
 }
+
+uint64_t MLIRNodeArgIndex::to_uint64() const { return value_; }
 const MLIRNodeArg& MLIRNodeArgIndex::get_node_arg() const {
   auto node_arg = get_graph().get_node_arg(*this);
   CHECK(node_arg != nullptr)

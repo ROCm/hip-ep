@@ -37,12 +37,15 @@ namespace attr_names {
 constexpr const char* ONNX_GRAPH_NAME = "onnx.graph.name";
 // "node.outputs" to represent NodeProto.output (outputs NodeArg Name)
 constexpr const char* NODE_OUTPUTS = "node.outputs";
-// "morphizen.node_inputs" to store node inputs pointers for runtime access
-constexpr const char* MORPHIZEN_NODE_INPUTS = "morphizen.node_inputs";
-// "morphizen.node_outputs" to store node outputs pointers for runtime access
-constexpr const char* MORPHIZEN_NODE_OUTPUTS = "morphizen.node_outputs";
 // "morphizen.placeholder" for placeholder operations in attributes
 constexpr const char* MORPHIZEN_PLACEHOLDER = "morphizen.placeholder";
+
+// Note: `morphizen.node_inputs` / `morphizen.node_implicit_inputs` /
+// `morphizen.node_outputs` are MLIRNode-internal and live as file-private
+// constants in mlir-node.cpp; consumers go through MLIRNode's get/set/
+// backup/restore methods. Any new `morphizen.*` attribute is automatically
+// covered by the prefix-based filters in mlir-node-attributes.cpp and
+// MLIRNode::backupAndClearMorphizenAttrs.
 
 // onnx.Custom convention: when an op cannot be expressed by a native MLIR op
 // name (custom domains like com.microsoft, or unregistered ONNX ops), it is

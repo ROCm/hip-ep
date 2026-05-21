@@ -145,6 +145,19 @@ public:
   std::vector<morphizen::NodeInput> inputs_as_node_input() const;
 
   /**
+   * @brief Outer-scope SSA values used inside this node's nested regions
+   * (Loop/If/Scan bodies). Empty vector on nodes without regions or
+   * without captures.
+   */
+  std::vector<std::optional<NodeArgConstRef>> implicit_inputs() const;
+
+  /**
+   * @brief Explicit operands followed by implicit captures. Equivalent to
+   * `inputs()` concatenated with `implicit_inputs()`.
+   */
+  std::vector<std::optional<NodeArgConstRef>> all_inputs() const;
+
+  /**
    * @brief Gets the index of the node within the graph.
    * @return int The index of the node.
    *

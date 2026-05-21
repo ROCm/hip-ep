@@ -150,25 +150,34 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
                                      morphizen::Graph& graph) const {
 
   auto nodes = graph_.nodes();
-  // collect all inputs
-  std::unordered_set<const OrtValueInfo*> all_inputs;
+
+  // ORT's Graph::Resolve propagates transitively-captured outer-scope
+  // values up to the outermost region-bearing node's implicit_input_defs,
+  // with stable OrtValueInfo* identity matching outer producers' outputs.
+  // So walking top-level nodes' GetInputs() + GetImplicitInputs() gives
+  // the complete consumed set -- no need to descend into body subgraphs.
+  std::unordered_set<const OrtValueInfo*> consumed;
   for (auto& node : nodes) {
-    std::vector<const OrtValueInfo*> node_inputs = {};
-    size_t num_of_inputs = 0;
-    throw_if_error(ort_api.Node_GetNumInputs(node, &num_of_inputs));
-    node_inputs.resize(num_of_inputs);
-    throw_if_error(
-        ort_api.Node_GetInputs(node, node_inputs.data(), num_of_inputs));
-    for (auto input : node_inputs) {
-      if (input != nullptr) { // input == nullptr mean optional argument.
-        all_inputs.insert(input);
+    Ort::ConstNode wrap(node);
+    for (auto in : wrap.GetInputs()) {
+      if (in) {
+        consumed.insert(in);
+      }
+    }
+    for (auto in : wrap.GetImplicitInputs()) {
+      if (in) {
+        consumed.insert(in);
       }
     }
   }
+  auto output_is_consumed = [&](const OrtValueInfo* vi) -> bool {
+    return consumed.count(vi) > 0;
+  };
 
-  // guess output: add dangling node outputs that are not consumed by any other
-  // node and are not already in the output list. Skip optional intermediates
-  // from multi-output ops where at least one sibling result IS consumed.
+  // guess output: add dangling node outputs that are not consumed by any
+  // other node (explicitly or implicitly via a body) and are not already
+  // in the output list. Skip optional intermediates from multi-output
+  // ops where at least one sibling result IS consumed.
   for (auto& node : nodes) {
     std::vector<const OrtValueInfo*> node_outputs = {};
     size_t num_of_outputs = 0;
@@ -180,7 +189,7 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
     bool any_sibling_consumed = false;
     if (num_of_outputs > 1) {
       for (auto sibling : node_outputs) {
-        if (sibling != nullptr && all_inputs.count(sibling) > 0) {
+        if (sibling != nullptr && output_is_consumed(sibling)) {
           any_sibling_consumed = true;
           break;
         }
@@ -189,7 +198,7 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
 
     for (auto output : node_outputs) {
       if (output != nullptr) { // output == nullptr mean optional argument.
-        if (all_inputs.count(output) == 0) {
+        if (!output_is_consumed(output)) {
           if (any_sibling_consumed) {
             auto vi = Ort::ConstValueInfo(output);
             MY_LOG(3) << "Skipping optional intermediate output: "

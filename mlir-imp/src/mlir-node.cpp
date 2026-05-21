@@ -11,10 +11,21 @@
 #include "./mlir-node-arg-index.hpp"
 #include "./mlir-node-attributes.hpp"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
 #include <glog/logging.h>
 
 namespace morphizen {
 namespace mlir_impl {
+
+// File-private attribute names. These are runtime-pointer-encoded indices
+// that should not leak outside MLIRNode -- consumers go through
+// MLIRNode::get/set/backupAndClear/restore methods.
+namespace {
+constexpr const char* MORPHIZEN_NODE_INPUTS = "morphizen.node_inputs";
+constexpr const char* MORPHIZEN_NODE_IMPLICIT_INPUTS =
+    "morphizen.node_implicit_inputs";
+constexpr const char* MORPHIZEN_NODE_OUTPUTS = "morphizen.node_outputs";
+} // namespace
 
 // === Property Accessors ===
 
@@ -74,42 +85,93 @@ mlir::StringRef MLIRNode::getDescription() const {
   return "<no description>";
 }
 
-std::vector<MLIRNodeArgIndex> MLIRNode::getInputNodeArgs() const {
-  std::vector<MLIRNodeArgIndex> inputs;
+namespace {
 
-  // Read the "morphizen.node_inputs" attribute
-  if (auto inputsAttr = (*this)->getAttr(attr_names::MORPHIZEN_NODE_INPUTS)) {
-    if (auto arrayAttr = mlir::dyn_cast<mlir::ArrayAttr>(inputsAttr)) {
-      inputs.reserve(arrayAttr.size());
-      for (auto attr : arrayAttr) {
-        if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr)) {
-          inputs.push_back(MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
-              reinterpret_cast<const void*>(intAttr.getInt())));
-        }
-      }
+// Decode a morphizen.node_inputs / node_implicit_inputs / node_outputs
+// attribute (ArrayAttr of i64 IntegerAttr storing raw uint64 payloads
+// via bit-pattern reinterpret) into a vector of indices.
+std::vector<MLIRNodeArgIndex> decode_node_arg_array_attr(mlir::Attribute attr) {
+  std::vector<MLIRNodeArgIndex> result;
+  auto arrayAttr = mlir::dyn_cast_or_null<mlir::ArrayAttr>(attr);
+  if (!arrayAttr) {
+    return result;
+  }
+  result.reserve(arrayAttr.size());
+  for (auto e : arrayAttr) {
+    if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(e)) {
+      result.push_back(MLIRNodeArgIndex::from_uint64(
+          static_cast<uint64_t>(intAttr.getInt())));
     }
   }
+  return result;
+}
 
-  return inputs;
+// Encode a vector of indices into an ArrayAttr of i64 IntegerAttrs for the
+// matching attribute slot.
+mlir::ArrayAttr
+encode_node_arg_array_attr(mlir::MLIRContext* ctx,
+                           llvm::ArrayRef<MLIRNodeArgIndex> args) {
+  mlir::OpBuilder builder(ctx);
+  llvm::SmallVector<mlir::Attribute> entries;
+  entries.reserve(args.size());
+  for (const auto& a : args) {
+    entries.push_back(
+        builder.getI64IntegerAttr(static_cast<int64_t>(a.to_uint64())));
+  }
+  return builder.getArrayAttr(entries);
+}
+
+} // namespace
+
+std::vector<MLIRNodeArgIndex> MLIRNode::getInputNodeArgs() const {
+  return decode_node_arg_array_attr((*this)->getAttr(MORPHIZEN_NODE_INPUTS));
+}
+
+std::vector<MLIRNodeArgIndex> MLIRNode::getImplicitInputNodeArgs() const {
+  return decode_node_arg_array_attr(
+      (*this)->getAttr(MORPHIZEN_NODE_IMPLICIT_INPUTS));
 }
 
 std::vector<MLIRNodeArgIndex> MLIRNode::getOutputNodeArgs() const {
-  std::vector<MLIRNodeArgIndex> outputs;
+  return decode_node_arg_array_attr((*this)->getAttr(MORPHIZEN_NODE_OUTPUTS));
+}
 
-  // Read the "morphizen.node_outputs" attribute
-  if (auto outputsAttr = (*this)->getAttr(attr_names::MORPHIZEN_NODE_OUTPUTS)) {
-    if (auto arrayAttr = mlir::dyn_cast<mlir::ArrayAttr>(outputsAttr)) {
-      outputs.reserve(arrayAttr.size());
-      for (auto attr : arrayAttr) {
-        if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr)) {
-          outputs.push_back(MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
-              reinterpret_cast<const void*>(intAttr.getInt())));
-        }
-      }
+void MLIRNode::setInputNodeArgs(llvm::ArrayRef<MLIRNodeArgIndex> args) {
+  (*this)->setAttr(MORPHIZEN_NODE_INPUTS,
+                   encode_node_arg_array_attr((*this)->getContext(), args));
+}
+
+void MLIRNode::setImplicitInputNodeArgs(llvm::ArrayRef<MLIRNodeArgIndex> args) {
+  (*this)->setAttr(MORPHIZEN_NODE_IMPLICIT_INPUTS,
+                   encode_node_arg_array_attr((*this)->getContext(), args));
+}
+
+void MLIRNode::setOutputNodeArgs(llvm::ArrayRef<MLIRNodeArgIndex> args) {
+  (*this)->setAttr(MORPHIZEN_NODE_OUTPUTS,
+                   encode_node_arg_array_attr((*this)->getContext(), args));
+}
+
+llvm::SmallVector<mlir::NamedAttribute>
+MLIRNode::backupAndClearMorphizenAttrs() {
+  llvm::SmallVector<mlir::NamedAttribute> snapshot;
+  // Collect first, then remove: removeAttr invalidates the attr-dict
+  // iteration order.
+  for (auto& named : (*this)->getAttrs()) {
+    if (named.getName().strref().starts_with("morphizen.")) {
+      snapshot.push_back(named);
     }
   }
+  for (auto& named : snapshot) {
+    (*this)->removeAttr(named.getName());
+  }
+  return snapshot;
+}
 
-  return outputs;
+void MLIRNode::restoreMorphizenAttrs(
+    llvm::ArrayRef<mlir::NamedAttribute> snapshot) {
+  for (auto& named : snapshot) {
+    (*this)->setAttr(named.getName(), named.getValue());
+  }
 }
 
 bool MLIRNode::isFused() const {

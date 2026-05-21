@@ -148,7 +148,7 @@ private:
   void initialize_graph_outputs();
   void initialize_constant_initializers();
   void initialize_node_args_map();
-  void maintain_morphizen_attributes();
+  void populate_node_arg_indexes();
 
   // helper functions
   std::string extract_value_name(const mlir::Value value);

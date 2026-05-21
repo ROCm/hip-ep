@@ -170,14 +170,20 @@ calculate_arguments(const Graph& graph, const Node& input_node,
                     const std::vector<const Node*>& body_nodes,
                     const std::set<std::string>& initializers) {
   auto ret = std::vector<std::string>();
-  auto args = node_get_input_node_args(input_node);
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
   auto graph_inputs = graph_ref.inputs();
-  for (auto arg : args) {
-    if (!node_arg_exists(*arg)) {
+
+  // node.all_inputs() unions explicit operands and implicit captures so
+  // the fused-subgraph MetaDef::inputs sees boundary tensors captured by
+  // Loop / If / Scan bodies.
+  auto input_node_ref =
+      morphizen_cxx::NodeConstRef::from_node(graph, input_node);
+  for (auto& opt_arg : input_node_ref.all_inputs()) {
+    if (!opt_arg.has_value()) {
       // testcase : hrnet_w18_small, optional node input
       continue;
     }
+    const auto* arg = opt_arg.value().ptr();
     auto& arg_name = node_arg_get_name(*arg);
     auto node_arg_opt = graph_ref.find_node_arg(arg_name);
     const Node* producer = nullptr;

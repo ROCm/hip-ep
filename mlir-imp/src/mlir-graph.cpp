@@ -18,19 +18,22 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/IRMapping.h" // for IRMapping
+#include "mlir/IR/IRMapping.h"           // for IRMapping
 #include "mlir/IR/Verifier.h"
+#include "mlir/Transforms/RegionUtils.h" // for getUsedValuesDefinedAbove
 #include "morphizen-foundation/env_config.hpp"
-#include "llvm/ADT/STLExtras.h"       // for map_range, to_vector
-#include "llvm/ADT/SmallSet.h"        // for SmallSet
-#include "llvm/ADT/SmallVector.h"     // for SmallVector
-#include "llvm/Support/raw_ostream.h" // for raw_fd_ostream
-#include <algorithm>                  // for std::sort
+#include "llvm/ADT/STLExtras.h"          // for map_range, to_vector
+#include "llvm/ADT/SetVector.h"          // for SetVector
+#include "llvm/ADT/SmallPtrSet.h"        // for SmallPtrSet
+#include "llvm/ADT/SmallSet.h"           // for SmallSet
+#include "llvm/ADT/SmallVector.h"        // for SmallVector
+#include "llvm/Support/raw_ostream.h"    // for raw_fd_ostream
+#include <algorithm>                     // for std::sort
 #include <glog/logging.h>
-#include <iomanip>                    // for std::setprecision
-#include <system_error>               // for std::error_code
-#include <unordered_map>              // for std::unordered_map
-#include <unordered_set>              // for std::unordered_set
+#include <iomanip>                       // for std::setprecision
+#include <system_error>                  // for std::error_code
+#include <unordered_map>                 // for std::unordered_map
+#include <unordered_set>                 // for std::unordered_set
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH, "0")
 DEF_ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH) >= n)
@@ -234,8 +237,7 @@ void MLIRGraph::initialize() {
   initialize_constant_initializers();
   initialize_node_args_map();
   initialize_graph_outputs();
-  // Maintain morphizen attributes after all node args are initialized
-  maintain_morphizen_attributes();
+  populate_node_arg_indexes();
 }
 
 void MLIRGraph::initialize_node_args_map() {
@@ -352,13 +354,13 @@ void MLIRGraph::initialize_graph_outputs() {
             << " (model_output_names: " << model_output_names_.size() << ")";
 }
 
-void MLIRGraph::maintain_morphizen_attributes() {
-  MY_LOG(1) << "Maintaining morphizen.node_inputs and morphizen.node_outputs "
-               "attributes";
+void MLIRGraph::populate_node_arg_indexes() {
+  MY_LOG(1) << "Populating per-op NodeArg index attributes";
 
-  // Get MLIR context and builder
-  auto* context = entry_block_->getParentOp()->getContext();
-  mlir::OpBuilder builder(context);
+  auto value_to_index = [&](mlir::Value value) {
+    return get_node_arg_index(extract_value_name(value));
+  };
+
   // Pre-order so the nested-region skip below can stop descent.
   entry_block_->walk<mlir::WalkOrder::PreOrder>([&](mlir::Operation* op) {
     // Skip return operations, constant operations, and our custom onnx.None
@@ -366,33 +368,43 @@ void MLIRGraph::maintain_morphizen_attributes() {
     if (!onnx_mlir::isReturnOp(op) &&
         op->getName().getStringRef() != "onnx.Constant" &&
         op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
-      // Collect input NodeArg pointers for this operation
-      llvm::SmallVector<mlir::Attribute> inputIndexes;
+      auto node = MLIRNode(op);
+
+      llvm::SmallVector<MLIRNodeArgIndex> explicit_inputs;
+      explicit_inputs.reserve(op->getNumOperands());
       for (mlir::Value operand : op->getOperands()) {
-        auto value_name = extract_value_name(operand);
-        inputIndexes.push_back(builder.getI64IntegerAttr(
-            reinterpret_cast<int64_t>(get_node_arg_index(value_name)
-                                          .to_morphizen_core_node_arg_ptr())));
+        explicit_inputs.push_back(value_to_index(operand));
+      }
+      node.setInputNodeArgs(explicit_inputs);
+
+      // An outer Value may appear as both an explicit operand AND a body
+      // capture (e.g. onnx-mlir's loopfix-promoted Loop where outer-scope
+      // refs aren't fully rewritten to block args); dedup against the
+      // explicit set so it records once.
+      if (op->getNumRegions() > 0) {
+        llvm::SetVector<mlir::Value> captures;
+        mlir::getUsedValuesDefinedAbove(op->getRegions(), captures);
+        llvm::SmallPtrSet<mlir::Value, 8> explicit_operands(
+            op->getOperands().begin(), op->getOperands().end());
+
+        llvm::SmallVector<MLIRNodeArgIndex> implicit_inputs;
+        implicit_inputs.reserve(captures.size());
+        for (mlir::Value v : captures) {
+          if (!explicit_operands.contains(v)) {
+            implicit_inputs.push_back(value_to_index(v));
+          }
+        }
+        node.setImplicitInputNodeArgs(implicit_inputs);
       }
 
-      op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS,
-                  builder.getArrayAttr(inputIndexes));
-
-      // Collect output NodeArg pointers for this operation
-      llvm::SmallVector<mlir::Attribute> outputIndexes;
+      llvm::SmallVector<MLIRNodeArgIndex> outputs;
+      outputs.reserve(op->getNumResults());
       for (auto result : op->getResults()) {
-        auto value_name = extract_value_name(result);
-        outputIndexes.push_back(builder.getI64IntegerAttr(
-            reinterpret_cast<int64_t>(get_node_arg_index(value_name)
-                                          .to_morphizen_core_node_arg_ptr())));
+        outputs.push_back(value_to_index(result));
       }
-
-      op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
-                  builder.getArrayAttr(outputIndexes));
+      node.setOutputNodeArgs(outputs);
     }
-    // Region contents belong to their own subgraph MLIRGraph; their bookkeeping
-    // is not ours. Descending here would also reach extract_value_name with a
-    // region BlockArgument, which only works for an entry-block FuncOp arg.
+    // Region contents belong to their own subgraph MLIRGraph; skip descent.
     // Use getNumRegions() rather than an op-name allow-list so future
     // region-bearing ONNX ops cannot slip through.
     if (op->getNumRegions() > 0) {
@@ -401,7 +413,7 @@ void MLIRGraph::maintain_morphizen_attributes() {
     return mlir::WalkResult::advance();
   });
 
-  MY_LOG(1) << "Completed maintaining morphizen attributes";
+  MY_LOG(1) << "Completed populating NodeArg index attributes";
 }
 
 const std::string& MLIRGraph::get_name() const {
@@ -450,18 +462,19 @@ std::string MLIRGraph::get_symbol_name() const {
 std::vector<mlir::Operation*> MLIRGraph::nodes_unsafe() const {
   std::vector<mlir::Operation*> nodes;
 
-  // Iterate over all operations in the entry block. Block::walk does not
-  // include the parent op, so no FuncOp self-skip is needed.
-  entry_block_->walk([&](mlir::Operation* op) {
-    // Skip return operations, constant operations, and our custom onnx.None
-    // operations
-    if (!onnx_mlir::isReturnOp(op) &&
-        op->getName().getStringRef() != "onnx.Constant" &&
-        op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
-      // Add operation as node
-      nodes.push_back(op);
+  // Top-level only: matches ORT::Graph::Nodes() "this view only"
+  // contract. Body ops of region-bearing nodes (Loop / If / Scan) live
+  // in the subgraph's own MLIRGraph instance and are walked by it.
+  // Block::walk() is recursive in MLIR; using it here would surface
+  // body ops as top-level fuse candidates and break the EP invariant
+  // supported_nodes.size() == ep_supported_outputs.size().
+  for (mlir::Operation& op : *entry_block_) {
+    if (!onnx_mlir::isReturnOp(&op) &&
+        op.getName().getStringRef() != "onnx.Constant" &&
+        op.getName().getStringRef() != onnx_mlir::ONNX_NONE) {
+      nodes.push_back(&op);
     }
-  });
+  }
 
   MY_LOG(1) << "Found " << nodes.size() << " nodes in MLIR graph";
   return nodes;
@@ -937,22 +950,9 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   }
 
   {
-    // Store NodeArg pointer references as MLIR attributes for runtime access
-    llvm::SmallVector<mlir::Attribute> inputIndexes;
-    for (const auto& input : input_args) {
-      inputIndexes.push_back(builder.getI64IntegerAttr(
-          reinterpret_cast<int64_t>(input.to_morphizen_core_node_arg_ptr())));
-    }
-    op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS,
-                builder.getArrayAttr(inputIndexes));
-
-    llvm::SmallVector<mlir::Attribute> outputIndexes;
-    for (const auto& output : output_args) {
-      outputIndexes.push_back(builder.getI64IntegerAttr(
-          reinterpret_cast<int64_t>(output.to_morphizen_core_node_arg_ptr())));
-    }
-    op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
-                builder.getArrayAttr(outputIndexes));
+    auto node = MLIRNode(op);
+    node.setInputNodeArgs(input_args);
+    node.setOutputNodeArgs(output_args);
   }
 
   // Collect output names for the "node.outputs" attribute
@@ -1183,39 +1183,21 @@ std::string MLIRGraph::save_string() const {
     return "";
   }
 
-  // Temporarily backup and remove internal morphizen attributes before saving
-  struct AttributeBackup {
-    mlir::Operation* op;
-    mlir::Attribute inputsAttr;
-    mlir::Attribute outputsAttr;
-  };
-
-  std::vector<AttributeBackup> backups;
-
+  std::vector<
+      std::pair<mlir::Operation*, llvm::SmallVector<mlir::NamedAttribute>>>
+      backups;
   module.walk([&](mlir::Operation* op) {
-    // Skip module and function operations themselves
     if (mlir::isa<mlir::ModuleOp>(op) || mlir::isa<mlir::func::FuncOp>(op)) {
       return;
     }
-
-    // Backup and temporarily remove morphizen internal attributes
-    AttributeBackup backup;
-    backup.op = op;
-    backup.inputsAttr = op->getAttr(attr_names::MORPHIZEN_NODE_INPUTS);
-    backup.outputsAttr = op->getAttr(attr_names::MORPHIZEN_NODE_OUTPUTS);
-
-    if (backup.inputsAttr || backup.outputsAttr) {
-      backups.push_back(backup);
-
-      // Temporarily remove the attributes
-      if (backup.inputsAttr) {
-        op->removeAttr(attr_names::MORPHIZEN_NODE_INPUTS);
-      }
-      if (backup.outputsAttr) {
-        op->removeAttr(attr_names::MORPHIZEN_NODE_OUTPUTS);
-      }
-    }
+    backups.emplace_back(op, MLIRNode(op).backupAndClearMorphizenAttrs());
   });
+
+  auto restore_backups = [&]() {
+    for (auto& [op, snapshot] : backups) {
+      MLIRNode(op).restoreMorphizenAttrs(snapshot);
+    }
+  };
 
   // Serialize the MLIR module (text or bytecode based on env var)
   std::string result;
@@ -1229,37 +1211,18 @@ std::string MLIRGraph::save_string() const {
     mlir::BytecodeWriterConfig config;
     if (failed(mlir::writeBytecodeToFile(module, stream, config))) {
       LOG(ERROR) << "Failed to write MLIR bytecode";
-      // Restore the backed up morphizen attributes before returning
-      for (const auto& backup : backups) {
-        if (backup.inputsAttr) {
-          backup.op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS,
-                             backup.inputsAttr);
-        }
-        if (backup.outputsAttr) {
-          backup.op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
-                             backup.outputsAttr);
-        }
-      }
+      restore_backups();
       return "";
     }
   }
   stream.flush();
 
-  // Restore the backed up morphizen attributes
-  for (const auto& backup : backups) {
-    if (backup.inputsAttr) {
-      backup.op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS, backup.inputsAttr);
-    }
-    if (backup.outputsAttr) {
-      backup.op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
-                         backup.outputsAttr);
-    }
-  }
+  restore_backups();
 
-  MY_LOG(1) << "Successfully serialized MLIR graph to string (restored "
-            << backups.size() << " operations with morphizen attributes)"
-            << " format="
-            << (ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT) ? "text" : "bytecode");
+  MY_LOG(1) << "Successfully serialized MLIR graph to string ("
+            << backups.size() << " ops snapshotted, format="
+            << (ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT) ? "text" : "bytecode")
+            << ")";
   return result;
 }
 
@@ -1791,20 +1754,9 @@ mlir::Operation* MLIRGraph::create_func_call(
   fuse_node->setAttr(attr_names::NODE_OUTPUTS,
                      rewriter.getArrayAttr(output_names));
   fuse_node->setAttr(attr_names::ONNX_NODE_NAME, rewriter.getStringAttr(name));
-  fuse_node->setAttr(
-      attr_names::MORPHIZEN_NODE_INPUTS,
-      rewriter.getArrayAttr(llvm::to_vector(
-          llvm::map_range(inputs, [&](const auto& input) -> mlir::Attribute {
-            return rewriter.getI64IntegerAttr(reinterpret_cast<int64_t>(
-                input.to_morphizen_core_node_arg_ptr()));
-          }))));
-  fuse_node->setAttr(
-      attr_names::MORPHIZEN_NODE_OUTPUTS,
-      rewriter.getArrayAttr(llvm::to_vector(
-          llvm::map_range(outputs, [&](const auto& output) -> mlir::Attribute {
-            return rewriter.getI64IntegerAttr(reinterpret_cast<int64_t>(
-                output.to_morphizen_core_node_arg_ptr()));
-          }))));
+  auto fused = MLIRNode(fuse_node);
+  fused.setInputNodeArgs(inputs);
+  fused.setOutputNodeArgs(outputs);
 
   for (const auto& [output, result] :
        llvm::zip(outputs, fuse_node->getResults())) {
@@ -1818,19 +1770,39 @@ mlir::Operation* MLIRGraph::create_func_call(
 
   std::function<void(mlir::Operation*)> collectDependentOps =
       [&](mlir::Operation* userOp) {
-        if (visited.count(userOp) || userOp == fuse_node ||
-            onnx_mlir::isReturnOp(userOp)) {
-          return;
-        }
-        visited.insert(userOp);
-
-        if (!userOp->isBeforeInBlock(fuse_node) && userOp != fuse_node) {
+        if (userOp == fuse_node || onnx_mlir::isReturnOp(userOp)) {
           return;
         }
 
-        opsToMove.push_back(userOp);
+        // userOp can live inside a nested region (e.g. Loop/If/Scan body)
+        // when fuse_node's outputs are implicitly captured by a region-
+        // bearing op. The naive `userOp->isBeforeInBlock(fuse_node)` is
+        // UB across blocks (mlir/lib/IR/Operation.cpp:386). Translate
+        // userOp to its ancestor that lies in fuse_node's block: that
+        // ancestor is the actual ordering proxy, because fuse_node must
+        // dominate the region-bearing op for the capture to be valid SSA.
+        // Same idiom as
+        // mlir/lib/Dialect/Transform/Interfaces/TransformInterfaces.cpp.
+        mlir::Operation* anchor =
+            fuse_node->getBlock()->findAncestorOpInBlock(*userOp);
+        if (!anchor || anchor == fuse_node || visited.count(anchor)) {
+          return;
+        }
+        visited.insert(anchor);
 
-        for (auto result : userOp->getResults()) {
+        // Only ops preceding fuse_node need to be moved after it to
+        // preserve SSA dominance when fuse_node's results replace the
+        // original outputs.
+        if (!anchor->isBeforeInBlock(fuse_node)) {
+          return;
+        }
+
+        opsToMove.push_back(anchor);
+
+        // Recurse on the anchor's results (the in-block representative),
+        // not userOp's, since transitive in-block users come through the
+        // anchor in fuse_node's block.
+        for (auto result : anchor->getResults()) {
           for (auto& use : result.getUses()) {
             collectDependentOps(use.getOwner());
           }
@@ -1859,13 +1831,17 @@ mlir::Operation* MLIRGraph::create_func_call(
 void MLIRGraph::remove_func_ops(
     std::stack<mlir::Operation*>& cloned_ops_cache) {
   CHECK(!is_subgraph()) << "remove_func_ops is top-level only";
-  // Delete cloned operations in LIFO order using stack
-  // This ensures proper deletion order since later operations may depend on
-  // earlier ones
+  // Delete cloned ops in LIFO order so later ops are erased before their
+  // producers. dropAllReferences() is load-bearing for region-bearing
+  // ops (onnx.Loop / If / Scan) whose body holds inter-op SSA uses (e.g.
+  // onnx.Add result -> onnx.Yield); without it, ~Operation walks the
+  // body and trips its use_empty assert. For region-less ops it is a
+  // no-op.
   while (!cloned_ops_cache.empty()) {
     mlir::Operation* op = cloned_ops_cache.top();
     cloned_ops_cache.pop();
     if (op && op->use_empty()) {
+      op->dropAllReferences();
       op->erase();
     }
   }

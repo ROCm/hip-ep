@@ -45,6 +45,9 @@ struct MorphizenOrtApiExt : public morphizen::OrtApiForMorphizen {
       int element_type,                  //
       const void* data,                  //
       size_t size);
+
+  morphizen::DllSafe<std::vector<morphizen::NodeInput>> (
+      *node_get_implicit_inputs_unsafe)(const morphizen::Node& node);
 };
 
 /**
