@@ -1,0 +1,13 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "hip-test-dll",
+    srcs = ["hip-test-dll.cpp"],
+    deps = [
+        "//tools/common:tool_common_headers",
+        "//include:hip_headers",
+        "//include:foundation_headers",
+        "@llvm-project-overlay//llvm:Support",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -9,6 +9,7 @@ cc_library(
         "//include:foundation_headers",
         "//lib/Compiler:LibHipCompiler",
         "//schemas:HipSchemasLib",
+        "@flatbuffers//:flatbuffers",
     ],
     visibility = ["//visibility:public"],
 )

@@ -1,0 +1,14 @@
+load("@rules_cc//cc:defs.bzl", "cc_shared_library")
+
+# hip-compiler.dll — the C API shared library consumed by onnxruntime EP.
+# On Windows Bazel produces a .dll + .if.lib (import library).
+cc_shared_library(
+    name = "hip_compiler_dll",
+    shared_lib_name = "hip-compiler.dll",
+    roots = ["//lib/CInterface:HipCInterface"],
+    exports_filter = [
+        "//lib/CInterface:HipCInterface",
+        "//include/...",
+    ],
+    visibility = ["//visibility:public"],
+)

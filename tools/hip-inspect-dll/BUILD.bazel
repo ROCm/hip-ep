@@ -1,0 +1,11 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "hip-inspect-dll",
+    srcs = ["hip-inspect-dll.cpp"],
+    deps = [
+        "//tools/common:tool_common_headers",
+        "@llvm-project-overlay//llvm:Support",
+    ],
+    visibility = ["//visibility:public"],
+)

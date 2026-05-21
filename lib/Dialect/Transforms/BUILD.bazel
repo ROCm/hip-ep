@@ -37,7 +37,7 @@ cc_library(
         "@llvm-project-overlay//mlir:MemRefToLLVM",
         "@llvm-project-overlay//mlir:FuncToLLVM",
         "@llvm-project-overlay//mlir:ReconcileUnrealizedCasts",
-        "@flatbuffers//:runtime_cc",
+        "@flatbuffers//:flatbuffers",
     ],
     visibility = ["//visibility:public"],
 )

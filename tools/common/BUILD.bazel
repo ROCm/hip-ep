@@ -1,0 +1,13 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# Shared headers for tool binaries (DllLoader.h, minioptions.h).
+# includes = ["."] makes tools/common/ the search root so that
+# #include "../common/DllLoader.h" resolves when compiled from a sibling dir.
+# The tools use relative-path includes ("../common/DllLoader.h"), so we
+# expose the parent directory (tools/) as the include root instead.
+cc_library(
+    name = "tool_common_headers",
+    hdrs = glob(["*.h"]),
+    includes = [".."],  # workspace-relative: tools/
+    visibility = ["//visibility:public"],
+)

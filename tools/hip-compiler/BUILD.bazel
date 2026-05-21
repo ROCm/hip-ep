@@ -1,0 +1,16 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "hip-compiler",
+    srcs = ["hip-compiler.cpp"],
+    deps = [
+        "//include:hip_headers",
+        "//include/hip/Dialect/IR:HipDialectIncGen",
+        "//include/hip/Dialect/IR:HipTypesIncGen",
+        "//include/hip/Dialect/IR:HipOpsIncGen",
+        "//include/hip/Dialect/Transforms:HipPassesIncGen",
+        "//lib/Compiler:LibHipCompiler",
+        "@llvm-project-overlay//llvm:Support",
+    ],
+    visibility = ["//visibility:public"],
+)
