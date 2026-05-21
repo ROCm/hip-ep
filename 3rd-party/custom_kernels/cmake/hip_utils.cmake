@@ -203,13 +203,49 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
         -fexceptions
     )
 
-    # MSVC 14.51 <cmath> compatibility shim.
+    # MSVC <cmath> + clang-HIP `<cmath>`/`__clang_cuda_math_forward_declares.h`
+    # incompatibility -- two-layer fix.
     #
-    # MSVC 14.51's `<cmath>` adds `inline` / `constexpr` overloads of
-    # `isless` / `islessequal` / etc. that clang in HIP mode treats as
-    # implicitly `__host__ __device__`, colliding with the `__device__`
-    # overloads in clang-hip's bundled `__clang_hip_cmath.h`. Force-include
-    # a tiny shim that neutralises the MS STL macros producing them.
+    # MSVC 14.51's `<cmath>` adds `constexpr` overloads of `isless`,
+    # `islessequal`, `isgreater`, `isgreaterequal`, `islessgreater`,
+    # `isunordered`, `isfinite`, `isinf`, `isnan`, `isnormal` (see
+    # microsoft/STL PR #4612).  In clang's HIP/CUDA mode every `constexpr`
+    # function with no explicit annotation is implicitly `__host__ __device__`,
+    # so these overloads collide with the `__device__`-only declarations in
+    # clang-hip's bundled `__clang_cuda_math_forward_declares.h`:
+    #
+    #   error: __device__ function 'isgreater' cannot overload
+    #          __host__ __device__ function 'isgreater'
+    #
+    # Layer 1 -- the canonical clang fix the diagnostic itself recommends:
+    # `-fno-cuda-host-device-constexpr` stops clang from implicitly marking
+    # unannotated `constexpr` functions as `__host__ __device__`, so MSVC's
+    # `<cmath>` overloads become host-only and the conflict disappears.
+    #
+    # CAVEAT: this also makes STL `constexpr` member functions that previously
+    # worked from device code -- notably `std::numeric_limits<T>::lowest()`,
+    # `::infinity()`, `::quiet_NaN()` -- host-only.  Device-side call sites in
+    # this tree have been migrated to the equivalent C macros (`INT32_MIN` /
+    # `INT64_MIN` from <cstdint>, `INFINITY` / `NAN` from <cmath>), which are
+    # not `constexpr` functions and so are unaffected.  See
+    # `reduce_sum_kernel.hip` for the canonical pattern; do NOT call
+    # `std::numeric_limits<T>::<fn>()` from `__device__` code without a
+    # matching adjustment.
+    #
+    # NOTE: this is a CC1 (frontend) flag in TheRock's clang build, not a
+    # driver flag, so it must be passed via `-Xclang`.  Driver-form
+    # `-fno-cuda-host-device-constexpr` errors with "unknown argument".
+    list(APPEND abi_flags -Xclang -fno-cuda-host-device-constexpr)
+    #
+    # Layer 2 -- belt-and-suspenders: force-include a header that pre-defines
+    # the `_CLANG_BUILTIN1` / `_CLANG_BUILTIN2` macros as empty.  This
+    # successfully neutralised older MSVC 14.51.x revisions that emitted the
+    # overloads at namespace scope after the `#define`, but MSVC 14.51.36231
+    # `<cmath>` re-defines the macros unconditionally inside cmath
+    # (`#define _CLANG_BUILTIN2(NAME) ...` with no `#ifndef` guard), so this
+    # layer alone is no longer sufficient.  Kept as a safety net for the
+    # cases where Layer 1's flag is not respected by some hipcc/clang
+    # combination.
     if(EXISTS "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
         list(APPEND abi_flags -include "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
     endif()

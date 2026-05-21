@@ -13,16 +13,21 @@
 //   error: __device__ function 'isless' cannot overload
 //          __host__ __device__ function 'isless'
 //
-// Until the clang-hip headers are updated to detect MSVC 14.51's `<cmath>`,
-// this header neutralises the MS STL macros that emit the offending overloads.
-// MSVC's existing pre-14.51 `<cmath>` declarations of these symbols are kept,
-// so host-side code compiles unchanged; the device-side overloads from
-// `__clang_hip_cmath.h` stay in effect.
+// Status (MSVC 14.51.36231, May 2026): the primary fix is now the clang flag
+// `-fno-cuda-host-device-constexpr` added to hipcc invocations in
+// `hip_utils.cmake`, which the diagnostic itself recommends.  That flag tells
+// clang not to implicitly mark unannotated `constexpr` functions as
+// `__host__ __device__`, making MSVC's `<cmath>` overloads host-only and
+// removing the collision entirely.
 //
-// Force-included from `_hip_compile_sources` in `3rd-party/custom_kernels/
-// cmake/hip_utils.cmake` (Windows only). Safe to include redundantly: the
-// macros are defined to expand to empty, so any later attempt to (re)define
-// them by the MS STL is overridden.
+// This header remains in the build as a belt-and-suspenders backup.  It used
+// to be the primary fix back when MSVC's pre-14.51.36231 `<cmath>` honoured
+// pre-defined empty `_CLANG_BUILTIN1` / `_CLANG_BUILTIN2` macros; in
+// 14.51.36231 the STL re-defines those macros unconditionally inside cmath
+// (`#define _CLANG_BUILTIN2(NAME) ...` with no `#ifndef` guard), so empty
+// pre-definitions no longer survive long enough to suppress the overload
+// emission.  Force-included from `_hip_compile_sources` in
+// `3rd-party/custom_kernels/cmake/hip_utils.cmake` (Windows only).
 
 #ifndef HIPDNN_EP_MSVC_HIP_CMATH_WORKAROUND_H
 #define HIPDNN_EP_MSVC_HIP_CMATH_WORKAROUND_H
