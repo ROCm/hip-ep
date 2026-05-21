@@ -5,28 +5,16 @@
 
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
-#
-# Files under `patches/**/*.patch` are auto-generated `git format-patch`
-# outputs that we apply verbatim onto third-party source trees in CI (see
-# patches/onnxruntime/README.md). Reformatting them -- stripping trailing
-# whitespace from empty-context diff lines, stripping the BOM that some
-# `git format-patch` shells emit on Windows, or fixing the final-newline
-# convention -- breaks `git apply`. Exclude this directory from the
-# whitespace / EOF / BOM hooks so the patches stay byte-exact.
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
     -   id: trailing-whitespace
-        exclude: ^patches/.*\.patch$
     -   id: end-of-file-fixer
-        exclude: ^patches/.*\.patch$
     -   id: check-yaml
     -   id: check-added-large-files
     -   id: fix-byte-order-marker
-        exclude: ^patches/.*\.patch$
     -   id: mixed-line-ending
-        exclude: ^patches/.*\.patch$
     -   id: check-merge-conflict
 -   repo: local
     hooks:

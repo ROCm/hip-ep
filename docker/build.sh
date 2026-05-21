@@ -22,6 +22,13 @@ set -euo pipefail
 : "${SOURCE_DIR:?SOURCE_DIR not set — run.sh should pass it via -e}"
 : "${HIP_ARCHITECTURES:=gfx1151}"
 : "${ONNXRUNTIME_VERSION:=1.25.1}"
+# Space-separated list of microsoft/onnxruntime PR numbers to fetch from
+# github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply` on top
+# of the pinned ONNXRUNTIME_VERSION tag in A.5. Remove a PR number once
+# its fix lands in the pinned ONNXRUNTIME_VERSION release. Kept in
+# lockstep with .github/workflows/linux-build.yml's env block; CI
+# forwards the workflow value via docker/run.sh.
+: "${ONNXRUNTIME_PR_PATCHES:=28608}"
 : "${PROTOBUF_REF:=v34.0}"
 : "${FLATBUFFERS_REF:=v25.12.19}"
 : "${THEROCK_VERSION:=therock-dist-linux-gfx1151-7.11.0}"
@@ -125,31 +132,33 @@ else
         echo "[skip] $ORT_SRC/.git exists — using user-managed checkout as-is"
     fi
 
-    # Apply locally-maintained ORT patches (see patches/onnxruntime/
-    # README.md). Idempotent: if a patch is already applied in the working
-    # tree (e.g. cache-restored ORT clone from a previous run with the same
-    # patch set), `git apply --reverse --check` succeeds and we skip;
-    # otherwise the patch must apply cleanly or we hard-fail. CI cache keys
-    # for `prebuilt-local` and the ORT source clone both hashFiles() over
-    # this patches dir, so a patch change forces a fresh clone path that
-    # always applies cleanly.
-    PATCH_DIR="$SOURCE_DIR/patches/onnxruntime"
-    if [ -d "$PATCH_DIR" ]; then
-        cd "$ORT_SRC"
-        for patch in "$PATCH_DIR"/*.patch; do
-            [ -f "$patch" ] || continue
-            name=$(basename "$patch")
-            if git apply --check --reverse "$patch" >/dev/null 2>&1; then
-                echo "[skip-patch] $name (already applied)"
-            elif git apply --check "$patch" >/dev/null 2>&1; then
-                echo "[apply-patch] $name"
-                git apply --whitespace=nowarn "$patch"
-            else
-                echo "[error] patch $name neither applies nor is already applied" >&2
-                exit 1
-            fi
-        done
-    fi
+    # Fetch + apply microsoft/onnxruntime PR patches listed in
+    # ONNXRUNTIME_PR_PATCHES. Each `.patch` endpoint returns the git
+    # format-patch mailbox for the PR's current head. Idempotent: a patch
+    # whose changes are already in the working tree (cache-restored ORT
+    # clone from a previous run with the same PR set) is detected via
+    # `git apply --reverse --check` and skipped; a patch that neither
+    # applies forward nor reverses cleanly hard-fails. CI cache keys for
+    # both `prebuilt-local` and the ORT source clone embed
+    # ONNXRUNTIME_PR_PATCHES, so changing the PR set forces a fresh clone
+    # path that always applies cleanly.
+    cd "$ORT_SRC"
+    for pr in $ONNXRUNTIME_PR_PATCHES; do
+        [ -n "$pr" ] || continue
+        url="https://github.com/microsoft/onnxruntime/pull/${pr}.patch"
+        tmp="$SCRATCH_DIR/ort-pr-${pr}.patch"
+        echo "[fetch] $url"
+        curl -fsSL "$url" -o "$tmp"
+        if git apply --check --reverse "$tmp" >/dev/null 2>&1; then
+            echo "[skip-patch] PR #${pr} (already applied)"
+        elif git apply --check "$tmp" >/dev/null 2>&1; then
+            echo "[apply-patch] PR #${pr}"
+            git apply --whitespace=nowarn "$tmp"
+        else
+            echo "[error] PR #${pr} neither applies nor is already applied" >&2
+            exit 1
+        fi
+    done
     cd "$ORT_SRC"
     # No --build_wheel: ORT's python wheel target pulls Python::NumPy and
     # dev headers; we only need C++ libs + headers + onnxruntime_perf_test.

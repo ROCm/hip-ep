@@ -59,6 +59,9 @@ populate_common_args() {
     if [ -n "${OGA_REF:-}" ]; then
         _out+=(-e "OGA_REF=$OGA_REF")
     fi
+    if [ -n "${ONNXRUNTIME_PR_PATCHES:-}" ]; then
+        _out+=(-e "ONNXRUNTIME_PR_PATCHES=$ONNXRUNTIME_PR_PATCHES")
+    fi
     _out+=(
         -w "$SOURCE_DIR"
         --cap-add SYS_PTRACE
