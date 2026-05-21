@@ -34,8 +34,9 @@
 
 // Test 1: passthrough cond (`cond_is_passthrough` set on hip.loop). Expect
 // the fast-path runtime symbol `hipdnn_ep_run_counted_loop` to be called and
-// the body to receive no separate `cond_out` arg (the trampoline aliases
-// cond_in/cond_out on the same buffer).
+// the body to receive no separate `cond_out` arg -- under passthrough the
+// outliner strips the cond from the body's return tuple, and the trampoline
+// skips the cond_out callee arg accordingly (LoopLowering.cpp:174-176).
 module {
   func.func @loop_passthrough(%ctx: !hip.context,
                               %A: memref<16xf32>,
