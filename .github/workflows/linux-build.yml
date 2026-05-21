@@ -37,11 +37,20 @@ jobs:
     # No draft-PR gate: the cache-priming strategy needs every PR push.
     runs-on: ubuntu-latest
     steps:
-      # ROCm/MorphiZen is private — reuse the same deploy key as windows-build.yml.
-      - name: Setup SSH key for MorphiZen submodule
+      # Both submodules (ROCm/MorphiZen and ROCm/hip-custom-kernels) are
+      # private. webfactory/ssh-agent loads both deploy keys into the same
+      # agent; the hip-custom-kernels key's comment is in the SSH-URL form
+      # `git@github.com:ROCm/hip-custom-kernels.git`, which the action
+      # recognizes and uses to auto-configure a per-key SSH host alias plus
+      # the matching `insteadOf` rewrite. MorphiZen's key has a generic
+      # comment and acts as the default identity for plain
+      # `git@github.com:...` URLs (its explicit `insteadOf` is below).
+      - name: Setup SSH keys for private submodules
         uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         with:
-          ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
+          ssh-private-key: |
+            ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
+            ${{ secrets.HIP_CUSTOM_KERNELS_DEPLOY_KEY }}
 
       # Check the repo into a sibling-layout subdir so the workspace root
       # (= $github.workspace) can hold prebuilt-local/, therock-dist/,
@@ -59,8 +68,8 @@ jobs:
       # Run `git submodule update` on the HOST with ssh-agent loaded —
       # docker/build.sh A.2 detects the populated checkout and skips its own
       # submodule update, so the container does NOT need SSH credentials
-      # for the private morphizen repo.
-      - name: Checkout MorphiZen submodule
+      # for the private submodules.
+      - name: Checkout submodules
         working-directory: onnx-hipdnn-ep
         run: |
           set -euo pipefail
