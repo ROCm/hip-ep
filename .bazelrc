@@ -88,8 +88,8 @@ build:prod --strip=never
 # -----------------------------------------------------------------------------
 
 # Remote execution (strict - fails if unavailable)
-build:remote --remote_executor=grpc://127.0.0.1:50051
-build:remote --remote_cache=grpc://127.0.0.1:50051
+build:remote --remote_executor=grpc://172.20.158.244:50051
+build:remote --remote_cache=grpc://172.20.158.244:50051
 build:remote --remote_upload_local_results=true
 build:remote --remote_download_outputs=minimal
 build:remote --remote_timeout=600
