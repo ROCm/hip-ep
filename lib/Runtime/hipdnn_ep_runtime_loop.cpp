@@ -19,21 +19,26 @@
 //                                  cond_out every iter to decide whether
 //                                  to continue.
 //
-// Both drivers reuse a pair of host-mapped per-state buffers (int64 iter,
-// int8 cond) so the host can write iter and read cond with zero DMA.
-// A `std::atomic_thread_fence(memory_order_release)` between the host
-// store of iter and the body launch makes the store globally visible
-// to subsequent kernels on the stream -- HIP does not contractually
-// order plain host stores against subsequent stream submissions, and
-// driver mappings vary (cacheable + snoop on AMD APUs, write-combining
-// on some dGPU configs). The fence lowers to a single sfence on x86
-// (~5 cycles) and is negligible vs the body itself. For the dynamic
-// path's cond readback, a reusable hipEvent_t (created with
-// hipEventDisableTiming) is recorded on the stream after each body call
-// and synchronized on before the host reads cond -- lower latency than
-// hipStreamSynchronize for the small-body case that dominates ONNX-Loop
-// usage, and the same readback shape as the seqlens_k optimization in
-// gqa.cpp.
+// Per-iter iter update is stream-ordered, not host-store-driven: each iter
+// enqueues an 8-byte hipMemcpyAsync(H2D) from a persistent pinned host
+// staging array (cpu_buf[i] = i, filled once on grow) into a small device-
+// side iter slot, then enqueues the body. Both ops on the same stream, so
+// the body kernel reads the value placed by the matching memcpy. This
+// replaces an earlier host-mapped + atomic_thread_fence(release) design
+// which was unsafe: HIP does not order plain host stores against later
+// stream submissions, so all M body kernels saw whatever value the host
+// happened to leave in the mapped page (typically M-1, after the host
+// finished its loop before any kernel ran). The new design adds a single
+// hipMemcpyAsync enqueue (~1-2 µs) per iter -- still vastly cheaper than
+// hipStreamSynchronize (~50-200 µs) and preserves the counted-loop fast
+// path's pipelined throughput.
+//
+// cond is still host-mapped: cond_init is host-written once before the
+// loop starts, cond_out is GPU-written per iter, and the dynamic path
+// uses a reusable hipEvent_t (hipEventDisableTiming) recorded on the
+// stream and hipEventSynchronize'd before reading cond_host. The event
+// sync serialises kernel completion vs the host read, so the read sees
+// the cond_out written by the just-finished iter.
 //
 // Aliasing invariant: each v_in_i and v_out_i (and, on the dynamic path,
 // cond_in and cond_out) refer to the same memref slot in the body's call.
@@ -49,16 +54,23 @@
 #include "runtime_state_internal.h"
 #include "runtime_types.h"
 
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
-// Lazily allocate the per-state iter / cond host-mapped buffers + reusable
-// sync event on first loop call. Both buffers are tiny (8 + 1 bytes); the
-// event is allocator-managed and reused across iters. All three are freed
-// once in hipdnn_ep_state_cleanup.
+// Lazily allocate the per-state iter / cond buffers + reusable sync event
+// on first loop call, then grow the iter cpu staging array on demand if
+// max_trip_count exceeds its current capacity.
+//
+// iter side (stream-ordered, see runtime_state_internal.h comment):
+//   * loop_iter_cpu_buf : pinned host int64[capacity], values [i] = i,
+//                         filled once at grow time
+//   * loop_iter_dev     : device int64, target of per-iter hipMemcpyAsync
+//
+// cond side stays host-mapped (correct as-is; only writer is host-before-loop
+// or GPU-via-stream, both serialised).
 //
 // Partial-allocation policy: if any later step fails, earlier successful
 // allocations stay live on the RuntimeState so the next call's null-check
@@ -66,21 +78,45 @@ namespace {
 // hipdnn_ep_state_cleanup regardless. This is intentional; do not "clean
 // up" by nullifying earlier slots on a later failure, or repeated transient
 // failures will leak.
-int ensureLoopBuffers(RuntimeState *state) {
-  if (!state->loop_iter_host) {
-    if (hipHostMalloc(&state->loop_iter_host, sizeof(int64_t),
-                      hipHostMallocMapped) != hipSuccess) {
+int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
+  // Grow-on-demand the pinned host iter array. Static contents: cpu_buf[i] = i.
+  if (max_trip_count > 0 &&
+      static_cast<size_t>(max_trip_count) > state->loop_iter_capacity) {
+    size_t old_cap = state->loop_iter_capacity;
+    size_t new_cap = static_cast<size_t>(max_trip_count);
+    void *new_buf = nullptr;
+    if (hipHostMalloc(&new_buf, new_cap * sizeof(int64_t),
+                      hipHostMallocDefault) != hipSuccess) {
       fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipHostMalloc for iter buffer failed\n");
-      state->loop_iter_host = nullptr;
+              "hipdnn_ep_run_*_loop: hipHostMalloc for iter cpu buf (%zu "
+              "entries) failed\n",
+              new_cap);
       return -1;
     }
-    if (hipHostGetDevicePointer(&state->loop_iter_dev, state->loop_iter_host,
-                                0) != hipSuccess) {
-      fprintf(stderr, "hipdnn_ep_run_*_loop: hipHostGetDevicePointer for iter "
-                      "buffer failed\n");
-      hipHostFree(state->loop_iter_host);
-      state->loop_iter_host = nullptr;
+    int64_t *new_arr = static_cast<int64_t *>(new_buf);
+    // Copy preserved [0..old_cap) -- values are static (i -> i), so even if we
+    // re-init from scratch the result is identical; copy is just a hair faster
+    // and removes any future surprise if cpu_buf semantics evolve.
+    if (state->loop_iter_cpu_buf && old_cap > 0) {
+      std::memcpy(new_arr, state->loop_iter_cpu_buf, old_cap * sizeof(int64_t));
+    }
+    for (size_t i = old_cap; i < new_cap; ++i) {
+      new_arr[i] = static_cast<int64_t>(i);
+    }
+    if (state->loop_iter_cpu_buf) {
+      // Stream may still hold async memcpy reads from the old buf; drain
+      // before freeing. Grow is a rare per-session event so the sync cost
+      // is negligible.
+      hipStreamSynchronize(static_cast<hipStream_t>(state->stream));
+      hipHostFree(state->loop_iter_cpu_buf);
+    }
+    state->loop_iter_cpu_buf = new_buf;
+    state->loop_iter_capacity = new_cap;
+  }
+  if (!state->loop_iter_dev) {
+    if (hipMalloc(&state->loop_iter_dev, sizeof(int64_t)) != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_run_*_loop: hipMalloc for iter dev buffer failed\n");
       state->loop_iter_dev = nullptr;
       return -1;
     }
@@ -199,17 +235,19 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
   LoopNestingGuard nestGuard(state);
   if (!nestGuard.ok)
     return -1;
-  if (ensureLoopBuffers(state) != 0)
+  if (ensureLoopBuffers(state, max_trip_count) != 0)
     return -1;
 
   void *iter_dev = state->loop_iter_dev;
   void *cond_dev = state->loop_cond_dev;
-  int64_t *iter_host = static_cast<int64_t *>(state->loop_iter_host);
+  int64_t *iter_cpu_buf = static_cast<int64_t *>(state->loop_iter_cpu_buf);
   int8_t *cond_host = static_cast<int8_t *>(state->loop_cond_host);
+  hipStream_t stream = static_cast<hipStream_t>(state->stream);
 
   // Initialize cond_in for the body to read. cond_init is guaranteed true
-  // here (false case short-circuited above); the release fence inside the
-  // loop below orders this store globally visible before iter 0 launches.
+  // here (false case short-circuited above). Host writes cond_host once,
+  // before any kernel launches read cond_dev, so no host-vs-stream race
+  // (the launch of iter 0 below already drains any prior writer).
   *cond_host = int8_t{1};
 
   bool keep_going = true;
@@ -218,15 +256,19 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
       if (!keep_going)
         break;
     }
-    *iter_host = i;
-    // Make the host stores of iter (and, on iter 0, of cond above) globally
-    // visible before the body launches kernels that read iter_dev/cond_dev.
-    // HIP does NOT contractually order plain host stores against subsequent
-    // stream submissions; cacheable+snoop mappings on AMD APUs happen to
-    // make the stores visible without a fence, but write-combining mappings
-    // on some dGPU configs need an sfence to flush. Lowers to one sfence on
-    // x86 / dmb ishst on aarch64 (~5 cycles), negligible vs the body.
-    std::atomic_thread_fence(std::memory_order_release);
+    // Stream-order the iter update: enqueue an 8-byte H2D copy from the
+    // persistent pinned `cpu_buf[i]` (statically holds value `i`) into the
+    // body's iter_dev slot. The subsequent body_fn enqueues its kernels on
+    // the same stream, so they observe `*iter_dev == i` (the value placed
+    // by this matching memcpy). No per-iter CPU sync, no host-store-vs-
+    // kernel-launch race that the old `*iter_host = i; fence;` design had.
+    if (hipMemcpyAsync(iter_dev, &iter_cpu_buf[i], sizeof(int64_t),
+                       hipMemcpyHostToDevice, stream) != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_run_*_loop: hipMemcpyAsync for iter[%lld] failed\n",
+              static_cast<long long>(i));
+      return -1;
+    }
     int rc =
         body_fn(state, iter_dev, cond_dev, loop_carried_descs, capture_descs);
     if (rc != 0)
