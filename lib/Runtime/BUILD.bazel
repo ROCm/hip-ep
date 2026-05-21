@@ -16,6 +16,14 @@ py_binary(
     main = "//cmake:xxd.py",
 )
 
+# Combined xxd + extern-C transform + size append in one Python script.
+# Replaces the two-step CMake pipeline in lib/Target/LLVM/CMakeLists.txt.
+py_binary(
+    name = "make_runtime_ir_data",
+    srcs = ["make_runtime_ir_data.py"],
+    main = "make_runtime_ir_data.py",
+)
+
 # Header-only library exposing lib/Runtime and lib/Runtime/mock as include roots.
 # cc_library.includes paths are relative to the package, prepended with the
 # workspace root automatically — they flow into CcInfo.system_includes and
@@ -66,8 +74,12 @@ genrule(
     name = "runtime_ir_data_cpp",
     srcs = [":runtime_bc"],
     outs = ["runtime_ir_data.cpp"],
-    cmd = "$(location :xxd_py) $(location :runtime_bc) --var kRuntimeIRData --output $@",
-    tools = [":xxd_py"],
+    # Generates:
+    #   extern "C" const unsigned char runtime_bc_data[] = {..., 0x00};
+    #   extern "C" const size_t runtime_bc_data_size = <N>;
+    # Matches the CMake two-step pipeline in lib/Target/LLVM/CMakeLists.txt.
+    cmd = "$(location :make_runtime_ir_data) $(location :runtime_bc) $@",
+    tools = [":make_runtime_ir_data"],
 )
 
 cc_library(

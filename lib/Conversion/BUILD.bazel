@@ -1,0 +1,17 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# Umbrella conversion library that bundles OnnxToHip, OnnxToHipDNN, HipToLLVM
+# and provides registerConversionPasses() used by InitAllPasses.h.
+cc_library(
+    name = "HipConversion",
+    srcs = ["Passes.cpp"],
+    deps = [
+        "//include:hip_headers",
+        "//lib/Conversion/HipToLLVM:HipToLLVM",
+        "//lib/Conversion/OnnxToHip:OnnxToHip",
+        "//lib/Conversion/OnnxToHipDNN:OnnxToHipDNN",
+        "@llvm-project-overlay//mlir:IR",
+        "@llvm-project-overlay//mlir:Pass",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -8,6 +8,7 @@ cc_library(
         "//include:foundation_headers",
         "//lib/Dialect/IR:HipDialectIR",
         "//lib/Dialect/Transforms:HipDialectTransforms",
+        "//lib/Conversion:HipConversion",
         "//lib/Conversion/OnnxToHip:OnnxToHip",
         "//lib/Conversion/HipToLLVM:HipToLLVM",
         "//lib/Conversion/OnnxToHipDNN:OnnxToHipDNN",

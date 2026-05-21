@@ -1,0 +1,56 @@
+# E2E Integration Tests
+#
+# Each test compiles a .mlir model to a DLL (via hip-compiler) then executes
+# it (via hip-test-dll --validate). Two-step compile-then-execute, isolated
+# via TEST_TMPDIR provided by the Bazel test runner.
+#
+# The .mlir sources live in //test/lit/e2e/ and are exposed via exports_files
+# in that package. Both tools are declared as data so Bazel stages them in the
+# runfiles tree alongside the shell script.
+
+_E2E_MODELS = [
+    "test_add_model",
+    "test_cast_model",
+    "test_causal_conv_with_state_model",
+    "test_conv_model",
+    "test_gather_model",
+    "test_gqa_model",
+    "test_matmul_model",
+    "test_matmulnbits_model",
+    "test_mlp_model",
+    "test_mul_model",
+    "test_qmoe_model",
+    "test_qmoe_subgraph_model",
+    "test_reciprocal_model",
+    "test_reduce_sum_model",
+    "test_reshape_model",
+    "test_rotary_embedding_model",
+    "test_sigmoid_model",
+    "test_simplified_layer_norm_model",
+    "test_single_layer_decode",
+    "test_single_layer_small_size",
+    "test_skip_simplified_layer_norm_model",
+    "test_softplus_model",
+    "test_sqrt_model",
+    "test_sub_model",
+]
+
+[
+    sh_test(
+        name = "e2e_" + model,
+        srcs = ["run_e2e.sh"],
+        args = [
+            "$(location //tools/hip-compiler:hip-compiler)",
+            "$(location //test/lit/e2e:" + model + ".mlir)",
+            "$(location //tools/hip-test-dll:hip-test-dll)",
+        ],
+        data = [
+            "//tools/hip-compiler:hip-compiler",
+            "//tools/hip-test-dll:hip-test-dll",
+            "//test/lit/e2e:" + model + ".mlir",
+        ],
+        tags = ["manual"],
+        visibility = ["//visibility:public"],
+    )
+    for model in _E2E_MODELS
+]

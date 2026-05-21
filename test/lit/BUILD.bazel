@@ -1,0 +1,55 @@
+load("@llvm-project-overlay//llvm:lit_test.bzl", "lit_test")
+
+# All .mlir test files — lit discovers and runs them via lit.bazel.cfg.py.
+# Note: e2e/ is a sub-package (has its own BUILD.bazel), so glob() cannot cross
+# that boundary. The e2e .mlir files are listed explicitly via their label.
+_MLIR_SRCS = glob([
+    "Conversion/**/*.mlir",
+    "Dialect/**/*.mlir",
+    "Pipeline/**/*.mlir",
+    "Transforms/**/*.mlir",
+]) + [
+    "//test/lit/e2e:" + f
+    for f in [
+        "test_add_model.mlir",
+        "test_cast_model.mlir",
+        "test_causal_conv_with_state_model.mlir",
+        "test_conv_model.mlir",
+        "test_gather_model.mlir",
+        "test_gqa_model.mlir",
+        "test_matmul_model.mlir",
+        "test_matmulnbits_model.mlir",
+        "test_mlp_model.mlir",
+        "test_mul_model.mlir",
+        "test_qmoe_model.mlir",
+        "test_qmoe_subgraph_model.mlir",
+        "test_reciprocal_model.mlir",
+        "test_reduce_sum_model.mlir",
+        "test_reshape_model.mlir",
+        "test_rotary_embedding_model.mlir",
+        "test_sigmoid_model.mlir",
+        "test_simplified_layer_norm_model.mlir",
+        "test_single_layer_decode.mlir",
+        "test_single_layer_small_size.mlir",
+        "test_skip_simplified_layer_norm_model.mlir",
+        "test_softplus_model.mlir",
+        "test_sqrt_model.mlir",
+        "test_sub_model.mlir",
+    ]
+]
+
+lit_test(
+    name = "hip_lit_tests",
+    srcs = _MLIR_SRCS,
+    args = [
+        "--config-prefix=lit.bazel",
+    ],
+    data = [
+        "lit.bazel.cfg.py",
+        "//tools/hip-mlir-opt:hip-mlir-opt",
+        "@llvm-project-overlay//llvm:FileCheck",
+        "@llvm-project-overlay//llvm:not",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)

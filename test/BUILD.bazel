@@ -1,0 +1,3 @@
+# Top-level test suite alias.
+# Run all lit tests:  bazel test //test/lit:hip_lit_tests --config=remote
+# Run all E2E tests:  bazel test //test/e2e/... --config=remote

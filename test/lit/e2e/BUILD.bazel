@@ -1,0 +1,2 @@
+# Expose .mlir model files for use as data deps in //test/e2e sh_test targets.
+exports_files(glob(["*.mlir"]))
