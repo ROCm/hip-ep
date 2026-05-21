@@ -142,7 +142,7 @@ def Hip_LoopOp : Hip_Op<"loop",
     `(` $ctx `,` $max_trip_count (`,` $cond_init^)? `)`
     ( `iter_args` `(` $v_init^ `:` type($v_init) `)` )?
     ( `captures` `(` $captures^ `:` type($captures) `)` )?
-    `->` `(` type($v_final) `)`
+    ( `->` `(` type($v_final)^ `)` )?
     `body` $body_func
     attr-dict
   }];
