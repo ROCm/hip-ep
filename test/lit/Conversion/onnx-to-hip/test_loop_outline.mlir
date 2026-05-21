@@ -8,11 +8,12 @@
 // body's onnx.* ops can be visited by the standard `--convert-onnx-to-hip`
 // pass like ops in main_graph.
 //
-// Source IR is a simplified counted accumulator loop -- the trip count is a
-// constant, the body is a single elementwise onnx.Add on a captured outer
-// tensor (no onnx.Gather), and the cond is a passthrough `onnx.Identity`.
-// This is the loop_add_v1 model from `SimpleTestModels/` with the gather
-// slice stripped out, so only the outlining surface area is exercised.
+// Source IR is a minimal counted accumulator loop -- constant trip count,
+// a single elementwise onnx.Add on a captured outer tensor, and a
+// passthrough `onnx.Identity` cond chain.  This is intentionally simpler
+// than the `loop_add_v1` model under `SimpleTestModels/` (which has a
+// dynamic trip count via `Squeeze(Dim(input))`, two adds, and a gather);
+// the goal here is to exercise only the outlining surface area.
 //
 // This test validates:
 // - onnx.Loop -> hip.loop + outlined `func.func @<parent>_loop_body_n0`
@@ -87,10 +88,14 @@ module {
 // -----
 
 // Test 2: passthrough cond, ui8 cond_init (morphizen importer spelling).
-// Same loop topology; verifies unboxCondInit folds dense<1> : tensor<ui8> -> i1
-// and that the cloned `onnx.Identity` ops in the body are removed (would
-// otherwise fail bufferization since onnx.Identity has no ConvertOnnxToHip
-// pattern when its sole use was the yield).
+// Same loop topology; verifies that unboxCondInit folds dense<1> :
+// tensor<ui8> -> i1, and that the now-dead `onnx.Identity` op cloned into
+// the body is erased.  (Standard DCE leaves it behind because onnx.Identity
+// is unregistered and MLIR conservatively assumes unregistered ops have
+// side effects, so the outliner has to erase those Identity chains itself
+// -- see LoopOutline.cpp:352-372.  Without that erase, the dead Identity
+// reaches `--convert-onnx-to-hip` with no matching pattern and later
+// fails bufferization with "op was not bufferized".)
 module {
   func.func @main_graph_ui8(%A: tensor<16xf32>, %B: tensor<16xf32>) -> tensor<16xf32> {
     %M = "onnx.Constant"() {value = dense<4> : tensor<i64>} : () -> tensor<i64>
@@ -110,10 +115,11 @@ module {
   // CHECK: hip.loop({{.*}}, {{.*}}, %[[TRUE]])
   // CHECK-SAME: cond_is_passthrough
   //
-  // Body's cond_in arg type is preserved as tensor<ui8> -- the outliner narrows
-  // the OUTER cond_init to i1 (above) but leaves the body's internal cond
-  // plumbing in its original type since the only use was the (now-erased)
-  // passthrough Identity chain.
+  // Body's cond_in arg type is preserved as tensor<ui8>.  The outliner
+  // narrows only the OUTER cond_init (the operand fed into hip.loop) to i1
+  // via unboxCondInit; the body's block-arg types are copied verbatim from
+  // the source onnx.Loop block, regardless of how cond_in is used inside
+  // (see LoopOutline.cpp:285-286).
   // CHECK-LABEL: func.func private @main_graph_ui8_loop_body_n0
   // CHECK-SAME: %{{.*}}: tensor<ui8>,
   //
@@ -140,10 +146,11 @@ module {
   }
 
   // CHECK-LABEL: func.func @main_graph_dynamic_cond
-  // Note the substring match: cond_is_passthrough would change the printed
-  // attr-dict from `{num_loop_carried = ...}` to
-  // `{cond_is_passthrough, num_loop_carried = ...}`, so the literal `{num_`
-  // requires its absence.
+  // The attr-dict is matched literally as `{num_loop_carried = 1 : i32}`.
+  // If `cond_is_passthrough` were set, the printer would emit
+  // `{cond_is_passthrough, num_loop_carried = 1 : i32}` instead, and this
+  // CHECK line would fail to match -- so the literal `{num_` after the
+  // body symbol is what enforces the attribute's absence.
   // CHECK: hip.loop({{.*}}) iter_args({{.*}}) captures({{.*}}) -> (tensor<16xf32>) body @main_graph_dynamic_cond_loop_body_n0 {num_loop_carried = 1 : i32}
   //
   // Body returns (cond_out, v_out).  Op order in the body matches source order
