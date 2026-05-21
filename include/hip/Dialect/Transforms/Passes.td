@@ -237,12 +237,12 @@ def MaterializeHostScalarsPass
     reading it; rejecting it left the host store crashing inside the GPU
     pool, so the pass intentionally allows it.
 
-    Why: on gfx1151 the GPU pool is real device memory; the bufferized
+    Why: on some targets the GPU pool is real device memory; the bufferized
     `tensor.from_elements` lowering emits `memref.alloc + memref.store`
     which, once absorbed by `hip-pool-allocs`, becomes a host store into
-    device memory and SEGVs.  (gfx1150 silently worked because hipMalloc
-    returned UMA-mapped host memory there.)  This pass runs BEFORE
-    `hip-pool-allocs` so candidates never enter the GPU pool.
+    device memory and SEGVs.  (Other targets silently worked because hipMalloc
+    returned UMA-mapped host memory there, masking the bug.)  This pass runs
+    BEFORE `hip-pool-allocs` so candidates never enter the GPU pool.
 
     Pipeline placement is load-bearing — see Pipelines.cpp for the exact
     ordering and the static-shape lockdown LIT under `test/lit/Pipeline/`.
