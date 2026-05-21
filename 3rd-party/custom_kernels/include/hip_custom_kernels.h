@@ -453,6 +453,13 @@ int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
+/* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer.
+ * One block per row, softmaxes the `cols` elements of each row in-place
+ * (data is overwritten with normalized probabilities). Matches ONNX
+ * Softmax semantics for axis = -1 on the flattened input. Used by the
+ * standalone `hip_miopen_softmax` runtime entry point. */
+int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */

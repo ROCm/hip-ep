@@ -23,6 +23,7 @@
 #endif
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -269,16 +270,30 @@ TensorData marshal_output_tensors(
                           output_meta.shape().end());
 
     // Resolve dynamic dims (-1) using DimSource entries from metadata.
-    // Each DimSource with resolved=true says "this output dim equals
-    // input[X].shape[Y]". Static dims and unresolved dynamic dims have
-    // resolved=false and are left alone here (the post-loop CHECK below
-    // will catch any unresolved dynamic dim that survives).
+    // Three encodings per the proto (consumer precedence: static_value >
+    // resolved > unresolved):
+    //   * `static_value > 0` — the compiler's InferOnnxShapes pass
+    //     tightened this dim to a known int. Use directly. (This is the
+    //     channel that lets the EP serve models whose output dim_params
+    //     don't match any input dim_param, without modifying the model.)
+    //   * `resolved == true` — dim is genuinely dynamic; runtime value
+    //     is `round(inputs[input_idx].shape[dim_idx] * mult)`. mult=1.0
+    //     is identity passthrough (most LLM dynshape outputs); mult=1/K
+    //     covers Reshape-induced spatial mergers (Qwen vision's patch
+    //     merger contributes mult=0.25). proto3 default 0.0 is treated
+    //     as 1.0 to preserve backward compatibility with metadata blobs
+    //     written before the `mult` field existed.
+    //   * Otherwise — unresolved; the post-loop CHECK below errors out.
     for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
       if (data.shapes[i][d] != -1)
         continue;
       if (d >= output_meta.dim_sources_size())
         continue;
       const auto &ds = output_meta.dim_sources(d);
+      if (ds.static_value() > 0) {
+        data.shapes[i][d] = ds.static_value();
+        continue;
+      }
       if (!ds.resolved())
         continue;
       int src_input = ds.input_idx();
@@ -295,7 +310,11 @@ TensorData marshal_output_tensors(
           << "Output '" << output_meta.name() << "' dim " << d
           << ": DimSource references input[" << src_input << "] dim " << src_dim
           << " but that input has rank " << src_shape.size();
-      data.shapes[i][d] = src_shape[src_dim];
+      double mult = ds.mult();
+      if (mult == 0.0) // proto3 default; treat as identity passthrough
+        mult = 1.0;
+      double v = static_cast<double>(src_shape[src_dim]) * mult;
+      data.shapes[i][d] = static_cast<int64_t>(std::llround(v));
     }
 
     // OGA's past_present_share_buffer binds the same OrtValue to both
