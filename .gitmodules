@@ -2,3 +2,7 @@
 	path = 3rd-party/morphizen
 	url = ../MorphiZen
 	branch = main
+[submodule "3rd-party/custom_kernels"]
+	path = 3rd-party/custom_kernels
+	url = https://github.com/ROCm/hip-custom-kernels.git
+	branch = main
