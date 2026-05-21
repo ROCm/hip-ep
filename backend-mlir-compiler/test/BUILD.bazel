@@ -1,0 +1,46 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+# E2E integration test for the MLIR backend.
+#
+# Compiles a two-layer-conv ONNX model through the MorphiZen EP → MLIR → HIP
+# pipeline and validates the output. The test gracefully skips (GTEST_SKIP)
+# when any required file is missing, so it runs safely in mock-runtime CI.
+#
+# Path defines: In Bazel's test sandbox the working directory is
+# $TEST_SRCDIR/_main (the runfiles tree root). The defines below use
+# workspace-relative Rlocation paths so fs::exists() resolves them correctly.
+# On Windows the test runner prepends the runfiles manifest lookup; on Linux
+# a symlink forest is created under TEST_SRCDIR.
+cc_test(
+    name = "test-e2e-mlir",
+    srcs = ["test_e2e_mlir.cpp"],
+    copts = select({
+        "@platforms//os:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17"],
+    }),
+    defines = [
+        # Runfiles-relative path to the two-layer conv ONNX model.
+        # The test skips cleanly if the file is missing.
+        'TWO_LAYER_CONV_MODEL_PATH=\\"backend-mlir-compiler/test/models/two_layer_conv.onnx\\"',
+        # Rlocation path to the MorphiZen EP shared library.
+        # Matches the runfiles staging location of
+        # //3rd-party/morphizen/morphizen-core:onnxruntime_morphizen_ep.
+        'MORPHIZEN_EP_LIB_PATH=\\"morphizen/morphizen-core/onnxruntime_morphizen_ep.dll\\"',
+        # Runfiles-relative path to the MLIR backend morphizen config.
+        # etc/morphizen_config_mlir.json doesn't exist yet → test skips.
+        'MORPHIZEN_CONFIG_MLIR_PATH=\\"etc/morphizen_config_mlir.json\\"',
+    ],
+    data = [
+        "models/two_layer_conv.onnx",
+        "//3rd-party/morphizen/morphizen-core:onnxruntime_morphizen_ep",
+    ],
+    deps = [
+        "@onnxruntime//:onnxruntime_headers",
+        "@onnxruntime//:onnxruntime",
+        "@googletest//:gtest_main",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["models/two_layer_conv.onnx"])

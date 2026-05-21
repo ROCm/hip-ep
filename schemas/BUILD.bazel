@@ -48,6 +48,7 @@ genrule(
     outs = ["model_metadata_generated.h"],
     cmd = "$(location @flatbuffers//:flatc) --cpp --gen-object-api --scoped-enums -o $(@D) $(location model_metadata.fbs)",
     tools = ["@flatbuffers//:flatc"],
+    visibility = ["//visibility:public"],
 )
 
 genrule(
