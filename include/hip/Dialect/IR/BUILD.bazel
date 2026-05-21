@@ -1,4 +1,15 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@llvm-project-overlay//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+
+# Public headers for the HIP IR dialect (.h files).
+# includes = ["../../../../include"] makes include/ the search root so that
+# #include "hip/Dialect/IR/HipDialect.h" resolves correctly for dependents.
+cc_library(
+    name = "hip_dialect_ir_headers",
+    hdrs = glob(["*.h"]),
+    includes = ["../../../../include"],  # workspace-relative: include/
+    visibility = ["//visibility:public"],
+)
 
 # td_library for the HIP IR .td files (dialect + types + ops).
 # The include root is //include so that `include "hip/Dialect/IR/..."` resolves.

@@ -1,0 +1,25 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "OnnxToHip",
+    srcs = glob(["*.cpp"]) + glob(["*.h"]),
+    deps = [
+        "//include:hip_headers",
+        "//include:foundation_headers",
+        "//include/hip/Dialect/IR:HipDialectIncGen",
+        "//include/hip/Dialect/IR:HipTypesIncGen",
+        "//include/hip/Dialect/IR:HipOpsIncGen",
+        "//include/hip/Dialect/Transforms:HipPassesIncGen",
+        "//lib/Dialect/IR:HipDialectIR",
+        "@llvm-project-overlay//mlir:IR",
+        "@llvm-project-overlay//mlir:Support",
+        "@llvm-project-overlay//mlir:Pass",
+        "@llvm-project-overlay//mlir:FuncDialect",
+        "@llvm-project-overlay//mlir:ArithDialect",
+        "@llvm-project-overlay//mlir:TensorDialect",
+        "@llvm-project-overlay//mlir:MemRefDialect",
+        "@llvm-project-overlay//mlir:BufferizationDialect",
+        "@llvm-project-overlay//mlir:Transforms",
+    ],
+    visibility = ["//visibility:public"],
+)

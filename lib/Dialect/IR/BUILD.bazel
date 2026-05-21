@@ -1,0 +1,16 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "HipDialectIR",
+    srcs = ["HipDialect.cpp"],
+    deps = [
+        "//include:hip_headers",
+        "//include/hip/Dialect/IR:HipDialectIncGen",
+        "//include/hip/Dialect/IR:HipTypesIncGen",
+        "//include/hip/Dialect/IR:HipOpsIncGen",
+        "@llvm-project-overlay//mlir:IR",
+        "@llvm-project-overlay//mlir:Support",
+        "@llvm-project-overlay//mlir:DestinationStyleOpInterface",
+    ],
+    visibility = ["//visibility:public"],
+)

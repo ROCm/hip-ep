@@ -1,0 +1,25 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# HipDNN is not yet available in the Bazel build; use the stub implementation.
+# When HipDNN becomes available, add CompileHipDNNGraphs.cpp and remove the stub.
+cc_library(
+    name = "OnnxToHipDNN",
+    srcs = [
+        "OutlineOnnxToHipDNN.cpp",
+        "CompileHipDNNGraphsStub.cpp",
+    ],
+    deps = [
+        "//include:hip_headers",
+        "//include/hip/Dialect/IR:HipDialectIncGen",
+        "//include/hip/Dialect/IR:HipTypesIncGen",
+        "//include/hip/Dialect/IR:HipOpsIncGen",
+        "//lib/Dialect/IR:HipDialectIR",
+        "@llvm-project-overlay//mlir:IR",
+        "@llvm-project-overlay//mlir:Pass",
+        "@llvm-project-overlay//mlir:FuncDialect",
+        "@llvm-project-overlay//mlir:TensorDialect",
+        "@llvm-project-overlay//mlir:Support",
+        "@llvm-project-overlay//llvm:Support",
+    ],
+    visibility = ["//visibility:public"],
+)

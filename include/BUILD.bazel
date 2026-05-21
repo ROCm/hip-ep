@@ -1,10 +1,18 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
-# HIP headers (timing.h, compiler_api.h, etc.)
+# HIP headers: top-level hip/*.h files plus headers from sub-packages.
+# glob(["hip/**/*.h"]) does not cross package boundaries, so
+# include/hip/Dialect/IR/ and include/hip/Dialect/Transforms/ (which each
+# have BUILD.bazel files) are NOT matched by the glob. Their headers are
+# exposed via dedicated cc_library targets in those sub-packages.
 cc_library(
     name = "hip_headers",
     hdrs = glob(["hip/**/*.h"]) + glob(["hip/**/*.hpp"], allow_empty = True),
     includes = ["."],
+    deps = [
+        "//include/hip/Dialect/IR:hip_dialect_ir_headers",
+        "//include/hip/Dialect/Transforms:hip_dialect_transforms_headers",
+    ],
     visibility = ["//visibility:public"],
 )
 
