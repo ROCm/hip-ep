@@ -124,6 +124,32 @@ else
     else
         echo "[skip] $ORT_SRC/.git exists — using user-managed checkout as-is"
     fi
+
+    # Apply locally-maintained ORT patches (see patches/onnxruntime/
+    # README.md). Idempotent: if a patch is already applied in the working
+    # tree (e.g. cache-restored ORT clone from a previous run with the same
+    # patch set), `git apply --reverse --check` succeeds and we skip;
+    # otherwise the patch must apply cleanly or we hard-fail. CI cache keys
+    # for `prebuilt-local` and the ORT source clone both hashFiles() over
+    # this patches dir, so a patch change forces a fresh clone path that
+    # always applies cleanly.
+    PATCH_DIR="$SOURCE_DIR/patches/onnxruntime"
+    if [ -d "$PATCH_DIR" ]; then
+        cd "$ORT_SRC"
+        for patch in "$PATCH_DIR"/*.patch; do
+            [ -f "$patch" ] || continue
+            name=$(basename "$patch")
+            if git apply --check --reverse "$patch" >/dev/null 2>&1; then
+                echo "[skip-patch] $name (already applied)"
+            elif git apply --check "$patch" >/dev/null 2>&1; then
+                echo "[apply-patch] $name"
+                git apply --whitespace=nowarn "$patch"
+            else
+                echo "[error] patch $name neither applies nor is already applied" >&2
+                exit 1
+            fi
+        done
+    fi
     cd "$ORT_SRC"
     # No --build_wheel: ORT's python wheel target pulls Python::NumPy and
     # dev headers; we only need C++ libs + headers + onnxruntime_perf_test.

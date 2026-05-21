@@ -90,13 +90,21 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ github.workspace }}/prebuilt-local
-          key: linux-deps-v${{ env.CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # hashFiles() over patches/onnxruntime/*.patch is appended so any
+          # change to a locally-maintained ORT patch (see patches/onnxruntime/
+          # README.md) auto-invalidates the cached install prefix. docker/
+          # build.sh A.5 applies these patches inside the container after
+          # the ORT clone step.
+          key: linux-deps-v${{ env.CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpatch${{ hashFiles('patches/onnxruntime/*.patch') }}
 
       - name: Cache ORT source clone
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ github.workspace }}/onnxruntime
-          key: ort-src-v${{ env.ONNXRUNTIME_VERSION }}
+          # Patch hash is in the key so a patch change forces a fresh clone
+          # (avoids "patch already applied" failures from re-applying a
+          # different version of the same patch on top of an old apply).
+          key: ort-src-v${{ env.ONNXRUNTIME_VERSION }}-ortpatch${{ hashFiles('patches/onnxruntime/*.patch') }}
 
       - name: Cache OGA source clone
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
