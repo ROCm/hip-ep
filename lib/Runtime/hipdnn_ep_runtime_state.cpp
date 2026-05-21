@@ -1001,8 +1001,7 @@ extern "C"
 #ifdef _WIN32
     __declspec(dllexport)
 #endif
-    void
-    hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
+        void hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
   if (!state) {
     return;
   }
