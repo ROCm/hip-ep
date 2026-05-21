@@ -190,7 +190,7 @@ struct RuntimeState {
   // level constraint: the driver increments it on entry, hard-fails on
   // re-entry, and decrements on exit. A future P-extension can replace the
   // single buffer with a small per-depth stack and remove the check.
-  void *loop_iter_cpu_buf;   // hipHostMalloc(default)-allocated, int64[capacity]
+  void *loop_iter_cpu_buf; // hipHostMalloc(default)-allocated, int64[capacity]
   size_t loop_iter_capacity; // current size of loop_iter_cpu_buf (in int64s)
   void *loop_iter_dev;       // hipMalloc'd, sizeof(int64), passed to body
   void *loop_cond_host;      // hipHostMalloc-allocated, host-side view (int8*)
