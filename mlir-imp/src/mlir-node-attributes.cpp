@@ -38,21 +38,23 @@ std::vector<std::string> MLIRNodeAttributes::get_attribute_names() const {
   auto dict_attr = (*this)->getAttrDictionary();
 
   for (auto named_attr : dict_attr) {
-    std::string attr_name = named_attr.getName().str();
+    llvm::StringRef attr_name = named_attr.getName().strref();
 
-    // Skip internal morphizen / onnx-mlir attributes that are not user-visible
-    if (attr_name == attr_names::NODE_OUTPUTS ||
+    // Skip internal morphizen / onnx-mlir attributes that are not user-
+    // visible. Everything under the `morphizen.` namespace is internal;
+    // the remaining named entries are ONNX bookkeeping plus onnx.Custom's
+    // function_name / domain_name stash.
+    if (attr_name.starts_with("morphizen.") ||
+        attr_name == attr_names::NODE_OUTPUTS ||
         attr_name == attr_names::ONNX_NAME ||
         attr_name == attr_names::ONNX_NODE_NAME ||
         attr_name == attr_names::ONNX_GRAPH_NAME ||
-        attr_name == attr_names::MORPHIZEN_NODE_OUTPUTS ||
-        attr_name == attr_names::MORPHIZEN_NODE_INPUTS ||
         attr_name == attr_names::CUSTOM_OP_FUNCTION_NAME ||
         attr_name == attr_names::CUSTOM_OP_DOMAIN_NAME) {
       continue;
     }
 
-    names.push_back(attr_name);
+    names.push_back(attr_name.str());
   }
 
   return names;

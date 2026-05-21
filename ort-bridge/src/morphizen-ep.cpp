@@ -306,9 +306,21 @@ MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
             << (gname_for_log ? gname_for_log : "<null>")
             << "', is_subgraph=" << is_subgraph;
   if (is_subgraph) {
-    // MorphiZen EP does not lower control-flow body subgraphs; let ORT
-    // partition them onto the CPU EP.
-    MY_LOG(1) << "Skip GetCapability for subgraph; leave to ORT/CPU.";
+    // Body subgraphs of Loop/If/Scan are claimed via the parent control-flow
+    // op fused at top-level: ir-converter reads the body region through
+    // `Node_GetSubgraphs` while the parent Loop still exists, and
+    // LoopOutline extracts it inside our MLIR pipeline. Sub-level fuse here
+    // would (1) break the MorphiZen invariant supported_nodes.size() ==
+    // ep_supported_outputs.size() (mlir-graph.cpp deliberately hides body
+    // ops from top-level fuse walk), (2) try to compile a body that
+    // references outer-scope SSA not available standalone, and (3) hide
+    // the original onnx.* body region that LoopOutline needs. The plugin
+    // EP ABI has no assign-only equivalent (only AddNodesToFuse /
+    // AddSingleNode); since ORT removes the original Loop after top-level
+    // fuse finalization, no other EP can reach the body once the parent
+    // is ours.
+    MY_LOG(1) << "Skip GetCapability for subgraph; parent Loop/If/Scan owns "
+                 "the body via LoopOutline.";
     return nullptr;
   }
   // setup API environment
@@ -430,6 +442,7 @@ void MorphiZenEP::update_input_output_argument_indice(
   throw_if_error(ort_api.Node_GetNumInputs(node, &num_of_inputs));
   inputs.resize(num_of_inputs);
   throw_if_error(ort_api.Node_GetInputs(node, inputs.data(), num_of_inputs));
+
   std::vector<const OrtValueInfo*> outputs = {};
   size_t num_of_outputs = 0;
   throw_if_error(ort_api.Node_GetNumOutputs(node, &num_of_outputs));

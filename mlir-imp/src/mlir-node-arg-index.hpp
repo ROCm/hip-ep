@@ -44,6 +44,10 @@ public:
   // a morphizen::NodeArg pointer, which is used in the ORT C API
   static MLIRNodeArgIndex from_morphizen_core_node_arg_ptr(const void* ptr);
 
+  // Round-trip the raw 64-bit payload, used when encoding/decoding an index
+  // into an IntegerAttr (e.g. morphizen.node_inputs).
+  static MLIRNodeArgIndex from_uint64(uint64_t v);
+
 public:
   // Default constructor
   MLIRNodeArgIndex();
@@ -126,6 +130,9 @@ public:
 
   // Conversion method
   const void* to_morphizen_core_node_arg_ptr() const;
+
+  // Raw 64-bit payload, used when encoding into an IntegerAttr.
+  uint64_t to_uint64() const;
 
 private:
   union {

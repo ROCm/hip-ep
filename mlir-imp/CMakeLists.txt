@@ -83,6 +83,7 @@ target_link_libraries(${LIB_NAME}
   MLIRParser          # for mlir::parseSourceFile
   MLIRBytecodeWriter  # for mlir::writeBytecodeToFile
   MLIRSupport         # for MLIR support utilities
+  MLIRTransformUtils  # for mlir::getUsedValuesDefinedAbove
 )
 
 if(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})

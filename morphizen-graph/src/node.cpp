@@ -8,6 +8,7 @@
 #include "morphizen/node_arg.hpp"
 #include <glog/logging.h>
 #include <limits>
+#include <morphizen/morphizen-ort-api-ext.hpp>
 #include <morphizen/morphizen_ort_api.h>
 #include <morphizen/my_ort.h>
 
@@ -292,6 +293,34 @@ std::vector<std::optional<NodeArgConstRef>> NodeConstRef::inputs() const {
 }
 std::vector<morphizen::NodeInput> NodeConstRef::inputs_as_node_input() const {
   return *MORPHIZEN_ORT_API(node_get_inputs_unsafe)(*this);
+}
+std::vector<std::optional<NodeArgConstRef>>
+NodeConstRef::implicit_inputs() const {
+  auto node_input =
+      *MORPHIZEN_ORT_API_EXT(node_get_implicit_inputs_unsafe)(*this);
+  std::vector<std::optional<NodeArgConstRef>> ret;
+  ret.reserve(node_input.size());
+  for (auto ni : node_input) {
+    auto arg = ni.node_arg;
+    if (arg != nullptr && morphizen::node_arg_exists(*arg)) {
+      ret.push_back(NodeArgConstRef(this->graph(), *arg));
+    } else {
+      ret.push_back(std::nullopt);
+    }
+  }
+  return ret;
+}
+std::vector<std::optional<NodeArgConstRef>> NodeConstRef::all_inputs() const {
+  auto ret = inputs();
+  auto impl = implicit_inputs();
+  // NodeArgConstRef holds a const Graph& and is not copy-assignable, so
+  // optional<NodeArgConstRef> can't be assigned -- use push_back which
+  // only invokes copy-construction.
+  ret.reserve(ret.size() + impl.size());
+  for (const auto& opt : impl) {
+    ret.push_back(opt);
+  }
+  return ret;
 }
 const std::string& NodeConstRef::name() const {
   return MORPHIZEN_ORT_API(node_get_name)(*this);

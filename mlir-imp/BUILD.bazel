@@ -37,5 +37,6 @@ cc_library(
         "@llvm-project-overlay//mlir:BytecodeWriter",
         "@llvm-project-overlay//mlir:Support",
         "@llvm-project-overlay//mlir:TensorDialect",
+        "@llvm-project-overlay//mlir:TransformUtils",
     ],
 )

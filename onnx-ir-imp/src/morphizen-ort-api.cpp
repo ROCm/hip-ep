@@ -498,6 +498,16 @@ static void initialize_dummy_api() {
     }
     return morphizen::DllSafe<std::vector<morphizen::NodeInput>>(result);
   };
+  the_instance_of_morphizen_ort_api.node_get_implicit_inputs_unsafe =
+      [](const morphizen::Node& /*node*/)
+      -> morphizen::DllSafe<std::vector<morphizen::NodeInput>> {
+    LOG(FATAL) << "node_get_implicit_inputs_unsafe is not implemented in "
+                  "the onnx-ir-imp backend; Loop / If / Scan models are "
+                  "not supported by this backend yet.";
+    return morphizen::DllSafe<std::vector<morphizen::NodeInput>>(
+        new std::vector<morphizen::NodeInput>());
+  };
+
   the_instance_of_morphizen_ort_api.node_get_output_node_args_unsafe =
       [](const morphizen::Node& node)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {
