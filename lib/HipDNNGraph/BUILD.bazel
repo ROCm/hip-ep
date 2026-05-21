@@ -1,0 +1,33 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# HipDNNGraph — real GPU only (requires TheRock hipDNN SDK).
+# Only built when --//build_settings:mock_runtime=false (--config=real_runtime).
+#
+# HipDNNGraph.cpp includes hipdnn_frontend.hpp which uses dynamic_cast and
+# typeid (requires RTTI). MLIR libraries are built with /GR- (no RTTI).
+# Solve this by enabling RTTI only for this target's compile via /GR copts,
+# matching CMakeLists.txt's set_source_files_properties(...COMPILE_OPTIONS /GR).
+cc_library(
+    name = "HipDNNGraph",
+    srcs = ["HipDNNGraph.cpp"],
+    hdrs = ["HipDNNGraph.h"],
+    # /GR enables RTTI for clang-cl (overrides the global /GR- from the toolchain).
+    # /permissive relaxes strict conformance for HIP __attribute__ syntax.
+    copts = select({
+        "@platforms//os:windows": ["/GR", "/permissive"],
+        "//conditions:default": ["-frtti"],
+    }),
+    local_defines = [
+        "__HIP_PLATFORM_AMD__",
+        "HIP_INCLUDE_HIP_HIP_VECTOR_TYPES_H",
+        "HIP_INCLUDE_HIP_AMD_DETAIL_CHANNEL_DESCRIPTOR_H",
+        "HIP_INCLUDE_HIP_AMD_DETAIL_HIP_VECTOR_TYPES_H",
+    ],
+    deps = [
+        "@llvm-project-overlay//mlir:IR",
+        "@llvm-project-overlay//llvm:Support",
+        "@therock//:hipdnn_backend",
+        "@therock//:hip_runtime",
+    ],
+    visibility = ["//visibility:public"],
+)

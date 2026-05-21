@@ -1,0 +1,13 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "hip-onnx-runner",
+    srcs = ["hip-onnx-runner.cpp"],
+    deps = [
+        "//include:hip_headers",
+        "//tools/common:tool_common_headers",
+        "@onnxruntime//:onnxruntime_headers",
+        "@onnxruntime//:onnxruntime",
+    ],
+    visibility = ["//visibility:public"],
+)
