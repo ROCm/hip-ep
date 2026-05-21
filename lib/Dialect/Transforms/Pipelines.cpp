@@ -79,9 +79,9 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     also visible to the candidate scan) and BEFORE PoolAllocs (so
   //     candidates are removed from its input set).  If PoolAllocs runs
   //     first, it absorbs the alloc into a memref.view over GPU pool memory
-  //     and the subsequent host store SEGVs on gfx1151 / gfx1100 / gfx1101
-  //     (real device memory; gfx1150 silently worked because hipMalloc
-  //     returned UMA-mapped host memory there).  See
+  //     and the subsequent host store SEGVs on targets where the GPU pool is
+  //     real device memory (other targets silently worked because hipMalloc
+  //     returned UMA-mapped host memory there, masking the bug).  See
   //     MaterializeHostScalars.cpp file header for the full pinned-mapped
   //     story; the static-shape lockdown test under
   //     test/lit/Pipelines/ asserts this ordering does not regress.

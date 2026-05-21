@@ -89,9 +89,9 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
   auto kAttr = rewriter.getI64IntegerAttr(kIntAttr ? kIntAttr.getSInt() : 1);
 
   // ms.QMoE's `block_size` attribute is documented as optional (no spec
-  // default) and is omitted by some quantization tools (e.g. AWQ exports of
-  // gpt-oss-120b). Without it `wrap_qmoe` later divides by zero. When the
-  // attribute is absent or non-positive, derive block_size from the
+  // default) and is omitted by some quantization tools (notably AWQ-style
+  // exports of MoE models). Without it `wrap_qmoe` later divides by zero.
+  // When the attribute is absent or non-positive, derive block_size from the
   // FC1 (gate_up_proj) scales tensor: scales has shape
   //     [num_experts, output_features, k_blocks_fc1]
   // with k_blocks_fc1 = ceil(hidden_size / block_size) and the activation

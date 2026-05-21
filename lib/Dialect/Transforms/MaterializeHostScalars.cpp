@@ -14,21 +14,47 @@
 //
 // Why this pass exists
 // --------------------
-// On gfx1151 the GPU pool is real device memory; the bufferized
+// On targets where the GPU pool is real device memory, the bufferized
 // `tensor.from_elements` lowering emits `memref.alloc + memref.store`
 // which, once absorbed by `hip-pool-allocs`, becomes a host store into
-// device memory and SEGVs.  gfx1150 silently worked because hipMalloc
-// returned UMA-mapped host memory there.  This pass runs BEFORE
-// `hip-pool-allocs` so candidates never enter the GPU pool.
+// device memory and SEGVs.  Other targets silently worked because hipMalloc
+// returned UMA-mapped host memory there, masking the bug.  This pass runs
+// BEFORE `hip-pool-allocs` so candidates never enter the GPU pool.
+//
+// Example IR (canonical seqlens_k pattern, edited for brevity)
+// ------------------------------------------------------------
+// Before (single-element host-fed scalar consumed by a hip op):
+//
+//   %c0_i64 = arith.constant 0 : i64
+//   %alloc  = memref.alloc() : memref<i64>           // <-- candidate
+//   memref.store %c0_i64, %alloc[] : memref<i64>     // host store
+//   %seqlens_k = hip.cast %alloc                     // hip consumer
+//                : memref<i64> to memref<1xi32>
+//
+// After (alloc replaced by a view into the per-function host scratch buffer):
+//
+//   %total   = arith.constant 8 : index              // 1 elem * 8 bytes (i64)
+//   %scratch = hip.get_host_scratch(%ctx, %total) : memref<?xi8>
+//   %c0      = arith.constant 0 : index
+//   %view    = memref.view %scratch[%c0][] : memref<?xi8> to memref<i64>
+//   %c0_i64  = arith.constant 0 : i64
+//   memref.store %c0_i64, %view[] : memref<i64>      // host store, into
+//                                                    // host-mapped memory
+//   %seqlens_k = hip.cast %view                      // GPU still reads at
+//                : memref<i64> to memref<1xi32>      // the same VA (UMA)
+//
+// Multiple candidates in one function share ONE `hip.get_host_scratch`
+// emitted at the entry block; each candidate gets its own 64-byte-aligned
+// offset.  See test/lit/Dialect/hip-materialize-host-scalars.mlir for the
+// full set of accepted/rejected shapes.
 //
 // Hip-dialect users are accepted, not rejected
 // --------------------------------------------
 // `hipHostMalloc(hipHostMallocMapped)` returns a host pointer that is also
-// GPU-accessible at the same virtual address on UMA targets (gfx1100,
-// gfx1101, gfx1150, gfx1151 verified), so the bare-ptr ABI used by
-// `--convert-hip-to-llvm` consumes the same buffer regardless of whether
-// it was hipMalloc'd or hipHostMalloc'd.  This is the correctness fix vs
-// the early design that rejected hip consumers: the canonical
+// GPU-accessible at the same virtual address on UMA targets, so the bare-ptr
+// ABI used by `--convert-hip-to-llvm` consumes the same buffer regardless of
+// whether it was hipMalloc'd or hipHostMalloc'd.  This is the correctness fix
+// vs the early design that rejected hip consumers: the canonical
 // `tensor.from_elements -> reduce_sum + sub + cast -> seqlens_k` GQA
 // pattern produces exactly an alloc with a host `memref.store` followed
 // by a `hip.cast` reading it; rejecting it left the host store crashing
@@ -92,12 +118,13 @@ static int64_t roundUp(int64_t x, int64_t align) {
 ///   - integer or index element type (no float -> these are bigger and almost
 ///     always GPU-consumed in flight)
 ///   - has at least one host I/O user (memref.store or memref.load): this is
-///     the SEGV trigger on gfx1151 — host accessing a GPU-pool address
+///     the SEGV trigger on targets where the GPU pool is real device memory
+///     — host accessing a GPU-pool address
 ///   - every user is in {memref.store, load, dim, dealloc} OR is a hip dialect
 ///     op. Hip consumers are fine: hipHostMalloc(hipHostMallocMapped) returns
 ///     a host pointer that is also GPU-accessible at the same VA on UMA
-///     (gfx1150/gfx1151), so the bare-ptr ABI used by --convert-hip-to-llvm
-///     works whether the backing memory is hipMalloc'd or hipHostMalloc'd.
+///     targets, so the bare-ptr ABI used by --convert-hip-to-llvm works
+///     whether the backing memory is hipMalloc'd or hipHostMalloc'd.
 ///
 /// Critically, we DO accept allocs with hip op users (writers and readers).
 /// The original implementation rejected those — but the canonical
