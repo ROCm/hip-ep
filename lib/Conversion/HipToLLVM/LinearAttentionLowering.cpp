@@ -217,8 +217,8 @@ struct LinearAttentionOpLowering
 
 } // namespace
 
-void mlir::hip::populateLinearAttentionLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns) {
   patterns.add<LinearAttentionOpLowering>(converter);
 }
 

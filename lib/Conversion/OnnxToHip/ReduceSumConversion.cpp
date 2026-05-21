@@ -93,8 +93,8 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateReduceSumConversionPatterns(RewritePatternSet &patterns,
-                                                    MLIRContext *ctx) {
+void populateReduceSumConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx) {
   patterns.add<ReduceSumToHip>(ctx);
 }
 

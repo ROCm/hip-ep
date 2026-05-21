@@ -103,10 +103,18 @@ protected:
   std::string config_path_;
 
   void SetUp() override {
-    // Set environment variables for verbose logging
-    _putenv_s("XLNX_ONNX_EP_VERBOSE", "2");
-    _putenv_s("DEBUG_LOG_LEVEL", "info");
-    _putenv_s("MORPHIZEN_DEBUG_PLUGIN", "1");
+    // Set environment variables for verbose logging. _putenv_s is MSVC-only;
+    // POSIX uses setenv. Wrap both behind a tiny SETENV macro so this test
+    // builds on both platforms.
+#ifdef _WIN32
+#define HIPDNN_SETENV(k, v) _putenv_s((k), (v))
+#else
+#define HIPDNN_SETENV(k, v) setenv((k), (v), /*overwrite=*/1)
+#endif
+    HIPDNN_SETENV("XLNX_ONNX_EP_VERBOSE", "2");
+    HIPDNN_SETENV("DEBUG_LOG_LEVEL", "info");
+    HIPDNN_SETENV("MORPHIZEN_DEBUG_PLUGIN", "1");
+#undef HIPDNN_SETENV
 
     // Initialize ORT environment with configurable log level
     OrtLoggingLevel log_level = GetOrtLoggingLevel();
