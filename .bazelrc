@@ -23,6 +23,10 @@ common --repo_env=PATH
 common --registry=https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c
 common --registry=https://bcr.bazel.build
 
+# Persistent repository cache — survives across Bazel invocations and CI runs.
+# On self-hosted runners this is a local disk cache (same path as MorphiZen).
+common --repository_cache=C:/bazel_cache/repository_cache
+
 # Credential helper: supplies Bearer token for private ROCm GitHub registry.
 # Reads GITHUB_TOKEN env var (CI) or falls back to `gh auth token` (local dev).
 common --credential_helper=raw.githubusercontent.com=%workspace%/tools/github-credential-helper.cmd

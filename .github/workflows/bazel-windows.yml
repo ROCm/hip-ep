@@ -1,0 +1,88 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Bazel Windows Build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  bazel-build:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: [self-hosted, Windows, X64]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: mock
+            bazel_config: --config=remote
+            run_tests: true
+          - name: real
+            bazel_config: --config=remote --config=real_runtime
+            run_tests: false
+
+    name: bazel build (${{ matrix.name }})
+
+    steps:
+      - name: Add git-lfs to PATH
+        shell: powershell
+        run: echo "C:\Program Files\Git\cmd" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Setup SSH key for MorphiZen submodule
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Checkout MorphiZen submodule
+        shell: bash
+        run: |
+          git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
+            "../MorphiZen"
+          git submodule update --init --recursive
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
+        with:
+          bazelisk-version: 1.x
+          bazelisk-cache: true
+          # Self-hosted runner uses persistent local disk cache at
+          # C:/bazel_cache/repository_cache (shared with MorphiZen builds).
+          repository-cache: false
+
+      # TheRock is fetched by Bazel's module system via MODULE.bazel when
+      # --config=real_runtime is active. No manual download step needed.
+      - name: bazel build
+        shell: powershell
+        run: bazel build ${{ matrix.bazel_config }} --build_tag_filters=-manual //...
+        env:
+          GITHUB_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}
+
+      # Tests run only for mock build — real runtime tests need GPU hardware
+      # and are covered by the gpu-perf-accuracy-test workflow.
+      - name: bazel test
+        if: matrix.run_tests
+        shell: powershell
+        run: bazel test ${{ matrix.bazel_config }} --test_output=errors --build_tag_filters=-manual //...
+        env:
+          GITHUB_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}
