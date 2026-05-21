@@ -16,7 +16,8 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @test_matmul_lowering
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
-// Verify 9 parameters:
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+// Verify 10 parameters:
 // - 4 pointers: state, A, B, output
-// - 5 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2
+// - 6 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2, b_batched=0
+//   (B is rank-2 [K, N] = broadcast weight → b_batched = 0)

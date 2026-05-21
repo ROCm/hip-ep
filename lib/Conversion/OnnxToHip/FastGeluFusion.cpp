@@ -52,6 +52,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "OnnxResultTypeInference.h"
 #include "OnnxToHipUtils.h"
 
 #include "llvm/ADT/Statistic.h"
@@ -170,6 +171,199 @@ static bool isBinaryOpWithConst(mlir::Operation *op, llvm::StringRef opName,
   outOther = other;
   return true;
 }
+
+/// Vision variant: Gemma-3 SigLIP MLP inlines the FastGelu chain with three
+/// substitutions vs. the canonical pattern matched by `InlinedFastGeluToGelu`:
+///
+///   1. `Pow(x, 3)`              -> `Mul(x, Mul(x, x))`   (cube via repeated
+///   Mul)
+///   2. `Sum(a, b)`              -> `Add(a, b)`           (Add instead of Sum)
+///   3. `Mul(Mul(0.5, x), phi)`  -> `Mul(0.5, Mul(x, phi))` (constant on the
+///                                                          outer Mul)
+///
+/// Walk (all op names use `onnx.Add`/`onnx.Mul`, NOT `onnx.Sum`):
+///
+///   xx       = Mul(x, x)                 // x^2
+///   xxx      = Mul(x, xx)                // x^3 (operand order may vary)
+///   scaled   = Mul(0.044715, xxx)
+///   inner    = Add(x, scaled)
+///   tanh_in  = Mul(sqrt(2/π), inner)
+///   tanh     = Tanh(tanh_in)
+///   phi      = Add(1.0, tanh)
+///   x_phi    = Mul(x, phi)               // not yet * 0.5
+///   y        = Mul(0.5, x_phi)
+///
+/// Implemented separately rather than polymorphically with the canonical
+/// pattern so each match path stays readable and its diagnostics keep their
+/// per-step granularity (the `tanh.in.mul_sqrt2pi :: onnx.Mul` line documented
+/// in CLAUDE.md is the regression signal for that pattern; this pattern's
+/// failure histogram doesn't conflate the two).
+struct InlinedFastGeluVisionToGelu : public mlir::RewritePattern {
+  InlinedFastGeluVisionToGelu(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Tanh", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *tanhOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (tanhOp->getNumOperands() != 1 || tanhOp->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(tanhOp, "tanh.arity");
+
+    // tanh_in = Mul(sqrt(2/π), inner)
+    mlir::Operation *tanhInputMul = tanhOp->getOperand(0).getDefiningOp();
+    if (!tanhInputMul)
+      return rewriter.notifyMatchFailure(tanhOp, "tanh.in.defop_null");
+    mlir::Value c2pi, inner;
+    if (!isBinaryOpWithConst(tanhInputMul, "onnx.Mul",
+                             /*sqrt(2/π)*/ 0.7978845608, c2pi, inner))
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "tanh.in.mul_sqrt2pi.vision (observed: " << tanhInputMul->getName()
+          << ")";
+      });
+
+    // inner = Add(x, scaled);  scaled = Mul(0.044715, xxx);  xxx = Mul(x,
+    // Mul(x, x))
+    mlir::Operation *innerOp = inner.getDefiningOp();
+    if (!innerOp || innerOp->getName().getStringRef() != "onnx.Add" ||
+        innerOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "inner.add.vision (observed: "
+          << (innerOp ? innerOp->getName().getStringRef() : "<null>") << ")";
+      });
+
+    // Probe each Add operand: the non-`x` operand is `scaled = Mul(0.044715,
+    // xxx)`
+    mlir::Value scaled, x;
+    for (mlir::Value cand : innerOp->getOperands()) {
+      mlir::Operation *def = cand.getDefiningOp();
+      if (def && def->getName().getStringRef() == "onnx.Mul" &&
+          def->getNumOperands() == 2) {
+        auto [c, other] = matchCommutativeConst(def, 0.044715);
+        if (c) {
+          scaled = cand;
+          x = (cand == innerOp->getOperand(0)) ? innerOp->getOperand(1)
+                                               : innerOp->getOperand(0);
+          break;
+        }
+      }
+    }
+    if (!scaled || !x)
+      return rewriter.notifyMatchFailure(tanhOp, "scaled_pow.044715.vision");
+
+    mlir::Operation *scaledOp = scaled.getDefiningOp();
+    mlir::Value c044715, xxx;
+    if (!isBinaryOpWithConst(scaledOp, "onnx.Mul", 0.044715, c044715, xxx))
+      return rewriter.notifyMatchFailure(tanhOp, "scaled_pow.mul.vision");
+
+    // xxx = Mul(x, xx);  xx = Mul(x, x). The outer Mul is commutative — the
+    // canonical Gemma-3 export is Mul(x, xx) but accept either operand order.
+    mlir::Operation *xxxOp = xxx.getDefiningOp();
+    if (!xxxOp || xxxOp->getName().getStringRef() != "onnx.Mul" ||
+        xxxOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(tanhOp, "xxx.not_mul");
+    mlir::Value xx;
+    if (xxxOp->getOperand(0) == x)
+      xx = xxxOp->getOperand(1);
+    else if (xxxOp->getOperand(1) == x)
+      xx = xxxOp->getOperand(0);
+    else
+      return rewriter.notifyMatchFailure(tanhOp, "xxx.x_not_in_operands");
+    mlir::Operation *xxOp = xx.getDefiningOp();
+    if (!xxOp || xxOp->getName().getStringRef() != "onnx.Mul" ||
+        xxOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(tanhOp, "xx.not_mul");
+    if (xxOp->getOperand(0) != x || xxOp->getOperand(1) != x)
+      return rewriter.notifyMatchFailure(tanhOp, "xx.not_x_squared");
+
+    // Forward walk:
+    //   phi   = Add(1.0, tanh)        (Add not Sum)
+    //   x_phi = Mul(x, phi)
+    //   y     = Mul(0.5, x_phi)
+    mlir::Value tanhRes = tanhOp->getResult(0);
+    if (!tanhRes.hasOneUse())
+      return rewriter.notifyMatchFailure(tanhOp, "tanh.not_one_use");
+    mlir::Operation *phiOp = *tanhRes.getUsers().begin();
+    mlir::Value c1, tanhInPhi;
+    if (!isBinaryOpWithConst(phiOp, "onnx.Add", 1.0, c1, tanhInPhi))
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "phi.add_one.vision (observed: " << phiOp->getName() << ")";
+      });
+    if (tanhInPhi != tanhRes)
+      return rewriter.notifyMatchFailure(tanhOp, "phi.tanh_mismatch.vision");
+
+    if (!phiOp->getResult(0).hasOneUse())
+      return rewriter.notifyMatchFailure(tanhOp, "phi.not_one_use");
+    mlir::Operation *xPhiOp = *phiOp->getResult(0).getUsers().begin();
+    if (xPhiOp->getName().getStringRef() != "onnx.Mul" ||
+        xPhiOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(tanhOp, "x_phi.not_mul.vision");
+    // The non-phi operand must be `x`.
+    mlir::Value xPhiOther;
+    for (mlir::Value cand : xPhiOp->getOperands()) {
+      if (cand != phiOp->getResult(0)) {
+        xPhiOther = cand;
+        break;
+      }
+    }
+    if (xPhiOther != x)
+      return rewriter.notifyMatchFailure(tanhOp, "x_phi.x_mismatch.vision");
+
+    if (!xPhiOp->getResult(0).hasOneUse())
+      return rewriter.notifyMatchFailure(tanhOp, "x_phi.not_one_use");
+    mlir::Operation *finalMulOp = *xPhiOp->getResult(0).getUsers().begin();
+    mlir::Value cHalf, xPhiInFinal;
+    if (!isBinaryOpWithConst(finalMulOp, "onnx.Mul", 0.5, cHalf, xPhiInFinal))
+      return rewriter.notifyMatchFailure(tanhOp, [&](mlir::Diagnostic &d) {
+        d << "final.mul_half.vision (observed: " << finalMulOp->getName()
+          << ")";
+      });
+    if (xPhiInFinal != xPhiOp->getResult(0))
+      return rewriter.notifyMatchFailure(tanhOp, "final.xphi_mismatch.vision");
+
+    // ── all matched; rewrite final Mul to onnx.Gelu(x, "tanh") ───────────
+    mlir::Location loc = finalMulOp->getLoc();
+    mlir::OperationState state(loc, "onnx.Gelu");
+    state.addOperands(x);
+    // Gelu output type == input type. Route through the shared
+    // inferUnarySameShape rule so the contract is explicit and matches
+    // the typing convention in ProjectorOpsRewrites. For an unranked-
+    // tensor input (rare on HF exports) fall back to the final Mul's
+    // type, which has the same shape as x by construction.
+    mlir::Type geluResultType;
+    if (auto rt = mlir::dyn_cast<mlir::RankedTensorType>(x.getType()))
+      geluResultType = inferUnarySameShapeResultType(rt);
+    else
+      geluResultType = finalMulOp->getResult(0).getType();
+    state.addTypes(geluResultType);
+    state.addAttribute("approximate", rewriter.getStringAttr("tanh"));
+    if (auto outputs =
+            finalMulOp->getAttrOfType<mlir::ArrayAttr>("node.outputs"))
+      state.addAttribute("node.outputs", outputs);
+    if (auto nodeName =
+            finalMulOp->getAttrOfType<mlir::StringAttr>("onnx_node_name"))
+      state.addAttribute("onnx_node_name", nodeName);
+    rewriter.setInsertionPoint(finalMulOp);
+    mlir::Operation *geluOp = rewriter.create(state);
+
+    rewriter.replaceOp(finalMulOp, geluOp->getResult(0));
+    auto eraseIfDead = [&rewriter](mlir::Operation *op) {
+      if (op && op->use_empty())
+        rewriter.eraseOp(op);
+    };
+    eraseIfDead(xPhiOp);
+    eraseIfDead(phiOp);
+    eraseIfDead(tanhOp);
+    eraseIfDead(tanhInputMul);
+    eraseIfDead(innerOp);
+    eraseIfDead(scaledOp);
+    eraseIfDead(xxxOp);
+    eraseIfDead(xxOp);
+
+    LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] fused vision-variant chain at "
+                            << loc << "\n");
+    ++NumFastGeluFused;
+    return mlir::success();
+  }
+};
 
 struct InlinedFastGeluToGelu : public mlir::RewritePattern {
   InlinedFastGeluToGelu(mlir::MLIRContext *ctx)
@@ -294,7 +488,17 @@ struct InlinedFastGeluToGelu : public mlir::RewritePattern {
     mlir::Location loc = finalMulOp->getLoc();
     mlir::OperationState state(loc, "onnx.Gelu");
     state.addOperands(x);
-    state.addTypes(finalMulOp->getResult(0).getType());
+    // Gelu output type == input type. Route through the shared
+    // inferUnarySameShape rule so the contract is explicit and matches
+    // the typing convention in ProjectorOpsRewrites. For an unranked-
+    // tensor input (rare on HF exports) fall back to the final Mul's
+    // type, which has the same shape as x by construction.
+    mlir::Type geluResultType;
+    if (auto rt = mlir::dyn_cast<mlir::RankedTensorType>(x.getType()))
+      geluResultType = inferUnarySameShapeResultType(rt);
+    else
+      geluResultType = finalMulOp->getResult(0).getType();
+    state.addTypes(geluResultType);
     state.addAttribute("approximate", rewriter.getStringAttr("tanh"));
     // Preserve the original output name attribute so downstream IR dumps
     // and metadata stay readable.
@@ -344,7 +548,7 @@ struct InlinedFastGeluToGelu : public mlir::RewritePattern {
 
 void populateFastGeluFusionPatterns(mlir::RewritePatternSet &patterns,
                                     mlir::MLIRContext *ctx) {
-  patterns.add<InlinedFastGeluToGelu>(ctx);
+  patterns.add<InlinedFastGeluToGelu, InlinedFastGeluVisionToGelu>(ctx);
 }
 
 } // namespace hip

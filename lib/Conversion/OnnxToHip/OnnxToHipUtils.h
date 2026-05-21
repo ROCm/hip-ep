@@ -222,6 +222,56 @@ void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
 void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 
+/// Forward shape inference for `onnx.*` ops. Walks the function in
+/// topological order, refining each op's result type to the maximum
+/// static info derivable from its operand types + op semantics + constant
+/// operands. Reshape uses a shape-operand resolver that traces back
+/// through `onnx.Concat / Slice / Shape / Gather / Unsqueeze / Cast /
+/// Constant` and handles ONNX's `-1` "infer from total size" via dyn-dim
+/// cancellation. Also refines the function signature when return-op
+/// operand types tighten (no `tensor.cast` bridge needed; the EP-side
+/// metadata reads from the morphizen graph, not from this MLIR type).
+///
+/// Must run BEFORE `lowerOnnxConstants` so the index / shape constants
+/// are still inline in `onnx.Constant` `value` attributes (the Reshape
+/// shape-operand resolver in `OnnxResultTypeInference.cpp` reads them).
+/// See `InferOnnxShapes.cpp` for the per-op rule set and the SSA-origin
+/// backward trace.
+///
+/// `changed` (optional out-param): when non-null, set to `true` if any op
+/// result type or the function signature was refined; left untouched
+/// otherwise. Used by the pre-lowering round loop in `OnnxToHip.cpp` to
+/// detect quiescence and skip the remaining safety-cap rounds.
+LogicalResult inferOnnxShapes(func::FuncOp funcOp, bool *changed = nullptr);
+
+/// Triple describing where an output dim's runtime value comes from.
+/// Runtime computes `round(inputs[arg_idx].shape[dim_idx] * mult)`.
+/// `mult == 1.0` is the identity passthrough (most LLM dynshape outputs);
+/// `mult == 1/K` covers Reshape-induced spatial mergers like Qwen vision's
+/// patch merger (`num_patches → num_patches / 4` ⇒ mult = 0.25).
+/// `(-1, -1, 1.0)` is the "no traceable origin" sentinel.
+struct DimOriginInfo {
+  int64_t arg_idx;
+  int64_t dim_idx;
+  double mult;
+};
+
+/// After `inferOnnxShapes` runs, returns per-output-dim SSA origins.
+/// Populated lazily by the most recent `inferOnnxShapes` call on the
+/// calling thread; read by the `hip_get_last_compile_output_dim_origins`
+/// C export so the EP can populate DimSource even when output
+/// `dim_param` names don't match any input `dim_param`. See
+/// `InferOnnxShapes.cpp` for trace rules.
+const std::vector<std::vector<DimOriginInfo>> &getInferredOutputOrigins();
+
+/// Pre-lowering pattern set: decompose `onnx.Pow` / `onnx.ReduceMean` /
+/// `onnx.AveragePool` into compositions of ops that already have HIP
+/// converters. Currently scoped to patterns surfaced by Gemma-3's
+/// multimodal projector — see ProjectorOpsRewrites.cpp for the supported
+/// shapes and fallback policy.
+void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+
 } // namespace hip
 } // namespace mlir
 

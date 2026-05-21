@@ -27,9 +27,14 @@
 
 #include "hip/debug_log.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/SymbolTable.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <sstream>
 
 namespace hip::compiler {
@@ -128,6 +133,13 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   if (!runMLIRPasses(module, options, error_message))
     return false;
   logPhase("runMLIRPasses");
+
+  // Note: refined output shapes / origins are stashed by `inferOnnxShapes`
+  // itself (in `lib/Conversion/OnnxToHip/InferOnnxShapes.cpp`) while the
+  // function is still `func::FuncOp`. They MUST be captured there —
+  // calling from here is too late because HipToLLVM has converted the
+  // function to `llvm.func`. CompilerAPI's `hip_get_last_compile_output_*`
+  // exports forward to those stashes.
 
   llvm::LLVMContext llvmContext;
   auto llvmModule = translateToLLVMIR(module, llvmContext, error_message);

@@ -60,6 +60,15 @@ def _normalize_gemma3_embedding(spec):
     with "Model input was not found: image_features". Upstream MS
     onnxruntime/Gemma-3-ONNX uses graph-input-only — we match that pattern by
     removing the initializer. Idempotent.
+
+    NOTE: vision.onnx is NOT modified here. The AS-SHIPPED form ships output
+    `image_features` with dim_params `[num_image_tokens,
+    MatMulimage_features_dim_1, 2560]` that don't match the input
+    `num_images` dim_param. The EP handles this via the
+    `InferOnnxShapes` pre-lowering pass + `DimSource.static_value` channel
+    (compiler tells the EP the refined static shape for symbolic dims that
+    don't resolve via input lookup). No on-disk or in-memory model
+    modification is needed.
     """
     import onnx
 
@@ -204,3 +213,123 @@ class TestGemma3_4BORT(BaseORTTests):
 
 class TestGemma3_4BOGA(BaseOGATests):
     spec = GEMMA3
+
+
+# ── Gemma3 vision encoder dyn-shape coverage ─────────────────────────────
+#
+# vision.onnx is a separate ONNX file (the SigLIP image encoder + multimodal
+# projector) loaded by OGA's gemma3 pipeline alongside text.onnx. Its sole
+# symbolic input dim is `num_images`; H/W are fixed at 896. The
+# `RefineReshapeOutputType` + companion shape-inference patterns (added for
+# this model family in CLAUDE.md "Dynamic-shape ViT / vision encoder
+# support") let MorphiZenEP compile vision.onnx end-to-end and reuse the
+# same compiled DLL for any num_images batch size at runtime — verified
+# below.
+#
+# Output values are currently all-NaN vs. ORT CPU finite (known correctness
+# bug, see CLAUDE.md). We assert SHAPE behavior + bit-pattern stability —
+# the dyn-shape compile path is independent of the correctness issue, and
+# regressing the shape behavior would silently break a future fix.
+
+
+class TestGemma3_4BVisionDynShape:
+    """Single EP session for vision.onnx must handle any `num_images` batch.
+
+    Tests are ordered (pytest preserves declaration order within a class):
+    each builds on the cached session, growing pool / input shapes
+    monotonically so we exercise the grow-on-demand path explicitly.
+    """
+
+    spec = GEMMA3
+
+    @classmethod
+    def setup_class(cls):
+        import gc
+
+        import onnxruntime as ort
+
+        from conftest import REPO_ROOT, register_morphizen_ep
+
+        gc.collect()
+        devices = register_morphizen_ep(REPO_ROOT)
+        if not devices:
+            pytest.skip("MorphiZen EP not found - run build.py first")
+        vision_path = cls.spec.model_dir / "vision.onnx"
+        if not vision_path.exists():
+            pytest.skip(f"vision.onnx not present at {vision_path}")
+        # Ensure the dim_param normalization has run (BaseORTTests fixtures
+        # invoke `normalize_onnx_hook` on model setup; this class skips that
+        # path so apply the hook directly).
+        if cls.spec.normalize_onnx_hook is not None:
+            cls.spec.normalize_onnx_hook(cls.spec)
+        so = ort.SessionOptions()
+        so.add_provider_for_devices(devices, {})
+        cls.sess = ort.InferenceSession(str(vision_path), sess_options=so)
+        # Two deterministic fp16 images (small magnitude for fp16 stability).
+        rng = np.random.default_rng(0)
+        cls.img1 = (rng.standard_normal((1, 3, 896, 896)) * 0.1).astype(np.float16)
+        cls.img2 = (rng.standard_normal((1, 3, 896, 896)) * 0.1).astype(np.float16)
+
+    @classmethod
+    def teardown_class(cls):
+        import gc
+
+        if hasattr(cls, "sess"):
+            del cls.sess
+        gc.collect()
+
+    def _run(self, pixel_values):
+        return self.sess.run(None, {"pixel_values": pixel_values})[0]
+
+    def test_vision_num_images_1(self):
+        """Output shape must adapt to num_images=1."""
+        out = self._run(self.img1)
+        assert out.shape == (1, 256, 2560), out.shape
+        assert out.dtype == np.float16
+
+    def test_vision_num_images_2_same_session(self):
+        """Same compiled DLL, larger batch — pool must grow on demand."""
+        both = np.concatenate([self.img1, self.img2], axis=0)
+        out = self._run(both)
+        assert out.shape == (2, 256, 2560), out.shape
+        assert out.dtype == np.float16
+
+    def test_vision_re_run_num_images_1_bit_identical(self):
+        """After running at num_images=2, going back to num_images=1 must
+        give bit-identical output to the first num_images=1 call. Guards
+        against cross-batch state leakage (e.g. pool slot recycling
+        without zeroing, autotune cache key omissions, etc.)."""
+        first = self._run(self.img1)
+        # Force the pool to have grown (re-run num_images=2 first).
+        _ = self._run(np.concatenate([self.img1, self.img2], axis=0))
+        second = self._run(self.img1)
+        assert first.shape == second.shape == (1, 256, 2560)
+        # Use bit-pattern equality so NaN==NaN works (current state).
+        assert np.array_equal(first.view(np.uint16), second.view(np.uint16)), (
+            "two identical num_images=1 runs through the same session must be bit-identical"
+        )
+
+    def test_vision_num_images_2_twin_input_rows_identical(self):
+        """num_images=2 with TWO COPIES of the same image must produce two
+        identical output rows. Guards against batch-axis bugs (e.g. an op
+        that confuses batch and channel strides)."""
+        twin = np.concatenate([self.img1, self.img1], axis=0)
+        out = self._run(twin)
+        assert out.shape == (2, 256, 2560), out.shape
+        row0 = out[0].view(np.uint16)
+        row1 = out[1].view(np.uint16)
+        assert np.array_equal(row0, row1), (
+            "two identical input images must produce identical output rows"
+        )
+
+    def test_vision_cross_batch_determinism(self):
+        """row 0 of a num_images=2 run with [img1, img2] must equal the
+        full output of a num_images=1 run on img1 alone. Stronger than
+        twin-row identity — checks that batch processing does not leak
+        information across rows."""
+        single = self._run(self.img1)
+        both = np.concatenate([self.img1, self.img2], axis=0)
+        batched = self._run(both)
+        assert np.array_equal(single[0].view(np.uint16), batched[0].view(np.uint16)), (
+            "num_images=2 row 0 must match num_images=1 output for the same image"
+        )

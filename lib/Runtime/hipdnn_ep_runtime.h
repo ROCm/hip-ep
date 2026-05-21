@@ -495,8 +495,13 @@ int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
 
 // MIOpen convolution forward operation
 // Full wrapper with descriptor creation, algorithm finding, workspace
-// management Follows opaque RuntimeState pattern - extracts handle/stream
-// internally Parameters match generated LLVM IR from HipToLLVM pass
+// management. Follows opaque RuntimeState pattern - extracts handle/stream
+// internally. Parameters match generated LLVM IR from HipToLLVM pass.
+//
+// `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
+// input / weights / output tensor descriptors — MIOpen requires all three to
+// share the same element type. The host-side lowering derives this from the
+// hip.conv result memref's element type.
 int wrap_miopenConvolutionForward(
     RuntimeState
         *state, // RuntimeState (opaque - extracts handle/stream internally)
@@ -521,7 +526,8 @@ int wrap_miopenConvolutionForward(
     int64_t pad_right,   // Padding right
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
-    int64_t group);      // Number of groups
+    int64_t group,       // Number of groups
+    int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations
@@ -539,6 +545,15 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // Computes output = A @ B for each batch
 // A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
 // output: [batch_count x M x N]
+//
+// `b_batched` MUST distinguish the two B layouts when `batch_count > 1`:
+// 0 = B is the broadcast `[K, N]` weight (per-batch stride = 0 — same
+// matrix reused across all batches); 1 = B is per-batch `[batch x K x N]`
+// (per-batch stride = K*N). Mis-setting this to 1 for a broadcast B
+// causes hipBLASLt to step `K*N` elements past the end of the weight
+// buffer on every batch beyond the first, reading uninitialised memory
+// into the GEMM and producing wrong (often NaN) outputs for batch > 0.
+// For batch_count == 1 the value is ignored.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
     const void *A,       // Matrix A GPU pointer
@@ -548,7 +563,8 @@ int wrap_hipblasLtMatmul(
     int64_t N,           // Columns of B
     int64_t K,           // Columns of A / Rows of B
     int64_t batch_count, // Number of batches
-    int64_t elem_size);  // Element size in bytes (2=f16, 4=f32)
+    int64_t elem_size,   // Element size in bytes (2=f16, 4=f32)
+    int64_t b_batched);  // 0 = broadcast [K,N], 1 = per-batch [B,K,N]
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering

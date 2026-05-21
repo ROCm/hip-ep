@@ -73,12 +73,20 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
     Value elemSize = createI64Const(elemBits / 8);
 
+    // b_batched = 1 iff B has rank > 2 (per-batch `[..., K, N]` weight);
+    // 0 iff B is a rank-2 broadcast weight `[K, N]` shared across batches.
+    // The runtime uses this to set hipBLASLt's STRIDED_BATCH_OFFSET on
+    // layA — a broadcast weight requires stride 0, not K*N. Mis-setting
+    // it causes batch > 0 to read past the end of the weight buffer.
+    Value bBatched = createI64Const(BRank > 2 ? 1 : 0);
+
     // Runtime signature:
     // int wrap_hipblasLtMatmul(RuntimeState* state,
     //                          const void* A, const void* B, void* output,
     //                          int64_t M, int64_t N, int64_t K,
-    //                          int64_t batch_count, int64_t elem_size)
-    SmallVector<Type, 9> paramTypes = {
+    //                          int64_t batch_count, int64_t elem_size,
+    //                          int64_t b_batched)
+    SmallVector<Type, 10> paramTypes = {
         ptrType, // state
         ptrType, // A
         ptrType, // B
@@ -87,7 +95,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         i64Type, // N
         i64Type, // K
         i64Type, // batch_count
-        i64Type  // elem_size
+        i64Type, // elem_size
+        i64Type  // b_batched
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -95,8 +104,9 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 9> args = {statePtr, APtr, BPtr,       outputPtr, M,
-                                  N,        K,    batchCount, elemSize};
+    SmallVector<Value, 10> args = {statePtr, APtr,    BPtr, outputPtr,
+                                   M,        N,       K,    batchCount,
+                                   elemSize, bBatched};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

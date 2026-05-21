@@ -10,6 +10,7 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
+#include <cstring>
 #include <fstream>
 #include <glog/logging.h>
 #include <sstream>
@@ -144,14 +145,86 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   }
   file.close();
 
-  // Clean up temporary file
+  // Clean up temporary file (DLL is already in memory).
   std::remove(temp_output_path.c_str());
 
-  // Build artifact
+  // Build artifact.
   CompilationArtifact artifact;
   artifact.filename = "model_compiled";
   artifact.bytes = std::move(buffer);
   artifact.format = config.artifactFormat;
+
+  // Pull MLIR-refined output shapes from the plugin (thread-local stash
+  // populated by `inferOnnxShapes` BEFORE HipToLLVM converts the
+  // function to `llvm.func`). Two-call discovery.
+  if (plugin->has_method("hip_get_last_compile_output_shapes")) {
+    auto shapes_fn = plugin->get_method<int64_t, int64_t *, int64_t>(
+        "hip_get_last_compile_output_shapes");
+    if (shapes_fn) {
+      int64_t needed = shapes_fn(nullptr, 0);
+      if (needed > 0) {
+        std::vector<int64_t> buf(static_cast<size_t>(needed));
+        if (shapes_fn(buf.data(), needed) == needed && !buf.empty()) {
+          int64_t cursor = 0;
+          int64_t num_outputs = buf[cursor++];
+          artifact.refined_output_shapes.reserve(
+              static_cast<size_t>(num_outputs));
+          for (int64_t i = 0; i < num_outputs && cursor < needed; ++i) {
+            int64_t num_dims = buf[cursor++];
+            std::vector<int64_t> dims;
+            dims.reserve(static_cast<size_t>(num_dims));
+            for (int64_t d = 0; d < num_dims && cursor < needed; ++d)
+              dims.push_back(buf[cursor++]);
+            artifact.refined_output_shapes.push_back(std::move(dims));
+          }
+          MY_LOG(2) << "Got " << artifact.refined_output_shapes.size()
+                    << " refined output shapes from compiler";
+        }
+      }
+    }
+  }
+
+  // Pull per-output-dim SSA origins (the (arg_idx, dim_idx) trace from
+  // InferOnnxShapes). Same two-call discovery pattern. Used by the EP
+  // to populate DimSource.input_idx/dim_idx for output dims whose
+  // dim_param names don't match any input dim_param.
+  if (plugin->has_method("hip_get_last_compile_output_dim_origins")) {
+    auto origins_fn = plugin->get_method<int64_t, int64_t *, int64_t>(
+        "hip_get_last_compile_output_dim_origins");
+    if (origins_fn) {
+      int64_t needed = origins_fn(nullptr, 0);
+      if (needed > 0) {
+        std::vector<int64_t> buf(static_cast<size_t>(needed));
+        if (origins_fn(buf.data(), needed) == needed && !buf.empty()) {
+          // Triple stride: (arg, dim, mult_bits) per dim, plus one
+          // num_dims marker per output, plus one num_outputs marker. See
+          // CompilerAPI.cpp::hip_get_last_compile_output_dim_origins for
+          // the exact layout. `mult_bits` is the IEEE 754 binary64 bit
+          // pattern of a double — bit-cast back here.
+          int64_t cursor = 0;
+          int64_t num_outputs = buf[cursor++];
+          artifact.refined_output_dim_origins.reserve(
+              static_cast<size_t>(num_outputs));
+          for (int64_t i = 0; i < num_outputs && cursor < needed; ++i) {
+            int64_t num_dims = buf[cursor++];
+            std::vector<CompilationArtifact::DimOriginTriple> dims;
+            dims.reserve(static_cast<size_t>(num_dims));
+            for (int64_t d = 0; d < num_dims && cursor + 2 < needed; ++d) {
+              int64_t arg = buf[cursor++];
+              int64_t idx = buf[cursor++];
+              int64_t mult_bits = buf[cursor++];
+              double mult;
+              std::memcpy(&mult, &mult_bits, sizeof(double));
+              dims.push_back({arg, idx, mult});
+            }
+            artifact.refined_output_dim_origins.push_back(std::move(dims));
+          }
+          MY_LOG(2) << "Got " << artifact.refined_output_dim_origins.size()
+                    << " refined output dim-origin maps from compiler";
+        }
+      }
+    }
+  }
 
   LOG(INFO) << "Artifact created: " << artifact.bytes.size() << " bytes";
 
