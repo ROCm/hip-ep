@@ -230,7 +230,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
-  state->loop_iter_host = nullptr;
+  state->loop_iter_cpu_buf = nullptr;
+  state->loop_iter_capacity = 0;
   state->loop_iter_dev = nullptr;
   state->loop_cond_host = nullptr;
   state->loop_cond_dev = nullptr;
@@ -868,8 +869,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->loop_event) {
     HIP_CLEANUP(hipEventDestroy(static_cast<hipEvent_t>(state->loop_event)));
   }
-  if (state->loop_iter_host) {
-    HIP_CLEANUP(hipHostFree(state->loop_iter_host));
+  if (state->loop_iter_cpu_buf) {
+    HIP_CLEANUP(hipHostFree(state->loop_iter_cpu_buf));
+  }
+  if (state->loop_iter_dev) {
+    HIP_CLEANUP(hipFree(state->loop_iter_dev));
   }
   if (state->loop_cond_host) {
     HIP_CLEANUP(hipHostFree(state->loop_cond_host));

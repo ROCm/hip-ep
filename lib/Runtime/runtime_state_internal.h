@@ -144,46 +144,55 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
-  // ONNX Loop driver state: host-mapped buffers holding the current iter
-  // index (int64) and condition (1-byte bool) that the trampoline passes
-  // to the outlined body. Lazily allocated by hipdnn_ep_run_counted_loop /
+  // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
   //
-  // Host-mapped (hipHostMalloc(hipHostMallocMapped)) rather than hipMalloc:
-  //   * iter: host writes the index per iter with a plain store; the GPU
-  //     reads via loop_iter_dev. A std::atomic_thread_fence(release) in
-  //     the driver between the store and the body launch makes the store
-  //     globally visible to the subsequent stream submission -- HIP does
-  //     not order plain host stores against later stream ops, and driver
-  //     mappings vary (cacheable+snoop on AMD APUs, write-combining on
-  //     some dGPU configs). This replaces the per-iter hipMemcpyAsync(H2D,
-  //     8B) the pre-host-mapped driver issued -- one fewer stream
-  //     submission per iter, and removes the host-stack-source race the
-  //     original `&i` argument exposed.
-  //   * cond: GPU writes cond_out through loop_cond_dev; after the body the
-  //     dynamic-path driver records `loop_event` on the stream and
-  //     hipEventSynchronizes before reading loop_cond_host. Cheaper than
-  //     hipStreamSynchronize + hipMemcpyAsync(D2H, 1B) and mirrors the
-  //     event-based readback pattern used elsewhere in the runtime.
+  // iter -- stream-ordered per-iter update model:
+  //   * `loop_iter_cpu_buf` is a pinned host array of int64 indexed by iter
+  //     number (capacity grows on demand to max trip count seen so far).
+  //     New tail entries are initialized to their own index on grow, then
+  //     never written again -- the values 0,1,2,... are static.
+  //   * `loop_iter_dev` is a real device buffer (hipMalloc) of a single
+  //     int64; the body's `iter` memref descriptor points here.
+  //   * Each iter does `hipMemcpyAsync(loop_iter_dev, &cpu_buf[i], 8, H2D,
+  //     stream)` immediately before launching the body. Both ops are on
+  //     the same stream, so the body kernel for iter i sees the value 'i'
+  //     placed by the matching memcpy. Stream-ordered, no per-iter sync
+  //     on the CPU side, no host-store-vs-kernel-launch race.
   //
-  // The same allocation backs both pointers: loop_*_dev is obtained via
-  // hipHostGetDevicePointer(loop_*_host). Both refer to the same system-
-  // memory page; the names track which pointer to use from which side.
+  // The previous design used hipHostMalloc(hipHostMallocMapped) so a plain
+  // host store + atomic_thread_fence(release) could "publish" the iter value
+  // to the GPU. That works only if you also flush the entire pipeline
+  // before reusing the buffer for the next iter -- HIP does NOT order plain
+  // host stores against later stream submissions, so without a sync the
+  // GPU sees whatever value is in the mapped page when the launched kernel
+  // actually runs (typically the last host store = M-1 for all iters).
+  // Switching to a stream-ordered hipMemcpyAsync from a per-iter slot
+  // restores correctness with negligible perf cost (~1-2 µs / iter
+  // memcpy enqueue, vs ~50-200 µs / hipStreamSynchronize).
+  //
+  // cond -- still host-mapped:
+  //   * Host writes cond_init exactly once before the loop starts; the GPU
+  //     reads cond_in on first iter, writes cond_out at end of each iter.
+  //     The dynamic path then records `loop_event` on the stream and
+  //     hipEventSynchronizes before reading loop_cond_host -- the event
+  //     sync serialises kernel completion vs the next host read, so there
+  //     is no iter-update race for cond.
   //
   // `loop_event` is reused across iters (hipEventCreateWithFlags +
   // hipEventDisableTiming -- we don't need timestamps, just synchronization)
   // to avoid hipEventCreate/Destroy per iter.
   //
-  // Sharing one slot per state is safe for non-nested Loops only -- nested
-  // Loops would race on the inner driver overwriting the outer's iter while
-  // the outer body still expects to read its own iter after the inner
-  // returns. `loop_nesting_depth` enforces the v1 single-level constraint:
-  // the driver increments it on entry, hard-fails on re-entry, and
-  // decrements on exit. A future P-extension can replace the single buffer
-  // with a small per-depth stack and remove the check.
-  void *loop_iter_host; // hipHostMalloc-allocated, host-side view (int64*)
-  void
-      *loop_iter_dev; // hipHostGetDevicePointer(loop_iter_host), passed to body
+  // Sharing one device iter slot per state is safe for non-nested Loops
+  // only -- nested Loops would race on the inner driver overwriting the
+  // outer's iter while the outer body still expects to read its own iter
+  // after the inner returns. `loop_nesting_depth` enforces the v1 single-
+  // level constraint: the driver increments it on entry, hard-fails on
+  // re-entry, and decrements on exit. A future P-extension can replace the
+  // single buffer with a small per-depth stack and remove the check.
+  void *loop_iter_cpu_buf; // hipHostMalloc(default)-allocated, int64[capacity]
+  size_t loop_iter_capacity; // current size of loop_iter_cpu_buf (in int64s)
+  void *loop_iter_dev;       // hipMalloc'd, sizeof(int64), passed to body
   void *loop_cond_host; // hipHostMalloc-allocated, host-side view (int8*)
   void
       *loop_cond_dev; // hipHostGetDevicePointer(loop_cond_host), passed to body
