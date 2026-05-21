@@ -55,13 +55,40 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
         extractContiguousMemRefPtr(adaptor.getLimit(), rewriter, loc);
     Value deltaPtr =
         extractContiguousMemRefPtr(adaptor.getDelta(), rewriter, loc);
+
+    Value hipDTypeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(hipDType));
+
+    // Category-C dispatch: when the conversion attached a `slot_id`
+    // attribute (intermediate operand provenance), the wrapper must own
+    // the output buffer allocation -- it cannot read the EP-marshalled
+    // output buffer because the EP could not yet resolve the dim. Emit
+    // a call to wrap_range_dyn(state, start, limit, delta, hip_dtype,
+    // slot_id) instead of the static wrap_range. The dyn variant
+    // publishes the resolved dim AND the GPU buffer to the slot table;
+    // the EP host-side resolver reads them post-compute.
+    if (auto slotAttr = op->getAttrOfType<IntegerAttr>("slot_id")) {
+      Value slotIdVal = LLVM::ConstantOp::create(
+          rewriter, loc, i32Type,
+          rewriter.getI32IntegerAttr(
+              static_cast<int32_t>(slotAttr.getInt())));
+      SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+                                         ptrType, i64Type, i32Type};
+      FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+          rewriter, module, "wrap_range_dyn", paramTypes, i32Type);
+      if (failed(funcOp))
+        return failure();
+      SmallVector<Value, 6> args = {statePtr, startPtr,   limitPtr,
+                                    deltaPtr, hipDTypeVal, slotIdVal};
+      LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value outputNumElems =
         computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
-
-    Value hipDTypeVal = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(hipDType));
 
     // int wrap_range(RuntimeState* state, void* start, void* limit,
     //                void* delta, void* output, int64_t output_num_elements,

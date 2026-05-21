@@ -5,6 +5,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "hip/Dialect/IR/HipShapeInterface.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -123,9 +124,40 @@ struct NonZeroToHip : public mlir::RewritePattern {
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
         mlir::ValueRange{upperBound});
 
+    // Allocate a unique slot_id from a module-level counter. NonZero is
+    // strictly Category-C (the row count `N` is only known after the count
+    // kernel runs) so it ALWAYS publishes into a slot. The
+    // `hipdnn.next_dyn_slot_id` attribute starts at 0 and is monotonically
+    // bumped here; ComposeDimSpecs reads it back as the per-module total
+    // `dyn_dim_slots_count`. Done inline (no separate pass) because the
+    // wrap kernel emitted by NonZeroLowering needs the literal int32 at
+    // lowering time.
+    auto moduleOp = op->getParentOfType<mlir::ModuleOp>();
+    int32_t slot_id_v = 0;
+    if (auto a =
+            moduleOp->getAttrOfType<mlir::IntegerAttr>("hipdnn.next_dyn_slot_id"))
+      slot_id_v = static_cast<int32_t>(a.getInt());
+    moduleOp->setAttr("hipdnn.next_dyn_slot_id",
+                      rewriter.getI32IntegerAttr(slot_id_v + 1));
+    mlir::IntegerAttr slot_id_attr = rewriter.getI32IntegerAttr(slot_id_v);
+
+    // Per-output / per-dim DimSpec tree. dim 0 is `R` (Static, equal to
+    // input rank); dim 1 is `slot[slot_id_v]` (Category-C). Encoded as a
+    // top-level ArrayAttr (one entry per result); each entry is itself an
+    // ArrayAttr with one entry per dim, each holding a serialised DimSpec.
+    auto *ctx = rewriter.getContext();
+    mlir::ArrayAttr dim0 =
+        mlir::hip::DimSpec::makeStatic(inputRank).serializeAsArrayAttr(ctx);
+    mlir::ArrayAttr dim1 =
+        mlir::hip::DimSpec::makeRuntimeSlot(slot_id_v).serializeAsArrayAttr(
+            ctx);
+    mlir::ArrayAttr resultDims = rewriter.getArrayAttr({dim0, dim1});
+    mlir::ArrayAttr output_dim_specs = rewriter.getArrayAttr({resultDims});
+
     auto hipOp = mlir::hip::NonZeroOp::create(
         rewriter, loc, resultType, context, op->getOperand(0), init,
-        rewriter.getI64IntegerAttr(inputDataType));
+        rewriter.getI64IntegerAttr(inputDataType), output_dim_specs,
+        slot_id_attr);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

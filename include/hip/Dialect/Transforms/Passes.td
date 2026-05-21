@@ -231,6 +231,42 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def ComposeDimSpecsPass
+    : Pass<"hip-compose-dim-specs", "mlir::ModuleOp"> {
+  let summary = "Compose per-op output DimSpecs into model-output DimSpecs";
+  let description = [{
+    For each result dimension of `@main_graph` that is dynamic (`?`), this
+    pass walks the producer chain via the (free-function-based)
+    `HipShapeOpInterface` (`shape_interface::resolveDimFromValue`) and
+    substitutes operand references until the spec bottoms out at one of:
+      * `Static` constant
+      * `InputDim(input_index, dim_index)` — Category A
+      * `InputValueI64(input_index, flat_offset)` — Category B
+      * `RuntimeSlot(slot_id)` — Category C (publisher op found upstream)
+
+    The resulting composed DimSpec tree is attached as a func-result
+    attribute `hip.dim_spec` on `@main_graph` so `GenerateInterface` can
+    pick it up at metadata-blob time without re-walking the IR. A second
+    module attribute `hip.dyn_dim_slots_count` records the maximum slot id
+    referenced anywhere, plus 1.
+
+    Backward compatibility: if `@main_graph` has no dynamic result dims,
+    the pass is a no-op. If a dynamic dim cannot be resolved by the
+    walker, the pass emits a remark (not an error) and the result attr
+    is left absent — downstream falls back to the legacy "-1 in shape"
+    behaviour and the EP will treat the dim as unknown.
+
+    Pipeline position: between `convert-hip-to-llvm` and
+    `generate-interface` (today both live inside `buildHipToLLVMPipeline`).
+    The pass operates on the bufferized memref IR but does not modify any
+    op — it only reads, composes, and attaches attributes.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
   let summary = "Replace extern memref.global constants with "

@@ -3,9 +3,90 @@
 
 namespace mlir.hip;
 
+// =============================================================================
+// DimSpec: tree-shaped specification of a tensor dimension extent.
+// =============================================================================
+//
+// DimSpec describes how to compute one dimension extent of a tensor at
+// runtime. The runtime walks the tree to resolve the actual value either
+// pre-compute (Categories A, B, D - "host-readable") or post-compute
+// (Category C - publishes into a RuntimeSlot from inside a wrap_*).
+//
+// Leaf kinds (semantics):
+//   Static            : compile-time constant value
+//   InputDim          : extent of an input tensor at (input_index, dim_index)
+//                       — Category A
+//   InputValueI64     : the i64 value at (input_index, flat_offset) of an
+//                       input tensor. Used for B (shape-tensor operands of
+//                       Range, ConstantOfShape, etc.). The EP-side evaluator
+//                       reads the i64 from host-readable input data.
+//   RuntimeSlot       : a slot published by a wrap_* during compute. Resolves
+//                       to a positive value only POST compute; PRE compute it
+//                       is "unresolved" (signals "no EP-side pre-alloc"). This
+//                       drives Category C.
+//
+// Binary node kinds (apply integer math on i64 children; saturating
+// non-negativity is enforced at evaluation time):
+//   Add, Sub, Mul, FloorDiv, CeilDiv, Min, Max — Category D arithmetic.
+//
+// Backward compatibility: legacy models predate dim_specs and store only
+// shape: [int64]. When a TensorInfo has shape[i] == -1 and no matching
+// dim_spec, the runtime / EP treats that dim as "unknown, must come from an
+// older runtime path" (best-effort fallback). When dim_specs is present, it
+// MUST cover every entry of shape with shape[i] == -1.
+
+enum DimSpecKind : ubyte {
+  // Leaves
+  Static        = 0,  // value = constant
+  InputDim      = 1,  // value = input[input_index].shape[dim_index]
+  InputValueI64 = 2,  // value = input[input_index].data[flat_offset] (i64)
+  RuntimeSlot   = 3,  // value = state->dyn_dim_slots[slot_id].size (POST only)
+  // Binary nodes
+  Add           = 16,
+  Sub           = 17,
+  Mul           = 18,
+  FloorDiv      = 19,
+  CeilDiv       = 20,
+  Min           = 21,
+  Max           = 22,
+}
+
+// One node in the DimSpec tree. Stored as a flat node array; child_indices
+// are zero-based offsets into the same array. The root is index 0. Leaves
+// have an empty `children` array.
+//
+// Leaf payload usage (each leaf only reads the relevant fields):
+//   Static        : reads `value`
+//   InputDim      : reads `input_index`, `dim_index`
+//   InputValueI64 : reads `input_index`, `flat_offset`
+//   RuntimeSlot   : reads `slot_id`
+table DimSpecNode {
+  kind: DimSpecKind;
+  // Leaf payloads (only the relevant ones are read per kind):
+  value: int64 = 0;
+  input_index: int32 = 0;
+  dim_index: int32 = 0;
+  flat_offset: int64 = 0;
+  slot_id: int32 = -1;
+  // Binary-node children (indices into the parent DimSpec.nodes array).
+  // Always size 0 for leaves, size 2 for binary nodes.
+  children: [int32];
+}
+
+// A complete DimSpec tree. `nodes[0]` is the root.
+table DimSpec {
+  nodes: [DimSpecNode];
+}
+
 table TensorInfo {
   shape: [int64];
   element_size: int64;
+  // Optional. When present, dim_specs.size() == shape.size() and dim_specs[i]
+  // describes how to compute shape[i] at runtime. When shape[i] is static the
+  // corresponding DimSpec is conventionally a single Static node, but the
+  // runtime / EP-side resolver MUST trust the DimSpec when present. Missing
+  // dim_specs means "all dims static (legacy model)".
+  dim_specs: [DimSpec];
 }
 
 // Per-constant source descriptor baked into __metadata_blob. When a
@@ -45,6 +126,11 @@ table HipModelMetaInfo {
   output_count: int64;
   inputs: [TensorInfo];
   outputs: [TensorInfo];
+  // Total number of RuntimeSlot ids referenced anywhere in this model's
+  // output DimSpec trees. RuntimeState pre-allocates this many slots in
+  // inference_init so wrap_* publishers never race with the EP-side reader.
+  // Defaults to 0 for legacy models with no Category-C outputs.
+  dyn_dim_slots_count: int32 = 0;
 }
 
 root_type HipModelMetaInfo;

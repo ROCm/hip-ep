@@ -1341,6 +1341,20 @@ void NonZeroOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ConstantOfShapeOp: ins(shape), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ConstantOfShapeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ConstantOfShapeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SizeOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 

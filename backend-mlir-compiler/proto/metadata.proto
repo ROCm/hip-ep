@@ -9,11 +9,51 @@ package mlir_metadata;
 message Metadata {
   string artifact_filename = 1;
   repeated Output outputs = 2;
+  // Number of RuntimeSlot ids referenced across this model's outputs.
+  // Mirrored from HipModelMetaInfo.dyn_dim_slots_count in the FlatBuffers
+  // blob so the EP can know up-front whether any output may need Category-C
+  // post-compute shape resolution without parsing the FlatBuffers blob too.
+  int32 dyn_dim_slots_count = 3;
+}
+
+// DimSpec kinds — must mirror enum DimSpecKind in schemas/model_metadata.fbs.
+enum DimSpecKind {
+  DIM_SPEC_STATIC = 0;
+  DIM_SPEC_INPUT_DIM = 1;
+  DIM_SPEC_INPUT_VALUE_I64 = 2;
+  DIM_SPEC_RUNTIME_SLOT = 3;
+  DIM_SPEC_ADD = 16;
+  DIM_SPEC_SUB = 17;
+  DIM_SPEC_MUL = 18;
+  DIM_SPEC_FLOOR_DIV = 19;
+  DIM_SPEC_CEIL_DIV = 20;
+  DIM_SPEC_MIN = 21;
+  DIM_SPEC_MAX = 22;
+}
+
+message DimSpecNode {
+  DimSpecKind kind = 1;
+  int64 value = 2;
+  int32 input_index = 3;
+  int32 dim_index = 4;
+  int64 flat_offset = 5;
+  int32 slot_id = 6;
+  // Always 0 for leaves, 2 for binary nodes. Indices into the same
+  // DimSpec.nodes array (root is index 0).
+  repeated int32 children = 7;
+}
+
+message DimSpec {
+  repeated DimSpecNode nodes = 1;
 }
 
 message Output {
   string name = 1;
   int32 rank = 2;
   int32 elem_type = 3;
+  // Static-dim values; -1 for any dim resolved at runtime via dim_specs[i].
   repeated int64 shape = 4;
+  // Optional. When present, dim_specs.size() == rank. Missing means
+  // "all dims static" (legacy).
+  repeated DimSpec dim_specs = 5;
 }

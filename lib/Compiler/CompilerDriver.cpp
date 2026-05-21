@@ -171,10 +171,39 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
   //                                          hook (called from EP-side
   //                                          MlirCustomOp::Compute() entry)
+  //   hipdnn_ep_state_read_dim, _read_buffer, _publish_dim,
+  //   _publish_buffer, _dyn_pool_alloc, _dyn_pool_reset,
+  //   _dyn_slots_reset                     — dynamic-output-shape ABI
+  //                                          (Category C support — model
+  //                                          DLLs only need it when
+  //                                          dyn_dim_slots_count > 0;
+  //                                          exported unconditionally so
+  //                                          the EP can probe + the
+  //                                          inference_dyn_slot_*
+  //                                          shims linked from the model
+  //                                          DLL resolve cleanly).
+  //   inference_dyn_slot_get_dim, _get_buffer, _reset — EP-facing
+  //                                          marker entry points emitted
+  //                                          by GenerateInterface when
+  //                                          dyn_dim_slots_count > 0.
   std::vector<std::string> export_symbols = {
-      "inference_init",    "inference_compute",
-      "inference_cleanup", "inference_get_metadata_json",
-      "test_hip_from_dll", "hipdnn_ep_runtime_begin_compute"};
+      "inference_init",
+      "inference_compute",
+      "inference_cleanup",
+      "inference_get_metadata_json",
+      "test_hip_from_dll",
+      "hipdnn_ep_runtime_begin_compute",
+      "hipdnn_ep_state_read_dim",
+      "hipdnn_ep_state_publish_dim",
+      "hipdnn_ep_state_read_buffer",
+      "hipdnn_ep_state_publish_buffer",
+      "hipdnn_ep_state_dyn_pool_alloc",
+      "hipdnn_ep_state_dyn_pool_reset",
+      "hipdnn_ep_state_dyn_slots_reset",
+      "inference_dyn_slot_get_dim",
+      "inference_dyn_slot_get_buffer",
+      "inference_dyn_slot_reset",
+  };
   std::vector<std::string> libraries;
   std::vector<std::string> library_paths;
   discoverLibraries(libraries, library_paths);

@@ -240,6 +240,73 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // across forward passes and return stale values.
 void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 
+//===----------------------------------------------------------------------===//
+// Dynamic-output-shape slot ABI (Category C support)
+//===----------------------------------------------------------------------===//
+//
+// These six functions are the runtime side of the data-dependent dynamic
+// output shape protocol described in
+// docs/design/compiler-runtime-contract.md and CLAUDE.md ("Dynamic Output
+// Shape Slots").
+//
+// LIFECYCLE per Compute():
+//   1. EP calls hipdnn_ep_state_dyn_slots_reset(state) before invoking
+//      inference_compute (alongside the seqlens_k cache invalidation).
+//      Resets every slot's published size to kDynSlotUnpublishedSize and
+//      every slot's buffer to nullptr; also resets the dyn pool to
+//      "all free" without freeing the GPU memory.
+//   2. inference_compute() runs the graph. Category-C runtime ops
+//      (wrap_nonzero, wrap_range on intermediate operands,
+//      wrap_constant_of_shape on intermediate operands) call:
+//          - hipdnn_ep_state_publish_dim(state, slot_id, count)
+//          - hipdnn_ep_state_dyn_pool_alloc(state, bytes)
+//          - hipdnn_ep_state_publish_buffer(state, slot_id, gpu_ptr)
+//      to register a slot.
+//   3. After inference_compute returns and the stream is synced, the EP
+//      calls hipdnn_ep_state_read_dim / _read_buffer for every dynamic
+//      output dim / Category-C output tensor it needs to resolve.
+//
+// All six entry points are no-throw / thread-unsafe (matching the rest of
+// the RuntimeState ABI). They are declared even when dyn_dim_slots_count
+// is 0 so legacy DLLs keep the same export surface they had before this
+// change (publishers / readers simply never get called).
+
+// Reset every slot to "unpublished" and the dyn pool to "all free".
+// Called once per Compute() by the EP. Safe to call when no slots exist
+// (no-op when dyn_dim_slots_count == 0).
+void hipdnn_ep_state_dyn_slots_reset(RuntimeState *state);
+
+// Same as above but only resets the pool (used internally by the wrappers
+// when they want a clean slate without touching slot publishers).
+void hipdnn_ep_state_dyn_pool_reset(RuntimeState *state);
+
+// Allocate `bytes` from the multi-segment dyn pool. Bumps a pointer in
+// the current segment; on overflow grows a new segment (geometric, never
+// shrinks). LOG(FATAL) on hipMalloc failure -- the model cannot recover
+// from missing GPU memory at this point. Bytes are always rounded up to
+// 256B for safety / alignment.
+void *hipdnn_ep_state_dyn_pool_alloc(RuntimeState *state, int64_t bytes);
+
+// Publish the actual size (in elements -- the EP later multiplies by
+// element size from the FlatBuffers blob) for slot `slot_id`. Aborts
+// (LOG(FATAL)) when slot_id is out of range -- this means the model
+// metadata says the model uses N slots but a Category-C wrapper tried
+// to publish slot N+k.
+void hipdnn_ep_state_publish_dim(RuntimeState *state, int32_t slot_id,
+                                 int64_t size);
+
+// Read the published size for slot `slot_id`. Returns
+// kDynSlotUnpublishedSize (-1) if the slot was never published this
+// Compute(); the EP MUST treat -1 as a fatal "Category-C op was skipped
+// somehow" error.
+int64_t hipdnn_ep_state_read_dim(RuntimeState *state, int32_t slot_id);
+
+// Publish / read the GPU buffer for slot `slot_id`. Same out-of-range
+// semantics as publish_dim. Read returns nullptr if never published.
+void hipdnn_ep_state_publish_buffer(RuntimeState *state, int32_t slot_id,
+                                    void *gpu_buf);
+void *hipdnn_ep_state_read_buffer(RuntimeState *state, int32_t slot_id);
+
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
 // Parameters:
@@ -663,6 +730,27 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype);
 
+// Category-C Range wrapper.
+//
+// Called by the lowered hip.range when at least one operand of
+// {start, limit, delta} is an intermediate (non-EP-input) value, so the
+// output length is computable only from device data. The wrapper does a
+// synchronous D2H of the three i64 scalars, computes the length on host,
+// publishes the length to dyn slot `slot_id`, allocates a fresh buffer
+// from the GPU dyn pool sized for the resolved length, publishes the
+// buffer ptr to the same slot, and launches the existing hip_range fill
+// kernel. The EP host-side resolver reads the slot post-compute and
+// D2H-copies the buffer into the actual-sized ORT OrtValue.
+//
+// Returns 0 on success; -1 on any GPU error (D2H, hipMalloc, or kernel
+// launch). When the resolved length is 0 the buffer is null and the
+// kernel is skipped.
+//
+// Only HIP_DTYPE_INT64 is supported on the Category-C path today (matches
+// the compiler-side gate in RangeConversion). Other dtypes are an error.
+int wrap_range_dyn(RuntimeState *state, void *start, void *limit, void *delta,
+                   int64_t hip_dtype, int32_t slot_id);
+
 // Transpose operation wrapper (ONNX Transpose).
 // Permutes the dimensions of `input` according to `perm` and writes the
 // result to `output`.  `input_shape` and `perm` are host-side arrays of
@@ -900,22 +988,61 @@ int wrap_neg(RuntimeState *state, void *input, void *output,
 int wrap_not(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
-// ONNX NonZero wrapper.
-// Returns the indices of the non-zero elements of `input` in row-major
-// order, packed into `output` as a [R, N] int64 tensor where R is the
-// input rank and N is the (data-dependent) number of non-zero entries.
-// The caller pre-allocates the output buffer with capacity `output_capacity`
-// elements along the N dim (the OnnxToHip pass uses `input_num_elements`
-// as the upper bound).
+// ONNX NonZero wrapper (Category-C dynamic output shape).
 //
-// `input_data_type` is the HIPDNN_EP_DATATYPE_* value of the input tensor.
-// Bool (ONNX `tensor(bool)`) is marshalled as 1-byte uint8 by the EP and
-// reuses the INT8 slot here. Today this is a stub: it logs its parameters
-// and throws std::runtime_error so an inference path that actually
-// reaches NonZero fails loudly instead of producing uninitialised output.
-int wrap_nonzero(RuntimeState *state, void *input, void *output,
+// Two-pass execution:
+//   1. hip_nonzero_count: count non-zero elements -> int64 on GPU.
+//   2. D2H + sync to get the exact N -> publish_dim(slot_id, N).
+//   3. dyn_pool_alloc(R*N*sizeof(int64)) -> publish_buffer(slot_id, ptr).
+//   4. hip_nonzero_fill: write [R, N] int64 indices to the pooled buffer.
+//
+// `input_shape_host` is a host-stack int64[R] array assembled by the
+// HipToLLVM lowering (constants for static dims, MemRefDescriptor
+// sizes[] for dynamic dims). The wrapper hipMemcpyAsync's it H2D into
+// a tiny dyn-pool slab so the fill kernel can do the per-axis
+// coordinate decomposition.
+//
+// `input_data_type` is the HIPDNN_EP_DATATYPE_* value of the input.
+// Bool (ONNX `tensor(bool)`) is marshalled as 1-byte uint8 by the EP
+// and reuses the INT8 slot here.
+//
+// `slot_id` is the per-module unique dyn-slot index where the wrapper
+// publishes the actual N and output GPU pointer; it is assigned during
+// the OnnxToHip conversion and embedded as an op attribute.
+int wrap_nonzero(RuntimeState *state, const void *input,
                  int64_t input_num_elements, int64_t input_rank,
-                 int64_t output_capacity, int64_t input_data_type);
+                 int64_t input_data_type, int32_t slot_id,
+                 const int64_t *input_shape_host);
+
+// ConstantOfShape - Category-B variant (output already allocated by EP).
+//
+// Used when ConstantOfShapeConversion proved the shape input traces to
+// EP-readable inputs and the EP has resolved every output dim via
+// `output_dim_specs`. The wrapper just dispatches the scalar-splat fill
+// kernel. `value_bits` is the raw i64-bitcast of the value attribute (or
+// the spec default 0); the kernel re-interprets it per `hip_dtype`.
+int wrap_constant_of_shape(RuntimeState *state, void *output,
+                           int64_t output_num_elements, int64_t value_bits,
+                           int64_t hip_dtype);
+
+// ConstantOfShape - Category-C variant (shape tensor is GPU-resident).
+//
+// Used when the shape input is an intermediate value. The wrapper:
+//   - D2H + sync the shape vector (length == output_rank; element type
+//     given by `shape_dtype`, supports INT32 / INT64),
+//   - computes num_elements = product(shape),
+//   - publishes one dim per output axis (slot_ids[i] <- shape[i]),
+//   - allocates `num_elements * elem_size` bytes from the dyn pool,
+//   - publishes that buffer to slot_ids[0] (the EP post-compute resolver
+//     reads the buffer from the first slot),
+//   - dispatches the scalar-splat fill kernel.
+//
+// `slot_ids` is a host-side i32 array of length `output_rank`. The lowered
+// call passes a pointer into a stack-allocated array (one per call site).
+int wrap_constant_of_shape_dyn(RuntimeState *state, const void *shape_dev,
+                               int64_t shape_dtype, int64_t output_rank,
+                               const int32_t *slot_ids, int64_t value_bits,
+                               int64_t output_dtype);
 
 // ONNX Size wrapper (dynamic-shape path only).
 //

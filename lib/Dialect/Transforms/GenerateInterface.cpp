@@ -33,9 +33,53 @@ using namespace mlir;
 
 namespace {
 
+/// Convert a serialized DimSpec ArrayAttr (one entry per node, each a
+/// DenseI64ArrayAttr [kind, value, input_index, dim_index, flat_offset,
+/// slot_id, lhs, rhs]) into a populated DimSpecT FlatBuffers native struct.
+/// Returns nullptr when `specAttr` is empty / malformed (caller treats
+/// as "no DimSpec for this dim").
+static std::unique_ptr<mlir::hip::DimSpecT>
+buildDimSpecNative(ArrayAttr specAttr) {
+  if (!specAttr || specAttr.empty())
+    return nullptr;
+  auto out = std::make_unique<mlir::hip::DimSpecT>();
+  out->nodes.reserve(specAttr.size());
+  for (Attribute e : specAttr) {
+    auto arr = dyn_cast<DenseI64ArrayAttr>(e);
+    if (!arr || arr.size() < 8)
+      return nullptr;
+    auto node = std::make_unique<mlir::hip::DimSpecNodeT>();
+    node->kind = static_cast<mlir::hip::DimSpecKind>(arr[0]);
+    node->value = arr[1];
+    node->input_index = static_cast<int32_t>(arr[2]);
+    node->dim_index = static_cast<int32_t>(arr[3]);
+    node->flat_offset = arr[4];
+    node->slot_id = static_cast<int32_t>(arr[5]);
+    int32_t lhs = static_cast<int32_t>(arr[6]);
+    int32_t rhs = static_cast<int32_t>(arr[7]);
+    // Binary nodes encode children in `children`. Leaves leave `children`
+    // empty.
+    auto kindEnum = node->kind;
+    if (kindEnum == mlir::hip::DimSpecKind::Static ||
+        kindEnum == mlir::hip::DimSpecKind::InputDim ||
+        kindEnum == mlir::hip::DimSpecKind::InputValueI64 ||
+        kindEnum == mlir::hip::DimSpecKind::RuntimeSlot) {
+      // No children.
+    } else {
+      node->children.push_back(lhs);
+      node->children.push_back(rhs);
+    }
+    out->nodes.push_back(std::move(node));
+  }
+  return out;
+}
+
 /// Build a TensorInfoT native struct from module tensor attributes at index i.
+/// When `dimSpecsArr` is present (per-tensor), additionally populates
+/// `ti->dim_specs` from per-dim ArrayAttrs at `dimSpecsArr[i]`.
 static std::unique_ptr<mlir::hip::TensorInfoT>
-buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
+buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i,
+                ArrayAttr dimSpecsArr = nullptr) {
   auto ti = std::make_unique<mlir::hip::TensorInfoT>();
   if (shapes && i < shapes.size()) {
     if (auto shapeAttr = dyn_cast<DenseI64ArrayAttr>(shapes.getValue()[i]))
@@ -46,6 +90,29 @@ buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
       (elementSizes && i < static_cast<size_t>(elementSizes.size()))
           ? elementSizes[i]
           : 4;
+  if (dimSpecsArr && i < dimSpecsArr.size()) {
+    auto perTensor = dyn_cast<ArrayAttr>(dimSpecsArr.getValue()[i]);
+    if (perTensor && perTensor.size() == ti->shape.size()) {
+      ti->dim_specs.reserve(perTensor.size());
+      bool anyNonEmpty = false;
+      for (Attribute e : perTensor) {
+        auto specAttr = dyn_cast<ArrayAttr>(e);
+        auto ds = buildDimSpecNative(specAttr);
+        if (ds)
+          anyNonEmpty = true;
+        // Push an empty DimSpec when missing; FlatBuffers needs a stable
+        // index space so the EP can map dim i ↔ dim_specs[i]. An empty
+        // node list means "no information" (legacy fallback).
+        ti->dim_specs.push_back(
+            ds ? std::move(ds) : std::make_unique<mlir::hip::DimSpecT>());
+      }
+      // If every dim resolves to "no information", drop the dim_specs
+      // vector to keep the blob backwards-compatible with old runtimes
+      // that may not understand the field.
+      if (!anyNonEmpty)
+        ti->dim_specs.clear();
+    }
+  }
   return ti;
 }
 
@@ -148,10 +215,14 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
     for (auto i : llvm::seq<size_t>(0, inputShapes.size()))
       meta.inputs.push_back(buildTensorInfo(inputShapes, inputElementSizes, i));
   }
+  // Dynamic-output DimSpecs (Composed by ComposeDimSpecs pass into
+  // hipdnn.output_dim_specs ArrayAttr).
+  auto outputDimSpecsAttr =
+      module->getAttrOfType<ArrayAttr>("hipdnn.output_dim_specs");
   if (outputShapes) {
     for (auto i : llvm::seq<size_t>(0, outputShapes.size()))
-      meta.outputs.push_back(
-          buildTensorInfo(outputShapes, outputElementSizes, i));
+      meta.outputs.push_back(buildTensorInfo(outputShapes, outputElementSizes,
+                                             i, outputDimSpecsAttr));
   }
 
   meta.input_count = inputCountAttr
@@ -160,6 +231,12 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
   meta.output_count = outputCountAttr
                           ? outputCountAttr.getInt()
                           : (int64_t)(outputShapes ? outputShapes.size() : 0);
+  // Number of dynamic-dim slots referenced anywhere in the output
+  // DimSpec trees. RuntimeState pre-allocates this many slots in
+  // inference_init. Defaults to 0 for legacy / all-static-output models.
+  if (auto slotsAttr =
+          module->getAttrOfType<IntegerAttr>("hipdnn.dyn_dim_slots_count"))
+    meta.dyn_dim_slots_count = static_cast<int32_t>(slotsAttr.getInt());
 
   return meta;
 }
@@ -257,6 +334,55 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
   Value addr =
       LLVM::AddressOfOp::create(builder, loc, ptrType, "__metadata_json");
   LLVM::ReturnOp::create(builder, loc, addr);
+}
+
+/// Emit three thin C-ABI shim entry points exposing the dynamic-output ABI
+/// to the EP host side. They are pure delegates onto the runtime helpers
+/// declared in getRuntimeFuncSpecs() and exist mainly so that the EP can
+/// detect support via `Plugin::get_method("inference_dyn_slot_get_dim")`
+/// rather than poking at the runtime DLL directly.
+///
+///   i64    inference_dyn_slot_get_dim(state, slot_id)
+///   ptr    inference_dyn_slot_get_buffer(state, slot_id)
+///   void   inference_dyn_slot_reset(state)
+///
+/// Only emitted when `hipdnn.dyn_dim_slots_count > 0`. Legacy / all-static
+/// models keep the historical 4-entry export surface — by-design.
+void generateInferenceDynShapeShims(ModuleOp module) {
+  OpBuilder builder(module.getContext());
+  Location loc = module.getLoc();
+
+  Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
+  Type i32Type = builder.getI32Type();
+  Type i64Type = builder.getI64Type();
+  Type voidType = LLVM::LLVMVoidType::get(builder.getContext());
+
+  auto emitShim = [&](StringRef name, Type retType, ArrayRef<Type> argTypes,
+                      StringRef calleeName) {
+    builder.setInsertionPointToEnd(module.getBody());
+    auto funcType = LLVM::LLVMFunctionType::get(retType, argTypes);
+    auto funcOp = LLVM::LLVMFuncOp::create(builder, loc, name, funcType);
+    funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
+    funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
+    Block *entry = funcOp.addEntryBlock(builder);
+    builder.setInsertionPointToStart(entry);
+    auto callee = module.lookupSymbol<LLVM::LLVMFuncOp>(calleeName);
+    SmallVector<Value> args(entry->getArguments().begin(),
+                            entry->getArguments().end());
+    auto call = LLVM::CallOp::create(builder, loc, callee, args);
+    if (retType == voidType) {
+      LLVM::ReturnOp::create(builder, loc, ValueRange{});
+    } else {
+      LLVM::ReturnOp::create(builder, loc, call.getResult());
+    }
+  };
+
+  emitShim("inference_dyn_slot_get_dim", i64Type, {ptrType, i32Type},
+           "hipdnn_ep_state_read_dim");
+  emitShim("inference_dyn_slot_get_buffer", ptrType, {ptrType, i32Type},
+           "hipdnn_ep_state_read_buffer");
+  emitShim("inference_dyn_slot_reset", voidType, {ptrType},
+           "hipdnn_ep_state_dyn_slots_reset");
 }
 
 /// Build an LLVM memref descriptor struct {ptr, ptr, offset, sizes, strides}
@@ -399,6 +525,20 @@ public:
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
 
+    // Conditionally emit thin entry points for the dynamic-output ABI so
+    // older EPs can detect "this DLL was built with dynamic-output
+    // support" via `Plugin::get_method("inference_dyn_slot_read_dim")`.
+    // When no slot is referenced anywhere in the model, the symbols are
+    // omitted — legacy DLLs (and freshly-built static-only DLLs) keep
+    // exactly the same export surface as before.
+    int32_t dynDimSlotsCount = 0;
+    if (auto a =
+            module->getAttrOfType<IntegerAttr>("hipdnn.dyn_dim_slots_count"))
+      dynDimSlotsCount = static_cast<int32_t>(a.getInt());
+    if (dynDimSlotsCount > 0) {
+      generateInferenceDynShapeShims(module);
+    }
+
     COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions\n");
   }
 
@@ -449,6 +589,19 @@ private:
         {"hipdnn_ep_stream_sync", i32, {ptr}},
         {"hipdnn_ep_state_reset_error_flag", i32, {ptr}},
         {"hipdnn_ep_state_read_and_clear_error_flag", i32, {ptr}},
+        // Dynamic-output-shape ABI. The first three are read by the EP
+        // from inside `inference_resolve_dynamic_output_shapes` (read_dim)
+        // and `inference_get_output_buffer` (read_buffer). The
+        // remaining wrap_* publishers write to them from inside
+        // Category-C runtime ops. Even when no model uses them, the
+        // symbols stay declared so legacy DLLs can link cleanly.
+        {"hipdnn_ep_state_read_dim", i64, {ptr, i32}},
+        {"hipdnn_ep_state_publish_dim", vd, {ptr, i32, i64}},
+        {"hipdnn_ep_state_read_buffer", ptr, {ptr, i32}},
+        {"hipdnn_ep_state_publish_buffer", vd, {ptr, i32, ptr}},
+        {"hipdnn_ep_state_dyn_pool_alloc", ptr, {ptr, i64}},
+        {"hipdnn_ep_state_dyn_pool_reset", vd, {ptr}},
+        {"hipdnn_ep_state_dyn_slots_reset", vd, {ptr}},
     };
   }
 

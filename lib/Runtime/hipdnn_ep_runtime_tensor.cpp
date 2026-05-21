@@ -440,6 +440,40 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   // Extract tensor from span
   tensor_t *tensor = &outputs->data[index];
 
+  // Category-C deferred-output sentinel: the EP knows this output's shape
+  // is only computable after inference_compute (e.g. an op publishes its
+  // dim to a RuntimeSlot during execution), so it could not yet allocate
+  // the ORT OrtValue. The sentinel is `data == nullptr` with a non-null
+  // `shape` and the matching `rank`. The EP keeps shape as a stack-
+  // resident upper-bound (or sentinel-filled) array so the
+  // buildMemrefDescriptor codegen has a valid array to GEP, but no GPU
+  // buffer is allocated and no D2H is queued -- main_graph reaches the
+  // wrap_* that owns this slot, which publishes its own GPU buffer
+  // through the dyn-pool ABI. The EP reads the slot post-compute,
+  // ctx.GetOutput's a fresh OrtValue with the resolved shape, and copies
+  // the slot buffer into it.
+  if (tensor->data == nullptr) {
+    if (tensor->rank != expected_rank) {
+      fprintf(stderr,
+              "hipdnn_ep_tensor_prepare_output: Category-C deferred rank "
+              "mismatch (expected %zu, got %zu) at index %zu\n",
+              expected_rank, tensor->rank, index);
+      return HIPDNN_EP_ERR_RANK_MISMATCH;
+    }
+    RUNTIME_DEBUG_LOG(
+        "[Runtime DEBUG] prepare_output[%zu]: Category-C deferred sentinel "
+        "(rank=%zu)\n",
+        index, tensor->rank);
+    out_buffer->gpu_ptr = nullptr;
+    out_buffer->host_ptr = nullptr;
+    out_buffer->shape_ptr = tensor->shape;
+    out_buffer->rank = tensor->rank;
+    out_buffer->size_bytes = 0;
+    out_buffer->is_pooled = false;
+    out_buffer->is_aliased = false;
+    return HIPDNN_EP_SUCCESS;
+  }
+
   // Validate tensor pointers
   if (!tensor->data) {
     fprintf(stderr,
@@ -533,6 +567,17 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
   if (!buffer) {
     fprintf(stderr, "hipdnn_ep_tensor_finalize_output: null buffer\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
+  }
+
+  // Category-C deferred sentinel: prepare_output set gpu_ptr = host_ptr =
+  // null with size_bytes == 0. Nothing to copy or release here -- the EP
+  // handles D2H + ORT allocation post-compute via the dyn-slot ABI.
+  if (buffer->gpu_ptr == nullptr && buffer->host_ptr == nullptr &&
+      buffer->size_bytes == 0) {
+    RUNTIME_DEBUG_LOG(
+        "[Runtime DEBUG] finalize_output: Category-C deferred sentinel "
+        "skipped\n");
+    return HIPDNN_EP_SUCCESS;
   }
 
   int result = HIPDNN_EP_SUCCESS;

@@ -94,6 +94,26 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
+/// True iff `v` is an entry-block argument of an ancestor `func.func`. Used
+/// by Range / ConstantOfShape conversions to decide whether their shape-
+/// tensor operands trace to a host-readable EP input (Category B) or to an
+/// intermediate value produced inside the graph (Category C — needs a
+/// RuntimeSlot publisher). The same predicate is used by the EP-side
+/// resolver to decide between InputValueI64 leaves and RuntimeSlot leaves.
+inline bool operandIsFuncEntryBlockArg(mlir::Value v) {
+  auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(v);
+  if (!blockArg)
+    return false;
+  auto *owner = blockArg.getOwner();
+  if (!owner || !owner->getParent())
+    return false;
+  auto funcOp =
+      mlir::dyn_cast<mlir::func::FuncOp>(owner->getParentOp());
+  if (!funcOp)
+    return false;
+  return &funcOp.getBody().front() == owner;
+}
+
 /// Get !hip.context from function argument 0. Returns failure if the
 /// function has no arguments or the first argument is not !hip.context.
 inline mlir::FailureOr<mlir::Value>

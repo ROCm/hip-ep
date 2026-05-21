@@ -12,6 +12,7 @@
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -70,6 +71,32 @@ static inline long shm_ref_dec(volatile long *p) { return --(*p); }
 
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
+static void initialize_dyn_dim_slots(RuntimeState *state, int32_t slot_count);
+static void cleanup_dyn_dim_slots(RuntimeState *state);
+
+// Multi-segment growable GPU pool for Category-C output buffers.
+// Layout matches what hipdnn_ep_state_dyn_pool_alloc / _reset operate on.
+// Kept as a POD vector behind a void* in RuntimeState so the public header
+// doesn't have to pull in <vector>.
+struct DynPoolSegment {
+  void *gpu_base;
+  size_t capacity_bytes;
+  size_t used_bytes;
+};
+struct DynPoolSegments {
+  DynPoolSegment *items;
+  int32_t count;
+  int32_t capacity;
+};
+
+// Allocation alignment for dyn-pool slabs. 256 bytes covers fp16 / int64
+// elements as well as the worst-case HIP texture alignment requirement.
+static constexpr size_t kDynPoolAllocAlign = 256;
+static constexpr size_t kDynPoolInitialSegmentBytes = 1u << 20; // 1 MiB
+static inline size_t round_up_pow2(size_t v, size_t align) {
+  return (v + align - 1) & ~(align - 1);
+}
+
 static int prepare_constants_array(RuntimeState *state,
                                    const mlir::hip::HipModelMetaInfo *meta);
 static size_t
@@ -109,6 +136,15 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   }
 
   auto *meta = flatbuffers::GetRoot<mlir::hip::HipModelMetaInfo>(metadata_blob);
+  // Dynamic-output slot table: total number of slots referenced anywhere
+  // in the output DimSpec trees. ComposeDimSpecs computes this at compile
+  // time and bakes it into HipModelMetaInfo.dyn_dim_slots_count; legacy
+  // / all-static-output models have dyn_dim_slots_count == 0 and skip the
+  // entire path.
+  int32_t slot_count = meta ? meta->dyn_dim_slots_count() : 0;
+  if (slot_count > 0) {
+    initialize_dyn_dim_slots(*out_state, slot_count);
+  }
   auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
   if (count <= 0) {
@@ -236,6 +272,12 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->loop_cond_host = nullptr;
   state->loop_cond_dev = nullptr;
   state->loop_event = nullptr;
+  state->dyn_dim_slots_count = 0;
+  state->dyn_slot_sizes = nullptr;
+  state->dyn_slot_bufs = nullptr;
+  state->dyn_pool_segments = nullptr;
+  state->dyn_pool_segment_count = 0;
+  state->dyn_pool_active_segment = 0;
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -943,6 +985,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->op_profile = nullptr;
   }
 
+  // Free dyn-dim slot tables + dyn pool segments (Category C ABI).
+  cleanup_dyn_dim_slots(state);
+
   // Destroy hipBLASLt handle
   if (state->hipblas_handle) {
     hipblasLtDestroy(state->hipblas_handle);
@@ -989,9 +1034,11 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {
   return state ? state->op_profile : nullptr;
 }
 
-// Per-Compute() cache invalidation hook. Today this only resets the GQA
-// seqlens_k cache; future per-forward-pass caches should be cleared here
-// as well so the EP-side hook stays a single call.
+// Per-Compute() cache invalidation hook. Today this resets the GQA
+// seqlens_k cache AND clears the dynamic-output slot table + dyn pool
+// (Category-C ops re-publish every Compute()); future per-forward-pass
+// caches should be cleared here as well so the EP-side hook stays a
+// single call.
 //
 // __declspec(dllexport) matches the convention in real/test_hip_from_dll.cpp
 // (belt-and-suspenders with the .def export list in CompilerDriver.cpp) and
@@ -1007,6 +1054,196 @@ extern "C"
   }
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_ptr = nullptr;
+  hipdnn_ep_state_dyn_slots_reset(state);
+}
+
+//===----------------------------------------------------------------------===//
+// Dynamic-output-shape slot ABI (Category C support)
+//===----------------------------------------------------------------------===//
+
+static void initialize_dyn_dim_slots(RuntimeState *state, int32_t slot_count) {
+  if (!state || slot_count <= 0)
+    return;
+  state->dyn_dim_slots_count = slot_count;
+  state->dyn_slot_sizes =
+      (int64_t *)malloc(sizeof(int64_t) * (size_t)slot_count);
+  state->dyn_slot_bufs = (void **)malloc(sizeof(void *) * (size_t)slot_count);
+  for (int32_t i = 0; i < slot_count; ++i) {
+    state->dyn_slot_sizes[i] = kDynSlotUnpublishedSize;
+    state->dyn_slot_bufs[i] = nullptr;
+  }
+  // dyn_pool_segments stays nullptr until the first allocation.
+}
+
+static void cleanup_dyn_dim_slots(RuntimeState *state) {
+  if (!state)
+    return;
+  if (state->dyn_slot_sizes) {
+    free(state->dyn_slot_sizes);
+    state->dyn_slot_sizes = nullptr;
+  }
+  if (state->dyn_slot_bufs) {
+    free(state->dyn_slot_bufs);
+    state->dyn_slot_bufs = nullptr;
+  }
+  if (state->dyn_pool_segments) {
+    auto *segs = static_cast<DynPoolSegments *>(state->dyn_pool_segments);
+    for (int32_t i = 0; i < segs->count; ++i) {
+      if (segs->items[i].gpu_base) {
+        HIP_CLEANUP(hipFree(segs->items[i].gpu_base));
+      }
+    }
+    free(segs->items);
+    free(segs);
+    state->dyn_pool_segments = nullptr;
+  }
+  state->dyn_dim_slots_count = 0;
+  state->dyn_pool_segment_count = 0;
+  state->dyn_pool_active_segment = 0;
+}
+
+extern "C" void hipdnn_ep_state_dyn_slots_reset(RuntimeState *state) {
+  if (!state)
+    return;
+  for (int32_t i = 0; i < state->dyn_dim_slots_count; ++i) {
+    state->dyn_slot_sizes[i] = kDynSlotUnpublishedSize;
+    state->dyn_slot_bufs[i] = nullptr;
+  }
+  hipdnn_ep_state_dyn_pool_reset(state);
+}
+
+extern "C" void hipdnn_ep_state_dyn_pool_reset(RuntimeState *state) {
+  if (!state || !state->dyn_pool_segments)
+    return;
+  auto *segs = static_cast<DynPoolSegments *>(state->dyn_pool_segments);
+  for (int32_t i = 0; i < segs->count; ++i)
+    segs->items[i].used_bytes = 0;
+  state->dyn_pool_active_segment = 0;
+}
+
+extern "C" void *hipdnn_ep_state_dyn_pool_alloc(RuntimeState *state,
+                                                int64_t bytes) {
+  if (!state || bytes <= 0)
+    return nullptr;
+  size_t needed = round_up_pow2(static_cast<size_t>(bytes), kDynPoolAllocAlign);
+
+  // Lazily allocate the segments vector itself.
+  DynPoolSegments *segs;
+  if (!state->dyn_pool_segments) {
+    segs = (DynPoolSegments *)malloc(sizeof(DynPoolSegments));
+    segs->capacity = 4;
+    segs->count = 0;
+    segs->items =
+        (DynPoolSegment *)malloc(sizeof(DynPoolSegment) * segs->capacity);
+    state->dyn_pool_segments = segs;
+  } else {
+    segs = static_cast<DynPoolSegments *>(state->dyn_pool_segments);
+  }
+
+  // Fast path: try the active segment first; if it fits, bump-pointer.
+  if (segs->count > 0) {
+    auto &cur = segs->items[state->dyn_pool_active_segment];
+    if (cur.used_bytes + needed <= cur.capacity_bytes) {
+      void *p = static_cast<char *>(cur.gpu_base) + cur.used_bytes;
+      cur.used_bytes += needed;
+      return p;
+    }
+  }
+
+  // Scan existing segments for one that fits (the active segment may be
+  // running low; an older / larger segment may still have room).
+  for (int32_t i = 0; i < segs->count; ++i) {
+    auto &seg = segs->items[i];
+    if (seg.used_bytes + needed <= seg.capacity_bytes) {
+      state->dyn_pool_active_segment = i;
+      void *p = static_cast<char *>(seg.gpu_base) + seg.used_bytes;
+      seg.used_bytes += needed;
+      return p;
+    }
+  }
+
+  // Need a new segment. Size = max(2 * largest_existing, needed,
+  // kDynPoolInitialSegmentBytes), rounded to 1 MiB. This keeps the
+  // segment count bounded across the session even for pathological
+  // alloc patterns.
+  size_t largest = kDynPoolInitialSegmentBytes;
+  for (int32_t i = 0; i < segs->count; ++i)
+    largest = std::max(largest, segs->items[i].capacity_bytes);
+  size_t new_capacity =
+      std::max(needed, std::max(largest * 2, kDynPoolInitialSegmentBytes));
+  new_capacity = round_up_pow2(new_capacity, 1u << 20);
+
+  if (segs->count == segs->capacity) {
+    int32_t new_cap = segs->capacity * 2;
+    auto *new_items =
+        (DynPoolSegment *)realloc(segs->items, sizeof(DynPoolSegment) * new_cap);
+    if (!new_items) {
+      fprintf(stderr,
+              "[hipdnn_ep_state_dyn_pool_alloc] realloc(segments) failed\n");
+      std::abort();
+    }
+    segs->items = new_items;
+    segs->capacity = new_cap;
+  }
+
+  void *gpu_base = nullptr;
+  if (hipMalloc(&gpu_base, new_capacity) != hipSuccess || !gpu_base) {
+    fprintf(stderr,
+            "[hipdnn_ep_state_dyn_pool_alloc] hipMalloc(%zu) failed; aborting "
+            "(Category-C op cannot proceed without GPU memory)\n",
+            new_capacity);
+    std::abort();
+  }
+  segs->items[segs->count] =
+      DynPoolSegment{gpu_base, new_capacity, needed};
+  state->dyn_pool_active_segment = segs->count;
+  segs->count += 1;
+  state->dyn_pool_segment_count = segs->count;
+  return gpu_base;
+}
+
+extern "C" void hipdnn_ep_state_publish_dim(RuntimeState *state,
+                                            int32_t slot_id, int64_t size) {
+  if (!state)
+    return;
+  if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
+    fprintf(stderr,
+            "[hipdnn_ep_state_publish_dim] slot_id %d out of range "
+            "[0, %d); model metadata is inconsistent with the runtime "
+            "wrapper that called publish_dim. Aborting.\n",
+            slot_id, state->dyn_dim_slots_count);
+    std::abort();
+  }
+  state->dyn_slot_sizes[slot_id] = size;
+}
+
+extern "C" int64_t hipdnn_ep_state_read_dim(RuntimeState *state,
+                                            int32_t slot_id) {
+  if (!state || slot_id < 0 || slot_id >= state->dyn_dim_slots_count)
+    return kDynSlotUnpublishedSize;
+  return state->dyn_slot_sizes[slot_id];
+}
+
+extern "C" void hipdnn_ep_state_publish_buffer(RuntimeState *state,
+                                               int32_t slot_id,
+                                               void *gpu_buf) {
+  if (!state)
+    return;
+  if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
+    fprintf(stderr,
+            "[hipdnn_ep_state_publish_buffer] slot_id %d out of range "
+            "[0, %d). Aborting.\n",
+            slot_id, state->dyn_dim_slots_count);
+    std::abort();
+  }
+  state->dyn_slot_bufs[slot_id] = gpu_buf;
+}
+
+extern "C" void *hipdnn_ep_state_read_buffer(RuntimeState *state,
+                                             int32_t slot_id) {
+  if (!state || slot_id < 0 || slot_id >= state->dyn_dim_slots_count)
+    return nullptr;
+  return state->dyn_slot_bufs[slot_id];
 }
 
 //===----------------------------------------------------------------------===//

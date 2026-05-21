@@ -44,6 +44,7 @@ typedef enum {
     HIP_DTYPE_FLOAT64  = 4,
     HIP_DTYPE_BFLOAT16 = 5,
     HIP_DTYPE_INT16    = 6,
+    HIP_DTYPE_INT8     = 7,  // Also used for ONNX bool (1-byte raw predicate).
 } hip_dtype_t;
 
 /* =========================================================================
@@ -893,6 +894,113 @@ int hip_range(
     int64_t output_num_elements,
     int64_t hip_dtype,
     void* device_error_flag);
+
+/* =========================================================================
+ * NonZero (Two-Pass: Count + Fill)
+ * =========================================================================
+ *
+ * Implements the standard ONNX NonZero operator. Returns a [R, N] int64
+ * tensor of the indices of non-zero elements of `input`, in row-major
+ * order over the input axes, where R is the input rank and N is the
+ * (data-dependent) number of non-zero elements.
+ *
+ * Two-pass design (the canonical Category-C dispatch — see CLAUDE.md and
+ * docs/design/compiler-runtime-contract.md):
+ *   Pass 1 (count): `hip_nonzero_count` writes a single int64 to
+ *                   `count_out` containing the number of non-zero
+ *                   elements. The host then reads + syncs that value and
+ *                   uses it to allocate the exact-sized output via the
+ *                   dyn pool / publish_dim.
+ *   Pass 2 (fill):  `hip_nonzero_fill` writes the [R, N] indices to
+ *                   `output` using a device-side atomic counter; the
+ *                   per-thread index allocations match what `count`
+ *                   computed in Pass 1.
+ *
+ * Parameters (shared):
+ *   stream             - hipStream_t cast to void*
+ *   input              - GPU pointer to input tensor data
+ *   input_num_elements - total elements (prod of input shape)
+ *   input_data_type    - HIP_DTYPE_* value (FLOAT32, FLOAT16, INT32,
+ *                        INT64, INT8 — ONNX bool is marshalled as int8
+ *                        by the EP)
+ *
+ * Pass 1 extra:
+ *   count_out  - GPU pointer to int64 scalar (initialised to 0 by the
+ *                kernel itself; the wrapper must NOT zero it host-side)
+ *
+ * Pass 2 extra:
+ *   output     - GPU pointer to [rank, N] int64 buffer (rank * N *
+ *                sizeof(int64_t) bytes)
+ *   rank       - input rank R (== output.shape[0])
+ *   N          - the count produced by Pass 1
+ *   atomic_idx - GPU pointer to int64 scratch counter (the kernel
+ *                resets it to 0 itself; one int64 = 8 bytes)
+ *   input_shape_dev - GPU pointer to int64 array of length `rank`
+ *                holding the input shape (used for the row-major
+ *                coordinate decomposition; the wrapper uploads this
+ *                once per call from host_shape_buf via hipMemcpyAsync,
+ *                or reuses a cached blob across calls when shape is
+ *                static)
+ *
+ * Returns: 0 on success, non-zero on launch failure.
+ */
+int hip_nonzero_count(
+    void* stream,
+    const void* input,
+    int64_t input_num_elements,
+    int64_t input_data_type,
+    void* count_out);
+
+int hip_nonzero_fill(
+    void* stream,
+    const void* input,
+    int64_t input_num_elements,
+    int64_t input_data_type,
+    int64_t rank,
+    int64_t N,
+    const void* input_shape_dev,
+    void* atomic_idx,
+    void* output);
+
+/* =========================================================================
+ * ConstantOfShape (Scalar Splat)
+ * =========================================================================
+ *
+ * Fills `output[0..num_elements)` with a single scalar value. ONNX
+ * ConstantOfShape allocates a tensor of a runtime-resolved shape and
+ * initialises every element to `value` (default fp32 zero, or the i64-
+ * bitcast `value` attribute from the op).
+ *
+ * The scalar is passed as a raw int64 bit pattern (`value_bits`) plus a
+ * dtype to interpret it. The wrapper reinterprets it per-dtype:
+ *   FP32   -> *(float*)&value_bits as a 32-bit float (low 32 bits)
+ *   FP16   -> low 16 bits as a __fp16
+ *   BF16   -> low 16 bits as bfloat16
+ *   INT8   -> low 8 bits as int8 (also bool: 0 or 1)
+ *   INT16  -> low 16 bits as int16
+ *   INT32  -> low 32 bits as int32
+ *   INT64  -> all 64 bits as int64
+ *   FP64   -> *(double*)&value_bits as a 64-bit float
+ *
+ * One thread per output element. Bandwidth-bound; no LDS needed.
+ *
+ * Parameters:
+ *   stream         - hipStream_t cast to void*
+ *   output         - GPU pointer to output buffer
+ *   num_elements   - total elements (product of resolved output shape)
+ *   value_bits     - raw scalar value (int64 bit pattern; see above)
+ *   hip_dtype      - element type (hip_dtype_t value cast to int)
+ *
+ * Supported dtypes: FLOAT32, FLOAT16, BFLOAT16, FLOAT64, INT8/bool, INT16,
+ *                    INT32, INT64
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+int hip_constant_of_shape(
+    void* stream,
+    void* output,
+    int64_t num_elements,
+    int64_t value_bits,
+    int hip_dtype);
 
 /* =========================================================================
  * Transpose (Generic N-D Permutation)
