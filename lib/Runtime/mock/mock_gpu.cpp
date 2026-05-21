@@ -424,7 +424,9 @@ int wrap_miopenConvolutionForward(
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t element_size_bytes) {
+  (void)element_size_bytes;
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
@@ -450,6 +452,56 @@ int wrap_miopenConvolutionForward(
   memset(output, 0, output_size);
 
   return 0;
+}
+
+int wrap_ckConvForward(RuntimeState *state, const void *input, int64_t input_n,
+                       int64_t input_c, int64_t input_h, int64_t input_w,
+                       const void *weights, int64_t weights_k, const void *bias,
+                       void *output, int64_t output_h, int64_t output_w,
+                       int64_t kernel_h, int64_t kernel_w, int64_t stride_h,
+                       int64_t stride_w, int64_t pad_top, int64_t pad_left,
+                       int64_t pad_bottom, int64_t pad_right,
+                       int64_t dilation_h, int64_t dilation_w, int64_t group,
+                       int64_t element_size_bytes) {
+  (void)element_size_bytes;
+  if (!state || !input || !weights || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_ckConvForward\n");
+    return -1;
+  }
+  MOCK_PRINT(
+      "[MOCK] wrap_ckConvForward(NCHW=[%lld,%lld,%lld,%lld], K=%lld, "
+      "kernel=[%lld,%lld], stride=[%lld,%lld], pad=[%lld,%lld,%lld,%lld], "
+      "dilation=[%lld,%lld], group=%lld)\n",
+      (long long)input_n, (long long)input_c, (long long)input_h,
+      (long long)input_w, (long long)weights_k, (long long)kernel_h,
+      (long long)kernel_w, (long long)stride_h, (long long)stride_w,
+      (long long)pad_top, (long long)pad_left, (long long)pad_bottom,
+      (long long)pad_right, (long long)dilation_h, (long long)dilation_w,
+      (long long)group);
+  (void)bias;
+  size_t output_size =
+      input_n * weights_k * output_h * output_w * sizeof(float);
+  memset(output, 0, output_size);
+  return 0;
+}
+
+int wrap_conv_forward_dispatch(
+    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
+    const void *bias, void *output, int64_t output_h, int64_t output_w,
+    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
+    int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t element_size_bytes) {
+  // Mock dispatcher: always delegates to the miopen mock (it just zero-fills
+  // the output anyway). The real dispatcher honours HIPDNN_EP_CONV.
+  MOCK_PRINT(
+      "[MOCK] wrap_conv_forward_dispatch -> wrap_miopenConvolutionForward\n");
+  return wrap_miopenConvolutionForward(
+      state, input, input_n, input_c, input_h, input_w, weights, weights_k,
+      bias, output, output_h, output_w, kernel_h, kernel_w, stride_h, stride_w,
+      pad_top, pad_left, pad_bottom, pad_right, dilation_h, dilation_w, group,
+      element_size_bytes);
 }
 
 int wrap_causal_conv_with_state(

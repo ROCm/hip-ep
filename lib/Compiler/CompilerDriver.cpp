@@ -357,6 +357,16 @@ void CompilerDriver::discoverLibraries(
   else
     COMPILER_DEBUG_LOG("  WARNING: hipblaslt import library not found\n");
 
+  // Composable Kernel is NOT linked into model.dll. The CK conv kernels
+  // live behind a stable vtable ABI (HIPBackendVTable) in
+  // hip-backend-gfx<ARCH>.dll. model.dll loads the per-gfx DLL at runtime
+  // via hip::GetBackend() (lib/Runtime/real/hip_backend_client.{h,cpp}); the
+  // only exported symbol crossing the boundary is `HIPBackendAPI`, a pointer to
+  // the static vtable. This isolates the multi-minute lld-link cost of
+  // device_conv_operations.lib (2.6 GB) to the one-time backend DLL build
+  // (done by MSVC link.exe, not LLD) instead of paying it on every
+  // model.dll compile in the EP pipeline.
+
   // Custom kernels library discovery (priority high → low):
   //
   //   1. HIP_CUSTOM_KERNELS_DIR env var  — runtime override for end-users

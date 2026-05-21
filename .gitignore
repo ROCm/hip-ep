@@ -127,6 +127,11 @@ Llama_Sliced/
 perf_seq*.txt
 dump_log.txt
 
+# Per-developer scratch (logs, ad-hoc benches, debug dumps, throwaway
+# Python/PowerShell helpers, etc.). Anything you don't want to commit but
+# want to keep around between sessions goes here.
+_local/
+
 # Local build scripts (contain machine-specific paths)
 setup_and_configure.ps1
 build_and_install.ps1

@@ -19,8 +19,27 @@
 
 #include "runtime_types.h"
 
+#include <memory>
+
+// Forward declaration only -- the type is complete in
+// `hip_backend_client.h` (real builds: lib/Runtime/real/hip_backend_client.h;
+// mock builds: stub in lib/Runtime/mock/hip_backend_client.h).
+// std::shared_ptr<T> is fine with an incomplete T in the field
+// declaration; the dtor and copy/move are instantiated where T is
+// complete (state_init / state_cleanup both include hip_backend_client.h
+// before touching the field).
+namespace hip {
+class Backend;
+}
+
 // Internal runtime state structure
-// This struct is opaque to generated code (passed as void*)
+// This struct is opaque to generated code (passed as void*).
+//
+// Allocated via `new RuntimeState()` (value-initialization) and freed via
+// `delete state` -- this runs the implicit ctors / dtors for non-POD
+// members (today: backend_holder). Earlier malloc-based allocation is
+// gone precisely because adding a smart-pointer member made the malloc
+// path UB (operator= on uninitialized memory).
 struct RuntimeState {
   hipStream_t stream;
   miopenHandle_t miopen_handle;
@@ -123,6 +142,17 @@ struct RuntimeState {
   // cleaned up here)
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
+
+  // Lifetime anchor for the per-gfx backend DLL (hip::Backend). Holding
+  // a strong ref pins the backend for the session. When state_cleanup
+  // runs `delete state`, the implicit ~RuntimeState drops this ref; if
+  // it was the last session, hip::Backend's dtor unloads the DLL.
+  // Op-site call sites use hip::GetBackend() directly via the weak_ptr
+  // cache; this field only exists so backend lifetime tracks session
+  // lifetime cleanly. Empty (default-constructed) if the backend wasn't
+  // available at init -- ops that need it will surface their own
+  // diagnostic when called.
+  std::shared_ptr<hip::Backend> backend_holder;
 
   // Per-Compute() cache for seqlens_k_val (decode hot path).
   //

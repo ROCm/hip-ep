@@ -7,6 +7,10 @@
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
 #include "op_profile.h"
+// Resolves to lib/Runtime/real/hip_backend_client.h in real builds and
+// to lib/Runtime/mock/hip_backend_client.h (no-op stub) in mock builds
+// via the per-mode -I flags in lib/Runtime/CMakeLists.txt.
+#include "hip_backend_client.h"
 #include "runtime_state_internal.h"
 
 #include "model_metadata_generated.h"
@@ -15,6 +19,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <memory>
+#include <new>
 
 // Win32 API declarations for the OGA pipeline shared-constants cache
 // (named shared memory + atomic ref counting). Model DLLs link static
@@ -67,6 +74,23 @@ static inline long shm_ref_dec(volatile long *p) { return --(*p); }
 #define SHM_FILE_MAP_ALL_ACCESS 0x000F001Fu
 #define SHM_PAGE_READWRITE 0x04u
 #endif
+
+// Scratch-provider callback handed to hip::Backend::SetScratchProvider in
+// state_init. Routes the backend's per-call scratch request through the
+// model's existing shared workspace (matmul / GQA / conv all share one
+// grow-on-demand buffer; serialized on the HIP stream so reuse is safe).
+// `ctx` is the owning RuntimeState* -- per session, so different sessions'
+// backends pull from their own workspaces. Returns nullptr on grow
+// failure; the backend converts that to a -1 op return.
+extern "C" void *hipdnn_ep_runtime_scratch_provider(void *ctx,
+                                                    size_t needed_bytes) {
+  auto *state = static_cast<RuntimeState *>(ctx);
+  if (!state || needed_bytes == 0)
+    return nullptr;
+  if (hipdnn_ep_state_ensure_workspace(state, needed_bytes) != 0)
+    return nullptr;
+  return hipdnn_ep_state_get_workspace(state);
+}
 
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
@@ -194,7 +218,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 static int initialize_state_handles(RuntimeState **out_state) {
   auto t_prev = timing_now();
 
-  RuntimeState *state = (RuntimeState *)malloc(sizeof(RuntimeState));
+  // value-init zeroes all POD members (raw pointers, sizes, bools) and
+  // default-constructs non-POD members (backend_holder = empty shared_ptr).
+  RuntimeState *state = new (std::nothrow) RuntimeState();
   if (!state) {
     fprintf(stderr, "Failed to allocate runtime state\n");
     return 1;
@@ -230,17 +256,18 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
+  // backend_holder default-constructed to empty by the value-init above.
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
     fprintf(stderr, "Failed to get HIP device count or no devices available\n");
-    free(state);
+    delete state;
     return 2;
   }
 
   if (hipSetDevice(0) != hipSuccess) {
     fprintf(stderr, "Failed to set HIP device 0\n");
-    free(state);
+    delete state;
     return 3;
   }
 
@@ -248,7 +275,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   if (hipStreamCreate(&state->stream) != hipSuccess) {
     fprintf(stderr, "Failed to create HIP stream\n");
-    free(state);
+    delete state;
     return 6;
   }
 
@@ -258,7 +285,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
+    delete state;
     return 7;
   }
 
@@ -268,7 +295,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
     miopenDestroy(state->miopen_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
+    delete state;
     return 8;
   }
 
@@ -279,7 +306,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
     miopenDestroy(state->miopen_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
+    delete state;
     return 9;
   }
 
@@ -294,7 +321,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
     miopenDestroy(state->miopen_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
+    delete state;
     return 10;
   }
   if (hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream) !=
@@ -306,8 +333,36 @@ static int initialize_state_handles(RuntimeState **out_state) {
     miopenDestroy(state->miopen_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
+    delete state;
     return 11;
+  }
+
+  // Anchor a strong reference to the per-gfx backend (CK conv etc.) on
+  // RuntimeState so the backend DLL lives for the session. hip::GetBackend
+  // is lazy and weak_ptr-cached, so concurrent sessions share one DLL load
+  // and the DLL is unloaded only when the last session exits. Failure to
+  // load is non-fatal: many models don't use the backend, and demoting to
+  // a warning lets unrelated workloads keep running. Op-site code that
+  // does need it (e.g. wrap_ckConvForward) calls hip::GetBackend() itself
+  // and surfaces its own diagnostic.
+  //
+  // If the backend loaded, also register our scratch-provider callback
+  // so the backend pulls GPU scratch from this session's workspace
+  // instead of hipMalloc'ing its own. Both calls are gated by try/catch
+  // because the scratch slot is optional (older backends won't have it).
+  try {
+    state->backend_holder = hip::GetBackend();
+    if (state->backend_holder) {
+      state->backend_holder->SetScratchProvider(
+          state, &hipdnn_ep_runtime_scratch_provider);
+    }
+  } catch (const std::exception &e) {
+    fprintf(stderr,
+            "[hip_ep] backend not available: %s -- ops requiring it will "
+            "fail at dispatch\n",
+            e.what());
+    // backend_holder stays empty (or holds a backend that lacks the
+    // scratch slot -- ops that need it will surface the failure).
   }
 
   *out_state = state;
@@ -920,6 +975,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->op_profile = nullptr;
   }
 
+  // backend_holder is a real std::shared_ptr<hip::Backend> field; the
+  // ref drop happens in ~RuntimeState() invoked by `delete state` below.
+  // If this is the last session in the process, hip::Backend's dtor
+  // unloads the per-gfx backend DLL.
+
   // Destroy hipBLASLt handle
   if (state->hipblas_handle) {
     hipblasLtDestroy(state->hipblas_handle);
@@ -935,8 +995,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipStreamDestroy(state->stream));
   }
 
-  // Free the context struct itself
-  free(state);
+  // Free the context struct itself. ~RuntimeState runs the implicit
+  // member dtors (today: drops backend_holder's ref); the rest of this
+  // function has already torn down the HIP/MIOpen/hipBLASLt handles + the
+  // explicit caches (gqa_gemm_cache, op_profile, etc.) above.
+  delete state;
 
   return 0; // Best-effort cleanup always returns success
 }
