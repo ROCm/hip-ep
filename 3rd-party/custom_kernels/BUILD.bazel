@@ -1,0 +1,11 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# Header-only library exposing the custom HIP kernel public API.
+# Source .hip files are compiled by hipcc (GPU compilation) — not Bazel cc_binary.
+# Consumers needing the headers (e.g. lib/Runtime/real/) depend on this target.
+cc_library(
+    name = "custom_kernels_headers",
+    hdrs = glob(["include/**/*.h"]),
+    strip_include_prefix = "include",
+    visibility = ["//visibility:public"],
+)

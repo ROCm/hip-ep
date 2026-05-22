@@ -402,6 +402,7 @@
     "https://bcr.bazel.build/modules/stardoc/0.7.2/source.json": "58b029e5e901d6802967754adf0a9056747e8176f017cfe3607c0851f4d42216",
     "https://bcr.bazel.build/modules/swift_argument_parser/1.3.1.1/MODULE.bazel": "5e463fbfba7b1701d957555ed45097d7f984211330106ccd1352c6e0af0dcf91",
     "https://bcr.bazel.build/modules/swift_argument_parser/1.3.1.1/source.json": "32bd87e5f4d7acc57c5b2ff7c325ae3061d5e242c0c4c214ae87e0f1c13e54cb",
+    "https://bcr.bazel.build/modules/therock/7.11.0/MODULE.bazel": "not found",
     "https://bcr.bazel.build/modules/upb/0.0.0-20211020-160625a/MODULE.bazel": "6cced416be2dc5b9c05efd5b997049ba795e5e4e6fafbe1624f4587767638928",
     "https://bcr.bazel.build/modules/upb/0.0.0-20220923-a547704/MODULE.bazel": "7298990c00040a0e2f121f6c32544bab27d4452f80d9ce51349b1a28f3005c43",
     "https://bcr.bazel.build/modules/upb/0.0.0-20230516-61a97ef/MODULE.bazel": "c0df5e35ad55e264160417fd0875932ee3c9dda63d9fccace35ac62f45e1b6f9",
@@ -447,8 +448,6 @@
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/aspect_rules_js/2.0.0/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/aspect_rules_js/2.3.8/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/aspect_rules_ts/3.6.0/MODULE.bazel": "not found",
-    "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/bazel_cpp_toolchain/1.0.0/MODULE.bazel": "c0d686c710b6da5106e3e6d5346aa28a7f16da03c6dbc6efbcbd481ec487844e",
-    "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/bazel_cpp_toolchain/1.0.0/source.json": "ad8db756a77eb70d7186dda29456b9f6535656ca00c308a2b93ea7e5adba3caf",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/bazel_features/1.1.0/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/bazel_features/1.1.1/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/bazel_features/1.10.0/MODULE.bazel": "not found",
@@ -731,6 +730,7 @@
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/stardoc/0.7.1/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/stardoc/0.7.2/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/swift_argument_parser/1.3.1.1/MODULE.bazel": "not found",
+    "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/therock/7.11.0/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/upb/0.0.0-20211020-160625a/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/upb/0.0.0-20220923-a547704/MODULE.bazel": "not found",
     "https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c/modules/upb/0.0.0-20230516-61a97ef/MODULE.bazel": "not found",
@@ -935,8 +935,8 @@
     },
     "@@bazel_cpp_toolchain+//toolchain/extensions:deps.bzl%toolchain_archive_deps": {
       "general": {
-        "bzlTransitiveDigest": "0Xg4Y/URUndtAF7sCX14aw2YzjgaePoIU790woTCN4Y=",
-        "usagesDigest": "nfDq+MOZJuSnT15bfhhDT6SN8FkVlA6+0TZ8/shDNiw=",
+        "bzlTransitiveDigest": "74K5I0AmDqIi1gDXYwrirx8EkYio7bzovyiaCJQJ4b8=",
+        "usagesDigest": "A6b69a48j5hOgTpwgreZcbTsE1HkXJlxtFYTK0ts1jM=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -991,8 +991,8 @@
     },
     "@@bazel_cpp_toolchain+//toolchain/extensions:local_tools.bzl%local_tool_deps": {
       "general": {
-        "bzlTransitiveDigest": "x5uhr1Yb1soRB7n1vZQwYIHoLtxs9SfzLYs96sIsB5Y=",
-        "usagesDigest": "H+M+JdjEe8lX3QA+6bixVEtB53C2hRIJRj4zkkntDaA=",
+        "bzlTransitiveDigest": "dRsTW5nm2pYSJUrztXSvdc6wWaBeOXs+SWc0kxBhYA8=",
+        "usagesDigest": "sWgDOouGeCT3U8UyfCRlXSPEkJpWIOLZNo+71l1u/Ts=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -1037,35 +1037,6 @@
           }
         },
         "recordedRepoMappingEntries": []
-      }
-    },
-    "@@morphizen+//3rd-party:onnx_extension.bzl%onnx_extension": {
-      "general": {
-        "bzlTransitiveDigest": "cZy+pnSc8PBTPUo2YKUIh25kn2neTALD9sqlQtjwHW0=",
-        "usagesDigest": "CjuGhUHQqrRb0KN3S+Gm4t5F/MPF2Q94r7h3D0oEnUQ=",
-        "recordedFileInputs": {},
-        "recordedDirentsInputs": {},
-        "envVariables": {},
-        "generatedRepoSpecs": {
-          "onnx": {
-            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
-            "attributes": {
-              "urls": [
-                "https://github.com/onnx/onnx/archive/refs/tags/v1.18.0.tar.gz"
-              ],
-              "sha256": "b466af96fd8d9f485d1bb14f9bbdd2dfb8421bc5544583f014088fb941a1d21e",
-              "strip_prefix": "onnx-1.18.0",
-              "build_file": "@@morphizen+//3rd-party:onnx.BUILD"
-            }
-          }
-        },
-        "recordedRepoMappingEntries": [
-          [
-            "morphizen+",
-            "bazel_tools",
-            "bazel_tools"
-          ]
-        ]
       }
     },
     "@@rules_kotlin+//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
@@ -1525,6 +1496,40 @@
             "rules_python+",
             "platforms",
             "platforms"
+          ]
+        ]
+      }
+    },
+    "@@therock+//:extensions.bzl%therock_dist": {
+      "os:windows": {
+        "bzlTransitiveDigest": "x9oxc06OxVWKcrOMmxQJupqFFgvqBYWf41wjJ3H3XBQ=",
+        "usagesDigest": "JZtPkRwkPEhUkEsYURXu1eyAJZkpQdAOE3t/CozQkjw=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "therock_dist_internal": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1151-7.11.0.tar.gz"
+              ],
+              "sha256": "6abd10114f8f85e2765a07ec70621efcb906e0d6ac413760639513a46b4a1ce8",
+              "strip_prefix": "therock-dist-windows-gfx1151-7.11.0rc2",
+              "build_file": "@@therock+//:thirdparty/therock_windows.BUILD"
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "therock+",
+            "bazel_tools",
+            "bazel_tools"
+          ],
+          [
+            "therock+",
+            "therock",
+            "therock+"
           ]
         ]
       }

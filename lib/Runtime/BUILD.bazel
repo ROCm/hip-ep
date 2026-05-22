@@ -3,11 +3,18 @@ load("@rules_python//python:defs.bzl", "py_binary")
 load(":compile_to_bc.bzl", "compile_to_bc")
 
 # ============================================================================
-# Runtime bitcode pipeline (mock runtime only)
+# Runtime bitcode pipeline (mock and real runtime)
 # ============================================================================
-# Mirrors CMakeLists.txt: compile .cpp → .bc via the CC toolchain (clang-cl
-# on Windows, clang on Linux/macOS), llvm-link → runtime.bc,
-# xxd.py → runtime_ir_data.cpp, wrap in cc_library.
+# Mirrors CMakeLists.txt: compile .cpp → .bc via clang -emit-llvm,
+# llvm-link → runtime.bc, make_runtime_ir_data.py → runtime_ir_data.cpp,
+# wrap in cc_library (HipRuntimeBitcode).
+#
+# Mock mode  (default, --//build_settings:mock_runtime=true):
+#   Compiles mock/ stubs — no GPU SDK required.
+#
+# Real mode  (--config=real_runtime i.e. --//build_settings:mock_runtime=false):
+#   Compiles real/ GPU implementations.
+#   Requires @therock SDK (fetched by Bazel module system automatically).
 # ============================================================================
 
 py_binary(
@@ -24,42 +31,87 @@ py_binary(
     main = "make_runtime_ir_data.py",
 )
 
-# Header-only library exposing lib/Runtime and lib/Runtime/mock as include roots.
-# cc_library.includes paths are relative to the package, prepended with the
-# workspace root automatically — they flow into CcInfo.system_includes and
-# are picked up by cc_common.compile() via compilation_contexts.
+# Header library — top-level headers shared by both mock and real.
+# Mode-specific subdirectory headers (mock/*.h or real/*.h) are added via select().
 cc_library(
     name = "runtime_headers",
-    hdrs = glob(["*.h"]) + glob(["mock/*.h"]),
-    includes = [
-        ".",      # → lib/Runtime (package dir)
-        "mock",   # → lib/Runtime/mock
-    ],
+    hdrs = glob(["*.h"]) + select({
+        "//build_settings:mock_runtime_false": glob(["real/*.h"]),
+        "//conditions:default": glob(["mock/*.h"]),
+    }),
+    includes = ["."] + select({
+        "//build_settings:mock_runtime_false": ["real"],
+        "//conditions:default": ["mock"],
+    }),
 )
 
-# Compile all mock runtime sources to LLVM bitcode in one step.
-# cc_common.compile() handles include paths, system headers, and toolchain
-# flags automatically. -emit-llvm is the only addition.
+# Source files shared by both mock and real bitcode compilations.
+_SHARED_SRCS = [
+    "hipdnn_ep_runtime_state.cpp",
+    "hipdnn_ep_runtime_tensor.cpp",
+]
+
+# Mock-only sources (5 files, no GPU SDK).
+_MOCK_SRCS = [
+    "mock/mock_gpu.cpp",
+    "mock/memory.cpp",
+    "mock/test_hip_from_dll.cpp",
+]
+
+# Real GPU sources (21 files, requires @therock).
+_REAL_SRCS = [
+    "real/activation.cpp",
+    "real/cast.cpp",
+    "real/causal_conv_with_state.cpp",
+    "real/elementwise.cpp",
+    "real/gather.cpp",
+    "real/gemm.cpp",
+    "real/gqa.cpp",
+    "real/hip.cpp",
+    "real/hipblas.cpp",
+    "real/matmul.cpp",
+    "real/matmul_nbits.cpp",
+    "real/memory.cpp",
+    "real/miopen.cpp",
+    "real/power.cpp",
+    "real/qmoe.cpp",
+    "real/reduce_sum.cpp",
+    "real/rotary_embedding.cpp",
+    "real/simplified_layer_norm.cpp",
+    "real/skip_simplified_layer_norm.cpp",
+    "real/test_hip_from_dll.cpp",
+]
+
+# Compile all runtime sources to LLVM bitcode in one step.
+# srcs and deps switch between mock and real via select().
 compile_to_bc(
     name = "runtime_bc_objects",
-    srcs = [
-        "hipdnn_ep_runtime_state.cpp",
-        "hipdnn_ep_runtime_tensor.cpp",
-        "mock/mock_gpu.cpp",
-        "mock/memory.cpp",
-        "mock/test_hip_from_dll.cpp",
-    ],
+    srcs = _SHARED_SRCS + select({
+        "//build_settings:mock_runtime_false": _REAL_SRCS,
+        "//conditions:default": _MOCK_SRCS,
+    }),
     deps = [
         ":runtime_headers",
         "//schemas:HipSchemasLib",
         "//include:foundation_headers",
         "//include:hip_headers",
-    ],
+    ] + select({
+        "//build_settings:mock_runtime_false": [
+            "@therock//:therock",
+            "//3rd-party/custom_kernels:custom_kernels_headers",
+        ],
+        "//conditions:default": [],
+    }),
     copts = [
         "-D_CRT_SECURE_NO_WARNINGS",
         "-DNDEBUG",
         "-O2",
-    ],
+    ] + select({
+        # compile_to_bc collects CcInfo includes but not defines; pass AMD
+        # platform define explicitly so HIP headers select the right platform.
+        "//build_settings:mock_runtime_false": ["-D__HIP_PLATFORM_AMD__"],
+        "//conditions:default": [],
+    }),
 )
 
 genrule(
