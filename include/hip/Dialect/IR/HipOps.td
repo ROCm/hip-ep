@@ -2355,20 +2355,37 @@ def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd"> {
       * `"min"` — minimum (`a = min(a, b)`)
       * `"max"` — maximum (`a = max(a, b)`)
 
+    `has_valid_count` indicates whether `valid_count` is meaningful.
+    When true, the `valid_count` buffer (memref<1xi32>) limits the number
+    of valid index rows processed. When false, `valid_count` is a dummy
+    buffer and all rows of indices are processed.
+
     This is the inverse of GatherND.
 
     Uses destination-passing style: the `output` buffer is provided as an
     argument, and the runtime is responsible for both the initial
     `data → output` copy and the subsequent scatter writes.
 
-    Example:
+    Example (no valid_count):
     ```mlir
-    hip.scatter_nd(%ctx) ins(%data, %indices, %updates :
+    hip.scatter_nd(%ctx) ins(%data, %indices, %updates, %dummy_count :
                               memref<4x4x4xf32, 1>,
                               memref<2x1xi64, 1>,
-                              memref<2x4x4xf32, 1>)
+                              memref<2x4x4xf32, 1>,
+                              memref<1xi32, 1>)
                           outs(%out : memref<4x4x4xf32, 1>)
-                          {reduction = "none"}
+                          {reduction = "none", has_valid_count = false}
+    ```
+
+    Example with valid_count (NonZero upstream):
+    ```mlir
+    hip.scatter_nd(%ctx) ins(%data, %indices, %updates, %count :
+                              memref<4x4x4xf32, 1>,
+                              memref<12x1xi64, 1>,
+                              memref<12x4x4xf32, 1>,
+                              memref<1xi32, 1>)
+                          outs(%out : memref<4x4x4xf32, 1>)
+                          {reduction = "none", has_valid_count = true}
     ```
   }];
 
@@ -2377,13 +2394,15 @@ def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd"> {
     Hip_TensorOrMemRef:$data,
     Hip_TensorOrMemRef:$indices,
     Hip_TensorOrMemRef:$updates,
+    Hip_TensorOrMemRef:$valid_count,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedStrAttr<StrAttr, "none">:$reduction
+    DefaultValuedStrAttr<StrAttr, "none">:$reduction,
+    DefaultValuedAttr<BoolAttr, "false">:$has_valid_count
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $data `,` $indices `,` $updates `:`
-        type($data) `,` type($indices) `,` type($updates) `)`
+    `(` $ctx `)` `ins` `(` $data `,` $indices `,` $updates `,` $valid_count `:`
+        type($data) `,` type($indices) `,` type($updates) `,` type($valid_count) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -2500,23 +2519,26 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
   let description = [{
     Implements the standard ONNX NonZero operator (opset 13+):
-    returns the indices of the elements that are non-zero in row-major
-    order (by dimension), behaving similarly to `numpy.nonzero`.
+    returns the indices of the elements that are non-zero, behaving
+    similarly to `numpy.nonzero`.
 
     Input `x` is a ranked tensor of shape `[D0, D1, ..., D(R-1)]`. Output
     `y` has shape `[R, N]` of element type `i64`, where `R` is the input
     rank and `N` is the (data-dependent) number of non-zero elements.
     The `N` dimension is represented as `?` in MLIR; the compiler
-    over-allocates using `numel(x)` as the upper bound (since the input
-    has fully static shape).
+    over-allocates using `numel(x)` as the upper bound.
 
-    Uses destination-passing style: the output buffer is provided as
-    argument.
+    `count_buf` is a side-output of shape `memref<1xi32>` that receives the
+    actual number of non-zero elements found at runtime. Downstream ops
+    (e.g. ScatterND) use this to know how many valid rows exist in `y`
+    without any D2H synchronization.
+
+    Uses destination-passing style: output buffers are provided as arguments.
 
     Example:
     ```mlir
     hip.nonzero(%ctx) ins(%x : memref<3x4xf16, 1>)
-                      outs(%y : memref<2x?xi64, 1>)
+                      outs(%y, %count : memref<2x?xi64, 1>, memref<1xi32, 1>)
                       {input_data_type = 1 : i64}
     ```
   }];
@@ -2525,12 +2547,13 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$x,
     Hip_TensorOrMemRef:$y,
+    Hip_TensorOrMemRef:$count_buf,
     I64Attr:$input_data_type
   );
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
-    `outs` `(` $y `:` type($y) `)`
+    `outs` `(` $y `,` $count_buf `:` type($y) `,` type($count_buf) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

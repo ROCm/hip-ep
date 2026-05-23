@@ -1253,7 +1253,10 @@ void ScatterNDOp::getEffects(
 // NonZeroOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange NonZeroOp::getDpsInitsMutable() { return getYMutable(); }
+MutableOperandRange NonZeroOp::getDpsInitsMutable() {
+  // DPS inits are y (operand 2) and count_buf (operand 3)
+  return MutableOperandRange(getOperation(), /*start=*/2, /*length=*/2);
+}
 
 void NonZeroOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
