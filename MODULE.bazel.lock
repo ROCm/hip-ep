@@ -1039,6 +1039,35 @@
         "recordedRepoMappingEntries": []
       }
     },
+    "@@morphizen+//3rd-party:onnx_extension.bzl%onnx_extension": {
+      "general": {
+        "bzlTransitiveDigest": "cZy+pnSc8PBTPUo2YKUIh25kn2neTALD9sqlQtjwHW0=",
+        "usagesDigest": "CjuGhUHQqrRb0KN3S+Gm4t5F/MPF2Q94r7h3D0oEnUQ=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "onnx": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/onnx/onnx/archive/refs/tags/v1.18.0.tar.gz"
+              ],
+              "sha256": "b466af96fd8d9f485d1bb14f9bbdd2dfb8421bc5544583f014088fb941a1d21e",
+              "strip_prefix": "onnx-1.18.0",
+              "build_file": "@@morphizen+//3rd-party:onnx.BUILD"
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "morphizen+",
+            "bazel_tools",
+            "bazel_tools"
+          ]
+        ]
+      }
+    },
     "@@rules_kotlin+//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
       "general": {
         "bzlTransitiveDigest": "sFhcgPbDQehmbD1EOXzX4H1q/CD5df8zwG4kp4jbvr8=",

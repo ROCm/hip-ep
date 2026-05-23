@@ -50,6 +50,9 @@ lit_test(
         "@llvm-project-overlay//llvm:FileCheck",
         "@llvm-project-overlay//llvm:not",
     ],
-    tags = ["manual"],
+    # PYTHONHASHSEED=0 disables hash randomization, required on Windows where
+    # Bazel's hermetic Python sandbox can't access the OS crypto RNG.
+    env = {"PYTHONHASHSEED": "0"},
+    tags = [],
     visibility = ["//visibility:public"],
 )

@@ -32,10 +32,14 @@ bazel_dep(name = "googletest", version = "1.17.0")
 # Provides: @therock//:hip_runtime, @therock//:hipdnn_backend, etc.
 bazel_dep(name = "therock", version = "7.11.0")
 
-# Python toolchain for hermetic builds
+# Python toolchain for hermetic builds.
+# Must be 3.11+ on Windows: Python 3.10 uses CryptGenRandom (legacy CryptoAPI)
+# which fails with NTE_PROVIDER_DLL_FAIL (0x8009001D) under restricted process
+# tokens (e.g. RBE workers). Python 3.11+ uses BCryptGenRandom (CNG) instead.
+# See: https://github.com/python/cpython/issues/88777 (bpo-44611)
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
-    python_version = "3.10",
+    python_version = "3.11",
 )
 
 # Expose pre-built clang binaries (clang, llvm-link) for the bitcode pipeline.
