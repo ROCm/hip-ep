@@ -80,9 +80,13 @@ jobs:
 
       # Tests run only for mock build — real runtime tests need GPU hardware
       # and are covered by the gpu-perf-accuracy-test workflow.
+      # --test_tag_filters=-manual skips tests still tagged manual
+      # (backend-mlir-compiler/test:test-e2e-mlir requires a GPU config file)
+      # while building all targets; this is separate from --build_tag_filters
+      # which is only used in the build step above.
       - name: bazel test
         if: matrix.run_tests
         shell: powershell
-        run: bazel test ${{ matrix.bazel_config }} --test_output=errors --build_tag_filters=-manual //...
+        run: bazel test ${{ matrix.bazel_config }} --test_output=errors --test_tag_filters=-manual //...
         env:
           GITHUB_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}
