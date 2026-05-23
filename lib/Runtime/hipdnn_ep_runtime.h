@@ -914,7 +914,8 @@ int wrap_not(RuntimeState *state, void *input, void *output,
 // and throws std::runtime_error so an inference path that actually
 // reaches NonZero fails loudly instead of producing uninitialised output.
 int wrap_nonzero(RuntimeState *state, void *input, void *output,
-                 int64_t input_num_elements, int64_t input_rank,
+                 int32_t *count_ptr, int64_t input_num_elements,
+                 int64_t input_rank, const int64_t *input_dims,
                  int64_t output_capacity, int64_t input_data_type);
 
 // ONNX Size wrapper (dynamic-shape path only).
@@ -1034,12 +1035,12 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
 // The runtime is responsible (when implemented) for both the initial
 // data -> output copy and the per-index scatter writes.
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
-                    void *updates, void *output, const int64_t *data_shape,
-                    int64_t data_rank, const int64_t *indices_shape,
-                    int64_t indices_rank, const int64_t *updates_shape,
-                    int64_t updates_rank, const int64_t *output_shape,
-                    int64_t output_rank, int64_t reduction_id,
-                    int64_t data_type);
+                    void *updates, void *output, const int32_t *count_ptr,
+                    const int64_t *data_shape, int64_t data_rank,
+                    const int64_t *indices_shape, int64_t indices_rank,
+                    const int64_t *updates_shape, int64_t updates_rank,
+                    const int64_t *output_shape, int64_t output_rank,
+                    int64_t reduction_id, int64_t data_type);
 
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers

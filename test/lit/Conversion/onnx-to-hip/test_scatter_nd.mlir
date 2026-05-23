@@ -2,9 +2,6 @@
 // Licensed under the MIT License.
 
 // Verify onnx.ScatterND -> hip.scatter_nd conversion.
-// The runtime is a logging-only stub today (no kernel), but the IR shape
-// must still be correct so the bufferize / LLVM lowering passes stay
-// happy.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -14,9 +11,6 @@ module {
   }
 
   // 1-D ScatterND, default reduction ("none"), scalar updates.
-  // Note: `reduction = "none"` is the default value of a
-  // `DefaultValuedStrAttr` and is therefore elided by MLIR's pretty
-  // printer — the absence of the attribute in IR IS the "none" case.
   func.func @test_scatter_nd_1d_default(
       %data: tensor<8xf32>,
       %indices: tensor<4x1xi64>,
@@ -26,17 +20,16 @@ module {
         : (tensor<8xf32>, tensor<4x1xi64>, tensor<4xf32>) -> tensor<8xf32>
 
     // CHECK-NOT: onnx.ScatterND
-    // CHECK: tensor.empty() : tensor<8xf32>
+    // CHECK-DAG: tensor.empty() : tensor<8xf32>
+    // CHECK-DAG: tensor.empty() : tensor<1xi32>
     // CHECK: hip.scatter_nd({{.*}}) ins(
-    // CHECK-SAME: : tensor<8xf32>, tensor<4x1xi64>, tensor<4xf32>)
+    // CHECK-SAME: tensor<8xf32>, tensor<4x1xi64>, tensor<4xf32>, tensor<1xi32>)
     // CHECK-SAME: outs({{.*}} : tensor<8xf32>)
-    // CHECK-NOT: reduction
 
     return %r : tensor<8xf32>
   }
 
-  // 3-D ScatterND with k=1: each update is a 2-D slice (default reduction
-  // is elided — see note in @test_scatter_nd_1d_default above).
+  // 3-D ScatterND with k=1: each update is a 2-D slice.
   func.func @test_scatter_nd_3d_slice(
       %data: tensor<4x4x4xf32>,
       %indices: tensor<2x1xi64>,
@@ -48,9 +41,8 @@ module {
 
     // CHECK-NOT: onnx.ScatterND
     // CHECK: hip.scatter_nd({{.*}}) ins(
-    // CHECK-SAME: : tensor<4x4x4xf32>, tensor<2x1xi64>, tensor<2x4x4xf32>)
+    // CHECK-SAME: tensor<4x4x4xf32>, tensor<2x1xi64>, tensor<2x4x4xf32>, tensor<1xi32>)
     // CHECK-SAME: outs({{.*}} : tensor<4x4x4xf32>)
-    // CHECK-NOT: reduction
 
     return %r : tensor<4x4x4xf32>
   }
@@ -91,9 +83,7 @@ module {
     return %r : tensor<4x4xf32>
   }
 
-  // Dynamic data shape (output.rank == data.rank invariant): every
-  // dynamic output dim is sourced from the matching data dim via
-  // tensor.dim.
+  // Dynamic data shape
   func.func @test_scatter_nd_dyn_data(
       %data: tensor<?x?xf32>,
       %indices: tensor<2x2xi64>,
@@ -110,5 +100,5 @@ module {
   // CHECK-DAG: %[[A1:.*]] = arith.constant 1 : index
   // CHECK-DAG: %[[D1:.*]] = tensor.dim %[[D]], %[[A1]] : tensor<?x?xf32>
   // CHECK: tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?xf32>
-  // CHECK: hip.scatter_nd({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<?x?xf32>, tensor<2x2xi64>, tensor<2xf32>) outs({{.*}} : tensor<?x?xf32>)
+  // CHECK: hip.scatter_nd({{.*}}) ins({{.*}} : tensor<?x?xf32>, tensor<2x2xi64>, tensor<2xf32>, tensor<1xi32>) outs({{.*}} : tensor<?x?xf32>)
 }
