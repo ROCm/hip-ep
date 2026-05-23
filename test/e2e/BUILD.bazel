@@ -1,12 +1,44 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
 # E2E Integration Tests
 #
 # Each test compiles a .mlir model to a DLL (via hip-compiler) then executes
 # it (via hip-test-dll --validate). Two-step compile-then-execute, isolated
 # via TEST_TMPDIR provided by the Bazel test runner.
 #
-# The .mlir sources live in //test/lit/e2e/ and are exposed via exports_files
-# in that package. Both tools are declared as data so Bazel stages them in the
-# runfiles tree alongside the shell script.
+# Uses py_test (hermetic Python 3.11) instead of sh_test so these tests run
+# on Windows RBE workers where bash is not available in the test wrapper.
+# run_e2e.py replicates run_e2e.sh with subprocess calls to both tools.
+
+# Windows import libraries required by lld-link at model-DLL link time.
+# hip-compiler calls lld-link in-process; it resolves bare lib names
+# (msvcrt.lib, ucrt.lib, kernel32.lib, …) via the LIB environment variable.
+# run_e2e.py discovers these staged dirs via RUNFILES_DIR and prepends them
+# to LIB before invoking hip-compiler.
+#
+# Uses the fine-grained public targets already defined in the toolchain repos
+# to avoid staging the full MSVC / Windows SDK trees:
+#   @msvc individual filegroups  — only the 5 release CRT libs   (~4 MB)
+#   @windows_sdk//:ucrt_libraries — Lib/ucrt/x64/*               (~85 MB)
+#   @windows_sdk//:um_libraries   — Lib/um/x64/*                 (~113 MB)
+#
+# On Linux no extra staging is needed (lld.elf resolves sysroot libs
+# differently and the E2E tests are not run on Linux yet).
+filegroup(
+    name = "_lld_link_libs",
+    srcs = select({
+        "@bazel_cpp_toolchain//toolchain/platforms:is_windows": [
+            "@@bazel_cpp_toolchain++local_tool_deps+msvc//:dynamic_no_debug_runtime_library_import_library",  # msvcrt.lib
+            "@@bazel_cpp_toolchain++local_tool_deps+msvc//:static_no_debug_runtime_library",                   # libcmt.lib
+            "@@bazel_cpp_toolchain++local_tool_deps+msvc//:no_debug_vcruntime_import_library",                 # vcruntime.lib
+            "@@bazel_cpp_toolchain++local_tool_deps+msvc//:oldnames_lib",                                       # oldnames.lib
+            "@@bazel_cpp_toolchain++local_tool_deps+msvc//:no_debug_static_cpp_standard_library",               # libcpmt.lib
+            "@@bazel_cpp_toolchain++local_tool_deps+windows_sdk//:ucrt_libraries",                              # ucrt.lib (+ others)
+            "@@bazel_cpp_toolchain++local_tool_deps+windows_sdk//:um_libraries",                                # kernel32.lib, user32.lib (+ others)
+        ],
+        "//conditions:default": [],
+    }),
+)
 
 _E2E_MODELS = [
     "test_add_model",
@@ -36,9 +68,10 @@ _E2E_MODELS = [
 ]
 
 [
-    sh_test(
+    py_test(
         name = "e2e_" + model,
-        srcs = ["run_e2e.sh"],
+        srcs = ["run_e2e.py"],
+        main = "run_e2e.py",
         args = [
             "$(location //tools/hip-compiler:hip-compiler)",
             "$(location //test/lit/e2e:" + model + ".mlir)",
@@ -48,8 +81,14 @@ _E2E_MODELS = [
             "//tools/hip-compiler:hip-compiler",
             "//tools/hip-test-dll:hip-test-dll",
             "//test/lit/e2e:" + model + ".mlir",
+            # Stage the minimal set of Windows import libs so lld-link
+            # (invoked inside hip-compiler) can resolve msvcrt.lib, ucrt.lib,
+            # kernel32.lib, etc.  run_e2e.py sets LIB from RUNFILES_DIR and
+            # lld-link reads LIB natively as a library search path.
+            ":_lld_link_libs",
         ],
-        tags = ["manual"],
+        env = {"PYTHONHASHSEED": "0"},
+        tags = [],
         visibility = ["//visibility:public"],
     )
     for model in _E2E_MODELS
