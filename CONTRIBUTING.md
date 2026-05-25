@@ -109,9 +109,9 @@ Five points are load-bearing for this repo:
 
 You should be sufficiently confident in the change that asking a
 maintainer to review it is a good use of their time. Concretely:
-during review, you must be able to answer "why did you write it this
-way?" without re-prompting an LLM. If you cannot defend a design
-decision, the PR is not ready.
+during review, you must be able to answer questions about each
+design decision without delegating back to the tool. If you cannot,
+the PR is not ready.
 
 ### Disclose substantial AI assistance
 
