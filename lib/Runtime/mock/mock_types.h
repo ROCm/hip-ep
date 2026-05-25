@@ -26,6 +26,8 @@ struct hipDeviceProp_t {
 #define hipMemcpyHostToDevice 0
 #define hipMemcpyDeviceToHost 1
 #define hipHostMallocDefault 0
+#define hipHostMallocMapped 0
+#define hipEventDisableTiming 0
 
 // MIOpen tensor layout enum (subset used by the runtime)
 typedef int miopenTensorLayout_t;
@@ -50,10 +52,15 @@ extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
 extern "C" hipError_t hipMemsetAsync(void *dst, int value, size_t size,
                                      hipStream_t stream);
 extern "C" hipError_t hipEventCreate(hipEvent_t *event);
+extern "C" hipError_t hipEventCreateWithFlags(hipEvent_t *event,
+                                              unsigned int flags);
 extern "C" hipError_t hipEventDestroy(hipEvent_t event);
 extern "C" hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream);
+extern "C" hipError_t hipEventSynchronize(hipEvent_t event);
 extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
                                           hipEvent_t stop);
+extern "C" hipError_t hipHostGetDevicePointer(void **devPtr, void *hstPtr,
+                                              unsigned int flags);
 extern "C" const char *hipGetErrorString(hipError_t error);
 extern "C" miopenStatus_t miopenCreate(miopenHandle_t *handle);
 extern "C" miopenStatus_t miopenDestroy(miopenHandle_t handle);

@@ -17,4 +17,5 @@ target_link_libraries(HipDialectIR PUBLIC
   MLIRIR
   MLIRSupport
   MLIRDestinationStyleOpInterface
+  MLIRFuncDialect
 )

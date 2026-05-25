@@ -82,6 +82,13 @@ extern "C" hipError_t hipEventCreate(hipEvent_t *event) {
   return hipSuccess;
 }
 
+extern "C" hipError_t hipEventCreateWithFlags(hipEvent_t *event,
+                                              unsigned int flags) {
+  (void)flags;
+  *event = malloc(sizeof(void *));
+  return hipSuccess;
+}
+
 extern "C" hipError_t hipEventDestroy(hipEvent_t event) {
   free(event);
   return hipSuccess;
@@ -93,11 +100,28 @@ extern "C" hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream) {
   return hipSuccess;
 }
 
+extern "C" hipError_t hipEventSynchronize(hipEvent_t event) {
+  (void)event;
+  return hipSuccess;
+}
+
 extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
                                           hipEvent_t stop) {
   (void)start;
   (void)stop;
   *ms = 0.0f;
+  return hipSuccess;
+}
+
+// Mock hipHostGetDevicePointer: in real HIP this returns the device-mapped
+// address corresponding to a hipHostMallocMapped host pointer. The mock
+// allocator returns plain malloc, which is already host-addressable; just
+// aliasing the same pointer is sufficient for the runtime drivers that
+// expect a "device" pointer to write into and a host pointer to read from.
+extern "C" hipError_t hipHostGetDevicePointer(void **devPtr, void *hstPtr,
+                                              unsigned int flags) {
+  (void)flags;
+  *devPtr = hstPtr;
   return hipSuccess;
 }
 
