@@ -610,6 +610,18 @@ private:
         {"hipdnn_ep_state_peek_buffer", ptr, {ptr, i32}},
         {"hipdnn_ep_state_publish_buffer", vd, {ptr, i32, ptr}},
         {"hipdnn_ep_state_dyn_pool_alloc", ptr, {ptr, i64}},
+        // Phase 2 of slot-buffer-coalesce: combined alloc + publish into
+        // a slot, used by translucent-propagator wrappers (transpose,
+        // gather, tile, ...).
+        {"hipdnn_ep_state_dyn_pool_alloc_for_slot", ptr, {ptr, i64, i32}},
+        // Phase 3: reuse an existing slot buffer when capacity fits;
+        // otherwise allocate fresh.
+        {"hipdnn_ep_state_publish_buffer_resize", ptr, {ptr, i32, i64}},
+        // Phase 2.4: bulk publish for a propagator wrapper -- walks a
+        // flat int32_t[total] slot-ids array + matching int64_t[total]
+        // runtime-dims array and dispatches publish_dim for each
+        // non-negative slot.
+        {"hipdnn_ep_publish_propagator_slots", vd, {ptr, ptr, ptr, i64}},
         {"hipdnn_ep_state_dyn_pool_reset", vd, {ptr}},
         {"hipdnn_ep_state_dyn_slots_reset", vd, {ptr}},
     };

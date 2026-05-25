@@ -113,6 +113,35 @@ public:
   // on success; writes a diagnostic into `error` on failure.
   bool verify(std::string &error) const;
 
+  // Phase 3.1 of the slot-buffer-coalesce design
+  // (docs/design/slot-buffer-coalesce.md): rewrite the tree into a
+  // canonical form so two structurally-equal expressions compare equal
+  // byte-for-byte after serialisation.
+  //
+  // Rules applied bottom-up:
+  //   * Constant-fold any subtree of Static leaves into a single
+  //     Static node (e.g. Add(Static(2), Static(3)) -> Static(5));
+  //   * Identity reductions: Add(Static(0), x) -> x, Mul(Static(1), x)
+  //     -> x, Max(x, x) -> x, Min(x, x) -> x, Sub(x, Static(0)) -> x,
+  //     Sub(x, x) -> Static(0), Mul(Static(0), x) -> Static(0);
+  //   * Commutative reordering: for Add / Mul / Min / Max, sort the
+  //     two children by their canonical-hash key so the lexicographic
+  //     ordering of the serialised bytes matches across structurally-
+  //     equal trees.
+  //
+  // Non-commutative ops (Sub, FloorDiv, CeilDiv) keep their operand
+  // order. Multi-way commutative chains are not flattened in this
+  // single-call implementation; binary trees with multiple Add / Mul
+  // nodes still benefit from the per-node reordering, which makes
+  // the slot-coalescing equality check work for the n_tiles+1
+  // patterns seen in text.onnx / vision.onnx today. A future
+  // extension can flatten Add(Add(a, b), c) -> Add(a, b, c) and
+  // sort the n-ary children for tighter coalescing on three-way
+  // sums.
+  //
+  // Idempotent: calling canonicalize() twice yields the same tree.
+  void canonicalize();
+
   //===--------------------------------------------------------------------===//
   // Module-level helpers — convenience for hip-mlir-opt analysis passes
   // and any other tool that wants to inspect the composed-DimSpec storage
@@ -247,6 +276,44 @@ DimSpec resolveDimFromValue(mlir::Value v, unsigned dim_index);
 // Otherwise returns an empty DimSpec (caller should fall back to Category
 // C / RuntimeSlot dispatch).
 DimSpec resolveValueFromI64Tensor(mlir::Value v, int64_t flat_offset);
+
+//===----------------------------------------------------------------------===//
+// Phase 4 of the slot-buffer-coalesce design
+// (docs/design/slot-buffer-coalesce.md): identity-propagator registry.
+//===----------------------------------------------------------------------===//
+//
+// Some Cat-C propagator ops degenerate into runtime no-ops on certain
+// attribute/operand combinations (e.g. `hip.transpose` with the
+// identity permutation, `hip.cast` from f32 -> f32, `hip.slice` over
+// the entire input). When that happens the op's single result is
+// bit-identical to its single SSA input, so the kernel launch is
+// wasted work and the propagator's reserved slot buffer can be
+// aliased onto the input's slot buffer (or onto the input directly
+// when the input has no slot).
+//
+// `IdentityPropagatorRebindPass` queries this registry to decide
+// which ops to elide; per-op predicates compute the identity check
+// from the op's MLIR-time attributes only (the predicate may not
+// peek into runtime values).
+
+using IdentityPredicateFn = bool (*)(mlir::Operation *op);
+
+// Register an identity predicate for the given op name (e.g.
+// "hip.transpose"). Last write wins. Thread-safety / lifetime mirror
+// the DimSpec builder registry above.
+void registerOpIdentityPredicate(llvm::StringRef op_name,
+                                 IdentityPredicateFn fn);
+
+// Populate the registry with the built-in identity predicates. Called
+// from `HipDialect::initialize()` so predicates are available before
+// any pass runs. Idempotent.
+void populateBuiltinIdentityPredicates();
+
+// Returns true when `op` has a registered identity predicate AND the
+// predicate evaluates to true on this op. Returns false when no
+// predicate is registered for `op->getName()` (so unknown ops are
+// conservatively kept alive).
+bool isIdentityOp(mlir::Operation *op);
 } // namespace shape_interface
 
 } // namespace hip

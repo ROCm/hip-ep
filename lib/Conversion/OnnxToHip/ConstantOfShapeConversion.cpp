@@ -518,6 +518,13 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
         rewriter.getI64IntegerAttr(hipdnnDtype),
         /*output_dim_specs=*/outputDimSpecsAttr,
         /*slot_ids=*/slotIdsAttr);
+    // Phase 1 marker (Cat-C branch only): when slot_ids are present the
+    // wrapper publishes a dyn-pool-allocated exact-size buffer per dim
+    // so the upper-bound DPS-init pool slot is dead. The Cat-B branch
+    // (shape from func-arg, no slot_ids) writes into the DPS init
+    // normally and must NOT carry this marker.
+    if (slotIdsAttr)
+      cofOp->setAttr("hipdnn.elide_dps_init", rewriter.getUnitAttr());
     rewriter.replaceOp(op, cofOp->getResult(0));
     return mlir::success();
   }

@@ -24,6 +24,23 @@ using namespace mlir;
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
 static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
+  // 1b. Phase 2 of slot-buffer-coalesce: reserve fresh runtime slot ids
+  // for translucent propagators whose result dims transitively depend on
+  // a Cat-C `RuntimeSlot` leaf. Runs while the IR is still in tensor
+  // form so `getResultDimSpec` can walk the SSA graph from the value
+  // side. See docs/design/slot-buffer-coalesce.md (Phase 2.3).
+  pm.addPass(mlir::hip::createReservePropagatorSlotsPass());
+
+  // 1c. Phase 4 of slot-buffer-coalesce: erase identity-shaped
+  // propagator ops (transpose with perm=[0..rank), cast same-dtype,
+  // full-range slice, etc.) before bufferize so the downstream
+  // bufferize + dealloc + pool-allocs / Phase 3 coalesce passes see
+  // a simpler IR. Runs in tensor form because the pass relies on
+  // `op->getResult(0)` being a real SSA value (post-bufferize HIP
+  // DPS ops have zero results — the DPS-init memref takes the place
+  // of the result).
+  pm.addPass(mlir::hip::createIdentityPropagatorRebindPass());
+
   // 2. Bufferize tensor IR to memref IR
   //
   // Use IdentityLayoutMap for function boundaries: all EP inputs/outputs come
@@ -54,6 +71,12 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
+
+  // 5b. Phase 1 of slot-buffer-coalesce: shrink the DPS-init allocs of
+  // Cat-C slot publishers (NonZero, Range Cat-C, ConstantOfShape Cat-C)
+  // to 0-byte placeholders so PoolAllocs reserves no bytes for them.
+  // See docs/design/slot-buffer-coalesce.md.
+  pm.addNestedPass<func::FuncOp>(hip::createElideSlotPublisherAllocsPass());
 
   // 6. HIP-specific buffer optimizations
   pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
@@ -165,6 +188,14 @@ void mlir::hip::buildHipToLLVMPipeline(
   // load on the relevant dim, so the kernel sees the actual published
   // count rather than the upper-bound pool allocation size.
   pm.addPass(mlir::hip::createAnnotateInputDimSlotsPass());
+
+  // Phase 3: coalesce slot ids whose canonical DimSpec + lifetime
+  // overlap allow them to share one dyn-pool buffer at runtime.
+  // Must run AFTER annotation (so per-operand input_dim_slots /
+  // input_slot_buffers attrs exist and get rewritten consistently)
+  // and BEFORE the HipToLLVM lowering (so the emitted runtime calls
+  // see the post-coalesce slot ids in op attributes).
+  pm.addPass(mlir::hip::createSlotLifetimeCoalescePass());
 
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.

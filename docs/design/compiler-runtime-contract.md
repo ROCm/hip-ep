@@ -318,6 +318,59 @@ falls back to CPU, and any CPU-vs-CPU comparison passes. The only reliable
 detection is checking wall-clock time and `HIPDNN_EP_DEBUG=1` output for
 `[REAL] wrap_*` lines confirming GPU dispatch.
 
+### Slot-buffer coalesce (Phases 3 + 4)
+
+Two compile-time passes (see `docs/design/slot-buffer-coalesce.md` for the
+full per-class taxonomy) cut dynamic-shape footprint and kernel-launch count
+without changing the runtime ABI:
+
+- `hip-identity-propagator-rebind` (PRE-bufferize, in the OnnxToHip tail)
+  erases ops whose registered identity predicate
+  (`shape_interface::isIdentityOp`) is true. Built-in predicates cover
+  `hip.transpose` with `perm = [0..rank)`, `hip.cast` with matching dtype,
+  `hip.expand` / `hip.tile` / `hip.slice` / `hip.reduce_*` with matching
+  shape. After erasure, the pass remaps the erased op's published slot id
+  (if any) to the upstream input's slot id across publishers, consumers,
+  `RuntimeSlot` leaves, and module-level metadata.
+- `hip-slot-lifetime-coalesce` (between `hip-annotate-input-dim-slots` and
+  `convert-hip-to-llvm`) groups published slot ids by canonical DimSpec
+  bytes (`DimSpec::canonicalize()` constant-folds + sorts commutative
+  children) and first-fit-decreasing bin-packs by lifetime within each
+  group. The smallest slot id in each bin becomes the representative; every
+  other id in the bin is rewritten throughout the module. Surviving slot
+  ids are renumbered to a contiguous `0..K-1` range and
+  `hipdnn.dyn_dim_slots_count` is updated so `GenerateInterface` emits the
+  reduced count into the FlatBuffers metadata.
+
+Runtime ABI additions for Phase 2 publisher / Phase 3 reuse:
+
+```c
+void *hipdnn_ep_state_dyn_pool_alloc_for_slot(RuntimeState*, int64_t bytes, int32_t slot);
+void *hipdnn_ep_state_publish_buffer_resize  (RuntimeState*, int32_t slot, int64_t bytes);
+```
+
+`dyn_pool_alloc_for_slot` is the publisher fast path: allocates a fresh
+exact-size buffer and publishes it to the given slot.
+`publish_buffer_resize` is the Phase 3 coalesced-slot helper: returns the
+existing buffer if the prior allocation in the same `Compute()` already met
+the byte requirement; otherwise allocates a fresh segment. Both functions
+range-check `slot_id` against `state->dyn_dim_slots_count` and `LOG(FATAL)`
+on out-of-range.
+
+Output-lifetime invariant: slot ids referenced from module-level
+`hipdnn.output_dim_specs` live past `inference_compute` return. The EP-side
+resolver reads them after stream sync to populate output OrtValue shapes.
+Two output-bound slots cannot share a dyn-pool buffer. The coalescer models
+this by assigning `lastUseIdx = +∞` to every output-bound slot;
+`VerifyDimSpecsPass` enforces the invariant.
+
+Disabled paths for A/B measurement:
+`--hip-identity-propagator-rebind=disable-identity-rebind=true` and
+`--hip-slot-lifetime-coalesce=disable-coalesce=true`. Combine with
+`--hip-print-pool-stats` (the diagnostic pass added in
+`lib/Dialect/Transforms/PrintPoolStats.cpp`) for before/after footprint and
+kernel-launch comparison.
+
 ---
 
 ## Related Documents
@@ -326,3 +379,4 @@ detection is checking wall-clock time and `HIPDNN_EP_DEBUG=1` output for
 - [morphizen-ep-integration.md](morphizen-ep-integration.md) — DLL contracts; `inference_init` public interface
 - [compilation-options.md](compilation-options.md) — `constants_file` compilation option
 - [dynamic-shape-debug-surface.md](dynamic-shape-debug-surface.md) — env-var gates for tracing DimSpec resolution and slot publish/read; deferred-validator rationale
+- [slot-buffer-coalesce.md](slot-buffer-coalesce.md) — full op-class taxonomy, per-class invariants, and pass design notes for `hip-identity-propagator-rebind` and `hip-slot-lifetime-coalesce`

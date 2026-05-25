@@ -316,6 +316,13 @@ struct RangeToHip : public RewritePattern {
         op->getOperand(2), init,
         /*output_dim_specs=*/outputDimSpecsAttr,
         /*slot_id=*/slotIdAttr);
+    // Phase 1 marker (Cat-C branch only): when the wrapper publishes a
+    // slot it also allocates its own exact-size buffer at runtime,
+    // making the upper-bound DPS-init pool slot dead. The Cat-A/B
+    // paths (no slot_id) write into the DPS init normally and must
+    // NOT carry this marker.
+    if (slotIdAttr)
+      rangeOp->setAttr("hipdnn.elide_dps_init", rewriter.getUnitAttr());
     rewriter.replaceOp(op, rangeOp->getResult(0));
     return success();
   }

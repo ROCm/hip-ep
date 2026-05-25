@@ -325,6 +325,60 @@ void hipdnn_ep_state_publish_buffer(RuntimeState *state, int32_t slot_id,
 void *hipdnn_ep_state_read_buffer(RuntimeState *state, int32_t slot_id);
 void *hipdnn_ep_state_peek_buffer(RuntimeState *state, int32_t slot_id);
 
+// Phase 2 of the slot-buffer-coalesce design (see
+// docs/design/slot-buffer-coalesce.md). Allocate `bytes` from the dyn
+// pool AND publish the returned pointer into `slot_id`'s buffer slot in
+// a single call. Equivalent to:
+//
+//     void *p = hipdnn_ep_state_dyn_pool_alloc(state, bytes);
+//     hipdnn_ep_state_publish_buffer(state, slot_id, p);
+//     return p;
+//
+// Used by translucent-propagator wrappers (transpose, gather, tile,
+// expand, slice, cast, ...) whose result is bound to a runtime slot.
+// Combining the two lets the wrapper materialise the new slot in one
+// generated-code statement and saves one ABI hop in the lowered IR.
+// Aborts the same way `publish_buffer` does on out-of-range slot.
+void *hipdnn_ep_state_dyn_pool_alloc_for_slot(RuntimeState *state,
+                                              int64_t bytes,
+                                              int32_t slot_id);
+
+// Phase 3 of the slot-buffer-coalesce design. Reuse a previously
+// allocated slot buffer when `bytes` fits the existing allocation;
+// otherwise allocate a fresh, larger buffer from the dyn pool and
+// re-publish. The intended caller is a coalesced slot's SECOND
+// publisher within a single Compute() -- the first publisher already
+// reserved storage and `publish_buffer_resize` reuses it as long as the
+// runtime extent didn't grow. Returns the (possibly reused, possibly
+// new) GPU buffer pointer.
+//
+// Backwards-compatible: if no buffer was published yet for `slot_id`,
+// behaves like `dyn_pool_alloc_for_slot`. Safe to call from any
+// translucent-propagator wrapper regardless of whether Phase 3
+// coalescing has actually merged this slot with anything.
+void *hipdnn_ep_state_publish_buffer_resize(RuntimeState *state,
+                                            int32_t slot_id, int64_t bytes);
+
+// Phase 2.4 wrapper-side helper. A translucent-propagator wrapper that
+// has computed the runtime output shape calls this once with:
+//   * the slot-ids grid emitted by the lowering's
+//     `emitOutputSlotIdsAlloca` -- a flat int32_t[total] array of slot
+//     ids (or -1 for "no slot");
+//   * the parallel flat int64_t[total] array of runtime dim values --
+//     same indexing as the slot ids.
+// Walks both arrays and calls `publish_dim` for each non-negative slot.
+// `total` is the sum-of-result-ranks emitted by the lowering. Tolerates
+// nullptr / total == 0 (legacy wrappers or ops with no slots reserved).
+//
+// Wrappers that allocate exact-size buffers per result MUST call
+// `dyn_pool_alloc_for_slot` (or `publish_buffer_resize` for Phase 3) on
+// the buffer's owning slot (= first dynamic-dim slot of that result, by
+// convention) -- this helper only handles the dim-publish leg.
+void hipdnn_ep_publish_propagator_slots(RuntimeState *state,
+                                        const int32_t *output_slot_ids,
+                                        const int64_t *runtime_dims,
+                                        int64_t total);
+
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
 // Parameters:

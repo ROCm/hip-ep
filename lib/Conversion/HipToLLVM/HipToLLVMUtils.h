@@ -7,6 +7,7 @@
 #define HIP_CONVERSION_HIPTOLLVM_UTILS_H
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipShapeInterface.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
@@ -103,6 +104,17 @@ inline constexpr const char *kWrapNonZero = "wrap_nonzero";
 inline constexpr const char *kWrapSize = "wrap_size";
 inline constexpr const char *kWrapShape = "wrap_shape";
 inline constexpr const char *kHipdnnEpStateReadDim = "hipdnn_ep_state_read_dim";
+
+// Phase 2 runtime ABI for translucent-propagator slot publishing.
+// `_publish_dim` writes the runtime extent for a slot; `_alloc_for_slot`
+// combines `dyn_pool_alloc` + `publish_buffer` into a single call; the
+// `_resize` variant is reserved for Phase 3 coalescing.
+inline constexpr const char *kHipdnnEpStatePublishDim =
+    "hipdnn_ep_state_publish_dim";
+inline constexpr const char *kHipdnnEpStateDynPoolAllocForSlot =
+    "hipdnn_ep_state_dyn_pool_alloc_for_slot";
+inline constexpr const char *kHipdnnEpStatePublishBufferResize =
+    "hipdnn_ep_state_publish_buffer_resize";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -384,6 +396,99 @@ inline Value emitReadDimCall(Value state, int32_t slotId,
       .getResult();
 }
 
+// Emit LLVM IR that evaluates a DimSpec tree to its i64 dim value at
+// runtime. Walks the tree recursively starting from the root node.
+//
+// Supported leaves:
+//   * Static(N)        -> llvm.mlir.constant N : i64
+//   * RuntimeSlot(N)   -> call @hipdnn_ep_state_read_dim(state, N)
+//
+// Supported arithmetic (Phase 2.5): Add, Sub, Mul, FloorDiv, CeilDiv,
+// Min, Max -- each lowered to the corresponding LLVM IR primitive
+// over the recursive sub-expression results.
+//
+// Forbidden in-DLL: InputDim, InputValueI64 -- those are EP-side
+// Cat-B leaves resolved by `MlirCustomOp::resolveValueFromI64Tensor`.
+// If the tree contains one, returns a null Value so the caller can
+// emit a verifier failure / fall back to the legacy descriptor read.
+//
+// Returns a null Value on any unsupported node so callers must
+// always null-check the result.
+inline Value emitDimSpecEvaluator(const DimSpec &ds, Value state,
+                                  ConversionPatternRewriter &rewriter,
+                                  Location loc) {
+  if (ds.nodes().empty())
+    return Value();
+  Type i64Type = rewriter.getI64Type();
+
+  std::function<Value(int32_t)> eval = [&](int32_t idx) -> Value {
+    if (idx < 0 || idx >= (int32_t)ds.nodes().size())
+      return Value();
+    const auto &n = ds.nodes()[idx];
+    switch (n.kind) {
+    case DimSpecKind::Static:
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(n.value));
+    case DimSpecKind::RuntimeSlot:
+      if (!state)
+        return Value();
+      return emitReadDimCall(state, n.slot_id, rewriter, loc);
+    case DimSpecKind::InputDim:
+    case DimSpecKind::InputValueI64:
+      // EP-only leaves; the consumer is responsible for picking the
+      // legacy descriptor read instead of calling the evaluator.
+      return Value();
+    case DimSpecKind::Add:
+    case DimSpecKind::Sub:
+    case DimSpecKind::Mul:
+    case DimSpecKind::FloorDiv:
+    case DimSpecKind::CeilDiv:
+    case DimSpecKind::Min:
+    case DimSpecKind::Max: {
+      Value lhs = eval(n.lhs);
+      Value rhs = eval(n.rhs);
+      if (!lhs || !rhs)
+        return Value();
+      switch (n.kind) {
+      case DimSpecKind::Add:
+        return LLVM::AddOp::create(rewriter, loc, lhs, rhs);
+      case DimSpecKind::Sub:
+        return LLVM::SubOp::create(rewriter, loc, lhs, rhs);
+      case DimSpecKind::Mul:
+        return LLVM::MulOp::create(rewriter, loc, lhs, rhs);
+      case DimSpecKind::FloorDiv:
+        // Operands are non-negative dim sizes -> sdiv is equivalent to
+        // floordiv for our use case (Phase 2.5 corner notes); using
+        // sdiv keeps the IR small.
+        return LLVM::SDivOp::create(rewriter, loc, lhs, rhs);
+      case DimSpecKind::CeilDiv: {
+        // ceildiv(a, b) = (a + b - 1) / b for positive b.
+        Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(1));
+        Value rhsMinusOne = LLVM::SubOp::create(rewriter, loc, rhs, one);
+        Value sum = LLVM::AddOp::create(rewriter, loc, lhs, rhsMinusOne);
+        return LLVM::SDivOp::create(rewriter, loc, sum, rhs);
+      }
+      case DimSpecKind::Min: {
+        Value cmp = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::sle,
+                                         lhs, rhs);
+        return LLVM::SelectOp::create(rewriter, loc, cmp, lhs, rhs);
+      }
+      case DimSpecKind::Max: {
+        Value cmp = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::sge,
+                                         lhs, rhs);
+        return LLVM::SelectOp::create(rewriter, loc, cmp, lhs, rhs);
+      }
+      default:
+        return Value();
+      }
+    }
+    }
+    return Value();
+  };
+  return eval(0);
+}
+
 // Helper: get a single memref dimension as an i64 Value, using a compile-time
 // constant for static dims and extracting from the descriptor for dynamic dims.
 inline Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
@@ -473,6 +578,162 @@ inline SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
       dims.push_back(createConst(type.getDimSize(i)));
   }
   return dims;
+}
+
+// Emit `call @hipdnn_ep_state_publish_dim(state, slot_id, count) :
+//                                          (ptr, i32, i64) -> void`.
+inline void emitPublishDimCall(Value state, int32_t slotId, Value count,
+                               ConversionPatternRewriter &rewriter,
+                               Location loc) {
+  ModuleOp module = state.getDefiningOp()
+                        ? state.getDefiningOp()->getParentOfType<ModuleOp>()
+                        : nullptr;
+  if (!module) {
+    Block *block = rewriter.getInsertionBlock();
+    if (block)
+      if (Operation *p = block->getParentOp())
+        module = p->getParentOfType<ModuleOp>();
+  }
+  Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+  Type i32Type = rewriter.getI32Type();
+  Type i64Type = rewriter.getI64Type();
+  SmallVector<Type, 3> paramTypes = {ptrType, i32Type, i64Type};
+  FailureOr<LLVM::LLVMFuncOp> funcOp =
+      LLVM::lookupOrCreateFn(rewriter, module, kHipdnnEpStatePublishDim,
+                             paramTypes, LLVM::LLVMVoidType::get(module.getContext()));
+  Value slotConst = LLVM::ConstantOp::create(
+      rewriter, loc, i32Type, rewriter.getI32IntegerAttr(slotId));
+  LLVM::CallOp::create(rewriter, loc, *funcOp,
+                       ValueRange{state, slotConst, count});
+}
+
+// Emit `call @hipdnn_ep_state_publish_buffer_resize(state, slot_id, bytes) :
+//                                                   (ptr, i32, i64) -> ptr`.
+//
+// This is the publisher-side primitive used by translucent-propagator
+// wrapper lowerings to obtain the GPU buffer the kernel writes its
+// result into. Uses the resize-or-alloc helper rather than the plain
+// `dyn_pool_alloc_for_slot` so Phase 3 coalescing (where the same slot
+// id may publish twice in one Compute) is transparent to the lowering.
+inline Value emitPublishBufferResizeCall(Value state, int32_t slotId,
+                                         Value bytes,
+                                         ConversionPatternRewriter &rewriter,
+                                         Location loc) {
+  ModuleOp module = state.getDefiningOp()
+                        ? state.getDefiningOp()->getParentOfType<ModuleOp>()
+                        : nullptr;
+  if (!module) {
+    Block *block = rewriter.getInsertionBlock();
+    if (block)
+      if (Operation *p = block->getParentOp())
+        module = p->getParentOfType<ModuleOp>();
+  }
+  Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+  Type i32Type = rewriter.getI32Type();
+  Type i64Type = rewriter.getI64Type();
+  SmallVector<Type, 3> paramTypes = {ptrType, i32Type, i64Type};
+  FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+      rewriter, module, kHipdnnEpStatePublishBufferResize, paramTypes, ptrType);
+  Value slotConst = LLVM::ConstantOp::create(
+      rewriter, loc, i32Type, rewriter.getI32IntegerAttr(slotId));
+  return LLVM::CallOp::create(rewriter, loc, *funcOp,
+                              ValueRange{state, slotConst, bytes})
+      .getResult();
+}
+
+// Helper used by translucent-propagator lowerings (transpose, gather,
+// tile, expand, ...) when the op has been annotated with
+// `hipdnn.output_slot_ids` by the Phase 2.3 ReservePropagatorSlots
+// pass. Emits a `publish_dim` call for every (resultIdx, dimIdx) pair
+// whose slot id is non-negative. `dimSizeProvider` is a callback that
+// returns the i64 SSA value of the runtime extent for a given
+// (resultIdx, dimIdx). Returns nothing -- pure side-effect.
+//
+// Lowerings call this AFTER they've computed the output shape and
+// BEFORE they emit the wrap_* kernel call, so the kernel + the
+// publish are part of the same generated-code block. Use only when the
+// lowering already has the dim values in hand; ops that need operand-
+// tensor reads to know their output shape (Range, Slice, Tile, Expand,
+// Pad, ...) should use the wrapper-side path via
+// `emitOutputSlotIdsAlloca` instead and let the wrapper publish.
+template <typename DimSizeFn>
+inline void emitPropagatorSlotPublishes(Operation *op, Value state,
+                                        DimSizeFn dimSizeProvider,
+                                        ConversionPatternRewriter &rewriter,
+                                        Location loc) {
+  auto grid =
+      op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids");
+  if (!grid || !state)
+    return;
+  for (unsigned r = 0; r < grid.size(); ++r) {
+    auto perResult = llvm::dyn_cast<DenseI32ArrayAttr>(grid[r]);
+    if (!perResult)
+      continue;
+    for (int64_t d = 0; d < perResult.size(); ++d) {
+      int32_t slot = perResult.asArrayRef()[d];
+      if (slot < 0)
+        continue;
+      Value size = dimSizeProvider(r, (unsigned)d);
+      if (!size)
+        continue;
+      emitPublishDimCall(state, slot, size, rewriter, loc);
+    }
+  }
+}
+
+// Companion to `emitPropagatorSlotPublishes`: materialise the
+// `hipdnn.output_slot_ids` attribute as a flat int32_t[total] stack
+// array suitable for being passed as a trailing `const int32_t *
+// output_slot_ids` parameter to a runtime wrapper that does the
+// publish itself.
+//
+// Layout: row-major, length = sum_r rank_r. Each result's row is
+// concatenated in result-index order. Entries are the slot id (>=0) or
+// -1 for "no slot".
+//
+// If the op carries no `hipdnn.output_slot_ids` attribute, returns a
+// null `LLVM::ZeroOp` pointer + sets `outTotalLen` to 0 so the
+// wrapper can fast-skip. Wrappers MUST therefore tolerate a null /
+// zero-length slot-ids pointer.
+inline Value
+emitOutputSlotIdsAlloca(Operation *op, ConversionPatternRewriter &rewriter,
+                        Location loc, int64_t &outTotalLen) {
+  outTotalLen = 0;
+  Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+  Type i32Type = rewriter.getI32Type();
+  Type i64Type = rewriter.getI64Type();
+  auto grid =
+      op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids");
+  if (!grid)
+    return LLVM::ZeroOp::create(rewriter, loc, ptrType);
+
+  SmallVector<int32_t, 8> flat;
+  for (unsigned r = 0; r < grid.size(); ++r) {
+    auto perResult = llvm::dyn_cast<DenseI32ArrayAttr>(grid[r]);
+    if (!perResult)
+      continue;
+    for (int64_t d = 0; d < perResult.size(); ++d)
+      flat.push_back(perResult.asArrayRef()[d]);
+  }
+  outTotalLen = (int64_t)flat.size();
+  if (outTotalLen == 0)
+    return LLVM::ZeroOp::create(rewriter, loc, ptrType);
+
+  auto arrayTy = LLVM::LLVMArrayType::get(i32Type, outTotalLen);
+  Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                          rewriter.getI64IntegerAttr(1));
+  Value alloca = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayTy,
+                                        oneI64, /*alignment=*/4);
+  for (int64_t i = 0; i < outTotalLen; ++i) {
+    Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                         rewriter.getI32IntegerAttr(i));
+    Value val = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                         rewriter.getI32IntegerAttr(flat[i]));
+    Value gep =
+        LLVM::GEPOp::create(rewriter, loc, ptrType, i32Type, alloca, idx);
+    LLVM::StoreOp::create(rewriter, loc, val, gep);
+  }
+  return alloca;
 }
 
 // Must match HIPDNN_EP_TENSOR_OP_* in lib/Runtime/hipdnn_ep_runtime.h
