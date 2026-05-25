@@ -64,12 +64,26 @@ The points that bite hardest in this repo:
   first) is the soft threshold. PRs above this get the `large-pr`
   label automatically as a reviewer signal — not a hard block.
 - A `large-pr` PR is acceptable when the work genuinely cannot be
-  split — typically a feature with irreducible cross-layer coupling
-  (compiler + runtime + tests that are only meaningful together), a
-  coordinated rename or signature change across many call sites
-  where splitting would leave the tree uncompilable between PRs, or
-  a single test that exercises many paths. The Summary / Why section
-  must explain why.
+  split. **Listing a category below is not a free pass** — the
+  Summary / Why section must explain *why this specific change*
+  couldn't be sliced further, naming the parts you considered
+  extracting (precursor refactors, build/CI bumps, isolated test
+  fixtures, separable increments) and why each one would not be
+  reviewable on its own. Categories that have carried justified
+  `large-pr` size on this repo:
+  - a feature with irreducible cross-layer coupling (compiler +
+    runtime + tests that are only meaningful together);
+  - a coordinated rename or signature change across many call sites
+    where splitting would leave the tree uncompilable between PRs;
+  - a single test that exercises many paths.
+  Reviewers retain the right to apply the `extractive` label even
+  when a category applies, if the slicing argument doesn't hold up.
+- **Hard ceiling.** PRs above 2,000 LOC or 30 files require a
+  pre-PR design discussion linked from the description — a GitHub
+  issue, a sync-meeting agenda item, or a Teams thread with the
+  affected reviewers. At that size, "explain why in the PR
+  description" stops being a useful review tool; the design needs
+  to be agreed on before code is written.
 - A `large-pr` PR that *could* have been split but wasn't may be
   marked `extractive` and asked to land as a series. See the
   [Extractive contributions](#extractive-contributions) section
