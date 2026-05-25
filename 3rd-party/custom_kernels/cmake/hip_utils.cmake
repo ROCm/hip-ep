@@ -202,18 +202,8 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
         -fms-compatibility
         -fexceptions
     )
-    
+
     list(APPEND abi_flags -Xclang -fno-cuda-host-device-constexpr)
-    # MSVC 14.51 <cmath> compatibility shim.
-    #
-    # MSVC 14.51's `<cmath>` adds `inline` / `constexpr` overloads of
-    # `isless` / `islessequal` / etc. that clang in HIP mode treats as
-    # implicitly `__host__ __device__`, colliding with the `__device__`
-    # overloads in clang-hip's bundled `__clang_hip_cmath.h`. Force-include
-    # a tiny shim that neutralises the MS STL macros producing them.
-    if(EXISTS "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
-        list(APPEND abi_flags -include "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
-    endif()
 
     # Warning suppression flags
     set(warning_flags

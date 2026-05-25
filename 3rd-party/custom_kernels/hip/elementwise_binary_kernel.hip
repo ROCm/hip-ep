@@ -23,7 +23,7 @@
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
-#include <cmath>//fix here
+#include <cmath>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
