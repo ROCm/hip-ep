@@ -373,10 +373,10 @@ __device__ inline float reduce_op_max<float>(float a, float b) {
 
 template <typename T> __device__ inline T reduce_init_max();
 template <> __device__ inline int64_t reduce_init_max<int64_t>() {
-  return INT64_MIN
+  return INT64_MIN;
 }
 template <> __device__ inline int32_t reduce_init_max<int32_t>() {
-  return INT32_MIN
+  return INT32_MIN;
 }
 template <> __device__ inline float reduce_init_max<float>() {
   return -INFINITY;
