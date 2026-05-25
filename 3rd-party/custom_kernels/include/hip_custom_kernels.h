@@ -44,6 +44,8 @@ typedef enum {
     HIP_DTYPE_FLOAT64  = 4,
     HIP_DTYPE_BFLOAT16 = 5,
     HIP_DTYPE_INT16    = 6,
+    HIP_DTYPE_INT8     = 7,
+    HIP_DTYPE_UINT8    = 8,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -778,11 +780,41 @@ int hip_scatter_nd(
     const void* indices,
     const void* updates,
     void* output,
+    const int32_t* count_ptr,
     const int64_t* data_shape_host,
     int data_rank,
     const int64_t* indices_shape_host,
     int indices_rank,
     int reduction_id,
+    int hip_dtype);
+
+/* =========================================================================
+ * NonZero
+ * =========================================================================
+ *
+ * Single-pass atomic kernel: each thread checks one element. If nonzero,
+ * atomicAdd on count_ptr gives the write position, then coordinates are
+ * written into output[rank, capacity] at stride = capacity.
+ *
+ * count_ptr is zeroed by the launcher before the kernel. After completion,
+ * *count_ptr holds the actual number of nonzero elements (on GPU — no D2H
+ * needed; downstream ops read it directly).
+ *
+ * input_dims_host: host pointer to int64_t[rank] holding the input
+ * shape (copied to device internally before the kernel launch).
+ *
+ * Supported dtypes: f16, f32, i32, i64, i8, u8.
+ * Bounded to rank <= 8.
+ */
+int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    int* count_ptr,
+    int64_t input_num_elements,
+    int64_t input_rank,
+    const int64_t* input_dims_host,
+    int64_t output_capacity,
     int hip_dtype);
 
 /* =========================================================================

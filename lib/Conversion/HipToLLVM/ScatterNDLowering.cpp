@@ -9,18 +9,18 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.scatter_nd(ctx, data, indices, updates, output) {reduction}
+// hip.scatter_nd(ctx, data, indices, updates, [valid_count], output) {reduction}
 //   -> wrap_scatter_nd(state, data_ptr, indices_ptr, updates_ptr, out_ptr,
+//                      count_ptr,
 //                      data_shape_ptr, data_rank,
 //                      indices_shape_ptr, indices_rank,
 //                      updates_shape_ptr, updates_rank,
 //                      output_shape_ptr, output_rank,
 //                      reduction_id, data_type)
 //
-// `reduction_id` encodes the ONNX `reduction` string attribute as a small
-// integer enum (see ScatterNDOpLowering::reductionIdFromString below). The
-// runtime side is a stub today that only logs its parameters, but the
-// signature is shaped to match the future kernel implementation.
+// `count_ptr` is either the GPU pointer to the NonZero count (int32) or
+// nullptr when no valid_count is provided (normal ScatterND with all rows
+// valid).
 struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -64,6 +64,15 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
     Value outPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
+    // count_ptr: either the GPU pointer from NonZero's count_buf, or null
+    Value countPtr;
+    if (op.getHasValidCount()) {
+      countPtr = extractContiguousMemRefPtr(adaptor.getValidCount(), rewriter,
+                                            loc);
+    } else {
+      countPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    }
+
     auto createI64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
@@ -99,9 +108,10 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
         createI64Const(reductionIdFromString(op.getReduction()));
     Value dataTypeVal = createI64Const(hipDtype);
 
-    SmallVector<Type, 16> paramTypes = {
+    SmallVector<Type, 17> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, ptrType, // state, data, idx,
                                                      // updates, out
+        ptrType,                                     // count_ptr
         ptrType, i64Type,                            // data_shape, data_rank
         ptrType, i64Type,                            // idx_shape, idx_rank
         ptrType, i64Type,                            // upd_shape, upd_rank
@@ -113,10 +123,11 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 16> args = {
-        statePtr,    dataPtr,  indicesPtr,   updatesPtr,   outPtr,
-        dataShape,   dataRank, indicesShape, indicesRank,  updatesShape,
-        updatesRank, outShape, outRank,      reductionVal, dataTypeVal};
+    SmallVector<Value, 17> args = {
+        statePtr,    dataPtr,     indicesPtr,   updatesPtr,   outPtr,
+        countPtr,    dataShape,   dataRank,     indicesShape, indicesRank,
+        updatesShape, updatesRank, outShape,    outRank,      reductionVal,
+        dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
