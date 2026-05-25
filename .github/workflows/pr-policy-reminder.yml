@@ -1,6 +1,8 @@
-# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-# Licensed under the MIT License.
-#
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # Posts a single reminder comment on PR open with links to the
 # incremental-development and AI-tool-use policies. Also auto-labels
 # PRs that exceed the soft size threshold as `large-pr`. The bot does
