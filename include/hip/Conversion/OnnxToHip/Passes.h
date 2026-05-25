@@ -28,6 +28,14 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass(
     int64_t minNumElements = kDefaultExternalizeMinNumElements,
     bool skipConstantData = false);
 
+/// Creates a pass that outlines each onnx.Loop body into a separate
+/// func.func and rewrites the loop into a hip.loop op that points at it.
+/// Runs BEFORE --convert-onnx-to-hip so the body's onnx.* ops get the
+/// same conversion treatment as ops in main_graph.  Requires
+/// --hip-add-context-arg to have run first so that !hip.context is
+/// available as the parent function's arg 0.
+std::unique_ptr<Pass> createOnnxLoopOutlinePass();
+
 } // namespace hip
 } // namespace mlir
 
