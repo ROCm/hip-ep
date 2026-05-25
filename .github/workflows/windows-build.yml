@@ -300,9 +300,10 @@ jobs:
             -DHIP_ARCHITECTURES=gfx1151 \
             -Dmorphizen_ENABLE_UNIT_TEST=OFF \
             -DBUILD_MOCK_RUNTIME=OFF \
-            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
+          # NOTE: sccache compiler launchers intentionally dropped here for a
+          # one-off measurement of the no-cache onnx-hipdnn-ep build time.
+          # Revert this hunk before merging.
 
 
       # -----------------------------------------------------------------------
