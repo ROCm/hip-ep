@@ -84,4 +84,19 @@ module {
   // CHECK-LABEL: func.func @test_range_empty_neg_f32
   // CHECK: tensor.empty
   // CHECK: hip.range
+
+  // ORT/HF often export scalar start/limit/delta as tensor<1xT>; collapse to 0-D before hip.range.
+  func.func @test_range_i32_1d_operands() -> tensor<4xi32> {
+    %s = arith.constant dense<2> : tensor<1xi32>
+    %l = arith.constant dense<10> : tensor<1xi32>
+    %d = arith.constant dense<2> : tensor<1xi32>
+    %r = "onnx.Range"(%s, %l, %d) : (tensor<1xi32>, tensor<1xi32>, tensor<1xi32>) -> tensor<4xi32>
+    return %r : tensor<4xi32>
+  }
+  // CHECK-LABEL: func.func @test_range_i32_1d_operands
+  // CHECK-COUNT-3: tensor.collapse_shape
+  // CHECK-SAME: tensor<1xi32> into tensor<i32>
+  // CHECK: tensor.empty
+  // CHECK: hip.range
+  // CHECK-NOT: onnx.Range
 }
