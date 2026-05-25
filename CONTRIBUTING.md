@@ -50,13 +50,13 @@ The points that bite hardest in this repo:
 > - Each change should be kept as small as possible. This simplifies
 >   your work (into a logical progression), simplifies code review and
 >   reduces the chance that you will get negative feedback on the
->   change.
+>   change. ...
 > - Large/invasive changes usually have a number of secondary changes
 >   that are required before the big change can be made (e.g. API
 >   cleanup, etc). These sorts of changes can often be done before the
 >   major change is done, independently of that work.
 > - Often, an independent precursor to a big change is to add a new API
->   and slowly migrate clients to use the new API.
+>   and slowly migrate clients to use the new API. ...
 
 ### What "small" means here
 
@@ -188,7 +188,7 @@ If a maintainer judges that a PR fits this pattern, they will:
    > tool-generated content, and requires additional justification
    > for why it is valuable enough to the project for us to review
    > it. Please see our developer policy on AI-generated
-   > contributions: <https://llvm.org/docs/AIToolPolicy.html>
+   > contributions: http://llvm.org/docs/AIToolPolicy.html
 
 3. Ask the contributor to either reduce the scope, split it into a
    series, or document why review cost is justified.
