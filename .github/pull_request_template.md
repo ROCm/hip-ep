@@ -1,4 +1,9 @@
 <!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
+
+<!--
 Thanks for contributing! Please skim the two policies this repo
 follows before requesting review (1-2 minutes each):
 
