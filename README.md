@@ -159,6 +159,17 @@ For prerequisites, environment setup, and step-by-step build instructions, see
 
 ---
 
+## Contributing
+
+This repo follows the LLVM project's
+[Incremental Development](https://llvm.org/docs/DeveloperPolicy.html#incremental-development)
+and [AI Tool Use](https://llvm.org/docs/AIToolPolicy.html) policies. Before
+opening a PR, please read [CONTRIBUTING.md](CONTRIBUTING.md) for the local
+specifics: PR sizing, AI-assistance disclosure, CODEOWNERS routing, and
+commit message trailers.
+
+---
+
 ## License
 
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
