@@ -63,12 +63,12 @@ static const char *reduction_name(int64_t id) {
 }
 
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
-                    void *updates, void *output, const int64_t *data_shape,
-                    int64_t data_rank, const int64_t *indices_shape,
-                    int64_t indices_rank, const int64_t *updates_shape,
-                    int64_t updates_rank, const int64_t *output_shape,
-                    int64_t output_rank, int64_t reduction_id,
-                    int64_t data_type) {
+                    void *updates, void *output, const int32_t *count_ptr,
+                    const int64_t *data_shape, int64_t data_rank,
+                    const int64_t *indices_shape, int64_t indices_rank,
+                    const int64_t *updates_shape, int64_t updates_rank,
+                    const int64_t *output_shape, int64_t output_rank,
+                    int64_t reduction_id, int64_t data_type) {
   OP_PROFILE(
       "scatter_nd",
       [&] {
@@ -115,12 +115,13 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
   void *stream = hipdnn_ep_state_get_stream(state);
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_scatter_nd: data_rank=%lld, indices_rank=%lld, "
-      "reduction=%s, data_type=%s -> hip_scatter_nd\n",
+      "reduction=%s, data_type=%s, count_ptr=%p -> hip_scatter_nd\n",
       (long long)data_rank, (long long)indices_rank,
-      reduction_name(reduction_id), hipdnn_ep_datatype_name(data_type));
+      reduction_name(reduction_id), hipdnn_ep_datatype_name(data_type),
+      (const void *)count_ptr);
 
-  return hip_scatter_nd(stream, data, indices, updates, output, data_shape,
-                        static_cast<int>(data_rank), indices_shape,
+  return hip_scatter_nd(stream, data, indices, updates, output, count_ptr,
+                        data_shape, static_cast<int>(data_rank), indices_shape,
                         static_cast<int>(indices_rank),
                         static_cast<int>(reduction_id), hip_dtype);
 }
