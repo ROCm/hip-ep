@@ -37,12 +37,18 @@ int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
 // pulling kernel-internal headers.
 static size_t hipDTypeElementSize(int64_t hip_dtype) {
   switch (hip_dtype) {
-  case 0: return 4; // HIP_DTYPE_FLOAT32
-  case 2: return 8; // HIP_DTYPE_INT64
-  case 3: return 4; // HIP_DTYPE_INT32
-  case 4: return 8; // HIP_DTYPE_FLOAT64
-  case 6: return 2; // HIP_DTYPE_INT16
-  default: return 0;
+  case 0:
+    return 4; // HIP_DTYPE_FLOAT32
+  case 2:
+    return 8; // HIP_DTYPE_INT64
+  case 3:
+    return 4; // HIP_DTYPE_INT32
+  case 4:
+    return 8; // HIP_DTYPE_FLOAT64
+  case 6:
+    return 2; // HIP_DTYPE_INT16
+  default:
+    return 0;
   }
 }
 
@@ -77,14 +83,14 @@ static size_t hipDTypeElementSize(int64_t hip_dtype) {
 // in practice. Mixed-element-type Range is impossible by ONNX Range's
 // schema (all three operands share the same T).
 extern "C" int wrap_range_dyn(RuntimeState *state, void *start, void *limit,
-                              void *delta, int64_t hip_dtype,
-                              int32_t slot_id) {
+                              void *delta, int64_t hip_dtype, int32_t slot_id) {
   if (!state || !start || !limit || !delta) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_range_dyn: null argument\n");
     return -1;
   }
 
-  hipStream_t stream = static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
   const size_t elem_bytes = hipDTypeElementSize(hip_dtype);
   if (elem_bytes == 0) {
@@ -131,23 +137,33 @@ extern "C" int wrap_range_dyn(RuntimeState *state, void *start, void *limit,
     std::memcpy(&s, &h_buf[0], sizeof(int64_t));
     std::memcpy(&l, &h_buf[8], sizeof(int64_t));
     std::memcpy(&d, &h_buf[16], sizeof(int64_t));
-    dbg_start = (double)s; dbg_limit = (double)l; dbg_delta = (double)d;
-    if (d > 0 && l > s)        N = (l - s + d - 1) / d;
-    else if (d < 0 && l < s)   N = (s - l + (-d) - 1) / (-d);
+    dbg_start = (double)s;
+    dbg_limit = (double)l;
+    dbg_delta = (double)d;
+    if (d > 0 && l > s)
+      N = (l - s + d - 1) / d;
+    else if (d < 0 && l < s)
+      N = (s - l + (-d) - 1) / (-d);
   } else if (hip_dtype == /*HIP_DTYPE_INT32=*/3) {
     int32_t s, l, d;
     std::memcpy(&s, &h_buf[0], sizeof(int32_t));
     std::memcpy(&l, &h_buf[8], sizeof(int32_t));
     std::memcpy(&d, &h_buf[16], sizeof(int32_t));
-    dbg_start = (double)s; dbg_limit = (double)l; dbg_delta = (double)d;
-    if (d > 0 && l > s)        N = ((int64_t)l - s + d - 1) / d;
-    else if (d < 0 && l < s)   N = ((int64_t)s - l + (-d) - 1) / (-d);
+    dbg_start = (double)s;
+    dbg_limit = (double)l;
+    dbg_delta = (double)d;
+    if (d > 0 && l > s)
+      N = ((int64_t)l - s + d - 1) / d;
+    else if (d < 0 && l < s)
+      N = ((int64_t)s - l + (-d) - 1) / (-d);
   } else if (hip_dtype == /*HIP_DTYPE_FLOAT32=*/0) {
     float s, l, d;
     std::memcpy(&s, &h_buf[0], sizeof(float));
     std::memcpy(&l, &h_buf[8], sizeof(float));
     std::memcpy(&d, &h_buf[16], sizeof(float));
-    dbg_start = (double)s; dbg_limit = (double)l; dbg_delta = (double)d;
+    dbg_start = (double)s;
+    dbg_limit = (double)l;
+    dbg_delta = (double)d;
     // ONNX f32 Range: N = max(ceil((limit - start) / delta), 0). We
     // evaluate in double to keep the count exact on borderline inputs.
     double diff = (double)l - (double)s;
@@ -164,18 +180,26 @@ extern "C" int wrap_range_dyn(RuntimeState *state, void *start, void *limit,
     std::memcpy(&s, &h_buf[0], sizeof(double));
     std::memcpy(&l, &h_buf[8], sizeof(double));
     std::memcpy(&d, &h_buf[16], sizeof(double));
-    dbg_start = s; dbg_limit = l; dbg_delta = d;
+    dbg_start = s;
+    dbg_limit = l;
+    dbg_delta = d;
     double diff = l - s;
-    if (d > 0.0 && diff > 0.0)        N = (int64_t)std::ceil(diff / d);
-    else if (d < 0.0 && diff < 0.0)   N = (int64_t)std::ceil(diff / d);
+    if (d > 0.0 && diff > 0.0)
+      N = (int64_t)std::ceil(diff / d);
+    else if (d < 0.0 && diff < 0.0)
+      N = (int64_t)std::ceil(diff / d);
   } else if (hip_dtype == /*HIP_DTYPE_INT16=*/6) {
     int16_t s, l, d;
     std::memcpy(&s, &h_buf[0], sizeof(int16_t));
     std::memcpy(&l, &h_buf[8], sizeof(int16_t));
     std::memcpy(&d, &h_buf[16], sizeof(int16_t));
-    dbg_start = (double)s; dbg_limit = (double)l; dbg_delta = (double)d;
-    if (d > 0 && l > s)        N = ((int64_t)l - s + d - 1) / d;
-    else if (d < 0 && l < s)   N = ((int64_t)s - l + (-d) - 1) / (-d);
+    dbg_start = (double)s;
+    dbg_limit = (double)l;
+    dbg_delta = (double)d;
+    if (d > 0 && l > s)
+      N = ((int64_t)l - s + d - 1) / d;
+    else if (d < 0 && l < s)
+      N = ((int64_t)s - l + (-d) - 1) / (-d);
   } else {
     fprintf(stderr,
             "[REAL] wrap_range_dyn: hip_dtype=%lld not supported on the "

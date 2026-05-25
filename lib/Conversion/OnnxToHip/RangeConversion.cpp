@@ -278,10 +278,8 @@ struct RangeToHip : public RewritePattern {
         // InputValueI64 by ComposeDimSpecs.
         DimSpec startSpec =
             DimSpec::makeInputValueI64(/*input_index=*/1, /*flat_offset=*/0);
-        DimSpec limitSpec =
-            DimSpec::makeInputValueI64(/*input_index=*/2, 0);
-        DimSpec deltaSpec =
-            DimSpec::makeInputValueI64(/*input_index=*/3, 0);
+        DimSpec limitSpec = DimSpec::makeInputValueI64(/*input_index=*/2, 0);
+        DimSpec deltaSpec = DimSpec::makeInputValueI64(/*input_index=*/3, 0);
         DimSpec diff =
             DimSpec::makeBinary(DimSpecKind::Sub, limitSpec, startSpec);
         DimSpec dim0 =

@@ -71,9 +71,7 @@ def _make_value_attr(dtype: np.dtype, scalar):
     return numpy_helper.from_array(arr, name="value")
 
 
-def _make_cof_model_constant_shape(
-    shape_values: list[int], dtype: np.dtype, scalar
-):
+def _make_cof_model_constant_shape(shape_values: list[int], dtype: np.dtype, scalar):
     """Compile-time-fold path: shape is a Constant initializer."""
     np_dtype = np.dtype(dtype)
     onnx_out_type = _VALUE_BUILDERS[np_dtype]
@@ -117,17 +115,11 @@ def _make_cof_model_funcarg_shape(
     Y = helper.make_tensor_value_info("Y", onnx_out_type, [None] * rank)
 
     value_attr = _make_value_attr(np_dtype, scalar)
-    cof_node = helper.make_node(
-        "ConstantOfShape", ["shape"], ["Y"], value=value_attr
-    )
-    return make_model_from_nodes(
-        [cof_node], inputs=[shape_in], outputs=[Y]
-    )
+    cof_node = helper.make_node("ConstantOfShape", ["shape"], ["Y"], value=value_attr)
+    return make_model_from_nodes([cof_node], inputs=[shape_in], outputs=[Y])
 
 
-def _make_cof_model_via_intermediate(
-    rank: int, dtype: np.dtype, scalar
-):
+def _make_cof_model_via_intermediate(rank: int, dtype: np.dtype, scalar):
     """Category C via intermediate shape: shape = Cast(shape_in, to=int64).
 
     The Cast output is an intermediate value (the OnnxToHip Cast
@@ -152,13 +144,9 @@ def _make_cof_model_via_intermediate(
     shape_in = helper.make_tensor_value_info("shape_in", TensorProto.INT64, [rank])
     Y = helper.make_tensor_value_info("Y", onnx_out_type, [None] * rank)
 
-    cast_node = helper.make_node(
-        "Cast", ["shape_in"], ["shape"], to=TensorProto.INT64
-    )
+    cast_node = helper.make_node("Cast", ["shape_in"], ["shape"], to=TensorProto.INT64)
     value_attr = _make_value_attr(np_dtype, scalar)
-    cof_node = helper.make_node(
-        "ConstantOfShape", ["shape"], ["Y"], value=value_attr
-    )
+    cof_node = helper.make_node("ConstantOfShape", ["shape"], ["Y"], value=value_attr)
     return make_model_from_nodes(
         [cast_node, cof_node],
         inputs=[shape_in],
@@ -211,18 +199,12 @@ class TestConstantOfShape:
             ([3, 3], np.bool_, True),
         ],
     )
-    def test_cof_category_b_i64_shape(
-        self, model_runner, shape, dtype, scalar
-    ):
+    def test_cof_category_b_i64_shape(self, model_runner, shape, dtype, scalar):
         """Category B: i64 func-arg shape -> EP pre-resolves all dims."""
         rank = len(shape)
-        model = _make_cof_model_funcarg_shape(
-            rank, dtype, scalar, shape_dtype=np.int64
-        )
+        model = _make_cof_model_funcarg_shape(rank, dtype, scalar, shape_dtype=np.int64)
         shape_arr = np.array(shape, dtype=np.int64)
-        actual, expected = model_runner.run_sample(
-            model, [shape_arr], reference="cpu"
-        )
+        actual, expected = model_runner.run_sample(model, [shape_arr], reference="cpu")
         compare_outputs(actual, expected, atol=0, rtol=0)
         assert actual[0].shape == tuple(shape)
 
@@ -239,15 +221,11 @@ class TestConstantOfShape:
             ([2, 3], np.int64, 7),
         ],
     )
-    def test_cof_category_c_via_intermediate(
-        self, model_runner, shape, dtype, scalar
-    ):
+    def test_cof_category_c_via_intermediate(self, model_runner, shape, dtype, scalar):
         rank = len(shape)
         model = _make_cof_model_via_intermediate(rank, dtype, scalar)
         shape_arr = np.array(shape, dtype=np.int64)
-        actual, expected = model_runner.run_sample(
-            model, [shape_arr], reference="cpu"
-        )
+        actual, expected = model_runner.run_sample(model, [shape_arr], reference="cpu")
         compare_outputs(actual, expected, atol=0, rtol=0)
         assert actual[0].shape == tuple(shape)
 
@@ -255,9 +233,7 @@ class TestConstantOfShape:
 
     def test_cof_large_fold(self, model_runner):
         """Bigger static splat -- exercises the fold path's bytes path."""
-        model = _make_cof_model_constant_shape(
-            [64, 64], np.float32, 0.125
-        )
+        model = _make_cof_model_constant_shape([64, 64], np.float32, 0.125)
         actual, expected = model_runner.run_sample(model, [], reference="cpu")
         compare_outputs(actual, expected, atol=0, rtol=0)
 
@@ -268,7 +244,5 @@ class TestConstantOfShape:
             rank, np.float32, -0.5, shape_dtype=np.int64
         )
         shape_arr = np.array([64, 64], dtype=np.int64)
-        actual, expected = model_runner.run_sample(
-            model, [shape_arr], reference="cpu"
-        )
+        actual, expected = model_runner.run_sample(model, [shape_arr], reference="cpu")
         compare_outputs(actual, expected, atol=0, rtol=0)

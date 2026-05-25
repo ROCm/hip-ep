@@ -111,8 +111,8 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     // num_elements: product of input_shape, honouring the slot-aware dim
     // reads above so the kernel writes only the runtime-published count of
     // elements (not the upper-bound pool allocation).
-    Value numElems = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+    Value numElems = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                              rewriter.getI64IntegerAttr(1));
     for (int64_t i = 0; i < rank; ++i) {
       Value dimVal = getMemRefDimSizeWithSlot(
           op, kInputOperandIdx, inputType, static_cast<unsigned>(i),

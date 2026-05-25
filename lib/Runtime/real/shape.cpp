@@ -63,7 +63,6 @@ int wrap_shape(RuntimeState *state, void *output, int64_t num_elements,
     return 0;
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  int64_t total_bytes =
-      num_elements * static_cast<int64_t>(sizeof(int64_t));
+  int64_t total_bytes = num_elements * static_cast<int64_t>(sizeof(int64_t));
   return wrap_hipMemcpyH2D(output, host_values, total_bytes, stream);
 }

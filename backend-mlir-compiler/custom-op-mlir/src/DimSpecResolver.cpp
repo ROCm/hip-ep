@@ -14,7 +14,8 @@ namespace mlir_compilation::customop {
 bool debugShapesEnabled() {
   static const bool enabled = []() {
     const char *v1 = std::getenv("HIPDNN_EP_DEBUG_SHAPES");
-    if (v1 && v1[0] >= '1') return true;
+    if (v1 && v1[0] >= '1')
+      return true;
     const char *v2 = std::getenv("HIPDNN_EP_TRACE_SHAPES");
     return v2 && v2[0] >= '1';
   }();
@@ -41,11 +42,11 @@ int64_t readInputI64(int32_t input_index, int64_t flat_offset,
                      const std::vector<const void *> &input_data) {
   CHECK_GE(input_index, 0);
   CHECK_LT(static_cast<size_t>(input_index), input_shapes.size())
-      << "InputValueI64 references input_index " << input_index
-      << " but only " << input_shapes.size() << " inputs are marshalled";
+      << "InputValueI64 references input_index " << input_index << " but only "
+      << input_shapes.size() << " inputs are marshalled";
   CHECK_LT(static_cast<size_t>(input_index), input_data.size())
-      << "InputValueI64 references input_index " << input_index
-      << " but only " << input_data.size() << " input data pointers";
+      << "InputValueI64 references input_index " << input_index << " but only "
+      << input_data.size() << " input data pointers";
   const void *raw = input_data[input_index];
   CHECK(raw) << "InputValueI64 references input_index " << input_index
              << " which is a GPU-resident tensor; the EP must D2H-stage "
@@ -56,10 +57,9 @@ int64_t readInputI64(int32_t input_index, int64_t flat_offset,
     numel *= d;
   }
   CHECK_GE(flat_offset, 0);
-  CHECK_LT(flat_offset, numel)
-      << "InputValueI64 flat_offset " << flat_offset
-      << " out of range for input " << input_index << " (numel " << numel
-      << ")";
+  CHECK_LT(flat_offset, numel) << "InputValueI64 flat_offset " << flat_offset
+                               << " out of range for input " << input_index
+                               << " (numel " << numel << ")";
   return reinterpret_cast<const int64_t *>(raw)[flat_offset];
 }
 
@@ -76,8 +76,8 @@ bool resolveNode(const mlir::hip::DimSpecT &spec, size_t node_idx,
   case mlir::hip::DimSpecKind::InputDim: {
     CHECK_GE(n.input_index, 0);
     CHECK_LT(static_cast<size_t>(n.input_index), input_shapes.size())
-        << "InputDim references input_index " << n.input_index
-        << " but only " << input_shapes.size() << " inputs are marshalled";
+        << "InputDim references input_index " << n.input_index << " but only "
+        << input_shapes.size() << " inputs are marshalled";
     const auto &shape = input_shapes[n.input_index];
     CHECK_GE(n.dim_index, 0);
     CHECK_LT(static_cast<size_t>(n.dim_index), shape.size())
@@ -91,10 +91,9 @@ bool resolveNode(const mlir::hip::DimSpecT &spec, size_t node_idx,
     out_value =
         readInputI64(n.input_index, n.flat_offset, input_shapes, input_data);
     if (debugShapesEnabled()) {
-      fprintf(stderr,
-              "[Resolver] InputValueI64(input=%d, offset=%lld) = %lld\n",
-              (int)n.input_index, (long long)n.flat_offset,
-              (long long)out_value);
+      fprintf(
+          stderr, "[Resolver] InputValueI64(input=%d, offset=%lld) = %lld\n",
+          (int)n.input_index, (long long)n.flat_offset, (long long)out_value);
     }
     return true;
 
@@ -172,17 +171,32 @@ bool resolveNode(const mlir::hip::DimSpecT &spec, size_t node_idx,
     if (debugShapesEnabled()) {
       const char *opn = "?";
       switch (n.kind) {
-        case mlir::hip::DimSpecKind::Add: opn = "Add"; break;
-        case mlir::hip::DimSpecKind::Sub: opn = "Sub"; break;
-        case mlir::hip::DimSpecKind::Mul: opn = "Mul"; break;
-        case mlir::hip::DimSpecKind::FloorDiv: opn = "FloorDiv"; break;
-        case mlir::hip::DimSpecKind::CeilDiv: opn = "CeilDiv"; break;
-        case mlir::hip::DimSpecKind::Min: opn = "Min"; break;
-        case mlir::hip::DimSpecKind::Max: opn = "Max"; break;
-        default: break;
+      case mlir::hip::DimSpecKind::Add:
+        opn = "Add";
+        break;
+      case mlir::hip::DimSpecKind::Sub:
+        opn = "Sub";
+        break;
+      case mlir::hip::DimSpecKind::Mul:
+        opn = "Mul";
+        break;
+      case mlir::hip::DimSpecKind::FloorDiv:
+        opn = "FloorDiv";
+        break;
+      case mlir::hip::DimSpecKind::CeilDiv:
+        opn = "CeilDiv";
+        break;
+      case mlir::hip::DimSpecKind::Min:
+        opn = "Min";
+        break;
+      case mlir::hip::DimSpecKind::Max:
+        opn = "Max";
+        break;
+      default:
+        break;
       }
-      fprintf(stderr, "[Resolver] %s(%lld, %lld) = %lld\n", opn,
-              (long long)lhs, (long long)rhs, (long long)out_value);
+      fprintf(stderr, "[Resolver] %s(%lld, %lld) = %lld\n", opn, (long long)lhs,
+              (long long)rhs, (long long)out_value);
     }
     return true;
   }

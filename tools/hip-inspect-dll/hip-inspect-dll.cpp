@@ -38,10 +38,11 @@
 
 typedef const char *(*InferenceGetMetadataJsonFunc)(void);
 
-// Mirror of mlir::hip::DimSpecKind in include/hip/Dialect/IR/HipShapeInterface.h
-// and schemas/model_metadata.fbs. Kept in sync by inspection — there is no
-// shared header because hip-inspect-dll deliberately does not link the
-// HipDialect (keeps the inspector small and standalone).
+// Mirror of mlir::hip::DimSpecKind in
+// include/hip/Dialect/IR/HipShapeInterface.h and schemas/model_metadata.fbs.
+// Kept in sync by inspection — there is no shared header because
+// hip-inspect-dll deliberately does not link the HipDialect (keeps the
+// inspector small and standalone).
 enum class DimSpecKindLocal : int {
   Static = 0,
   InputDim = 1,
@@ -297,8 +298,9 @@ static bool printSummary(const char *json_str, bool dumpDimSpecs) {
                        "legacy model>\n";
         } else {
           for (size_t d = 0; d < specs->size(); ++d) {
-            std::cout << "      dim[" << d << "] = "
-                      << renderDimSpec((*specs)[d].getAsObject()) << "\n";
+            std::cout << "      dim[" << d
+                      << "] = " << renderDimSpec((*specs)[d].getAsObject())
+                      << "\n";
           }
         }
       }

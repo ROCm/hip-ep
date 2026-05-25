@@ -15,10 +15,10 @@ namespace {
 // Operand-provenance dispatch is encoded in the IR by the conversion:
 //
 //   * `slot_ids` present  -> Category C: shape tensor is GPU-resident
-//                            (intermediate). Lower to wrap_constant_of_shape_dyn
-//                            which D2Hs the shape vector, publishes the dims
-//                            and an output buffer to the slots, and runs the
-//                            fill kernel.
+//                            (intermediate). Lower to
+//                            wrap_constant_of_shape_dyn which D2Hs the shape
+//                            vector, publishes the dims and an output buffer to
+//                            the slots, and runs the fill kernel.
 //
 //   * `slot_ids` absent  -> Category B: EP has resolved the output shape
 //                            and allocated the output OrtValue (the `output`
@@ -38,15 +38,24 @@ constexpr const char *kWrapConstantOfShapeDyn = "wrap_constant_of_shape_dyn";
 // stays a thin shim. Mirrors hipDTypeFromHipdnn in NonZero / Range wrappers.
 static int64_t hipdnnDtypeToHipDtype(int64_t hipdnn_dtype) {
   switch (hipdnn_dtype) {
-  case 0: return 0;  // HIPDNN_EP_DATATYPE_FLOAT   -> HIP_DTYPE_FLOAT32
-  case 1: return 1;  // HIPDNN_EP_DATATYPE_HALF    -> HIP_DTYPE_FLOAT16
-  case 2: return 5;  // HIPDNN_EP_DATATYPE_BFLOAT16-> HIP_DTYPE_BFLOAT16
-  case 3: return 3;  // HIPDNN_EP_DATATYPE_INT32   -> HIP_DTYPE_INT32
-  case 4: return 2;  // HIPDNN_EP_DATATYPE_INT64   -> HIP_DTYPE_INT64
-  case 5: return 7;  // HIPDNN_EP_DATATYPE_INT8    -> HIP_DTYPE_INT8
-  case 6: return 4;  // HIPDNN_EP_DATATYPE_DOUBLE  -> HIP_DTYPE_FLOAT64
-  case 7: return 7;  // HIPDNN_EP_DATATYPE_UINT8   -> HIP_DTYPE_INT8 (same width)
-  default: return -1;
+  case 0:
+    return 0; // HIPDNN_EP_DATATYPE_FLOAT   -> HIP_DTYPE_FLOAT32
+  case 1:
+    return 1; // HIPDNN_EP_DATATYPE_HALF    -> HIP_DTYPE_FLOAT16
+  case 2:
+    return 5; // HIPDNN_EP_DATATYPE_BFLOAT16-> HIP_DTYPE_BFLOAT16
+  case 3:
+    return 3; // HIPDNN_EP_DATATYPE_INT32   -> HIP_DTYPE_INT32
+  case 4:
+    return 2; // HIPDNN_EP_DATATYPE_INT64   -> HIP_DTYPE_INT64
+  case 5:
+    return 7; // HIPDNN_EP_DATATYPE_INT8    -> HIP_DTYPE_INT8
+  case 6:
+    return 4; // HIPDNN_EP_DATATYPE_DOUBLE  -> HIP_DTYPE_FLOAT64
+  case 7:
+    return 7; // HIPDNN_EP_DATATYPE_UINT8   -> HIP_DTYPE_INT8 (same width)
+  default:
+    return -1;
   }
 }
 
@@ -88,8 +97,7 @@ struct ConstantOfShapeOpLowering
       if (!shapeType)
         return rewriter.notifyMatchFailure(
             op, "shape operand must be a ranked memref");
-      int64_t shape_dtype_enum =
-          getHipdnnDataType(shapeType.getElementType());
+      int64_t shape_dtype_enum = getHipdnnDataType(shapeType.getElementType());
       int64_t shape_hip_dtype = hipdnnDtypeToHipDtype(shape_dtype_enum);
       if (shape_hip_dtype < 0)
         return rewriter.notifyMatchFailure(
@@ -115,8 +123,7 @@ struct ConstantOfShapeOpLowering
         Value slot = LLVM::GEPOp::create(rewriter, loc, ptrType, i32Type,
                                          slotsArr, ValueRange{idx});
         Value sidVal = LLVM::ConstantOp::create(
-            rewriter, loc, i32Type,
-            rewriter.getI32IntegerAttr(slot_ids[i]));
+            rewriter, loc, i32Type, rewriter.getI32IntegerAttr(slot_ids[i]));
         LLVM::StoreOp::create(rewriter, loc, sidVal, slot);
       }
 
@@ -126,9 +133,8 @@ struct ConstantOfShapeOpLowering
           rewriter, module, kWrapConstantOfShapeDyn, paramTypes, i32Type);
       if (failed(funcOp))
         return failure();
-      SmallVector<Value, 7> args = {statePtr,        shapePtr,
-                                    shapeDtypeConst, rankConst,
-                                    slotsArr,        fillValueConst,
+      SmallVector<Value, 7> args = {statePtr,        shapePtr, shapeDtypeConst,
+                                    rankConst,       slotsArr, fillValueConst,
                                     outputDtypeConst};
       LLVM::CallOp::create(rewriter, loc, *funcOp, args);
       rewriter.eraseOp(op);

@@ -833,10 +833,10 @@ int wrap_constant_of_shape_dyn(RuntimeState *state, const void *shape_dev,
     fprintf(stderr, "Invalid state in wrap_constant_of_shape_dyn\n");
     return -1;
   }
-  MOCK_PRINT(
-      "[MOCK] wrap_constant_of_shape_dyn(rank=%lld, value_bits=%lld, "
-      "out_dtype=%lld)\n",
-      (long long)output_rank, (long long)value_bits, (long long)output_dtype);
+  MOCK_PRINT("[MOCK] wrap_constant_of_shape_dyn(rank=%lld, value_bits=%lld, "
+             "out_dtype=%lld)\n",
+             (long long)output_rank, (long long)value_bits,
+             (long long)output_dtype);
   // Mirror NonZero/Range: publish placeholder dims (1) and null buffer
   // for every slot so downstream post-compute resolvers do not LOG(FATAL).
   // The mock does not need to actually compute -- there is no GPU.
@@ -1196,12 +1196,11 @@ int wrap_nonzero(RuntimeState *state, const void *input,
   }
   (void)input;
   (void)input_shape_host;
-  MOCK_PRINT(
-      "[MOCK] wrap_nonzero(input_num_elements=%lld, input_rank=%lld, "
-      "input_data_type=%s(%lld), slot_id=%d)\n",
-      (long long)input_num_elements, (long long)input_rank,
-      hipdnn_ep_datatype_name(input_data_type), (long long)input_data_type,
-      (int)slot_id);
+  MOCK_PRINT("[MOCK] wrap_nonzero(input_num_elements=%lld, input_rank=%lld, "
+             "input_data_type=%s(%lld), slot_id=%d)\n",
+             (long long)input_num_elements, (long long)input_rank,
+             hipdnn_ep_datatype_name(input_data_type),
+             (long long)input_data_type, (int)slot_id);
   // Mock semantics: publish N=0 + an empty buffer so the EP-side resolver
   // doesn't trip an unpublished-slot fatal. Real wrappers would run the
   // count + fill kernels; without HIP we have no input data to inspect.
@@ -1218,8 +1217,7 @@ int wrap_shape(RuntimeState *state, void *output, int64_t num_elements,
   }
   (void)output;
   (void)host_values;
-  MOCK_PRINT("[MOCK] wrap_shape(num_elements=%lld)\n",
-             (long long)num_elements);
+  MOCK_PRINT("[MOCK] wrap_shape(num_elements=%lld)\n", (long long)num_elements);
   return 0;
 }
 

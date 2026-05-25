@@ -64,12 +64,10 @@ InferenceState::InferenceState(
     // emitted by GenerateInterface when dyn_dim_slots_count > 0, so for
     // legacy / all-static-output DLLs the lookups silently fall back to
     // null and the read_* / reset_dyn_slots accessors become no-ops.
-    dyn_slot_get_dim_fn_ =
-        plugin_->get_method<int64_t, void *, int32_t>(
-            "inference_dyn_slot_get_dim");
-    dyn_slot_get_buffer_fn_ =
-        plugin_->get_method<void *, void *, int32_t>(
-            "inference_dyn_slot_get_buffer");
+    dyn_slot_get_dim_fn_ = plugin_->get_method<int64_t, void *, int32_t>(
+        "inference_dyn_slot_get_dim");
+    dyn_slot_get_buffer_fn_ = plugin_->get_method<void *, void *, int32_t>(
+        "inference_dyn_slot_get_buffer");
     dyn_slot_reset_fn_ =
         plugin_->get_method<void, void *>("inference_dyn_slot_reset");
     MY_LOG(2) << "dyn_slot ABI: get_dim="
@@ -83,9 +81,8 @@ InferenceState::InferenceState(
   // dynamic-output-shape implementation. Log fatal so the user gets a
   // concrete signal instead of segfaulting on the first NonZero call.
   const int32_t dyn_slots = dyn_dim_slots_count();
-  if (dyn_slots > 0 &&
-      (!dyn_slot_get_dim_fn_ || !dyn_slot_get_buffer_fn_ ||
-       !dyn_slot_reset_fn_)) {
+  if (dyn_slots > 0 && (!dyn_slot_get_dim_fn_ || !dyn_slot_get_buffer_fn_ ||
+                        !dyn_slot_reset_fn_)) {
     LOG(FATAL) << "model.dll metadata declares " << dyn_slots
                << " dynamic dim slot(s) but is missing the "
                   "inference_dyn_slot_* ABI exports -- this DLL was built "
@@ -201,8 +198,7 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
       auto parsed = std::make_unique<mlir::hip::HipModelMetaInfoT>();
       std::string error;
       if (!mlir::hip::fromJson<mlir::hip::HipModelMetaInfoT>(
-              json_str, mlir::hip::k_model_metadata_schema(), *parsed,
-              error)) {
+              json_str, mlir::hip::k_model_metadata_schema(), *parsed, error)) {
         LOG(FATAL) << "Failed to parse inference_get_metadata_json output: "
                    << error;
       }
@@ -221,9 +217,8 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
 
   MY_LOG(1) << "Inference state initialized";
 
-  return std::make_unique<InferenceState>(PrivateTag{}, state,
-                                          std::move(plugin), dll_path,
-                                          std::move(metadata));
+  return std::make_unique<InferenceState>(
+      PrivateTag{}, state, std::move(plugin), dll_path, std::move(metadata));
 }
 
 InferenceState::~InferenceState() {

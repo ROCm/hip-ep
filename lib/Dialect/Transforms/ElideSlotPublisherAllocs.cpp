@@ -80,8 +80,7 @@ memref::AllocOp findAllocBehind(Value v) {
 // publisher itself, another hip-dialect op, a memref.dim query, or a
 // view-like memref op. Any other use causes us to skip (be safe).
 bool everyUseSafeToShrink(Value allocResult, Operation *publisher) {
-  auto *hipDialect =
-      allocResult.getContext()->getLoadedDialect<HipDialect>();
+  auto *hipDialect = allocResult.getContext()->getLoadedDialect<HipDialect>();
   auto *memrefDialect =
       allocResult.getContext()->getLoadedDialect<memref::MemRefDialect>();
   for (Operation *user : allocResult.getUsers()) {
@@ -172,8 +171,7 @@ struct ElideSlotPublisherAllocsPass
       // as a 0-byte dynamic bucket whose contribution to the pool size
       // is `aligned(0) * num_bins = 0`.
       builder.setInsertionPoint(alloc);
-      Value zero =
-          arith::ConstantIndexOp::create(builder, alloc.getLoc(), 0);
+      Value zero = arith::ConstantIndexOp::create(builder, alloc.getLoc(), 0);
       // memref.alloc's operand layout is `dynamicSizes ++ symbolOperands`.
       // We rewrite exactly the first `dynamicSizes.size()` operands so
       // any symbolOperands (none today, but be defensive) are untouched.

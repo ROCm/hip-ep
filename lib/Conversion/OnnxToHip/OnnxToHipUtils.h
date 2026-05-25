@@ -107,8 +107,7 @@ inline bool operandIsFuncEntryBlockArg(mlir::Value v) {
   auto *owner = blockArg.getOwner();
   if (!owner || !owner->getParent())
     return false;
-  auto funcOp =
-      mlir::dyn_cast<mlir::func::FuncOp>(owner->getParentOp());
+  auto funcOp = mlir::dyn_cast<mlir::func::FuncOp>(owner->getParentOp());
   if (!funcOp)
     return false;
   return &funcOp.getBody().front() == owner;
@@ -135,10 +134,10 @@ inline bool operandIsFuncEntryBlockArg(mlir::Value v) {
 /// tensor<RxI64>`.  Callers that need to broadcast to a dynamic shape
 /// should build the shape operand themselves and create the
 /// `hip.expand` directly.
-inline mlir::Value
-broadcastToShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
-                 mlir::Value context, mlir::Value operand,
-                 mlir::RankedTensorType targetType) {
+inline mlir::Value broadcastToShape(mlir::PatternRewriter &rewriter,
+                                    mlir::Location loc, mlir::Value context,
+                                    mlir::Value operand,
+                                    mlir::RankedTensorType targetType) {
   auto opType = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
   if (opType && opType.getShape() == targetType.getShape())
     return operand;
@@ -150,7 +149,8 @@ broadcastToShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
   // since targetType is static -- we asserted above).
   mlir::Type elemType =
       opType ? opType.getElementType() : targetType.getElementType();
-  auto resultType = mlir::RankedTensorType::get(targetType.getShape(), elemType);
+  auto resultType =
+      mlir::RankedTensorType::get(targetType.getShape(), elemType);
   mlir::Value init = mlir::tensor::EmptyOp::create(
       rewriter, loc, resultType.getShape(), resultType.getElementType(),
       /*dynSizes=*/mlir::ValueRange{});

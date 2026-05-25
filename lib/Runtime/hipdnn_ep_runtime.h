@@ -340,8 +340,7 @@ void *hipdnn_ep_state_peek_buffer(RuntimeState *state, int32_t slot_id);
 // generated-code statement and saves one ABI hop in the lowered IR.
 // Aborts the same way `publish_buffer` does on out-of-range slot.
 void *hipdnn_ep_state_dyn_pool_alloc_for_slot(RuntimeState *state,
-                                              int64_t bytes,
-                                              int32_t slot_id);
+                                              int64_t bytes, int32_t slot_id);
 
 // Phase 3 of the slot-buffer-coalesce design. Reuse a previously
 // allocated slot buffer when `bytes` fits the existing allocation;

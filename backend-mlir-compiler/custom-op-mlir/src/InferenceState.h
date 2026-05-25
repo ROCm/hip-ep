@@ -19,8 +19,9 @@ struct Plugin; // Must match definition in morphizen_plugin.hpp (struct, not
 class FileSystem;
 } // namespace morphizen
 
-// Forward-declare the FlatBuffers-generated metadata struct so the InferenceState
-// header doesn't have to pull the full generated header into every consumer.
+// Forward-declare the FlatBuffers-generated metadata struct so the
+// InferenceState header doesn't have to pull the full generated header into
+// every consumer.
 namespace mlir::hip {
 struct HipModelMetaInfoT;
 } // namespace mlir::hip

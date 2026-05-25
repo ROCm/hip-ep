@@ -102,9 +102,7 @@ def _make_range_model_via_intermediate(dtype: np.dtype):
 
     cast_node = helper.make_node("Cast", ["start_in"], ["start"], to=onnx_type)
     range_node = helper.make_node("Range", ["start", "limit", "delta"], ["Y"])
-    return make_model_from_nodes(
-        [cast_node, range_node], [s, l, d], [Y]
-    )
+    return make_model_from_nodes([cast_node, range_node], [s, l, d], [Y])
 
 
 def _scalar(value, dtype: np.dtype) -> np.ndarray:

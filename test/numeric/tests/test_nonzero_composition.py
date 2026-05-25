@@ -50,9 +50,7 @@ from framework.onnx_utils import make_model_from_nodes
 # ---------------------------------------------------------------------------
 
 
-def _make_shape_of_nonzero_model(
-    input_dtype: np.dtype, input_shape: list[int]
-):
+def _make_shape_of_nonzero_model(input_dtype: np.dtype, input_shape: list[int]):
     """`Shape(NonZero(X))` -- output is `[2]` int64 = (rank, N).
 
     The runtime evaluates NonZero (publishes the dyn N into a slot),
@@ -119,19 +117,13 @@ def _make_constantofshape_over_range_model():
     # We declare a max possible rank dynamically by computing it from
     # the test inputs in the test body; ONNX requires us to declare a
     # rank here. We use rank=3 throughout the parametrised cases below.
-    Y = helper.make_tensor_value_info(
-        "Y", TensorProto.FLOAT, [None, None, None]
-    )
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [None, None, None])
 
-    range_node = helper.make_node(
-        "Range", ["start", "limit", "delta"], ["range_out"]
-    )
+    range_node = helper.make_node("Range", ["start", "limit", "delta"], ["range_out"])
     value_t = numpy_helper.from_array(
         np.array([1.0], dtype=np.float32), name="cof_value"
     )
-    cof_node = helper.make_node(
-        "ConstantOfShape", ["range_out"], ["Y"], value=value_t
-    )
+    cof_node = helper.make_node("ConstantOfShape", ["range_out"], ["Y"], value=value_t)
     return make_model_from_nodes(
         [range_node, cof_node],
         [start, limit, delta],
@@ -225,22 +217,18 @@ class TestRangeConstantOfShapeComposition:
     @pytest.mark.parametrize(
         "start,limit,delta,expected_shape",
         [
-            (2, 5, 1, (2, 3, 4)),           # Range = [2,3,4]
-            (1, 7, 2, (1, 3, 5)),           # Range = [1,3,5]
-            (4, 13, 3, (4, 7, 10)),          # Range = [4,7,10]
+            (2, 5, 1, (2, 3, 4)),  # Range = [2,3,4]
+            (1, 7, 2, (1, 3, 5)),  # Range = [1,3,5]
+            (4, 13, 3, (4, 7, 10)),  # Range = [4,7,10]
         ],
     )
-    def test_range_cof_i64(
-        self, model_runner, start, limit, delta, expected_shape
-    ):
+    def test_range_cof_i64(self, model_runner, start, limit, delta, expected_shape):
         dtype = np.int64
         model = _make_constantofshape_over_range_model()
         s = np.array(start, dtype=dtype)
         l = np.array(limit, dtype=dtype)
         d = np.array(delta, dtype=dtype)
-        actual, expected = model_runner.run_sample(
-            model, [s, l, d], reference="cpu"
-        )
+        actual, expected = model_runner.run_sample(model, [s, l, d], reference="cpu")
         compare_outputs(actual, expected, atol=0, rtol=0)
         assert actual[0].shape == expected_shape, (
             f"actual={actual[0].shape} expected={expected_shape}"

@@ -240,8 +240,7 @@ struct OperandSlotInfo {
 //
 // Operand 0 of every Hip dialect op is the `!hip.context` arg by
 // convention — it carries no shape and is excluded from the scan.
-llvm::SmallVector<OperandSlotInfo, 4>
-collectInputDimSlots(Operation *op) {
+llvm::SmallVector<OperandSlotInfo, 4> collectInputDimSlots(Operation *op) {
   llvm::SmallVector<OperandSlotInfo, 4> perOperand(op->getNumOperands());
   for (unsigned i = 0; i < op->getNumOperands(); ++i) {
     Value operand = op->getOperand(i);
@@ -324,8 +323,7 @@ collectInputDimSlots(Operation *op) {
 // is empty — caller should then skip the attribute set to keep IR
 // uncluttered.
 Attribute serializeInputDimSlots(
-    MLIRContext *ctx,
-    const llvm::SmallVector<OperandSlotInfo, 4> &perOperand) {
+    MLIRContext *ctx, const llvm::SmallVector<OperandSlotInfo, 4> &perOperand) {
   bool anyNonEmpty = false;
   for (const auto &info : perOperand) {
     if (!info.dim_slots.empty()) {
@@ -354,8 +352,7 @@ Attribute serializeInputDimSlots(
 // (one i32 per operand; -1 = no slot publisher producer). Returns null
 // when every entry is -1.
 Attribute serializeInputSlotBuffers(
-    MLIRContext *ctx,
-    const llvm::SmallVector<OperandSlotInfo, 4> &perOperand) {
+    MLIRContext *ctx, const llvm::SmallVector<OperandSlotInfo, 4> &perOperand) {
   bool anyNonNeg = false;
   for (const auto &info : perOperand) {
     if (info.producer_slot_id >= 0) {

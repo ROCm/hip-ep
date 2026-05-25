@@ -42,8 +42,8 @@ namespace {
 // Compute the clamped [start, end) slice on the input shape vector, in
 // the same way ONNX opset 15+ defines for the `Shape` attributes. Shared
 // between the two patterns to keep the math identical.
-static void computeShapeSlice(mlir::Operation *op, int64_t rank,
-                              int64_t &start, int64_t &end) {
+static void computeShapeSlice(mlir::Operation *op, int64_t rank, int64_t &start,
+                              int64_t &end) {
   start = 0;
   end = rank;
   // ONNX importer emits si64 (signed) attributes; IntegerAttr::getInt()
@@ -135,8 +135,7 @@ struct ShapeToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected 1 input and 1 output");
 
     mlir::Value input = op->getOperand(0);
-    auto inputType =
-        mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
     if (!inputType)
       return rewriter.notifyMatchFailure(op, "input must be ranked tensor");
 

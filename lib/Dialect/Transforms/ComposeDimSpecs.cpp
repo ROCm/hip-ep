@@ -105,8 +105,7 @@ DimSpec composeSpecFromOpSpec(Operation *op, const DimSpec &op_spec) {
     if (needSubstitute(src)) {
       // Resolve the operand-relative leaf:
       int32_t operand_idx = src.input_index;
-      if (operand_idx < 0 ||
-          operand_idx >= (int32_t)op->getNumOperands()) {
+      if (operand_idx < 0 || operand_idx >= (int32_t)op->getNumOperands()) {
         // Defensive: copy unchanged (will be diagnosed by verify).
         out_nodes.push_back(src);
         return (int32_t)out_nodes.size() - 1;
@@ -270,8 +269,7 @@ public:
       // the propagator slots reserved by ReservePropagatorSlotsPass do
       // not contribute to `hipdnn.dyn_dim_slots_count`, and at runtime
       // the propagator wrapper aborts with "slot_id N out of range".
-      if (auto grid =
-              op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids")) {
+      if (auto grid = op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids")) {
         for (Attribute outer : grid) {
           if (auto perDim = dyn_cast<DenseI32ArrayAttr>(outer)) {
             for (int32_t s : perDim.asArrayRef()) {
