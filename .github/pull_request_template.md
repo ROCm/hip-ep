@@ -124,8 +124,9 @@ Hardware: gfxNNNN, model: <name>, build: <flags>.
       generated substantial code or text, the Summary discloses it,
       the commit messages carry the trailers documented in
       [`CONTRIBUTING.md`](../blob/main/CONTRIBUTING.md#commit-message-trailers),
-      and you can defend each design decision in review without
-      re-prompting an LLM. See: https://llvm.org/docs/AIToolPolicy.html
+      and you can answer questions about each design decision in
+      review without delegating back to the tool. See:
+      https://llvm.org/docs/AIToolPolicy.html
 - [ ] **No `good first issue` automation.** This PR is not an AI-tool
       fix to an issue tagged `good first issue` (those are reserved as
       learning opportunities for new contributors).
