@@ -160,6 +160,18 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
                        output_shape, aligned_in_strides, output_rank,
                        num_output_elements);
     break;
+  // Bitwise broadcast for 1-byte payloads (Equal/Mask outputs are uint8 or
+  // bool / int8). int8 instantiation covers both since the kernel only
+  // reads + writes 1-byte slots and never does arithmetic.
+  case HIP_DTYPE_INT8:
+  case HIP_DTYPE_UINT8:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<int8_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t *>(input),
+                       static_cast<int8_t *>(output), aligned_in_shape,
+                       output_shape, aligned_in_strides, output_rank,
+                       num_output_elements);
+    break;
   default:
     fprintf(stderr, "[custom_kernels] hip_expand: unsupported dtype=%d\n",
             hip_dtype);

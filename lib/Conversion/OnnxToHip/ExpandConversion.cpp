@@ -2,19 +2,121 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+//===- ExpandConversion.cpp - lower onnx.Expand to hip.expand
+//--------------===//
+//
+// Lowers `onnx.Expand` to `tensor.empty` + `hip.expand`.  For dynamic result
+// dims that come from the 1-D `shape` operand, we avoid `tensor.extract` on a
+// `tensor.from_elements` shape vector when each element traces to
+// `tensor.dim(source, k)` or a compile-time constant.  That keeps the
+// bufferized size chain in the `memref.dim` / `arith.*` form
+// `hip-pool-allocs` can hoist, instead of `memref.load` from a shared shape
+// scratch buffer (dominance failure when two Expands reuse one Shape result).
+//
+// Symmetric to `GatherShapeFold.cpp`, which collapses Gather(Shape, const) ->
+// tensor.dim.  Here the idiom is Shape(x) -> from_elements -> Expand, and we
+// read dims directly from x for `tensor.empty` sizing.
+//
+// When `shape` is `tensor.from_elements` but a needed entry is not traceable,
+// we fail the match so the pipeline surfaces a clear error rather than
+// emitting extract/load IR that breaks pool-allocs.
+//
+//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
+
+#include "llvm/ADT/Statistic.h"
+
+STATISTIC(NumExpandShapeTraces,
+          "Number of Expand dynamic dims resolved via tensor.dim traceback "
+          "instead of tensor.extract on a shape vector");
 
 namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.Expand -> hip.expand
+/// If \p value is `arith.index_cast` of an index-typed SSA value, return the
+/// operand; otherwise return \p value unchanged.
+static mlir::Value skipIndexCastToIndex(mlir::Value value) {
+  if (auto castOp = value.getDefiningOp<arith::IndexCastOp>()) {
+    if (castOp.getIn().getType().isIndex())
+      return castOp.getIn();
+  }
+  return value;
+}
+
+/// Try to resolve `shape[elemIdx]` to an index SSA value without
+/// `tensor.extract`, when `shape` is `tensor.from_elements(...)`.
 ///
-/// We trust the result type produced by ONNX shape inference. For dynamic
-/// dims in the result we extract the corresponding entry from the `shape`
-/// input tensor (right-aligned with the result rank, NumPy-style); leading
-/// dims that are absent from `shape` fall back to the matching input dim.
+/// Supported element producers (after optional `arith.index_cast` i64 <-
+/// index):
+///   - `tensor.dim %tensor, %k`
+///   - `arith.constant` i64 (static dim baked into Shape lowering)
+static std::optional<mlir::Value>
+tryResolveIndexFromShapeVector(mlir::Value shape, int64_t elemIdx,
+                               mlir::Location loc,
+                               mlir::PatternRewriter &rewriter) {
+  auto fromElts = shape.getDefiningOp<tensor::FromElementsOp>();
+  if (!fromElts)
+    return std::nullopt;
+  if (elemIdx < 0 || elemIdx >= static_cast<int64_t>(fromElts.getNumOperands()))
+    return std::nullopt;
+
+  mlir::Value elem = skipIndexCastToIndex(fromElts.getOperand(elemIdx));
+
+  if (auto dimOp = elem.getDefiningOp<tensor::DimOp>())
+    return dimOp.getResult();
+
+  if (auto cst = elem.getDefiningOp<arith::ConstantOp>()) {
+    if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(cst.getValue()))
+      return arith::ConstantIndexOp::create(rewriter, loc,
+                                            intAttr.getValue().getSExtValue());
+  }
+  return std::nullopt;
+}
+
+/// When `shape` is still `onnx.Shape(%tensor)` (Expand lowered before
+/// ShapeConversion in the same greedy pass), resolve entry \p elemIdx in the
+/// shape vector directly from \p tensor's dims (same start/end normalization
+/// as ShapeConversion / GatherShapeFold).
+static std::optional<mlir::Value>
+tryResolveIndexFromOnnxShape(mlir::Value shape, int64_t elemIdx,
+                             mlir::Location loc,
+                             mlir::PatternRewriter &rewriter) {
+  auto *shapeOp = shape.getDefiningOp();
+  if (!shapeOp || shapeOp->getName().getStringRef() != "onnx.Shape")
+    return std::nullopt;
+
+  mlir::Value shapeInput = shapeOp->getOperand(0);
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(shapeInput.getType());
+  if (!inputType)
+    return std::nullopt;
+
+  int64_t rank = inputType.getRank();
+  int64_t start = 0;
+  int64_t end = rank;
+  if (auto startAttr = shapeOp->getAttrOfType<mlir::IntegerAttr>("start"))
+    start = startAttr.getSInt();
+  if (auto endAttr = shapeOp->getAttrOfType<mlir::IntegerAttr>("end"))
+    end = endAttr.getSInt();
+  if (start < 0)
+    start += rank;
+  if (end < 0)
+    end += rank;
+  start = std::max(start, int64_t(0));
+  end = std::min(end, rank);
+  int64_t rangeLen = std::max(end - start, int64_t(0));
+  if (elemIdx < 0 || elemIdx >= rangeLen)
+    return std::nullopt;
+
+  int64_t absDim = start + elemIdx;
+  if (inputType.isDynamicDim(absDim))
+    return mlir::tensor::DimOp::create(rewriter, loc, shapeInput, absDim);
+  return arith::ConstantIndexOp::create(rewriter, loc,
+                                        inputType.getDimSize(absDim));
+}
+
+/// onnx.Expand -> hip.expand
 struct ExpandToHip : public mlir::RewritePattern {
   ExpandToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Expand", /*benefit=*/1, ctx) {}
@@ -38,14 +140,17 @@ struct ExpandToHip : public mlir::RewritePattern {
     int64_t resultRank = resultType.getRank();
     int64_t inputRank = inputType.getRank();
 
-    // shape is a 1-D int tensor; for dynamic result dims we extract entries
-    // from it (right-aligned with the result rank). When `shape` itself has
-    // a dynamic length we cannot reason about it here, so bail out.
     auto shapeType = mlir::cast<mlir::RankedTensorType>(shape.getType());
     if (shapeType.getRank() != 1 || shapeType.isDynamicDim(0))
       return rewriter.notifyMatchFailure(
           op, "expand shape input must have static rank-1 type");
     int64_t shapeLen = shapeType.getDimSize(0);
+
+    mlir::Operation *shapeDef = shape.getDefiningOp();
+    const bool shapeIsFromElements =
+        shapeDef && isa<tensor::FromElementsOp>(shapeDef);
+    const bool shapeIsOnnxShape =
+        shapeDef && shapeDef->getName().getStringRef() == "onnx.Shape";
 
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultRank; ++i) {
@@ -54,28 +159,42 @@ struct ExpandToHip : public mlir::RewritePattern {
       int64_t shapeIdx = i - (resultRank - shapeLen);
       mlir::Value dim;
       if (shapeIdx >= 0) {
-        mlir::Value idx =
-            mlir::arith::ConstantIndexOp::create(rewriter, loc, shapeIdx);
-        mlir::Value extracted = mlir::tensor::ExtractOp::create(
-            rewriter, loc, shape, mlir::ValueRange{idx});
-        dim = mlir::arith::IndexCastOp::create(
-            rewriter, loc, rewriter.getIndexType(), extracted);
+        std::optional<mlir::Value> traced =
+            tryResolveIndexFromShapeVector(shape, shapeIdx, loc, rewriter);
+        if (!traced)
+          traced = tryResolveIndexFromOnnxShape(shape, shapeIdx, loc, rewriter);
+        if (traced) {
+          dim = *traced;
+          ++NumExpandShapeTraces;
+        } else if (shapeIsFromElements || shapeIsOnnxShape) {
+          return rewriter.notifyMatchFailure(
+              op, "expand shape is Shape/from_elements but entry is not "
+                  "tensor.dim or constant; cannot size empty() without "
+                  "tensor.extract (breaks hip-pool-allocs dominance)");
+        } else {
+          mlir::Value idx =
+              arith::ConstantIndexOp::create(rewriter, loc, shapeIdx);
+          mlir::Value extracted = tensor::ExtractOp::create(
+              rewriter, loc, shape, mlir::ValueRange{idx});
+          dim = arith::IndexCastOp::create(rewriter, loc,
+                                           rewriter.getIndexType(), extracted);
+        }
       } else {
         int64_t inputIdx = i - (resultRank - inputRank);
         if (inputIdx < 0)
           return rewriter.notifyMatchFailure(
               op, "cannot resolve dynamic dim from input or shape");
-        dim = mlir::tensor::DimOp::create(rewriter, loc, input, inputIdx);
+        dim = tensor::DimOp::create(rewriter, loc, input, inputIdx);
       }
       dynSizes.push_back(dim);
     }
 
     mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                      resultType.getElementType(), dynSizes);
+        tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                resultType.getElementType(), dynSizes);
 
-    auto hipOp = mlir::hip::ExpandOp::create(rewriter, loc, resultType, context,
-                                             input, shape, init);
+    auto hipOp = hip::ExpandOp::create(rewriter, loc, resultType, context,
+                                       input, shape, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }
@@ -83,8 +202,8 @@ struct ExpandToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void populateExpandConversionPatterns(RewritePatternSet &patterns,
-                                      MLIRContext *ctx) {
+void populateExpandConversionPatterns(mlir::RewritePatternSet &patterns,
+                                      mlir::MLIRContext *ctx) {
   patterns.add<ExpandToHip>(ctx);
 }
 

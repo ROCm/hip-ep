@@ -198,12 +198,23 @@ int hip_elementwise_mod(
     int hip_dtype,
     int fmod_flag);
 
+/*
+ * Element-wise Equal with optional scalar broadcast.
+ *
+ * `lhs_num_elements` / `rhs_num_elements` may each be 1 (scalar broadcast)
+ * or equal to `out_num_elements` (no broadcast). Other mismatches are
+ * rejected by the host wrapper.
+ *
+ * Output type is always uint8 (1-byte bool).
+ */
 int hip_elementwise_equal(
     void* stream,
     const void* lhs,
     const void* rhs,
     void* output,
-    int64_t num_elements,
+    int64_t lhs_num_elements,
+    int64_t rhs_num_elements,
+    int64_t out_num_elements,
     int hip_dtype);
 
 int hip_elementwise_less(

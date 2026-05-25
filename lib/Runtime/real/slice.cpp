@@ -236,10 +236,19 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     step_per_axis[axis] = step;
   }
 
-  // Sanity check: derived output extents must match the IR-supplied
-  // output shape. Mismatches are programming bugs (lowering or upstream
-  // shape-inference disagreement) and would silently corrupt data, so
-  // fail loud rather than launch a broken kernel.
+  // Sanity check: derived output extents must fit inside the IR-supplied
+  // output shape (the IR-derived shape is the static upper bound; the
+  // runtime extent is the actual count coming from a dynamic producer like
+  // NonZero). `derived > output_shape` would write out-of-bounds and is a
+  // genuine lowering bug; `derived < output_shape` is a legitimate partial
+  // fill (downstream ops such as ScatterND consume a `count` and ignore
+  // the unused tail). When we partial-fill, we *narrow* output_shape_eff
+  // to `derived` so hip_slice's element count and stride math match the
+  // actual data written.
+  int64_t output_shape_eff[kSliceRuntimeMaxRank];
+  for (int d = 0; d < data_rank; ++d) {
+    output_shape_eff[d] = output_shape[d];
+  }
   for (int d = 0; d < data_rank; ++d) {
     if (!axis_set[d])
       continue; // unmodified axis: output extent must == data extent.
@@ -272,14 +281,18 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       expected = (end - start + step + 1) / step;
     if (expected < 0)
       expected = 0;
-    if (expected != output_shape[d]) {
+    if (expected > output_shape[d]) {
       fprintf(stderr,
               "[REAL] wrap_slice: derived output extent on axis %d "
-              "(%lld) != IR output_shape (%lld) -- aborting to avoid "
+              "(%lld) > IR output_shape (%lld) -- aborting to avoid "
               "writing out-of-bounds\n",
               d, (long long)expected, (long long)output_shape[d]);
       return -1;
     }
+    // Legitimate partial fill: dynamic producer upstream chose a smaller
+    // count than the static upper bound. Narrow the effective output
+    // extent so the kernel only writes the actual data.
+    output_shape_eff[d] = expected;
   }
 
   for (int d = 0; d < data_rank; ++d) {
@@ -295,6 +308,6 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                     hipdnn_ep_datatype_name(data_type));
 
   return hip_slice(hipdnn_ep_state_get_stream(state), data, output, data_shape,
-                   output_shape, start_per_axis, step_per_axis,
+                   output_shape_eff, start_per_axis, step_per_axis,
                    static_cast<int>(data_rank), hip_dtype);
 }
