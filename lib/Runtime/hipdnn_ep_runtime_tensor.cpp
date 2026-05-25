@@ -42,6 +42,19 @@ struct PerfState {
   size_t d2h_count = 0;
   unsigned inference_num = 0;
   bool initialized = false;
+  // Per-inference flags for which events were actually recorded.  Required
+  // because a model whose outputs are all Category-C deferred (e.g. NonZero)
+  // never executes the `finalize_output` body that records `d2h_start` --
+  // calling `hipEventElapsedTime` on an unrecorded event returns
+  // `hipErrorInvalidHandle` (400) and sets the sticky HIP error state, which
+  // then leaks into the next inference's kernel launches (`hipGetLastError`
+  // returns the stale 400 and the wrapper interprets it as a launch failure).
+  // Reset to false at the start of each inference (in `prepare_input` with
+  // index==0); flipped to true wherever the matching `hipEventRecord` runs.
+  bool h2d_start_recorded = false;
+  bool h2d_end_recorded = false;
+  bool d2h_start_recorded = false;
+  bool d2h_end_recorded = false;
 };
 static PerfState g_perf;
 
@@ -358,10 +371,19 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     // alias fast path and accumulate zero H2D bytes.
     if (g_perf.initialized && g_perf.inference_num > 0) {
       (void)hipStreamSynchronize(static_cast<hipStream_t>(state->stream));
+      // Only query events that were actually recorded last inference.
+      // Models with all Category-C deferred outputs (e.g. NonZero) never run
+      // the body of `finalize_output`, so `d2h_start` is unrecorded -- calling
+      // `hipEventElapsedTime` on it returns hipErrorInvalidHandle and pollutes
+      // the sticky HIP error state for the next inference's kernel launches.
       float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;
-      (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
-      (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
-      (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
+      if (g_perf.h2d_start_recorded && g_perf.h2d_end_recorded)
+        (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
+      if (g_perf.h2d_end_recorded && g_perf.d2h_start_recorded)
+        (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end,
+                                  g_perf.d2h_start);
+      if (g_perf.d2h_start_recorded && g_perf.d2h_end_recorded)
+        (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
       const float total_ms = h2d_ms + compute_ms + d2h_ms;
       RUNTIME_PERF_LOG("[PERF] #%u: H2D %zut/%.1fMB/%.2fms | Compute %.2fms | "
                        "D2H %zut/%.1fMB/%.2fms | Total %.2fms\n",
@@ -374,8 +396,13 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     g_perf.h2d_count = 0;
     g_perf.d2h_bytes = 0;
     g_perf.d2h_count = 0;
+    g_perf.h2d_start_recorded = false;
+    g_perf.h2d_end_recorded = false;
+    g_perf.d2h_start_recorded = false;
+    g_perf.d2h_end_recorded = false;
     (void)hipEventRecord(g_perf.h2d_start,
                          static_cast<hipStream_t>(state->stream));
+    g_perf.h2d_start_recorded = true;
     op_profile_reset(static_cast<OpProfileState *>(state->op_profile));
     g_perf.inference_num++; // marks "window opened"; flush above guards on this
   }
@@ -523,6 +550,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   if (hipdnn_ep_perf_enabled() && index == 0 && g_perf.initialized) {
     (void)hipEventRecord(g_perf.h2d_end,
                          static_cast<hipStream_t>(state->stream));
+    g_perf.h2d_end_recorded = true;
   }
 
   // Fast path: caller's output OrtValue is in GPU-accessible memory, alias
@@ -588,6 +616,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
   if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 && g_perf.initialized) {
     (void)hipEventRecord(g_perf.d2h_start,
                          static_cast<hipStream_t>(state->stream));
+    g_perf.d2h_start_recorded = true;
   }
 
   // D2H transfer (async -- sync happens once after all outputs).
@@ -619,6 +648,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
     (void)hipEventRecord(g_perf.d2h_end,
                          static_cast<hipStream_t>(state->stream));
+    g_perf.d2h_end_recorded = true;
   }
 
   // Return buffer to pool only if we own it. Aliased buffers are owned by
@@ -644,6 +674,7 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
     (void)hipEventRecord(g_perf.d2h_end,
                          static_cast<hipStream_t>(state->stream));
+    g_perf.d2h_end_recorded = true;
   }
 
   if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
@@ -652,12 +683,23 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
     return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
   }
 
-  // PERF: compute and log timing breakdown
+  // PERF: compute and log timing breakdown. Only query events that were
+  // actually recorded this inference -- models with all Category-C deferred
+  // outputs (e.g. NonZero) skip the body of `finalize_output` that records
+  // `d2h_start`, and calling `hipEventElapsedTime` on an unrecorded event
+  // returns hipErrorInvalidHandle (400). That sticky error then leaks into
+  // the next inference's kernel launches (where `hipGetLastError` returns
+  // 400 and the wrapper mis-reports the kernel as failed -- symptom: NonZero
+  // returns rc=400, slot publish never happens, MlirCustomOp aborts with
+  // "RuntimeSlot ... unpublished" invariant violation).
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
     float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;
-    (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
-    (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
-    (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
+    if (g_perf.h2d_start_recorded && g_perf.h2d_end_recorded)
+      (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
+    if (g_perf.h2d_end_recorded && g_perf.d2h_start_recorded)
+      (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
+    if (g_perf.d2h_start_recorded && g_perf.d2h_end_recorded)
+      (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
     float total_ms = h2d_ms + compute_ms + d2h_ms;
 
     g_perf.inference_num++;
