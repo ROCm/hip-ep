@@ -158,6 +158,15 @@ struct NonZeroToHip : public mlir::RewritePattern {
         rewriter, loc, resultType, context, op->getOperand(0), init,
         rewriter.getI64IntegerAttr(inputDataType), output_dim_specs,
         slot_id_attr);
+    // Phase 1 marker: this publisher allocates and publishes its own
+    // exact-size buffer at runtime (`wrap_nonzero` → `dyn_pool_alloc`
+    // → `publish_buffer`). The DPS-init `init` operand above is sized
+    // to the upper bound for IR-level type correctness only; its
+    // backing pool allocation is dead once every consumer of the
+    // result has the slot-aware shape/pointer rewiring. The
+    // `ElideSlotPublisherAllocsPass` consumes this marker to drop
+    // the static-pool reservation.
+    hipOp->setAttr("hipdnn.elide_dps_init", rewriter.getUnitAttr());
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

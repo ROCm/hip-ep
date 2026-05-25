@@ -34,27 +34,42 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
     // Extract pointers using alignedPtr (respects memref.view offsets)
 
     Value statePtr = adaptor.getCtx();
-    Value inputPtr =
-        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value inputPtr = extractContiguousMemRefPtrWithSlot(
+        op, /*operandIdx=*/1, adaptor.getInput(), statePtr, rewriter, loc);
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    // Compute num_elements (supports dynamic shapes)
+    // Compute num_elements (supports dynamic shapes). For Cat-C-downstream
+    // casts, the input descriptor's dynamic dim may itself be slot-bound
+    // (the immediate producer is a Cat-C op or another translucent
+    // propagator). Use `getMemRefDimSizeWithSlot` on the INPUT operand
+    // (operand index 1 = `input`; 0 is `!hip.context`) so the loop
+    // count matches the runtime-published extent rather than the
+    // upper-bound DPS init buffer size encoded in the descriptor.
+    constexpr unsigned kInputOperandIdx = 1;
     Value numElements = createI64Const(1);
-    MemRefDescriptor outputDesc(adaptor.getOutput());
-
-    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
-      Value dimSize;
-      if (outputType.isDynamicDim(dimIdx)) {
-        dimSize = outputDesc.size(rewriter, loc, dimIdx);
-      } else {
-        dimSize = createI64Const(outputType.getDimSize(dimIdx));
-      }
+    for (auto dimIdx : llvm::seq<int64_t>(inputType.getRank())) {
+      Value dimSize = getMemRefDimSizeWithSlot(
+          op, kInputOperandIdx, inputType, static_cast<unsigned>(dimIdx),
+          adaptor.getInput(), statePtr, rewriter, loc);
       numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
     }
+
+    // Phase 2.4: if `hip-reserve-propagator-slots` reserved output
+    // slot ids for this cast, publish the (1:1) output dim values.
+    // Cast is rank- and shape-preserving so the input dim values
+    // computed above are exactly the output dim values.
+    auto dimSizeProvider = [&](unsigned resultIdx, unsigned outDim) -> Value {
+      if (resultIdx != 0)
+        return Value();
+      return getMemRefDimSizeWithSlot(op, kInputOperandIdx, inputType, outDim,
+                                      adaptor.getInput(), statePtr, rewriter,
+                                      loc);
+    };
+    emitPropagatorSlotPublishes(op, statePtr, dimSizeProvider, rewriter, loc);
 
     // Get source and destination data type enums
     int64_t srcDataType = getHipdnnDataType(inputType.getElementType());

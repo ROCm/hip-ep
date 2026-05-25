@@ -238,6 +238,15 @@ struct RuntimeState {
   int64_t *dyn_slot_sizes;
   void **dyn_slot_bufs;
 
+  // Per-slot capacity (in bytes) of the buffer most recently published
+  // via hipdnn_ep_state_dyn_pool_alloc_for_slot or
+  // hipdnn_ep_state_publish_buffer_resize. Mirrors dyn_slot_bufs in
+  // shape (length = dyn_dim_slots_count, 0 means "no buffer yet").
+  // Used by publish_buffer_resize to decide reuse vs. fresh alloc when
+  // a coalesced slot publishes a second time within one Compute().
+  // Reset to all-zero by hipdnn_ep_state_dyn_slots_reset.
+  int64_t *dyn_slot_buf_caps;
+
   // Multi-segment growable GPU pool used by dyn_pool_alloc.
   //
   // Layout: dyn_pool_segments[0..dyn_pool_segment_count) is a vector of

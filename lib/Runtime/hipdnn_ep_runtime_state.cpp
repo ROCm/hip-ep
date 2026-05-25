@@ -275,6 +275,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->dyn_dim_slots_count = 0;
   state->dyn_slot_sizes = nullptr;
   state->dyn_slot_bufs = nullptr;
+  state->dyn_slot_buf_caps = nullptr;
   state->dyn_pool_segments = nullptr;
   state->dyn_pool_segment_count = 0;
   state->dyn_pool_active_segment = 0;
@@ -1068,9 +1069,12 @@ static void initialize_dyn_dim_slots(RuntimeState *state, int32_t slot_count) {
   state->dyn_slot_sizes =
       (int64_t *)malloc(sizeof(int64_t) * (size_t)slot_count);
   state->dyn_slot_bufs = (void **)malloc(sizeof(void *) * (size_t)slot_count);
+  state->dyn_slot_buf_caps =
+      (int64_t *)malloc(sizeof(int64_t) * (size_t)slot_count);
   for (int32_t i = 0; i < slot_count; ++i) {
     state->dyn_slot_sizes[i] = kDynSlotUnpublishedSize;
     state->dyn_slot_bufs[i] = nullptr;
+    state->dyn_slot_buf_caps[i] = 0;
   }
   // dyn_pool_segments stays nullptr until the first allocation.
 }
@@ -1085,6 +1089,10 @@ static void cleanup_dyn_dim_slots(RuntimeState *state) {
   if (state->dyn_slot_bufs) {
     free(state->dyn_slot_bufs);
     state->dyn_slot_bufs = nullptr;
+  }
+  if (state->dyn_slot_buf_caps) {
+    free(state->dyn_slot_buf_caps);
+    state->dyn_slot_buf_caps = nullptr;
   }
   if (state->dyn_pool_segments) {
     auto *segs = static_cast<DynPoolSegments *>(state->dyn_pool_segments);
@@ -1108,6 +1116,8 @@ extern "C" void hipdnn_ep_state_dyn_slots_reset(RuntimeState *state) {
   for (int32_t i = 0; i < state->dyn_dim_slots_count; ++i) {
     state->dyn_slot_sizes[i] = kDynSlotUnpublishedSize;
     state->dyn_slot_bufs[i] = nullptr;
+    if (state->dyn_slot_buf_caps)
+      state->dyn_slot_buf_caps[i] = 0;
   }
   hipdnn_ep_state_dyn_pool_reset(state);
 }
@@ -1320,6 +1330,70 @@ extern "C" void *hipdnn_ep_state_read_buffer(RuntimeState *state,
   }
   HIPDNN_EP_SLOT_TRACE("read_buffer(%d)    = %p", slot_id, p);
   return p;
+}
+
+extern "C" void *
+hipdnn_ep_state_dyn_pool_alloc_for_slot(RuntimeState *state, int64_t bytes,
+                                        int32_t slot_id) {
+  if (!state || bytes <= 0)
+    return nullptr;
+  if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
+    fprintf(stderr,
+            "[hipdnn_ep_state_dyn_pool_alloc_for_slot] slot_id %d out of "
+            "range [0, %d). Aborting.\n",
+            slot_id, state->dyn_dim_slots_count);
+    std::abort();
+  }
+  void *p = hipdnn_ep_state_dyn_pool_alloc(state, bytes);
+  state->dyn_slot_bufs[slot_id] = p;
+  if (state->dyn_slot_buf_caps)
+    state->dyn_slot_buf_caps[slot_id] = bytes;
+  HIPDNN_EP_SLOT_TRACE("alloc_for_slot(%d, %lld) = %p", slot_id,
+                       (long long)bytes, p);
+  return p;
+}
+
+extern "C" void hipdnn_ep_publish_propagator_slots(RuntimeState *state,
+                                                   const int32_t *output_slot_ids,
+                                                   const int64_t *runtime_dims,
+                                                   int64_t total) {
+  if (!state || !output_slot_ids || !runtime_dims || total <= 0)
+    return;
+  for (int64_t i = 0; i < total; ++i) {
+    int32_t s = output_slot_ids[i];
+    if (s < 0)
+      continue;
+    hipdnn_ep_state_publish_dim(state, s, runtime_dims[i]);
+  }
+}
+
+extern "C" void *
+hipdnn_ep_state_publish_buffer_resize(RuntimeState *state, int32_t slot_id,
+                                      int64_t bytes) {
+  if (!state || bytes <= 0)
+    return nullptr;
+  if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
+    fprintf(stderr,
+            "[hipdnn_ep_state_publish_buffer_resize] slot_id %d out of "
+            "range [0, %d). Aborting.\n",
+            slot_id, state->dyn_dim_slots_count);
+    std::abort();
+  }
+  // Slot has never been published in this Compute() (cap == 0 OR
+  // dyn_slot_buf_caps array wasn't initialised on legacy state): fall
+  // through to the regular alloc + publish path.
+  void *existing = state->dyn_slot_bufs[slot_id];
+  int64_t existing_cap =
+      state->dyn_slot_buf_caps ? state->dyn_slot_buf_caps[slot_id] : 0;
+  if (existing && existing_cap >= bytes) {
+    HIPDNN_EP_SLOT_TRACE("resize_reuse(%d, %lld) = %p (cap=%lld)", slot_id,
+                         (long long)bytes, existing, (long long)existing_cap);
+    return existing;
+  }
+  // Need fresh storage; allocator handles the bump-pointer / new
+  // segment policy and the previous bytes (if any) become dead inside
+  // the existing segment until the next per-Compute reset.
+  return hipdnn_ep_state_dyn_pool_alloc_for_slot(state, bytes, slot_id);
 }
 
 //===----------------------------------------------------------------------===//

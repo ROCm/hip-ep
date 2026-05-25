@@ -34,6 +34,7 @@ void HipDialect::initialize() {
   // Doing this here guarantees builders are registered before any
   // pattern can reach `shape_interface::getResultDimSpec`.
   shape_interface::populateBuiltinDimSpecBuilders();
+  shape_interface::populateBuiltinIdentityPredicates();
 }
 
 #define GET_TYPEDEF_CLASSES

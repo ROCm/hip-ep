@@ -69,6 +69,8 @@
 #include "hip/debug_log.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
@@ -107,21 +109,61 @@ namespace {
 // the producer's result index (corresponding to `v`) into `*resultIdx`
 // when non-null; for 0-result DPS ops (the post-bufferize norm) the
 // result index is the position of `v` in the init operand list.
-Operation *findMemRefWriter(Value v, unsigned *resultIdx) {
-  if (resultIdx)
-    *resultIdx = 0;
-  if (!v)
-    return nullptr;
+// Return the single-step view-source of `cursor` if its defining op is one
+// of the view-style memref / tensor ops we treat as transparent. The
+// returned value identifies the same underlying buffer (for memref ops)
+// or the same tensor identity (for tensor ops). Returns `Value()` when
+// the defining op is not a view -- callers can use that as a stop sentinel.
+//
+// Crucially, this includes `memref.view` and `memref.subview` even though
+// those ops slice into a larger buffer at a non-zero offset. The walk is
+// used to chase DPS writers: in the post-bufferize pool layout the writer
+// (e.g. `hip.transpose`) and the reader (e.g. `hip.scatter_nd`) may share
+// the same `memref.view` SSA value directly, share a chain of casts above
+// it, or, in the rare aliasing case, the writer may use a different
+// `memref.view` of the SAME pool offset. The first two cases are handled
+// by the per-step search in `findMemRefWriter`; chasing through `view` /
+// `subview` here only kicks in if no DPS writer was found at any closer
+// step, which keeps the legacy aliasing fallback alive without
+// incorrectly mistaking unrelated views of the same pool for the writer.
+static Value stepThroughView(Value cursor) {
+  if (!cursor)
+    return Value();
+  Operation *def = cursor.getDefiningOp();
+  if (!def)
+    return Value();
+  if (auto cast = llvm::dyn_cast<memref::CastOp>(def))
+    return cast.getSource();
+  if (auto sub = llvm::dyn_cast<memref::SubViewOp>(def))
+    return sub.getSource();
+  if (auto view = llvm::dyn_cast<memref::ViewOp>(def))
+    return view.getSource();
+  if (auto reinterp = llvm::dyn_cast<memref::ReinterpretCastOp>(def))
+    return reinterp.getSource();
+  if (auto exp = llvm::dyn_cast<memref::ExpandShapeOp>(def))
+    return exp.getSrc();
+  if (auto coll = llvm::dyn_cast<memref::CollapseShapeOp>(def))
+    return coll.getSrc();
+  if (auto exp = llvm::dyn_cast<tensor::ExpandShapeOp>(def))
+    return exp.getSrc();
+  if (auto coll = llvm::dyn_cast<tensor::CollapseShapeOp>(def))
+    return coll.getSrc();
+  if (auto extract = llvm::dyn_cast<tensor::ExtractSliceOp>(def))
+    return extract.getSource();
+  return Value();
+}
+
+// Returns the first DPS hip-dialect user of `v` that writes into it (i.e.
+// has `v` as one of its DPS init operands). Writes the matching init
+// operand index into `*resultIdx`. Returns nullptr if no such user exists.
+static Operation *findDirectDpsHipWriter(Value v, unsigned *resultIdx) {
   for (Operation *user : v.getUsers()) {
     auto dpsOp = llvm::dyn_cast<DestinationStyleOpInterface>(user);
     if (!dpsOp)
       continue;
-    // Skip ops outside the hip dialect — they don't carry our DimSpec
-    // metadata.
     if (user->getDialect() !=
         user->getContext()->getLoadedDialect<HipDialect>())
       continue;
-    // Match `v` against init (DPS output) operands.
     auto inits = dpsOp.getDpsInits();
     for (auto [initIdx, initVal] : llvm::enumerate(inits)) {
       if (initVal == v) {
@@ -131,8 +173,46 @@ Operation *findMemRefWriter(Value v, unsigned *resultIdx) {
       }
     }
   }
-  // Fall back to the defining op (tensor-mode IR or non-DPS producers).
-  return v.getDefiningOp();
+  return nullptr;
+}
+
+Operation *findMemRefWriter(Value v, unsigned *resultIdx) {
+  if (resultIdx)
+    *resultIdx = 0;
+  if (!v)
+    return nullptr;
+  // CRITICAL: search at EACH view step rather than walking all the way to
+  // the underlying pool / alloc first. After bufferize + pool-allocs the
+  // pool memref (`hip.get_pool`) is the source of every `memref.view`, and
+  // the legacy "walk to the deepest source, then search users" strategy
+  // saw only `memref.view` ops on the pool's user list -- no DPS writer.
+  //
+  // The Qwen embedding model exposes this: `hip.transpose` writes into
+  // `%cast_5 = memref.cast %view_4` (where `%view_4 = memref.view %pool`),
+  // and `hip.scatter_nd` reads the SAME `%cast_5` as its indices operand.
+  // Searching `%cast_5.getUsers()` finds the transpose immediately; walking
+  // back to `%pool` and searching ITS users misses the transpose entirely
+  // and the scatter_nd's indices_shape[0] silently picks up the upper-bound
+  // pool dim (524288) instead of the runtime-published NonZero slot (0).
+  //
+  // The per-step walk also subsumes the legacy aliasing fallback: if
+  // writer and reader share a chain of casts above a single view, the
+  // search finds the writer at the level where its DPS init operand
+  // matches the cursor.
+  Value cursor = v;
+  while (cursor) {
+    if (Operation *writer = findDirectDpsHipWriter(cursor, resultIdx))
+      return writer;
+    Value next = stepThroughView(cursor);
+    if (!next || next == cursor)
+      break;
+    cursor = next;
+  }
+  // Fall back to the defining op of the deepest view-passthrough value
+  // (tensor-mode IR or non-DPS producers).
+  if (cursor)
+    return cursor.getDefiningOp();
+  return nullptr;
 }
 
 // Per-operand annotation gathered for one consumer op. `dim_slots`
@@ -182,27 +262,46 @@ collectInputDimSlots(Operation *op) {
     Operation *producer = findMemRefWriter(operand, &producerResultIdx);
     if (!producer)
       continue;
-    // If `producer` is itself a slot publisher (carries `slot_id`),
-    // its DPS-init upper-bound buffer is the WRONG place to read from
-    // — record the slot id so consumer lowerings can call
-    // `hipdnn_ep_state_read_buffer(slot_id)`. For translucent
-    // propagators (e.g. hip.transpose that wrote into its own
-    // upper-bound buffer with my fix), the descriptor pointer IS the
-    // right one; only the shape needs slot lookup.
-    if (auto slotAttr =
-            producer->getAttrOfType<IntegerAttr>("slot_id")) {
-      int32_t s = static_cast<int32_t>(slotAttr.getInt());
-      if (s >= 0)
-        perOperand[i].producer_slot_id = s;
-    }
+    // If `producer` is itself a slot PUBLISHER — i.e. allocates an
+    // EXACT-size output buffer at runtime and ignores its DPS-init
+    // upper-bound — record the slot id so consumer lowerings can call
+    // `hipdnn_ep_state_read_buffer(slot_id)` to get the real data
+    // pointer instead of the (uninitialised) upper-bound DPS init.
+    //
+    // Critically, we ONLY honour DIRECT-publisher attributes
+    // (`slot_id` for single-slot publishers like `hip.nonzero`, or
+    // `slot_ids` for multi-axis publishers like `hip.constant_of_shape`).
+    // We deliberately IGNORE `hipdnn.output_slot_ids` here:
+    // `hipdnn.output_slot_ids` is set by `ReservePropagatorSlots` on
+    // TRANSLUCENT propagators (e.g. `hip.transpose`, `hip.slice`) which
+    // WROTE into their OWN DPS-init upper-bound buffer — the descriptor
+    // pointer IS the right one and only the SHAPE needs slot lookup
+    // (the dim_slots loop below). Confusing these two would route
+    // consumers to a never-published slot buffer (segfault / "null
+    // required argument") and silently corrupt the data path.
+    auto pickProducerBufferSlot = [&](Operation *prod, unsigned r) -> int32_t {
+      (void)r;
+      if (auto arr = prod->getAttrOfType<DenseI32ArrayAttr>("slot_ids")) {
+        for (int64_t d = 0; d < arr.size(); ++d) {
+          int32_t s = arr.asArrayRef()[d];
+          if (s >= 0)
+            return s;
+        }
+        return -1;
+      }
+      if (auto slot = prod->getAttrOfType<IntegerAttr>("slot_id"))
+        return (int32_t)slot.getInt();
+      return -1;
+    };
+    int32_t prodSlot = pickProducerBufferSlot(producer, producerResultIdx);
+    if (prodSlot >= 0)
+      perOperand[i].producer_slot_id = prodSlot;
     // For each dynamic dim of the operand, query the DimSpec system.
     // If the spec root is a RuntimeSlot, record it. We deliberately
     // do NOT descend into arithmetic trees: the consumer-side
     // lowering only knows how to substitute a single slot read for
     // a single dim. A compound spec (e.g. mul(slot[0], slot[1]))
-    // would need a more elaborate runtime evaluator, which today
-    // does not exist for non-output-bound dims — and no current
-    // model exercises that case.
+    // would need a more elaborate runtime evaluator (Phase 2.5).
     for (int64_t d = 0; d < shaped.getRank(); ++d) {
       if (!shaped.isDynamicDim(d))
         continue;

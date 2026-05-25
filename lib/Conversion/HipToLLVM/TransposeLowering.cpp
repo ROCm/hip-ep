@@ -120,6 +120,25 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
       numElems = LLVM::MulOp::create(rewriter, loc, numElems, dimVal);
     }
 
+    // Phase 2.4 of slot-buffer-coalesce: publish any output slots
+    // reserved by `hip-reserve-propagator-slots` BEFORE the kernel
+    // call. For Transpose, output dim `d` resolves to input dim
+    // `perm[d]`; the value has already been materialised above and is
+    // either folded to a constant (static input dim) or loaded via
+    // slot-aware getMemRefDimSizeWithSlot (dynamic input dim that is
+    // itself slot-bound). We re-compute through the same helper so the
+    // SSA edges land in the right block.
+    auto dimSizeProvider = [&](unsigned resultIdx, unsigned outDim) -> Value {
+      if (resultIdx != 0)
+        return Value();
+      int64_t srcDim =
+          cast<IntegerAttr>(permAttr[outDim]).getValue().getSExtValue();
+      return getMemRefDimSizeWithSlot(
+          op, kInputOperandIdx, inputType, static_cast<unsigned>(srcDim),
+          adaptor.getInput(), statePtr, rewriter, loc);
+    };
+    emitPropagatorSlotPublishes(op, statePtr, dimSizeProvider, rewriter, loc);
+
     // int wrap_transpose(RuntimeState* state, void* input, void* output,
     //                    int64_t rank, const int64_t* input_shape,
     //                    const int64_t* perm, int64_t num_elements,

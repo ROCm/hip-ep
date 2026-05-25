@@ -26,6 +26,7 @@
 #include "hip/Dialect/IR/HipShapeInterface.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h" // mlir::ModuleOp
 #include "mlir/IR/BuiltinTypes.h"
@@ -33,6 +34,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -334,6 +337,103 @@ public:
           }
         }
       }
+    }
+
+    // 3) Phase 3 invariants:
+    //    (i)  Every `hipdnn.output_slot_ids` grid `-1` entry must
+    //         correspond to a non-dynamic dim of the op's result;
+    //         every non-`-1` entry must correspond to a dynamic dim.
+    //         A `-1` on a dynamic dim means the publisher forgot to
+    //         reserve it; a non-`-1` on a static dim is a slot leak.
+    //    (ii) Output-bound slots (slot ids referenced by
+    //         `hipdnn.output_dim_specs` -- those live PAST stream-sync)
+    //         may not share their slot id with another op's publisher
+    //         (would silently overwrite the value the EP reads after
+    //         sync).
+    DenseSet<int32_t> outputBoundSlots;
+    if (modAttr) {
+      auto parsed = DimSpec::parseOutputDimSpecsAttr(modAttr);
+      for (const auto &perOut : parsed) {
+        for (const auto &ds : perOut) {
+          for (int32_t s : ds.collectSlotIds())
+            outputBoundSlots.insert(s);
+        }
+      }
+    }
+    DenseMap<int32_t, Operation *> firstPublisherOfSlot;
+    auto mainFunc = module.lookupSymbol<func::FuncOp>("main_graph");
+    if (mainFunc) {
+      mainFunc.walk([&](Operation *op) {
+        auto ns = op->getDialect()
+                      ? op->getDialect()->getNamespace()
+                      : llvm::StringRef("");
+        if (ns != "hip")
+          return;
+        // (i) `hipdnn.output_slot_ids` grid vs. dynamic-dim mask.
+        if (auto arr = op->getAttrOfType<::mlir::ArrayAttr>(
+                "hipdnn.output_slot_ids")) {
+          for (unsigned r = 0; r < arr.size() && r < op->getNumResults();
+               ++r) {
+            auto perResult = llvm::dyn_cast<::mlir::DenseI32ArrayAttr>(arr[r]);
+            if (!perResult)
+              continue;
+            auto rt = llvm::dyn_cast<ShapedType>(op->getResult(r).getType());
+            if (!rt || !rt.hasRank())
+              continue;
+            for (int64_t d = 0; d < (int64_t)perResult.size() && d < rt.getRank();
+                 ++d) {
+              int32_t s = perResult.asArrayRef()[d];
+              bool isDyn = rt.isDynamicDim(d);
+              if (s >= 0 && !isDyn) {
+                os << op->getName() << " @ " << op->getLoc()
+                   << ": hipdnn.output_slot_ids[" << r << "][" << d
+                   << "]=" << s << " on a STATIC dim (slot leak)\n";
+                ok = false;
+              }
+              // A -1 on a dynamic dim is allowed when the dim resolves
+              // entirely Cat-A / Cat-B (no slot needed). The reservation
+              // pass only assigns slots when the DimSpec contains a
+              // RuntimeSlot leaf, so a -1 on a dynamic dim is a legitimate
+              // "no slot needed" marker.
+            }
+          }
+        }
+        // (ii) Slot-publisher uniqueness via the legacy attrs as well.
+        auto recordPublisher = [&](int32_t s, Operation *op) {
+          if (s < 0)
+            return;
+          auto it = firstPublisherOfSlot.find(s);
+          if (it == firstPublisherOfSlot.end()) {
+            firstPublisherOfSlot[s] = op;
+            return;
+          }
+          if (it->second == op)
+            return;
+          // Two distinct publisher ops sharing a slot id -- legal only
+          // when the slot is NOT output-bound (intermediate coalescing).
+          if (outputBoundSlots.count(s)) {
+            os << op->getName() << " @ " << op->getLoc()
+               << ": output-bound slot " << s
+               << " is also published by " << it->second->getName() << " @ "
+               << it->second->getLoc()
+               << " -- output-bound slots cannot be coalesced\n";
+            ok = false;
+          }
+        };
+        if (auto a = op->getAttrOfType<::mlir::IntegerAttr>("slot_id"))
+          recordPublisher((int32_t)a.getInt(), op);
+        if (auto a = op->getAttrOfType<::mlir::DenseI32ArrayAttr>("slot_ids"))
+          for (int32_t s : a.asArrayRef())
+            recordPublisher(s, op);
+        if (auto arr = op->getAttrOfType<::mlir::ArrayAttr>(
+                "hipdnn.output_slot_ids")) {
+          for (Attribute resA : arr) {
+            if (auto pr = llvm::dyn_cast<::mlir::DenseI32ArrayAttr>(resA))
+              for (int32_t s : pr.asArrayRef())
+                recordPublisher(s, op);
+          }
+        }
+      });
     }
 
     if (!ok) {

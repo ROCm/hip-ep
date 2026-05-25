@@ -9,13 +9,18 @@ add_library(HipDialectTransforms STATIC
   BufferUtils.cpp
   ComposeDimSpecs.cpp
   DimSpecsDebug.cpp
+  ElideSlotPublisherAllocs.cpp
   GenerateInterface.cpp
+  IdentityPropagatorRebind.cpp
   LowerAllocs.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp
+  PrintPoolStats.cpp
   PromoteStridedHipOperands.cpp
+  ReservePropagatorSlots.cpp
   ResolveExternConstants.cpp
+  SlotLifetimeCoalesce.cpp
 )
 
 add_dependencies(HipDialectTransforms
@@ -36,6 +41,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRTransforms
   MLIRFuncDialect
   MLIRMemRefDialect
+  MLIRTensorDialect
   MLIRArithDialect
   MLIRLLVMDialect
   MLIRBufferizationDialect

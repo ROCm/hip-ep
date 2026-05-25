@@ -145,15 +145,23 @@ int wrap_nonzero(RuntimeState *state, const void *input,
 
   void *out_dev = nullptr;
   int64_t out_bytes = input_rank * N * (int64_t)sizeof(int64_t);
-  if (out_bytes > 0) {
-    out_dev = hipdnn_ep_state_dyn_pool_alloc(state, out_bytes);
-    if (!out_dev) {
-      fprintf(stderr,
-              "[REAL] wrap_nonzero: dyn_pool_alloc(output) failed (R=%lld, "
-              "N=%lld)\n",
-              (long long)input_rank, (long long)N);
-      return -1;
-    }
+  // When N==0 we still allocate a 1-byte sentinel from the dyn pool and
+  // publish that as the slot buffer. Consumers do null-pointer guarding
+  // (transpose / scatter_nd / gather_nd) on their input buffer pointers
+  // even when the matching slot-published dim says "0 elements", so
+  // publishing a literal nullptr trips a "null required argument" early-
+  // exit and we miss the legitimate no-op (scatter_nd should still
+  // copy data -> output even when 0 updates land). The sentinel makes
+  // the pointer non-null while ensuring 0 reads/writes happen because
+  // every consumer is also wired to read the dim from slot `slot_id`.
+  int64_t alloc_bytes = out_bytes > 0 ? out_bytes : 1;
+  out_dev = hipdnn_ep_state_dyn_pool_alloc(state, alloc_bytes);
+  if (!out_dev) {
+    fprintf(stderr,
+            "[REAL] wrap_nonzero: dyn_pool_alloc(output) failed (R=%lld, "
+            "N=%lld, bytes=%lld)\n",
+            (long long)input_rank, (long long)N, (long long)alloc_bytes);
+    return -1;
   }
   hipdnn_ep_state_publish_buffer(state, slot_id, out_dev);
 

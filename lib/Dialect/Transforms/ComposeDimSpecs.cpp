@@ -264,6 +264,23 @@ public:
           if (s > maxSlotIdSeen)
             maxSlotIdSeen = s;
       }
+      // Phase 2 array-form schema: `hipdnn.output_slot_ids` is an outer
+      // ArrayAttr keyed on result index, each entry a DenseI32ArrayAttr
+      // of length == rank with -1 for non-dyn dims. Without this scan
+      // the propagator slots reserved by ReservePropagatorSlotsPass do
+      // not contribute to `hipdnn.dyn_dim_slots_count`, and at runtime
+      // the propagator wrapper aborts with "slot_id N out of range".
+      if (auto grid =
+              op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids")) {
+        for (Attribute outer : grid) {
+          if (auto perDim = dyn_cast<DenseI32ArrayAttr>(outer)) {
+            for (int32_t s : perDim.asArrayRef()) {
+              if (s > maxSlotIdSeen)
+                maxSlotIdSeen = s;
+            }
+          }
+        }
+      }
     });
 
     // Resolve the source value (and, if applicable, the producing op
@@ -411,9 +428,23 @@ public:
     }
     module->setAttr("hipdnn.output_dim_specs",
                     ArrayAttr::get(module.getContext(), outerEntries));
+    // Defensive floor: if ReservePropagatorSlotsPass bumped
+    // `hipdnn.next_dyn_slot_id` higher than any slot id we walked
+    // (e.g. an allocated slot id was canonicalised away by an
+    // intervening pass), still reserve enough table entries for the
+    // pre-bumped high water. This is symmetric to the body-walk above
+    // and protects against future passes that touch the schema in
+    // ways the walk doesn't observe.
+    int32_t finalCount = maxSlotIdSeen + 1;
+    if (auto a =
+            module->getAttrOfType<IntegerAttr>("hipdnn.next_dyn_slot_id")) {
+      int32_t reserved = static_cast<int32_t>(a.getInt());
+      if (reserved > finalCount)
+        finalCount = reserved;
+    }
     module->setAttr("hipdnn.dyn_dim_slots_count",
                     IntegerAttr::get(IntegerType::get(module.getContext(), 32),
-                                     maxSlotIdSeen + 1));
+                                     finalCount));
   }
 };
 
