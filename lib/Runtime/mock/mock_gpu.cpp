@@ -1048,13 +1048,19 @@ int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
 }
 
 int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t num_elements, int64_t data_type) {
+               int64_t a_num_elements, int64_t b_num_elements,
+               int64_t out_num_elements, int64_t data_type) {
+  (void)a;
+  (void)b;
+  (void)output;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_equal\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_equal(num_elements=%lld, data_type=%s)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+  MOCK_PRINT("[MOCK] wrap_equal(a_num=%lld, b_num=%lld, out=%lld, "
+             "data_type=%s)\n",
+             (long long)a_num_elements, (long long)b_num_elements,
+             (long long)out_num_elements, hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 

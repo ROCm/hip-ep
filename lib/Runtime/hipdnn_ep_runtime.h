@@ -895,8 +895,14 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
               int64_t cDim0, int64_t cDim1);
 
+// `out_num_elements` is the broadcast result count.  `a_num_elements` and
+// `b_num_elements` are the per-input element counts; either may be 1 to
+// indicate scalar broadcast.  Today only same-shape OR scalar-vs-tensor is
+// supported (the common case for embedding-style models like Qwen3.5 where
+// `Equal(input_ids[1,N], scalar)` lowers without an intervening `Expand`).
 int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t num_elements, int64_t data_type);
+               int64_t a_num_elements, int64_t b_num_elements,
+               int64_t out_num_elements, int64_t data_type);
 
 // Element-wise logical AND wrapper. Inputs / output share the same data_type
 // (HIPDNN_EP_DATATYPE_*); ONNX `And` is defined on bool tensors, which the
