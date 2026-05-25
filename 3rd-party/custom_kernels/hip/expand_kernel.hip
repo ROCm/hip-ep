@@ -160,6 +160,16 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
                        output_shape, aligned_in_strides, output_rank,
                        num_output_elements);
     break;
+  case HIP_DTYPE_INT8:
+    // Also covers ONNX bool and uint8 -- Expand is a pure broadcast copy
+    // so the 1-byte payload is forwarded verbatim, signedness irrelevant.
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<int8_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t *>(input),
+                       static_cast<int8_t *>(output), aligned_in_shape,
+                       output_shape, aligned_in_strides, output_rank,
+                       num_output_elements);
+    break;
   default:
     fprintf(stderr, "[custom_kernels] hip_expand: unsupported dtype=%d\n",
             hip_dtype);

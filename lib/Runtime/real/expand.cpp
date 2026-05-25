@@ -29,6 +29,13 @@ static int expand_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:
     return HIP_DTYPE_INT64;
+  // ONNX `bool` is marshalled as INT8/UINT8 by the EP; both reuse the
+  // byte-wise kernel slot. Expand is a pure broadcast copy (no value
+  // interpretation), so signedness is irrelevant. Same convention as
+  // wrap_nonzero / hip_nonzero / hip_constant_of_shape.
+  case HIPDNN_EP_DATATYPE_INT8:
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return HIP_DTYPE_INT8;
   default:
     return -1;
   }
@@ -66,7 +73,7 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_expand: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
+            "(supported: f16, f32, i32, i64, i8, ui8/bool)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

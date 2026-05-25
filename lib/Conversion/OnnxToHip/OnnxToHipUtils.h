@@ -114,6 +114,63 @@ inline bool operandIsFuncEntryBlockArg(mlir::Value v) {
   return &funcOp.getBody().front() == owner;
 }
 
+/// If `operand` already has the shape and rank of `targetType`, return it
+/// unchanged.  Otherwise insert a `hip.expand` that broadcasts `operand`
+/// to `targetType` (preserving its element type) and return the expanded
+/// result.
+///
+/// This is the canonical solution to the binary-elementwise broadcasting
+/// problem: the HipToLLVM elementwise lowerings (Equal / Less / And /
+/// Add / Mul / Sub / ...) pass a single `num_elements` to the runtime
+/// and require both operand buffers to already have identical layouts
+/// (see the comment block at the top of
+/// `3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip`).
+/// ONNX, however, allows NumPy-style broadcasting; the canonical
+/// trigger is `Equal(input_ids, scalar_const)`, which would otherwise
+/// have the kernel read past the 1-element constant buffer and produce
+/// uninitialised junk.
+///
+/// `targetType` MUST be fully static -- this helper materialises the
+/// expand `shape` operand as an `arith.constant dense<...> :
+/// tensor<RxI64>`.  Callers that need to broadcast to a dynamic shape
+/// should build the shape operand themselves and create the
+/// `hip.expand` directly.
+inline mlir::Value
+broadcastToShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                 mlir::Value context, mlir::Value operand,
+                 mlir::RankedTensorType targetType) {
+  auto opType = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
+  if (opType && opType.getShape() == targetType.getShape())
+    return operand;
+
+  assert(targetType.hasStaticShape() &&
+         "broadcastToShape only handles static targets today");
+
+  // Build a tensor.empty for the DPS init operand (no dynamic sizes
+  // since targetType is static -- we asserted above).
+  mlir::Type elemType =
+      opType ? opType.getElementType() : targetType.getElementType();
+  auto resultType = mlir::RankedTensorType::get(targetType.getShape(), elemType);
+  mlir::Value init = mlir::tensor::EmptyOp::create(
+      rewriter, loc, resultType.getShape(), resultType.getElementType(),
+      /*dynSizes=*/mlir::ValueRange{});
+
+  // The shape tensor is a static 1-D int64 constant carrying the target
+  // dims -- exactly what ExpandConversion would have given hip.expand
+  // when lowering an explicit onnx.Expand whose target is static.
+  llvm::SmallVector<int64_t> dimValues(targetType.getShape().begin(),
+                                       targetType.getShape().end());
+  auto shapeAttrType = mlir::RankedTensorType::get(
+      {static_cast<int64_t>(dimValues.size())}, rewriter.getI64Type());
+  mlir::Value shapeTensor = mlir::arith::ConstantOp::create(
+      rewriter, loc, shapeAttrType,
+      mlir::DenseElementsAttr::get(shapeAttrType, llvm::ArrayRef(dimValues)));
+
+  return mlir::hip::ExpandOp::create(rewriter, loc, resultType, context,
+                                     operand, shapeTensor, init)
+      ->getResult(0);
+}
+
 /// Get !hip.context from function argument 0. Returns failure if the
 /// function has no arguments or the first argument is not !hip.context.
 inline mlir::FailureOr<mlir::Value>
@@ -220,6 +277,8 @@ void populateSizeConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateShapeConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

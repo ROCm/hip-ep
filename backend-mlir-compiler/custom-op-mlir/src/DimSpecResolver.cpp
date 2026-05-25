@@ -11,6 +11,16 @@
 
 namespace mlir_compilation::customop {
 
+bool debugShapesEnabled() {
+  static const bool enabled = []() {
+    const char *v1 = std::getenv("HIPDNN_EP_DEBUG_SHAPES");
+    if (v1 && v1[0] >= '1') return true;
+    const char *v2 = std::getenv("HIPDNN_EP_TRACE_SHAPES");
+    return v2 && v2[0] >= '1';
+  }();
+  return enabled;
+}
+
 namespace {
 
 const mlir::hip::DimSpecNodeT &nodeAt(const mlir::hip::DimSpecT &spec,
@@ -80,6 +90,12 @@ bool resolveNode(const mlir::hip::DimSpecT &spec, size_t node_idx,
   case mlir::hip::DimSpecKind::InputValueI64:
     out_value =
         readInputI64(n.input_index, n.flat_offset, input_shapes, input_data);
+    if (debugShapesEnabled()) {
+      fprintf(stderr,
+              "[Resolver] InputValueI64(input=%d, offset=%lld) = %lld\n",
+              (int)n.input_index, (long long)n.flat_offset,
+              (long long)out_value);
+    }
     return true;
 
   case mlir::hip::DimSpecKind::RuntimeSlot: {
@@ -146,9 +162,28 @@ bool resolveNode(const mlir::hip::DimSpecT &spec, size_t node_idx,
       // Unreachable -- silences the compiler in the outer switch.
       break;
     }
-    // Saturating non-negativity per the spec contract.
-    if (out_value < 0)
-      out_value = 0;
+    // NOTE: previously this branch clamped `out_value` to 0 inside the
+    // recursion. That was wrong: intermediate values may be legitimately
+    // negative (e.g. ONNX `Range(start=10, limit=0, delta=-2)` has the
+    // DimSpec `CeilDiv(Sub(limit,start), delta) = CeilDiv(-10, -2) = 5`
+    // -- the inner Sub is -10, but the final dim is 5). Saturation only
+    // makes sense at the root, where we know the value is the dim size;
+    // the public `resolve()` entry-point does that final clamp.
+    if (debugShapesEnabled()) {
+      const char *opn = "?";
+      switch (n.kind) {
+        case mlir::hip::DimSpecKind::Add: opn = "Add"; break;
+        case mlir::hip::DimSpecKind::Sub: opn = "Sub"; break;
+        case mlir::hip::DimSpecKind::Mul: opn = "Mul"; break;
+        case mlir::hip::DimSpecKind::FloorDiv: opn = "FloorDiv"; break;
+        case mlir::hip::DimSpecKind::CeilDiv: opn = "CeilDiv"; break;
+        case mlir::hip::DimSpecKind::Min: opn = "Min"; break;
+        case mlir::hip::DimSpecKind::Max: opn = "Max"; break;
+        default: break;
+      }
+      fprintf(stderr, "[Resolver] %s(%lld, %lld) = %lld\n", opn,
+              (long long)lhs, (long long)rhs, (long long)out_value);
+    }
     return true;
   }
   }
@@ -185,8 +220,18 @@ bool resolve(const mlir::hip::DimSpecT &spec,
     // to fall back to the legacy proto shape (-1 -> unknown).
     return false;
   }
-  return resolveNode(spec, /*node_idx=*/0, input_shapes, input_data, state,
-                     out_value);
+  if (!resolveNode(spec, /*node_idx=*/0, input_shapes, input_data, state,
+                   out_value)) {
+    return false;
+  }
+  // ONNX-side dimension sizes are non-negative. Negative root values can
+  // legitimately arise from `Sub(small, large)` in ONNX Range with an
+  // empty interval (e.g. Range(0, 0, 1) -> Sub(0,0)=0 / CeilDiv -> 0, or
+  // Range(5, 3, 1) -> CeilDiv(-2, 1) = -2 -> clamped to 0). Saturate at
+  // the root so downstream consumers see a well-formed dim size.
+  if (out_value < 0)
+    out_value = 0;
+  return true;
 }
 
 } // namespace mlir_compilation::customop

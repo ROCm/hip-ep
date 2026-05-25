@@ -55,12 +55,22 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
       return rewriter.notifyMatchFailure(op, "unsupported data element type");
 
     Value statePtr = adaptor.getCtx();
-    Value dataPtr =
-        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
-    Value indicesPtr =
-        extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
-    Value updatesPtr =
-        extractContiguousMemRefPtr(adaptor.getUpdates(), rewriter, loc);
+    // Operand layout: 0=ctx, 1=data, 2=indices, 3=updates, 4=output.
+    // When `hip-annotate-input-dim-slots` has tagged an operand as
+    // consuming a Cat-C slot, the descriptor's `alignedPtr` points
+    // at the upper-bound DPS init buffer (uninitialised — the
+    // producer wrote into a separately allocated exact-size buffer
+    // published via the slot table). Read the published pointer
+    // instead so the scatter_nd kernel sees the actual data. In the
+    // Qwen embedding graph both `indices` (from Transpose of NonZero)
+    // and `updates` (from Slice of the Reshape of image_features)
+    // would otherwise be garbage.
+    Value dataPtr = extractContiguousMemRefPtrWithSlot(
+        op, /*operandIdx=*/1, adaptor.getData(), statePtr, rewriter, loc);
+    Value indicesPtr = extractContiguousMemRefPtrWithSlot(
+        op, /*operandIdx=*/2, adaptor.getIndices(), statePtr, rewriter, loc);
+    Value updatesPtr = extractContiguousMemRefPtrWithSlot(
+        op, /*operandIdx=*/3, adaptor.getUpdates(), statePtr, rewriter, loc);
     Value outPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -69,14 +79,24 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
     Value one = createI64Const(1);
-    auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
+    // Slot-aware variant: for dynamic dims annotated by
+    // `hip-annotate-input-dim-slots` we read the runtime-published
+    // value from the slot table instead of the descriptor (which
+    // encodes the upper-bound pool size). This is the critical path
+    // for the Qwen embedding model — indices (operand 2) and updates
+    // (operand 3) both arrive as upper-bound buffers whose true row
+    // count is the published NonZero slot.
+    auto emitShapeArray = [&](MemRefType type, Value descriptor,
+                              unsigned operandIdx) -> Value {
       int rank = type.getRank();
       int arrLen = std::max(rank, 1);
       auto arrType = LLVM::LLVMArrayType::get(i64Type, arrLen);
       Value arr =
           LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
       for (int i = 0; i < rank; ++i) {
-        Value dim = getMemRefDimSize(type, i, descriptor, rewriter, loc);
+        Value dim = getMemRefDimSizeWithSlot(
+            op, operandIdx, type, static_cast<unsigned>(i), descriptor,
+            statePtr, rewriter, loc);
         Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                              rewriter.getI32IntegerAttr(i));
         Value elemPtr =
@@ -86,10 +106,12 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
       return arr;
     };
 
-    Value dataShape = emitShapeArray(dataType, adaptor.getData());
-    Value indicesShape = emitShapeArray(indicesType, adaptor.getIndices());
-    Value updatesShape = emitShapeArray(updatesType, adaptor.getUpdates());
-    Value outShape = emitShapeArray(outputType, adaptor.getOutput());
+    // Operand layout per Hip_ScatterNDOp: 0=ctx, 1=data, 2=indices,
+    // 3=updates, 4=output.
+    Value dataShape = emitShapeArray(dataType, adaptor.getData(), 1);
+    Value indicesShape = emitShapeArray(indicesType, adaptor.getIndices(), 2);
+    Value updatesShape = emitShapeArray(updatesType, adaptor.getUpdates(), 3);
+    Value outShape = emitShapeArray(outputType, adaptor.getOutput(), 4);
 
     Value dataRank = createI64Const(dataType.getRank());
     Value indicesRank = createI64Const(indicesType.getRank());

@@ -68,13 +68,16 @@ static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
     if (!srcType || !srcType.hasStaticShape())
       return nullptr;
     // ONNX Shape supports start/end attributes for slicing the shape vector.
+    // ONNX importer uses signed (si64) attributes; `IntegerAttr::getInt()`
+    // asserts signless, so go through getValue().getSExtValue() which works
+    // for both signed and signless.
     int64_t rank = srcType.getRank();
     int64_t start = 0;
     int64_t end = rank;
     if (auto a = defOp->getAttrOfType<mlir::IntegerAttr>("start"))
-      start = a.getInt();
+      start = a.getValue().getSExtValue();
     if (auto a = defOp->getAttrOfType<mlir::IntegerAttr>("end"))
-      end = a.getInt();
+      end = a.getValue().getSExtValue();
     if (start < 0)
       start += rank;
     if (end < 0)

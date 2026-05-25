@@ -21,16 +21,42 @@ namespace mlir_compilation {
 
 // Per-output dynamic-shape metadata cached in MlirCustomOp ctor. Populated
 // from the FB-JSON metadata blob the EP parses out of the model.dll.
-// `has_runtime_slot` is true iff at least one dim of this output is a
-// RuntimeSlot leaf (Category C). For now we only support one slot per
-// output (NonZero / Range / ConstantOfShape pattern); a future op that
-// publishes two independent dims would need a multi-slot resolver path.
+//
+// Two orthogonal flags describe the output's resolution requirements:
+//
+//   * `needs_pre_compute_resolve` -- the static metadata `shape` array
+//     contains at least one INT64_MIN sentinel (= dynamic dim) AND the
+//     output has a non-trivial DimSpec tree. Category B / Category D
+//     outputs walk the spec tree pre-compute (with the EP's input
+//     shapes + bytes) to resolve every dim to a concrete value, then
+//     allocate the ORT OrtValue at the right size BEFORE running
+//     main_graph. Even purely Category B outputs need this so the
+//     runtime fill kernel writes into the correct buffer.
+//
+//   * `has_runtime_slot` -- at least one dim is a RuntimeSlot leaf
+//     (Category C). The EP allocates a placeholder, defers the OrtValue
+//     allocation until POST-compute when the wrap_* function has
+//     published the actual dim into a slot, then D2H-copies the
+//     wrapper-allocated GPU buffer into the freshly-sized OrtValue.
+//
+// Per-output dynamic-shape info. Supports any number of RuntimeSlot dims
+// per output -- ConstantOfShape (Category C) publishes one slot per output
+// axis, while NonZero / Range / etc. publish a single slot for their one
+// dynamic dim. The buffer for Category C outputs is, by convention,
+// published to `buffer_slot_id` (== the first RuntimeSlot we encountered
+// while walking dim_specs; today this matches `slot_ids[0]` set by the
+// wrap_* lowerings, but the resolver doesn't bake in that assumption).
 // Defined here (not in the .cpp) so MlirCustomOp's std::vector member can
 // see the complete type at destructor instantiation time.
 struct OutputDynamicInfo {
+  bool needs_pre_compute_resolve = false;
   bool has_runtime_slot = false;
-  int32_t slot_id = -1;
-  int32_t slot_dim_index = -1;
+  // For each output dim, the slot id that publishes it (or -1 if that dim
+  // is not RuntimeSlot-driven). One entry per rank.
+  std::vector<int32_t> dim_slot_ids;
+  // Slot id from which the wrap_* publishes the output GPU buffer pointer.
+  // -1 when the output has no RuntimeSlot dims.
+  int32_t buffer_slot_id = -1;
 };
 
 // Custom Op implementation for MLIR-compiled models

@@ -52,6 +52,7 @@ add_library(OnnxToHip STATIC
   SizeConversion.cpp
   NonZeroConversion.cpp
   LoopOutline.cpp
+  ShapeConversion.cpp
 )
 
 add_dependencies(OnnxToHip

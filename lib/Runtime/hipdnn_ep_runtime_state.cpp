@@ -1214,14 +1214,67 @@ extern "C" void hipdnn_ep_state_publish_dim(RuntimeState *state,
             slot_id, state->dyn_dim_slots_count);
     std::abort();
   }
+  HIPDNN_EP_SLOT_TRACE("publish_dim(%d) = %lld", slot_id, (long long)size);
   state->dyn_slot_sizes[slot_id] = size;
 }
 
-extern "C" int64_t hipdnn_ep_state_read_dim(RuntimeState *state,
+// Non-aborting "peek" variant. The EP-side post-compute resolver uses
+// this so it can report a richer message (model identity, output index,
+// dim index) before LOG(FATAL)-ing. In-DLL call sites should NOT use
+// this — they should use `hipdnn_ep_state_read_dim`, which aborts loudly
+// with a stack trace that names the consumer wrap.
+extern "C" int64_t hipdnn_ep_state_peek_dim(RuntimeState *state,
                                             int32_t slot_id) {
   if (!state || slot_id < 0 || slot_id >= state->dyn_dim_slots_count)
     return kDynSlotUnpublishedSize;
   return state->dyn_slot_sizes[slot_id];
+}
+
+extern "C" void *hipdnn_ep_state_peek_buffer(RuntimeState *state,
+                                             int32_t slot_id) {
+  if (!state || slot_id < 0 || slot_id >= state->dyn_dim_slots_count)
+    return nullptr;
+  return state->dyn_slot_bufs[slot_id];
+}
+
+extern "C" int64_t hipdnn_ep_state_read_dim(RuntimeState *state,
+                                            int32_t slot_id) {
+  // null state is the legitimate "no slot table at all" path used by
+  // graphs without any dynamic outputs — silently fall through.
+  if (!state)
+    return kDynSlotUnpublishedSize;
+  if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
+    // Either the lowering emitted a slot id this DLL doesn't know about,
+    // or the metadata's dyn_dim_slots_count is stale. Both are
+    // unrecoverable — the alternative (silent kDynSlotUnpublishedSize
+    // return) propagates -1 into downstream alloc-size math which
+    // either crashes much later with a confusing trace or silently
+    // computes the wrong-size buffer.
+    fprintf(stderr,
+            "[hipdnn_ep_state_read_dim] slot_id %d out of range [0, %d); "
+            "model metadata is inconsistent with the runtime wrapper "
+            "that called read_dim. Aborting.\n",
+            slot_id, state->dyn_dim_slots_count);
+    std::abort();
+  }
+  int64_t v = state->dyn_slot_sizes[slot_id];
+  if (v == kDynSlotUnpublishedSize) {
+    // Read-before-publish — the lowering / EP composed an alloc-site
+    // read_dim BEFORE the producing Category-C wrap ran. Either pass
+    // ordering is wrong, ComposeDimSpecs computed the wrong producer
+    // chain, or the producing wrap silently bailed out without
+    // calling publish_dim. Any of these is a hard bug; surfacing it
+    // here gives an exact stack trace to the consumer.
+    fprintf(stderr,
+            "[hipdnn_ep_state_read_dim] slot[%d] read before publish; "
+            "either the producing Category-C wrapper did not run or did "
+            "not call publish_dim, or the lowering ordered the read "
+            "ahead of the write. Aborting.\n",
+            slot_id);
+    std::abort();
+  }
+  HIPDNN_EP_SLOT_TRACE("read_dim(%d)    = %lld", slot_id, (long long)v);
+  return v;
 }
 
 extern "C" void hipdnn_ep_state_publish_buffer(RuntimeState *state,
@@ -1236,14 +1289,37 @@ extern "C" void hipdnn_ep_state_publish_buffer(RuntimeState *state,
             slot_id, state->dyn_dim_slots_count);
     std::abort();
   }
+  HIPDNN_EP_SLOT_TRACE("publish_buffer(%d) = %p", slot_id, gpu_buf);
   state->dyn_slot_bufs[slot_id] = gpu_buf;
 }
 
 extern "C" void *hipdnn_ep_state_read_buffer(RuntimeState *state,
                                              int32_t slot_id) {
-  if (!state || slot_id < 0 || slot_id >= state->dyn_dim_slots_count)
+  if (!state)
     return nullptr;
-  return state->dyn_slot_bufs[slot_id];
+  if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
+    fprintf(stderr,
+            "[hipdnn_ep_state_read_buffer] slot_id %d out of range [0, %d); "
+            "model metadata is inconsistent with the runtime wrapper "
+            "that called read_buffer. Aborting.\n",
+            slot_id, state->dyn_dim_slots_count);
+    std::abort();
+  }
+  void *p = state->dyn_slot_bufs[slot_id];
+  if (!p) {
+    // Producer published a dim but never a buffer (or never ran). Same
+    // root-cause set as read_dim's read-before-publish trap; same fix
+    // (loud abort with the slot id named) so the consumer's frame is
+    // on the stack.
+    fprintf(stderr,
+            "[hipdnn_ep_state_read_buffer] slot[%d] buffer read before "
+            "publish; the producing Category-C wrapper either did not "
+            "run or did not call publish_buffer. Aborting.\n",
+            slot_id);
+    std::abort();
+  }
+  HIPDNN_EP_SLOT_TRACE("read_buffer(%d)    = %p", slot_id, p);
+  return p;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1311,10 +1387,31 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
   return pool_ptr + offset;
 }
 
-void *hipdnn_ep_get_pool_base(RuntimeState *state) {
+void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t required_size) {
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
+  }
+  if (required_size > state->pool_size) {
+    // Grow the pool. Free the old buffer (no live references survive across
+    // Compute() — the lowering re-queries the base pointer on every entry to
+    // the function) and allocate a new one. Round up to a small multiple to
+    // amortise allocation cost across small bumps without leaking too much.
+    size_t new_size = required_size;
+    if (new_size < 256)
+      new_size = 256;
+    if (state->pool_base) {
+      HIP_CLEANUP(hipFree(state->pool_base));
+      state->pool_base = nullptr;
+    }
+    if (hipMalloc(&state->pool_base, new_size) != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_get_pool_base: hipMalloc(%zu) failed\n", new_size);
+      state->pool_base = nullptr;
+      state->pool_size = 0;
+      return nullptr;
+    }
+    state->pool_size = new_size;
   }
   return state->pool_base;
 }

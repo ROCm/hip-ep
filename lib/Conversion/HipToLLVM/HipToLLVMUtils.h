@@ -101,6 +101,8 @@ inline constexpr const char *kWrapSlice = "wrap_slice";
 inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
 inline constexpr const char *kWrapSize = "wrap_size";
+inline constexpr const char *kWrapShape = "wrap_shape";
+inline constexpr const char *kHipdnnEpStateReadDim = "hipdnn_ep_state_read_dim";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -242,6 +244,146 @@ extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter &rewriter,
   return MemRefDescriptor(memrefDesc);
 }
 
+// Returns the slot id annotated by the `hip-annotate-input-dim-slots` pass
+// for `(operand_idx, dim_idx)` on `op`, or -1 if no annotation exists. The
+// attribute encoding is
+//   hipdnn.input_dim_slots = [
+//     <per-operand 0> = [[d, s], ...] | empty,
+//     <per-operand 1> = [[d, s], ...] | empty,
+//     ...
+//   ]
+// where each [d, s] is a DenseI32ArrayAttr of length 2: d = dim index, s =
+// slot id. Lowerings call this on every dynamic-dim read and substitute a
+// runtime `hipdnn_ep_state_read_dim` call when a slot match is found,
+// so the kernel sees the runtime-published size rather than the
+// pool-allocator's upper bound. Cheap: tiny attribute walk, no hot-path
+// allocation.
+inline int32_t lookupInputDimSlot(Operation *op, unsigned operandIdx,
+                                  unsigned dimIdx) {
+  auto outer = op->getAttrOfType<ArrayAttr>("hipdnn.input_dim_slots");
+  if (!outer || operandIdx >= outer.size())
+    return -1;
+  auto perOperand = llvm::dyn_cast<ArrayAttr>(outer[operandIdx]);
+  if (!perOperand)
+    return -1;
+  for (Attribute pair : perOperand) {
+    auto arr = llvm::dyn_cast<DenseI32ArrayAttr>(pair);
+    if (!arr || arr.size() != 2)
+      continue;
+    if (static_cast<unsigned>(arr[0]) == dimIdx)
+      return arr[1];
+  }
+  return -1;
+}
+
+inline constexpr const char *kHipdnnEpStatePeekBuffer =
+    "hipdnn_ep_state_peek_buffer";
+
+// Emit `call @hipdnn_ep_state_peek_buffer(state, slot_id) : (ptr, i32) -> ptr`.
+// Returns the runtime-published GPU pointer for `slotId`, or null when
+// the producer published a null buffer (N=0 case — Category-C wrappers
+// skip the allocation when there is nothing to fill, but the slot
+// dim is still published as 0). Used by consumer lowerings to redirect
+// their input pointer from the upper-bound DPS init buffer (which the
+// Category-C producer never writes into) to the runtime-allocated
+// exact-size buffer.
+//
+// We use the *peek* (non-aborting) flavor specifically to keep N=0
+// scenarios alive: the kernel launches receive a null pointer + 0
+// element count and short-circuit at the dispatcher level. The
+// aborting `read_buffer` flavor is reserved for the EP-side resolver
+// where a missing buffer indicates a real bug.
+inline Value emitReadBufferCall(Value state, int32_t slotId,
+                                ConversionPatternRewriter &rewriter,
+                                Location loc) {
+  ModuleOp module = state.getDefiningOp()
+                        ? state.getDefiningOp()->getParentOfType<ModuleOp>()
+                        : nullptr;
+  if (!module) {
+    Block *block = rewriter.getInsertionBlock();
+    if (block) {
+      Operation *parent = block->getParentOp();
+      if (parent)
+        module = parent->getParentOfType<ModuleOp>();
+    }
+  }
+  Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+  Type i32Type = rewriter.getI32Type();
+  SmallVector<Type, 2> paramTypes = {ptrType, i32Type};
+  FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+      rewriter, module, kHipdnnEpStatePeekBuffer, paramTypes, ptrType);
+  Value slotConst = LLVM::ConstantOp::create(
+      rewriter, loc, i32Type, rewriter.getI32IntegerAttr(slotId));
+  return LLVM::CallOp::create(rewriter, loc, *funcOp,
+                              ValueRange{state, slotConst})
+      .getResult();
+}
+
+// Slot-aware variant of `extractContiguousMemRefPtr`. When the
+// `hipdnn.input_slot_buffers` attribute (set by
+// `hip-annotate-input-dim-slots`) records a non-negative slot id for
+// `operandIdx`, returns the runtime-published exact-size buffer via
+// `hipdnn_ep_state_read_buffer`. Otherwise falls back to the
+// descriptor's `alignedPtr`.
+//
+// Triggers ONLY when the operand's IMMEDIATE producer is a slot
+// publisher (e.g. `hip.nonzero`) — those publishers allocate a
+// separate exact-size buffer at runtime and ignore their upper-bound
+// DPS init, so the consumer needs to read the published pointer
+// instead of the descriptor. Translucent propagators (e.g.
+// `hip.transpose` consumed by `hip.scatter_nd`) DO write into their
+// upper-bound DPS init, so the descriptor pointer is the correct one
+// for the propagator's consumers — the annotation pass deliberately
+// does NOT set `hipdnn.input_slot_buffers` for that case (only
+// `hipdnn.input_dim_slots` for the shape).
+inline Value extractContiguousMemRefPtrWithSlot(
+    Operation *op, unsigned operandIdx, Value descriptor, Value state,
+    ConversionPatternRewriter &rewriter, Location loc) {
+  if (state) {
+    if (auto bufs =
+            op->getAttrOfType<DenseI32ArrayAttr>("hipdnn.input_slot_buffers")) {
+      if (operandIdx < bufs.size()) {
+        int32_t slotId = bufs[operandIdx];
+        if (slotId >= 0)
+          return emitReadBufferCall(state, slotId, rewriter, loc);
+      }
+    }
+  }
+  return extractContiguousMemRefPtr(descriptor, rewriter, loc);
+}
+
+// Emit `call @hipdnn_ep_state_read_dim(state, slot_id) : (ptr, i32) -> i64`.
+// Looks up (or declares) the runtime symbol on demand. Returns the i64 SSA
+// value of the published dim. The caller is responsible for ensuring
+// `state` is the runtime state pointer (typically the converted
+// `!hip.context` operand of the consumer op).
+inline Value emitReadDimCall(Value state, int32_t slotId,
+                             ConversionPatternRewriter &rewriter,
+                             Location loc) {
+  ModuleOp module = state.getDefiningOp()
+                        ? state.getDefiningOp()->getParentOfType<ModuleOp>()
+                        : nullptr;
+  if (!module) {
+    Block *block = rewriter.getInsertionBlock();
+    if (block) {
+      Operation *parent = block->getParentOp();
+      if (parent)
+        module = parent->getParentOfType<ModuleOp>();
+    }
+  }
+  Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+  Type i32Type = rewriter.getI32Type();
+  Type i64Type = rewriter.getI64Type();
+  SmallVector<Type, 2> paramTypes = {ptrType, i32Type};
+  FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+      rewriter, module, kHipdnnEpStateReadDim, paramTypes, i64Type);
+  Value slotConst = LLVM::ConstantOp::create(
+      rewriter, loc, i32Type, rewriter.getI32IntegerAttr(slotId));
+  return LLVM::CallOp::create(rewriter, loc, *funcOp,
+                              ValueRange{state, slotConst})
+      .getResult();
+}
+
 // Helper: get a single memref dimension as an i64 Value, using a compile-time
 // constant for static dims and extracting from the descriptor for dynamic dims.
 inline Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
@@ -257,6 +399,33 @@ inline Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
         rewriter.getI64IntegerAttr(type.getDimSize(dimIdx)));
   }
   return result;
+}
+
+// Slot-aware variant of `getMemRefDimSize`. When `op` has been annotated
+// by `hip-annotate-input-dim-slots` with a slot for `(operandIdx, dimIdx)`,
+// returns the runtime-published dim via `hipdnn_ep_state_read_dim`
+// instead of reading the descriptor (which encodes the upper-bound
+// pool allocation). `state` is the runtime state pointer required for
+// the read_dim call. `descriptor` is the converted memref descriptor
+// for that operand. `operandIdx` is the ORIGINAL (pre-conversion)
+// operand index, matching the indexing used by the annotation pass.
+//
+// Use this in lowerings that emit shape/count parameters for ops whose
+// inputs may be Category-C upper-bound buffers (e.g. transpose of a
+// NonZero output). For ops whose inputs cannot consume Category-C
+// outputs (constant-time-shape inputs, weights, etc.), the plain
+// `getMemRefDimSize` is sufficient.
+inline Value getMemRefDimSizeWithSlot(Operation *op, unsigned operandIdx,
+                                      MemRefType type, unsigned dimIdx,
+                                      Value descriptor, Value state,
+                                      ConversionPatternRewriter &rewriter,
+                                      Location loc) {
+  if (type.isDynamicDim(dimIdx)) {
+    int32_t slotId = lookupInputDimSlot(op, operandIdx, dimIdx);
+    if (slotId >= 0 && state)
+      return emitReadDimCall(state, slotId, rewriter, loc);
+  }
+  return getMemRefDimSize(type, dimIdx, descriptor, rewriter, loc);
 }
 
 // Helper: compute total number of elements in a memref, handling both static
@@ -398,6 +567,8 @@ void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
 
 void populateConstantOfShapeLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
+void populateShapeLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

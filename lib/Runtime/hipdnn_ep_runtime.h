@@ -203,10 +203,16 @@ void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
 // Ownership: Caller does NOT own pointer (freed in cleanup)
 void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 
-// Get the base pointer of the GPU memory pool
-// Returns: GPU base pointer of pool (NULL if pool not initialized)
-// Used by hip.get_pool lowering in generated compute kernels
-void *hipdnn_ep_get_pool_base(RuntimeState *state);
+// Get the base pointer of the GPU memory pool, growing it on demand to at
+// least `required_size` bytes. `required_size` may be 0 (returns the current
+// base or nullptr if uninitialised) or may exceed the current pool size, in
+// which case the pool is reallocated. The base pointer can change across
+// calls; long-lived consumers must re-query after every potential growth.
+//
+// Used by `hip.get_pool` lowering in generated compute kernels. The lowering
+// computes `required_size` from the bump-pointer offset of all pooled
+// allocations within the function and passes it on every call.
+void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t required_size);
 
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);
@@ -299,13 +305,25 @@ void hipdnn_ep_state_publish_dim(RuntimeState *state, int32_t slot_id,
 // kDynSlotUnpublishedSize (-1) if the slot was never published this
 // Compute(); the EP MUST treat -1 as a fatal "Category-C op was skipped
 // somehow" error.
+// IMPORTANT: read_dim / read_buffer have two ABI flavors.
+//   * `_read_*` is the **aborting** flavor used by generated-DLL call sites
+//     (Category-C consumer wraps materialising their alloc dim). On a
+//     read-before-publish or out-of-range slot it prints a diagnostic to
+//     stderr and calls std::abort(), which lands a stack trace in the
+//     crash handler that names the consumer.
+//   * `_peek_*` is the **silent** flavor exposed to the EP only via the
+//     inference_dyn_slot_peek_* shims; it returns kDynSlotUnpublishedSize
+//     / nullptr on miss so the EP-side post-compute resolver can LOG(FATAL)
+//     with model-level context (output index, dim index, identity).
 int64_t hipdnn_ep_state_read_dim(RuntimeState *state, int32_t slot_id);
+int64_t hipdnn_ep_state_peek_dim(RuntimeState *state, int32_t slot_id);
 
 // Publish / read the GPU buffer for slot `slot_id`. Same out-of-range
-// semantics as publish_dim. Read returns nullptr if never published.
+// semantics as publish_dim. _read aborts on miss; _peek returns nullptr.
 void hipdnn_ep_state_publish_buffer(RuntimeState *state, int32_t slot_id,
                                     void *gpu_buf);
 void *hipdnn_ep_state_read_buffer(RuntimeState *state, int32_t slot_id);
+void *hipdnn_ep_state_peek_buffer(RuntimeState *state, int32_t slot_id);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
@@ -1053,6 +1071,27 @@ int wrap_constant_of_shape_dyn(RuntimeState *state, const void *shape_dev,
 // descriptor `sizes[]` for dynamic dims) and calls this wrapper, which
 // stores the 8-byte value into the rank-0 i64 output buffer on the GPU.
 int wrap_size(RuntimeState *state, void *output, int64_t num_elements);
+
+// ONNX Shape wrapper (dynamic-input path only).
+//
+// Static-input Shape ops are folded into arith.constant at OnnxToHip
+// time and never reach this symbol. The dynamic path is emitted when at
+// least one input dim is dynamic (typically because the input came from
+// a Category-C producer such as NonZero). HipToLLVM materialises each
+// per-element DimSpec to an i64 SSA value (constants for Static leaves,
+// hipdnn_ep_state_read_dim() calls for RuntimeSlot leaves), packs the
+// resulting i64s into a host-stack int64_t[num_elements] and hands the
+// pointer to this wrapper. We blit the host array H2D into the
+// destination GPU memref via a single hipMemcpyAsync.
+//
+// `num_elements` is the rank-1 result length (compile-time constant —
+// equals `end - start` of the ONNX Shape op, clamped against input rank).
+// `host_values` is a host-resident array; pageable + H2D in HIP is
+// effectively synchronous from the host's POV so the stack slot lifetime
+// is safe across the call.
+int wrap_shape(RuntimeState *state, void *output, int64_t num_elements,
+               const int64_t *host_values);
+
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,

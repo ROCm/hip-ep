@@ -44,6 +44,7 @@ add_library(HipToLLVM STATIC
   SizeLowering.cpp
   LoopLowering.cpp
   ConstantOfShapeLowering.cpp
+  ShapeLowering.cpp
 )
 
 add_dependencies(HipToLLVM
@@ -55,6 +56,7 @@ add_dependencies(HipToLLVM
 
 target_link_libraries(HipToLLVM PUBLIC
   HipDialectIR
+  HipConversionCommon
   MLIRPass
   MLIRLLVMDialect
   MLIRLLVMCommonConversion

@@ -5,8 +5,10 @@
 
 add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
+  AnnotateInputDimSlots.cpp
   BufferUtils.cpp
   ComposeDimSpecs.cpp
+  DimSpecsDebug.cpp
   GenerateInterface.cpp
   LowerAllocs.cpp
   OptimizeMemRefs.cpp
@@ -41,6 +43,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRBufferizationPipelines
   MLIRBufferizationToMemRef
   MLIRArithToLLVM
+  MLIRArithTransforms
   MLIRMemRefToLLVM
   MLIRFuncToLLVM
   MLIRAffineToStandard

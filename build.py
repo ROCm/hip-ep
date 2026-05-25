@@ -216,7 +216,7 @@ def fetch_prebuilt_deps():
 # ONNX Runtime
 # ---------------------------------------------------------------------------
 
-ORT_VERSION = "1.24.4"  # must match pip onnxruntime-directml for Python API compat
+ORT_VERSION = "1.25.1"  # must match pip onnxruntime-directml for Python API compat
 
 
 def fetch_onnxruntime():

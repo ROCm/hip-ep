@@ -113,6 +113,35 @@ public:
   // on success; writes a diagnostic into `error` on failure.
   bool verify(std::string &error) const;
 
+  //===--------------------------------------------------------------------===//
+  // Module-level helpers — convenience for hip-mlir-opt analysis passes
+  // and any other tool that wants to inspect the composed-DimSpec storage
+  // form attached to the module by `ComposeDimSpecsPass`.
+  //===--------------------------------------------------------------------===//
+
+  // Pretty-print the value of the `hipdnn.output_dim_specs` module
+  // attribute (an ArrayAttr<ArrayAttr<ArrayAttr>>). One line per (output,
+  // dim) entry, formatted as:
+  //     Output[i] dim[d] = <expression>
+  //
+  // Entries with an empty inner ArrayAttr (the convention `ComposeDimSpecs`
+  // uses for "no spec recorded for this dim") are printed as
+  // "<no spec>". Returns false if `attr` is null or its inner structure
+  // is malformed; partial output is still emitted in the latter case so
+  // that a corrupt attr is recognisable from the dump.
+  static bool printOutputDimSpecsAttr(mlir::ArrayAttr attr,
+                                      llvm::raw_ostream &os);
+
+  // Parse a `hipdnn.output_dim_specs`-style nested ArrayAttr into a
+  // 2-D vector of DimSpec trees: `[output_index][dim_index]`. The
+  // outer dimension matches the number of outputs; the inner dimension
+  // matches per-output rank. An empty inner ArrayAttr entry yields an
+  // empty (`nodes_.empty()`) DimSpec at that slot. Returns an empty
+  // outer vector if `attr` is null. Used by both the dumper and the
+  // verifier to avoid re-implementing the nesting walk in each caller.
+  static std::vector<std::vector<DimSpec>>
+  parseOutputDimSpecsAttr(mlir::ArrayAttr attr);
+
 private:
   // Recursive toString helper.
   void appendNodeString(int32_t idx, std::string &out) const;
@@ -155,14 +184,42 @@ private:
 // wrap_constant_of_shape on intermediate operands) do the same.
 
 namespace shape_interface {
+// Per-op DimSpec builder function. Returns the DimSpec for `op`'s
+// (result_index, dim_index) result dim. Implementations should call
+// `resolveDimFromValue` recursively on operand values to walk the
+// producer chain; they MUST be pure functions of the op's operands /
+// attributes (no side effects, no global state) so that
+// `getResultDimSpec` remains deterministic across passes.
+//
+// Builders may return an empty DimSpec ("I cannot resolve this") to
+// signal a graceful fallback to the static-type strategy.
+using DimSpecBuilderFn =
+    DimSpec (*)(mlir::Operation *op, unsigned result_index,
+                unsigned dim_index);
+
+// Register a builder for the given op name (e.g. "hip.transpose"). The
+// last registration wins. Thread-safe (registry is populated once at
+// dialect-initialise time from a single thread; lookup is read-only).
+void registerOpDimSpecBuilder(llvm::StringRef op_name, DimSpecBuilderFn fn);
+
+// Populate the registry with the built-in shape-behavior builders. Called
+// from `HipDialect::initialize()` so builders are available before any
+// pattern or pass runs. Idempotent — safe to call multiple times (the
+// underlying registration is "last write wins" on a stable name set).
+void populateBuiltinDimSpecBuilders();
+
 // Return the DimSpec for result `result_index`, dim `dim_index` of `op`.
-// Each concrete HIP op that wants to participate registers a builder via
-// `registerOpDimSpecBuilder`. Default behavior for unregistered ops:
-//   - If the result type is a RankedTensor/RankedMemRef and the dim is
-//     static, return DimSpec::makeStatic(dim_size).
-//   - If the dim is dynamic, return an empty DimSpec (caller treats this
-//     as "unresolvable here — leave the operand-walker to descend further
-//     until it hits a known producer").
+// Resolution order (first non-empty wins):
+//   1. Per-op `output_dim_specs` attribute (when the producing
+//      conversion pre-attached a DimSpec — Category-C producers, etc.).
+//   2. Registered builder for `op->getName()` (this is how passthrough,
+//      elementwise/broadcast, reduction, etc. ops contribute without
+//      every conversion having to attach an attribute).
+//   3. Static-type fallback: if the result MLIR type has a known dim
+//      size at this index, return DimSpec::makeStatic(dim_size).
+//   4. Otherwise an empty DimSpec — the caller is expected to either
+//      walk further back through the producer chain or treat the
+//      result as un-resolvable here.
 DimSpec getResultDimSpec(mlir::Operation *op, unsigned result_index,
                          unsigned dim_index);
 

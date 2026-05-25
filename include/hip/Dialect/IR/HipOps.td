@@ -2672,4 +2672,61 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+def Hip_ShapeOp : Hip_DpsOp<"shape"> {
+  let summary = "Materialise tensor shape into an i64 vector (ONNX Shape, dynamic input path)";
+  let description = [{
+    Implements ONNX Shape semantics for the *dynamic-input* path. The
+    static-input path is folded directly to `arith.constant` in
+    `ShapeConversion.cpp` and never reaches this op — every output element
+    is a compile-time constant in that case.
+
+    This op is emitted when at least one input dim is dynamic (typically
+    because the input came from a Category-C producer such as NonZero).
+    The op carries one `DimSpec` per output element in `element_dim_specs`,
+    serialised the same way the per-op `output_dim_specs` is for other
+    Category-C ops; each entry is a flat `ArrayAttr` of DimSpec nodes
+    rooted at index 0.
+
+    At HIP→LLVM time the lowering materialises each DimSpec to a single
+    i64 SSA value (using `arith.constant` for Static leaves and
+    `hipdnn_ep_state_read_dim` calls for RuntimeSlot leaves), packs them
+    into a host-side stack buffer via `llvm.alloca`, and hands that buffer
+    to the `wrap_shape` runtime which does a single `hipMemcpyAsync` H2D
+    into the destination GPU memref.
+
+    Shape does NOT publish any slot — it only *reads* slots that earlier
+    Category-C producers published. Downstream consumers may still see a
+    rank-1 i64 tensor of dynamic length in some MLIR snapshots; in
+    practice ONNX Shape always has a compile-time-known result length
+    (`end - start`, clamped against the input rank), so the output type
+    is fully static.
+
+    Uses destination-passing style: the output buffer is provided as an
+    argument and the wrapper writes the i64 values into it.
+
+    Example:
+    ```mlir
+    hip.shape(%ctx) ins(%nonzero_result : memref<2x?xi64, 1>)
+                    outs(%out : memref<2xi64, 1>)
+                    {element_dim_specs = [
+                      [[0, 2]],            // Static 2
+                      [[3, 0, 0, 0, 0, 0]] // RuntimeSlot(0)
+                    ]}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y,
+    ArrayAttr:$element_dim_specs
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS

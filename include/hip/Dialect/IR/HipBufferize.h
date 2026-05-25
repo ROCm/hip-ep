@@ -125,6 +125,9 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
+    ConstantOfShapeOp::attachInterface<
+        HipDstBufferizableModel<ConstantOfShapeOp>>(*ctx);
+    ShapeOp::attachInterface<HipDstBufferizableModel<ShapeOp>>(*ctx);
   });
 }
 
