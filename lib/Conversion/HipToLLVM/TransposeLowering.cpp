@@ -48,8 +48,15 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
       return rewriter.notifyMatchFailure(op, "unsupported element bit width");
 
     Value statePtr = adaptor.getCtx();
-    Value inputPtr =
-        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    // Operand 1 is `input`; operand 2 is `output`. When `hip-annotate-
+    // input-dim-slots` has tagged the input as consuming a Cat-C slot,
+    // the descriptor's `alignedPtr` points at the upper-bound DPS init
+    // buffer (uninitialised — the producer wrote into a separately
+    // allocated exact-size buffer published via the slot table). Read
+    // the published pointer instead so the transpose kernel sees the
+    // actual data.
+    Value inputPtr = extractContiguousMemRefPtrWithSlot(
+        op, /*operandIdx=*/1, adaptor.getInput(), statePtr, rewriter, loc);
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -71,9 +78,16 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
 
     // Populate input_shape via per-dim load from the memref descriptor (static
     // dims fold to constants; dynamic dims hit the descriptor sizes array).
+    // For dynamic dims annotated by `hip-annotate-input-dim-slots` we read
+    // the runtime-published value from the slot table instead of the
+    // descriptor — the descriptor encodes the upper-bound pool size, not
+    // the post-Category-C actual count. Operand 1 is the `input` (operand 0
+    // is the `!hip.context`).
+    constexpr unsigned kInputOperandIdx = 1;
     for (int64_t i = 0; i < rank; ++i) {
-      Value dimVal = getMemRefDimSize(inputType, static_cast<unsigned>(i),
-                                      adaptor.getInput(), rewriter, loc);
+      Value dimVal = getMemRefDimSizeWithSlot(
+          op, kInputOperandIdx, inputType, static_cast<unsigned>(i),
+          adaptor.getInput(), statePtr, rewriter, loc);
       Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                               rewriter.getI32IntegerAttr(i));
       Value gep = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
@@ -94,8 +108,17 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
       LLVM::StoreOp::create(rewriter, loc, permConst, gep);
     }
 
-    Value numElems =
-        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
+    // num_elements: product of input_shape, honouring the slot-aware dim
+    // reads above so the kernel writes only the runtime-published count of
+    // elements (not the upper-bound pool allocation).
+    Value numElems = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+    for (int64_t i = 0; i < rank; ++i) {
+      Value dimVal = getMemRefDimSizeWithSlot(
+          op, kInputOperandIdx, inputType, static_cast<unsigned>(i),
+          adaptor.getInput(), statePtr, rewriter, loc);
+      numElems = LLVM::MulOp::create(rewriter, loc, numElems, dimVal);
+    }
 
     // int wrap_transpose(RuntimeState* state, void* input, void* output,
     //                    int64_t rank, const int64_t* input_shape,

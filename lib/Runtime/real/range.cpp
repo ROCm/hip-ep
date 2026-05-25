@@ -10,6 +10,10 @@
 
 #include <hip/hip_runtime.h>
 
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype) {
   if (!state || !start || !limit || !delta || !output) {
@@ -49,9 +53,16 @@ static size_t hipDTypeElementSize(int64_t hip_dtype) {
 // pre-resolve the output length because the operands aren't host-readable
 // without a D2H stage, so the wrapper:
 //
-//   1. Stages start / limit / delta to host (3 i64 scalars, synchronous D2H).
-//   2. Computes the output length on host (CeilDiv((limit-start), delta)
-//      following ONNX Range semantics, with empty-range clamp).
+//   1. Stages start / limit / delta to host (3 scalars of `hip_dtype`,
+//      synchronous D2H).
+//   2. Computes the output length on host using ONNX Range semantics
+//      (`ceil((limit-start) / delta)` with empty-range clamping). For
+//      integer dtypes the computation is exact in i64. For floating-point
+//      dtypes it follows ONNX's `max(ceil((limit - start) / delta), 0)`
+//      formulation, evaluated in double precision to avoid f32 rounding
+//      bias on borderline inputs (e.g. start=0.0, limit=8.0, delta=1.0
+//      must give N=8 rather than N=7 due to a representable-difference
+//      underestimate).
 //   3. Publishes the resolved length to dyn slot `slot_id`.
 //   4. Allocates `length * element_size` bytes from the GPU dyn pool and
 //      publishes the buffer pointer to the same slot.
@@ -59,12 +70,12 @@ static size_t hipDTypeElementSize(int64_t hip_dtype) {
 //      output. The EP reads the slot post-compute and D2H-copies the
 //      buffer into the actual-sized ORT OrtValue.
 //
-// Today we only support i64 element type for the Category-C path (the
-// only dtype Qwen-style embedding lookups use); extending to int32/i16/
-// float32/double is straightforward (just teach `decodeI64Scalar` to
-// handle wider/narrower element types). Mixed-type Range falls back to
-// the static `wrap_range` (which the compiler refuses to emit a Category
-// -C dispatch for, by construction).
+// Supported element types: i64 (HIP_DTYPE_INT64=2), i32 (=3), f32 (=0).
+// These are the only types ONNX Range accepts that the rest of the
+// runtime (custom kernel + ORT) also supports. f16 is rejected by ORT
+// at graph load time (Range f16 is not in the spec); f64/i16 are rare
+// in practice. Mixed-element-type Range is impossible by ONNX Range's
+// schema (all three operands share the same T).
 extern "C" int wrap_range_dyn(RuntimeState *state, void *start, void *limit,
                               void *delta, int64_t hip_dtype,
                               int32_t slot_id) {
@@ -75,28 +86,33 @@ extern "C" int wrap_range_dyn(RuntimeState *state, void *start, void *limit,
 
   hipStream_t stream = static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
-  // Currently only i64 element type is supported on the Category-C path.
-  // The compiler-side gate in RangeConversion mirrors this constraint.
-  if (hip_dtype != /*HIP_DTYPE_INT64=*/2) {
+  const size_t elem_bytes = hipDTypeElementSize(hip_dtype);
+  if (elem_bytes == 0) {
     fprintf(stderr,
-            "[REAL] wrap_range_dyn: hip_dtype=%lld not supported on the "
-            "Category-C path (only HIP_DTYPE_INT64 = 2 today)\n",
+            "[REAL] wrap_range_dyn: unsupported hip_dtype=%lld (no element "
+            "size known)\n",
             (long long)hip_dtype);
     return -1;
   }
 
-  int64_t h_start = 0, h_limit = 0, h_delta = 0;
-  if (hipMemcpyAsync(&h_start, start, sizeof(int64_t), hipMemcpyDeviceToHost,
+  // Stage the three scalars to host. The dyn buffer is one contiguous
+  // {start, limit, delta} layout to issue a single D2H copy instead of
+  // three (lower API call count, plus the ranges sit on a single 24B
+  // cache line for the host-side compute below).
+  alignas(8) unsigned char h_buf[3 * 8] = {0};
+  // 8B per slot up to i64/f64; smaller types occupy the low bytes of
+  // their slot, so the per-type decode below picks the right prefix.
+  if (hipMemcpyAsync(&h_buf[0], start, elem_bytes, hipMemcpyDeviceToHost,
                      stream) != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_range_dyn: D2H start failed\n");
     return -1;
   }
-  if (hipMemcpyAsync(&h_limit, limit, sizeof(int64_t), hipMemcpyDeviceToHost,
+  if (hipMemcpyAsync(&h_buf[8], limit, elem_bytes, hipMemcpyDeviceToHost,
                      stream) != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_range_dyn: D2H limit failed\n");
     return -1;
   }
-  if (hipMemcpyAsync(&h_delta, delta, sizeof(int64_t), hipMemcpyDeviceToHost,
+  if (hipMemcpyAsync(&h_buf[16], delta, elem_bytes, hipMemcpyDeviceToHost,
                      stream) != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_range_dyn: D2H delta failed\n");
     return -1;
@@ -106,28 +122,75 @@ extern "C" int wrap_range_dyn(RuntimeState *state, void *start, void *limit,
     return -1;
   }
 
-  // ONNX Range semantics:
-  //   delta > 0 and limit > start  -> N = ceil_div(limit - start, delta)
-  //   delta < 0 and limit < start  -> N = ceil_div(start - limit, -delta)
-  //   otherwise empty -> N = 0
+  // ONNX Range semantics for each dtype.
   int64_t N = 0;
-  if (h_delta > 0 && h_limit > h_start) {
-    int64_t diff = h_limit - h_start;
-    N = (diff + h_delta - 1) / h_delta;
-  } else if (h_delta < 0 && h_limit < h_start) {
-    int64_t diff = h_start - h_limit;
-    int64_t neg = -h_delta;
-    N = (diff + neg - 1) / neg;
+  double dbg_start = 0.0, dbg_limit = 0.0, dbg_delta = 0.0;
+
+  if (hip_dtype == /*HIP_DTYPE_INT64=*/2) {
+    int64_t s, l, d;
+    std::memcpy(&s, &h_buf[0], sizeof(int64_t));
+    std::memcpy(&l, &h_buf[8], sizeof(int64_t));
+    std::memcpy(&d, &h_buf[16], sizeof(int64_t));
+    dbg_start = (double)s; dbg_limit = (double)l; dbg_delta = (double)d;
+    if (d > 0 && l > s)        N = (l - s + d - 1) / d;
+    else if (d < 0 && l < s)   N = (s - l + (-d) - 1) / (-d);
+  } else if (hip_dtype == /*HIP_DTYPE_INT32=*/3) {
+    int32_t s, l, d;
+    std::memcpy(&s, &h_buf[0], sizeof(int32_t));
+    std::memcpy(&l, &h_buf[8], sizeof(int32_t));
+    std::memcpy(&d, &h_buf[16], sizeof(int32_t));
+    dbg_start = (double)s; dbg_limit = (double)l; dbg_delta = (double)d;
+    if (d > 0 && l > s)        N = ((int64_t)l - s + d - 1) / d;
+    else if (d < 0 && l < s)   N = ((int64_t)s - l + (-d) - 1) / (-d);
+  } else if (hip_dtype == /*HIP_DTYPE_FLOAT32=*/0) {
+    float s, l, d;
+    std::memcpy(&s, &h_buf[0], sizeof(float));
+    std::memcpy(&l, &h_buf[8], sizeof(float));
+    std::memcpy(&d, &h_buf[16], sizeof(float));
+    dbg_start = (double)s; dbg_limit = (double)l; dbg_delta = (double)d;
+    // ONNX f32 Range: N = max(ceil((limit - start) / delta), 0). We
+    // evaluate in double to keep the count exact on borderline inputs.
+    double diff = (double)l - (double)s;
+    double dd = (double)d;
+    if (dd > 0.0 && diff > 0.0) {
+      double n_f = std::ceil(diff / dd);
+      N = (int64_t)n_f;
+    } else if (dd < 0.0 && diff < 0.0) {
+      double n_f = std::ceil(diff / dd);
+      N = (int64_t)n_f;
+    }
+  } else if (hip_dtype == /*HIP_DTYPE_FLOAT64=*/4) {
+    double s, l, d;
+    std::memcpy(&s, &h_buf[0], sizeof(double));
+    std::memcpy(&l, &h_buf[8], sizeof(double));
+    std::memcpy(&d, &h_buf[16], sizeof(double));
+    dbg_start = s; dbg_limit = l; dbg_delta = d;
+    double diff = l - s;
+    if (d > 0.0 && diff > 0.0)        N = (int64_t)std::ceil(diff / d);
+    else if (d < 0.0 && diff < 0.0)   N = (int64_t)std::ceil(diff / d);
+  } else if (hip_dtype == /*HIP_DTYPE_INT16=*/6) {
+    int16_t s, l, d;
+    std::memcpy(&s, &h_buf[0], sizeof(int16_t));
+    std::memcpy(&l, &h_buf[8], sizeof(int16_t));
+    std::memcpy(&d, &h_buf[16], sizeof(int16_t));
+    dbg_start = (double)s; dbg_limit = (double)l; dbg_delta = (double)d;
+    if (d > 0 && l > s)        N = ((int64_t)l - s + d - 1) / d;
+    else if (d < 0 && l < s)   N = ((int64_t)s - l + (-d) - 1) / (-d);
+  } else {
+    fprintf(stderr,
+            "[REAL] wrap_range_dyn: hip_dtype=%lld not supported on the "
+            "Category-C path\n",
+            (long long)hip_dtype);
+    return -1;
   }
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_range_dyn: start=%lld limit=%lld delta=%lld "
-                    "-> N=%lld slot=%d\n",
-                    (long long)h_start, (long long)h_limit, (long long)h_delta,
+  RUNTIME_DEBUG_LOG("[REAL] wrap_range_dyn: dtype=%lld start=%g limit=%g "
+                    "delta=%g -> N=%lld slot=%d\n",
+                    (long long)hip_dtype, dbg_start, dbg_limit, dbg_delta,
                     (long long)N, slot_id);
 
   hipdnn_ep_state_publish_dim(state, slot_id, N);
 
-  const size_t elem_bytes = hipDTypeElementSize(hip_dtype);
   void *buf = nullptr;
   if (N > 0) {
     buf = hipdnn_ep_state_dyn_pool_alloc(

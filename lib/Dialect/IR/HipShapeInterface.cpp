@@ -12,10 +12,13 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <mutex>
 #include <sstream>
 
 namespace mlir {
@@ -318,6 +321,69 @@ bool DimSpec::printArrayAttr(mlir::ArrayAttr attr, llvm::raw_ostream &os) {
   return true;
 }
 
+std::vector<std::vector<DimSpec>>
+DimSpec::parseOutputDimSpecsAttr(mlir::ArrayAttr attr) {
+  std::vector<std::vector<DimSpec>> result;
+  if (!attr)
+    return result;
+  result.reserve(attr.size());
+  for (mlir::Attribute outer : attr) {
+    auto perOutput = llvm::dyn_cast<mlir::ArrayAttr>(outer);
+    std::vector<DimSpec> dims;
+    if (!perOutput) {
+      // Malformed entry — push an empty per-output vector so the outer
+      // index keeps lining up with the model output index. Caller is
+      // expected to spot the empty vector and report.
+      result.push_back(std::move(dims));
+      continue;
+    }
+    dims.reserve(perOutput.size());
+    for (mlir::Attribute inner : perOutput) {
+      auto perDim = llvm::dyn_cast<mlir::ArrayAttr>(inner);
+      if (!perDim) {
+        dims.emplace_back(); // empty DimSpec
+        continue;
+      }
+      dims.push_back(parseFromArrayAttr(perDim));
+    }
+    result.push_back(std::move(dims));
+  }
+  return result;
+}
+
+bool DimSpec::printOutputDimSpecsAttr(mlir::ArrayAttr attr,
+                                      llvm::raw_ostream &os) {
+  if (!attr) {
+    os << "  <no hipdnn.output_dim_specs attribute on module>\n";
+    return false;
+  }
+  auto parsed = parseOutputDimSpecsAttr(attr);
+  if (parsed.empty()) {
+    os << "  <hipdnn.output_dim_specs is empty>\n";
+    return true;
+  }
+  bool ok = true;
+  for (size_t i = 0; i < parsed.size(); ++i) {
+    const auto &dims = parsed[i];
+    if (dims.empty()) {
+      // ComposeDimSpecs uses an empty inner ArrayAttr to mean
+      // "nothing was recorded for this output" — typically a legacy
+      // output with all-static shape that the pass left untouched.
+      os << "  Output[" << i << "]: <no dim_specs entries>\n";
+      continue;
+    }
+    for (size_t d = 0; d < dims.size(); ++d) {
+      os << "  Output[" << i << "] dim[" << d << "] = ";
+      if (dims[d].nodes_.empty()) {
+        os << "<no spec>\n";
+        continue;
+      }
+      os << dims[d].toString() << "\n";
+    }
+  }
+  return ok;
+}
+
 //===----------------------------------------------------------------------===//
 // DimSpec - verification
 //===----------------------------------------------------------------------===//
@@ -412,22 +478,53 @@ bool isFuncEntryBlockArg(mlir::Value v, int32_t &arg_index) {
 // EP-visible input index is the count of non-context args before this
 // arg. Returns -1 if `arg_index` is a HIP context arg.
 int32_t computeEpInputIndex(mlir::func::FuncOp funcOp, int32_t arg_index);
+
+// Per-op DimSpec builder registry. Populated once from
+// `HipDialect::initialize()` via `populateBuiltinDimSpecBuilders()`.
+// Lookup is read-only at pattern time so no per-call lock is needed; the
+// `std::call_once` in `populateBuiltinDimSpecBuilders` guards the
+// initialisation race when several MLIRContexts spin up concurrently.
+llvm::StringMap<DimSpecBuilderFn> &getBuilderRegistry() {
+  static llvm::StringMap<DimSpecBuilderFn> registry;
+  return registry;
+}
 } // namespace
+
+void registerOpDimSpecBuilder(llvm::StringRef op_name,
+                              DimSpecBuilderFn fn) {
+  getBuilderRegistry()[op_name] = fn;
+}
 
 DimSpec getResultDimSpec(mlir::Operation *op, unsigned result_index,
                          unsigned dim_index) {
   if (!op)
     return emptySpec();
-  // Per-op `output_dim_specs` attribute wins.
+  // Strategy 1 — per-op `output_dim_specs` attribute wins.
   DimSpec specFromAttr = getFromOpDimSpecsAttr(op, result_index, dim_index);
   if (!specFromAttr.nodes().empty())
     return specFromAttr;
-  // Default: copy the static MLIR type dim when known. Guard against the
-  // DPS-after-bufferize case: ops like `hip.range` lose their results
-  // after `BufferResultsToOutParams` (writes into an out-param memref
-  // instead), so `op->getResult(result_index)` would assert. In that
-  // case `result_index` is requested by ComposeDimSpecs scanning the
-  // out-param users and we have nothing more to add.
+
+  // Strategy 2 — registered per-op builder. This is how rank-preserving,
+  // elementwise/broadcast, and other "shape-behavior class" ops
+  // contribute without every conversion having to pre-attach an
+  // attribute. The builder is responsible for walking the op's operands
+  // (typically via `resolveDimFromValue`) and returning a composed
+  // DimSpec. An empty return is a "I cannot resolve this here" signal
+  // and falls through to strategy 3.
+  auto &registry = getBuilderRegistry();
+  auto it = registry.find(op->getName().getStringRef());
+  if (it != registry.end()) {
+    DimSpec built = it->second(op, result_index, dim_index);
+    if (!built.nodes().empty())
+      return built;
+  }
+
+  // Strategy 3 — copy the static MLIR type dim when known. Guard against
+  // the DPS-after-bufferize case: ops like `hip.range` lose their
+  // results after `BufferResultsToOutParams` (writes into an out-param
+  // memref instead), so `op->getResult(result_index)` would assert. In
+  // that case `result_index` is requested by ComposeDimSpecs scanning
+  // the out-param users and we have nothing more to add.
   if (result_index >= op->getNumResults())
     return emptySpec();
   mlir::Value result = op->getResult(result_index);
@@ -512,6 +609,37 @@ int32_t computeEpInputIndex(mlir::func::FuncOp funcOp, int32_t arg_index) {
 }
 } // namespace
 
+// After bufferize-to-out-params + pool-allocs, a SSA value referencing
+// e.g. a NonZero output looks like `%v = memref.view %pool[%off][]` —
+// the "defining op" is `memref.view` / `memref.alloc`, NOT the
+// `hip.nonzero` that actually populated the buffer. Walk the use-list
+// of `v` and prefer the DPS-init writer (the first Hip-dialect op that
+// uses `v` as a DPS output) as the producer for DimSpec queries; this
+// lets RuntimeSlot leaves attached on `hip.nonzero` etc. flow through
+// any number of intermediate consumers.
+//
+// Returns `nullptr` (with `*resIdx` unchanged) if no DPS writer is
+// found — callers should then fall back to `v.getDefiningOp()`.
+static mlir::Operation *findDpsWriter(mlir::Value v, unsigned *resIdx) {
+  for (mlir::Operation *user : v.getUsers()) {
+    auto dpsOp = llvm::dyn_cast<mlir::DestinationStyleOpInterface>(user);
+    if (!dpsOp)
+      continue;
+    if (user->getDialect() !=
+        user->getContext()->getLoadedDialect<mlir::hip::HipDialect>())
+      continue;
+    auto inits = dpsOp.getDpsInits();
+    for (auto [i, init] : llvm::enumerate(inits)) {
+      if (init == v) {
+        if (resIdx)
+          *resIdx = static_cast<unsigned>(i);
+        return user;
+      }
+    }
+  }
+  return nullptr;
+}
+
 DimSpec resolveDimFromValue(mlir::Value v, unsigned dim_index) {
   if (!v)
     return emptySpec();
@@ -535,7 +663,28 @@ DimSpec resolveDimFromValue(mlir::Value v, unsigned dim_index) {
     }
     return DimSpec::makeInputDim(epIdx, (int32_t)dim_index);
   }
-  // Producer chain: defer to the producing op's getResultDimSpec.
+  // Producer chain: prefer the DPS writer (post-bufferize) over the
+  // raw defining op (pre-bufferize). Without this, after bufferize
+  // every memref operand's `getDefiningOp()` is `memref.alloc` /
+  // `memref.view` which carries no DimSpec — and the chain would
+  // silently break at the first bufferized hop.
+  if (auto shaped = llvm::dyn_cast<mlir::ShapedType>(v.getType())) {
+    if (llvm::isa<mlir::MemRefType>(shaped)) {
+      unsigned writerResIdx = 0;
+      if (mlir::Operation *writer = findDpsWriter(v, &writerResIdx)) {
+        // For 0-result DPS ops (post-bufferize), `getResultDimSpec`
+        // reads the per-op `output_dim_specs` attribute keyed on the
+        // ORIGINAL result index. The writer index returned by
+        // `findDpsWriter` is the DPS-init operand index, which
+        // mirrors the original result position for every Hip_DpsOp
+        // (one result per init operand pre-bufferize).
+        DimSpec specFromWriter =
+            getResultDimSpec(writer, writerResIdx, dim_index);
+        if (!specFromWriter.nodes().empty())
+          return specFromWriter;
+      }
+    }
+  }
   mlir::Operation *producer = v.getDefiningOp();
   if (!producer)
     return emptySpec();
@@ -566,6 +715,171 @@ DimSpec resolveValueFromI64Tensor(mlir::Value v, int64_t flat_offset) {
     return DimSpec::makeInputValueI64(epIdx, flat_offset);
   }
   return emptySpec();
+}
+
+//===----------------------------------------------------------------------===//
+// Built-in DimSpec builders
+//===----------------------------------------------------------------------===//
+//
+// One builder per "shape behavior" class — they cover whole groups of ops
+// at a time so adding a new op with the same behavior is a one-line
+// registration call below. Builders are deliberately tolerant: if they
+// cannot resolve a dim they return empty so `getResultDimSpec` falls
+// through to the static-type strategy.
+
+namespace {
+
+// Walk-back helper that prefers static / non-empty over empty without
+// hard-failing. Returns empty when `v` is null. Used by all builders.
+DimSpec resolveOperandDim(mlir::Value v, unsigned dim_index) {
+  if (!v)
+    return emptySpec();
+  return resolveDimFromValue(v, dim_index);
+}
+
+// Rank-preserving permutation builder. Handles `hip.transpose`: output
+// dim `d` is exactly input dim `perm[d]`. Operand 0 is the `!hip.context`
+// arg; operand 1 is the data tensor.
+//
+// `perm` is required by the op verifier (TransposeOp::verify) so we
+// assert presence; bail to empty if anything unexpected appears in the
+// attr to stay graceful in the face of partially-converted IR.
+DimSpec buildTransposeDimSpec(mlir::Operation *op, unsigned result_index,
+                              unsigned dim_index) {
+  if (op->getNumOperands() < 2 || result_index != 0)
+    return emptySpec();
+  auto permAttr = op->getAttrOfType<mlir::ArrayAttr>("perm");
+  if (!permAttr || dim_index >= permAttr.size())
+    return emptySpec();
+  auto intAttr =
+      llvm::dyn_cast<mlir::IntegerAttr>(permAttr[dim_index]);
+  if (!intAttr)
+    return emptySpec();
+  int64_t srcDim = intAttr.getValue().getSExtValue();
+  if (srcDim < 0)
+    return emptySpec();
+  mlir::Value data = op->getOperand(1);
+  return resolveOperandDim(data, (unsigned)srcDim);
+}
+
+// NumPy-style broadcast builder. Covers every elementwise / broadcast op
+// (add/mul/sub/div/min/max/equal/less/and/not/cos/sin/neg/sign/mod/cast
+// /silu/sigmoid/softplus/gelu/reciprocal/sqrt/where/pow/...). The
+// op-signature convention is: operand 0 is `!hip.context`, the last
+// operand is the DPS init/output buffer, and everything in between is a
+// data input that participates in broadcast.
+//
+// Broadcast semantics: right-align all operand ranks against the result
+// rank. For output dim `d` (front-indexed), the contribution from
+// operand `k` is `operand_k_dim[d - (out_rank - operand_k_rank)]`, or
+// "no contribution" when that index would be negative. A static dim of
+// 1 means "broadcast me", so prefer any other operand whose dim resolves
+// to either a non-Static-1 value or a non-empty DimSpec.
+//
+// Result: the *first* operand whose contribution at this position is
+// (a) non-empty and (b) not static-1. Falls back to "any non-empty"
+// (incl. static-1) when nothing else exists. Returns empty when every
+// participating operand returns empty — caller hits static-type fallback.
+DimSpec buildBroadcastDimSpec(mlir::Operation *op, unsigned result_index,
+                              unsigned dim_index) {
+  if (op->getNumOperands() < 3 || result_index != 0)
+    return emptySpec();
+  // Determine the output rank from the result type (tensor mode) or the
+  // last operand's type (memref/DPS mode after bufferize). Both are
+  // ShapedType.
+  unsigned outRank = 0;
+  if (op->getNumResults() > 0) {
+    auto t = llvm::dyn_cast<mlir::ShapedType>(
+        op->getResult(0).getType());
+    if (!t || !t.hasRank())
+      return emptySpec();
+    outRank = (unsigned)t.getRank();
+  } else {
+    auto t = llvm::dyn_cast<mlir::ShapedType>(
+        op->getOperand(op->getNumOperands() - 1).getType());
+    if (!t || !t.hasRank())
+      return emptySpec();
+    outRank = (unsigned)t.getRank();
+  }
+  if (dim_index >= outRank)
+    return emptySpec();
+
+  // Data operands span [1, N-1) in tensor mode (last operand is the
+  // DPS init) and [1, N) in memref mode (no result, the init is the
+  // last operand but still counts as a buffer — we exclude it the same
+  // way by stopping before N-1, since after bufferize the init is also
+  // a memref of the output shape, which gives the SAME broadcast info
+  // as the result type).
+  unsigned firstData = 1;
+  unsigned pastEnd = op->getNumOperands() - 1;
+  if (pastEnd <= firstData)
+    return emptySpec();
+
+  DimSpec fallback = emptySpec();
+  for (unsigned k = firstData; k < pastEnd; ++k) {
+    mlir::Value v = op->getOperand(k);
+    auto t = llvm::dyn_cast<mlir::ShapedType>(v.getType());
+    if (!t || !t.hasRank())
+      continue;
+    int64_t shift = (int64_t)outRank - (int64_t)t.getRank();
+    int64_t opIdx = (int64_t)dim_index - shift;
+    if (opIdx < 0 || opIdx >= t.getRank())
+      continue; // operand doesn't reach this dim (broadcast as 1)
+    // Skip operands whose dim is statically 1 — they're broadcast over.
+    // We still keep them as a last-resort fallback in case every other
+    // operand returns empty.
+    int64_t staticDim = t.getDimSize(opIdx);
+    DimSpec d = resolveOperandDim(v, (unsigned)opIdx);
+    if (d.nodes().empty())
+      continue;
+    if (!mlir::ShapedType::isDynamic(staticDim) && staticDim == 1) {
+      if (fallback.nodes().empty())
+        fallback = d;
+      continue;
+    }
+    return d; // first non-broadcast operand wins
+  }
+  return fallback;
+}
+
+} // namespace
+
+void populateBuiltinDimSpecBuilders() {
+  // Idempotent — guarded so multiple MLIRContext spin-ups don't race.
+  static std::once_flag once;
+  std::call_once(once, [] {
+    // Rank-preserving permutation.
+    registerOpDimSpecBuilder("hip.transpose", buildTransposeDimSpec);
+
+    // Elementwise / broadcast (binary).
+    registerOpDimSpecBuilder("hip.add", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.sub", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.mul", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.div", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.min", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.equal", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.less", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.and", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.mod", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.where", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.miopen.add", buildBroadcastDimSpec);
+
+    // Elementwise unary — these never broadcast (rank+shape == input
+    // exactly), so the broadcast builder degenerates to "input operand
+    // dim k for output dim k". Same registration works.
+    registerOpDimSpecBuilder("hip.not", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.neg", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.cos", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.sin", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.sign", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.silu", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.sigmoid", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.softplus", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.gelu", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.reciprocal", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.sqrt", buildBroadcastDimSpec);
+    registerOpDimSpecBuilder("hip.cast", buildBroadcastDimSpec);
+  });
 }
 
 } // namespace shape_interface

@@ -242,6 +242,30 @@ public:
     llvm::SmallVector<Attribute> perOutputDimSpecAttrs(numOutputs, nullptr);
     int32_t maxSlotIdSeen = -1;
 
+    // Walk every op in main_graph and collect slot ids referenced by op
+    // attributes. Without this, slots claimed by Category-C wrappers
+    // (e.g. `wrap_nonzero` slot 0) whose published dim is never reflected
+    // in a function-output `RuntimeSlot` leaf — typical when the
+    // intermediate output is consumed only by something like `Shape()`
+    // that converts the dim into a static-typed payload — would not
+    // contribute to `hipdnn.dyn_dim_slots_count`. The runtime then aborts
+    // at publish_dim time with "slot_id N out of range [0, 0)". This
+    // mirrors the same scan done by ComposeDimSpecs for output-bound
+    // slots, but covers ALL slot publishers regardless of whether their
+    // slot is referenced from a function output.
+    mainFunc.getBody().walk([&](Operation *op) {
+      if (auto sidAttr = op->getAttrOfType<IntegerAttr>("slot_id")) {
+        int32_t s = static_cast<int32_t>(sidAttr.getInt());
+        if (s > maxSlotIdSeen)
+          maxSlotIdSeen = s;
+      }
+      if (auto sidsAttr = op->getAttrOfType<DenseI32ArrayAttr>("slot_ids")) {
+        for (int32_t s : sidsAttr.asArrayRef())
+          if (s > maxSlotIdSeen)
+            maxSlotIdSeen = s;
+      }
+    });
+
     // Resolve the source value (and, if applicable, the producing op
     // when the out-param is consumed via DPS) for a given out-param
     // block-argument. The two cases:
@@ -329,11 +353,17 @@ public:
             if (!via_attr.nodes().empty()) {
               auto kind = via_attr.root().kind;
               if (kind == DimSpecKind::Static ||
-                  kind == DimSpecKind::InputDim ||
-                  kind == DimSpecKind::InputValueI64 ||
                   kind == DimSpecKind::RuntimeSlot) {
+                // Universal leaves (no operand reference): use as-is.
+                // Static is a literal; RuntimeSlot is keyed on a global
+                // slot id namespace that doesn't shift across ops.
                 ds = via_attr;
               } else {
+                // InputDim / InputValueI64 / arithmetic trees attached
+                // to a producer op all use OPERAND-RELATIVE indices in
+                // the producer's own scope. They must be re-walked
+                // through the producer's operands to be lifted into
+                // func-arg-relative indices the EP resolver can read.
                 ds = composeSpecFromOpSpec(srcInfo.dps_producer, via_attr);
               }
             }

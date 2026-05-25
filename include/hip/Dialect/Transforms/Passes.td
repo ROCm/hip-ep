@@ -267,6 +267,116 @@ def ComposeDimSpecsPass
   ];
 }
 
+def AnnotateInputDimSlotsPass
+    : Pass<"hip-annotate-input-dim-slots", "mlir::ModuleOp"> {
+  let summary = "Tag every consumer operand with the (dim_idx, slot_id) "
+                "pairs of any RuntimeSlot leaves in the producer's "
+                "output_dim_specs (transitively)";
+  let description = [{
+    Walks every op in the module. For each operand whose producer's
+    `output_dim_specs` (resolved via `shape_interface::getResultDimSpec`)
+    contains one or more `RuntimeSlot` leaves, attaches a per-operand
+    `hipdnn.input_dim_slots` attribute. The attribute is an `ArrayAttr`
+    with one entry per operand of the op; each entry is itself an
+    `ArrayAttr` of `DenseI32ArrayAttr` two-element arrays `[dim_idx,
+    slot_id]`, listing every dynamic dim of that operand that resolves
+    to a slot.
+
+    Rationale: bufferized memrefs encode the *upper-bound* shape (the
+    DPS init buffer that pool-allocs allocated). The HipToLLVM lowering
+    of consumer ops would otherwise read `descriptor.sizes[d]` of the
+    upper-bound buffer for any dynamic dim — that value is the
+    pre-allocated maximum, not the runtime-published exact size. By
+    propagating the slot-id at compile time, the per-op lowering can
+    emit a `hipdnn_ep_state_read_dim(state, slot_id)` call for the
+    affected dim and feed the kernel the right element count.
+
+    Producers handled today:
+      * `hip.nonzero` (slot dim is the N output)
+      * Any op whose `output_dim_specs` contains a `RuntimeSlot` leaf
+        is treated as a producer, so future Category-C ops opt-in
+        automatically.
+
+    Consumer ops handled (lowering-side honour of the attribute):
+      * `hip.transpose` (input dim size determines output element count)
+      * `hip.scatter_nd` (indices dim 0 = number of scattered slices)
+      * `hip.shape` (dim values are the result tensor)
+      * `hip.slice` (data dim used in clamp; output dim sets write count)
+
+    Other consumers (gather, elementwise, etc.) work unchanged because
+    they either:
+      * have a static result shape (no dynamic dim to override), or
+      * route through an op whose lowering already calls back into
+        `hipdnn_ep_state_read_dim` directly (e.g. the dyn-pool path).
+
+    The pass is a pre-`convert-hip-to-llvm` annotator. It does not
+    rewrite IR — only adds attributes — so it is a *safe* analysis: a
+    subsequent lowering that does not look at the attribute remains
+    correct for the static-shape case and exhibits the pre-pass
+    behaviour for the dynamic case.
+
+    Pipeline position: between `hip-compose-dim-specs` and
+    `convert-hip-to-llvm`. Runs after ComposeDimSpecs only because
+    `RuntimeSlot` leaves are present on every op that publishes a slot
+    after `OnnxToHip`; ComposeDimSpecs does not modify per-op specs and
+    runs first only to keep the global `hipdnn.output_dim_specs`
+    annotation phase together.
+  }];
+  let dependentDialects = ["mlir::hip::HipDialect"];
+}
+
+def DumpDimSpecsPass : Pass<"hip-dump-dim-specs", "mlir::ModuleOp"> {
+  let summary = "Dump every per-op output_dim_specs and the module-level "
+                "composed hipdnn.output_dim_specs to stderr";
+  let description = [{
+    Analysis-only pass for the data-dependent dynamic output shape feature.
+    Walks the module and prints every DimSpec attached to a HIP op
+    (via the `output_dim_specs` / `element_dim_specs` attribute) as well as
+    the model-level composed attribute `hipdnn.output_dim_specs` produced
+    by `hip-compose-dim-specs`.
+
+    Output format (one DimSpec per line):
+        Output[i] dim[d] = mul(arg[0].shape[0], slot[3])
+                                                 ^^^^^^^ root of the tree
+    Same `toString()` form the EP-side resolver tracer uses, so DimSpec
+    diagnostics are textually consistent across compiler, EP, and runtime.
+
+    Useful when working on `OnnxToHip` conversions for ops that produce
+    dynamic-shape results, or when debugging a `ComposeDimSpecs`
+    composition that resolves to a surprising tree shape. Run via:
+        hip-mlir-opt --hip-dump-dim-specs <model.mlir>
+
+    Does not modify the IR.
+  }];
+  let dependentDialects = ["mlir::hip::HipDialect"];
+}
+
+def VerifyDimSpecsPass : Pass<"hip-verify-dim-specs", "mlir::ModuleOp"> {
+  let summary = "Verify that DimSpec metadata is structurally well-formed "
+                "and covers every dynamic result dim of @main_graph";
+  let description = [{
+    Analysis-only pass. Returns failure when any of the following hold:
+      * `hipdnn.output_dim_specs` exists but its outer rank does not
+        match the @main_graph result count, or its per-output inner
+        rank does not match each result's rank;
+      * any DimSpec tree fails `DimSpec::verify()` (cycle, invalid child
+        index, leaf with children, binary node with wrong arity, ...);
+      * any dynamic (`?`) dim of an @main_graph result has no
+        corresponding non-empty DimSpec entry. This catches a class of
+        latent bugs where `ComposeDimSpecs` silently failed to resolve
+        a dim and left an empty entry — the runtime would later
+        fall back to the legacy "-1 in shape" path and the EP would
+        treat the dim as "unknown", producing confusing downstream
+        crashes or wrong-shape allocations.
+      * a RuntimeSlot leaf references a slot_id >= `hipdnn.dyn_dim_slots_count`.
+
+    Typical use: as a final pre-emit gate inside a custom pipeline, or
+    as a debugging check after editing `ComposeDimSpecs`:
+        hip-mlir-opt --hip-compose-dim-specs --hip-verify-dim-specs <m.mlir>
+  }];
+  let dependentDialects = ["mlir::hip::HipDialect"];
+}
+
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
   let summary = "Replace extern memref.global constants with "

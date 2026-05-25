@@ -200,10 +200,22 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
       "hipdnn_ep_state_dyn_pool_alloc",
       "hipdnn_ep_state_dyn_pool_reset",
       "hipdnn_ep_state_dyn_slots_reset",
-      "inference_dyn_slot_get_dim",
-      "inference_dyn_slot_get_buffer",
-      "inference_dyn_slot_reset",
   };
+  // GenerateInterface only emits these three EP-facing shims when the
+  // module has Category-C output dims (dyn_dim_slots_count > 0). Asking
+  // lld-link to export a symbol that doesn't exist in the object file
+  // produces a hard "undefined symbol" error, so we mirror the
+  // GenerateInterface gate here: shims are conditionally exported.
+  // Category B / fully-static models keep the legacy export surface.
+  int32_t dynSlotsCountForExport = 0;
+  if (auto a =
+          module->getAttrOfType<mlir::IntegerAttr>("hipdnn.dyn_dim_slots_count"))
+    dynSlotsCountForExport = static_cast<int32_t>(a.getInt());
+  if (dynSlotsCountForExport > 0) {
+    export_symbols.push_back("inference_dyn_slot_get_dim");
+    export_symbols.push_back("inference_dyn_slot_get_buffer");
+    export_symbols.push_back("inference_dyn_slot_reset");
+  }
   std::vector<std::string> libraries;
   std::vector<std::string> library_paths;
   discoverLibraries(libraries, library_paths);

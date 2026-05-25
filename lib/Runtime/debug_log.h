@@ -80,10 +80,91 @@ inline bool hipdnn_ep_perf_enabled() {
   return enabled;
 }
 
+// ============================================================================
+// Dynamic-shape debug tracers (added with the data-dependent dynamic output
+// shapes feature). All three are zero-overhead when off: each gate is a
+// `static const bool` checked once at first use, then branch-predicted.
+//
+// HIPDNN_EP_DEBUG_SHAPES=1
+//     Dumps a one-line summary on the EP side for every dynamic output dim
+//     resolved at pre- and post-Compute() phases:
+//       [Shapes pre]  out[0] = [16, ?, ?]  spec[1]=RuntimeSlot(2) ...
+//       [Shapes post] out[0] = [16, 7, 8]  via slots {2: 7, 3: 8}
+//     Use this when you suspect ComposeDimSpecs is computing the wrong shape
+//     for an output but the kernels themselves are fine.
+//
+// HIPDNN_EP_TRACE_SLOTS=1
+//     Traces every publish_dim / read_dim / publish_buffer / read_buffer call
+//     inside the model.dll:
+//       [Slots] publish_dim(7) = 12     <- wrap_nonzero
+//       [Slots] read_dim(7)    = 12     <- wrap_shape consumer
+//     Use this when you need to confirm that a producer fires before its
+//     consumer, or to localize a read-before-publish abort.
+//
+// HIPDNN_EP_VALIDATE_SHAPES=1
+//     INTENTIONALLY NOT WIRED -- gate exists, no call site reads it. Setting
+//     this is currently a no-op. Designed-but-deferred: after every
+//     Compute() that produces a dynamic-shape output, would run the same
+//     subgraph on the ORT CPU EP and compare **shape only** (not values),
+//     diverging with LOG(ERROR) on mismatch. Deferred because the existing
+//     numeric suite (test/numeric/) already catches DimSpec / resolver bugs
+//     as fatal aborts or numeric divergence, and the framework cost of
+//     building, holding, and per-Compute()-running a second ORT session per
+//     fused MlirCustomOp is high relative to the residual coverage gain.
+//     See docs/design/dynamic-shape-debug-surface.md (`Deferred` section)
+//     for the full rationale, the slot-in point, and the trigger conditions
+//     for reviving it (new DimSpec node kinds, a real silent-shape-divergence
+//     bug, or post-DimSpec-composition compiler optimizations).
+// ============================================================================
+
+inline bool hipdnn_ep_debug_shapes_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_DEBUG_SHAPES");
+#else
+    const char *v = std::getenv("HIPDNN_EP_DEBUG_SHAPES");
+    return v && v[0] >= '1';
+#endif
+  }();
+  return enabled;
+}
+
+inline bool hipdnn_ep_trace_slots_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_TRACE_SLOTS");
+#else
+    const char *v = std::getenv("HIPDNN_EP_TRACE_SLOTS");
+    return v && v[0] >= '1';
+#endif
+  }();
+  return enabled;
+}
+
+inline bool hipdnn_ep_validate_shapes_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_VALIDATE_SHAPES");
+#else
+    const char *v = std::getenv("HIPDNN_EP_VALIDATE_SHAPES");
+    return v && v[0] >= '1';
+#endif
+  }();
+  return enabled;
+}
+
 #define RUNTIME_DEBUG_LOG(fmt, ...)                                            \
   do {                                                                         \
     if (hipdnn_ep_debug_enabled())                                             \
       fprintf(stderr, fmt, ##__VA_ARGS__);                                     \
+  } while (0)
+
+// Zero-overhead trace point for the dynamic-output slot ABI. Gated on
+// HIPDNN_EP_TRACE_SLOTS=1; argument-evaluation cost is zero when off.
+#define HIPDNN_EP_SLOT_TRACE(fmt, ...)                                         \
+  do {                                                                         \
+    if (hipdnn_ep_trace_slots_enabled())                                       \
+      fprintf(stderr, "[Slots] " fmt "\n", ##__VA_ARGS__);                     \
   } while (0)
 
 // Conditional fprintf to stderr, gated on HIPDNN_EP_PERF only (DEBUG does

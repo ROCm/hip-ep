@@ -1210,6 +1210,19 @@ int wrap_nonzero(RuntimeState *state, const void *input,
   return 0;
 }
 
+int wrap_shape(RuntimeState *state, void *output, int64_t num_elements,
+               const int64_t *host_values) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_shape\n");
+    return -1;
+  }
+  (void)output;
+  (void)host_values;
+  MOCK_PRINT("[MOCK] wrap_shape(num_elements=%lld)\n",
+             (long long)num_elements);
+  return 0;
+}
+
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {

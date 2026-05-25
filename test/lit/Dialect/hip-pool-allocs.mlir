@@ -84,11 +84,18 @@ func.func @mixed_element_types(
   return %alloc1 : memref<8x8xf16>
 }
 
-// ===== Single alloc: pass is a no-op (need >=2 allocs to pool) =====
+// ===== Single alloc: also pooled =====
+//
+// The pass previously short-circuited at fewer than 2 allocs, but that left
+// the single alloc to flow through `LowerAllocs` -> `hip.alloc` ->
+// `MemoryLowering` which lowers to a `hip_device_malloc` symbol the runtime
+// does not export. We now pool every alloc, even a single one, so the
+// dyn-pool path is the only allocation path the compiled model uses.
 //
 // CHECK-LABEL: func.func @single_alloc_noop
-// CHECK-NOT:     hip.get_pool
-// CHECK:         memref.alloc() : memref<8x8xf32>
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         memref.view {{.*}} : memref<?xi8> to memref<8x8xf32>
+// CHECK-NOT:     memref.alloc() : memref<8x8xf32>
 // CHECK:         return
 func.func @single_alloc_noop(
     %ctx: !hip.context,

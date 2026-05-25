@@ -377,10 +377,18 @@ void generateInferenceDynShapeShims(ModuleOp module) {
     }
   };
 
+  // NOTE: shims intentionally bind to the **peek** flavor of the runtime
+  // ABI. The EP is the only caller of these shims (via
+  // InferenceState::read_dim / read_buffer) and wants silent
+  // kDynSlotUnpublishedSize / nullptr on miss so that
+  // resolveOutputShapePostCompute can LOG(FATAL) with output/dim context.
+  // In-DLL Category-C consumers should keep calling
+  // hipdnn_ep_state_read_dim directly so the abort lands a stack frame
+  // that names the consumer wrap.
   emitShim("inference_dyn_slot_get_dim", i64Type, {ptrType, i32Type},
-           "hipdnn_ep_state_read_dim");
+           "hipdnn_ep_state_peek_dim");
   emitShim("inference_dyn_slot_get_buffer", ptrType, {ptrType, i32Type},
-           "hipdnn_ep_state_read_buffer");
+           "hipdnn_ep_state_peek_buffer");
   emitShim("inference_dyn_slot_reset", voidType, {ptrType},
            "hipdnn_ep_state_dyn_slots_reset");
 }
@@ -596,8 +604,10 @@ private:
         // Category-C runtime ops. Even when no model uses them, the
         // symbols stay declared so legacy DLLs can link cleanly.
         {"hipdnn_ep_state_read_dim", i64, {ptr, i32}},
+        {"hipdnn_ep_state_peek_dim", i64, {ptr, i32}},
         {"hipdnn_ep_state_publish_dim", vd, {ptr, i32, i64}},
         {"hipdnn_ep_state_read_buffer", ptr, {ptr, i32}},
+        {"hipdnn_ep_state_peek_buffer", ptr, {ptr, i32}},
         {"hipdnn_ep_state_publish_buffer", vd, {ptr, i32, ptr}},
         {"hipdnn_ep_state_dyn_pool_alloc", ptr, {ptr, i64}},
         {"hipdnn_ep_state_dyn_pool_reset", vd, {ptr}},

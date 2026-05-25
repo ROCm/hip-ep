@@ -11,13 +11,17 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/ControlFlow/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
+#include "mlir/Dialect/SCF/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
@@ -57,6 +61,25 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
+
+  // BufferDeallocationOpInterface external models. The
+  // ownership-based buffer deallocation pass (run from
+  // buildBufferDeallocationPipeline in Pipelines.cpp) queries this
+  // interface on every op it visits and LLVM_FATALs out if the dialect
+  // PROMISED the interface (via the canonical pass setup elsewhere in
+  // MLIR) but never had its external-model implementation registered.
+  // Arith is the canonical triggering case in our pipeline: when
+  // OnnxToHip emits an `arith.constant <i64>` for a Range / Cast
+  // operand, the bufferization wraps it in a buffer-producing chain
+  // and the deallocation pass needs the interface to decide
+  // ownership. Same for ControlFlow / SCF / GPU when those op-trees
+  // appear (today they don't, but the registration is cheap and
+  // matches mlir-opt's behavior, so we register them all up-front to
+  // forestall the same crash class as new ops land).
+  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
+  mlir::cf::registerBufferDeallocationOpInterfaceExternalModels(registry);
+  mlir::scf::registerBufferDeallocationOpInterfaceExternalModels(registry);
+  mlir::gpu::registerBufferDeallocationOpInterfaceExternalModels(registry);
 }
 
 /// Load all required dialects into an MLIRContext.

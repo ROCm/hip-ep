@@ -28,6 +28,15 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRBufferizationTransforms
   MLIRSCFDialect
   MLIRSCFToControlFlow
+  # *BufferDeallocation* external-model libs. Without these, the
+  # ownership-based buffer-deallocation pass LLVM_FATALs on the first
+  # arith / cf / scf / gpu op it sees because the interface was
+  # promised by the dialect but never implemented (the implementation
+  # lives in these `Transforms` libs).
+  MLIRArithTransforms
+  MLIRControlFlowTransforms
+  MLIRSCFTransforms
+  MLIRGPUTransforms
   MLIRParser
   MLIRLLVMToLLVMIRTranslation
   MLIRTargetLLVMIRExport

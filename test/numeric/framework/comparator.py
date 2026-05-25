@@ -80,6 +80,14 @@ def compare_outputs(
             all_passed = False
             continue
 
+        # Dynamic-output ops (Range, NonZero, ConstantOfShape with dynamic
+        # shape input) legitimately produce zero-element tensors when their
+        # runtime length resolves to 0 -- treat that as a structural match
+        # without invoking min/max/mean/cosine, which all raise on empty.
+        if act.size == 0:
+            details.append(f"Output {i}: empty (shape match, no values to compare)")
+            continue
+
         act_f = act.flatten().astype(np.float64)
         exp_f = exp.flatten().astype(np.float64)
         diff = np.abs(act_f - exp_f)
@@ -129,6 +137,17 @@ def print_output_summary(
     """Print a per-output summary comparing *actual* and *expected* tensors."""
     print(f"{tag} Outputs:")
     for i, (act, exp) in enumerate(zip(actual, expected)):
+        # Both empty -> trivial match. Shapes differ or one is empty ->
+        # broadcasting / reductions in the diff line below blow up, so
+        # short-circuit with a structural-only summary. The full diff is
+        # reported by compare_outputs() against actual/expected separately.
+        if act.shape != exp.shape or act.size == 0:
+            print(
+                f"{tag}   [{i}] actual  {tensor_desc(act)}"
+                f"  |  expect  {tensor_desc(exp)}"
+                f"  |  (shape/empty -- diff suppressed)"
+            )
+            continue
         diff = float(np.abs(act.astype(np.float64) - exp.astype(np.float64)).max())
         print(
             f"{tag}   [{i}] actual  {tensor_desc(act)}"

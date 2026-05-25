@@ -207,3 +207,4 @@ communicate through minimal C APIs at DLL boundaries:
 - [constant-handling-design.md](constant-handling-design.md) — constants file format, write order, and runtime upload
 - [compiler-runtime-contract.md](compiler-runtime-contract.md) — `model_metadata` schema; how metadata is embedded in `model.dll`
 - [compilation-options.md](compilation-options.md) — `CompilationOptionsT` fields and CLI mapping
+- [dynamic-shape-debug-surface.md](dynamic-shape-debug-surface.md) — env-var gates exposed to EP users; what the EP logs on dynamic-output resolution

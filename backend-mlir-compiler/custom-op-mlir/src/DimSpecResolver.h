@@ -75,6 +75,15 @@ bool resolve(const mlir::hip::DimSpecT &spec,
              const std::vector<const void *> &input_data,
              const InferenceState *state, int64_t &out_value);
 
+// True when either HIPDNN_EP_DEBUG_SHAPES=1 or the legacy
+// HIPDNN_EP_TRACE_SHAPES=1 is set in the process environment. Cached on
+// first call so subsequent invocations are a single branch.
+// HIPDNN_EP_DEBUG_SHAPES is the canonical name (matches CLAUDE.md);
+// HIPDNN_EP_TRACE_SHAPES is kept as an alias because the resolver and
+// MlirCustomOp ship reading it already and we want unambiguous output
+// from any combination of the two.
+bool debugShapesEnabled();
+
 } // namespace mlir_compilation::customop
 
 #endif // HIPDNN_EP_DIM_SPEC_RESOLVER_H

@@ -355,7 +355,13 @@ void PoolAllocsPass::runOnOperation() {
     allInfos.push_back(info);
   }
 
-  if (allInfos.size() < 2) {
+  // No allocs: nothing to pool.
+  // Previously we also short-circuited at `< 2`, but that left single
+  // allocs to flow through `LowerAllocs` -> `hip.alloc` -> `MemoryLowering`
+  // which lowers to a global `hip_device_malloc` symbol that the runtime
+  // does not export. We pool any allocs we see, even if just one, so the
+  // dyn-pool path is the only allocation path the compiled model exercises.
+  if (allInfos.empty()) {
     ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
     OpBuilder zeroBuilder(funcOp.getContext());
     moduleOp->setAttr("hipdnn.pool_size", zeroBuilder.getI64IntegerAttr(0));

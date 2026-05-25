@@ -182,19 +182,31 @@ int wrap_nonzero(RuntimeState *state, const void *input,
     return -1;
   }
 
-  // Fresh atomic counter for the fill pass (kernel does its own
-  // atomicAdd to compute per-non-zero output slots). Allocate + zero.
+  // Scratch buffers required by the deterministic two-pass scan
+  // fill. `atomic_idx_dev` is retained for source compatibility with
+  // older bitcode paths (the new fill ignores it) but allocated all
+  // the same so the call site doesn't need to special-case nullptr.
   void *atomic_idx_dev =
       hipdnn_ep_state_dyn_pool_alloc(state, sizeof(int64_t));
-  if (!atomic_idx_dev) {
+  // thread_off: 1 int32 per input element. block_sums: 1 int32 per
+  // 64-element block. Block size is fixed at kNonZeroScanBS=64 in the
+  // kernel; keep this constant in sync if the kernel ever changes.
+  constexpr int64_t kBS = 64;
+  int64_t thread_off_bytes = input_num_elements * (int64_t)sizeof(int32_t);
+  int64_t num_blocks = (input_num_elements + kBS - 1) / kBS;
+  if (num_blocks <= 0)
+    num_blocks = 1;
+  int64_t block_sums_bytes = num_blocks * (int64_t)sizeof(int32_t);
+  void *thread_off_dev =
+      hipdnn_ep_state_dyn_pool_alloc(state, thread_off_bytes);
+  void *block_sums_dev =
+      hipdnn_ep_state_dyn_pool_alloc(state, block_sums_bytes);
+  if (!atomic_idx_dev || !thread_off_dev || !block_sums_dev) {
     fprintf(stderr,
-            "[REAL] wrap_nonzero: dyn_pool_alloc(atomic_idx) failed\n");
-    return -1;
-  }
-  herr = hipMemsetAsync(atomic_idx_dev, 0, sizeof(int64_t), stream);
-  if (herr != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_nonzero: zero atomic_idx failed: %s\n",
-            hipGetErrorString(herr));
+            "[REAL] wrap_nonzero: dyn_pool_alloc(scratch) failed "
+            "(atomic_idx=%p, thread_off=%p[%lld B], block_sums=%p[%lld B])\n",
+            atomic_idx_dev, thread_off_dev, (long long)thread_off_bytes,
+            block_sums_dev, (long long)block_sums_bytes);
     return -1;
   }
 
@@ -205,7 +217,8 @@ int wrap_nonzero(RuntimeState *state, const void *input,
 
   rc = hip_nonzero_fill(stream_v, input, input_num_elements,
                         (int64_t)hip_dtype, input_rank, N, shape_dev,
-                        atomic_idx_dev, out_dev);
+                        atomic_idx_dev, thread_off_dev, block_sums_dev,
+                        out_dev);
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_nonzero: hip_nonzero_fill rc=%d\n", rc);
     return rc;

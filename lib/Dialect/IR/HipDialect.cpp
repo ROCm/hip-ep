@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "hip/Dialect/IR/HipShapeInterface.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -27,6 +28,12 @@ void HipDialect::initialize() {
 #define GET_OP_LIST
 #include "hip/Dialect/IR/HipOps.cpp.inc"
       >();
+  // Populate the per-op DimSpec builder registry used by the
+  // data-dependent dynamic output shape pipeline (ShapeToHip,
+  // ComposeDimSpecs, etc.). Idempotent — call_once-guarded inside.
+  // Doing this here guarantees builders are registered before any
+  // pattern can reach `shape_interface::getResultDimSpec`.
+  shape_interface::populateBuiltinDimSpecBuilders();
 }
 
 #define GET_TYPEDEF_CLASSES
@@ -1361,6 +1368,18 @@ void ConstantOfShapeOp::getEffects(
 MutableOperandRange SizeOp::getDpsInitsMutable() { return getYMutable(); }
 
 void SizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ShapeOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ShapeOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ShapeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

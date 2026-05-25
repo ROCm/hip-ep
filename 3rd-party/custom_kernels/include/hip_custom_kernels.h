@@ -951,6 +951,13 @@ int hip_nonzero_count(
     int64_t input_data_type,
     void* count_out);
 
+// Deterministic two-pass scan fill. ONNX NonZero requires row-major
+// input order for the output indices (matches numpy.nonzero). Scratch:
+//   thread_off_dev: input_num_elements * sizeof(int32_t)
+//   block_sums_dev: ceil(input_num_elements / 64) * sizeof(int32_t)
+// `atomic_idx` retained for source compatibility but unused; pass any
+// non-null device pointer (or nullptr — wrapper-side checks the new
+// scratch params, not this one).
 int hip_nonzero_fill(
     void* stream,
     const void* input,
@@ -960,6 +967,8 @@ int hip_nonzero_fill(
     int64_t N,
     const void* input_shape_dev,
     void* atomic_idx,
+    void* thread_off_dev,
+    void* block_sums_dev,
     void* output);
 
 /* =========================================================================

@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -37,6 +38,14 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
 
 namespace mlir_compilation {
+
+// Use the resolver's shared `debugShapesEnabled()` so HIPDNN_EP_DEBUG_SHAPES
+// (alias: HIPDNN_EP_TRACE_SHAPES) toggles the EP session-open dump, the
+// per-Compute() pre/post-resolve traces, AND the resolver's per-leaf
+// traces from a single env var.
+inline bool debug_shapes_enabled() {
+  return customop::debugShapesEnabled();
+}
 
 // Tensor marshaling state - holds tensors, shapes, and span
 struct TensorData {
@@ -569,15 +578,93 @@ MlirCustomOp::MlirCustomOp(
       const auto &ti = fb_meta->outputs[i];
       if (!ti)
         continue;
-      for (size_t d = 0; d < ti->dim_specs.size(); ++d) {
+      // Category B / D detection: the static metadata shape carries
+      // INT64_MIN for dynamic dims (the MLIR `?`-dim sentinel). If any
+      // dim is dynamic AND the output has dim_specs to resolve them
+      // from, the EP must walk the spec pre-compute. The dyn-slot
+      // detection below is a strict superset signal -- a RuntimeSlot
+      // dim is dynamic too -- but we route Cat B/D and Cat C through
+      // different code paths (pre-compute vs deferred). Don't gate the
+      // pre-compute flag on `containsRuntimeSlot`; that's the Cat C
+      // path. Pre-compute resolves all non-slot dims and Cat C dims
+      // resolve in their own post-compute step.
+      if (!ti->dim_specs.empty()) {
+        // Both INT64_MIN (MLIR `?`-dim sentinel as serialized by the
+        // compiler) and -1 (ONNX-style "dynamic" sentinel) mark a dim
+        // that must be resolved from a DimSpec. The proto path collapses
+        // INT64_MIN to -1 during serialization in some emitter
+        // variants, so accept either.
+        const auto &shape = metadata_.outputs(i).shape();
+        for (int d = 0; d < shape.size(); ++d) {
+          const int64_t v = shape[d];
+          if (v == std::numeric_limits<int64_t>::min() || v < 0) {
+            output_dyn_info_[i].needs_pre_compute_resolve = true;
+            break;
+          }
+        }
+      }
+      if (debug_shapes_enabled()) {
+        // Debug dump of every output's DimSpec tree at session creation.
+        // Gated on HIPDNN_EP_DEBUG_SHAPES (alias: HIPDNN_EP_TRACE_SHAPES)
+        // so we never spam stderr in normal usage; reach for this knob
+        // when an output dim resolves to a surprising value (the
+        // resolver also traces under the same env var, so the
+        // (declared spec) -> (resolved value) chain is visible in
+        // one log).
+        const auto &shape = metadata_.outputs(i).shape();
+        std::string sh;
+        for (int d = 0; d < shape.size(); ++d) {
+          if (!sh.empty()) sh += ",";
+          sh += std::to_string(shape[d]);
+        }
+        fprintf(stderr,
+                "[CTor] Output[%zu]: proto_shape=[%s] dim_specs_count=%zu "
+                "needs_pre_compute=%d\n",
+                i, sh.c_str(), ti->dim_specs.size(),
+                output_dyn_info_[i].needs_pre_compute_resolve ? 1 : 0);
+        for (size_t d = 0; d < ti->dim_specs.size(); ++d) {
+          const auto &spec = ti->dim_specs[d];
+          fprintf(stderr,
+                  "[CTor]   dim_spec[%zu]: %s, %zu node(s)\n", d,
+                  spec ? "present" : "null",
+                  spec ? spec->nodes.size() : 0);
+          if (spec) {
+            for (size_t ni = 0; ni < spec->nodes.size(); ++ni) {
+              const auto &node = spec->nodes[ni];
+              fprintf(stderr,
+                      "[CTor]     node[%zu]: kind=%d value=%lld "
+                      "input_idx=%d dim_idx=%d flat_off=%lld slot=%d "
+                      "children=[",
+                      ni, (int)node->kind, (long long)node->value,
+                      node->input_index, node->dim_index,
+                      (long long)node->flat_offset, node->slot_id);
+              for (size_t c = 0; c < node->children.size(); ++c) {
+                if (c) fprintf(stderr, ",");
+                fprintf(stderr, "%d", node->children[c]);
+              }
+              fprintf(stderr, "]\n");
+            }
+          }
+        }
+      }
+      // Walk every output dim; record per-dim slot ids. The runtime
+      // convention (see wrap_constant_of_shape_dyn / wrap_nonzero /
+      // wrap_range) is: each RuntimeSlot dim is published by the wrap_*
+      // into its own slot; the output GPU buffer pointer is published
+      // into the first RuntimeSlot slot (== `slot_ids[0]` in the wrap_*
+      // call) -- which is also the first slot we record here.
+      const size_t rank = ti->dim_specs.size();
+      output_dyn_info_[i].dim_slot_ids.assign(rank, -1);
+      for (size_t d = 0; d < rank; ++d) {
         const auto &spec = ti->dim_specs[d];
         if (!spec)
           continue;
         if (!customop::containsRuntimeSlot(*spec))
           continue;
-        // Find the (unique) RuntimeSlot leaf. Multi-slot trees are not
-        // supported today -- bail loudly so a future op exercising the
-        // path doesn't silently mis-resolve the dim.
+        // Find the (unique) RuntimeSlot leaf for this dim. Arithmetic
+        // composition trees that mix RuntimeSlot with other leaves are
+        // not yet exercised; bail loudly if we see one so a future op
+        // doesn't silently mis-resolve.
         int32_t found_slot = -1;
         for (const auto &node : spec->nodes) {
           if (node && node->kind == mlir::hip::DimSpecKind::RuntimeSlot) {
@@ -593,16 +680,11 @@ MlirCustomOp::MlirCustomOp(
         CHECK_GE(found_slot, 0)
             << "containsRuntimeSlot returned true but no RuntimeSlot leaf "
                "was found in the tree";
-        if (output_dyn_info_[i].has_runtime_slot) {
-          LOG(FATAL)
-              << "Output " << i
-              << " has more than one dim driven by a RuntimeSlot; the EP "
-                 "host-side resolver only supports a single slot-driven dim "
-                 "per output today";
+        output_dyn_info_[i].dim_slot_ids[d] = found_slot;
+        if (!output_dyn_info_[i].has_runtime_slot) {
+          output_dyn_info_[i].has_runtime_slot = true;
+          output_dyn_info_[i].buffer_slot_id = found_slot;
         }
-        output_dyn_info_[i].has_runtime_slot = true;
-        output_dyn_info_[i].slot_id = found_slot;
-        output_dyn_info_[i].slot_dim_index = static_cast<int32_t>(d);
         MY_LOG(2) << "Output " << i << ": Category-C, dim " << d
                   << " <- slot " << found_slot;
       }
@@ -628,18 +710,32 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   // function pointer is null). Cheap (~1 ns indirect call).
   inference_state_->reset_dyn_slots();
 
-  // Detect whether any output of this graph is Category-C
-  // (data-dependent shape published via runtime slot). When no output is
-  // dynamic the legacy fast path runs unchanged -- this preserves the
-  // existing perf characteristics for every model that doesn't include
-  // NonZero / Range / ConstantOfShape on intermediate values.
+  // Detect whether any output of this graph needs dynamic-shape
+  // resolution. Two distinct cases:
+  //
+  //   * Category B / D pre-compute resolve: dim_specs walk before
+  //     main_graph runs (no runtime slot involvement). The OrtValue
+  //     ends up correctly sized BEFORE compute and the runtime fill
+  //     kernel writes into it directly. No D2H post-compute.
+  //
+  //   * Category C runtime slot: at least one dim is published by the
+  //     wrapper at runtime (NonZero N, etc.). The OrtValue is allocated
+  //     POST-compute, then D2H-copied from the wrapper's GPU buffer.
+  //
+  // Both go through computeDynamic, which handles each per-output via
+  // tryResolveOutputShapePreCompute / resolveOutputShapePostCompute.
+  // When no output is dynamic the legacy fast path runs unchanged --
+  // this preserves the existing perf characteristics for every model
+  // that doesn't include any dynamic-shape op.
   bool any_dynamic_output = false;
   for (const auto &info : output_dyn_info_) {
-    if (info.has_runtime_slot) {
+    if (info.has_runtime_slot || info.needs_pre_compute_resolve) {
       any_dynamic_output = true;
       break;
     }
   }
+  MY_LOG(2) << "Compute dispatch: any_dynamic_output=" << any_dynamic_output
+            << " (outputs=" << output_dyn_info_.size() << ")";
 
   if (!perf_enabled() && !any_dynamic_output) {
     // --- Fast path: original behaviour, no timing overhead. ---
@@ -802,6 +898,21 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
           onnx_elem_type_size(output_meta.elem_type());
       outputs.tensors[i].memory_type =
           static_cast<int>(t.GetTensorMemoryInfo().GetDeviceType());
+      // Diag print of the resolved shape; gated on HIPDNN_EP_DEBUG_SHAPES
+      // (alias HIPDNN_EP_TRACE_SHAPES) so production runs see nothing.
+      // Pair this with the resolver and ctor traces to reconstruct the
+      // full (declared DimSpec) -> (per-input-value resolution) ->
+      // (final dim) chain when a dim resolves to a surprising value.
+      if (debug_shapes_enabled()) {
+        std::string s;
+        for (auto d : resolved_shapes[i]) {
+          if (!s.empty()) s += ",";
+          s += std::to_string(d);
+        }
+        fprintf(stderr,
+                "[EP] Output[%d] pre-compute resolved shape=[%s]\n",
+                i, s.c_str());
+      }
       MY_LOG(3) << "Output[" << i << "] resolved pre-compute, rank="
                 << outputs.tensors[i].rank;
     } else {
@@ -823,7 +934,7 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
           onnx_elem_type_size(output_meta.elem_type());
       outputs.tensors[i].memory_type = TENSOR_MEMORY_CPU;
       MY_LOG(3) << "Output[" << i << "] Category-C sentinel, rank=" << rank
-                << " slot_id=" << dyn_info.slot_id;
+                << " buffer_slot_id=" << dyn_info.buffer_slot_id;
     }
   }
   outputs.span.data = outputs.tensors.data();
@@ -853,13 +964,27 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
     // RuntimeSlot leaves return their published value.
     auto resolved = resolveOutputShapePostCompute(*fb_meta, i, input_shapes,
                                                   input_data, *inference_state_);
+    // Per-Compute() post-resolve trace -- pairs with the pre-compute
+    // trace above so the full lifecycle of a dynamic dim is visible
+    // under one env var.
+    if (debug_shapes_enabled()) {
+      std::string s;
+      for (auto d : resolved) {
+        if (!s.empty()) s += ",";
+        s += std::to_string(d);
+      }
+      fprintf(stderr,
+              "[EP] Output[%d] post-compute resolved shape=[%s] "
+              "(buffer_slot_id=%d)\n",
+              i, s.c_str(), dyn_info.buffer_slot_id);
+    }
     // Allocate the actual-sized ORT OrtValue. ctx.GetOutput is idempotent
     // per ort_idx, but for Category-C outputs we deliberately did NOT
     // call it pre-compute, so this is the first (and only) call.
     int ort_idx = output_index_map_[i];
     auto out_t = ctx.GetOutput(ort_idx, resolved);
     void *host_dst = out_t.GetTensorMutableRawData();
-    void *gpu_src = inference_state_->read_buffer(dyn_info.slot_id);
+    void *gpu_src = inference_state_->read_buffer(dyn_info.buffer_slot_id);
     int64_t numel = 1;
     for (int64_t d : resolved)
       numel *= d;
@@ -868,7 +993,8 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
     const size_t bytes = static_cast<size_t>(numel) * elem_size;
 
     MY_LOG(3) << "Output[" << i << "] Category-C resolved: numel=" << numel
-              << " bytes=" << bytes << " slot=" << dyn_info.slot_id
+              << " bytes=" << bytes
+              << " buffer_slot_id=" << dyn_info.buffer_slot_id
               << " gpu_src=" << gpu_src << " host_dst=" << host_dst;
 
     if (bytes == 0) {
@@ -880,7 +1006,7 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
     CHECK(gpu_src) << "Output " << i
                    << " is Category-C with non-empty result but the wrap_* "
                       "did not publish a GPU buffer for slot "
-                   << dyn_info.slot_id;
+                   << dyn_info.buffer_slot_id;
     CHECK(host_dst);
     hipError_t herr = hipMemcpyAsync(host_dst, gpu_src, bytes,
                                      hipMemcpyDeviceToHost, stream);

@@ -157,8 +157,172 @@ a separate file, environment variable, or hardcoded constant.
 
 ---
 
+## Dynamic Output Shapes (DimSpec, dyn_dim_slots)
+
+Some ONNX ops produce outputs whose shapes are only known at runtime
+(e.g. `NonZero`, `Range` with non-static `start`/`limit`/`delta`,
+`ConstantOfShape` with a non-constant shape input). The compiler partitions
+each output dim into one of three categories and dispatches accordingly.
+
+### Provenance categories
+
+| Category | Definition | Dispatch |
+|----------|------------|----------|
+| **A** (static) | Dim is a compile-time integer literal | Folded into module metadata as a positive value |
+| **B** (host-resolvable) | Dim is derivable at the EP boundary from func-arg shape metadata or from scalar host-side values (e.g. `Range` with int64 scalar inputs) | EP pre-computes the dim before `inference_compute`; output OrtValue is allocated with the right shape; runtime wrapper receives the buffer and fills it |
+| **C** (runtime-published) | Dim is only known after a kernel runs (e.g. `NonZero` count, `Range` whose inputs trace to another GPU-resident tensor) | Runtime wrapper allocates from the dyn pool, **publishes** the dim size to a slot, and **publishes** the buffer pointer; EP post-`inference_compute` reads the slot and constructs the OrtValue |
+
+Categories B and C share the same lowering machinery — the wrapper just sees
+different operand provenance. The category is implicit in the lowering choice
+(`wrap_X` vs `wrap_X_dyn`), so the runtime never has to reason about it.
+
+### DimSpec tree
+
+Each per-op output dim carries a `DimSpec` attribute — a small algebraic tree
+describing how to compute that dim. Leaves:
+
+| Leaf | Encoding | Meaning |
+|------|----------|---------|
+| `Static(v)` | `[1, v]` | Compile-time constant `v` |
+| `InputDim(arg, dim)` | `[2, arg, dim, …]` | Dim `dim` of func-arg `arg` |
+| `InputValueI64(arg)` | `[3, arg, …]` | Scalar i64 value of func-arg `arg` |
+| `RuntimeSlot(slot_id)` | `[4, slot_id, …]` | Runtime-published value in slot `slot_id` |
+
+Internal nodes encode arithmetic (`Add`, `Sub`, `Mul`, `Div`, `Max`, `Min`,
+`SelectGT`, …) and saturate-to-zero clamping at the **root** only.
+`ComposeDimSpecs` (`lib/Dialect/Transforms/ComposeDimSpecs.cpp`) walks SSA
+producers backward to compose per-op specs into a single per-module-output
+spec, materialised as the `hipdnn.output_dim_specs` module attribute. The EP
+host-side resolver (`backend-mlir-compiler/custom-op-mlir/src/DimSpecResolver.cpp`)
+evaluates the tree at every `Compute()` for both pre-marshal (to size the
+OrtValue) and post-marshal (to publish results) purposes.
+
+### Per-op DimSpec builder registry
+
+Not every HIP op pre-attaches an `output_dim_specs` ArrayAttr at conversion
+time — that would require every conversion to be aware of the dynamic-shape
+plan, including ones whose shape semantics are trivial (rank-preserving
+permutations, NumPy-style broadcast, identity-style passthroughs). To keep
+those conversions simple, `shape_interface::getResultDimSpec`
+(`lib/Dialect/IR/HipShapeInterface.cpp`) consults a per-op **builder
+registry** keyed on the op's full name (e.g. `"hip.transpose"`).
+
+Resolution order in `getResultDimSpec(op, result_index, dim_index)`:
+
+1. **Explicit attribute** — if the op carries `output_dim_specs`, return
+   the serialised entry. Highest precedence so an op that knows its shape
+   (e.g. a Category-C producer like `hip.nonzero` that publishes a
+   `RuntimeSlot`) wins unconditionally.
+2. **Registered builder** — if the op's name has a builder registered,
+   invoke it. Builders are pure functions of `(op, result_index,
+   dim_index)`; they typically walk operands via `resolveDimFromValue` to
+   compose a DimSpec from upstream producers. Returning empty signals "I
+   cannot resolve this here" and falls through to (3).
+3. **Static-type fallback** — if the result MLIR type has a known dim
+   size, return `Static(dim_size)`. Otherwise return empty (caller
+   handles the un-resolvable case, e.g. by `notifyMatchFailure` and
+   waiting for upstream ops to convert further).
+
+Builder registration is performed once from `HipDialect::initialize` via
+`populateBuiltinDimSpecBuilders` (idempotent — guarded by `std::call_once`).
+This guarantees builders are available before any pattern (including
+`ShapeToHip`, the canonical consumer) ever runs.
+
+Built-in builders today:
+
+| Builder | Op names | Behaviour |
+|---|---|---|
+| `buildTransposeDimSpec` | `hip.transpose` | Rank-preserving permutation: output dim `d` ← `resolveDimFromValue(operand_1, perm[d])`. Returns empty if `perm` is missing/malformed (defensive — should never happen post-verifier). |
+| `buildBroadcastDimSpec` | `hip.add/sub/mul/div/min/equal/less/and/mod/where/miopen.add/not/neg/cos/sin/sign/silu/sigmoid/softplus/gelu/reciprocal/sqrt/cast` | NumPy-style broadcast: walks every data operand `[1, N-1)` (skipping ctx and the last DPS init), right-aligns ranks against the result, and returns the first operand whose dim at this position resolves to a non-empty *and* non-broadcast-1 DimSpec. A static dim of 1 is treated as "broadcast me" — kept as a fallback only. |
+
+**Adding a new shape-behavior op** is a one-line registration call inside
+`populateBuiltinDimSpecBuilders`. Prefer re-using an existing builder when
+the new op shares its shape semantics — `buildBroadcastDimSpec` correctly
+handles **all** pure elementwise ops regardless of arity (unary,
+two-operand, three-operand `where`, …) since it iterates the data operand
+range generically. Write a new builder only when the shape transformation
+genuinely differs (e.g. reductions, gathers, concats — all currently rely
+on the explicit-attribute path).
+
+**Coverage gap intentionally left open**: ops whose output shape is a
+*non-trivial* transformation of their inputs (`hip.gather`, `hip.slice`,
+`hip.scatter_nd`, `hip.reduce_*`, `hip.cumsum`, `hip.expand`, `hip.tile`,
+…) still rely on explicit `output_dim_specs` attached by their respective
+conversions. The registry is the framework facility to remove that
+requirement op-by-op when the explicit-attribute path proves insufficient.
+
+LIT coverage: `test/lit/Conversion/onnx-to-hip/test_shape_dyn_via_passthrough.mlir`
+exercises both `Shape(hip.transpose(?))` and `Shape(hip.<elementwise>(?))`
+end-to-end through the lowered IR (asserting on the materialised
+`element_dim_specs` ArrayAttr in `hip.shape`).
+
+### Runtime slot mechanics
+
+`RuntimeState->dyn_dim_slots` is an `int64_t[dyn_dim_slots_count]` (size
+known at compile time from `hipdnn.dyn_dim_slots_count` module attr) plus a
+parallel `void *[dyn_dim_slots_count]` for buffer pointers. Helpers:
+
+```c
+void hipdnn_ep_state_publish_dim   (RuntimeState*, int32_t slot, int64_t v);
+int64_t hipdnn_ep_state_read_dim   (RuntimeState*, int32_t slot);
+void hipdnn_ep_state_publish_buffer(RuntimeState*, int32_t slot, void* gpu_ptr);
+void *hipdnn_ep_state_read_buffer  (RuntimeState*, int32_t slot);
+void *hipdnn_ep_state_dyn_pool_alloc(RuntimeState*, int64_t bytes);
+```
+
+The `dyn_pool` is a growable contiguous GPU buffer managed by
+`hipdnn_ep_state_dyn_pool_alloc` (bump-pointer within current segment;
+`hipMalloc` a new segment on overflow). Reset across each `Compute()` via the
+`begin_compute()` runtime hook (also invalidates the GQA seqlens_k cache).
+
+### `hipdnn_ep_get_pool_base(state, required_size)` contract
+
+The lowering of `hip.get_pool(%ctx, %size_index)` emits
+
+```mlir
+llvm.call @hipdnn_ep_get_pool_base(%state, %size) : (!llvm.ptr, i64) -> !llvm.ptr
+```
+
+This is a separate, **growable-pool** API from `dyn_pool_alloc` and is used
+by the post-bufferize `hip-pool-allocs` pass to back ALL `memref.alloc`s
+(including single-alloc functions) with a view into the pool. Contract:
+
+- `required_size = 0` returns the current base (or `nullptr` if uninitialised).
+- `required_size > state->pool_size` triggers `hipFree(old) + hipMalloc(new)`.
+- The base pointer can change across calls — long-lived consumers must
+  re-query on every entry into the function. The generated code already
+  follows this contract (no SSA value of the base survives across
+  `inference_compute` boundaries).
+- Failure to allocate (rare) leaves `state->pool_base = nullptr` and
+  `state->pool_size = 0`, returns `nullptr`.
+
+The legacy 1-arg `hipdnn_ep_get_pool_base(state)` is **no longer supported**.
+This signature is wired through `lib/Conversion/HipToLLVM/MemoryLowering.cpp::GetPoolOpLowering`
+to match what the codegen produces.
+
+### Pipeline ordering invariants (added)
+
+Two passes were added to `buildHipToLLVMPipeline` to support the dyn-shape
+codegen:
+
+1. `createLowerAffinePass()` between `ExpandStridedMetadata` and
+   `ConvertHipToLLVM` (lowers `affine.apply` that survives strided-metadata
+   expansion of multi-dim collapse_shape).
+2. `arith::createArithExpandOpsPass()` after `LowerAffinePass` and before
+   `ConvertHipToLLVM` (expands `arith.ceildivsi` / `arith.floordivsi` /
+   `arith.ceildivui` which `populateArithToLLVMConversionPatterns` does NOT
+   handle natively — needed by `wrap_range`-style output-length math).
+
+Both passes are silent in production when omitted: compilation fails, the EP
+falls back to CPU, and any CPU-vs-CPU comparison passes. The only reliable
+detection is checking wall-clock time and `HIPDNN_EP_DEBUG=1` output for
+`[REAL] wrap_*` lines confirming GPU dispatch.
+
+---
+
 ## Related Documents
 
 - [constant-handling-design.md](constant-handling-design.md) — how `constants_filename`, `sizes`, and `offsets` fields are produced and consumed
 - [morphizen-ep-integration.md](morphizen-ep-integration.md) — DLL contracts; `inference_init` public interface
 - [compilation-options.md](compilation-options.md) — `constants_file` compilation option
+- [dynamic-shape-debug-surface.md](dynamic-shape-debug-surface.md) — env-var gates for tracing DimSpec resolution and slot publish/read; deferred-validator rationale

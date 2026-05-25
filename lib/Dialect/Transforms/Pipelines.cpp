@@ -10,6 +10,7 @@
 
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -156,6 +157,15 @@ void mlir::hip::buildHipToLLVMPipeline(
   // pure metadata, no IR rewriting.
   pm.addPass(mlir::hip::createComposeDimSpecsPass());
 
+  // Annotate every consumer op with the (operand_idx, dim_idx, slot_id)
+  // tuples of any dynamic dim that resolves (per the per-op DimSpec
+  // system) to a runtime-published slot. The HipToLLVM lowering of
+  // affected consumers reads this attribute and substitutes a
+  // `hipdnn_ep_state_read_dim` call for the descriptor `sizes[d]`
+  // load on the relevant dim, so the kernel sees the actual published
+  // count rather than the upper-bound pool allocation size.
+  pm.addPass(mlir::hip::createAnnotateInputDimSlotsPass());
+
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.
   // populateFinalizeMemRefToLLVMConversionPatterns (used by ConvertHipToLLVM)
@@ -169,6 +179,17 @@ void mlir::hip::buildHipToLLVMPipeline(
   // surviving affine.apply leaves builtin.unrealized_conversion_cast in the
   // final LLVM IR and "Failed to translate MLIR to LLVM IR" aborts compile.
   pm.addPass(createLowerAffinePass());
+
+  // ConvertHipToLLVM uses populateArithToLLVMConversionPatterns, which does
+  // NOT include lowering for ceildivsi / floordivsi / ceildivui. The dynamic
+  // wrap_range fallback path in OnnxToHip emits arith.ceildivsi for the
+  // Range output-length computation. Running arith-expand here decomposes
+  // those ops into basic divisions + compares + selects that the LLVM
+  // converter can lower; without it, ceildivsi survives the convert pass
+  // and translation to LLVM IR aborts with
+  // "LLVM Translation failed for operation: arith.ceildivsi".
+  // Module-scope pass so it walks both main_graph and any helpers.
+  pm.addPass(arith::createArithExpandOpsPass());
 
   pm.addPass(createConvertHipToLLVMPass());
 

@@ -195,6 +195,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SizeOp>>(*ctx);
     mlir::hip::LoopOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::LoopOp>>(*ctx);
+    mlir::hip::ConstantOfShapeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ConstantOfShapeOp>>(*ctx);
   });
 }
 
