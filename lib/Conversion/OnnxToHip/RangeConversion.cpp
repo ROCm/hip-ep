@@ -187,24 +187,44 @@ struct RangeToHip : public RewritePattern {
     if (!elemTy.isIntOrFloat())
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 
-    for (Value v : op->getOperands()) {
-      auto t = dyn_cast<RankedTensorType>(v.getType());
-      if (!t || t.getRank() != 0 || t.getElementType() != elemTy)
-        return rewriter.notifyMatchFailure(
-            op, "expected 0-D operands matching result element type");
-    }
-
     Location loc = op->getLoc();
+    SmallVector<Value, 3> operands;
+    for (Value v : op->getOperands()) {
+      // Operand normalization: tensor<1xT> is collapsed to 0-D tensor<T> via
+      // tensor.collapse_shape; 0-D tensor<T> is used as-is. The resulting
+      // scalars feed hip.range (start/limit/delta). tensor.extract on each
+      // scalar drives build*RangeCount for the dynamic output length.
+      auto t = dyn_cast<RankedTensorType>(v.getType());
+      if (!t || t.getElementType() != elemTy)
+        return rewriter.notifyMatchFailure(op, "expected ranked tensor");
+      if (t.getRank() == 0) {
+        // 0-D operand(tensor<i64>)
+        operands.push_back(v);
+      } else if (t.getRank() == 1 && t.getDimSize(0) == 1) {
+        // 1-D operand with static length 1, convert to 0-D operand(tensor<i64>)
+        auto scalarTy = RankedTensorType::get({}, elemTy);
+        auto reassoc = getReassociationIndicesForReshape(t, scalarTy);
+        if (!reassoc)
+          return rewriter.notifyMatchFailure(
+              op, "cannot compute reshape reassociation");
+        operands.push_back(tensor::CollapseShapeOp::create(
+            rewriter, loc, scalarTy, v, *reassoc));
+      } else {
+        return rewriter.notifyMatchFailure(
+            op, "expected 0-D or tensor<1xT> operands matching result element "
+                "type");
+      }
+    }
 
     if (failed(verifyConstantDeltaNonZero(op, op->getOperand(2), elemTy)))
       return failure();
 
-    Value startE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(0),
-                                             ValueRange{});
-    Value limitE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(1),
-                                             ValueRange{});
-    Value deltaE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(2),
-                                             ValueRange{});
+    Value startE =
+        tensor::ExtractOp::create(rewriter, loc, operands[0], ValueRange{});
+    Value limitE =
+        tensor::ExtractOp::create(rewriter, loc, operands[1], ValueRange{});
+    Value deltaE =
+        tensor::ExtractOp::create(rewriter, loc, operands[2], ValueRange{});
 
     Value len = llvm::TypeSwitch<Type, Value>(elemTy)
                     .Case<IntegerType>([&](IntegerType ity) {
@@ -233,9 +253,9 @@ struct RangeToHip : public RewritePattern {
                                      elemTy, ValueRange{});
     }
 
-    auto rangeOp = mlir::hip::RangeOp::create(
-        rewriter, loc, resultType, ctx, op->getOperand(0), op->getOperand(1),
-        op->getOperand(2), init);
+    auto rangeOp =
+        mlir::hip::RangeOp::create(rewriter, loc, resultType, ctx, operands[0],
+                                   operands[1], operands[2], init);
     rewriter.replaceOp(op, rangeOp->getResult(0));
     return success();
   }
