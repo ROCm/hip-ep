@@ -27,6 +27,14 @@ env:
   CACHE_VERSION: "1"
   # Pinned versions — kept in lockstep with docker/build.sh defaults.
   ONNXRUNTIME_VERSION: "1.25.1"
+  # Space-separated list of microsoft/onnxruntime PR numbers to fetch from
+  # github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply` on top
+  # of the pinned ONNXRUNTIME_VERSION tag during docker/build.sh A.5. The
+  # PR list is also part of the prebuilt-local and ort-src cache keys, so
+  # editing this list auto-invalidates both. Kept in lockstep with
+  # docker/build.sh defaults. Remove a PR number once its fix lands in the
+  # pinned ONNXRUNTIME_VERSION release.
+  ONNXRUNTIME_PR_PATCHES: "28608"
   THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
   # OGA fork+pin matches windows-build.yml so both platforms produce
   # ABI-compatible OGA binaries against the same ORT and tokenizer surface.
@@ -90,13 +98,21 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ github.workspace }}/prebuilt-local
-          key: linux-deps-v${{ env.CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # The `ortpr-<list>` segment embeds the ONNXRUNTIME_PR_PATCHES env
+          # verbatim, so editing the PR list auto-invalidates the cached
+          # install prefix. docker/build.sh A.5 fetches each PR's `.patch`
+          # from GitHub and applies it after the ORT clone.
+          key: linux-deps-v${{ env.CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Cache ORT source clone
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ github.workspace }}/onnxruntime
-          key: ort-src-v${{ env.ONNXRUNTIME_VERSION }}
+          # PR list is in the key so changing the patched PR set forces a
+          # fresh clone (avoids "patch already applied" failures from
+          # re-applying a different version of the same PR on top of an
+          # old apply).
+          key: ort-src-v${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Cache OGA source clone
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
@@ -138,6 +154,11 @@ jobs:
           # OGA_REF in this workflow's env block to roll OGA forward —
           # nothing else needs to change.
           OGA_REF: ${{ env.OGA_REF }}
+          # ONNXRUNTIME_PR_PATCHES forwards the same workflow-level PR list
+          # that drove the cache key into docker/build.sh A.5, which fetches
+          # each PR's `.patch` from GitHub and applies it on the freshly
+          # cloned ORT source.
+          ONNXRUNTIME_PR_PATCHES: ${{ env.ONNXRUNTIME_PR_PATCHES }}
         run: |
           set -euo pipefail
           ./docker/run.sh image

@@ -7,9 +7,11 @@
 
 #include "llvm/ADT/TypeSwitch.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
+#include "mlir/IR/SymbolTable.h"
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -64,6 +66,83 @@ void GetConstantOp::getEffects(
         &effects) {
   effects.emplace_back(MemoryEffects::Read::get(), getOperation()->getResult(0),
                        SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// LoopOp: outlined-body counted/conditional loop (DPS)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LoopOp::getDpsInitsMutable() { return getVInitMutable(); }
+
+void LoopOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Match the DPS convention used by other Hip ops (see emitDpsMemoryEffects):
+  //   - v_init are DPS inits  -> Write (the body accumulates into them across
+  //     iterations; without Write, post-bufferization DCE drops the entire
+  //     loop because it appears side-effect-free with no live results).
+  //   - captures are data inputs -> Read.
+  //   - ctx / index / i1 operands are skipped (not memref).
+  // Pre-bufferization v_init are tensors (not memref) -- the isa<MemRefType>
+  // filter naturally suppresses effects then, which is correct: the op's
+  // tensor result use prevents DCE in tensor mode.
+  for (OpOperand &operand : getVInitMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getCapturesMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+}
+
+LogicalResult LoopOp::verify() {
+  uint32_t numLoopCarried = getNumLoopCarried();
+
+  // num_loop_carried must equal the v_init count (both modes).
+  if (numLoopCarried != getVInit().size())
+    return emitOpError("num_loop_carried (")
+           << numLoopCarried << ") must equal the v_init operand count ("
+           << getVInit().size() << ")";
+
+  // Determine mode from v_init type when present; otherwise default to
+  // tensor mode (a num_loop_carried=0 op makes no sense, but allow it).
+  bool tensorMode = true;
+  if (!getVInit().empty())
+    tensorMode = isa<RankedTensorType>(getVInit()[0].getType());
+
+  if (tensorMode) {
+    // Tensor mode: results count == num_loop_carried, types match v_init.
+    if (numLoopCarried != getNumResults())
+      return emitOpError("tensor mode: num_loop_carried (")
+             << numLoopCarried << ") must equal the result count ("
+             << getNumResults() << ")";
+    for (uint32_t i = 0; i < numLoopCarried; ++i)
+      if (getVInit()[i].getType() != getResult(i).getType())
+        return emitOpError("result type #")
+               << i << " (" << getResult(i).getType()
+               << ") must match v_init type #" << i << " ("
+               << getVInit()[i].getType() << ")";
+  } else {
+    // Memref mode (post-bufferization): no results, v_init carries writes.
+    if (getNumResults() != 0)
+      return emitOpError("memref mode must have zero results, got ")
+             << getNumResults();
+  }
+
+  // body_func symbol resolution is checked in verifySymbolUses() so the
+  // verifier driver can share a SymbolTableCollection across all
+  // symbol-user ops in the module.
+  return success();
+}
+
+LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto bodyFunc = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getBodyFuncAttr());
+  if (!bodyFunc)
+    return emitOpError("body_func '")
+           << getBodyFunc() << "' does not reference a func.func";
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

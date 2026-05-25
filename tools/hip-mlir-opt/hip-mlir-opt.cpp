@@ -30,6 +30,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/InitAllPasses.h"
 
@@ -192,6 +193,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::NonZeroOp>>(*ctx);
     mlir::hip::SizeOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SizeOp>>(*ctx);
+    mlir::hip::LoopOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LoopOp>>(*ctx);
   });
 }
 
@@ -224,6 +227,9 @@ int main(int argc, char **argv) {
   mlir::hip::registerHipPipelines();
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::hip::createOutlineOnnxToHipDNNPass();
+  });
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::hip::createOnnxLoopOutlinePass();
   });
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();

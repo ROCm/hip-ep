@@ -32,6 +32,13 @@ jobs:
       FLATBUFFERS_TAG: flatbuffers-25.12.19-release
       PROTO_TAG: protobuf-34.0-release
       ONNXRUNTIME_VERSION: "1.25.1"
+      # Space-separated list of microsoft/onnxruntime PR numbers to fetch
+      # from github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply`
+      # on top of the pinned ONNXRUNTIME_VERSION tag during the source-build
+      # step. The PR list is also part of the prebuilt-local cache key, so
+      # editing this list auto-invalidates the cached install prefix.
+      # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
+      ONNXRUNTIME_PR_PATCHES: "28608"
       GTEST_VERSION: "1.15.0"
       THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       SCCACHE_GHA_ENABLED: "true"
@@ -80,7 +87,12 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/prebuilt-local
-          key: prebuilt-v${{ env.PREBUILT_CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
+          # The `ortpr-<list>` segment embeds the ONNXRUNTIME_PR_PATCHES env
+          # value verbatim, so editing the PR list auto-invalidates the
+          # cached install prefix. Without this, bumping the patched PR set
+          # but leaving ONNXRUNTIME_VERSION fixed would silently keep the
+          # previous-patch ORT artifacts in the cache.
+          key: prebuilt-v${{ env.PREBUILT_CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
 
       # -----------------------------------------------------------------------
       # Cache: TheRock HIP SDK for Windows (separate cache – large tarball)
@@ -152,6 +164,39 @@ jobs:
           submodules: true
           fetch-depth: 1
           show-progress: false
+
+      # Fetch and apply microsoft/onnxruntime PR patches listed in
+      # ONNXRUNTIME_PR_PATCHES (env). Each PR's `.patch` endpoint returns the
+      # git format-patch mailbox for the PR's current head, which we apply on
+      # top of the pinned ONNXRUNTIME_VERSION tag. The cache key on
+      # `prebuilt-local` includes the PR list, so adding/removing a PR
+      # number forces a rebuild. The source-onnxruntime tree itself is not
+      # cached, so a fresh checkout always lands here clean and patches
+      # apply directly. No idempotency needed.
+      - name: Apply ONNX Runtime PR patches
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}\source-onnxruntime
+        env:
+          ORT_PRS: ${{ env.ONNXRUNTIME_PR_PATCHES }}
+        run: |
+          $prs = $env:ORT_PRS.Trim()
+          if (-not $prs) {
+            Write-Host "ONNXRUNTIME_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          }
+          foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $url = "https://github.com/microsoft/onnxruntime/pull/$pr.patch"
+            $tmp = Join-Path $env:RUNNER_TEMP "ort-pr-$pr.patch"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            Write-Host "Applying PR #$pr"
+            git apply --whitespace=nowarn $tmp
+            if ($LASTEXITCODE -ne 0) {
+              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
+            }
+          }
 
       - name: Build ONNX Runtime
         if: steps.cache-prebuilt.outputs.cache-hit != 'true'

@@ -42,6 +42,7 @@ add_library(HipToLLVM STATIC
   ScatterNDLowering.cpp
   NonZeroLowering.cpp
   SizeLowering.cpp
+  LoopLowering.cpp
 )
 
 add_dependencies(HipToLLVM

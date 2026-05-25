@@ -11,6 +11,7 @@ include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpBase.td"
+include "mlir/IR/SymbolInterfaces.td"
 
 class Hip_Op<string mnemonic, list<Trait> traits = []> :
     Op<Hip_Dialect, mnemonic, traits>;
@@ -72,6 +73,81 @@ def Hip_GetPoolOp : Hip_Op<"get_pool",
   let arguments = (ins Hip_ContextType:$ctx, Index:$pool_size);
   let results = (outs AnyMemRef:$pool);
   let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";
+}
+
+// ===== Control flow ==========================================================
+
+def Hip_LoopOp : Hip_Op<"loop",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                               ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Outlined-body counted/conditional loop";
+  let description = [{
+    Runtime-driven loop with an outlined body function. Each iteration
+    invokes `$body_func` with the iteration index, the current condition,
+    the loop-carried values, and the captured outer-graph values. The
+    body updates the loop-carried values and returns a new condition.
+
+    Operand layout:
+      - `$ctx`: `!hip.context` (always first).
+      - `$max_trip_count`: `index` — the trip count `M` (ONNX Loop input 0).
+      - `$cond_init`: optional `i1` — initial condition (ONNX Loop input 1).
+      - `$v_init`: variadic, length must equal `$num_loop_carried` — initial
+        values for loop-carried tensors/memrefs; types must match the op's
+        result types.
+      - `$captures`: variadic — outer-graph values used inside the body
+        that are not loop-carried (e.g. constant tensors A, B).
+
+    Result types match `$v_init` types and correspond to the loop-carried
+    values after the final iteration.
+
+    If `$cond_is_passthrough` is set, the outlining pass has verified that
+    the body's yielded `cond_out` is SSA-equal to its `cond_in` block
+    argument. The LLVM lowering then picks the fast-path runtime function
+    `hipdnn_ep_run_counted_loop` (no per-iter device->host cond sync).
+    Otherwise the slow-path `hipdnn_ep_run_loop` is used (matches ORT CUDA
+    EP / MIGraphX behavior).
+
+    Example:
+    ```mlir
+    %v_final = hip.loop(%ctx, %M, %cond_init)
+                   iter_args(%acc_init : tensor<16x16xf32>)
+                   captures(%A, %B : tensor<?x16x16xf32>,
+                                     tensor<16x16xf32>)
+                   -> (tensor<16x16xf32>)
+                   body @loop_body_n0
+                   {num_loop_carried = 1 : i32, cond_is_passthrough}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Index:$max_trip_count,
+    Optional<I1>:$cond_init,
+    Variadic<Hip_TensorOrMemRef>:$v_init,
+    Variadic<AnyType>:$captures,
+    FlatSymbolRefAttr:$body_func,
+    I32Attr:$num_loop_carried,
+    UnitAttr:$cond_is_passthrough
+  );
+
+  // v_final is non-empty only at the tensor level (DPS convention).
+  // After BufferResultsToOutParams / OneShotBufferize, the results are
+  // eliminated and v_init carries the writes via its memref descriptors.
+  let results = (outs Variadic<AnyRankedTensor>:$v_final);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $max_trip_count (`,` $cond_init^)? `)`
+    ( `iter_args` `(` $v_init^ `:` type($v_init) `)` )?
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    ( `->` `(` type($v_final)^ `)` )?
+    `body` $body_func
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_FreeOp : Hip_Op<"free",
