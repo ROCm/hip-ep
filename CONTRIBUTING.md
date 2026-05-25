@@ -64,9 +64,12 @@ The points that bite hardest in this repo:
   first) is the soft threshold. PRs above this get the `large-pr`
   label automatically as a reviewer signal — not a hard block.
 - A `large-pr` PR is acceptable when the work genuinely cannot be
-  split (a vendor drop, a generated file regen, a single test that
-  exercises many paths, a feature with irreducible cross-layer
-  coupling). The Summary / Why section must explain why.
+  split — typically a feature with irreducible cross-layer coupling
+  (compiler + runtime + tests that are only meaningful together), a
+  coordinated rename or signature change across many call sites
+  where splitting would leave the tree uncompilable between PRs, or
+  a single test that exercises many paths. The Summary / Why section
+  must explain why.
 - A `large-pr` PR that *could* have been split but wasn't may be
   marked `extractive` and asked to land as a series. See the
   [Extractive contributions](#extractive-contributions) section
