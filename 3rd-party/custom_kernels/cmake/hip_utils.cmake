@@ -202,7 +202,8 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
         -fms-compatibility
         -fexceptions
     )
-
+    
+    list(APPEND abi_flags -Xclang -fno-cuda-host-device-constexpr)
     # MSVC 14.51 <cmath> compatibility shim.
     #
     # MSVC 14.51's `<cmath>` adds `inline` / `constexpr` overloads of
