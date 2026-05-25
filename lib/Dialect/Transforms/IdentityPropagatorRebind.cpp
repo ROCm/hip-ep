@@ -56,8 +56,7 @@
 
 #define DEBUG_TYPE "hip-identity-propagator-rebind"
 
-STATISTIC(NumOpsElided,
-          "Number of identity-propagator ops erased");
+STATISTIC(NumOpsElided, "Number of identity-propagator ops erased");
 STATISTIC(NumSlotsRebound,
           "Number of output slot ids rebound to the upstream input slot");
 STATISTIC(NumRefsRewritten,
@@ -110,8 +109,7 @@ int32_t findProducerSlotForValue(Value v) {
       }
     }
   }
-  if (auto slotIds =
-          producer->getAttrOfType<DenseI32ArrayAttr>("slot_ids")) {
+  if (auto slotIds = producer->getAttrOfType<DenseI32ArrayAttr>("slot_ids")) {
     if (ri == 0) {
       for (int32_t s : slotIds.asArrayRef())
         if (s >= 0)
@@ -129,8 +127,7 @@ int32_t findProducerSlotForValue(Value v) {
 // grid or the legacy scalar / array attrs). Returns -1 when the op
 // doesn't carry a slot.
 int32_t findFirstOwnSlot(Operation *op) {
-  if (auto outer =
-          op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids")) {
+  if (auto outer = op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids")) {
     for (Attribute resA : outer) {
       if (auto pr = llvm::dyn_cast<DenseI32ArrayAttr>(resA)) {
         for (int32_t s : pr.asArrayRef())
@@ -181,10 +178,9 @@ Attribute remapDenseI32Array(MLIRContext *ctx, DenseI32ArrayAttr attr,
   return b.getDenseI32ArrayAttr(out);
 }
 
-Attribute
-remapInputDimSlotsAttr(MLIRContext *ctx, ArrayAttr attr,
-                       const DenseMap<int32_t, int32_t> &remap,
-                       uint64_t &rewriteCount) {
+Attribute remapInputDimSlotsAttr(MLIRContext *ctx, ArrayAttr attr,
+                                 const DenseMap<int32_t, int32_t> &remap,
+                                 uint64_t &rewriteCount) {
   if (!attr)
     return attr;
   Builder b(ctx);
@@ -240,8 +236,7 @@ Attribute remapOutputSlotIdsAttr(MLIRContext *ctx, ArrayAttr attr,
       outer.push_back(resAttr);
       continue;
     }
-    Attribute newAttr =
-        remapDenseI32Array(ctx, perResult, remap, rewriteCount);
+    Attribute newAttr = remapDenseI32Array(ctx, perResult, remap, rewriteCount);
     if (newAttr != Attribute(perResult))
       changed = true;
     outer.push_back(newAttr);
@@ -446,9 +441,8 @@ public:
         if (s >= 0) {
           auto it = remap.find(s);
           if (it != remap.end() && it->second != s) {
-            op->setAttr("slot_id",
-                        IntegerAttr::get(IntegerType::get(ctx, 32),
-                                         it->second));
+            op->setAttr("slot_id", IntegerAttr::get(IntegerType::get(ctx, 32),
+                                                    it->second));
             ++rewrites;
           }
         }
@@ -459,20 +453,17 @@ public:
           op->setAttr("slot_ids", newAttr);
       }
       if (auto a = op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids")) {
-        Attribute newAttr =
-            remapOutputSlotIdsAttr(ctx, a, remap, rewrites);
+        Attribute newAttr = remapOutputSlotIdsAttr(ctx, a, remap, rewrites);
         if (newAttr != Attribute(a))
           op->setAttr("hipdnn.output_slot_ids", newAttr);
       }
       if (auto a = op->getAttrOfType<ArrayAttr>("output_dim_specs")) {
-        Attribute newAttr =
-            remapOutputDimSpecsAttr(ctx, a, remap, rewrites);
+        Attribute newAttr = remapOutputDimSpecsAttr(ctx, a, remap, rewrites);
         if (newAttr != Attribute(a))
           op->setAttr("output_dim_specs", newAttr);
       }
       if (auto a = op->getAttrOfType<ArrayAttr>("hipdnn.input_dim_slots")) {
-        Attribute newAttr =
-            remapInputDimSlotsAttr(ctx, a, remap, rewrites);
+        Attribute newAttr = remapInputDimSlotsAttr(ctx, a, remap, rewrites);
         if (newAttr != Attribute(a))
           op->setAttr("hipdnn.input_dim_slots", newAttr);
       }

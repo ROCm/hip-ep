@@ -115,10 +115,9 @@ struct NonZeroOpLowering : public ConvertOpToLLVMPattern<NonZeroOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 7> args = {statePtr,        inputPtr,
-                                  inputNumElements, inputRankConst,
-                                  inputDataTypeVal, slotIdConst,
-                                  shapeArr};
+    SmallVector<Value, 7> args = {
+        statePtr,         inputPtr,    inputNumElements, inputRankConst,
+        inputDataTypeVal, slotIdConst, shapeArr};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

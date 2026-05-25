@@ -20,8 +20,7 @@ namespace {
 
 // Materialize a single node recursively. Returns an i64 SSA Value.
 Value materializeNode(OpBuilder &builder, Location loc, const DimSpec &spec,
-                      int32_t idx,
-                      const DimSpecMaterializerCallbacks &cbacks) {
+                      int32_t idx, const DimSpecMaterializerCallbacks &cbacks) {
   const auto &n = spec.nodes()[idx];
   Type i64 = builder.getI64Type();
   switch (n.kind) {
@@ -33,8 +32,8 @@ Value materializeNode(OpBuilder &builder, Location loc, const DimSpec &spec,
       // Emit a constant -1 to make the IR well-typed but flagged.
       return arith::ConstantIntOp::create(builder, loc, i64, -1);
     }
-    Value v = cbacks.readInputDim((unsigned)n.input_index,
-                                  (unsigned)n.dim_index);
+    Value v =
+        cbacks.readInputDim((unsigned)n.input_index, (unsigned)n.dim_index);
     if (v.getType() != i64) {
       v = arith::IndexCastOp::create(builder, loc, i64, v);
     }
@@ -51,9 +50,8 @@ Value materializeNode(OpBuilder &builder, Location loc, const DimSpec &spec,
     return v;
   }
   case DimSpecKind::RuntimeSlot: {
-    auto module = builder.getInsertionBlock()
-                      ->getParent()
-                      ->getParentOfType<ModuleOp>();
+    auto module =
+        builder.getInsertionBlock()->getParent()->getParentOfType<ModuleOp>();
     if (!module || !cbacks.statePtr) {
       return arith::ConstantIntOp::create(builder, loc, i64, -1);
     }
@@ -68,11 +66,10 @@ Value materializeNode(OpBuilder &builder, Location loc, const DimSpec &spec,
                                     kReadDimFnName, funcType);
       fn.setLinkage(LLVM::Linkage::External);
     }
-    Value slotIdConst = arith::ConstantIntOp::create(builder, loc, i32,
-                                                     (int64_t)n.slot_id);
-    auto callOp =
-        LLVM::CallOp::create(builder, loc, fn,
-                             ValueRange{cbacks.statePtr, slotIdConst});
+    Value slotIdConst =
+        arith::ConstantIntOp::create(builder, loc, i32, (int64_t)n.slot_id);
+    auto callOp = LLVM::CallOp::create(
+        builder, loc, fn, ValueRange{cbacks.statePtr, slotIdConst});
     return callOp.getResult();
   }
   case DimSpecKind::Add:

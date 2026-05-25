@@ -208,8 +208,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   // GenerateInterface gate here: shims are conditionally exported.
   // Category B / fully-static models keep the legacy export surface.
   int32_t dynSlotsCountForExport = 0;
-  if (auto a =
-          module->getAttrOfType<mlir::IntegerAttr>("hipdnn.dyn_dim_slots_count"))
+  if (auto a = module->getAttrOfType<mlir::IntegerAttr>(
+          "hipdnn.dyn_dim_slots_count"))
     dynSlotsCountForExport = static_cast<int32_t>(a.getInt());
   if (dynSlotsCountForExport > 0) {
     export_symbols.push_back("inference_dyn_slot_get_dim");

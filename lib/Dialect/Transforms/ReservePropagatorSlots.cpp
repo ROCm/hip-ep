@@ -77,8 +77,7 @@ public:
     // converters). Any propagator reservation we make extends this
     // counter.
     int32_t nextSlot = 0;
-    if (auto a =
-            module->getAttrOfType<IntegerAttr>("hipdnn.next_dyn_slot_id"))
+    if (auto a = module->getAttrOfType<IntegerAttr>("hipdnn.next_dyn_slot_id"))
       nextSlot = (int32_t)a.getInt();
 
     Builder b(ctx);
@@ -144,12 +143,10 @@ public:
     // Persist the bumped counter so any later pass (e.g. another
     // converter run, lowering metadata emit) sees the new high water.
     int32_t prev = 0;
-    if (auto a =
-            module->getAttrOfType<IntegerAttr>("hipdnn.next_dyn_slot_id"))
+    if (auto a = module->getAttrOfType<IntegerAttr>("hipdnn.next_dyn_slot_id"))
       prev = (int32_t)a.getInt();
     if (nextSlot > prev) {
-      module->setAttr("hipdnn.next_dyn_slot_id",
-                      b.getI32IntegerAttr(nextSlot));
+      module->setAttr("hipdnn.next_dyn_slot_id", b.getI32IntegerAttr(nextSlot));
       NumSlotsReserved += (uint64_t)(nextSlot - prev);
     }
   }

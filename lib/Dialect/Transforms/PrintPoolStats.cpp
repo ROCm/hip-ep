@@ -48,8 +48,7 @@ public:
             module->getAttrOfType<IntegerAttr>("hipdnn.dyn_dim_slots_count"))
       dynSlotsCount = ds.getInt();
     int64_t nextDynSlotId = 0;
-    if (auto ds =
-            module->getAttrOfType<IntegerAttr>("hipdnn.next_dyn_slot_id"))
+    if (auto ds = module->getAttrOfType<IntegerAttr>("hipdnn.next_dyn_slot_id"))
       nextDynSlotId = ds.getInt();
     int64_t outputDimSpecCount = 0;
     if (auto outDS =

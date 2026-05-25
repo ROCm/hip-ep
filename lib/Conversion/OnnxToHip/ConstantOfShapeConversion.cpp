@@ -279,9 +279,9 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
 /// `hip.constant_of_shape`'s `fill_value`. The runtime kernel re-interprets
 /// the low bits per `output_data_type`.  Returns failure if the value
 /// attribute is non-dense / unsupported.
-static mlir::LogicalResult
-encodeFillValueBits(mlir::Operation *op, mlir::Type elemType,
-                    int64_t &bits_out) {
+static mlir::LogicalResult encodeFillValueBits(mlir::Operation *op,
+                                               mlir::Type elemType,
+                                               int64_t &bits_out) {
   bits_out = 0;
   auto valueAttr = op->getAttrOfType<mlir::ElementsAttr>("value");
   if (!valueAttr) {
@@ -354,8 +354,8 @@ reserveSlotIds(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                int64_t count) {
   auto moduleOp = op->getParentOfType<mlir::ModuleOp>();
   int32_t base = 0;
-  if (auto a = moduleOp->getAttrOfType<mlir::IntegerAttr>(
-          "hipdnn.next_dyn_slot_id"))
+  if (auto a =
+          moduleOp->getAttrOfType<mlir::IntegerAttr>("hipdnn.next_dyn_slot_id"))
     base = static_cast<int32_t>(a.getInt());
   moduleOp->setAttr(
       "hipdnn.next_dyn_slot_id",
@@ -461,8 +461,7 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
       // memref that bufferization can allocate and immediately leak; the
       // EP's tensor_t marshalling for Category-C outputs already skips
       // memcpy via the sentinel data=null path.
-      mlir::Value one =
-          mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+      mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
       for (int64_t i = 0; i < outRank; ++i) {
         if (resultType.isDynamicDim(i))
           dynSizes.push_back(one);

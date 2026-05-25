@@ -43,9 +43,7 @@ namespace mlir_compilation {
 // (alias: HIPDNN_EP_TRACE_SHAPES) toggles the EP session-open dump, the
 // per-Compute() pre/post-resolve traces, AND the resolver's per-leaf
 // traces from a single env var.
-inline bool debug_shapes_enabled() {
-  return customop::debugShapesEnabled();
-}
+inline bool debug_shapes_enabled() { return customop::debugShapesEnabled(); }
 
 // Tensor marshaling state - holds tensors, shapes, and span
 struct TensorData {
@@ -53,7 +51,6 @@ struct TensorData {
   std::vector<std::vector<int64_t>> shapes; // Storage for shape arrays
   span_t span;
 };
-
 
 static size_t ort_element_size(ONNXTensorElementDataType dtype) {
   switch (dtype) {
@@ -614,7 +611,8 @@ MlirCustomOp::MlirCustomOp(
         const auto &shape = metadata_.outputs(i).shape();
         std::string sh;
         for (int d = 0; d < shape.size(); ++d) {
-          if (!sh.empty()) sh += ",";
+          if (!sh.empty())
+            sh += ",";
           sh += std::to_string(shape[d]);
         }
         fprintf(stderr,
@@ -624,10 +622,8 @@ MlirCustomOp::MlirCustomOp(
                 output_dyn_info_[i].needs_pre_compute_resolve ? 1 : 0);
         for (size_t d = 0; d < ti->dim_specs.size(); ++d) {
           const auto &spec = ti->dim_specs[d];
-          fprintf(stderr,
-                  "[CTor]   dim_spec[%zu]: %s, %zu node(s)\n", d,
-                  spec ? "present" : "null",
-                  spec ? spec->nodes.size() : 0);
+          fprintf(stderr, "[CTor]   dim_spec[%zu]: %s, %zu node(s)\n", d,
+                  spec ? "present" : "null", spec ? spec->nodes.size() : 0);
           if (spec) {
             for (size_t ni = 0; ni < spec->nodes.size(); ++ni) {
               const auto &node = spec->nodes[ni];
@@ -639,7 +635,8 @@ MlirCustomOp::MlirCustomOp(
                       node->input_index, node->dim_index,
                       (long long)node->flat_offset, node->slot_id);
               for (size_t c = 0; c < node->children.size(); ++c) {
-                if (c) fprintf(stderr, ",");
+                if (c)
+                  fprintf(stderr, ",");
                 fprintf(stderr, "%d", node->children[c]);
               }
               fprintf(stderr, "]\n");
@@ -685,8 +682,8 @@ MlirCustomOp::MlirCustomOp(
           output_dyn_info_[i].has_runtime_slot = true;
           output_dyn_info_[i].buffer_slot_id = found_slot;
         }
-        MY_LOG(2) << "Output " << i << ": Category-C, dim " << d
-                  << " <- slot " << found_slot;
+        MY_LOG(2) << "Output " << i << ": Category-C, dim " << d << " <- slot "
+                  << found_slot;
       }
     }
   }
@@ -906,15 +903,15 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
       if (debug_shapes_enabled()) {
         std::string s;
         for (auto d : resolved_shapes[i]) {
-          if (!s.empty()) s += ",";
+          if (!s.empty())
+            s += ",";
           s += std::to_string(d);
         }
-        fprintf(stderr,
-                "[EP] Output[%d] pre-compute resolved shape=[%s]\n",
-                i, s.c_str());
+        fprintf(stderr, "[EP] Output[%d] pre-compute resolved shape=[%s]\n", i,
+                s.c_str());
       }
-      MY_LOG(3) << "Output[" << i << "] resolved pre-compute, rank="
-                << outputs.tensors[i].rank;
+      MY_LOG(3) << "Output[" << i
+                << "] resolved pre-compute, rank=" << outputs.tensors[i].rank;
     } else {
       // Category-C deferred sentinel. Build a shape array of length rank
       // filled with -1 (so any code path that mistakenly inspects it gets
@@ -962,15 +959,16 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
 
     // Re-resolve the shape with the inference_state available -- now
     // RuntimeSlot leaves return their published value.
-    auto resolved = resolveOutputShapePostCompute(*fb_meta, i, input_shapes,
-                                                  input_data, *inference_state_);
+    auto resolved = resolveOutputShapePostCompute(
+        *fb_meta, i, input_shapes, input_data, *inference_state_);
     // Per-Compute() post-resolve trace -- pairs with the pre-compute
     // trace above so the full lifecycle of a dynamic dim is visible
     // under one env var.
     if (debug_shapes_enabled()) {
       std::string s;
       for (auto d : resolved) {
-        if (!s.empty()) s += ",";
+        if (!s.empty())
+          s += ",";
         s += std::to_string(d);
       }
       fprintf(stderr,
@@ -988,8 +986,8 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
     int64_t numel = 1;
     for (int64_t d : resolved)
       numel *= d;
-    const size_t elem_size = onnx_elem_type_size(
-        metadata_.outputs(i).elem_type());
+    const size_t elem_size =
+        onnx_elem_type_size(metadata_.outputs(i).elem_type());
     const size_t bytes = static_cast<size_t>(numel) * elem_size;
 
     MY_LOG(3) << "Output[" << i << "] Category-C resolved: numel=" << numel
@@ -1008,11 +1006,11 @@ void MlirCustomOp::computeDynamic(OrtKernelContext *context) const {
                       "did not publish a GPU buffer for slot "
                    << dyn_info.buffer_slot_id;
     CHECK(host_dst);
-    hipError_t herr = hipMemcpyAsync(host_dst, gpu_src, bytes,
-                                     hipMemcpyDeviceToHost, stream);
+    hipError_t herr =
+        hipMemcpyAsync(host_dst, gpu_src, bytes, hipMemcpyDeviceToHost, stream);
     if (herr != hipSuccess) {
-      LOG(ERROR) << "Category-C output " << i << " D2H failed: "
-                 << hipGetErrorString(herr);
+      LOG(ERROR) << "Category-C output " << i
+                 << " D2H failed: " << hipGetErrorString(herr);
       continue;
     }
     any_async_d2h = true;

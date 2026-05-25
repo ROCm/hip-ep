@@ -46,8 +46,7 @@ struct ShapeOpLowering : public ConvertOpToLLVMPattern<ShapeOp> {
       return rewriter.notifyMatchFailure(
           op, "hip.shape lowering expects a ranked memref output");
     if (outputType.getRank() != 1)
-      return rewriter.notifyMatchFailure(
-          op, "hip.shape output must be rank-1");
+      return rewriter.notifyMatchFailure(op, "hip.shape output must be rank-1");
     if (!outputType.getElementType().isInteger(64))
       return rewriter.notifyMatchFailure(
           op, "hip.shape output must have i64 elements");
@@ -65,8 +64,7 @@ struct ShapeOpLowering : public ConvertOpToLLVMPattern<ShapeOp> {
           op, "element_dim_specs size does not match output length");
 
     Value statePtr = adaptor.getCtx();
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc);
+    Value outputPtr = extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc);
 
     // Stack-alloca a host int64[length] and fill it by materialising each
     // DimSpec. We rely on the shared DimSpecMaterializer to emit the right
@@ -131,8 +129,8 @@ struct ShapeOpLowering : public ConvertOpToLLVMPattern<ShapeOp> {
             op, "materializeDimSpec returned non-i64 value");
       }
       Value idx = createI64Const(i);
-      Value slot = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
-                                       hostBuf, ValueRange{idx});
+      Value slot = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, hostBuf,
+                                       ValueRange{idx});
       LLVM::StoreOp::create(rewriter, loc, dimVal, slot);
     }
 
@@ -140,8 +138,7 @@ struct ShapeOpLowering : public ConvertOpToLLVMPattern<ShapeOp> {
     //                const int64_t* host_values)
     SmallVector<Type, 4> paramTypes = {ptrType, ptrType, i64Type, ptrType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapShape, paramTypes,
-        rewriter.getI32Type());
+        rewriter, module, kWrapShape, paramTypes, rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
 

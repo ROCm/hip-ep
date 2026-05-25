@@ -92,10 +92,9 @@ int wrap_nonzero(RuntimeState *state, const void *input,
   }
   int hip_dtype = nonzero_hipdnn_to_hip_dtype(input_data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_nonzero: unsupported input_data_type=%s(%lld)\n",
-            hipdnn_ep_datatype_name(input_data_type),
-            (long long)input_data_type);
+    fprintf(
+        stderr, "[REAL] wrap_nonzero: unsupported input_data_type=%s(%lld)\n",
+        hipdnn_ep_datatype_name(input_data_type), (long long)input_data_type);
     return -1;
   }
 
@@ -133,7 +132,8 @@ int wrap_nonzero(RuntimeState *state, const void *input,
   }
   herr = hipStreamSynchronize(stream);
   if (herr != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_nonzero: stream sync (post-count) failed: %s\n",
+    fprintf(stderr,
+            "[REAL] wrap_nonzero: stream sync (post-count) failed: %s\n",
             hipGetErrorString(herr));
     return -1;
   }
@@ -194,8 +194,7 @@ int wrap_nonzero(RuntimeState *state, const void *input,
   // fill. `atomic_idx_dev` is retained for source compatibility with
   // older bitcode paths (the new fill ignores it) but allocated all
   // the same so the call site doesn't need to special-case nullptr.
-  void *atomic_idx_dev =
-      hipdnn_ep_state_dyn_pool_alloc(state, sizeof(int64_t));
+  void *atomic_idx_dev = hipdnn_ep_state_dyn_pool_alloc(state, sizeof(int64_t));
   // thread_off: 1 int32 per input element. block_sums: 1 int32 per
   // 64-element block. Block size is fixed at kNonZeroScanBS=64 in the
   // kernel; keep this constant in sync if the kernel ever changes.
@@ -223,10 +222,9 @@ int wrap_nonzero(RuntimeState *state, const void *input,
       slot_id, (long long)input_rank, (long long)N,
       hipdnn_ep_datatype_name(input_data_type));
 
-  rc = hip_nonzero_fill(stream_v, input, input_num_elements,
-                        (int64_t)hip_dtype, input_rank, N, shape_dev,
-                        atomic_idx_dev, thread_off_dev, block_sums_dev,
-                        out_dev);
+  rc = hip_nonzero_fill(stream_v, input, input_num_elements, (int64_t)hip_dtype,
+                        input_rank, N, shape_dev, atomic_idx_dev,
+                        thread_off_dev, block_sums_dev, out_dev);
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_nonzero: hip_nonzero_fill rc=%d\n", rc);
     return rc;

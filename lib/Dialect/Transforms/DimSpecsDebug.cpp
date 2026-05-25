@@ -99,8 +99,7 @@ void dumpPerOpArrayAttr(llvm::raw_ostream &os, llvm::StringRef header,
 // --hip-dump-dim-specs
 //===----------------------------------------------------------------------===//
 
-class DumpDimSpecsPass
-    : public impl::DumpDimSpecsPassBase<DumpDimSpecsPass> {
+class DumpDimSpecsPass : public impl::DumpDimSpecsPassBase<DumpDimSpecsPass> {
 public:
   using impl::DumpDimSpecsPassBase<DumpDimSpecsPass>::DumpDimSpecsPassBase;
 
@@ -116,23 +115,21 @@ public:
     os << "[per-op DimSpecs]\n";
     bool any_op_with_dimspec = false;
     module.walk([&](Operation *op) {
-      auto opNs = op->getDialect()
-                      ? op->getDialect()->getNamespace()
-                      : llvm::StringRef("");
+      auto opNs = op->getDialect() ? op->getDialect()->getNamespace()
+                                   : llvm::StringRef("");
       if (opNs != "hip")
         return;
-      auto output_dim_specs = op->getAttrOfType<::mlir::ArrayAttr>(
-          kPerOpOutputDimSpecsAttr);
-      auto element_dim_specs = op->getAttrOfType<::mlir::ArrayAttr>(
-          kHipShapeElementDimSpecsAttr);
+      auto output_dim_specs =
+          op->getAttrOfType<::mlir::ArrayAttr>(kPerOpOutputDimSpecsAttr);
+      auto element_dim_specs =
+          op->getAttrOfType<::mlir::ArrayAttr>(kHipShapeElementDimSpecsAttr);
       if ((!output_dim_specs || output_dim_specs.empty()) &&
           (!element_dim_specs || element_dim_specs.empty())) {
         return;
       }
       any_op_with_dimspec = true;
       os << "  " << op->getName() << " @ " << op->getLoc() << "\n";
-      dumpPerOpArrayAttr(os, "output_dim_specs[result][dim]",
-                         output_dim_specs);
+      dumpPerOpArrayAttr(os, "output_dim_specs[result][dim]", output_dim_specs);
       dumpPerOpArrayAttr(os, "element_dim_specs[result][elem]",
                          element_dim_specs);
     });
@@ -142,8 +139,8 @@ public:
 
     // 2) Module-level composed DimSpecs produced by --hip-compose-dim-specs.
     os << "[module-level hipdnn.output_dim_specs]\n";
-    auto modAttr = module->getAttrOfType<::mlir::ArrayAttr>(
-        kModuleOutputDimSpecsAttr);
+    auto modAttr =
+        module->getAttrOfType<::mlir::ArrayAttr>(kModuleOutputDimSpecsAttr);
     if (!modAttr) {
       os << "  <attribute not present — has --hip-compose-dim-specs run?>\n";
     } else {
@@ -167,7 +164,8 @@ public:
 class VerifyDimSpecsPass
     : public impl::VerifyDimSpecsPassBase<VerifyDimSpecsPass> {
 public:
-  using impl::VerifyDimSpecsPassBase<VerifyDimSpecsPass>::VerifyDimSpecsPassBase;
+  using impl::VerifyDimSpecsPassBase<
+      VerifyDimSpecsPass>::VerifyDimSpecsPassBase;
 
   // Collect every slot_id referenced inside `ds`. Recurses through binary
   // nodes; visits each node exactly once via a flat node-array sweep.
@@ -182,15 +180,14 @@ public:
   // Verify a single tree, emitting one diagnostic per failure to
   // `errStream` and returning the cumulative pass/fail.
   bool verifyOneTree(const DimSpec &ds, llvm::StringRef context,
-                     int32_t dyn_slot_bound,
-                     llvm::raw_ostream &errStream) {
+                     int32_t dyn_slot_bound, llvm::raw_ostream &errStream) {
     if (ds.nodes().empty())
       return true; // "no spec" is signalled separately by callers
     std::string err;
     if (!ds.verify(err)) {
       errStream << context
-                << ": malformed DimSpec tree (DimSpec::verify failed): "
-                << err << "\n";
+                << ": malformed DimSpec tree (DimSpec::verify failed): " << err
+                << "\n";
       return false;
     }
     llvm::SmallVector<int32_t, 4> slots;
@@ -226,9 +223,8 @@ public:
     //    We iterate at the op level so the diagnostic carries the op
     //    location.
     module.walk([&](Operation *op) {
-      auto ns = op->getDialect()
-                    ? op->getDialect()->getNamespace()
-                    : llvm::StringRef("");
+      auto ns = op->getDialect() ? op->getDialect()->getNamespace()
+                                 : llvm::StringRef("");
       if (ns != "hip")
         return;
       auto checkArrayAttr = [&](::mlir::ArrayAttr a, llvm::StringRef label) {
@@ -237,8 +233,8 @@ public:
         for (size_t i = 0; i < a.size(); ++i) {
           auto inner = llvm::dyn_cast<::mlir::ArrayAttr>(a[i]);
           if (!inner) {
-            os << op->getName() << " @ " << op->getLoc() << ": " << label
-               << "[" << i << "] is not an ArrayAttr\n";
+            os << op->getName() << " @ " << op->getLoc() << ": " << label << "["
+               << i << "] is not an ArrayAttr\n";
             ok = false;
             continue;
           }
@@ -253,19 +249,19 @@ public:
             DimSpec ds = DimSpec::parseFromArrayAttr(leaf);
             std::string ctx;
             llvm::raw_string_ostream rs(ctx);
-            rs << op->getName() << " @ " << op->getLoc() << " " << label
-               << "[" << i << "][" << j << "]";
+            rs << op->getName() << " @ " << op->getLoc() << " " << label << "["
+               << i << "][" << j << "]";
             rs.flush();
             ok &= verifyOneTree(ds, ctx, dyn_slot_bound, os);
           }
         }
       };
-      checkArrayAttr(op->getAttrOfType<::mlir::ArrayAttr>(
-                         kPerOpOutputDimSpecsAttr),
-                     kPerOpOutputDimSpecsAttr);
-      checkArrayAttr(op->getAttrOfType<::mlir::ArrayAttr>(
-                         kHipShapeElementDimSpecsAttr),
-                     kHipShapeElementDimSpecsAttr);
+      checkArrayAttr(
+          op->getAttrOfType<::mlir::ArrayAttr>(kPerOpOutputDimSpecsAttr),
+          kPerOpOutputDimSpecsAttr);
+      checkArrayAttr(
+          op->getAttrOfType<::mlir::ArrayAttr>(kHipShapeElementDimSpecsAttr),
+          kHipShapeElementDimSpecsAttr);
     });
 
     // 2) Module-level composed attr (the EP / GenerateInterface consumer).
@@ -277,8 +273,8 @@ public:
     //      (b) per-output inner rank == that output's rank
     //      (c) every dynamic ('?'/-1) output dim has a non-empty DimSpec
     //          entry (otherwise the EP falls back to "-1 unknown" silently)
-    auto modAttr = module->getAttrOfType<::mlir::ArrayAttr>(
-        kModuleOutputDimSpecsAttr);
+    auto modAttr =
+        module->getAttrOfType<::mlir::ArrayAttr>(kModuleOutputDimSpecsAttr);
     auto outputShapesAttr =
         module->getAttrOfType<::mlir::ArrayAttr>("hipdnn.output_shapes");
     if (modAttr && outputShapesAttr) {
@@ -290,8 +286,8 @@ public:
       } else {
         auto parsed = DimSpec::parseOutputDimSpecsAttr(modAttr);
         for (size_t i = 0; i < parsed.size(); ++i) {
-          auto shapeArr = llvm::dyn_cast<::mlir::DenseI64ArrayAttr>(
-              outputShapesAttr[i]);
+          auto shapeArr =
+              llvm::dyn_cast<::mlir::DenseI64ArrayAttr>(outputShapesAttr[i]);
           if (!shapeArr) {
             os << "hipdnn.output_shapes[" << i
                << "] is not a DenseI64ArrayAttr\n";
@@ -316,9 +312,8 @@ public:
           }
           if ((int64_t)dimSpecs.size() != rank) {
             os << "hipdnn.output_dim_specs[" << i << "] size "
-               << dimSpecs.size()
-               << " does not match Output[" << i << "] rank " << rank
-               << "\n";
+               << dimSpecs.size() << " does not match Output[" << i << "] rank "
+               << rank << "\n";
             ok = false;
             continue;
           }
@@ -364,30 +359,28 @@ public:
     auto mainFunc = module.lookupSymbol<func::FuncOp>("main_graph");
     if (mainFunc) {
       mainFunc.walk([&](Operation *op) {
-        auto ns = op->getDialect()
-                      ? op->getDialect()->getNamespace()
-                      : llvm::StringRef("");
+        auto ns = op->getDialect() ? op->getDialect()->getNamespace()
+                                   : llvm::StringRef("");
         if (ns != "hip")
           return;
         // (i) `hipdnn.output_slot_ids` grid vs. dynamic-dim mask.
         if (auto arr = op->getAttrOfType<::mlir::ArrayAttr>(
                 "hipdnn.output_slot_ids")) {
-          for (unsigned r = 0; r < arr.size() && r < op->getNumResults();
-               ++r) {
+          for (unsigned r = 0; r < arr.size() && r < op->getNumResults(); ++r) {
             auto perResult = llvm::dyn_cast<::mlir::DenseI32ArrayAttr>(arr[r]);
             if (!perResult)
               continue;
             auto rt = llvm::dyn_cast<ShapedType>(op->getResult(r).getType());
             if (!rt || !rt.hasRank())
               continue;
-            for (int64_t d = 0; d < (int64_t)perResult.size() && d < rt.getRank();
-                 ++d) {
+            for (int64_t d = 0;
+                 d < (int64_t)perResult.size() && d < rt.getRank(); ++d) {
               int32_t s = perResult.asArrayRef()[d];
               bool isDyn = rt.isDynamicDim(d);
               if (s >= 0 && !isDyn) {
                 os << op->getName() << " @ " << op->getLoc()
-                   << ": hipdnn.output_slot_ids[" << r << "][" << d
-                   << "]=" << s << " on a STATIC dim (slot leak)\n";
+                   << ": hipdnn.output_slot_ids[" << r << "][" << d << "]=" << s
+                   << " on a STATIC dim (slot leak)\n";
                 ok = false;
               }
               // A -1 on a dynamic dim is allowed when the dim resolves
@@ -413,9 +406,8 @@ public:
           // when the slot is NOT output-bound (intermediate coalescing).
           if (outputBoundSlots.count(s)) {
             os << op->getName() << " @ " << op->getLoc()
-               << ": output-bound slot " << s
-               << " is also published by " << it->second->getName() << " @ "
-               << it->second->getLoc()
+               << ": output-bound slot " << s << " is also published by "
+               << it->second->getName() << " @ " << it->second->getLoc()
                << " -- output-bound slots cannot be coalesced\n";
             ok = false;
           }

@@ -103,8 +103,8 @@ buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i,
         // Push an empty DimSpec when missing; FlatBuffers needs a stable
         // index space so the EP can map dim i ↔ dim_specs[i]. An empty
         // node list means "no information" (legacy fallback).
-        ti->dim_specs.push_back(
-            ds ? std::move(ds) : std::make_unique<mlir::hip::DimSpecT>());
+        ti->dim_specs.push_back(ds ? std::move(ds)
+                                   : std::make_unique<mlir::hip::DimSpecT>());
       }
       // If every dim resolves to "no information", drop the dim_specs
       // vector to keep the blob backwards-compatible with old runtimes

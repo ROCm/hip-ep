@@ -85,8 +85,7 @@ extern "C" int wrap_constant_of_shape(RuntimeState *state, void *output,
       state);
 
   if (!state || !output) {
-    fprintf(stderr,
-            "[REAL] wrap_constant_of_shape: null state/output\n");
+    fprintf(stderr, "[REAL] wrap_constant_of_shape: null state/output\n");
     return -1;
   }
   if (output_num_elements <= 0) {
@@ -102,13 +101,11 @@ extern "C" int wrap_constant_of_shape(RuntimeState *state, void *output,
 // per output dim. The buffer is associated with `slot_ids[0]` -- the EP
 // post-compute resolver reads the buffer from slot_ids[0] and the dim
 // sizes from each slot in order.
-extern "C" int wrap_constant_of_shape_dyn(RuntimeState *state,
-                                          const void *shape_dev,
-                                          int64_t shape_dtype,
-                                          int64_t output_rank,
-                                          const int32_t *slot_ids,
-                                          int64_t value_bits,
-                                          int64_t output_dtype) {
+extern "C" int
+wrap_constant_of_shape_dyn(RuntimeState *state, const void *shape_dev,
+                           int64_t shape_dtype, int64_t output_rank,
+                           const int32_t *slot_ids, int64_t value_bits,
+                           int64_t output_dtype) {
   OP_PROFILE(
       "constant_of_shape_dyn",
       [&] {
@@ -133,8 +130,7 @@ extern "C" int wrap_constant_of_shape_dyn(RuntimeState *state,
   int hip_dtype = static_cast<int>(output_dtype);
   size_t elem_size = constant_of_shape_elem_size(hip_dtype);
   if (elem_size == 0) {
-    fprintf(stderr,
-            "[REAL] wrap_constant_of_shape_dyn: unsupported dtype=%d\n",
+    fprintf(stderr, "[REAL] wrap_constant_of_shape_dyn: unsupported dtype=%d\n",
             hip_dtype);
     return -1;
   }

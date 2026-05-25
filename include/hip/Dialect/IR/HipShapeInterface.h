@@ -222,9 +222,8 @@ namespace shape_interface {
 //
 // Builders may return an empty DimSpec ("I cannot resolve this") to
 // signal a graceful fallback to the static-type strategy.
-using DimSpecBuilderFn =
-    DimSpec (*)(mlir::Operation *op, unsigned result_index,
-                unsigned dim_index);
+using DimSpecBuilderFn = DimSpec (*)(mlir::Operation *op, unsigned result_index,
+                                     unsigned dim_index);
 
 // Register a builder for the given op name (e.g. "hip.transpose"). The
 // last registration wins. Thread-safe (registry is populated once at
@@ -260,8 +259,7 @@ struct PublishedSlot {
   unsigned result_index;
   unsigned dim_index;
 };
-llvm::SmallVector<PublishedSlot, 1>
-getPublishedSlots(mlir::Operation *op);
+llvm::SmallVector<PublishedSlot, 1> getPublishedSlots(mlir::Operation *op);
 
 // Try to derive a DimSpec for `v`'s dim `dim_index` by walking back
 // through producing ops. If `v` is a function argument (a `BlockArgument`

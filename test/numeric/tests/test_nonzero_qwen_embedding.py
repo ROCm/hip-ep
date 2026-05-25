@@ -132,9 +132,9 @@ _QWEN_EMBEDDING_ONNX = Path(
 # during test authoring -- if any of them change the model is a
 # different graph and this test should be re-authored, not silently
 # adapted.
-_IMAGE_TOKEN_ID = 248056          # Equal's constant operand
-_HIDDEN = 4096                    # embed_tokens.weight cols
-_IMAGE_FEATURES_COLS = 2048       # image_features cols (after Reshape->[-1] flattens)
+_IMAGE_TOKEN_ID = 248056  # Equal's constant operand
+_HIDDEN = 4096  # embed_tokens.weight cols
+_IMAGE_FEATURES_COLS = 2048  # image_features cols (after Reshape->[-1] flattens)
 _BATCH = 1
 _SEQ = 128
 
@@ -175,8 +175,16 @@ def _assert_graph_invariants(m: onnx.ModelProto) -> None:
     for n in m.graph.node:
         op_counts[n.op_type] = op_counts.get(n.op_type, 0) + 1
     expected_ops = {
-        "Gather": 2, "Equal": 1, "Expand": 2, "NonZero": 1, "Transpose": 1,
-        "Reshape": 1, "Slice": 1, "ScatterND": 1, "Shape": 3, "Unsqueeze": 2,
+        "Gather": 2,
+        "Equal": 1,
+        "Expand": 2,
+        "NonZero": 1,
+        "Transpose": 1,
+        "Reshape": 1,
+        "Slice": 1,
+        "ScatterND": 1,
+        "Shape": 3,
+        "Unsqueeze": 2,
         "Constant": 7,
     }
     for op, n in expected_ops.items():
@@ -218,8 +226,9 @@ def _substitute_image_features(m: onnx.ModelProto, rows: int) -> onnx.ModelProto
     chain underfeeds ScatterND.
     """
     out = copy.deepcopy(m)
-    fill = (np.arange(rows * _IMAGE_FEATURES_COLS, dtype=np.float16)
-            .reshape(rows, _IMAGE_FEATURES_COLS) * np.float16(0.01))
+    fill = np.arange(rows * _IMAGE_FEATURES_COLS, dtype=np.float16).reshape(
+        rows, _IMAGE_FEATURES_COLS
+    ) * np.float16(0.01)
     new_init = onnx.numpy_helper.from_array(fill, name="image_features")
     replaced = False
     for i, ini in enumerate(out.graph.initializer):
@@ -273,7 +282,9 @@ class TestQwenEmbeddingComposition:
                 f"row {s} differs from row 0 although all input_ids are 1"
             )
 
-    def test_n_positive_k4_image_tokens(self, request, model_runner, qwen_embedding_model):
+    def test_n_positive_k4_image_tokens(
+        self, request, model_runner, qwen_embedding_model
+    ):
         """Scenario 2: K=4 IMAGE_TOKEN_IDs + synthetic image_features.
 
         ``image_features`` is set to ``[8, 2048]`` fp16 (=2K rows ->
@@ -295,9 +306,7 @@ class TestQwenEmbeddingComposition:
 
         m2 = _substitute_image_features(qwen_embedding_model, rows=2 * K)
 
-        actual, expected = model_runner.run_sample(
-            m2, [input_ids], reference="cache"
-        )
+        actual, expected = model_runner.run_sample(m2, [input_ids], reference="cache")
 
         # fp16 ScatterND: bit-exact (no arithmetic).
         compare_outputs(actual, expected, atol=0.0, rtol=0.0)
@@ -316,7 +325,9 @@ class TestQwenEmbeddingComposition:
                     f"non-image position {s} differs from token=1 baseline"
                 )
 
-    def test_n_positive_k1_single_image_token(self, request, model_runner, qwen_embedding_model):
+    def test_n_positive_k1_single_image_token(
+        self, request, model_runner, qwen_embedding_model
+    ):
         """Scenario 2 smallest interesting K=1 case.
 
         Useful regression for off-by-one host-side N-publish bugs:
@@ -331,9 +342,7 @@ class TestQwenEmbeddingComposition:
 
         m2 = _substitute_image_features(qwen_embedding_model, rows=2 * K)
 
-        actual, expected = model_runner.run_sample(
-            m2, [input_ids], reference="cache"
-        )
+        actual, expected = model_runner.run_sample(m2, [input_ids], reference="cache")
 
         compare_outputs(actual, expected, atol=0.0, rtol=0.0)
 

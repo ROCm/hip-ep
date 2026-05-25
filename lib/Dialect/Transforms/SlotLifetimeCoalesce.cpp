@@ -232,13 +232,12 @@ Attribute remapDenseI32Array(MLIRContext *ctx, DenseI32ArrayAttr attr,
   return b.getDenseI32ArrayAttr(out);
 }
 
-// Same shape as the dim-slot pair attribute: ArrayAttr<ArrayAttr<DenseI32ArrayAttr>>
-// for `hipdnn.input_dim_slots` (per-operand list of [dim_idx, slot_id]
-// pairs).
-Attribute
-remapInputDimSlotsAttr(MLIRContext *ctx, ArrayAttr attr,
-                       const DenseMap<int32_t, int32_t> &remap,
-                       uint64_t &rewriteCount) {
+// Same shape as the dim-slot pair attribute:
+// ArrayAttr<ArrayAttr<DenseI32ArrayAttr>> for `hipdnn.input_dim_slots`
+// (per-operand list of [dim_idx, slot_id] pairs).
+Attribute remapInputDimSlotsAttr(MLIRContext *ctx, ArrayAttr attr,
+                                 const DenseMap<int32_t, int32_t> &remap,
+                                 uint64_t &rewriteCount) {
   if (!attr)
     return attr;
   Builder b(ctx);
@@ -296,8 +295,7 @@ Attribute remapOutputSlotIdsAttr(MLIRContext *ctx, ArrayAttr attr,
       outer.push_back(resAttr);
       continue;
     }
-    Attribute newAttr =
-        remapDenseI32Array(ctx, perResult, remap, rewriteCount);
+    Attribute newAttr = remapDenseI32Array(ctx, perResult, remap, rewriteCount);
     if (newAttr != Attribute(perResult))
       changed = true;
     outer.push_back(newAttr);
@@ -385,9 +383,9 @@ Attribute remapOutputDimSpecsAttr(MLIRContext *ctx, ArrayAttr attr,
 
 // Walk the module-level `hipdnn.output_dim_specs` (same nesting shape
 // as the per-op one) and rewrite slot ids.
-Attribute remapModuleOutputDimSpecsAttr(
-    MLIRContext *ctx, ArrayAttr attr,
-    const DenseMap<int32_t, int32_t> &remap, uint64_t &rewriteCount) {
+Attribute remapModuleOutputDimSpecsAttr(MLIRContext *ctx, ArrayAttr attr,
+                                        const DenseMap<int32_t, int32_t> &remap,
+                                        uint64_t &rewriteCount) {
   return remapOutputDimSpecsAttr(ctx, attr, remap, rewriteCount);
 }
 
@@ -495,14 +493,13 @@ public:
               continue;
             int32_t s = pair.asArrayRef()[1];
             auto it = infoBySlot.find(s);
-            if (it != infoBySlot.end() &&
-                myIdx > it->second.last_use_idx)
+            if (it != infoBySlot.end() && myIdx > it->second.last_use_idx)
               it->second.last_use_idx = myIdx;
           }
         }
       }
-      if (auto a =
-              op->getAttrOfType<DenseI32ArrayAttr>("hipdnn.input_slot_buffers")) {
+      if (auto a = op->getAttrOfType<DenseI32ArrayAttr>(
+              "hipdnn.input_slot_buffers")) {
         for (int32_t s : a.asArrayRef()) {
           if (s < 0)
             continue;
@@ -547,8 +544,8 @@ public:
       for (auto &[s, info] : infoBySlot) {
         llvm::dbgs() << "  slot " << s << ": def=" << info.def_idx
                      << " lastUse=" << info.last_use_idx
-                     << " outBound=" << info.output_bound
-                     << " canon=\"" << info.canon_bytes << "\"\n";
+                     << " outBound=" << info.output_bound << " canon=\""
+                     << info.canon_bytes << "\"\n";
       }
     });
 
@@ -575,20 +572,19 @@ public:
     for (auto &[key, group] : byCanonical) {
       // Sort by lifetime length descending so first-fit-decreasing
       // packs the longest lifetimes first (better packing).
-      std::sort(group.begin(), group.end(),
-                [&](int32_t a, int32_t b) {
-                  const SlotInfo &ia = infoBySlot[a];
-                  const SlotInfo &ib = infoBySlot[b];
-                  int64_t la = (ia.last_use_idx == kInfLifetime
-                                    ? kInfLifetime
-                                    : ia.last_use_idx - ia.def_idx);
-                  int64_t lb = (ib.last_use_idx == kInfLifetime
-                                    ? kInfLifetime
-                                    : ib.last_use_idx - ib.def_idx);
-                  if (la != lb)
-                    return la > lb;
-                  return a < b;
-                });
+      std::sort(group.begin(), group.end(), [&](int32_t a, int32_t b) {
+        const SlotInfo &ia = infoBySlot[a];
+        const SlotInfo &ib = infoBySlot[b];
+        int64_t la =
+            (ia.last_use_idx == kInfLifetime ? kInfLifetime
+                                             : ia.last_use_idx - ia.def_idx);
+        int64_t lb =
+            (ib.last_use_idx == kInfLifetime ? kInfLifetime
+                                             : ib.last_use_idx - ib.def_idx);
+        if (la != lb)
+          return la > lb;
+        return a < b;
+      });
       SmallVector<SmallVector<int32_t>> bins;
       for (int32_t s : group) {
         SlotInfo &info = infoBySlot[s];
@@ -667,9 +663,8 @@ public:
         if (s >= 0) {
           auto it = finalRemap.find(s);
           if (it != finalRemap.end() && it->second != s) {
-            op->setAttr("slot_id",
-                        IntegerAttr::get(IntegerType::get(ctx, 32),
-                                         it->second));
+            op->setAttr("slot_id", IntegerAttr::get(IntegerType::get(ctx, 32),
+                                                    it->second));
             ++rewrites;
           }
         }
@@ -699,8 +694,8 @@ public:
         if (newAttr != Attribute(a))
           op->setAttr("hipdnn.input_dim_slots", newAttr);
       }
-      if (auto a =
-              op->getAttrOfType<DenseI32ArrayAttr>("hipdnn.input_slot_buffers")) {
+      if (auto a = op->getAttrOfType<DenseI32ArrayAttr>(
+              "hipdnn.input_slot_buffers")) {
         Attribute newAttr = remapDenseI32Array(ctx, a, finalRemap, rewrites);
         if (newAttr != Attribute(a))
           op->setAttr("hipdnn.input_slot_buffers", newAttr);

@@ -134,8 +134,8 @@ struct NonZeroToHip : public mlir::RewritePattern {
     // lowering time.
     auto moduleOp = op->getParentOfType<mlir::ModuleOp>();
     int32_t slot_id_v = 0;
-    if (auto a =
-            moduleOp->getAttrOfType<mlir::IntegerAttr>("hipdnn.next_dyn_slot_id"))
+    if (auto a = moduleOp->getAttrOfType<mlir::IntegerAttr>(
+            "hipdnn.next_dyn_slot_id"))
       slot_id_v = static_cast<int32_t>(a.getInt());
     moduleOp->setAttr("hipdnn.next_dyn_slot_id",
                       rewriter.getI32IntegerAttr(slot_id_v + 1));

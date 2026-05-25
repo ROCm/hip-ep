@@ -125,10 +125,10 @@ llvm::SmallVector<int32_t, 4> DimSpec::collectSlotIds() const {
 // DimSpec - substitution
 //===----------------------------------------------------------------------===//
 
-int32_t DimSpec::cloneSubtree(
-    int32_t src_root,
-    const llvm::DenseMap<int32_t, DimSpec> &slot_to_subtree,
-    std::vector<DimSpecNode> &out) const {
+int32_t
+DimSpec::cloneSubtree(int32_t src_root,
+                      const llvm::DenseMap<int32_t, DimSpec> &slot_to_subtree,
+                      std::vector<DimSpecNode> &out) const {
   const DimSpecNode &src = nodes_[src_root];
   // Slot substitution: graft the entire subtree from the substitution map.
   if (src.kind == DimSpecKind::RuntimeSlot) {
@@ -153,8 +153,7 @@ int32_t DimSpec::cloneSubtree(
       DimSpec inner;
       inner.nodes_.assign(out.begin() + base, out.end());
       std::vector<DimSpecNode> inner_out;
-      int32_t inner_root =
-          inner.cloneSubtree(0, slot_to_subtree, inner_out);
+      int32_t inner_root = inner.cloneSubtree(0, slot_to_subtree, inner_out);
       // Replace the just-appended span with `inner_out` shifted to base.
       out.erase(out.begin() + base, out.end());
       for (auto &n : inner_out) {
@@ -200,8 +199,7 @@ DimSpec DimSpec::substituteSlots(
 //   [kind, value, input_index, dim_index, flat_offset, slot_id, lhs, rhs]
 static constexpr unsigned kEncodingArity = 8;
 
-mlir::ArrayAttr
-DimSpec::serializeAsArrayAttr(mlir::MLIRContext *ctx) const {
+mlir::ArrayAttr DimSpec::serializeAsArrayAttr(mlir::MLIRContext *ctx) const {
   mlir::Builder b(ctx);
   llvm::SmallVector<mlir::Attribute> entries;
   entries.reserve(nodes_.size());
@@ -216,8 +214,8 @@ DimSpec::serializeAsArrayAttr(mlir::MLIRContext *ctx) const {
         n.lhs,
         n.rhs,
     };
-    entries.push_back(
-        b.getDenseI64ArrayAttr(llvm::ArrayRef<int64_t>(fields, kEncodingArity)));
+    entries.push_back(b.getDenseI64ArrayAttr(
+        llvm::ArrayRef<int64_t>(fields, kEncodingArity)));
   }
   return b.getArrayAttr(entries);
 }
@@ -468,8 +466,7 @@ bool isCommutative(DimSpecKind k) {
 // result to `dst`, returning the new root index in `dst`. Bottom-up:
 // children are canonicalised first, then the parent applies its
 // fold / identity / sort rules.
-int32_t canonicalizeSubtree(const std::vector<DimSpecNode> &src,
-                            int32_t srcIdx,
+int32_t canonicalizeSubtree(const std::vector<DimSpecNode> &src, int32_t srcIdx,
                             std::vector<DimSpecNode> &dst) {
   if (srcIdx < 0 || srcIdx >= (int32_t)src.size())
     return -1;
@@ -671,8 +668,7 @@ bool DimSpec::verify(std::string &error) const {
   for (int32_t i = 0; i < N; ++i) {
     const auto &n = nodes_[i];
     auto isLeaf = [&]() {
-      return n.kind == DimSpecKind::Static ||
-             n.kind == DimSpecKind::InputDim ||
+      return n.kind == DimSpecKind::Static || n.kind == DimSpecKind::InputDim ||
              n.kind == DimSpecKind::InputValueI64 ||
              n.kind == DimSpecKind::RuntimeSlot;
     };
@@ -692,8 +688,8 @@ bool DimSpec::verify(std::string &error) const {
       }
       continue;
     }
-    if (n.lhs < 0 || n.lhs >= N || n.rhs < 0 || n.rhs >= N ||
-        n.lhs == i || n.rhs == i) {
+    if (n.lhs < 0 || n.lhs >= N || n.rhs < 0 || n.rhs >= N || n.lhs == i ||
+        n.rhs == i) {
       std::ostringstream oss;
       oss << "DimSpec node " << i << " has invalid child indices (" << n.lhs
           << ", " << n.rhs << ")";
@@ -766,8 +762,7 @@ llvm::StringMap<DimSpecBuilderFn> &getBuilderRegistry() {
 }
 } // namespace
 
-void registerOpDimSpecBuilder(llvm::StringRef op_name,
-                              DimSpecBuilderFn fn) {
+void registerOpDimSpecBuilder(llvm::StringRef op_name, DimSpecBuilderFn fn) {
   getBuilderRegistry()[op_name] = fn;
 }
 
@@ -804,8 +799,7 @@ DimSpec getResultDimSpec(mlir::Operation *op, unsigned result_index,
   if (result_index >= op->getNumResults())
     return emptySpec();
   mlir::Value result = op->getResult(result_index);
-  if (auto rankedType =
-          llvm::dyn_cast<mlir::ShapedType>(result.getType())) {
+  if (auto rankedType = llvm::dyn_cast<mlir::ShapedType>(result.getType())) {
     if (rankedType.hasRank() && dim_index < rankedType.getRank()) {
       int64_t d = rankedType.getDimSize(dim_index);
       if (!mlir::ShapedType::isDynamic(d))
@@ -842,8 +836,8 @@ llvm::SmallVector<PublishedSlot, 1> getPublishedSlots(mlir::Operation *op) {
   // Path A: new array-form attribute. If present we trust it directly
   // -- the (result, dim) -> slot mapping is explicit and we don't need
   // to cross-reference output_dim_specs.
-  if (auto arrAttr = op->getAttrOfType<mlir::ArrayAttr>(
-          "hipdnn.output_slot_ids")) {
+  if (auto arrAttr =
+          op->getAttrOfType<mlir::ArrayAttr>("hipdnn.output_slot_ids")) {
     for (unsigned r = 0; r < arrAttr.size(); ++r) {
       auto perResult = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(arrAttr[r]);
       if (!perResult)
@@ -911,8 +905,7 @@ namespace {
 int32_t computeEpInputIndex(mlir::func::FuncOp funcOp, int32_t arg_index) {
   int32_t epIdx = 0;
   for (int32_t i = 0; i < arg_index; ++i) {
-    if (llvm::isa<mlir::hip::ContextType>(
-            funcOp.getFunctionType().getInput(i)))
+    if (llvm::isa<mlir::hip::ContextType>(funcOp.getFunctionType().getInput(i)))
       continue;
     ++epIdx;
   }
@@ -961,15 +954,14 @@ DimSpec resolveDimFromValue(mlir::Value v, unsigned dim_index) {
   int32_t arg_index = -1;
   if (isFuncEntryBlockArg(v, arg_index)) {
     auto blockArg = llvm::cast<mlir::BlockArgument>(v);
-    auto funcOp = llvm::cast<mlir::func::FuncOp>(
-        blockArg.getOwner()->getParentOp());
+    auto funcOp =
+        llvm::cast<mlir::func::FuncOp>(blockArg.getOwner()->getParentOp());
     int32_t epIdx = computeEpInputIndex(funcOp, arg_index);
     if (epIdx < 0)
       return emptySpec(); // ContextType arg
     // If the func arg dim is statically known, prefer Static (cheaper
     // evaluation, no shape table indirection on the host side).
-    if (auto rankedType =
-            llvm::dyn_cast<mlir::ShapedType>(v.getType())) {
+    if (auto rankedType = llvm::dyn_cast<mlir::ShapedType>(v.getType())) {
       if (rankedType.hasRank() && dim_index < rankedType.getRank()) {
         int64_t d = rankedType.getDimSize(dim_index);
         if (!mlir::ShapedType::isDynamic(d))
@@ -1022,8 +1014,8 @@ DimSpec resolveValueFromI64Tensor(mlir::Value v, int64_t flat_offset) {
   int32_t arg_index = -1;
   if (isFuncEntryBlockArg(v, arg_index)) {
     auto blockArg = llvm::cast<mlir::BlockArgument>(v);
-    auto funcOp = llvm::cast<mlir::func::FuncOp>(
-        blockArg.getOwner()->getParentOp());
+    auto funcOp =
+        llvm::cast<mlir::func::FuncOp>(blockArg.getOwner()->getParentOp());
     int32_t epIdx = computeEpInputIndex(funcOp, arg_index);
     if (epIdx < 0)
       return emptySpec();
@@ -1066,8 +1058,7 @@ DimSpec buildTransposeDimSpec(mlir::Operation *op, unsigned result_index,
   auto permAttr = op->getAttrOfType<mlir::ArrayAttr>("perm");
   if (!permAttr || dim_index >= permAttr.size())
     return emptySpec();
-  auto intAttr =
-      llvm::dyn_cast<mlir::IntegerAttr>(permAttr[dim_index]);
+  auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(permAttr[dim_index]);
   if (!intAttr)
     return emptySpec();
   int64_t srcDim = intAttr.getValue().getSExtValue();
@@ -1104,8 +1095,7 @@ DimSpec buildBroadcastDimSpec(mlir::Operation *op, unsigned result_index,
   // ShapedType.
   unsigned outRank = 0;
   if (op->getNumResults() > 0) {
-    auto t = llvm::dyn_cast<mlir::ShapedType>(
-        op->getResult(0).getType());
+    auto t = llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
     if (!t || !t.hasRank())
       return emptySpec();
     outRank = (unsigned)t.getRank();
@@ -1243,14 +1233,12 @@ DimSpec buildExpandDimSpec(mlir::Operation *op, unsigned result_index,
   auto inputTy = llvm::dyn_cast<mlir::ShapedType>(input.getType());
   unsigned outRank = 0;
   if (op->getNumResults() > 0) {
-    auto outTy =
-        llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
+    auto outTy = llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
     if (!outTy || !outTy.hasRank())
       return emptySpec();
     outRank = (unsigned)outTy.getRank();
   } else {
-    auto outTy =
-        llvm::dyn_cast<mlir::ShapedType>(op->getOperand(3).getType());
+    auto outTy = llvm::dyn_cast<mlir::ShapedType>(op->getOperand(3).getType());
     if (!outTy || !outTy.hasRank())
       return emptySpec();
     outRank = (unsigned)outTy.getRank();
@@ -1268,8 +1256,8 @@ DimSpec buildExpandDimSpec(mlir::Operation *op, unsigned result_index,
     if (!mlir::ShapedType::isDynamic(staticDim) && staticDim > 1)
       return DimSpec::makeStatic(staticDim);
     DimSpec fromInput = resolveOperandDim(input, (unsigned)inIdx);
-    if (!fromInput.nodes().empty() && !(fromInput.isStatic() &&
-                                         fromInput.staticValue() == 1))
+    if (!fromInput.nodes().empty() &&
+        !(fromInput.isStatic() && fromInput.staticValue() == 1))
       return fromInput;
   }
   DimSpec fromShape =
@@ -1339,8 +1327,8 @@ DimSpec buildSliceDimSpec(mlir::Operation *op, unsigned result_index,
   // ships steps without axes), but we still need the operand_segment_sizes
   // discriminator. If the attr is present we use it; otherwise we
   // conservatively bail.
-  auto segSizesAttr = op->getAttrOfType<mlir::DenseI32ArrayAttr>(
-      "operand_segment_sizes");
+  auto segSizesAttr =
+      op->getAttrOfType<mlir::DenseI32ArrayAttr>("operand_segment_sizes");
   if (!segSizesAttr || segSizesAttr.size() != 7)
     return emptySpec();
   auto seg = segSizesAttr.asArrayRef();
@@ -1444,8 +1432,8 @@ DimSpec buildPadDimSpec(mlir::Operation *op, unsigned result_index,
                         unsigned dim_index) {
   if (op->getNumOperands() < 4 || result_index != 0)
     return emptySpec();
-  auto segSizesAttr = op->getAttrOfType<mlir::DenseI32ArrayAttr>(
-      "operand_segment_sizes");
+  auto segSizesAttr =
+      op->getAttrOfType<mlir::DenseI32ArrayAttr>("operand_segment_sizes");
   if (!segSizesAttr || segSizesAttr.size() != 6)
     return emptySpec();
   auto seg = segSizesAttr.asArrayRef();
@@ -1506,8 +1494,7 @@ DimSpec buildPadDimSpec(mlir::Operation *op, unsigned result_index,
   if (axisSlot < 0)
     return resolveOperandDim(data, dim_index);
   int64_t halfLen = padsLen / 2;
-  DimSpec startPad =
-      shape_interface::resolveValueFromI64Tensor(pads, axisSlot);
+  DimSpec startPad = shape_interface::resolveValueFromI64Tensor(pads, axisSlot);
   DimSpec endPad =
       shape_interface::resolveValueFromI64Tensor(pads, axisSlot + halfLen);
   DimSpec inDim = resolveOperandDim(data, dim_index);
@@ -1667,8 +1654,8 @@ DimSpec buildConcatDimSpec(mlir::Operation *op, unsigned result_index,
   if (pastEnd <= firstData)
     return emptySpec();
   // Determine the rank from operand 1.
-  auto refTy = llvm::dyn_cast<mlir::ShapedType>(
-      op->getOperand(firstData).getType());
+  auto refTy =
+      llvm::dyn_cast<mlir::ShapedType>(op->getOperand(firstData).getType());
   if (!refTy || !refTy.hasRank())
     return emptySpec();
   if (axis < 0)
@@ -1813,10 +1800,8 @@ bool isIdentityCast(mlir::Operation *op) {
   if (op->getNumOperands() < 2 || op->getNumResults() < 1)
     return false;
   // ins() = (ctx, input), result is the output.
-  auto inTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
-  auto outTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
+  auto inTy = llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
+  auto outTy = llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
   if (!inTy || !outTy)
     return false;
   return inTy.getElementType() == outTy.getElementType();
@@ -1832,10 +1817,8 @@ bool isIdentityCast(mlir::Operation *op) {
 bool isIdentityExpand(mlir::Operation *op) {
   if (op->getNumOperands() < 2 || op->getNumResults() < 1)
     return false;
-  auto inTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
-  auto outTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
+  auto inTy = llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
+  auto outTy = llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
   if (!inTy || !outTy || !inTy.hasRank() || !outTy.hasRank())
     return false;
   if (inTy.getRank() != outTy.getRank())
@@ -1869,10 +1852,8 @@ bool isIdentitySlice(mlir::Operation *op) {
   // shapes as a shortcut: if every result dim equals the input dim
   // (modulo dynamic), this is necessarily an identity slice
   // regardless of the operand values.
-  auto dataTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
-  auto outTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
+  auto dataTy = llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
+  auto outTy = llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
   if (!dataTy || !outTy || !dataTy.hasRank() || !outTy.hasRank())
     return false;
   if (dataTy.getRank() != outTy.getRank())
@@ -1899,8 +1880,7 @@ bool isIdentitySlice(mlir::Operation *op) {
 // empty `axes` operand IS treated as "no reduction" rather than the
 // implicit "reduce all axes" fallback.
 bool isIdentityReduce(mlir::Operation *op) {
-  auto noopAttr =
-      op->getAttrOfType<mlir::IntegerAttr>("noop_with_empty_axes");
+  auto noopAttr = op->getAttrOfType<mlir::IntegerAttr>("noop_with_empty_axes");
   if (!noopAttr || noopAttr.getInt() != 1)
     return false;
   if (op->getNumOperands() < 2 || op->getNumResults() < 1)
@@ -1908,10 +1888,8 @@ bool isIdentityReduce(mlir::Operation *op) {
   // ins() = (ctx, data, axes); for `noop_with_empty_axes=1` the
   // identity is "every input dim survives in the output at the same
   // index" — which the result-vs-input static shape check captures.
-  auto dataTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
-  auto outTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
+  auto dataTy = llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
+  auto outTy = llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
   if (!dataTy || !outTy || !dataTy.hasRank() || !outTy.hasRank())
     return false;
   if (dataTy.getRank() != outTy.getRank())
@@ -1936,10 +1914,8 @@ bool isIdentityReduce(mlir::Operation *op) {
 bool isIdentityTile(mlir::Operation *op) {
   if (op->getNumOperands() < 3 || op->getNumResults() < 1)
     return false;
-  auto inTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
-  auto outTy =
-      llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
+  auto inTy = llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
+  auto outTy = llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
   if (!inTy || !outTy || !inTy.hasRank() || !outTy.hasRank())
     return false;
   if (inTy.getRank() != outTy.getRank())

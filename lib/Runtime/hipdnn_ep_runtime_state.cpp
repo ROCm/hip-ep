@@ -1185,8 +1185,8 @@ extern "C" void *hipdnn_ep_state_dyn_pool_alloc(RuntimeState *state,
 
   if (segs->count == segs->capacity) {
     int32_t new_cap = segs->capacity * 2;
-    auto *new_items =
-        (DynPoolSegment *)realloc(segs->items, sizeof(DynPoolSegment) * new_cap);
+    auto *new_items = (DynPoolSegment *)realloc(
+        segs->items, sizeof(DynPoolSegment) * new_cap);
     if (!new_items) {
       fprintf(stderr,
               "[hipdnn_ep_state_dyn_pool_alloc] realloc(segments) failed\n");
@@ -1204,8 +1204,7 @@ extern "C" void *hipdnn_ep_state_dyn_pool_alloc(RuntimeState *state,
             new_capacity);
     std::abort();
   }
-  segs->items[segs->count] =
-      DynPoolSegment{gpu_base, new_capacity, needed};
+  segs->items[segs->count] = DynPoolSegment{gpu_base, new_capacity, needed};
   state->dyn_pool_active_segment = segs->count;
   segs->count += 1;
   state->dyn_pool_segment_count = segs->count;
@@ -1288,8 +1287,7 @@ extern "C" int64_t hipdnn_ep_state_read_dim(RuntimeState *state,
 }
 
 extern "C" void hipdnn_ep_state_publish_buffer(RuntimeState *state,
-                                               int32_t slot_id,
-                                               void *gpu_buf) {
+                                               int32_t slot_id, void *gpu_buf) {
   if (!state)
     return;
   if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
@@ -1332,9 +1330,9 @@ extern "C" void *hipdnn_ep_state_read_buffer(RuntimeState *state,
   return p;
 }
 
-extern "C" void *
-hipdnn_ep_state_dyn_pool_alloc_for_slot(RuntimeState *state, int64_t bytes,
-                                        int32_t slot_id) {
+extern "C" void *hipdnn_ep_state_dyn_pool_alloc_for_slot(RuntimeState *state,
+                                                         int64_t bytes,
+                                                         int32_t slot_id) {
   if (!state || bytes <= 0)
     return nullptr;
   if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
@@ -1353,10 +1351,10 @@ hipdnn_ep_state_dyn_pool_alloc_for_slot(RuntimeState *state, int64_t bytes,
   return p;
 }
 
-extern "C" void hipdnn_ep_publish_propagator_slots(RuntimeState *state,
-                                                   const int32_t *output_slot_ids,
-                                                   const int64_t *runtime_dims,
-                                                   int64_t total) {
+extern "C" void
+hipdnn_ep_publish_propagator_slots(RuntimeState *state,
+                                   const int32_t *output_slot_ids,
+                                   const int64_t *runtime_dims, int64_t total) {
   if (!state || !output_slot_ids || !runtime_dims || total <= 0)
     return;
   for (int64_t i = 0; i < total; ++i) {
@@ -1367,9 +1365,9 @@ extern "C" void hipdnn_ep_publish_propagator_slots(RuntimeState *state,
   }
 }
 
-extern "C" void *
-hipdnn_ep_state_publish_buffer_resize(RuntimeState *state, int32_t slot_id,
-                                      int64_t bytes) {
+extern "C" void *hipdnn_ep_state_publish_buffer_resize(RuntimeState *state,
+                                                       int32_t slot_id,
+                                                       int64_t bytes) {
   if (!state || bytes <= 0)
     return nullptr;
   if (slot_id < 0 || slot_id >= state->dyn_dim_slots_count) {
@@ -1479,8 +1477,8 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t required_size) {
       state->pool_base = nullptr;
     }
     if (hipMalloc(&state->pool_base, new_size) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_get_pool_base: hipMalloc(%zu) failed\n", new_size);
+      fprintf(stderr, "hipdnn_ep_get_pool_base: hipMalloc(%zu) failed\n",
+              new_size);
       state->pool_base = nullptr;
       state->pool_size = 0;
       return nullptr;

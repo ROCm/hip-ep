@@ -40,7 +40,6 @@ Covers:
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from onnx import helper
 
 from framework.comparator import compare_outputs
@@ -89,9 +88,7 @@ def _sort_nonzero_columns(idx: np.ndarray) -> np.ndarray:
     return idx[:, order]
 
 
-def _compare_nonzero(
-    actual: list[np.ndarray], expected: list[np.ndarray]
-) -> None:
+def _compare_nonzero(actual: list[np.ndarray], expected: list[np.ndarray]) -> None:
     """Compare with column-permutation invariance.
 
     Asserts both sides have exactly one output, identical shape, and
@@ -100,8 +97,7 @@ def _compare_nonzero(
     int64 -- there is no rounding to tolerate.
     """
     assert len(actual) == len(expected) == 1, (
-        f"NonZero expected 1 output, got actual={len(actual)} "
-        f"expected={len(expected)}"
+        f"NonZero expected 1 output, got actual={len(actual)} expected={len(expected)}"
     )
     a, e = actual[0], expected[0]
     assert a.shape == e.shape, (

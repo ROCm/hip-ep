@@ -470,13 +470,13 @@ inline Value emitDimSpecEvaluator(const DimSpec &ds, Value state,
         return LLVM::SDivOp::create(rewriter, loc, sum, rhs);
       }
       case DimSpecKind::Min: {
-        Value cmp = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::sle,
-                                         lhs, rhs);
+        Value cmp = LLVM::ICmpOp::create(rewriter, loc,
+                                         LLVM::ICmpPredicate::sle, lhs, rhs);
         return LLVM::SelectOp::create(rewriter, loc, cmp, lhs, rhs);
       }
       case DimSpecKind::Max: {
-        Value cmp = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::sge,
-                                         lhs, rhs);
+        Value cmp = LLVM::ICmpOp::create(rewriter, loc,
+                                         LLVM::ICmpPredicate::sge, lhs, rhs);
         return LLVM::SelectOp::create(rewriter, loc, cmp, lhs, rhs);
       }
       default:
@@ -598,9 +598,9 @@ inline void emitPublishDimCall(Value state, int32_t slotId, Value count,
   Type i32Type = rewriter.getI32Type();
   Type i64Type = rewriter.getI64Type();
   SmallVector<Type, 3> paramTypes = {ptrType, i32Type, i64Type};
-  FailureOr<LLVM::LLVMFuncOp> funcOp =
-      LLVM::lookupOrCreateFn(rewriter, module, kHipdnnEpStatePublishDim,
-                             paramTypes, LLVM::LLVMVoidType::get(module.getContext()));
+  FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+      rewriter, module, kHipdnnEpStatePublishDim, paramTypes,
+      LLVM::LLVMVoidType::get(module.getContext()));
   Value slotConst = LLVM::ConstantOp::create(
       rewriter, loc, i32Type, rewriter.getI32IntegerAttr(slotId));
   LLVM::CallOp::create(rewriter, loc, *funcOp,
@@ -661,8 +661,7 @@ inline void emitPropagatorSlotPublishes(Operation *op, Value state,
                                         DimSizeFn dimSizeProvider,
                                         ConversionPatternRewriter &rewriter,
                                         Location loc) {
-  auto grid =
-      op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids");
+  auto grid = op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids");
   if (!grid || !state)
     return;
   for (unsigned r = 0; r < grid.size(); ++r) {
@@ -695,15 +694,14 @@ inline void emitPropagatorSlotPublishes(Operation *op, Value state,
 // null `LLVM::ZeroOp` pointer + sets `outTotalLen` to 0 so the
 // wrapper can fast-skip. Wrappers MUST therefore tolerate a null /
 // zero-length slot-ids pointer.
-inline Value
-emitOutputSlotIdsAlloca(Operation *op, ConversionPatternRewriter &rewriter,
-                        Location loc, int64_t &outTotalLen) {
+inline Value emitOutputSlotIdsAlloca(Operation *op,
+                                     ConversionPatternRewriter &rewriter,
+                                     Location loc, int64_t &outTotalLen) {
   outTotalLen = 0;
   Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
   Type i32Type = rewriter.getI32Type();
   Type i64Type = rewriter.getI64Type();
-  auto grid =
-      op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids");
+  auto grid = op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids");
   if (!grid)
     return LLVM::ZeroOp::create(rewriter, loc, ptrType);
 
@@ -722,8 +720,8 @@ emitOutputSlotIdsAlloca(Operation *op, ConversionPatternRewriter &rewriter,
   auto arrayTy = LLVM::LLVMArrayType::get(i32Type, outTotalLen);
   Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                           rewriter.getI64IntegerAttr(1));
-  Value alloca = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayTy,
-                                        oneI64, /*alignment=*/4);
+  Value alloca = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayTy, oneI64,
+                                        /*alignment=*/4);
   for (int64_t i = 0; i < outTotalLen; ++i) {
     Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                          rewriter.getI32IntegerAttr(i));

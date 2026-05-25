@@ -148,7 +148,7 @@ def _build_subproc_cmd(request, target_test: str) -> list[str]:
         "-q",
         "-p",
         "no:cacheprovider",
-        "--no-cache",   # framework's reference cache; orthogonal to model.dll cache
+        "--no-cache",  # framework's reference cache; orthogonal to model.dll cache
     ]
     for key in ("--backend", "--ep-name", "--ep-dll"):
         try:
@@ -343,9 +343,7 @@ def _probe_exports(dll_path: Path, names: Iterable[str]) -> dict[str, bool]:
 #     (Shape(NonZero(X)) -- NonZero publishes RuntimeSlot 0, Shape reads
 #     it). Already used as the canonical Category-C composition target by
 #     test_debug_surface.py.
-_STATIC_SCENARIO_TEST = (
-    "tests/test_sigmoid.py::TestSigmoid::test_sigmoid_small"
-)
+_STATIC_SCENARIO_TEST = "tests/test_sigmoid.py::TestSigmoid::test_sigmoid_small"
 _SLOT_SCENARIO_TEST = (
     "tests/test_nonzero_composition.py::TestNonZeroComposition::"
     "test_shape_of_nonzero_1d_i64"
@@ -365,9 +363,7 @@ class TestBackwardCompat:
     only the framework was built.
     """
 
-    def test_static_only_model_does_not_export_slot_abi(
-        self, request, tmp_path
-    ):
+    def test_static_only_model_does_not_export_slot_abi(self, request, tmp_path):
         """All-static model -> DLL has the always-present exports + the
         new metadata-JSON + begin_compute exports, but does NOT export
         the three ``inference_dyn_slot_*`` symbols.

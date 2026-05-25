@@ -177,9 +177,7 @@ class TestDebugSurface:
     def test_debug_shapes_emits_per_output_trace(self, request):
         if not _have_ep_dll(request):
             pytest.skip("requires --ep-dll (EP backend)")
-        rc, out = _rerun_with_env(
-            request, {"HIPDNN_EP_DEBUG_SHAPES": "1"}
-        )
+        rc, out = _rerun_with_env(request, {"HIPDNN_EP_DEBUG_SHAPES": "1"})
         assert rc == 0, (
             f"composition test failed under HIPDNN_EP_DEBUG_SHAPES=1:\n{out}"
         )
@@ -200,12 +198,8 @@ class TestDebugSurface:
     def test_trace_slots_emits_publish_and_read(self, request):
         if not _have_ep_dll(request):
             pytest.skip("requires --ep-dll (EP backend)")
-        rc, out = _rerun_with_env(
-            request, {"HIPDNN_EP_TRACE_SLOTS": "1"}
-        )
-        assert rc == 0, (
-            f"composition test failed under HIPDNN_EP_TRACE_SLOTS=1:\n{out}"
-        )
+        rc, out = _rerun_with_env(request, {"HIPDNN_EP_TRACE_SLOTS": "1"})
+        assert rc == 0, f"composition test failed under HIPDNN_EP_TRACE_SLOTS=1:\n{out}"
         # The marker emitted by hipdnn_ep_state_publish_dim and
         # _read_dim when called from inside the generated model.dll.
         # The Shape(NonZero(X)) graph publishes one dim slot from
@@ -236,6 +230,5 @@ class TestDebugSurface:
             "post-compute resolved shape",
         ):
             assert marker not in out, (
-                f"marker {marker!r} leaked with no debug env var set:\n"
-                + out
+                f"marker {marker!r} leaked with no debug env var set:\n" + out
             )

@@ -70,15 +70,14 @@ struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
     if (auto slotAttr = op->getAttrOfType<IntegerAttr>("slot_id")) {
       Value slotIdVal = LLVM::ConstantOp::create(
           rewriter, loc, i32Type,
-          rewriter.getI32IntegerAttr(
-              static_cast<int32_t>(slotAttr.getInt())));
+          rewriter.getI32IntegerAttr(static_cast<int32_t>(slotAttr.getInt())));
       SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
                                          ptrType, i64Type, i32Type};
       FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
           rewriter, module, "wrap_range_dyn", paramTypes, i32Type);
       if (failed(funcOp))
         return failure();
-      SmallVector<Value, 6> args = {statePtr, startPtr,   limitPtr,
+      SmallVector<Value, 6> args = {statePtr, startPtr,    limitPtr,
                                     deltaPtr, hipDTypeVal, slotIdVal};
       LLVM::CallOp::create(rewriter, loc, *funcOp, args);
       rewriter.eraseOp(op);
