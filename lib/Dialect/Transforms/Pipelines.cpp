@@ -159,6 +159,16 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
 void mlir::hip::buildHipToLLVMPipeline(
     OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
+  // Rewrite multi-dyn-per-group memref.expand_shape ops into
+  // memref.reinterpret_cast BEFORE expand-strided-metadata.  Upstream
+  // expand-strided-metadata asserts at most one dynamic size per
+  // reassociation group, but our IR legitimately produces 2-dyn groups
+  // (e.g. ONNX `Range -> Reshape([bs, ss])` for 2-D position_ids).  This
+  // local pass handles only that case; everything else passes through
+  // untouched and is handled by upstream.  See RelaxMultiDynExpandShape.cpp
+  // header for the IR snippet and the retirement path.
+  pm.addNestedPass<func::FuncOp>(hip::createRelaxMultiDynExpandShapePass());
+
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.
   // populateFinalizeMemRefToLLVMConversionPatterns (used by ConvertHipToLLVM)

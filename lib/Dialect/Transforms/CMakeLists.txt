@@ -13,6 +13,7 @@ add_library(HipDialectTransforms STATIC
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
+  RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp
 )
 
