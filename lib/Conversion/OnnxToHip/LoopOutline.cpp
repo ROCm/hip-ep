@@ -23,9 +23,14 @@
 //   6. Replace the onnx.Loop op with hip.loop and erase it.
 //
 // Limitations of this initial version:
-//   - Requires M (trip count) and cond_init both present.  Missing-M
-//     (while-style infinite loop) and missing-cond (unconditional counted
-//     loop) variants are rejected with a clean diagnostic for now.
+//   - Missing-M (while-style infinite loop) is rejected.  Counted loops
+//     with `cond_init` absent (`onnx.NoValue` / `none` type) are
+//     supported: cond is synthesized as `arith.constant true : i1` and
+//     `cond_is_passthrough` is forced so the runtime takes the fast
+//     `hipdnn_ep_run_counted_loop` path (no per-iter cond readback).
+//     Per ONNX spec, missing cond means the loop runs M times with no
+//     conditional early exit -- the body's `cond_out` (if any) is
+//     ignored.
 //   - Scan outputs (results beyond the loop-carried slot count) are not
 //     yet supported; rejected with a clean diagnostic.
 //
@@ -216,13 +221,19 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   Block &bodyBlock = bodyRegion.front();
 
   // ONNX Loop has the operand layout (M, cond_init, v_init_1, ..., v_init_N).
-  // We currently require M and cond_init both present.
+  // M (trip count) is currently required; cond_init is optional. Importers
+  // materialize a missing cond_init as `onnx.NoValue` (none type). When
+  // absent, ONNX semantics is "cond stays true forever; only
+  // max_trip_count terminates the loop". All downstream layers
+  // (hip.loop dialect cond_init=Optional<I1>, LoopOpLowering null
+  // handling, runtime fast-path) already accept that shape, so we
+  // synthesize an i1-true here and force cond_is_passthrough.
   unsigned numOperands = loopOp->getNumOperands();
   if (numOperands < 2)
-    return loopOp->emitOpError(
-        "onnx.Loop with missing M or cond_init not yet supported");
+    return loopOp->emitOpError("onnx.Loop with missing M not yet supported");
   Value mTensor = loopOp->getOperand(0);
   Value condInitTensor = loopOp->getOperand(1);
+  bool condInitIsNone = isa<NoneType>(condInitTensor.getType());
   ValueRange vInitTensors = loopOp->getOperands().drop_front(2);
   unsigned numLoopCarried = vInitTensors.size();
 
@@ -264,7 +275,9 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     yieldCondOutSrc = defOp->getOperand(0);
   }
   BlockArgument condInArg = bodyBlock.getArgument(1);
-  bool condIsPassthrough = (yieldCondOutSrc == condInArg);
+  // When cond_init is none, ONNX spec says the body's cond_out is ignored;
+  // we force the fast counted-loop path regardless of what the body yields.
+  bool condIsPassthrough = condInitIsNone || (yieldCondOutSrc == condInArg);
   LLVM_DEBUG(llvm::dbgs() << "[onnx-loop-outline] cond_is_passthrough = "
                           << condIsPassthrough << "\n");
 
@@ -398,12 +411,21 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     return loopOp->emitOpError("could not unbox M to index (expected "
                                "tensor<i64>, got ")
            << mTensor.getType() << ")";
-  FailureOr<Value> condI1 = unboxCondInit(outerBuilder, loc, condInitTensor);
-  if (failed(condI1))
-    return loopOp->emitOpError("could not unbox cond_init to i1 (expected "
-                               "0-D tensor<i1>, tensor<i8>, or tensor<ui8>, "
-                               "got ")
-           << condInitTensor.getType() << ")";
+  Value condI1Val;
+  if (condInitIsNone) {
+    // Synthesize i1-true; runtime takes counted-loop fast path and never
+    // reads it back. See file header "Limitations" comment.
+    condI1Val = arith::ConstantIntOp::create(outerBuilder, loc,
+                                             outerBuilder.getI1Type(), 1);
+  } else {
+    FailureOr<Value> condI1 = unboxCondInit(outerBuilder, loc, condInitTensor);
+    if (failed(condI1))
+      return loopOp->emitOpError("could not unbox cond_init to i1 (expected "
+                                 "0-D tensor<i1>, tensor<i8>, or tensor<ui8>, "
+                                 "got ")
+             << condInitTensor.getType() << ")";
+    condI1Val = *condI1;
+  }
 
   // hip.loop result types: same as the (loop-carried portion of) yield ops
   // minus the cond_out slot, i.e. the original onnx.Loop's result types.
@@ -414,7 +436,7 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
       /*v_final=*/hipLoopResultTypes,
       /*ctx=*/ctxVal,
       /*max_trip_count=*/*mIdx,
-      /*cond_init=*/*condI1,
+      /*cond_init=*/condI1Val,
       /*v_init=*/vInitTensors,
       /*captures=*/ValueRange(captureVals),
       /*body_func=*/FlatSymbolRefAttr::get(ctx, fnName),
