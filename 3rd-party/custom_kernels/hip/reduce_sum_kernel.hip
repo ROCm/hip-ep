@@ -368,19 +368,23 @@ __device__ inline T reduce_op_max(T a, T b) {
 template <>
 __device__ inline float reduce_op_max<float>(float a, float b) {
   // NaN-propagating: ORT _Max<float> returns NaN if either operand is NaN.
-  return (isnan(a) || isnan(b)) ? std::numeric_limits<float>::quiet_NaN()
-                                : (a > b ? a : b);
+  // Use the <cmath> macro instead of std::numeric_limits<float>::quiet_NaN():
+  // the latter is an unannotated `constexpr` member function, and the host
+  // build for MSVC 14.51 disables clang's implicit constexpr->__host__ __device__
+  // promotion (see 3rd-party/custom_kernels/cmake/hip_utils.cmake), which
+  // would otherwise make this call host-only and break device compilation.
+  return (isnan(a) || isnan(b)) ? NAN : (a > b ? a : b);
 }
 
 template <typename T> __device__ inline T reduce_init_max();
 template <> __device__ inline int64_t reduce_init_max<int64_t>() {
-  return std::numeric_limits<int64_t>::lowest();
+  return INT64_MIN;
 }
 template <> __device__ inline int32_t reduce_init_max<int32_t>() {
-  return std::numeric_limits<int32_t>::lowest();
+  return INT32_MIN;
 }
 template <> __device__ inline float reduce_init_max<float>() {
-  return -std::numeric_limits<float>::infinity();
+  return -INFINITY;
 }
 
 template <typename T>

@@ -117,6 +117,13 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
 
+  // Outline onnx.Loop bodies into separate func.func ops before the main
+  // onnx-to-hip conversion runs. That way each outlined body's onnx.* ops
+  // get the same treatment as ops in main_graph (constant lowering, op
+  // mapping, etc.) -- the conversion pass already iterates all func.func
+  // ops in the module.
+  pm.addPass(createOnnxLoopOutlinePass());
+
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
         fs, options.externalizeMinNumElements, options.skipConstantData));
@@ -138,6 +145,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // See sibling overload for rationale.
   pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
+  pm.addPass(createOnnxLoopOutlinePass());
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());
