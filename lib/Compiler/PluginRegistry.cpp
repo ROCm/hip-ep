@@ -39,7 +39,14 @@ struct Storage {
   // requestPipelineSlot calls.
   std::vector<std::pair<PipelineSlot, std::string>> slotRequests;
 
-  // PR 3 will append: bitcode buffers contributed by plugins.
+  // PR 3: bitcode buffers contributed by plugin addRuntimeBitcode
+  // calls. We record the pointer + size verbatim; the buffer is
+  // expected to live in the plugin DLL's read-only data segment for
+  // the lifetime of hip-compiler. linkRuntimeModule consumes these
+  // by parsing each buffer with llvm::parseBitcodeFile and merging
+  // the result with Linker::Flags::OverrideFromSrc.
+  std::vector<PluginBitcodeBuffer> bitcodeBuffers;
+
   // PR 4 will append: library paths and library names.
 };
 
@@ -57,9 +64,16 @@ void requestPipelineSlotImpl(void * /*self*/, int slot, const char *name,
                                       std::string(name, nameLen));
 }
 
-void addRuntimeBitcodeImpl(void * /*self*/, const void * /*data*/,
-                           std::size_t /*sizeBytes*/) {
-  // PR 3 fills this in.
+void addRuntimeBitcodeImpl(void * /*self*/, const void *data,
+                           std::size_t sizeBytes) {
+  // We do *not* copy the buffer. Plugins are required to back the
+  // pointer with static storage that lives for the process's
+  // lifetime (the doc on addRuntimeBitcode says so). Copying here
+  // would double the memory footprint for a typical 100kB-1MB vendor
+  // runtime bitcode and produce no real safety win, since
+  // linkRuntimeModule consumes the buffer well before any plugin
+  // could plausibly free it.
+  storage().bitcodeBuffers.push_back(PluginBitcodeBuffer{data, sizeBytes});
 }
 
 void addLibraryPathImpl(void * /*self*/, const char * /*path*/,
@@ -95,6 +109,18 @@ llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot) {
     if (s == slot)
       result.emplace_back(name);
   }
+  return result;
+}
+
+llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers() {
+  // Copy out a SmallVector view of the buffers. Buffers are tiny
+  // (struct of 16 bytes on x64) and there are typically 0-2 of them,
+  // so the copy is negligible and saves callers from worrying about
+  // mutation between the call and use.
+  llvm::SmallVector<PluginBitcodeBuffer> result;
+  result.reserve(storage().bitcodeBuffers.size());
+  for (const auto &buf : storage().bitcodeBuffers)
+    result.push_back(buf);
   return result;
 }
 
