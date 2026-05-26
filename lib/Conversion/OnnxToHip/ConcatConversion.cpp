@@ -145,13 +145,11 @@ struct ConcatDecompose : public mlir::RewritePattern {
         // Sum of all inputs' extents along `axis`.
         mlir::Value sum;
         for (size_t i = 0; i < op->getNumOperands(); ++i) {
-          mlir::Value extent =
-              materializeExtent(getDimExtent(op->getOperand(i), inputTypes[i],
-                                             axis));
-          sum = i == 0
-                    ? extent
-                    : mlir::arith::AddIOp::create(rewriter, loc, sum, extent)
-                          .getResult();
+          mlir::Value extent = materializeExtent(
+              getDimExtent(op->getOperand(i), inputTypes[i], axis));
+          sum = i == 0 ? extent
+                       : mlir::arith::AddIOp::create(rewriter, loc, sum, extent)
+                             .getResult();
         }
         dynSizes.push_back(sum);
       } else {
@@ -174,10 +172,10 @@ struct ConcatDecompose : public mlir::RewritePattern {
       }
     }
 
-    mlir::Value current = mlir::tensor::EmptyOp::create(
-                              rewriter, loc, resultType.getShape(),
-                              resultType.getElementType(), dynSizes)
-                              .getResult();
+    mlir::Value current =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes)
+            .getResult();
 
     // Insert each input into `current` at the running axis offset. We
     // track the offset as an OpFoldResult: a static int64 fast path
@@ -204,8 +202,8 @@ struct ConcatDecompose : public mlir::RewritePattern {
           } else if (staticOffset == 0) {
             offsets.push_back(dynamicOffset);
           } else {
-            mlir::Value c = mlir::arith::ConstantIndexOp::create(
-                                rewriter, loc, staticOffset)
+            mlir::Value c = mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                                 staticOffset)
                                 .getResult();
             offsets.push_back(
                 mlir::arith::AddIOp::create(rewriter, loc, dynamicOffset, c)
@@ -217,9 +215,8 @@ struct ConcatDecompose : public mlir::RewritePattern {
         sizes.push_back(getDimExtent(input, inputType, d));
       }
 
-      current = mlir::tensor::InsertSliceOp::create(rewriter, loc, input,
-                                                    current, offsets, sizes,
-                                                    strides)
+      current = mlir::tensor::InsertSliceOp::create(
+                    rewriter, loc, input, current, offsets, sizes, strides)
                     .getResult();
 
       // Advance the running axis offset by this input's axis-dim extent.
@@ -229,16 +226,16 @@ struct ConcatDecompose : public mlir::RewritePattern {
         if (!dynamicOffset && staticOffset == 0) {
           dynamicOffset = extent;
         } else if (!dynamicOffset) {
-          mlir::Value c = mlir::arith::ConstantIndexOp::create(rewriter, loc,
-                                                                staticOffset)
-                              .getResult();
+          mlir::Value c =
+              mlir::arith::ConstantIndexOp::create(rewriter, loc, staticOffset)
+                  .getResult();
           dynamicOffset =
               mlir::arith::AddIOp::create(rewriter, loc, c, extent).getResult();
           staticOffset = 0;
         } else {
-          dynamicOffset = mlir::arith::AddIOp::create(rewriter, loc,
-                                                      dynamicOffset, extent)
-                              .getResult();
+          dynamicOffset =
+              mlir::arith::AddIOp::create(rewriter, loc, dynamicOffset, extent)
+                  .getResult();
         }
       } else {
         staticOffset += inputType.getDimSize(axis);
