@@ -263,6 +263,35 @@ commit.
 
 ---
 
+## Plugin extension API (proposal — PR 1 in flight)
+
+This repo is growing a plugin extension API so confidential AMD-internal
+backends can ship vendor-specific ONNX ops, custom kernels, and MLIR
+passes on top of `onnx-hipdnn-ep` without forking the public repo.
+
+The full design lives at
+[`docs/design/plugin-extension-api.md`](docs/design/plugin-extension-api.md).
+Two points worth knowing as a contributor:
+
+1. **Plugins are loaded via `HIP_EP_PLUGINS`** (semicolon-separated
+   list of plugin DLL paths). The public ABI sits at
+   [`include/hip/Compiler/PluginAPI.h`](include/hip/Compiler/PluginAPI.h);
+   a working sample plugin lives at
+   `test/plugin/sample_plugin/` and is exercised by the
+   `PluginLoaderPR1` CTest target.
+2. **Vendor improvements that are not confidential go upstream, not
+   into a plugin.** The plugin model exists to keep proprietary code
+   out of the public repo — not to keep day-to-day improvements out
+   of the public repo. See section 1.A of the design doc for the
+   plugin-vs-upstream decision rule.
+
+The ABI is **not yet frozen**: PRs 1–5 of the rollout are still
+landing, and the vendor team's review is pending. Do not ship a plugin
+against the in-tree headers until the design status changes from
+"Proposal — under review" to "Stable".
+
+---
+
 ## Other repo conventions
 
 - **Branch protection on `main`:** PR + 1 CODEOWNER approval, all
