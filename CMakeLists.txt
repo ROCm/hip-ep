@@ -181,6 +181,10 @@ if(BUILD_HIP_TOOLS)
 
     # Runtime unit tests (GPU-free; native against mock types)
     add_subdirectory(test/runtime)
+
+    # Plugin loader unit tests (PR 1 of the plugin extension API).
+    # See docs/design/plugin-extension-api.md.
+    add_subdirectory(test/plugin)
   endif()
 endif()
 
