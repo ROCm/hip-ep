@@ -9,6 +9,7 @@ message(STATUS "Building Compiler Library")
 add_library(LibHipCompiler STATIC
   CompilerDriver.cpp
   PluginLoader.cpp
+  PluginRegistry.cpp
 )
 
 # Link against required libraries

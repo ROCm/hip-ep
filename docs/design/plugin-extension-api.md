@@ -592,6 +592,18 @@ this PR; they can land in any order relative to vendor-side work.
    public repo updates LLVM. (This matches the constraint upstream
    MLIR plugins live with.)
 
+   **PR-2 update.** In implementing PR 2 we discovered that the
+   `requestPipelineSlot` / `addRuntimeBitcode` / `addLibraryPath` /
+   `addLibrary` methods cannot be normal C++ method calls across
+   the DLL boundary because hip-compiler ships as a static library,
+   not a DLL — so plugin DLLs have nothing to import from. We solved
+   this by making the registry a thin C-vtable: the plugin sees
+   inline thunks that dispatch through function pointers stored on
+   the registry instance, populated by the host. See PluginRegistry.h
+   for details. This is the same pattern COM and the V8 embedder API
+   use; it preserves the upstream "registry passed by reference"
+   feel without requiring a shared-library hip-compiler.
+
 3. **Pass options for plugin passes.** MLIR passes are typically
    parameterized via a generated options struct. Plugin passes that
    want options need to use the same MLIR mechanism. The registry
@@ -612,6 +624,44 @@ this PR; they can land in any order relative to vendor-side work.
    machines without `HIP_EP_PLUGINS` set in the environment. CMake
    should always build it; the test runner sets the env var
    per-test. No design impact, but PR 1 needs to get this right.
+
+6. **Shared MLIR requirement for cross-DLL pass instances.**
+   *(New in PR 2 — needs vendor-team / build-system review.)* MLIR
+   carries process-global state for its pass registry, dialect
+   registry, and TypeIDs. When the plugin DLL statically links the
+   `MLIR*.lib` static libs from `prebuilt-local/`, that state is
+   duplicated per DLL: the plugin's
+   `mlir::PassRegistration<MyPass>()` writes into the plugin's copy
+   of the pass registry, not the host's. As a result, a plugin pass
+   "registered" through the public ABI is not visible to the host's
+   `parsePassPipeline` lookup, so `Pipelines.cpp` slots cannot
+   actually instantiate plugin passes today.
+
+   **Status.** PR 2 lands the host-side machinery (vtable-based
+   registry, slot-request storage, pipeline-slot wiring, idempotent
+   plugin dispatch). The PR-2 LIT test
+   `test/lit/Plugin/sample_plugin_pass.mlir` is committed with
+   `XFAIL: *` precisely so this gap is reviewable in code rather
+   than only in this doc.
+
+   **Resolution path.** This is the same problem upstream LLVM
+   solves with `libLLVM.so` — a single shared library that both the
+   host and the plugin link against, so `mlir::PassRegistry`,
+   `mlir::DialectRegistry`, and `mlir::TypeID` live in one place.
+   Adopting that for `onnx-hipdnn-ep` requires either:
+
+   - Switching `prebuilt-local/` to ship `libMLIR.dll` /
+     `libMLIR.so` instead of the per-component static libs (the
+     "whole-libMLIR shared lib" build mode upstream supports), or
+   - Building hip-compiler itself as a shared library, exporting
+     the MLIR symbols it uses, and having plugins delay-load
+     against it (Windows-specific; brittle across compilers).
+
+   **Recommendation.** Defer this to a focused build-system PR
+   after vendor review confirms the public ABI is the right shape.
+   Until then, plugins can still contribute LLVM bitcode (PR 3) and
+   linker entries (PR 4) without any MLIR state crossing the DLL
+   boundary, so the broader design is not blocked.
 
 ### Resolved by adopting the upstream pattern
 
