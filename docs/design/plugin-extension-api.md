@@ -559,20 +559,66 @@ Risk as landed: low for the new-symbol path (round-trip + magic-
 bytes check are tight); medium for the override path until a
 follow-up adds the E2E override assertion described above.
 
-### PR 4 — External Library Contribution
+### PR 4 — External Library Contribution **(landed 2026-05-26)**
 
-Scope:
+Scope as landed:
 
-- Implement `HipEpPluginRegistry::addLibraryPath` and `addLibrary`.
-- Wire `CompilerDriver::discoverLibraries` — at the end, walk plugin
-  contributions and append to `libraries` / `library_paths`.
-- Sample plugin's E2E test now also points at a sample static lib
-  built in-tree (no GPU code needed; can be a plain C `.lib`
-  exporting one `int sample_lib_noop(void)` symbol called from the
-  sample bitcode).
+- `HipEpPluginRegistry::addLibraryPath` / `addLibrary` are wired
+  into the vtable + per-process registry storage; the registered
+  paths and library names are exposed by the new
+  `pluginLibraryPaths()` and `pluginLibraries()` accessors. Both
+  copy the plugin's `StringRef` into a per-process `std::string`
+  to decouple the recorded value's lifetime from the plugin's
+  argument storage.
+- `CompilerDriver::discoverLibraries` was split into
+  `discoverInTreeLibraries` (the existing THEROCK_DIST + custom-
+  kernels + hipDNN-graph-runtime body) and a new top-level
+  `discoverLibraries` that calls the in-tree helper, then appends
+  plugin paths and library names. Critically, the early-return on
+  missing `THEROCK_DIST` was lifted so plugin contributions flow
+  through even on a CPU-only smoke build that loads a vendor
+  plugin.
+- Plugin contributions are appended *after* the in-tree libraries.
+  This keeps in-tree-defined symbols winning under lld-link's
+  command-line search; vendors who need to override an in-tree
+  symbol use the bitcode mechanism (PR 3) with
+  `Linker::Flags::OverrideFromSrc` instead. The doc comment on
+  `pluginLibraries()` documents this contract.
+- The sample plugin grew a sibling `hip_ep_sample_lib` static
+  library (compiled from a one-function `sample_lib.cpp`) and
+  hands its directory to `addLibraryPath` and its bare name
+  `hip_ep_sample_lib` to `addLibrary`. Both calls are
+  unconditional in the sample, so the unit test asserts "grew by
+  exactly 1" rather than "grew by 0 or 1". CMake plumbing in
+  `test/plugin/sample_plugin/CMakeLists.txt` propagates the
+  static lib's directory into the plugin source via two compile-
+  time defines (`HIP_EP_SAMPLE_LIB_DIR`, `HIP_EP_SAMPLE_LIB_NAME`).
+- Unit test (`test/plugin/test_plugin_loader.cpp`) asserts the
+  round-trip: after `RegisterCallbacks` runs,
+  `pluginLibraryPaths()` and `pluginLibraries()` each grew by
+  exactly one entry; the new library entry equals the literal
+  `hip_ep_sample_lib`; the new path entry is non-empty. Plugin
+  version bumped 0.3.0 → 0.4.0 so the literal-match assertion
+  catches stale builds.
 
-Risk: low. The change is symmetric to the existing
-`HIP_CUSTOM_KERNELS_DIR` path.
+Tests deferred to a follow-up:
+  An E2E test that invokes a model whose generated code calls a
+  symbol defined in the plugin static library. Same dev-env
+  blocker as PR 3: this dev machine cannot run E2E_Compile or
+  E2E_Execute because of a missing `amdhip64.lib`. The
+  `discoverLibraries` code path is exercised on every model
+  compile via `linkToDLL`, so the integration is exercised in
+  the broad sense; the explicit "plugin-defined symbol resolved
+  through plugin lib" assertion lands once the dev-env block
+  clears.
+
+Risk as landed: low. The change is symmetric to the existing
+`HIP_CUSTOM_KERNELS_DIR` path; the only meaningful behaviour
+change for non-plugin users is that `discoverLibraries` no longer
+early-returns on missing `THEROCK_DIST`. Functional behaviour is
+identical: when no plugins are loaded, the post-`THEROCK_DIST`
+section runs with empty plugin accessors and produces the same
+`libraries` / `library_paths` vectors as before.
 
 ### PR 5 — CONTRIBUTING + README + Vendor Documentation
 

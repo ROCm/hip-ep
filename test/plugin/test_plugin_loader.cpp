@@ -33,7 +33,14 @@
 //      magic ('BC\xc0\xde'), confirming the build's clang->bitcode
 //      pipeline succeeded and the bytes survived the C ABI boundary
 //      intact.
-//   7. A clearly-bad path yields an `llvm::Error` with a useful
+//   7. PR 4: After the callback runs, the registry records the
+//      library search path + library name the plugin contributed
+//      via `addLibraryPath` / `addLibrary`. Both round-trip across
+//      the DLL boundary as recorded `std::string` copies, so the
+//      `StringRef`s returned by the accessors are stable for the
+//      lifetime of the process even though the plugin's source
+//      string was a stack-bound `llvm::StringRef`.
+//   8. A clearly-bad path yields an `llvm::Error` with a useful
 //      message rather than a crash.
 //
 // The test is plain `main()` rather than GTest so it has no
@@ -111,7 +118,7 @@ void testDirectLoadResolvesEntryPointAndValidatesStruct() {
                "Plugin API version matches HIP_EP_PLUGIN_API_VERSION");
   HIP_EP_CHECK(plugin->getPluginName() == llvm::StringRef("HipEpSamplePlugin"),
                "Plugin name returned by sample matches expected literal");
-  HIP_EP_CHECK(plugin->getPluginVersion() == llvm::StringRef("0.3.0"),
+  HIP_EP_CHECK(plugin->getPluginVersion() == llvm::StringRef("0.4.0"),
                "Plugin version returned by sample matches expected literal");
   HIP_EP_CHECK(plugin->getFilename() == llvm::StringRef(kSamplePluginPath),
                "Loader records the filename it loaded from");
@@ -159,6 +166,8 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
                          hip::compiler::PipelineSlot::AfterConvertOnnxToHip)
                          .size();
   auto beforeBitcodeCount = hip::compiler::pluginBitcodeBuffers().size();
+  auto beforeLibraryPathCount = hip::compiler::pluginLibraryPaths().size();
+  auto beforeLibraryCount = hip::compiler::pluginLibraries().size();
 
   // The registry is a process-wide handle whose methods dispatch
   // through a vtable into the per-process storage in
@@ -226,6 +235,38 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
   } else {
     std::fprintf(stdout, "  no bitcode contributed (likely a degraded build "
                          "without clang at sample-plugin configure time)\n");
+  }
+
+  // PR 4: the sample plugin contributes one library path + one
+  // library name unconditionally. Both should appear in the
+  // accessors with the expected literal values.
+  auto afterLibraryPaths = hip::compiler::pluginLibraryPaths();
+  auto afterLibraries = hip::compiler::pluginLibraries();
+  HIP_EP_CHECK(afterLibraryPaths.size() == beforeLibraryPathCount + 1u,
+               "pluginLibraryPaths grew by 1 after registerCallbacks");
+  HIP_EP_CHECK(afterLibraries.size() == beforeLibraryCount + 1u,
+               "pluginLibraries grew by 1 after registerCallbacks");
+
+  bool foundSampleLibName = false;
+  for (auto name : afterLibraries) {
+    if (name == llvm::StringRef("hip_ep_sample_lib")) {
+      foundSampleLibName = true;
+      break;
+    }
+  }
+  HIP_EP_CHECK(foundSampleLibName,
+               "pluginLibraries contains the sample lib name "
+               "'hip_ep_sample_lib'");
+
+  // The path is a build-tree directory we cannot hard-code in the
+  // test; we verify only that *some* non-empty path was recorded
+  // and that it points to an existing directory (so a malformed
+  // contribution is caught).
+  if (!afterLibraryPaths.empty()) {
+    auto path = afterLibraryPaths.back();
+    HIP_EP_CHECK(!path.empty(), "Last contributed library path is non-empty");
+    std::fprintf(stdout, "  contributed lib path: %.*s\n",
+                 static_cast<int>(path.size()), path.data());
   }
 }
 

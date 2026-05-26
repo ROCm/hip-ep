@@ -81,9 +81,38 @@ else()
     )
 endif()
 
+# ============================================================================
+# PR 4: build a tiny static library and have the plugin contribute
+# its path + name through addLibraryPath / addLibrary. The library
+# exposes a single uniquely-named C symbol so it cannot collide with
+# anything in-tree.
+#
+# We deliberately make this a STATIC library (matching how vendor
+# kernel packs are typically distributed) so the plugin DLL itself
+# does not depend on it at load time.
+# ============================================================================
+add_library(hip_ep_sample_lib STATIC sample_lib.cpp)
+target_compile_features(hip_ep_sample_lib PRIVATE cxx_std_17)
+# Platform defaults give us hip_ep_sample_lib.lib (Windows) or
+# libhip_ep_sample_lib.a (Linux); both are what lld-link / the
+# clang driver search for given the bare name "hip_ep_sample_lib".
+set_target_properties(hip_ep_sample_lib PROPERTIES
+  FOLDER "mlir/Test/Plugin"
+)
+
 add_library(hip_ep_sample_plugin SHARED
   sample_plugin.cpp
   ${SAMPLE_PLUGIN_BITCODE_SRC}
+)
+add_dependencies(hip_ep_sample_plugin hip_ep_sample_lib)
+
+# Generator expressions resolve at build time, so the directory
+# embedded into the plugin source is the canonical
+# $<TARGET_FILE_DIR:hip_ep_sample_lib> -- typically the build's
+# bin/ directory on this tree's layout.
+target_compile_definitions(hip_ep_sample_plugin PRIVATE
+  "HIP_EP_SAMPLE_LIB_DIR=\"$<TARGET_FILE_DIR:hip_ep_sample_lib>\""
+  "HIP_EP_SAMPLE_LIB_NAME=\"hip_ep_sample_lib\""
 )
 
 # Plugin links against the MLIR libraries it actually uses

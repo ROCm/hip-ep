@@ -21,8 +21,11 @@
 //   5. PR 3: the plugin contributes a tiny LLVM bitcode buffer
 //      (compiled at build time from `sample_plugin_runtime.cpp`)
 //      through `addRuntimeBitcode`.
-//
-// PR 4 will additionally contribute a sample static library.
+//   6. PR 4: the plugin contributes a tiny static library (the
+//      sibling `hip_ep_sample_lib` target, compiled from
+//      `sample_lib.cpp`) through `addLibraryPath` + `addLibrary`.
+//      Vendor-side: this is the same shape downstream plugins will
+//      use to ship vendor kernel packs.
 
 #include "hip/Compiler/PluginAPI.h"
 #include "hip/Compiler/PluginRegistry.h"
@@ -95,6 +98,18 @@ void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
   if (kSamplePluginBitcodeSize != 0) {
     R.addRuntimeBitcode(kSamplePluginBitcode, kSamplePluginBitcodeSize);
   }
+
+  // PR 4: contribute the sibling sample static library. Both the
+  // path and the library name come from compile-time defines
+  // populated by sample_plugin/CMakeLists.txt; HIP_EP_SAMPLE_LIB_DIR
+  // resolves to $<TARGET_FILE_DIR:hip_ep_sample_lib>, i.e. the
+  // build-tree directory containing hip_ep_sample_lib.lib (Windows)
+  // or libhip_ep_sample_lib.a (Linux). The library exposes a
+  // single uniquely-named symbol; the model module never references
+  // it, so the link succeeds whether or not the model module
+  // declares any plugin functions.
+  R.addLibraryPath(HIP_EP_SAMPLE_LIB_DIR);
+  R.addLibrary(HIP_EP_SAMPLE_LIB_NAME);
 }
 
 } // namespace
@@ -108,7 +123,7 @@ hipEpGetPluginInfo() {
   return {
       HIP_EP_PLUGIN_API_VERSION,
       "HipEpSamplePlugin",
-      "0.3.0",
+      "0.4.0",
       &registerCallbacks,
   };
 }

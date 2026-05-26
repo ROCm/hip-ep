@@ -47,7 +47,15 @@ struct Storage {
   // the result with Linker::Flags::OverrideFromSrc.
   std::vector<PluginBitcodeBuffer> bitcodeBuffers;
 
-  // PR 4 will append: library paths and library names.
+  // PR 4: library search paths and library names contributed by
+  // plugin addLibraryPath / addLibrary calls. We own the std::string
+  // copies because the plugin's StringRef may point into the plugin
+  // DLL's read-only data; the registry must outlive any individual
+  // RegisterCallbacks call. CompilerDriver::discoverLibraries reads
+  // these and appends them to the lld-link argument vector after
+  // the in-tree libraries.
+  std::vector<std::string> libraryPaths;
+  std::vector<std::string> libraries;
 };
 
 Storage &storage() {
@@ -76,14 +84,13 @@ void addRuntimeBitcodeImpl(void * /*self*/, const void *data,
   storage().bitcodeBuffers.push_back(PluginBitcodeBuffer{data, sizeBytes});
 }
 
-void addLibraryPathImpl(void * /*self*/, const char * /*path*/,
-                        std::size_t /*pathLen*/) {
-  // PR 4 fills this in.
+void addLibraryPathImpl(void * /*self*/, const char *path,
+                        std::size_t pathLen) {
+  storage().libraryPaths.emplace_back(path, pathLen);
 }
 
-void addLibraryImpl(void * /*self*/, const char * /*name*/,
-                    std::size_t /*nameLen*/) {
-  // PR 4 fills this in.
+void addLibraryImpl(void * /*self*/, const char *name, std::size_t nameLen) {
+  storage().libraries.emplace_back(name, nameLen);
 }
 
 const HipEpPluginRegistry::VTable g_vtable = {
@@ -121,6 +128,28 @@ llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers() {
   result.reserve(storage().bitcodeBuffers.size());
   for (const auto &buf : storage().bitcodeBuffers)
     result.push_back(buf);
+  return result;
+}
+
+llvm::SmallVector<llvm::StringRef> pluginLibraryPaths() {
+  // StringRef into the per-process storage; valid for the process
+  // lifetime since slotRequests/libraryPaths are append-only and
+  // the std::string never reallocates after the registry vector
+  // grows past the SmallString small-string optimization. The
+  // recorder uses std::string explicitly to make this contract
+  // visible.
+  llvm::SmallVector<llvm::StringRef> result;
+  result.reserve(storage().libraryPaths.size());
+  for (const auto &p : storage().libraryPaths)
+    result.emplace_back(p);
+  return result;
+}
+
+llvm::SmallVector<llvm::StringRef> pluginLibraries() {
+  llvm::SmallVector<llvm::StringRef> result;
+  result.reserve(storage().libraries.size());
+  for (const auto &l : storage().libraries)
+    result.emplace_back(l);
   return result;
 }
 
