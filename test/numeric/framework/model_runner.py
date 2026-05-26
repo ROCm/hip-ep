@@ -26,7 +26,7 @@ import onnx
 from .backend import Backend
 from .comparator import print_output_summary, sizeof_fmt, tensor_desc
 from .ort_cpu_backend import OrtCpuBackend
-from .reference_cache import ReferenceCache, sanitize_name
+from .reference_cache import ReferenceCache, _contig_preserve_rank, sanitize_name
 
 _TAG = "[ModelRunner]"
 
@@ -241,11 +241,11 @@ class ModelRunner:
         sub_act.mkdir(exist_ok=True)
         sub_exp.mkdir(exist_ok=True)
         for i, arr in enumerate(inputs):
-            np.save(sub_in / f"in_{i}.npy", np.ascontiguousarray(arr))
+            np.save(sub_in / f"in_{i}.npy", _contig_preserve_rank(arr))
         for i, arr in enumerate(actual):
-            np.save(sub_act / f"out_{i}.npy", np.ascontiguousarray(arr))
+            np.save(sub_act / f"out_{i}.npy", _contig_preserve_rank(arr))
         for i, arr in enumerate(expected):
-            np.save(sub_exp / f"out_{i}.npy", np.ascontiguousarray(arr))
+            np.save(sub_exp / f"out_{i}.npy", _contig_preserve_rank(arr))
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +276,7 @@ def _resolve_inputs(inputs: Iterable[InputLike]) -> list[np.ndarray]:
     forwarded by reference. The downstream consumers (ORT ``Run``, the
     cache serialiser, the artifact snapshotter) all treat their input
     as read-only -- ORT does not mutate session inputs and the
-    serialisers always go through ``np.save(np.ascontiguousarray(...))``
+    serialisers always go through ``np.save(_contig_preserve_rank(...))``
     -- so no defensive copy is needed.
     """
     result: list[np.ndarray] = []

@@ -29,6 +29,27 @@ from pathlib import Path
 
 import numpy as np
 
+
+def _contig_preserve_rank(arr: np.ndarray) -> np.ndarray:
+    """Return a C-contiguous view of *arr* that keeps a 0-d array 0-d.
+
+    ``np.ascontiguousarray`` is documented to "convert an array to an
+    array with at least one dimension", so calling it on a numpy scalar
+    silently promotes ``shape=()`` to ``shape=(1,)``. That promotion
+    then round-trips through ``np.save`` / ``np.load`` and rank-corrupts
+    every on-disk artifact we hand back to the comparator -- which made
+    ``compare_outputs`` flag a phantom shape mismatch the moment any
+    test passed a rank-0 input or returned a rank-0 output (see the
+    ``test_gather_axis0_scalar_index`` failure pattern). This helper
+    keeps rank intact while still guaranteeing a contiguous buffer.
+    """
+    if arr.flags.c_contiguous:
+        return arr
+    if arr.ndim == 0:
+        return arr.copy(order="C")
+    return np.ascontiguousarray(arr)
+
+
 _TAG = "[Cache]"
 _MANIFEST = "manifest.json"
 _MODEL = "model.onnx"
@@ -63,17 +84,27 @@ def sanitize_name(name: str) -> str:
 
 
 def compute_content_hash(model_bytes: bytes, inputs: list[np.ndarray]) -> str:
-    """Return ``sha256(model_bytes ++ each input as contiguous bytes)`` as hex.
+    """Return ``sha256(model_bytes ++ each input's shape/dtype/bytes)`` as hex.
 
     The hash is used purely as a tripwire: it never appears in any
     filesystem path. Storing it inside the manifest makes the cache
     directory layout self-documenting while still detecting silent edits
     to the test model or input distribution.
+
+    Note: rank promotion is invisible at the byte level -- ``np.array(1,
+    dtype=int64).tobytes()`` and ``np.array([1], dtype=int64).tobytes()``
+    produce the same 8 bytes. ORT then happily runs a rank-1 input
+    against a rank-0 model input slot and produces a rank-1 output that
+    silently disagrees with the model's declared output shape -- which
+    poisons the cache. Including ``shape`` and ``dtype`` in the hash
+    catches that drift on the very next test run.
     """
     h = hashlib.sha256()
     h.update(model_bytes)
     for arr in inputs:
-        contig = np.ascontiguousarray(arr)
+        contig = _contig_preserve_rank(arr)
+        h.update(repr(contig.shape).encode("utf-8"))
+        h.update(str(contig.dtype).encode("utf-8"))
         h.update(contig.tobytes())
     return h.hexdigest()
 
@@ -232,10 +263,10 @@ class ReferenceCache:
         (d / _MODEL).write_bytes(model_bytes)
 
         for i, arr in enumerate(inputs):
-            np.save(d / _INPUTS_DIR / f"in_{i}.npy", np.ascontiguousarray(arr))
+            np.save(d / _INPUTS_DIR / f"in_{i}.npy", _contig_preserve_rank(arr))
 
         for i, arr in enumerate(outputs):
-            np.save(d / _OUTPUTS_DIR / f"out_{i}.npy", np.ascontiguousarray(arr))
+            np.save(d / _OUTPUTS_DIR / f"out_{i}.npy", _contig_preserve_rank(arr))
 
         manifest = Manifest(
             content_hash=compute_content_hash(model_bytes, inputs),
