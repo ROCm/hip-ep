@@ -4,6 +4,8 @@
  */
 #include "hip/Target/LLVM/LLVMBackend.h"
 
+#include "hip/Compiler/PluginRegistry.h"
+
 #include <mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h>
 #include <mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h>
 #include <mlir/Target/LLVMIR/Export.h>
@@ -290,18 +292,50 @@ bool LLVMBackend::compileToObjectInMemory(llvm::Module *module,
 extern "C" const unsigned char runtime_bc_data[];
 extern "C" const size_t runtime_bc_data_size;
 
+// Helper: parse a bitcode buffer and link it into `linker` with the
+// caller-supplied `flags`. Used by linkRuntimeModule for both the
+// in-tree runtime (no flags) and plugin contributions
+// (Linker::Flags::OverrideFromSrc, so a plugin's symbols shadow any
+// in-tree definition with the same name).
+static bool linkBitcodeBuffer(llvm::Linker &linker, llvm::LLVMContext &context,
+                              const void *data, std::size_t sizeBytes,
+                              llvm::StringRef bufName, unsigned flags) {
+  auto memBuf = llvm::MemoryBuffer::getMemBuffer(
+      llvm::StringRef(reinterpret_cast<const char *>(data), sizeBytes), bufName,
+      /*RequiresNullTerminator=*/false);
+
+  llvm::Expected<std::unique_ptr<llvm::Module>> moduleOrErr =
+      llvm::parseBitcodeFile(memBuf->getMemBufferRef(), context);
+  if (!moduleOrErr) {
+    llvm::errs() << "Error: Failed to parse bitcode '" << bufName
+                 << "': " << llvm::toString(moduleOrErr.takeError()) << "\n";
+    return false;
+  }
+
+  if (linker.linkInModule(std::move(*moduleOrErr), flags)) {
+    llvm::errs() << "Error: Failed to link bitcode '" << bufName
+                 << "' into destination\n";
+    return false;
+  }
+  return true;
+}
+
 bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
   if (!destModule) {
     llvm::errs() << "Error: Null destination module\n";
     return false;
   }
 
-  // Use pre-calculated bitcode size
-  size_t bcSize = runtime_bc_data_size;
+  llvm::Linker linker(*destModule);
 
+  // Step 1: in-tree runtime bitcode.
+  //
+  // Use pre-calculated bitcode size from the xxd-generated header.
+  size_t bcSize = runtime_bc_data_size;
   if (bcSize == 0) {
-    // Empty bitcode - this means Clang wasn't available during build
-    // Runtime IR merging is disabled, skip linking
+    // Empty bitcode - this means Clang wasn't available during build.
+    // Runtime IR merging is disabled, but plugin bitcode may still be
+    // contributed below.
     COMPILER_DEBUG_LOG(
         "Warning: Runtime bitcode is empty (Clang not available during "
         "build).\n"
@@ -309,35 +343,35 @@ bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
         "call overhead.\n"
         "         To enable zero-cost abstraction, rebuild with Clang "
         "installed.\n");
-    return true; // Not an error, just a degraded mode
+  } else {
+    if (!linkBitcodeBuffer(linker, destModule->getContext(), runtime_bc_data,
+                           bcSize, "runtime.bc", /*flags=*/0)) {
+      return false;
+    }
   }
 
-  // Create memory buffer from embedded bitcode
-  auto MemBuf = llvm::MemoryBuffer::getMemBuffer(
-      llvm::StringRef(reinterpret_cast<const char *>(runtime_bc_data), bcSize),
-      "runtime.bc",
-      /*RequiresNullTerminator=*/false);
-
-  // Parse bitcode into LLVM Module
-  llvm::Expected<std::unique_ptr<llvm::Module>> ModuleOrErr =
-      llvm::parseBitcodeFile(MemBuf->getMemBufferRef(),
-                             destModule->getContext());
-
-  if (!ModuleOrErr) {
-    llvm::errs() << "Error: Failed to parse Runtime bitcode: "
-                 << llvm::toString(ModuleOrErr.takeError()) << "\n";
-    return false;
-  }
-
-  std::unique_ptr<llvm::Module> RuntimeModule = std::move(*ModuleOrErr);
-
-  // Link Runtime module into destination module
-  // Linker::linkInModule() merges RuntimeModule into destModule
-  // After this call, destModule contains both generated + Runtime IR
-  llvm::Linker linker(*destModule);
-  if (linker.linkInModule(std::move(RuntimeModule))) {
-    llvm::errs() << "Error: Failed to link Runtime module into destination\n";
-    return false;
+  // Step 2: plugin-contributed bitcode (PR 3).
+  //
+  // Linked AFTER the in-tree runtime with `OverrideFromSrc` so a
+  // vendor `wrap_*` definition replaces the in-tree weak/default one.
+  // This is the LLVM-native way to do "vendor specialization" of
+  // runtime entry points; it is safer than mutating the destination
+  // module after-the-fact and matches how OpenMP and HIP themselves
+  // overlay device-runtime libraries.
+  //
+  // Order: insertion order from `pluginBitcodeBuffers()`. If two
+  // plugins contribute the same symbol the second one wins; this
+  // mirrors lld's link-order semantics. We document this in the
+  // design doc rather than promising any deterministic-by-name
+  // ordering.
+  unsigned i = 0;
+  for (const auto &buf : ::hip::compiler::pluginBitcodeBuffers()) {
+    std::string name = "plugin." + std::to_string(i++) + ".bc";
+    if (!linkBitcodeBuffer(linker, destModule->getContext(), buf.data,
+                           buf.sizeBytes, name,
+                           llvm::Linker::Flags::OverrideFromSrc)) {
+      return false;
+    }
   }
 
   return true;

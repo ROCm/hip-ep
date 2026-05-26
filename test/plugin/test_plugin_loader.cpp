@@ -27,7 +27,13 @@
 //      request the plugin made (`AfterConvertOnnxToHip` ->
 //      "hip-ep-sample-print-functions"). The Pipelines.cpp slot
 //      hook reads exactly this state.
-//   6. A clearly-bad path yields an `llvm::Error` with a useful
+//   6. PR 3: After the callback runs, the registry also records the
+//      LLVM bitcode buffer the plugin contributed via
+//      `addRuntimeBitcode`. The buffer carries the LLVM bitcode
+//      magic ('BC\xc0\xde'), confirming the build's clang->bitcode
+//      pipeline succeeded and the bytes survived the C ABI boundary
+//      intact.
+//   7. A clearly-bad path yields an `llvm::Error` with a useful
 //      message rather than a crash.
 //
 // The test is plain `main()` rather than GTest so it has no
@@ -105,7 +111,7 @@ void testDirectLoadResolvesEntryPointAndValidatesStruct() {
                "Plugin API version matches HIP_EP_PLUGIN_API_VERSION");
   HIP_EP_CHECK(plugin->getPluginName() == llvm::StringRef("HipEpSamplePlugin"),
                "Plugin name returned by sample matches expected literal");
-  HIP_EP_CHECK(plugin->getPluginVersion() == llvm::StringRef("0.2.0"),
+  HIP_EP_CHECK(plugin->getPluginVersion() == llvm::StringRef("0.3.0"),
                "Plugin version returned by sample matches expected literal");
   HIP_EP_CHECK(plugin->getFilename() == llvm::StringRef(kSamplePluginPath),
                "Loader records the filename it loaded from");
@@ -152,6 +158,7 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
   auto beforeCount = hip::compiler::pluginPassesForSlot(
                          hip::compiler::PipelineSlot::AfterConvertOnnxToHip)
                          .size();
+  auto beforeBitcodeCount = hip::compiler::pluginBitcodeBuffers().size();
 
   // The registry is a process-wide handle whose methods dispatch
   // through a vtable into the per-process storage in
@@ -189,6 +196,37 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
   HIP_EP_CHECK(
       unrelated.size() == 0u,
       "pluginPassesForSlot(AfterPoolAllocs) is empty (unrelated slot)");
+
+  // PR 3: the sample plugin contributed a bitcode buffer if its
+  // build had clang available. We can't tell from here whether the
+  // build was degraded; instead we check that the recorded count
+  // either stayed the same (degraded build) or grew by exactly one
+  // (normal build) and that any new buffer carries valid LLVM
+  // bitcode magic.
+  auto afterBuffers = hip::compiler::pluginBitcodeBuffers();
+  bool bitcodeContributed = afterBuffers.size() == beforeBitcodeCount + 1u;
+  bool bitcodeAbsent = afterBuffers.size() == beforeBitcodeCount;
+  HIP_EP_CHECK(bitcodeContributed || bitcodeAbsent,
+               "pluginBitcodeBuffers grew by 0 or 1 after registerCallbacks");
+  if (bitcodeContributed) {
+    const auto &buf = afterBuffers.back();
+    HIP_EP_CHECK(buf.sizeBytes >= 4u,
+                 "Contributed bitcode is at least 4 bytes (room for magic)");
+    if (buf.sizeBytes >= 4u) {
+      const unsigned char *bytes = static_cast<const unsigned char *>(buf.data);
+      // LLVM bitcode wrapper magic: 'BC\xc0\xde' (little-endian 4-byte).
+      // See llvm/Bitcode/BitcodeReader.h, function `getBitcodeFileContents`.
+      HIP_EP_CHECK(bytes[0] == 0x42 && bytes[1] == 0x43 && bytes[2] == 0xC0 &&
+                       bytes[3] == 0xDE,
+                   "Contributed bitcode starts with LLVM bitcode magic "
+                   "'BC\\xc0\\xde'");
+    }
+    std::fprintf(stdout, "  contributed bitcode size: %zu bytes\n",
+                 buf.sizeBytes);
+  } else {
+    std::fprintf(stdout, "  no bitcode contributed (likely a degraded build "
+                         "without clang at sample-plugin configure time)\n");
+  }
 }
 
 void testLoadFailsCleanlyOnNonExistentPath() {

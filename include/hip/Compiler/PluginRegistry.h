@@ -204,6 +204,26 @@ HipEpPluginRegistry &getProcessPluginRegistry();
 /// global pass registry and add them to the active `PassManager`.
 llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot);
 
+/// One bitcode buffer contributed by a plugin's `addRuntimeBitcode`
+/// call. Borrowed view into plugin-DLL-owned static storage; valid for
+/// the lifetime of the process.
+struct PluginBitcodeBuffer {
+  const void *data;
+  std::size_t sizeBytes;
+};
+
+/// Read the bitcode buffers recorded by every loaded plugin's
+/// `addRuntimeBitcode` call, in the order they were registered. The
+/// returned vector references storage owned by the per-process
+/// plugin registry; each `data` pointer is stable for the lifetime
+/// of the process.
+///
+/// Used by `lib/Target/LLVM/LLVMBackend.cpp::linkRuntimeModule` to
+/// link plugin-contributed bitcode into the model module after the
+/// in-tree runtime, with `Linker::Flags::OverrideFromSrc` so vendor
+/// definitions shadow in-tree ones.
+llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers();
+
 } // namespace hip::compiler
 
 #endif // HIP_COMPILER_PLUGIN_REGISTRY_H

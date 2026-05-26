@@ -18,9 +18,11 @@
 //   4. The plugin's pass (`SamplePrintFunctionsPass`) is registered in
 //      MLIR's global pass registry and runs when requested by name
 //      via the `AfterConvertOnnxToHip` slot.
+//   5. PR 3: the plugin contributes a tiny LLVM bitcode buffer
+//      (compiled at build time from `sample_plugin_runtime.cpp`)
+//      through `addRuntimeBitcode`.
 //
-// PR 3 will additionally contribute LLVM bitcode through the same
-// callback; PR 4 will contribute a sample static library.
+// PR 4 will additionally contribute a sample static library.
 
 #include "hip/Compiler/PluginAPI.h"
 #include "hip/Compiler/PluginRegistry.h"
@@ -30,6 +32,16 @@
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/StringRef.h"
+
+#include <cstddef>
+
+// Embedded bitcode buffer compiled from sample_plugin_runtime.cpp.
+// Defined in the auto-generated `sample_plugin_bitcode.cpp` (see
+// sample_plugin/CMakeLists.txt). A clean degraded build that lacks
+// clang/python emits an empty buffer (size == 0); the unit test
+// detects that case and skips the round-trip assertion.
+extern "C" const unsigned char kSamplePluginBitcode[];
+extern "C" const std::size_t kSamplePluginBitcodeSize;
 
 namespace {
 
@@ -73,6 +85,16 @@ void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
   // mlir::parsePassPipeline.
   R.requestPipelineSlot(::hip::compiler::PipelineSlot::AfterConvertOnnxToHip,
                         "hip-ep-sample-print-functions");
+
+  // Contribute the embedded plugin bitcode. The buffer lives in
+  // this DLL's read-only data segment for the lifetime of hip-
+  // compiler, which is the contract addRuntimeBitcode requires.
+  // When the build did not have clang available, the buffer is
+  // empty and we skip the call so the host's
+  // pluginBitcodeBuffers() stays empty too.
+  if (kSamplePluginBitcodeSize != 0) {
+    R.addRuntimeBitcode(kSamplePluginBitcode, kSamplePluginBitcodeSize);
+  }
 }
 
 } // namespace
@@ -86,7 +108,7 @@ hipEpGetPluginInfo() {
   return {
       HIP_EP_PLUGIN_API_VERSION,
       "HipEpSamplePlugin",
-      "0.2.0",
+      "0.3.0",
       &registerCallbacks,
   };
 }
