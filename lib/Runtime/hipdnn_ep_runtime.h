@@ -1054,6 +1054,62 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
                     int64_t data_type);
 
 //===----------------------------------------------------------------------===//
+// ONNX Loop Drivers
+//===----------------------------------------------------------------------===//
+//
+// Body callback signature shared by both loop drivers. Emitted as a small
+// trampoline LLVMFuncOp by the HipToLLVM lowering pass; one trampoline per
+// `hip.loop`. The trampoline unpacks the descriptor-pointer arrays and
+// invokes the outlined ONNX body function with its actual (variable-arity)
+// positional memref-descriptor signature.
+//
+// Args:
+//   state              : RuntimeState pointer.
+//   iter_dev_ptr       : device int64_t holding the current iteration index.
+//                        Driver writes the host iter value into this buffer
+//                        each iter before calling the trampoline.
+//   cond_dev_ptr       : device bool (i1, 1 byte) holding the current cond.
+//                        Aliased between cond_in and cond_out -- the body
+//                        reads it as cond_in and writes the next-iter cond
+//                        in place. The driver re-reads it on the slow path
+//                        to decide whether to continue.
+//   loop_carried_descs : array of pointers to memref descriptors for each
+//                        loop-carried slot. The trampoline passes the same
+//                        descriptor for both the v_in and v_out positions
+//                        of the body -- one buffer per slot, body reads-
+//                        and-writes in place (safe under single-pass kernel
+//                        semantics).
+//   capture_descs      : array of pointers to memref descriptors for each
+//                        captured value. Treated read-only by the body.
+// Returns 0 on success, non-zero on body failure.
+typedef int (*HipdnnEpLoopBodyFn)(RuntimeState *state, void *iter_dev_ptr,
+                                  void *cond_dev_ptr, void **loop_carried_descs,
+                                  void **capture_descs);
+
+// Fast-path: counted loop. Selected by the HipToLLVM lowering when the
+// outlining pass proves cond_out == cond_in (SSA-equality, i.e. the body's
+// returned cond passes through unchanged). Skips per-iter D2H cond sync,
+// which is the dominant cost in the slow path.
+//
+// Equivalent to `for (i = 0; i < max_trip_count; ++i) body(i)` -- the
+// cheapest possible CPU-driven loop. Inspired by counted-loop hoisting in
+// classic optimizing compilers; no analogue in ORT CUDA EP or MIGraphX
+// (both always read cond_out every iter, even for trivially-counted loops).
+int hipdnn_ep_run_counted_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
+                               int64_t max_trip_count, bool cond_init,
+                               int32_t num_loop_carried, int32_t num_captures,
+                               void **loop_carried_descs, void **capture_descs);
+
+// Slow-path: dynamic-cond loop. Reads cond_out each iter via D2H sync
+// (matches the behavior of ORT CUDA EP `LoopImpl::Execute` and MIGraphX
+// `run_loop`). Used when the body's returned cond is the result of a body-
+// internal computation rather than a passthrough of cond_in.
+int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
+                       int64_t max_trip_count, bool cond_init,
+                       int32_t num_loop_carried, int32_t num_captures,
+                       void **loop_carried_descs, void **capture_descs);
+
+//===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
 //===----------------------------------------------------------------------===//
 
