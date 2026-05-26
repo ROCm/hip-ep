@@ -10,6 +10,7 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
+#include <cstring>
 #include <fstream>
 #include <glog/logging.h>
 #include <sstream>
@@ -40,6 +41,31 @@ struct CompilerError {
   CompilerErrorCode code;
   char message[1024];
 };
+
+// Mirrors `CompilationOutputs` in include/hip/compiler_types.h. Layout
+// MUST stay in sync with that struct (binary-compatible across the plugin
+// boundary). Pre-allocate the buffers in `compileFromBytecode` and pass
+// the struct through to the compiler — replaces the prior two-call
+// thread-local stash retrieval (`hip_get_last_compile_output_*`).
+//
+// Buffer sizing rationale: shapes_needed is bounded by
+//   1 + num_outputs * (1 + max_rank);
+// origins_needed by
+//   1 + num_outputs * (1 + 3 * max_rank).
+// Real models top out around tens of outputs × tens of dims; 4096 int64s
+// (32 KB) per buffer is generous enough that we never expect truncation.
+// We assert (`*_needed <= *_capacity`) and warn loudly if a model ever
+// pushes past — that's the trigger to bump the constants.
+struct PluginCompilationOutputs {
+  int64_t *shapes_buf;
+  int64_t shapes_capacity;
+  int64_t shapes_needed;
+  int64_t *origins_buf;
+  int64_t origins_capacity;
+  int64_t origins_needed;
+};
+
+static constexpr int64_t kInferOutputsBufferInt64s = 4096;
 
 // Build JSON options string from compilation config
 std::string build_compiler_options_json(const CompilationConfig &config) {
@@ -93,13 +119,15 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   LOG(INFO) << "Calling hip_compile_with_fs with JSON options: "
             << options_json;
 
-  // Get method with explicit types (avoids template forwarding ref issues)
-  // Signature: CompilerErrorCode (*)(const void*, size_t, const char*, const
-  // char*, CompilerError*, void* fs)
+  // Get method with explicit types (avoids template forwarding ref issues).
+  // Signature: CompilerErrorCode (*)(const void*, size_t, const char*,
+  //   const char*, CompilerError*, void* fs, PluginCompilationOutputs*)
+  // The trailing struct pointer is the InferOnnxShapes-results out-channel
+  // (replaces the prior thread-local stash + two-call discovery).
   auto func =
       plugin->get_method<CompilerErrorCode, const void *, size_t, const char *,
-                         const char *, CompilerError *, void *>(
-          "hip_compile_with_fs");
+                         const char *, CompilerError *, void *,
+                         PluginCompilationOutputs *>("hip_compile_with_fs");
 
   MY_LOG(2) << "get_method returned func = " << (void *)func;
   MY_LOG(2) << "Bytecode data() = " << (void *)mlir_bytecode.data();
@@ -110,13 +138,30 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
     return std::nullopt;
   }
 
+  // Pre-allocate output buffers. The compiler will write the full
+  // packed-int64 layout (shapes + per-dim SSA origins) into these. If a
+  // model ever pushes past the fixed capacity we warn loudly so the
+  // constant can be bumped — bounded by graph signature size, not
+  // anything content-dependent.
+  std::vector<int64_t> shapes_storage(
+      static_cast<size_t>(kInferOutputsBufferInt64s), 0);
+  std::vector<int64_t> origins_storage(
+      static_cast<size_t>(kInferOutputsBufferInt64s), 0);
+  PluginCompilationOutputs outputs{};
+  outputs.shapes_buf = shapes_storage.data();
+  outputs.shapes_capacity = kInferOutputsBufferInt64s;
+  outputs.shapes_needed = 0;
+  outputs.origins_buf = origins_storage.data();
+  outputs.origins_capacity = kInferOutputsBufferInt64s;
+  outputs.origins_needed = 0;
+
   // Call the function with binary-safe parameters
   MY_LOG(2) << "About to call func with size = " << mlir_bytecode.size();
 
   CompilerError error = {};
   auto result =
       func(mlir_bytecode.data(), mlir_bytecode.size(), temp_output_path.c_str(),
-           options_json.c_str(), &error, fs);
+           options_json.c_str(), &error, fs, &outputs);
 
   if (result != COMPILER_SUCCESS) {
     LOG(ERROR) << "Compilation failed: " << error.message;
@@ -144,14 +189,82 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   }
   file.close();
 
-  // Clean up temporary file
+  // Clean up temporary file (DLL is already in memory).
   std::remove(temp_output_path.c_str());
 
-  // Build artifact
+  // Build artifact.
   CompilationArtifact artifact;
   artifact.filename = "model_compiled";
   artifact.bytes = std::move(buffer);
   artifact.format = config.artifactFormat;
+
+  // Parse the InferOnnxShapes output buffers the compiler just wrote.
+  // The compiler always populates `*_needed` even when *_buf is too small;
+  // we pre-allocated generously (see kInferOutputsBufferInt64s) so
+  // truncation only happens if a future model pushes past the budget —
+  // warn loudly in that case so the constant gets bumped (the data we
+  // already have is still well-formed up to the truncation point, but
+  // some output dims may be missing their origins).
+  if (outputs.shapes_needed > outputs.shapes_capacity) {
+    LOG(WARNING) << "MlirCompiler: refined_output_shapes truncated by "
+                 << (outputs.shapes_needed - outputs.shapes_capacity)
+                 << " int64s (needed=" << outputs.shapes_needed
+                 << ", capacity=" << outputs.shapes_capacity
+                 << "). Bump kInferOutputsBufferInt64s in MlirCompiler.cpp.";
+  }
+  if (outputs.origins_needed > outputs.origins_capacity) {
+    LOG(WARNING) << "MlirCompiler: refined_output_dim_origins truncated by "
+                 << (outputs.origins_needed - outputs.origins_capacity)
+                 << " int64s (needed=" << outputs.origins_needed
+                 << ", capacity=" << outputs.origins_capacity
+                 << "). Bump kInferOutputsBufferInt64s in MlirCompiler.cpp.";
+  }
+
+  int64_t shapes_avail =
+      std::min<int64_t>(outputs.shapes_needed, outputs.shapes_capacity);
+  if (shapes_avail > 0) {
+    int64_t cursor = 0;
+    int64_t num_outputs = outputs.shapes_buf[cursor++];
+    artifact.refined_output_shapes.reserve(static_cast<size_t>(num_outputs));
+    for (int64_t i = 0; i < num_outputs && cursor < shapes_avail; ++i) {
+      int64_t num_dims = outputs.shapes_buf[cursor++];
+      std::vector<int64_t> dims;
+      dims.reserve(static_cast<size_t>(num_dims));
+      for (int64_t d = 0; d < num_dims && cursor < shapes_avail; ++d)
+        dims.push_back(outputs.shapes_buf[cursor++]);
+      artifact.refined_output_shapes.push_back(std::move(dims));
+    }
+    MY_LOG(2) << "Got " << artifact.refined_output_shapes.size()
+              << " refined output shapes from compiler";
+  }
+
+  int64_t origins_avail =
+      std::min<int64_t>(outputs.origins_needed, outputs.origins_capacity);
+  if (origins_avail > 0) {
+    // Triple stride: (arg, dim, mult_bits) per dim, plus one num_dims
+    // marker per output, plus one num_outputs marker. `mult_bits` is the
+    // IEEE 754 binary64 bit pattern of a double — bit-cast back here.
+    int64_t cursor = 0;
+    int64_t num_outputs = outputs.origins_buf[cursor++];
+    artifact.refined_output_dim_origins.reserve(
+        static_cast<size_t>(num_outputs));
+    for (int64_t i = 0; i < num_outputs && cursor < origins_avail; ++i) {
+      int64_t num_dims = outputs.origins_buf[cursor++];
+      std::vector<CompilationArtifact::DimOriginTriple> dims;
+      dims.reserve(static_cast<size_t>(num_dims));
+      for (int64_t d = 0; d < num_dims && cursor + 2 < origins_avail; ++d) {
+        int64_t arg = outputs.origins_buf[cursor++];
+        int64_t idx = outputs.origins_buf[cursor++];
+        int64_t mult_bits = outputs.origins_buf[cursor++];
+        double mult;
+        std::memcpy(&mult, &mult_bits, sizeof(double));
+        dims.push_back({arg, idx, mult});
+      }
+      artifact.refined_output_dim_origins.push_back(std::move(dims));
+    }
+    MY_LOG(2) << "Got " << artifact.refined_output_dim_origins.size()
+              << " refined output dim-origin maps from compiler";
+  }
 
   LOG(INFO) << "Artifact created: " << artifact.bytes.size() << " bytes";
 

@@ -43,9 +43,22 @@ static bool autotune_enabled() {
 
 struct MatmulCacheKey {
   int64_t M, N, K, batch_count, elem_size;
+  // hipBLASLt's STRIDED_BATCH_OFFSET on layA, in elements. Two distinct
+  // values reach this site at the same (M,N,K,batch,elem_size):
+  //   * 0   — B is a broadcast weight (rank-2 [K,N], or rank-N
+  //           [1,...,1,K,N] whose leading-dim product is 1).
+  //   * K*N — B is per-batch (leading-dim product > 1; the buffer holds
+  //           multiple [K,N] matrices laid out contiguously).
+  // Part of the cache key because the layout descriptor is parameterised
+  // by the stride: mixing the two would silently route one path through
+  // the other's stride and read past the end of a broadcast weight buffer.
+  // Keyed on the actual int stride (not a 0/1 bool) so any future site
+  // that legitimately uses a stride other than {0, K*N} also gets its
+  // own cache entry rather than aliasing one of these two.
+  int64_t b_batch_stride;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
-           elem_size == o.elem_size;
+           elem_size == o.elem_size && b_batch_stride == o.b_batch_stride;
   }
 };
 
@@ -57,6 +70,7 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.K);
     hash_combine_val(h, k.batch_count);
     hash_combine_val(h, k.elem_size);
+    hash_combine_val(h, k.b_batch_stride);
     return h;
   }
 };
@@ -126,7 +140,19 @@ static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
 
   if (key.batch_count > 1) {
     int64_t bc = key.batch_count;
-    int64_t sA = K * N, sB = M * K, sC = M * N;
+    // layA → user's B. The stride is whatever the compiler computed —
+    // 0 for broadcast B (rank-2 [K,N] or rank-N [1,...,1,K,N]), K*N for
+    // per-batch B (rank-N with leading-dim product > 1). Setting sA = K*N
+    // for a broadcast weight reads K*N elements PAST the end of the
+    // buffer on batch 1+ and feeds garbage into the GEMM — typical symptom
+    // on vision models is image-0 correct, image-1+ NaN (the OOB read
+    // often lands in a fp16-NaN pattern from adjacent pool slots /
+    // constants). Mis-setting sA = 0 for a per-batch B does the opposite:
+    // every batch reads matrix 0 instead of its own.
+    // layB → user's A and layC → output are always per-batch (the BATCH
+    // partition comes from A's leading dim by construction).
+    int64_t sA = key.b_batch_stride;
+    int64_t sB = M * K, sC = M * N;
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
         entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
@@ -350,7 +376,8 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 
 int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                          void *output, int64_t M, int64_t N, int64_t K,
-                         int64_t batch_count, int64_t elem_size) {
+                         int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride) {
   OP_PROFILE(
       "matmul",
       [&] {
@@ -383,13 +410,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-                    "batch=%lld, elem_size=%lld (%s), "
+                    "batch=%lld, b_batch_stride=%lld, elem_size=%lld (%s), "
                     "total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
-                    (long long)batch_count, (long long)elem_size, type_name,
+                    (long long)batch_count, (long long)b_batch_stride,
+                    (long long)elem_size, type_name,
                     (long long)(batch_count * M * N * elem_size));
 
-  MatmulCacheKey key{M, N, K, batch_count, elem_size};
+  MatmulCacheKey key{M, N, K, batch_count, elem_size, b_batch_stride};
   MatmulCacheEntry *cached = queryOrCreateMatmul(handle, key);
   if (!cached) {
     fprintf(stderr,

@@ -27,9 +27,15 @@
 
 #include "hip/debug_log.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/SymbolTable.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <sstream>
 
 namespace hip::compiler {
@@ -128,6 +134,16 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   if (!runMLIRPasses(module, options, error_message))
     return false;
   logPhase("runMLIRPasses");
+
+  // InferOnnxShapes attaches its refined shapes + per-output-dim origins
+  // as module attributes (`hip.refined_output_shapes`,
+  // `hip.refined_output_dim_origins`). The pass MUST run inside the MLIR
+  // pipeline while the function is still `func::FuncOp` — by this point
+  // HipToLLVM has converted the function to `llvm.func` and the original
+  // signature is no longer queryable directly. But module-level
+  // attributes survive that conversion intact. Read them into driver
+  // members so the C ABI can pack them into the caller's CompilationOutputs.
+  readRefinedOutputsFromModule(module);
 
   llvm::LLVMContext llvmContext;
   auto llvmModule = translateToLLVMIR(module, llvmContext, error_message);
@@ -287,6 +303,78 @@ bool CompilerDriver::runMLIRPasses(
     COMPILER_DEBUG_LOG("MLIR passes completed\n\n");
 
   return true;
+}
+
+// Read the per-output refined shapes + per-dim SSA origins that
+// `InferOnnxShapes` attached to the module as ArrayAttr-of-ArrayAttr.
+//
+// Encoding (one IntegerAttr<i64> per slot):
+//   refined_output_shapes  : ArrayAttr<ArrayAttr<IntegerAttr<i64>>>
+//                            outer = per output; inner = per dim
+//                            (positive int = static dim, -1 = dynamic)
+//   refined_output_dim_origins : ArrayAttr<ArrayAttr<IntegerAttr<i64>>>
+//                            outer = per output; inner = flat triples
+//                            (arg_idx, dim_idx, mult_bits) — 3 slots per dim
+//                            mult_bits = IEEE 754 binary64 bit pattern of
+//                            the per-dim mult composed by the SSA trace.
+//
+// Missing attributes → empty member vectors (no-op, e.g. a pipeline that
+// skipped InferOnnxShapes).
+void CompilerDriver::readRefinedOutputsFromModule(mlir::ModuleOp module) {
+  refinedOutputShapes_.clear();
+  refinedOutputDimOrigins_.clear();
+  if (!module)
+    return;
+
+  if (auto shapesAttr =
+          module->getAttrOfType<mlir::ArrayAttr>("hip.refined_output_shapes")) {
+    refinedOutputShapes_.reserve(shapesAttr.size());
+    for (mlir::Attribute outAttr : shapesAttr) {
+      auto perOut = mlir::dyn_cast<mlir::ArrayAttr>(outAttr);
+      if (!perOut) {
+        refinedOutputShapes_.push_back({});
+        continue;
+      }
+      std::vector<int64_t> dims;
+      dims.reserve(perOut.size());
+      for (mlir::Attribute dimAttr : perOut) {
+        auto ia = mlir::dyn_cast<mlir::IntegerAttr>(dimAttr);
+        dims.push_back(ia ? ia.getInt() : int64_t(-1));
+      }
+      refinedOutputShapes_.push_back(std::move(dims));
+    }
+  }
+
+  if (auto originsAttr = module->getAttrOfType<mlir::ArrayAttr>(
+          "hip.refined_output_dim_origins")) {
+    refinedOutputDimOrigins_.reserve(originsAttr.size());
+    for (mlir::Attribute outAttr : originsAttr) {
+      auto perOut = mlir::dyn_cast<mlir::ArrayAttr>(outAttr);
+      if (!perOut) {
+        refinedOutputDimOrigins_.push_back({});
+        continue;
+      }
+      std::vector<DimOriginTriple> dims;
+      // Inner array is a flat (arg, dim, mult_bits) stream — 3 slots per
+      // output dim. Tolerate mis-sized inner arrays by truncating to a
+      // multiple of 3 (defensive against a future encoding mismatch).
+      size_t n = (perOut.size() / 3) * 3;
+      dims.reserve(n / 3);
+      for (size_t i = 0; i + 2 < n; i += 3) {
+        auto a = mlir::dyn_cast<mlir::IntegerAttr>(perOut[i]);
+        auto d = mlir::dyn_cast<mlir::IntegerAttr>(perOut[i + 1]);
+        auto mb = mlir::dyn_cast<mlir::IntegerAttr>(perOut[i + 2]);
+        int64_t arg = a ? a.getInt() : int64_t(-1);
+        int64_t dim = d ? d.getInt() : int64_t(-1);
+        int64_t mult_bits =
+            mb ? mb.getInt() : int64_t(0x3FF0000000000000LL); // 1.0
+        double mult;
+        std::memcpy(&mult, &mult_bits, sizeof(double));
+        dims.push_back({arg, dim, mult});
+      }
+      refinedOutputDimOrigins_.push_back(std::move(dims));
+    }
+  }
 }
 
 std::unique_ptr<llvm::Module>
