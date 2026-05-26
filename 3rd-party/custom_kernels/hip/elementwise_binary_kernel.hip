@@ -514,3 +514,114 @@ extern "C" int hip_elementwise_div(void *stream, const void *lhs,
   }
   return static_cast<int>(err);
 }
+
+// =====================================================================
+// Mul: y = a * b
+// ORT: BINARY_OP_NAME_EXPR(Mul, (a * b))
+//
+// Sibling of hip_elementwise_div above. Exists for the integer (i32/i64)
+// case: MIOpen's miopenOpTensor only supports FLOAT/HALF/BFLOAT16, so
+// `Mul(i64, i64)` from in-graph shape arithmetic
+// (Shape -> Gather -> Mul -> Range / Reshape) silently aborted in the
+// MIOpen path and wrote garbage to the output. The FP path is still
+// served by MIOpen in wrap_miopenOpTensor; we cover it here as well so
+// callers that explicitly route an FP Mul through this kernel (e.g.
+// tests, or future ops that avoid the MIOpen descriptor cache) get the
+// same coverage matrix as hip_elementwise_div.
+// =====================================================================
+
+template <typename T>
+__global__ void elementwise_mul_kernel(const T *__restrict__ lhs,
+                                       const T *__restrict__ rhs,
+                                       T *__restrict__ output,
+                                       int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = lhs[idx] * rhs[idx];
+  }
+}
+
+// FP16 specialization: promote to float so we don't depend on the half
+// `operator*` (matches the div FP16 specialization above).
+template <>
+__global__ void elementwise_mul_kernel<__half>(const __half *__restrict__ lhs,
+                                               const __half *__restrict__ rhs,
+                                               __half *__restrict__ output,
+                                               int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __half2float(lhs[idx]);
+    float b = __half2float(rhs[idx]);
+    output[idx] = __float2half(a * b);
+  }
+}
+
+extern "C" int hip_elementwise_mul(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_mul: f16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_mul_kernel<__half>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(lhs),
+                       static_cast<const __half *>(rhs),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_mul: f32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_mul_kernel<float>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(lhs),
+                       static_cast<const float *>(rhs),
+                       static_cast<float *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_mul: i32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_mul_kernel<int32_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t *>(lhs),
+                       static_cast<const int32_t *>(rhs),
+                       static_cast<int32_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT64:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_mul: i64, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_mul_kernel<int64_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int64_t *>(lhs),
+                       static_cast<const int64_t *>(rhs),
+                       static_cast<int64_t *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_mul: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_mul launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}

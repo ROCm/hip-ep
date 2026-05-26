@@ -197,6 +197,17 @@ void mlir::hip::buildHipToLLVMPipeline(
   // see the post-coalesce slot ids in op attributes).
   pm.addPass(mlir::hip::createSlotLifetimeCoalescePass());
 
+  // Pre-legalize: rewrite memref.expand_shape with multiple dynamic dims per
+  // reassociation group into memref.reinterpret_cast. The upstream
+  // expand-strided-metadata pass asserts on this case ("There must be at most
+  // one dynamic size per group" in ExpandStridedMetadata.cpp::getExpandedSizes)
+  // because its size/stride helpers predate the addition of the output_shape
+  // operand to memref.expand_shape. Triggered by dynamic Reshape ops in the
+  // ONNX graph whose Reshape converts e.g. rank-1 [batch_seq] to rank-2 [B,S].
+  // See lib/Dialect/Transforms/LegalizeMultiDynExpandShape.cpp.
+  pm.addNestedPass<func::FuncOp>(
+      mlir::hip::createLegalizeMultiDynExpandShapePass());
+
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.
   // populateFinalizeMemRefToLLVMConversionPatterns (used by ConvertHipToLLVM)

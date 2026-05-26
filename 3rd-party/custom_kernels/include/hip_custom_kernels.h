@@ -188,6 +188,22 @@ int hip_elementwise_div(
     int64_t num_elements,
     int hip_dtype);
 
+/* Mul over equal-shape lhs/rhs. Sibling of hip_elementwise_div; covers
+ * the integer (i32/i64) case that MIOpen's miopenOpTensor cannot handle
+ * (MIOpen only supports FLOAT/HALF/BFLOAT16). FP types are supported for
+ * symmetry with div.
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32,
+ *                      HIP_DTYPE_INT32, HIP_DTYPE_INT64
+ */
+int hip_elementwise_mul(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 int hip_elementwise_mod(
     void* stream,
     const void* lhs,

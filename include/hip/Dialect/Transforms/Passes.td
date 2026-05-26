@@ -658,6 +658,42 @@ def PrintPoolStatsPass
   ];
 }
 
+def LegalizeMultiDynExpandShapePass
+    : Pass<"hip-legalize-multi-dyn-expand-shape", "mlir::func::FuncOp"> {
+  let summary = "Rewrite memref.expand_shape with multiple dynamic dims per "
+                "reassociation group into memref.reinterpret_cast";
+  let description = [{
+    The upstream MLIR `expand-strided-metadata` pass (used to decompose
+    `memref.expand_shape` into reinterpret_cast + stride arithmetic before
+    `convert-hip-to-llvm`) does NOT support reassociation groups that contain
+    more than one dynamic dimension. It hits an
+    `assert(!dynSizeIdx && "There must be at most one dynamic size per group")`
+    in `ExpandStridedMetadata.cpp::getExpandedSizes`. The assumption predates
+    the introduction of the `output_shape` operand to `memref.expand_shape`
+    -- which provides exactly the per-dim runtime sizes that would let the
+    pass handle the multi-dyn case directly. Upstream commit eca7d83 (May
+    2025) fixed this, but the LLVM/MLIR prebuilt used here predates that fix.
+
+    This pass walks every `memref.expand_shape` op in the function and, for
+    each one whose reassociation groups contain a group with > 1 dynamic
+    dimension, rewrites it into a `memref.reinterpret_cast`. The cast uses:
+      * offset = 0 (the source memref is always contiguous after bufferization
+        + IdentityLayoutMap; this pass refuses to fire otherwise)
+      * sizes  = the `output_shape` operand sequence (already SSA values)
+      * strides = contiguous right-to-left products of sizes
+
+    Ops with at most one dynamic dim per group are left alone -- the upstream
+    `expand-strided-metadata` pass handles them correctly.
+
+    Pipeline position: BEFORE `memref::createExpandStridedMetadataPass` in
+    `buildHipToLLVMPipeline`.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
   let summary = "Replace extern memref.global constants with "

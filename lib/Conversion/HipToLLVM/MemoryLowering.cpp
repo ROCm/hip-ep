@@ -357,6 +357,50 @@ static FailureOr<int64_t> tryElemSizeBytes(Type elemTy) {
   return static_cast<int64_t>(bits / 8);
 }
 
+/// Returns true iff `ty`'s layout is dense row-major, allowing dynamic dims:
+/// identity layout (the default — fully contiguous), OR a strided layout
+/// with offset 0 whose static strides match the right-to-left product of the
+/// sizes, treating any dynamic size as introducing a kDynamic in all
+/// strictly-earlier strides. Crucially, the last stride must be exactly 1
+/// (the innermost dim is contiguous) and the runtime computes the actual
+/// total element count from the descriptor's sizes array.
+static bool isDenseRowMajorMaybeDyn(MemRefType ty) {
+  if (ty.getLayout().isIdentity())
+    return true;
+  int64_t offset;
+  SmallVector<int64_t> strides;
+  if (failed(ty.getStridesAndOffset(strides, offset)))
+    return false;
+  if (offset != 0)
+    return false;
+  ArrayRef<int64_t> sizes = ty.getShape();
+  unsigned rank = sizes.size();
+  if (rank == 0)
+    return true;
+  if (strides[rank - 1] != 1)
+    return false;
+  int64_t expectedStride = 1;
+  bool earlierDyn = false;
+  for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
+    int64_t actual = strides[i];
+    if (earlierDyn) {
+      if (!ShapedType::isDynamic(actual))
+        return false;
+    } else {
+      if (ShapedType::isDynamic(actual))
+        return false;
+      if (actual != expectedStride)
+        return false;
+    }
+    if (ShapedType::isDynamic(sizes[i])) {
+      earlierDyn = true;
+    } else if (!earlierDyn) {
+      expectedStride *= sizes[i];
+    }
+  }
+  return true;
+}
+
 static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
   if (a.size() != b.size())
     return false;
@@ -395,6 +439,62 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     if (failed(elemBytesOr))
       return rewriter.notifyMatchFailure(op, "unsupported element type");
     int64_t elemBytes = *elemBytesOr;
+
+    // Dynamic-shape fast path: dense row-major identity layout on both sides
+    // (or strided layout whose static pattern matches identity), with at
+    // least one dynamic dim. Compute numElems at runtime from the source
+    // descriptor's sizes array. This kicks in for Reshape lowerings whose
+    // input/output are contiguous but whose total element count depends on
+    // runtime-published dynamic dims.
+    if (isDenseRowMajorMaybeDyn(srcTy) && isDenseRowMajorMaybeDyn(dstTy) &&
+        (!srcTy.hasStaticShape() || !dstTy.hasStaticShape())) {
+      ModuleOp module = op->getParentOfType<ModuleOp>();
+      Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+      Type i64Type = rewriter.getI64Type();
+      Type i32Type = rewriter.getI32Type();
+
+      Value statePtr = llvmFn.getArgument(0);
+      // Source pointer: respect the slot-buffer annotation set by
+      // AnnotateInputDimSlots. When `hipdnn.input_slot_buffers[0] >= 0`
+      // the source memref's data lives in a runtime-published slot
+      // buffer rather than the elided 0-byte DPS-init placeholder
+      // baked into the source descriptor. Without this hop, a Cat-C
+      // publisher (Range / NonZero / ConstantOfShape-dyn) whose
+      // output is reshaped before reaching a func out-param ends up
+      // copying zeros from the placeholder into the output.
+      Value srcPtr = extractContiguousMemRefPtrWithSlot(
+          op.getOperation(), /*operandIdx=*/0, adaptor.getSource(), statePtr,
+          rewriter, loc);
+      Value dstPtr = extractMemRefDataPtr(adaptor.getTarget(), dstTy,
+                                          getTypeConverter(), rewriter, loc);
+      if (!srcPtr || !dstPtr)
+        return failure();
+
+      // numElems = product(sizes[i]) extracted from the source descriptor.
+      // The src and dst shapes are guaranteed equal by the early check above.
+      MemRefDescriptor srcDesc(adaptor.getSource());
+      Value totalElems = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+      for (int64_t i = 0, e = srcTy.getRank(); i < e; ++i) {
+        Value dim = srcDesc.size(rewriter, loc, i);
+        totalElems = LLVM::MulOp::create(rewriter, loc, totalElems, dim);
+      }
+      Value elemBytesVal = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
+      Value totalBytes =
+          LLVM::MulOp::create(rewriter, loc, totalElems, elemBytesVal);
+
+      FailureOr<LLVM::LLVMFuncOp> memcpyFn =
+          LLVM::lookupOrCreateFn(rewriter, module, kWrapHipMemcpyAsync,
+                                 {ptrType, ptrType, ptrType, i64Type}, i32Type);
+      if (failed(memcpyFn))
+        return failure();
+
+      LLVM::CallOp::create(rewriter, loc, *memcpyFn,
+                           ValueRange{statePtr, dstPtr, srcPtr, totalBytes});
+      rewriter.eraseOp(op);
+      return success();
+    }
 
     FailureOr<SmallVector<int64_t>> srcStridesOr = tryStaticStridesElems(srcTy);
     FailureOr<SmallVector<int64_t>> dstStridesOr = tryStaticStridesElems(dstTy);

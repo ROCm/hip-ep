@@ -40,16 +40,29 @@ Shape(Transpose); Gather; Unsqueeze; Slice      -> [N]      fp16       (= flatte
 ScatterND(Gather, Transpose, Slice)             -> [B, S, 2048] fp16   (static output rank)
 ```
 
-Three scenarios match the 9B test conventions:
+Two scenarios match the 9B test conventions:
 
-  1. **K=0** -- text-only inference; ``image_features=(0, 2048)``,
-     no IMAGE_TOKEN_ID in input_ids. NonZero N=0, ScatterND no-op,
-     output == pure Gather (after Where masks nothing). Exercises the
-     empty-graph-input edge case AND the no-op ScatterND path.
+  1. **K=1** -- single image token; off-by-one regression for
+     N-publishing + Slice/ScatterND indexing.
   2. **K=4** -- four scattered image tokens, ``image_features=(4, 2048)``.
      Full scatter path with multiple distinct destinations.
-  3. **K=1** -- single image token; off-by-one regression for
-     N-publishing + Slice/ScatterND indexing.
+
+The K=0 text-only scenario (``image_features=(0, 2048)``) is
+intentionally NOT a scenario here because the EP MLIR pipeline
+currently cannot bufferize a graph with a static zero-extent input
+(``tensor<0x2048xf16>``) -- the compile-time bufferization fails
+before the DLL can be produced. The K=0 behaviour is fully covered
+by the dynamic-shape sister test
+``test_nonzero_qwen3_35b_a3b_embedding_dyn.py``, where
+``image_features`` stays symbolic at compile time
+(``tensor<?x2048xf16>``) and the K=0 case is exercised per-call via
+the runtime's empty-input sentinel path (see CLAUDE.md
+"Empty (zero-element) Category-B inputs MUST get a sentinel buffer,
+not a null"). When the EP grows support for static zero-extent
+inputs, add a K=0 scenario back here -- the expected output is the
+pure ``Gather(embed_tokens.weight, input_ids)`` because ScatterND
+with N=0 is a no-op (and ``Where`` masks nothing since Equal is
+all-false).
 
 The full model file (~1 GB ``embedding.onnx.data``) is loaded once at
 module scope and shared across scenarios via deepcopy.
@@ -225,65 +238,19 @@ class TestQwen35bA3bEmbeddingComposition:
     exercises (a) ``image_features`` as a real graph input, (b) the
     ``Where`` + ``ConstantOfShape`` mask-out branch, and (c) the 1:1
     flatten ratio (``hidden == image_features_cols == 2048``).
+
+    K=0 (text-only inference, ``image_features=(0, 2048)``) is
+    deliberately NOT covered here -- the EP MLIR pipeline currently
+    cannot bufferize a graph with a static zero-extent input, so the
+    DLL never gets produced. K=0 IS exercised end-to-end in the
+    dynamic-shape sister test
+    ``test_nonzero_qwen3_35b_a3b_embedding_dyn.py::TestQwen35bA3bEmbeddingDyn::test_per_call_shape_switching``
+    (first iteration of its ``_SHAPES`` list: ``(1, 128, 0)``), where
+    ``image_features`` stays symbolic at compile time
+    (``tensor<?x2048xf16>``) and the K=0 case is handled by the
+    runtime's empty-input sentinel path. See the module docstring at
+    the top of this file for the full rationale.
     """
-
-    @pytest.mark.xfail(
-        reason=(
-            "EP MLIR pipeline cannot bufferize a graph with a zero-extent "
-            "static-shape input (`image_features=[0, 2048]`). ORT CPU runs "
-            "the same graph successfully. Test is kept as a regression "
-            "target -- it should auto-flip to XPASS once the EP supports "
-            "empty graph inputs."
-        ),
-        strict=True,
-        raises=Exception,
-    )
-    def test_k_zero_no_image_tokens(
-        self, request, model_runner, qwen35b_a3b_embedding_model
-    ):
-        """Scenario 1: K=0 -- text-only inference path.
-
-        No IMAGE_TOKEN_ID in ``input_ids`` -> Equal is all-false ->
-        Where passes ``input_ids`` through unchanged -> Gather lookups
-        run on the real token ids -> NonZero output is ``[3, 0]`` ->
-        ScatterND is a no-op. ``image_features`` is an empty
-        ``(0, 2048)`` tensor, exercising the zero-element graph-input
-        edge case.
-
-        Expected output: the pure ``Gather(embed_tokens.weight, input_ids)``.
-
-        Currently xfail (see decorator): the EP MLIR pipeline fails with
-        ``error: op was not bufferized`` during the
-        ``ConvertOnnxToHipPass`` -> bufferize lowering when any graph
-        input has a static zero-extent dimension. CPU EP handles the
-        same graph correctly, so this is a real EP gap and not a test
-        defect.
-        """
-        k = 0
-        input_ids = np.full((_BATCH, _SEQ), 1, dtype=np.int64)
-        assert (input_ids == _IMAGE_TOKEN_ID).sum() == 0, (
-            "scenario K=0 must have zero IMAGE_TOKEN_IDs in input_ids"
-        )
-
-        image_features = _make_image_features(k)
-        assert image_features.shape == (0, _IMAGE_FEATURES_COLS)
-
-        m_bound = _bind_num_logical_patches(qwen35b_a3b_embedding_model, k)
-
-        actual, expected = model_runner.run_sample(
-            m_bound, [input_ids, image_features], reference="cache"
-        )
-
-        # fp16 Gather lookup: bit-exact (no arithmetic).
-        compare_outputs(actual, expected, atol=0.0, rtol=0.0)
-
-        # Sanity: every row should equal the embedding row for token=1.
-        assert actual[0].shape == (_BATCH, _SEQ, _HIDDEN)
-        baseline = actual[0][0, 0, :]
-        for s in range(1, _SEQ):
-            assert np.array_equal(actual[0][0, s, :], baseline), (
-                f"row {s} differs from row 0 although all input_ids are 1"
-            )
 
     def test_k_one_single_image_token(
         self, request, model_runner, qwen35b_a3b_embedding_model
