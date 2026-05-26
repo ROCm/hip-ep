@@ -10,6 +10,7 @@
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -213,6 +214,13 @@ int main(int argc, char **argv) {
   registry.insert<hip::compiler::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
+  // BufferDeallocationOpInterface external model for arith — required by the
+  // upstream buildBufferDeallocationPipeline when arith.constant / arith.select
+  // appear in bufferized IR (e.g. via rank-1 size-1 scalar extraction in Range
+  // lowering, or any other path that produces arith ops the dealloc pipeline
+  // walks).  Mirrors the same registration in
+  // include/hip/InitAllPasses.h::registerAllDialects for the EP path.
+  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);

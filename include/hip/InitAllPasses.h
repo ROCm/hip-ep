@@ -11,6 +11,7 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
@@ -52,6 +53,11 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
+  // Register BufferDeallocationOpInterface external model for arith — required
+  // by the upstream buildBufferDeallocationPipeline when arith.constant /
+  // arith.select / arith.constant_index appear in bufferized IR (e.g. via
+  // rank-1 size-1 scalar extraction in Range lowering).
+  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
