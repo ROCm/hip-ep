@@ -54,6 +54,7 @@ add_library(OnnxToHip STATIC
   AndConversion.cpp
   SizeConversion.cpp
   NonZeroConversion.cpp
+  ConcatConversion.cpp
   LoopOutline.cpp
 )
 
