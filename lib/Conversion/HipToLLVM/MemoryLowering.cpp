@@ -370,6 +370,53 @@ static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
   return failure();
 }
 
+/// Returns true when the type's layout guarantees the last dimension has
+/// stride 1 (contiguous last axis).  Both identity layout and strided layout
+/// with an explicit innermost stride of 1 qualify.
+static bool isLastDimStrideOne(MemRefType ty) {
+  if (ty.getRank() == 0)
+    return true;
+  MemRefLayoutAttrInterface layout = ty.getLayout();
+  if (layout.isIdentity())
+    return true;
+  if (auto sl = dyn_cast<StridedLayoutAttr>(layout)) {
+    if (sl.getStrides().empty())
+      return false;
+    return sl.getStrides().back() == 1;
+  }
+  return false;
+}
+
+/// Returns true when the destination is dense row-major identity layout — the
+/// canonical shape produced by `memref.alloc` (and by --hip-promote-strided-
+/// operands' temporary alloc) for a freshly materialised buffer.  Identity
+/// layout (no explicit layout attr) trivially qualifies; an explicit
+/// strided<[..., 1]> layout qualifies only when all strides are static AND
+/// match the row-major prefix-product pattern.
+static bool isIdentityRowMajor(MemRefType ty) {
+  MemRefLayoutAttrInterface layout = ty.getLayout();
+  if (layout.isIdentity())
+    return true;
+  auto sl = dyn_cast<StridedLayoutAttr>(layout);
+  if (!sl)
+    return false;
+  ArrayRef<int64_t> strides = sl.getStrides();
+  ArrayRef<int64_t> shape = ty.getShape();
+  if (strides.size() != shape.size())
+    return false;
+  if (sl.getOffset() != 0)
+    return false;
+  int64_t running = 1;
+  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+    if (strides[static_cast<unsigned>(i)] != running)
+      return false;
+    if (ShapedType::isDynamic(shape[static_cast<unsigned>(i)]))
+      return false;
+    running *= shape[static_cast<unsigned>(i)];
+  }
+  return true;
+}
+
 static FailureOr<SmallVector<int64_t>>
 computeRowMajorStridesElems(ArrayRef<int64_t> shape) {
   unsigned rank = shape.size();
@@ -404,8 +451,27 @@ static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
 }
 
 /// Lowers memref.copy on GPU memrefs to wrap_hipMemcpyAsync /
-/// wrap_hipMemcpy2DAsync when strides are statically known. Otherwise leaves
-/// conversion to the default MemRef→LLVM copy lowering (benefit 1).
+/// wrap_hipMemcpy2DAsync.
+///
+/// Three regimes, in order:
+///   1. Static-stride dense row-major (src ≡ dst, no holes): single
+///      wrap_hipMemcpyAsync of total bytes.
+///   2. Static-stride pitched (src has holes, dst dense row-major):
+///      wrap_hipMemcpy2DAsync after collapsing fully-static dims into a
+///      width / height pair.
+///   3. Dynamic-stride / dynamic-shape (typical promote-strided output:
+///      src has dynamic outer strides from a subview, dst is identity
+///      row-major dyn-shape alloc): wrap_hipMemcpyAsync (rank ≤ 1) or
+///      wrap_hipMemcpy2DAsync with runtime-computed sizes / src-pitch.
+///
+/// Regimes 2 and 3 assume the source's outer dims collapse uniformly into a
+/// single height pitch (true for any subview-of-contiguous-parent).
+///
+/// Cases outside these three (e.g. arbitrary non-row-major source, transposed
+/// view) intentionally fall through with notifyMatchFailure rather than into
+/// the upstream MemRefToLLVM `memrefCopy` libcall, since that libcall is not
+/// linked into the EP runtime — failing here surfaces unsupported patterns
+/// at compile time instead of as a downstream undefined-symbol link error.
 struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
   MemRefCopyOpLowering(const LLVMTypeConverter &converter)
       : ConvertOpToLLVMPattern(converter, PatternBenefit(10)) {}
@@ -434,11 +500,6 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 
     FailureOr<SmallVector<int64_t>> srcStridesOr = tryStaticStridesElems(srcTy);
     FailureOr<SmallVector<int64_t>> dstStridesOr = tryStaticStridesElems(dstTy);
-    if (failed(srcStridesOr) || failed(dstStridesOr))
-      return rewriter.notifyMatchFailure(op, "need static strides/layout");
-
-    ArrayRef<int64_t> srcStrides = *srcStridesOr;
-    ArrayRef<int64_t> dstStrides = *dstStridesOr;
 
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
@@ -452,6 +513,127 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
                                         getTypeConverter(), rewriter, loc);
     if (!srcPtr || !dstPtr)
       return failure();
+
+    // ---------------------------------------------------------------------
+    // Dynamic-stride / dynamic-shape path.
+    //
+    // Triggered when either operand's layout has dynamic strides at type
+    // level (e.g. `memref<?x?x16x256xf16, strided<[?, ?, 256, 1], offset: ?>>`
+    // produced by --hip-promote-strided-operands wrapping a memref.subview of
+    // a contiguous parent into a fresh alloc).
+    //
+    // Strategy: emit ONE runtime call (`wrap_hipMemcpyAsync` for rank-1 or
+    // fully-degenerate, `wrap_hipMemcpy2DAsync` otherwise) using sizes and
+    // src-pitch read from the converted memref descriptors.  Dst is required
+    // to be identity row-major (the canonical alloc shape) so dst-pitch is
+    // simply the product of inner sizes.
+    //
+    // Runtime invariant assumed (NOT verified at compile time): the source's
+    // outer dims [0..rank-2) collapse into a single height — i.e.
+    // `src.stride[i] == src.stride[i+1] * src.size[i+1]` for i in
+    // [0..rank-2).  This holds for any subview of a contiguous parent, which
+    // is the only producer of these copies in the current pipeline.
+    //
+    // Before:
+    //   memref.copy %sv, %tmp
+    //     : memref<?x?x16x256xf16, strided<[?, ?, 256, 1], offset: ?>>
+    //       to memref<?x?x16x256xf16>
+    // After:
+    //   %h_outer = mul %size0, %size1     ; B * S
+    //   %height  = mul %h_outer, 16       ; B * S * H
+    //   %width   = const(256 * 2)         ; D * elem_bytes (statically known)
+    //   %src_pitch = mul %src.stride[2], elem_bytes
+    //   %dst_pitch = const(256 * 2)        ; dense dst
+    //   call @wrap_hipMemcpy2DAsync(state, dst, dst_pitch,
+    //                                src, src_pitch, width, height)
+    // ---------------------------------------------------------------------
+    if (failed(srcStridesOr) || failed(dstStridesOr)) {
+      if (!isLastDimStrideOne(srcTy) || !isLastDimStrideOne(dstTy))
+        return rewriter.notifyMatchFailure(
+            op, "dynamic-stride copy requires last dim contiguous on both");
+      if (!isIdentityRowMajor(dstTy))
+        return rewriter.notifyMatchFailure(
+            op, "dynamic-stride copy requires identity row-major destination");
+
+      int64_t rank = srcTy.getRank();
+      ArrayRef<int64_t> shape = srcTy.getShape();
+      Value elemBytesVal = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
+
+      MemRefDescriptor srcDesc(adaptor.getSource());
+      // Destination is identity row-major; its runtime sizes/strides are
+      // recoverable from the static shape + computed pitch, so we never need
+      // to query its descriptor here.
+
+      auto runtimeDim = [&](MemRefDescriptor &desc, unsigned i) -> Value {
+        if (ShapedType::isDynamic(shape[i]))
+          return desc.size(rewriter, loc, i);
+        return LLVM::ConstantOp::create(
+            rewriter, loc, i64Type,
+            rewriter.getI64IntegerAttr(shape[static_cast<unsigned>(i)]));
+      };
+
+      // Rank-0 / rank-1: degenerate to a single 1D D2D memcpy. All elements
+      // are contiguous on src (last stride 1) and on dst (identity).
+      if (rank <= 1) {
+        Value nElems = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                                rewriter.getI64IntegerAttr(1));
+        if (rank == 1)
+          nElems = runtimeDim(srcDesc, 0);
+        Value totalBytes =
+            LLVM::MulOp::create(rewriter, loc, nElems, elemBytesVal);
+
+        FailureOr<LLVM::LLVMFuncOp> memcpyFn = LLVM::lookupOrCreateFn(
+            rewriter, module, kWrapHipMemcpyAsync,
+            {ptrType, ptrType, ptrType, i64Type}, i32Type);
+        if (failed(memcpyFn))
+          return failure();
+        LLVM::CallOp::create(rewriter, loc, *memcpyFn,
+                             ValueRange{statePtr, dstPtr, srcPtr, totalBytes});
+        rewriter.eraseOp(op);
+        return success();
+      }
+
+      // Width = size[rank-1] * elem_bytes.
+      Value innerElems = runtimeDim(srcDesc, rank - 1);
+      Value widthBytes =
+          LLVM::MulOp::create(rewriter, loc, innerElems, elemBytesVal);
+
+      // Height = product of all outer dims (sizes [0..rank-2]).
+      Value height = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                              rewriter.getI64IntegerAttr(1));
+      for (int64_t i = 0; i + 1 < rank; ++i)
+        height =
+            LLVM::MulOp::create(rewriter, loc, height,
+                                runtimeDim(srcDesc, static_cast<unsigned>(i)));
+
+      // Src pitch = src.stride[rank-2] * elem_bytes (runtime — descriptor
+      // holds the actual stride even when the type-level value is dynamic).
+      Value srcStrideOuter =
+          srcDesc.stride(rewriter, loc, static_cast<unsigned>(rank - 2));
+      Value srcPitchBytes =
+          LLVM::MulOp::create(rewriter, loc, srcStrideOuter, elemBytesVal);
+
+      // Dst pitch = inner row bytes (identity row-major dst, so adjacent
+      // rows are tightly packed).
+      Value dstPitchBytes = widthBytes;
+
+      FailureOr<LLVM::LLVMFuncOp> memcpy2dFn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapHipMemcpy2DAsync,
+          {ptrType, ptrType, i64Type, ptrType, i64Type, i64Type, i64Type},
+          i32Type);
+      if (failed(memcpy2dFn))
+        return failure();
+
+      LLVM::CallOp::create(rewriter, loc, *memcpy2dFn,
+                           ValueRange{statePtr, dstPtr, dstPitchBytes, srcPtr,
+                                      srcPitchBytes, widthBytes, height});
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    ArrayRef<int64_t> srcStrides = *srcStridesOr;
+    ArrayRef<int64_t> dstStrides = *dstStridesOr;
 
     int64_t rank = srcTy.getRank();
     ArrayRef<int64_t> shape = srcTy.getShape();
