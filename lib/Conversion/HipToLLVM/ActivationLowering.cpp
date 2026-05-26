@@ -251,6 +251,7 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 // hip.miopen.softmax(%handle) ins(%input) outs(%output)
 //   -> hip_miopen_softmax(handle, input, output, rows, cols)
 // Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D.
+// fp16-only on the runtime side today.
 struct MiopenSoftmaxOpLowering
     : public ConvertOpToLLVMPattern<MiopenSoftmaxOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
