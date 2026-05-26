@@ -12,12 +12,16 @@ Licensed under the MIT License.
 [`include/hip/Compiler/PluginLoader.h`](../../include/hip/Compiler/PluginLoader.h)
 
 > **Status note (2026-05-26).** This document describes a multi-PR
-> plan. PR 1 lands the C ABI header and the loader skeleton with no
-> hook sites — it is the smallest possible unit that can be reviewed
-> on its own and that establishes the public surface. PRs 2–5 fill in
-> the registry methods and add hook sites incrementally. Until PRs
-> 1–5 have all landed, the API surface here is **not yet frozen** and
-> should not be depended on by external consumers.
+> plan; PRs 1–5 of the rollout have now landed in private review.
+> PR 1 introduced the C ABI header and the loader skeleton with no
+> hook sites; PR 2 wired the pipeline-slot dispatch and the vtable
+> registry; PR 3 added LLVM bitcode contribution with override-from-
+> source semantics; PR 4 added external library + library-path
+> contribution; PR 5 (this one) finalised the documentation. The
+> API surface is **not yet frozen** — vendor-team review and the
+> shared-MLIR work in Open Question 6 are still outstanding — and
+> should not be depended on by external consumers until the doc
+> Status flips to "Stable".
 
 ---
 
@@ -620,17 +624,26 @@ identical: when no plugins are loaded, the post-`THEROCK_DIST`
 section runs with empty plugin accessors and produces the same
 `libraries` / `library_paths` vectors as before.
 
-### PR 5 — CONTRIBUTING + README + Vendor Documentation
+### PR 5 — CONTRIBUTING + README + Vendor Documentation **(landed 2026-05-26)**
 
-Scope:
+Scope as landed:
 
-- Document the plugin model in `CONTRIBUTING.md` and add a one-liner
-  pointer in `README.md`.
-- Add a small `docs/plugin_authoring.md` (or equivalent location)
-  with the sample as the worked example.
-- This PR can land in parallel with PR 4 if reviewer load allows.
+- `README.md` gained a "Plugin extension API" section pointing at
+  the design doc, the authoring guide, and the in-tree sample,
+  with an explicit note that the ABI is in proposal status.
+- `CONTRIBUTING.md`'s plugin section was expanded from the PR 1
+  framing ("PR 1 in flight") to "PRs 1–4 landed; freeze pending".
+  Added a third bullet documenting the rules for adding new methods
+  to `HipEpPluginRegistry` (vtable extension, host wiring, unit
+  test, no removals/reorders).
+- New `docs/plugin_authoring.md` is a practical companion to this
+  design doc. It covers: mental model; the in-tree sample as the
+  worked example; quickstart for a minimal plugin; pattern for each
+  of the five contribution points (`registerPass`,
+  `requestPipelineSlot`, `addRuntimeBitcode`, `addLibraryPath`,
+  `addLibrary`); a distribution checklist.
 
-Risk: zero — docs only.
+Risk as landed: zero. Docs only.
 
 ### PR 6 — Vendor-Side Bring-Up (Vendor Repo, Not Public)
 
