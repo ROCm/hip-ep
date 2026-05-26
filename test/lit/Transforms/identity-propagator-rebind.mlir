@@ -158,15 +158,67 @@ module {
 
 // === POSITIVE: full-range slice elided ===
 //
-// `hip.slice` whose result shape equals the input shape on every dim
-// is a runtime no-op (the starts=0/ends=full/steps=1 case).
+// `hip.slice` with provable starts=[0,0], ends=[3,4] (== full dim),
+// steps=[1,1] is a runtime no-op and the op is erased.
 //
 // CHECK-LABEL: func.func @identity_slice
 // CHECK-NOT:    hip.slice
 // CHECK:        return
 module {
-  func.func @identity_slice(%ctx: !hip.context, %x: tensor<3x4xf32>,
-                            %starts: tensor<2xi64>, %ends: tensor<2xi64>)
+  func.func @identity_slice(%ctx: !hip.context, %x: tensor<3x4xf32>)
+      -> tensor<3x4xf32> {
+    %starts = arith.constant dense<[0, 0]> : tensor<2xi64>
+    %ends = arith.constant dense<[3, 4]> : tensor<2xi64>
+    %steps = arith.constant dense<[1, 1]> : tensor<2xi64>
+    %axes = arith.constant dense<[0, 1]> : tensor<2xi64>
+    %init = tensor.empty() : tensor<3x4xf32>
+    %s = hip.slice(%ctx) ins(%x, %starts, %ends : tensor<3x4xf32>, tensor<2xi64>, tensor<2xi64>) axes(%axes : tensor<2xi64>) steps(%steps : tensor<2xi64>) outs(%init : tensor<3x4xf32>) : tensor<3x4xf32>
+    return %s : tensor<3x4xf32>
+  }
+}
+
+// -----
+
+// === NEGATIVE: reverse slice with same output shape preserved ===
+//
+// `hip.slice` with start=2, end=-4 (== -1 after normalisation), step=-1
+// over axis 0 of a [3xf32] reverses the 3 elements. The output type is
+// `tensor<3xf32>` -- same as the input -- but the data permutes. The
+// pass MUST NOT elide this op (regression for the bug where same-shape
+// shortcut alone treated all slices as identity).
+//
+// CHECK-LABEL: func.func @reverse_slice_same_shape
+// CHECK:        hip.slice
+// CHECK:        return
+module {
+  func.func @reverse_slice_same_shape(%ctx: !hip.context, %x: tensor<3xf32>)
+      -> tensor<3xf32> {
+    %starts = arith.constant dense<[2]> : tensor<1xi64>
+    %ends = arith.constant dense<[-4]> : tensor<1xi64>
+    %axes = arith.constant dense<[0]> : tensor<1xi64>
+    %steps = arith.constant dense<[-1]> : tensor<1xi64>
+    %init = tensor.empty() : tensor<3xf32>
+    %s = hip.slice(%ctx) ins(%x, %starts, %ends : tensor<3xf32>, tensor<1xi64>, tensor<1xi64>) axes(%axes : tensor<1xi64>) steps(%steps : tensor<1xi64>) outs(%init : tensor<3xf32>) : tensor<3xf32>
+    return %s : tensor<3xf32>
+  }
+}
+
+// -----
+
+// === NEGATIVE: runtime-value starts/ends preserved ===
+//
+// When starts/ends arrive as func args (runtime values), the pass
+// cannot prove the slice is full-range and MUST leave the op intact
+// even when the output type happens to match the input type. This
+// is the safety contract that prevents a runtime-controlled reverse
+// or sub-range slice from being silently elided.
+//
+// CHECK-LABEL: func.func @runtime_indices_slice
+// CHECK:        hip.slice
+// CHECK:        return
+module {
+  func.func @runtime_indices_slice(%ctx: !hip.context, %x: tensor<3x4xf32>,
+                                   %starts: tensor<2xi64>, %ends: tensor<2xi64>)
       -> tensor<3x4xf32> {
     %init = tensor.empty() : tensor<3x4xf32>
     %s = hip.slice(%ctx) ins(%x, %starts, %ends : tensor<3x4xf32>, tensor<2xi64>, tensor<2xi64>) outs(%init : tensor<3x4xf32>) : tensor<3x4xf32>
