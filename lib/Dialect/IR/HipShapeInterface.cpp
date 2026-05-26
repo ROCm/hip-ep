@@ -11,6 +11,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "llvm/ADT/DenseSet.h"
@@ -1836,22 +1837,35 @@ bool isIdentityExpand(mlir::Operation *op) {
   return true;
 }
 
-// hip.slice is identity iff `starts == 0`, `ends == fullSize`, and
-// `steps == 1` on every axis. `starts`/`ends`/`steps` arrive as
-// tensors -- we can only fold this when they come from
-// `arith.constant` / `tosa.const`-shaped producers (or are part of
-// the op's attribute list). For now, we recognise the constant-i64
-// pattern that the converter emits: arith.constant dense<...>.
-// Conservatively returns false when the producers are runtime values.
+// hip.slice is identity iff for every axis listed in `axes` (or all
+// axes when `axes` is absent), we can PROVE at compile time that
+// `start == 0`, `end >= dim`, and `step == 1`. Same-shape input/output
+// is necessary but NOT sufficient: a full reverse-slice
+// (start=dim-1, end=-(dim+1), step=-1) produces the same output shape
+// as the input but permutes the data, so eliding it silently corrupts.
+//
+// We read `starts` / `ends` / `steps` from compile-time constant
+// producers only. Three patterns are supported (matching what the
+// ONNX-to-HIP converter emits):
+//
+//   1. arith.constant dense<...> : tensor<KxiN>
+//   2. bufferization.to_tensor of a memref.get_global pointing at a
+//      memref.global with an `initial_value = dense<...>`.
+//   3. bufferization.to_tensor of a memref.get_global pointing at a
+//      memref.global with `hip.external_data = {index = N, ...}` whose
+//      module-level `hipdnn.constant_source_kinds[N] == 1` (Splat) and
+//      whose value lives in `hipdnn.constant_splat_elem_values[N]`.
+//
+// Anything else (runtime values, file-ref / sidecar constants, dense
+// non-splat external data) -> conservatively returns false. The slice
+// op then runs at runtime, which is always safe.
 bool isIdentitySlice(mlir::Operation *op) {
-  if (op->getNumOperands() < 3 || op->getNumResults() < 1)
+  if (op->getNumOperands() < 4 || op->getNumResults() < 1)
     return false;
-  // ins() = (ctx, data, starts, ends [, axes [, steps]]); op has
-  // AttrSizedOperandSegments so we don't know precise positions
-  // without consulting the segment attr. Read the result vs input
-  // shapes as a shortcut: if every result dim equals the input dim
-  // (modulo dynamic), this is necessarily an identity slice
-  // regardless of the operand values.
+
+  // Necessary precondition: result shape == input shape (modulo dynamic).
+  // If shapes differ, the slice is definitely NOT identity, so skip
+  // the more expensive constant-resolution path.
   auto dataTy = llvm::dyn_cast<mlir::ShapedType>(op->getOperand(1).getType());
   auto outTy = llvm::dyn_cast<mlir::ShapedType>(op->getResult(0).getType());
   if (!dataTy || !outTy || !dataTy.hasRank() || !outTy.hasRank())
@@ -1868,6 +1882,187 @@ bool isIdentitySlice(mlir::Operation *op) {
     if (!iDyn && iD != oD)
       return false;
   }
+
+  // Read a 1-D compile-time-constant int64 tensor into `out`. Returns
+  // true on success, false when the producer chain doesn't resolve.
+  // Walks: arith.constant -> dense | bufferization.to_tensor ->
+  // memref.get_global -> (initial_value OR hip.external_data splat).
+  auto readI64Constant = [&](mlir::Value v,
+                             llvm::SmallVectorImpl<int64_t> &out) -> bool {
+    if (!v)
+      return false;
+    mlir::Operation *defOp = v.getDefiningOp();
+    if (!defOp)
+      return false;
+    llvm::StringRef defName = defOp->getName().getStringRef();
+
+    // Pattern 1: arith.constant dense<>
+    if (defName == "arith.constant") {
+      auto valueAttr = defOp->getAttr("value");
+      if (auto dense = llvm::dyn_cast_or_null<mlir::DenseElementsAttr>(valueAttr)) {
+        auto tType = llvm::dyn_cast<mlir::RankedTensorType>(dense.getType());
+        if (!tType || tType.getRank() != 1)
+          return false;
+        auto et = tType.getElementType();
+        if (!et.isInteger(64) && !et.isInteger(32))
+          return false;
+        for (mlir::APInt entry : dense.getValues<mlir::APInt>())
+          out.push_back(entry.getSExtValue());
+        return true;
+      }
+      return false;
+    }
+
+    // Patterns 2 & 3: chase bufferization.to_tensor -> memref.get_global.
+    if (defName != "bufferization.to_tensor")
+      return false;
+    if (defOp->getNumOperands() < 1)
+      return false;
+    mlir::Operation *bufDef = defOp->getOperand(0).getDefiningOp();
+    if (!bufDef || bufDef->getName().getStringRef() != "memref.get_global")
+      return false;
+    auto nameAttr = bufDef->getAttrOfType<mlir::FlatSymbolRefAttr>("name");
+    if (!nameAttr)
+      return false;
+    auto module = bufDef->getParentOfType<mlir::ModuleOp>();
+    if (!module)
+      return false;
+    mlir::Operation *symbol =
+        mlir::SymbolTable::lookupSymbolIn(module, nameAttr.getValue());
+    if (!symbol || symbol->getName().getStringRef() != "memref.global")
+      return false;
+
+    // Pattern 2: in-tree initial value (small constants that the
+    // converter chose not to externalise).
+    if (auto initAttr = symbol->getAttr("initial_value")) {
+      if (auto dense =
+              llvm::dyn_cast<mlir::DenseElementsAttr>(initAttr)) {
+        auto sType = llvm::dyn_cast<mlir::ShapedType>(dense.getType());
+        if (!sType || sType.getRank() != 1)
+          return false;
+        auto et = sType.getElementType();
+        if (!et.isInteger(64) && !et.isInteger(32))
+          return false;
+        for (mlir::APInt entry : dense.getValues<mlir::APInt>())
+          out.push_back(entry.getSExtValue());
+        return true;
+      }
+    }
+
+    // Pattern 3: externalised splat constant. The module attrs
+    // `hipdnn.constant_source_kinds` (kind=1 means splat) and
+    // `hipdnn.constant_splat_elem_values` hold the value at the index
+    // recorded on the global's `hip.external_data` attribute.
+    auto extDataAttr =
+        symbol->getAttrOfType<mlir::DictionaryAttr>("hip.external_data");
+    if (!extDataAttr)
+      return false;
+    auto indexAttr = extDataAttr.getAs<mlir::IntegerAttr>("index");
+    if (!indexAttr)
+      return false;
+    int64_t idx = indexAttr.getInt();
+    auto kindsAttr = module->getAttrOfType<mlir::DenseI32ArrayAttr>(
+        "hipdnn.constant_source_kinds");
+    auto splatAttr = module->getAttrOfType<mlir::DenseI64ArrayAttr>(
+        "hipdnn.constant_splat_elem_values");
+    if (!kindsAttr || !splatAttr || idx < 0 ||
+        idx >= (int64_t)kindsAttr.size() ||
+        idx >= (int64_t)splatAttr.size())
+      return false;
+    // kind=1 is Splat (see lib/Conversion/OnnxToHip/OnnxToHip.cpp); any
+    // other kind (file-ref / sidecar / dense external) means we can't
+    // recover the value without I/O, so bail.
+    if (kindsAttr.asArrayRef()[idx] != 1)
+      return false;
+    auto globalTy =
+        llvm::dyn_cast<mlir::ShapedType>(symbol->getAttrOfType<mlir::TypeAttr>(
+                                              "type")
+                                              .getValue());
+    if (!globalTy || globalTy.getRank() != 1)
+      return false;
+    int64_t numElements = globalTy.getNumElements();
+    int64_t value = splatAttr.asArrayRef()[idx];
+    out.assign(numElements, value);
+    return true;
+  };
+
+  // Use operand_segment_sizes (mandatory because Hip_SliceOp has
+  // AttrSizedOperandSegments) to find starts/ends/axes/steps precisely.
+  auto segSizesAttr =
+      op->getAttrOfType<mlir::DenseI32ArrayAttr>("operand_segment_sizes");
+  if (!segSizesAttr || segSizesAttr.size() != 7)
+    return false;
+  auto seg = segSizesAttr.asArrayRef();
+  unsigned ctxN = (unsigned)seg[0];
+  unsigned dataN = (unsigned)seg[1];
+  unsigned startsN = (unsigned)seg[2];
+  unsigned endsN = (unsigned)seg[3];
+  unsigned axesN = (unsigned)seg[4];
+  unsigned stepsN = (unsigned)seg[5];
+  unsigned outN = (unsigned)seg[6];
+  if (ctxN != 1 || dataN != 1 || startsN != 1 || endsN != 1 || outN != 1)
+    return false;
+
+  mlir::Value starts = op->getOperand(2);
+  mlir::Value ends = op->getOperand(3);
+  mlir::Value axes;
+  mlir::Value steps;
+  unsigned cursor = 4;
+  if (axesN == 1) {
+    axes = op->getOperand(cursor);
+    ++cursor;
+  }
+  if (stepsN == 1)
+    steps = op->getOperand(cursor);
+
+  llvm::SmallVector<int64_t> startsVec, endsVec, axesVec, stepsVec;
+  if (!readI64Constant(starts, startsVec))
+    return false;
+  if (!readI64Constant(ends, endsVec))
+    return false;
+  if (axes && !readI64Constant(axes, axesVec))
+    return false;
+  if (steps && !readI64Constant(steps, stepsVec))
+    return false;
+
+  size_t K = startsVec.size();
+  if (endsVec.size() != K)
+    return false;
+  if (axes && axesVec.size() != K)
+    return false;
+  if (steps && stepsVec.size() != K)
+    return false;
+
+  int64_t rank = dataTy.getRank();
+  for (size_t k = 0; k < K; ++k) {
+    int64_t axis = axes ? axesVec[k] : (int64_t)k;
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank)
+      return false;
+    int64_t step = steps ? stepsVec[k] : 1;
+    if (step != 1)
+      return false; // negative or strided step is NEVER identity
+    int64_t start = startsVec[k];
+    int64_t end = endsVec[k];
+    int64_t dim = dataTy.getDimSize(axis);
+    // The data dim must be static to evaluate the ONNX clamping rule
+    // -- we already require result shape == input shape above, so a
+    // dynamic dim here means both sides are `?` and the slice could
+    // legitimately reduce the dim at runtime; bail.
+    if (mlir::ShapedType::isDynamic(dim))
+      return false;
+    if (start < 0)
+      start += dim;
+    if (end < 0)
+      end += dim;
+    // ONNX positive-step clamp: start in [0, dim], end in [0, dim].
+    start = std::clamp<int64_t>(start, 0, dim);
+    end = std::clamp<int64_t>(end, 0, dim);
+    if (start != 0 || end != dim)
+      return false;
+  }
+
   return true;
 }
 
