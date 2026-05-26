@@ -43,8 +43,14 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
       return rewriter.notifyMatchFailure(op, "unsupported data element type");
 
     Value statePtr = adaptor.getCtx();
-    Value dataPtr =
-        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
+    // Operand layout per HipSliceOp: 0=ctx, 1=data, 2=starts, 3=ends,
+    // 4=axes (optional), 5=steps (optional), 6=output. For Category-C
+    // input chains (e.g. NonZero -> ... -> data) the descriptor's
+    // alignedPtr may point at the upper-bound DPS-init buffer; use the
+    // slot-aware extractor so the kernel sees the published exact-size
+    // buffer of the publisher.
+    Value dataPtr = extractContiguousMemRefPtrWithSlot(
+        op, /*operandIdx=*/1, adaptor.getData(), statePtr, rewriter, loc);
     Value startsPtr =
         extractContiguousMemRefPtr(adaptor.getStarts(), rewriter, loc);
     Value endsPtr =
@@ -60,6 +66,14 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
     Value one = createI64Const(1);
+    // Pure-shape arrays for the runtime call. For the OUTPUT operand,
+    // the descriptor's dyn dims encode the pool's upper bound, NOT the
+    // per-call extent the slice will produce -- which is the whole
+    // point of the slice (its own runtime publishes the extent through
+    // the slot table AFTER computing it from starts/ends/steps). Pass
+    // `-1` for each dynamic output dim so the wrapper knows to skip
+    // its upper-bound-vs-derived equality check and use the derived
+    // extent directly.
     auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
       int rank = type.getRank();
       int arrLen = std::max(rank, 1);
@@ -76,9 +90,34 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
       }
       return arr;
     };
+    auto emitOutputShapeArray = [&](MemRefType type) -> Value {
+      int rank = type.getRank();
+      int arrLen = std::max(rank, 1);
+      auto arrType = LLVM::LLVMArrayType::get(i64Type, arrLen);
+      Value arr =
+          LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
+      Value minusOne = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                                rewriter.getI64IntegerAttr(-1));
+      for (int i = 0; i < rank; ++i) {
+        Value dim;
+        if (type.isDynamicDim(i)) {
+          dim = minusOne;
+        } else {
+          dim = LLVM::ConstantOp::create(
+              rewriter, loc, i64Type,
+              rewriter.getI64IntegerAttr(type.getDimSize(i)));
+        }
+        Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                             rewriter.getI32IntegerAttr(i));
+        Value elemPtr =
+            LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
+        LLVM::StoreOp::create(rewriter, loc, dim, elemPtr);
+      }
+      return arr;
+    };
 
     Value dataShape = emitShapeArray(dataType, adaptor.getData());
-    Value outShape = emitShapeArray(outputType, adaptor.getOutput());
+    Value outShape = emitOutputShapeArray(outputType);
 
     Value startsNum =
         computeNumElements(startsType, adaptor.getStarts(), rewriter, loc);

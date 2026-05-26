@@ -55,7 +55,7 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
 
 } // anonymous namespace
 
-std::optional<CompilationArtifact>
+CompilationResult
 MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
                                   const CompilationConfig &config,
                                   morphizen::FileSystem *fs) {
@@ -63,37 +63,36 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   LOG(INFO) << "Compiling MLIR bytecode using hip-compiler plugin";
   LOG(INFO) << "Bytecode size: " << mlir_bytecode.size() << " bytes";
 
-  // Load plugin via MorphiZen Plugin API
+  CompilationResult outcome;
+
   auto plugin = morphizen::Plugin::get("hip-compiler");
   if (!plugin) {
-    LOG(ERROR) << "Failed to load hip-compiler plugin";
-    return std::nullopt;
+    outcome.error_message = "Failed to load hip-compiler plugin";
+    LOG(ERROR) << outcome.error_message;
+    return outcome;
   }
 
-  // Get plugin version
   auto version = plugin->invoke<const char *>("hip_get_version");
   LOG(INFO) << "Plugin version: " << version;
 
-  // Generate temporary output path for compilation
   // No extension: compiler derives output format from output_mode in options
   // JSON
   std::string temp_output_path = mlir_compiler_utils::generateTempPath("");
 
-  // Build JSON options string from config
   std::string options_json = build_compiler_options_json(config);
 
   LOG(INFO) << "Compilation options (JSON): " << options_json;
 
-  // Check if symbol exists
   if (!plugin->has_method("hip_compile_with_fs")) {
-    LOG(ERROR) << "Symbol 'hip_compile_with_fs' NOT found in DLL";
-    return std::nullopt;
+    outcome.error_message =
+        "Symbol 'hip_compile_with_fs' NOT found in hip-compiler plugin";
+    LOG(ERROR) << outcome.error_message;
+    return outcome;
   }
 
   LOG(INFO) << "Calling hip_compile_with_fs with JSON options: "
             << options_json;
 
-  // Get method with explicit types (avoids template forwarding ref issues)
   // Signature: CompilerErrorCode (*)(const void*, size_t, const char*, const
   // char*, CompilerError*, void* fs)
   auto func =
@@ -106,11 +105,12 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   MY_LOG(2) << "Bytecode size() = " << mlir_bytecode.size();
 
   if (func == nullptr) {
-    LOG(ERROR) << "get_method returned nullptr for hip_compile_with_fs";
-    return std::nullopt;
+    outcome.error_message =
+        "get_method returned nullptr for hip_compile_with_fs";
+    LOG(ERROR) << outcome.error_message;
+    return outcome;
   }
 
-  // Call the function with binary-safe parameters
   MY_LOG(2) << "About to call func with size = " << mlir_bytecode.size();
 
   CompilerError error = {};
@@ -119,18 +119,25 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
            options_json.c_str(), &error, fs);
 
   if (result != COMPILER_SUCCESS) {
-    LOG(ERROR) << "Compilation failed: " << error.message;
-    return std::nullopt;
+    // Capture plugin diagnostic (e.g. MLIR pass failure, SSA dominance
+    // violation) so pass_main.cpp can surface it instead of silently letting
+    // ORT route the subgraph elsewhere.
+    outcome.error_message = std::string("hip-compiler plugin failed (code=") +
+                            std::to_string(static_cast<int>(result)) +
+                            "): " + error.message;
+    LOG(ERROR) << outcome.error_message;
+    return outcome;
   }
 
   LOG(INFO) << "Compilation successful";
   LOG(INFO) << "Reading artifact from: " << temp_output_path;
 
-  // Read compiled DLL into memory
   std::ifstream file(temp_output_path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
-    LOG(ERROR) << "Failed to open compiled artifact: " << temp_output_path;
-    return std::nullopt;
+    outcome.error_message =
+        "Failed to open compiled artifact: " + temp_output_path;
+    LOG(ERROR) << outcome.error_message;
+    return outcome;
   }
 
   std::streamsize size = file.tellg();
@@ -138,16 +145,15 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
 
   std::vector<uint8_t> buffer(size);
   if (!file.read(reinterpret_cast<char *>(buffer.data()), size)) {
-    LOG(ERROR) << "Failed to read compiled artifact";
+    outcome.error_message = "Failed to read compiled artifact bytes";
+    LOG(ERROR) << outcome.error_message;
     file.close();
-    return std::nullopt;
+    return outcome;
   }
   file.close();
 
-  // Clean up temporary file
   std::remove(temp_output_path.c_str());
 
-  // Build artifact
   CompilationArtifact artifact;
   artifact.filename = "model_compiled";
   artifact.bytes = std::move(buffer);
@@ -155,7 +161,8 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
 
   LOG(INFO) << "Artifact created: " << artifact.bytes.size() << " bytes";
 
-  return artifact;
+  outcome.artifact = std::move(artifact);
+  return outcome;
 }
 
 } // namespace hipdnn::level1pass

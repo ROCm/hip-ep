@@ -65,6 +65,23 @@ module {
     %result = "onnx.Squeeze"(%data, %axes) : (tensor<128x4096x1xf16>, tensor<1xi64>) -> tensor<128x4096xf16>
     return %result : tensor<128x4096xf16>
   }
+
+  // --- Squeeze the size-1 trailing dim of a 3D tensor with dynamic
+  //     non-squeezed dims. The collapse_shape reassociation must group
+  //     the squeezed dim correctly; the surviving dynamic dims propagate
+  //     via the output type without needing extra SSA values.
+  func.func @test_squeeze_dynamic_input(%data: tensor<?x2048x1xf16>) -> tensor<?x2048xf16> {
+    %axes = "onnx.Constant"() {value = dense<[2]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %result = "onnx.Squeeze"(%data, %axes) : (tensor<?x2048x1xf16>, tensor<1xi64>) -> tensor<?x2048xf16>
+    return %result : tensor<?x2048xf16>
+  }
+
+  // --- Fully dynamic non-squeezed dims with size-1 trailing axis.
+  func.func @test_squeeze_fully_dynamic(%data: tensor<?x?x1xf16>) -> tensor<?x?xf16> {
+    %axes = "onnx.Constant"() {value = dense<[2]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %result = "onnx.Squeeze"(%data, %axes) : (tensor<?x?x1xf16>, tensor<1xi64>) -> tensor<?x?xf16>
+    return %result : tensor<?x?xf16>
+  }
 }
 
 // CHECK-LABEL: func.func @test_squeeze_front
@@ -96,3 +113,13 @@ module {
 // CHECK-NOT: onnx.Squeeze
 // CHECK: %[[RESULT:.*]] = tensor.collapse_shape %[[DATA]] {{\[\[}}0], [1, 2]] : tensor<128x4096x1xf16> into tensor<128x4096xf16>
 // CHECK: return %[[RESULT]] : tensor<128x4096xf16>
+
+// CHECK-LABEL: func.func @test_squeeze_dynamic_input
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x2048x1xf16>)
+// CHECK-NOT: onnx.Squeeze
+// CHECK: tensor.collapse_shape %[[DATA]] {{\[\[}}0], [1, 2]] : tensor<?x2048x1xf16> into tensor<?x2048xf16>
+
+// CHECK-LABEL: func.func @test_squeeze_fully_dynamic
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x1xf16>)
+// CHECK-NOT: onnx.Squeeze
+// CHECK: tensor.collapse_shape %[[DATA]] {{\[\[}}0], [1, 2]] : tensor<?x?x1xf16> into tensor<?x?xf16>

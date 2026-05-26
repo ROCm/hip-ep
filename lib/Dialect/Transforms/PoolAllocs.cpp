@@ -36,6 +36,7 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -407,9 +408,108 @@ void PoolAllocsPass::runOnOperation() {
   for (auto &info : allInfos)
     if (info.allocOp->isBeforeInBlock(firstPooledAlloc))
       firstPooledAlloc = info.allocOp.getOperation();
+
+  // Partition dynamics into "poolable" and "unpoolable" based on whether
+  // every transitive dependency of each dyn-size operand is hoistable
+  // above `firstPooledAlloc`.
+  //
+  // An op is hoistable when it is (a) a function argument, (b) already
+  // before `firstPooledAlloc`, or (c) side-effect-free AND every operand
+  // is itself hoistable. Hoistability is recursive because the
+  // byte-size computation we emit below (`staticFactor * dynDim0 * ...`)
+  // is inserted at `firstPooledAlloc`'s position and so requires every
+  // input to dominate it. Side-effectful ops like `memref.load` cannot
+  // be moved without risking aliasing with an intervening store.
+  //
+  // Concretely: bufferization may build a dyn-alloc size from a
+  // `memref.load` of a shape buffer that another op (e.g. `hip.shape`)
+  // writes into earlier in the function. Pooling such an alloc would
+  // require moving the `memref.load` above the `hip.shape` write —
+  // impossible without redoing memory analysis. We sidestep the issue
+  // by leaving those allocs unpooled; `LowerAllocs` then converts each
+  // to `hip.alloc` + `hip.free`. Statically-sized allocs and dynamic
+  // allocs whose sizes derive purely from args/constants are still
+  // pooled.
+  //
+  // We must hoist hoistable defining ops (e.g. `memref.dim %arg, %c0`
+  // that bufferization places right next to its consumer alloc) to
+  // before `firstPooledAlloc` so the byte-size computation that
+  // consumes them dominates `hip.get_pool`.
+  SmallVector<AllocInfo> poolableDynamics;
+  SmallVector<AllocInfo> unpoolableDynamics;
+  {
+    DenseMap<Operation *, bool> hoistableCache;
+    std::function<bool(Operation *)> isHoistable = [&](Operation *def) -> bool {
+      if (!def)
+        return true; // block argument
+      if (def->getBlock() != &block)
+        return true; // outside this block — dominates
+      if (def->isBeforeInBlock(firstPooledAlloc))
+        return true; // already dominates
+      auto it = hoistableCache.find(def);
+      if (it != hoistableCache.end())
+        return it->second;
+      // Mark as visited (assume false to handle any cycles defensively;
+      // SSA in a single block shouldn't have cycles but be safe).
+      hoistableCache[def] = false;
+      if (!isPure(def))
+        return false;
+      for (Value v : def->getOperands()) {
+        if (!isHoistable(v.getDefiningOp()))
+          return false;
+      }
+      hoistableCache[def] = true;
+      return true;
+    };
+
+    for (AllocInfo &info : dynamics) {
+      bool allHoistable = true;
+      for (Value dynOperand : info.allocOp.getDynamicSizes()) {
+        if (!isHoistable(dynOperand.getDefiningOp())) {
+          allHoistable = false;
+          break;
+        }
+      }
+      if (allHoistable)
+        poolableDynamics.push_back(info);
+      else
+        unpoolableDynamics.push_back(info);
+    }
+
+    // Hoist every cached-as-hoistable op that's still after
+    // `firstPooledAlloc` to dominate it. Iterate to a fixed point so
+    // dependencies move before users (small worklist in practice).
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (auto &[def, hoistable] : hoistableCache) {
+        if (!hoistable)
+          continue;
+        if (def->isBeforeInBlock(firstPooledAlloc))
+          continue;
+        bool allOperandsDominate = true;
+        for (Value v : def->getOperands()) {
+          Operation *vDef = v.getDefiningOp();
+          if (!vDef)
+            continue;
+          if (vDef->getBlock() != &block)
+            continue;
+          if (!vDef->isBeforeInBlock(firstPooledAlloc)) {
+            allOperandsDominate = false;
+            break;
+          }
+        }
+        if (allOperandsDominate) {
+          def->moveBefore(firstPooledAlloc);
+          changed = true;
+        }
+      }
+    }
+  }
+
   builder.setInsertionPoint(firstPooledAlloc);
 
-  auto dynBuckets = packDynamicAllocs(dynamics, builder, loc, align);
+  auto dynBuckets = packDynamicAllocs(poolableDynamics, builder, loc, align);
   NumDynBuckets += dynBuckets.size();
 
   // ----- Phase 5: emit pool + views -----------------------------------
@@ -526,12 +626,18 @@ void PoolAllocsPass::runOnOperation() {
     op.erase();
 
   // 5e. Attach pool metadata to the module for GenerateInterface.
+  // `buffer_count` is the number of allocs actually pooled (== size of
+  // `staticOffsets`), NOT `allInfos.size()`. When some dynamic allocs
+  // are left unpooled (their dyn-size operands depend on non-hoistable
+  // ops; see Phase 4 partitioning) `buffer_count` < `allInfos.size()`.
+  // `GenerateInterface` indexes `buffer_offsets[0..buffer_count)` so the
+  // two sizes must agree.
   ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
   MLIRContext *mlirCtx = funcOp.getContext();
   moduleOp->setAttr("hipdnn.pool_size",
                     builder.getI64IntegerAttr(staticPoolSize));
   moduleOp->setAttr("hipdnn.buffer_count",
-                    builder.getI64IntegerAttr((int64_t)allInfos.size()));
+                    builder.getI64IntegerAttr((int64_t)staticOffsets.size()));
   SmallVector<Attribute> offsetAttrs;
   for (int64_t off : staticOffsets)
     offsetAttrs.push_back(builder.getI64IntegerAttr(off));
