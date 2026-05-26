@@ -87,3 +87,32 @@ tools = [
     "not",
 ]
 llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_dir])
+
+# Sample plugin DLL substitution.
+#
+# %hip-ep-sample-plugin resolves to the absolute path of the in-tree
+# sample plugin built by test/plugin/sample_plugin/CMakeLists.txt.
+# Tests that exercise the public plugin ABI (HIP_EP_PLUGINS) point
+# at this path so the cross-DLL load path is covered in CI without
+# any external artefact.
+plugin_search_dirs = [
+    os.path.join(config.hip_build_dir, "test", "plugin", "sample_plugin",
+                 config.hip_build_mode),
+    os.path.join(config.hip_build_dir, "test", "plugin", "sample_plugin"),
+]
+plugin_filename = "hip_ep_sample_plugin.dll" if os.name == "nt" else \
+                  "hip_ep_sample_plugin.so"
+sample_plugin_path = ""
+for d in plugin_search_dirs:
+    candidate = os.path.join(d, plugin_filename)
+    if os.path.isfile(candidate):
+        sample_plugin_path = candidate
+        break
+if not sample_plugin_path:
+    # Fall back to the first candidate so the substitution string
+    # exists; the test will fail with an obvious "plugin not found"
+    # error from HIP_EP_PLUGINS rather than a missing-substitution
+    # LIT error.
+    sample_plugin_path = os.path.join(plugin_search_dirs[0], plugin_filename)
+config.substitutions.append(("%hip-ep-sample-plugin",
+                             sample_plugin_path.replace("\\", "/")))

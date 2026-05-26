@@ -80,9 +80,13 @@ foreach(_lit_tool FileCheck not count)
 endforeach()
 
 # Add custom build target for manual invocation: cmake --build . --target check-hip-mlir-lit
+#
+# The sample plugin is a hard dependency: the Plugin/ subtree exercises
+# the cross-DLL HIP_EP_PLUGINS path, so the test runner needs the DLL
+# to be on disk before lit launches.
 add_custom_target(check-hip-mlir-lit
     COMMAND ${LIT_EXECUTABLE} ${LIT_ARGS} --param=build_mode=$<CONFIG> .
-    DEPENDS ${_lit_deps}
+    DEPENDS ${_lit_deps} hip_ep_sample_plugin
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running LIT tests for hip-mlir-compiler"
 )

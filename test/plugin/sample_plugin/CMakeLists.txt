@@ -3,17 +3,32 @@
 # ** Licensed under the MIT License.
 ##
 
-# Sample plugin DLL exercising the PR-1 plugin ABI surface in CI.
+# Sample plugin DLL exercising the public plugin ABI surface in CI.
 # See docs/design/plugin-extension-api.md for the broader context.
 
 add_library(hip_ep_sample_plugin SHARED
   sample_plugin.cpp
 )
 
-# The plugin only needs the public PluginAPI.h header. We pick it up
-# via the global include_directories() from the top-level CMakeLists.
-# We do NOT link against LibHipCompiler — the plugin is a tiny ABI
-# consumer, not a hip-compiler internal.
+# Plugin links against the MLIR libraries it actually uses
+# (PassRegistration<>, PassWrapper<>, func::FuncOp). It does NOT link
+# LibHipCompiler -- a real vendor plugin is a downstream binary
+# consumer of the public hip-compiler artefact, not an internal
+# component, so we match that constraint here in the in-tree sample.
+#
+# This list mirrors the upstream `mlir/examples/standalone/lib/...`
+# pattern. Bringing in MLIRPass also brings the MLIRSupport / MLIRIR
+# transitive dependencies the pass needs.
+target_link_libraries(hip_ep_sample_plugin PRIVATE
+  MLIRPass
+  MLIRIR
+  MLIRSupport
+  MLIRFuncDialect
+)
+
+# The plugin uses public hip-compiler headers (PluginAPI.h,
+# PluginRegistry.h). Both already on the global include path via
+# the top-level include_directories(); no per-target setup needed.
 
 # Pull in the LLVM_ATTRIBUTE_WEAK / Compiler.h shim from LLVM.
 target_include_directories(hip_ep_sample_plugin PRIVATE

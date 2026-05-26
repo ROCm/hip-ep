@@ -11,6 +11,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -140,36 +141,20 @@ const std::vector<HipEpPluginLoader> &loadPluginsOnce() {
   return plugins;
 }
 
-// ============================================================================
-// HipEpPluginRegistry stub method bodies.
-//
-// In PR 1 these are intentionally empty. Subsequent PRs fill them in:
-//   PR 2: requestPipelineSlot() records into a per-process registry
-//         consulted by lib/Dialect/Transforms/Pipelines.cpp.
-//   PR 3: addRuntimeBitcode() records buffers consumed by
-//         lib/Target/LLVM/LLVMBackend.cpp::linkRuntimeModule.
-//   PR 4: addLibraryPath() / addLibrary() record entries appended in
-//         lib/Compiler/CompilerDriver.cpp::discoverLibraries.
-//
-// They live in this translation unit (and not their own
-// PluginRegistry.cpp) until PR 2 grows their bodies — keeping the PR
-// 1 file count minimal.
-// ============================================================================
-
-void HipEpPluginRegistry::requestPipelineSlot(PipelineSlot, llvm::StringRef) {
-  // PR 2 fills this in.
-}
-
-void HipEpPluginRegistry::addRuntimeBitcode(const void *, std::size_t) {
-  // PR 3 fills this in.
-}
-
-void HipEpPluginRegistry::addLibraryPath(llvm::StringRef) {
-  // PR 4 fills this in.
-}
-
-void HipEpPluginRegistry::addLibrary(llvm::StringRef) {
-  // PR 4 fills this in.
+void dispatchPluginRegistrationsOnce() {
+  static std::once_flag flag;
+  std::call_once(flag, [] {
+    // The registry returned here is a facade whose methods all
+    // dispatch through a vtable that writes into per-process storage
+    // in PluginRegistry.cpp. The plugin DLL therefore never needs to
+    // resolve a hip-compiler symbol across the DLL boundary; it only
+    // calls inline thunks that read function pointers off the
+    // registry instance.
+    HipEpPluginRegistry &registry = getProcessPluginRegistry();
+    for (const auto &plugin : loadPluginsOnce()) {
+      plugin.registerCallbacks(registry);
+    }
+  });
 }
 
 } // namespace hip::compiler

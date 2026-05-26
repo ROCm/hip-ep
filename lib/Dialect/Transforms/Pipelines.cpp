@@ -4,6 +4,7 @@
  */
 
 #include "hip/Dialect/Transforms/Pipelines.h"
+#include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -20,9 +21,45 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "llvm/Support/raw_ostream.h"
+
 #include "compilation_options_generated.h"
 
 using namespace mlir;
+
+namespace {
+
+/// Append every plugin pass requested for `slot` to `pm`. Resolves
+/// each pass by name through MLIR's pass registry (the same path
+/// `--pass=foo` takes inside hip-mlir-opt), so a typo in a plugin's
+/// requestPipelineSlot call surfaces as an audible warning rather
+/// than a silent miss.
+///
+/// Cost when no plugins are loaded: one StringRef vector lookup,
+/// nothing added to the pass manager. Pipeline construction cost is
+/// effectively unchanged in that case, which is the common case.
+//
+// Note on ::hip: Pipelines.cpp pulls in `using namespace mlir;`, so
+// unqualified `hip` resolves to `mlir::hip` (this file's own
+// namespace). The plugin registry lives in `::hip::compiler`, so we
+// always need the leading `::` here.
+void addPluginPassesForSlot(OpPassManager &pm,
+                            ::hip::compiler::PipelineSlot slot) {
+  auto passNames = ::hip::compiler::pluginPassesForSlot(slot);
+  if (passNames.empty())
+    return;
+  for (llvm::StringRef passName : passNames) {
+    if (failed(parsePassPipeline(passName, pm))) {
+      llvm::errs()
+          << "[plugin-loader] WARNING: pass '" << passName
+          << "' requested for pipeline slot " << static_cast<int>(slot)
+          << " but not registered in MLIR's pass registry. "
+          << "Did the plugin's RegisterCallbacks call registerPass<>()?\n";
+    }
+  }
+}
+
+} // namespace
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
 ///
@@ -90,6 +127,12 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //     `onnx.Reshape` (typical: norm / projection chains).  See
   //     `ResolveTensorDims.cpp`.
   pm.addNestedPass<func::FuncOp>(hip::createResolveTensorDimsPass());
+
+  // Plugin slot: BeforeBufferization. Vendors often want to lower or
+  // canonicalize hip.* ops before bufferization fixes the type system
+  // to memrefs.
+  addPluginPassesForSlot(pm,
+                         ::hip::compiler::PipelineSlot::BeforeBufferization);
 
   // 2. Bufferize tensor IR to memref IR
   //
@@ -185,7 +228,7 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
   // 6. HIP-specific buffer optimizations
-  pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
 
   // 6a. Promote strided memref operands of hip.* ops to contiguous
   //     temporaries.  Required because the HIP runtime call ABI (used by
@@ -198,7 +241,8 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //     subview-folding) and before PoolAllocs (so the new transient
   //     memref.alloc / memref.dealloc pairs flow through pool views and do
   //     not trigger extra hipMalloc calls per inference).
-  pm.addNestedPass<func::FuncOp>(hip::createPromoteStridedHipOperandsPass());
+  pm.addNestedPass<func::FuncOp>(
+      mlir::hip::createPromoteStridedHipOperandsPass());
 
   // 6b. Redirect tiny host-fed memref.alloc ops (bufferized
   //     `tensor.from_elements` for shape arithmetic — rank-0 / 1xi64) away
@@ -232,6 +276,11 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
 
   pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
 
+  // Plugin slot: AfterPoolAllocs. Useful for vendor passes that
+  // analyze or transform memref allocations after pooling
+  // (e.g., custom allocator tagging).
+  addPluginPassesForSlot(pm, ::hip::compiler::PipelineSlot::AfterPoolAllocs);
+
   // 7. Lower remaining bufferization ops to memref
   pm.addPass(createConvertBufferizationToMemRefPass());
 
@@ -239,10 +288,10 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   pm.addPass(createCanonicalizerPass());
 
   // 8. Replace memref.alloc with hip.alloc/hip.free
-  pm.addNestedPass<func::FuncOp>(hip::createLowerAllocsPass());
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createLowerAllocsPass());
 
   // 9. Resolve extern constants → memref.view into constants blob argument
-  pm.addPass(hip::createResolveExternConstantsPass());
+  pm.addPass(mlir::hip::createResolveExternConstantsPass());
 
   // 10. Final cleanup: LowerAllocs and ResolveExternConstants both introduce
   //     new constants and ops that benefit from deduplication and hoisting.
@@ -258,6 +307,11 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // BEFORE hip-add-context-arg so it operates in the original ONNX
   // function index space and has no HIP-dialect dependency.
   pm.addPass(createSimplifyOnnxPass());
+
+  // Plugin slot: AfterSimplifyOnnx. Vendor passes here see canonical
+  // ONNX dialect IR with no HIP context arg yet.
+  addPluginPassesForSlot(pm, ::hip::compiler::PipelineSlot::AfterSimplifyOnnx);
+
   pm.addPass(createHipAddContextArgPass());
 
   // Outline onnx.Loop bodies into separate func.func ops before the main
@@ -295,6 +349,11 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // func signature and later bufferization.
   pm.addPass(createInferLoopBodyShapesPass());
 
+  // Plugin slot: AfterOnnxLoopOutline. Operate on outlined ONNX loop
+  // bodies before the main lowering runs.
+  addPluginPassesForSlot(pm,
+                         ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
+
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
         fs, options.externalizeMinNumElements, options.skipConstantData));
@@ -304,6 +363,12 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
     onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
     pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
   }
+
+  // Plugin slot: AfterConvertOnnxToHip. The most common slot for
+  // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
+  // canonicalisations.
+  addPluginPassesForSlot(pm,
+                         ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
 
   buildOnnxToHipPipelineTail(pm, options.useOutputAllocator);
 }
@@ -315,9 +380,13 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        CompiledGraphMap output_graphs) {
   // See sibling overload for rationale.
   pm.addPass(createSimplifyOnnxPass());
+  addPluginPassesForSlot(pm, ::hip::compiler::PipelineSlot::AfterSimplifyOnnx);
+
   pm.addPass(createHipAddContextArgPass());
   pm.addPass(createOnnxLoopOutlinePass());
   pm.addPass(createInferLoopBodyShapesPass());
+  addPluginPassesForSlot(pm,
+                         ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());
@@ -334,6 +403,9 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
     pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
   }
 
+  addPluginPassesForSlot(pm,
+                         ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+
   buildOnnxToHipPipelineTail(pm, options.useOutputAllocator);
 }
 
@@ -348,6 +420,11 @@ void mlir::hip::buildHipToLLVMPipeline(
   // untouched and is handled by upstream.  See RelaxMultiDynExpandShape.cpp
   // header for the IR snippet and the retirement path.
   pm.addNestedPass<func::FuncOp>(hip::createRelaxMultiDynExpandShapePass());
+
+  // Plugin slot: BeforeConvertHipToLLVM. Last chance to operate on
+  // hip.* / memref IR before the lowering to LLVM dialect erases it.
+  addPluginPassesForSlot(pm,
+                         ::hip::compiler::PipelineSlot::BeforeConvertHipToLLVM);
 
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.
@@ -392,6 +469,12 @@ void mlir::hip::buildHipToLLVMPipeline(
   // allocator vs 3-arg classic ABI. No pipeline option is needed here -- one
   // generator handles both modes.
   pm.addPass(createGenerateInterfacePass(compOpts));
+
+  // Plugin slot: AfterGenerateInterface. The C interface (inference_init,
+  // inference_compute, ...) is in place; vendor passes can stamp metadata
+  // attributes or add LLVM-dialect ops alongside it.
+  addPluginPassesForSlot(pm,
+                         ::hip::compiler::PipelineSlot::AfterGenerateInterface);
 }
 
 void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,

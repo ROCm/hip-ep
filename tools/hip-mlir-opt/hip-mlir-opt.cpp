@@ -4,6 +4,7 @@
  */
 
 #include "CrashHandler.h"
+#include "hip/Compiler/PluginLoader.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -94,6 +95,14 @@ int main(int argc, char **argv) {
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::createCanonicalizerPass();
   });
+
+  // Plugin DLLs listed in HIP_EP_PLUGINS get loaded here and have
+  // their RegisterCallbacks invoked before MlirOptMain parses the
+  // command line. That way `--<plugin-pass>` is recognised by the CL
+  // parser, and `--onnx-to-hip-pipeline` will see plugin slot
+  // requests when it builds its pass manager.
+  // No-op when HIP_EP_PLUGINS is unset.
+  hip::compiler::dispatchPluginRegistrationsOnce();
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(
       argc, argv, "hip-mlir-opt: HIP dialect compiler driver\n", registry));

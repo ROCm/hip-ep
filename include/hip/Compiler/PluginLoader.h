@@ -18,17 +18,16 @@
 // Loader for hip-compiler plugins, modeled after `llvm::PassPlugin` and
 // `mlir::PassPlugin`.
 //
-// Usage from inside hip-compiler.dll:
+// Production callers should use `dispatchPluginRegistrationsOnce()`,
+// which loads every DLL listed in `HIP_EP_PLUGINS` and runs each
+// plugin's `RegisterCallbacks` exactly once per process. After it
+// returns:
+//   - all plugin passes are in MLIR's global pass registry
+//   - all (slot, passName) requests are queryable via
+//     `hip::compiler::pluginPassesForSlot(slot)` (see PluginRegistry.h)
 //
-//   const auto &plugins = hip::compiler::loadPluginsOnce();
-//   HipEpPluginRegistry R;
-//   for (const auto &p : plugins)
-//     p.registerCallbacks(R);
-//
-// The `loadPluginsOnce` call is idempotent and thread-safe; it loads
-// every DLL listed in the `HIP_EP_PLUGINS` env var (semicolon-separated)
-// the first time it is called. In PR 1 it is invoked only by the unit
-// test; PR 2 wires it into `Pipelines.cpp`.
+// Tests and tools that need finer-grained control can use the lower
+// level `loadPluginsOnce()` and dispatch `registerCallbacks` manually.
 
 namespace hip::compiler {
 
@@ -97,6 +96,23 @@ private:
 /// Empty / unset env var is a normal "no plugins" case and returns
 /// an empty vector.
 const std::vector<HipEpPluginLoader> &loadPluginsOnce();
+
+/// Load all plugins (via `loadPluginsOnce`) and invoke each plugin's
+/// `RegisterCallbacks` against the per-process plugin registry.
+/// Idempotent: subsequent calls are no-ops, so it is safe to call
+/// from every entry point that might run before pipelines are built
+/// (`hip-compiler` driver, `hip-mlir-opt` main, etc.).
+///
+/// After this returns:
+///   - every plugin pass is in `mlir::PassRegistry` (global)
+///   - every (slot, passName) request is queryable via
+///     `hip::compiler::pluginPassesForSlot(slot)`
+///   - every (future) bitcode buffer / library entry recorded by
+///     plugins is queryable via the corresponding accessor
+///
+/// Cost when no plugins are configured: one `getenv` lookup, no DLL
+/// loads.
+void dispatchPluginRegistrationsOnce();
 
 } // namespace hip::compiler
 

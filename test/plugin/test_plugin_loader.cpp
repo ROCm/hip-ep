@@ -3,32 +3,35 @@
  * Licensed under the MIT License.
  */
 
-// PR-1 plugin-loader unit test.
+// Plugin-loader unit test.
 //
 // Exercises the public ABI surface declared in
 //   include/hip/Compiler/PluginAPI.h
 //   include/hip/Compiler/PluginLoader.h
+//   include/hip/Compiler/PluginRegistry.h
 // against the sample plugin built in `test/plugin/sample_plugin/`.
 //
-// What this test guarantees about the PR-1 plugin infrastructure:
+// What this test guarantees about the plugin infrastructure:
 //
 //   1. `HipEpPluginLoader::Load` resolves a plugin DLL by absolute
 //      path, looks up `hipEpGetPluginInfo`, and validates the
 //      returned struct (API version, non-null name/version).
 //   2. The plugin name and version reported by `loadPluginsOnce()`
-//      match what the sample DLL hard-codes — i.e., the struct
+//      match what the sample DLL hard-codes -- i.e., the struct
 //      survives the C ABI boundary intact.
 //   3. `loadPluginsOnce()` is idempotent: a second call returns the
 //      same vector and does not re-load DLLs.
 //   4. `RegisterCallbacks` fires across the DLL boundary against a
 //      `HipEpPluginRegistry &` without crashing.
-//   5. A clearly-bad path yields an `llvm::Error` with a useful
+//   5. After the callback runs, the registry records the slot
+//      request the plugin made (`AfterConvertOnnxToHip` ->
+//      "hip-ep-sample-print-functions"). The Pipelines.cpp slot
+//      hook reads exactly this state.
+//   6. A clearly-bad path yields an `llvm::Error` with a useful
 //      message rather than a crash.
 //
 // The test is plain `main()` rather than GTest so it has no
 // dependency that the public configure does not already provide.
-// PR 2 will likely promote this to GTest once the plugin loader
-// has more methods worth checking.
 
 #include "hip/Compiler/PluginAPI.h"
 #include "hip/Compiler/PluginLoader.h"
@@ -102,7 +105,7 @@ void testDirectLoadResolvesEntryPointAndValidatesStruct() {
                "Plugin API version matches HIP_EP_PLUGIN_API_VERSION");
   HIP_EP_CHECK(plugin->getPluginName() == llvm::StringRef("HipEpSamplePlugin"),
                "Plugin name returned by sample matches expected literal");
-  HIP_EP_CHECK(plugin->getPluginVersion() == llvm::StringRef("0.1.0"),
+  HIP_EP_CHECK(plugin->getPluginVersion() == llvm::StringRef("0.2.0"),
                "Plugin version returned by sample matches expected literal");
   HIP_EP_CHECK(plugin->getFilename() == llvm::StringRef(kSamplePluginPath),
                "Loader records the filename it loaded from");
@@ -143,13 +146,49 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
     return;
   }
 
-  hip::compiler::HipEpPluginRegistry registry;
-  // Sample callback is empty in PR 1 but non-null. The pass condition
-  // here is the absence of a crash. PR 2 layers real assertions on
-  // top once the registry has observable methods.
+  // Snapshot the registry's view of `AfterConvertOnnxToHip` BEFORE we
+  // dispatch any callbacks -- if some other test has already done so
+  // during this process, we want to detect only the increment we add.
+  auto beforeCount = hip::compiler::pluginPassesForSlot(
+                         hip::compiler::PipelineSlot::AfterConvertOnnxToHip)
+                         .size();
+
+  // The registry is a process-wide handle whose methods dispatch
+  // through a vtable into the per-process storage in
+  // lib/Compiler/PluginRegistry.cpp.
+  hip::compiler::HipEpPluginRegistry &registry =
+      hip::compiler::getProcessPluginRegistry();
   plugins[0].registerCallbacks(registry);
   HIP_EP_CHECK(true,
                "registerCallbacks fired across DLL boundary without crashing");
+
+  // The sample plugin's RegisterCallbacks calls
+  //   R.requestPipelineSlot(PipelineSlot::AfterConvertOnnxToHip,
+  //                         "hip-ep-sample-print-functions");
+  // so that pair must now be queryable through the public accessor.
+  auto afterPasses = hip::compiler::pluginPassesForSlot(
+      hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+  HIP_EP_CHECK(afterPasses.size() == beforeCount + 1u,
+               "pluginPassesForSlot increments by 1 after registerCallbacks");
+  bool foundSamplePass = false;
+  for (auto name : afterPasses) {
+    if (name == llvm::StringRef("hip-ep-sample-print-functions")) {
+      foundSamplePass = true;
+      break;
+    }
+  }
+  HIP_EP_CHECK(
+      foundSamplePass,
+      "pluginPassesForSlot(AfterConvertOnnxToHip) contains the sample pass");
+
+  // Slots the plugin did NOT request should not have been touched
+  // by this dispatch (i.e., callbacks don't accidentally write into
+  // the wrong slot).
+  auto unrelated = hip::compiler::pluginPassesForSlot(
+      hip::compiler::PipelineSlot::AfterPoolAllocs);
+  HIP_EP_CHECK(
+      unrelated.size() == 0u,
+      "pluginPassesForSlot(AfterPoolAllocs) is empty (unrelated slot)");
 }
 
 void testLoadFailsCleanlyOnNonExistentPath() {
