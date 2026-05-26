@@ -224,6 +224,33 @@ struct PluginBitcodeBuffer {
 /// definitions shadow in-tree ones.
 llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers();
 
+/// Read the library search paths recorded by every loaded plugin's
+/// `addLibraryPath` call, in the order they were registered. Each
+/// `StringRef` is backed by a `std::string` owned by the per-process
+/// plugin registry and is stable for the lifetime of the process.
+///
+/// Used by `lib/Compiler/CompilerDriver.cpp::discoverLibraries` to
+/// extend the `library_paths` argument vector handed to lld-link
+/// (rendered as one `/LIBPATH:<path>` per entry on Windows; `-L<path>`
+/// on Linux). Paths are appended *after* the in-tree paths so that
+/// in-tree libraries continue to resolve from their canonical
+/// location.
+llvm::SmallVector<llvm::StringRef> pluginLibraryPaths();
+
+/// Read the library names (or full library paths) recorded by every
+/// loaded plugin's `addLibrary` call, in the order they were
+/// registered.
+///
+/// Used by `lib/Compiler/CompilerDriver.cpp::discoverLibraries` to
+/// extend the `libraries` argument vector handed to lld-link.
+/// Entries are appended *after* the in-tree libraries; lld-link
+/// command-line search order means a plugin lib later in the list
+/// only contributes new symbols, it does not shadow in-tree ones.
+/// Vendors who need to override an in-tree symbol should use the
+/// bitcode mechanism (`addRuntimeBitcode`) instead, which is wired
+/// with `Linker::Flags::OverrideFromSrc` for that purpose.
+llvm::SmallVector<llvm::StringRef> pluginLibraries();
+
 } // namespace hip::compiler
 
 #endif // HIP_COMPILER_PLUGIN_REGISTRY_H

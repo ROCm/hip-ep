@@ -5,6 +5,7 @@
 
 #include "hip/Compiler/CompilerDriver.h"
 #include "hip/Compiler/PluginLoader.h"
+#include "hip/Compiler/PluginRegistry.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
@@ -423,7 +424,7 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
   return true;
 }
 
-void CompilerDriver::discoverLibraries(
+void CompilerDriver::discoverInTreeLibraries(
     std::vector<std::string> &libraries,
     std::vector<std::string> &library_paths) {
   // Current-stream accessor (lib/Runtime/tls_stream.cpp). runtime.bc references
@@ -526,6 +527,34 @@ void CompilerDriver::discoverLibraries(
     libraries.push_back("hipdnn_graph_runtime");
     COMPILER_DEBUG_LOG("  hipDNN graph runtime: hipdnn_graph_runtime\n");
 #endif
+  }
+}
+
+void CompilerDriver::discoverLibraries(
+    std::vector<std::string> &libraries,
+    std::vector<std::string> &library_paths) {
+  // Phase 1: in-tree library discovery driven by THEROCK_DIST.
+  // No-op without THEROCK_DIST, which lets a CPU-only smoke test
+  // load a vendor plugin and still produce a model.dll, as long
+  // as the plugin contributes everything the model module needs.
+  discoverInTreeLibraries(libraries, library_paths);
+
+  // Phase 2: plugin-contributed libraries (PR 4).
+  //
+  // Appended *after* in-tree libraries so that an in-tree library
+  // continues to be searched first when both define the same
+  // symbol. Vendors who need to override an in-tree symbol should
+  // use the bitcode mechanism (`addRuntimeBitcode`, PR 3), which
+  // is wired with `Linker::Flags::OverrideFromSrc` for that
+  // purpose. The doc comment on `pluginLibraries()` in
+  // include/hip/Compiler/PluginRegistry.h documents this contract.
+  for (auto path : ::hip::compiler::pluginLibraryPaths()) {
+    library_paths.emplace_back(path);
+    COMPILER_DEBUG_LOG("  Plugin library path: " << path << "\n");
+  }
+  for (auto lib : ::hip::compiler::pluginLibraries()) {
+    libraries.emplace_back(lib);
+    COMPILER_DEBUG_LOG("  Plugin library: " << lib << "\n");
   }
 
   for (const auto &lib : libraries) {
