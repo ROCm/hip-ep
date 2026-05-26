@@ -34,8 +34,10 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
+#include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/SymbolTable.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -367,6 +369,66 @@ static Value resolveDimAtSource(OpBuilder &b, Location loc, Value src,
     if (dynIdx < static_cast<int64_t>(dynSizes.size()))
       return dynSizes[dynIdx];
   }
+  // memref.dim(memref.cast(src), i) -> memref.dim(src, i). Casts only change
+  // the layout / dynamic-dim annotations; the runtime dim values are
+  // unchanged. Recurse so subview/expand/etc. underneath get resolved too.
+  if (auto castOp = dyn_cast_or_null<memref::CastOp>(def))
+    return resolveDimAtSource(b, loc, castOp.getSource(), i);
+
+  // memref.dim(memref.subview(parent, ...), i) -> i-th `size` operand of the
+  // subview. Static sizes become constants; dynamic sizes are the SSA values
+  // the subview was already sized by, which are hoistable through the rest of
+  // the pool prelude (typically themselves memref.dim / arith.* / index_cast).
+  //
+  // This avoids the dominance trap of emitting a fresh `memref.dim` on the
+  // subview itself, because the subview op is created in the middle of the
+  // function body and isn't reachable through Phase-4 hoisting.
+  //
+  // Before / After (canonical case: packed-QKV split via subview):
+  //   Before:
+  //     %qkv  = memref.alloc(%d0, %d1) : memref<?x?x8192xf16>
+  //     %k    = memref.subview %qkv[0,0,2048] [%d0,%d1,2048] [1,1,1]
+  //               : memref<?x?x8192xf16>
+  //               to   memref<?x?x2048xf16, strided<[?, 8192, 1], offset:
+  //               2048>>
+  //     %dim0 = memref.dim %k, %c0   // !! dim-of-subview, not hoistable
+  //   After:
+  //     %qkv  = memref.alloc(%d0, %d1) : memref<?x?x8192xf16>
+  //     %k    = memref.subview ...                // unchanged (dead-arith DCE
+  //                                               // may remove it later)
+  //     %dim0 = %d0                              // direct use of operand
+  if (auto subview = dyn_cast_or_null<memref::SubViewOp>(def)) {
+    auto resultType = cast<MemRefType>(src.getType());
+    if (i < 0 || i >= resultType.getRank())
+      return Value();
+    if (!resultType.isDynamicDim(i))
+      return arith::ConstantIndexOp::create(b, loc, resultType.getDimSize(i));
+    auto mixedSizes = subview.getMixedSizes();
+    // memref.subview's `sizes` are 1:1 with the SOURCE rank (not result),
+    // when rank-reduction is allowed. SubViewOp::getMixedSizes() returns
+    // entries in source-rank order; the result rank is built by skipping
+    // size-1 dims dropped by rank reduction.  Walk source dims and skip the
+    // dropped ones to find the source dim that maps to result dim `i`.
+    auto droppedDims = subview.getDroppedDims();
+    int64_t resultDim = -1;
+    for (int64_t srcDim = 0, e = static_cast<int64_t>(mixedSizes.size());
+         srcDim < e; ++srcDim) {
+      if (droppedDims.test(srcDim))
+        continue;
+      ++resultDim;
+      if (resultDim != i)
+        continue;
+      OpFoldResult size = mixedSizes[srcDim];
+      if (auto attr = dyn_cast<Attribute>(size)) {
+        if (auto intAttr = dyn_cast<IntegerAttr>(attr))
+          return arith::ConstantIndexOp::create(b, loc, intAttr.getInt());
+        return Value();
+      }
+      return cast<Value>(size);
+    }
+    return Value();
+  }
+
   if (auto collapse = dyn_cast_or_null<memref::CollapseShapeOp>(def)) {
     auto reassoc = collapse.getReassociationIndices();
     if (i >= 0 && i < static_cast<int64_t>(reassoc.size())) {
@@ -421,6 +483,284 @@ static Value resolveDimAtSource(OpBuilder &b, Location loc, Value src,
   return memref::DimOp::create(b, loc, src, idxVal);
 }
 
+/// Return true when `op` writes to its `outs` operand `m` and the
+/// computation is a pure elementwise binary op on scalar memrefs that we can
+/// promote to `arith` SSA. Sets `lhs`/`rhs`/`kind` on success.
+enum class ScalarBinaryKind { None, Mul, Add, Sub, Div };
+static ScalarBinaryKind classifyScalarBinaryWriter(Operation *op, Value m,
+                                                   Value &lhs, Value &rhs) {
+  if (auto mul = dyn_cast<MulOp>(op)) {
+    if (mul.getOutput() != m)
+      return ScalarBinaryKind::None;
+    lhs = mul.getLhs();
+    rhs = mul.getRhs();
+    return ScalarBinaryKind::Mul;
+  }
+  if (auto add = dyn_cast<AddOp>(op)) {
+    if (add.getOutput() != m)
+      return ScalarBinaryKind::None;
+    lhs = add.getLhs();
+    rhs = add.getRhs();
+    return ScalarBinaryKind::Add;
+  }
+  if (auto sub = dyn_cast<SubOp>(op)) {
+    if (sub.getOutput() != m)
+      return ScalarBinaryKind::None;
+    lhs = sub.getLhs();
+    rhs = sub.getRhs();
+    return ScalarBinaryKind::Sub;
+  }
+  if (auto div = dyn_cast<DivOp>(op)) {
+    if (div.getOutput() != m)
+      return ScalarBinaryKind::None;
+    lhs = div.getLhs();
+    rhs = div.getRhs();
+    return ScalarBinaryKind::Div;
+  }
+  return ScalarBinaryKind::None;
+}
+
+/// True if `m` is a scalar-shaped memref: rank-0, or rank-1 with static
+/// size 1.
+static bool isScalarShapeMemref(Value m) {
+  auto ty = dyn_cast<MemRefType>(m.getType());
+  if (!ty)
+    return false;
+  if (ty.getRank() == 0)
+    return true;
+  if (ty.getRank() == 1 && !ty.isDynamicDim(0) && ty.getDimSize(0) == 1)
+    return true;
+  return false;
+}
+
+/// True if `indices` are all constant zero (scalar slot access).
+static bool indicesAreZero(ValueRange indices) {
+  for (Value idx : indices) {
+    auto cst = getConstantIntValue(idx);
+    if (!cst || *cst != 0)
+      return false;
+  }
+  return true;
+}
+
+/// True if `op` writes to a memref that may alias `target` (intervening
+/// store-or-write between a forward-fold candidate's writer and the load).
+/// Uses BufferOriginAnalysis to detect aliases through view chains
+/// (memref.view / reinterpret_cast / cast / subview / expand_shape /
+/// collapse_shape).
+static bool opMayWriteToAlias(Operation *op, Value target,
+                              BufferOriginAnalysis &origin) {
+  // Cheap pre-filter: ops with no memref operands cannot write to memrefs.
+  bool hasMemrefOperand = false;
+  for (Value operand : op->getOperands())
+    if (isa<MemRefType>(operand.getType())) {
+      hasMemrefOperand = true;
+      break;
+    }
+  if (!hasMemrefOperand)
+    return false;
+
+  // Helper: a memref operand may write to target if it might be the same
+  // allocation (returns nullopt or true).
+  auto mayAlias = [&](Value v) {
+    std::optional<bool> same = origin.isSameAllocation(v, target);
+    // Conservative: unknown (nullopt) -> treat as aliasing.
+    return !same.has_value() || *same;
+  };
+
+  // memref.store writes to its memref operand.
+  if (auto store = dyn_cast<memref::StoreOp>(op))
+    return mayAlias(store.getMemRef());
+
+  // hip dialect DPS ops write to their `output` operand (last memref operand
+  // by convention; matches the Hip_DpsOp layout used across the dialect).
+  // Reads (ins) don't matter for forward-fold correctness.
+  if (op->getDialect() && op->getDialect()->getNamespace() == "hip") {
+    Value last;
+    for (Value operand : op->getOperands())
+      if (isa<MemRefType>(operand.getType()))
+        last = operand;
+    if (last)
+      return mayAlias(last);
+    return false;
+  }
+
+  // memref.copy / dealloc are conservatively treated as writes.
+  if (isa<memref::CopyOp, memref::DeallocOp>(op)) {
+    for (Value operand : op->getOperands())
+      if (isa<MemRefType>(operand.getType()) && mayAlias(operand))
+        return true;
+    return false;
+  }
+
+  // memref.load / memref.dim / view-likes only read.
+  if (isa<memref::LoadOp, memref::DimOp, memref::ViewOp,
+          memref::ReinterpretCastOp, memref::CastOp, memref::CollapseShapeOp,
+          memref::ExpandShapeOp, memref::SubViewOp>(op))
+    return false;
+
+  // Conservatively treat unknown ops with memref operands as potential writers.
+  return true;
+}
+
+/// Walk the block from start to (but excluding) `useOp` and return the most
+/// recent op that writes to a memref aliased with `target`.  This is the
+/// classical "immediately preceding store/write" pattern but generalised
+/// across aliasing view-like ops (memref.view / reinterpret_cast / cast /
+/// subview / collapse_shape / expand_shape) via BufferOriginAnalysis.
+///
+/// Multiple-writer scratch slots are routine in this pipeline: a single
+/// scratch byte slot (e.g. host-scratch offset 64 emitted by
+/// `--hip-materialize-host-scalars`) is overwritten once per Range / Expand /
+/// etc.  The relevant writer for a given load is the one immediately before
+/// it in topological (block) order.
+static Operation *
+findImmediatePrecedingAliasingWriter(Operation *useOp, Value target,
+                                     BufferOriginAnalysis &origin) {
+  Block *block = useOp->getBlock();
+  Operation *latest = nullptr;
+  for (Operation &op : *block) {
+    if (&op == useOp)
+      break;
+    if (opMayWriteToAlias(&op, target, origin))
+      latest = &op;
+  }
+  return latest;
+}
+
+/// Recursive scalar materializer.  Walks back from `m` (a scalar-shape
+/// memref<T>) through the immediately-preceding writer to produce a pure
+/// SSA scalar value that, when bufferization unwinds, equals the value
+/// stored at index 0 of `m` at `useOp`'s position.  Returns `Value()` when
+/// traceback fails (no preceding writer, non-promotable writer, or
+/// recursive call fails).
+///
+/// Handled writers:
+///   * `memref.store %v, %m[%c0]`            -> %v
+///   * `hip.mul ins(%a, %b) outs(%m)`        -> arith.muli(scalar(%a),
+///                                                         scalar(%b))
+///   * `hip.add/sub/div` similar             -> arith.{addi, subi, divsi}
+///
+/// "Immediately preceding" semantics matter because the canonical IR has
+/// many writers to the same scratch slot (e.g. one `hip.mul` per Range op
+/// overwriting the same offset-64 view of host scratch).  Each `memref.load`
+/// reads what was written by the most-recent preceding hip op, and that
+/// chain is exactly what hoisting needs to ascend through.
+static Value materializeScalarFromMemref(Value m, Operation *useOp,
+                                         BufferOriginAnalysis &origin,
+                                         OpBuilder &builder, Location loc) {
+  if (!isScalarShapeMemref(m))
+    return Value();
+
+  Operation *writer = findImmediatePrecedingAliasingWriter(useOp, m, origin);
+  if (!writer)
+    return Value();
+
+  if (auto store = dyn_cast<memref::StoreOp>(writer)) {
+    if (!indicesAreZero(store.getIndices()))
+      return Value();
+    return store.getValueToStore();
+  }
+
+  Value lhsMem, rhsMem;
+  ScalarBinaryKind kind = classifyScalarBinaryWriter(writer, m, lhsMem, rhsMem);
+  // The writer might be classified but with a different output operand (e.g.
+  // it writes to an alias of m, not m itself).  classifyScalarBinaryWriter
+  // requires output == m exactly.  When the writer aliases m via
+  // reinterpret_cast / subview chains, we conservatively bail — the simpler
+  // case (same SSA value) is what we care about here.
+  if (kind == ScalarBinaryKind::None)
+    return Value();
+  Value lhsScalar =
+      materializeScalarFromMemref(lhsMem, writer, origin, builder, loc);
+  if (!lhsScalar)
+    return Value();
+  Value rhsScalar =
+      materializeScalarFromMemref(rhsMem, writer, origin, builder, loc);
+  if (!rhsScalar)
+    return Value();
+  if (lhsScalar.getType() != rhsScalar.getType())
+    return Value();
+  if (!isa<IntegerType>(lhsScalar.getType()))
+    return Value(); // Only promote integer-typed scalar arith.
+  switch (kind) {
+  case ScalarBinaryKind::Mul:
+    return arith::MulIOp::create(builder, loc, lhsScalar, rhsScalar)
+        .getResult();
+  case ScalarBinaryKind::Add:
+    return arith::AddIOp::create(builder, loc, lhsScalar, rhsScalar)
+        .getResult();
+  case ScalarBinaryKind::Sub:
+    return arith::SubIOp::create(builder, loc, lhsScalar, rhsScalar)
+        .getResult();
+  case ScalarBinaryKind::Div:
+    return arith::DivSIOp::create(builder, loc, lhsScalar, rhsScalar)
+        .getResult();
+  case ScalarBinaryKind::None:
+    return Value();
+  }
+  return Value();
+}
+
+/// Forward-fold `memref.load %m[%c0]` (where `%m` is a scalar-shape memref
+/// fed by a single `memref.store` or hip elementwise DPS op) into pure SSA
+/// arith on the underlying scalars, so `hip-pool-allocs` can hoist dynamic
+/// alloc sizes through the count chain.
+///
+/// Motivating IR (after `--hip-materialize-host-scalars` redirects scalar
+/// `tensor.from_elements` allocations to a host-mapped scratch buffer):
+///
+///   Before:
+///     %712 = arith.index_cast %dim_275 : index to i64
+///     memref.store %712, %reinterpret_cast[%c0]
+///     %713 = arith.index_cast %dim_276 : index to i64
+///     memref.store %713, %view[%c0]
+///     hip.mul ins(%reinterpret_cast, %view) outs(%view_278)
+///     %715 = memref.load %view_278[%c0]   // <-- not hoistable
+///     ...
+///     %733 = arith.index_cast %732 : i64 to index
+///     %alloc = memref.alloc(%733) : memref<?xi64>
+///
+///   After (this pass):
+///     %712 = arith.index_cast %dim_275 : index to i64
+///     %713 = arith.index_cast %dim_276 : index to i64
+///     %715 = arith.muli %712, %713 : i64  // <-- promoted, hoistable
+///     ...
+///     %733 = arith.index_cast %732 : i64 to index
+///     %alloc = memref.alloc(%733) : memref<?xi64>
+///
+/// Dead `memref.store` / `hip.mul` ops remain in the IR — they have memref
+/// side effects so we don't DCE them here; downstream passes (canonicalize)
+/// remove them once nothing reads the scratch slot.  Their cost is one
+/// scratch write per inference, negligible relative to GPU work.
+static void foldScalarMemrefArith(func::FuncOp funcOp,
+                                  BufferOriginAnalysis &origin) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    SmallVector<memref::LoadOp> loads;
+    funcOp.walk([&](memref::LoadOp op) {
+      if (!isScalarShapeMemref(op.getMemRef()))
+        return;
+      if (!indicesAreZero(op.getIndices()))
+        return;
+      loads.push_back(op);
+    });
+    for (memref::LoadOp load : loads) {
+      OpBuilder builder(load);
+      Value scalar = materializeScalarFromMemref(load.getMemRef(), load, origin,
+                                                 builder, load.getLoc());
+      if (!scalar)
+        continue;
+      if (scalar.getType() != load.getType())
+        continue;
+      load.replaceAllUsesWith(scalar);
+      load.erase();
+      changed = true;
+    }
+  }
+}
+
 /// Fold `memref.dim(memref.collapse_shape(src), i)` and
 /// `memref.dim(memref.expand_shape(src), i)` into pure arithmetic on
 /// `memref.dim(root, ...)`. Required for PoolAllocs's hoisting to succeed
@@ -438,9 +778,17 @@ static void foldDimOfReshape(func::FuncOp funcOp) {
   SmallVector<memref::DimOp> worklist;
   funcOp.walk([&](memref::DimOp op) {
     Operation *def = op.getSource().getDefiningOp();
+    // Worklist mirrors the producers handled in resolveDimAtSource. Anything
+    // that can be folded to either a hoistable scalar (constant / arith) or
+    // to a dim-of-root must be listed here, otherwise the unhandled
+    // dim-of-non-alloc survives into Phase-4 hoisting and triggers
+    // "operand #0 does not dominate this use" when the producer is later in
+    // the function body than the hoist target (typical of memref.subview /
+    // memref.cast chains created by packed-QKV split or strided-output IR).
     if (def &&
         (isa<memref::AllocOp>(def) || isa<memref::CollapseShapeOp>(def) ||
-         isa<memref::ExpandShapeOp>(def)))
+         isa<memref::ExpandShapeOp>(def) || isa<memref::SubViewOp>(def) ||
+         isa<memref::CastOp>(def)))
       worklist.push_back(op);
   });
 
@@ -471,12 +819,6 @@ void PoolAllocsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
-  // Pre-pass: simplify `memref.dim` of `memref.collapse_shape`/
-  // `memref.expand_shape` so the hoist worklist below can ascend through to
-  // the original source memref. Without this, a surviving dim-of-collapse
-  // breaks Phase 4's SSA dominance for any same-rank dynamic Reshape
-  // decomposed into expand_shape + collapse_shape.
-  foldDimOfReshape(funcOp);
   // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
   // instead of sequential op indices.
   if (!funcOp.getBody().hasOneBlock()) {
@@ -486,11 +828,33 @@ void PoolAllocsPass::runOnOperation() {
     return signalPassFailure();
   }
 
+  // Pre-pass: forward-fold scalar `memref.load`s into pure SSA arith so the
+  // hoist worklist below ascends through `arith.muli/cmpi/select/ceildivsi`
+  // instead of stopping at `memref.load %scratch[%c0]` (which would leave
+  // the dynamic-size alloc referencing values defined later than the pool
+  // prelude — "operand #0 does not dominate this use" in Phase 4).
+  // Order matters: this runs BEFORE foldDimOfReshape because some shape
+  // arithmetic chains feed through both reshape ops AND scratch slot loads.
+  // BufferOriginAnalysis is used to detect aliasing writes through view /
+  // reinterpret_cast / cast chains (multiple SSA reinterpret_casts of one
+  // rank-0 scratch alloc would otherwise be treated as independent slots).
+  {
+    BufferOriginAnalysis origin(funcOp);
+    foldScalarMemrefArith(funcOp, origin);
+  }
+
+  BufferViewFlowAnalysis aliasAnalysis(funcOp);
+
+  // Pre-pass: simplify `memref.dim` of `memref.collapse_shape`/
+  // `memref.expand_shape` so the hoist worklist below can ascend through to
+  // the original source memref. Without this, a surviving dim-of-collapse
+  // breaks Phase 4's SSA dominance for any same-rank dynamic Reshape
+  // decomposed into expand_shape + collapse_shape.
+  foldDimOfReshape(funcOp);
+
   Block &block = funcOp.getBody().front();
 
   // ----- Phase 1: liveness analysis ------------------------------------
-
-  BufferViewFlowAnalysis aliasAnalysis(funcOp);
 
   DenseMap<Operation *, unsigned> opIndex;
   unsigned idx = 0;
@@ -582,15 +946,69 @@ void PoolAllocsPass::runOnOperation() {
   // whitelisted ops).  This guarantees the move never reorders observable
   // behavior — the ops are restricted to shape/index arithmetic, never any
   // op that might read or mutate buffers.
-  auto isHoistable = [](Operation *op) {
-    return isa<memref::DimOp, arith::ConstantOp, arith::ConstantIndexOp,
-               arith::MulIOp, arith::AddIOp, arith::SubIOp, arith::IndexCastOp,
-               // Division: needed when a Reshape is decomposed into
-               // expand_shape(input, [..., dyn/K, K, ...]) + collapse_shape,
-               // which emits `arith.divui %dim, K` for the dynamic absorber.
-               // Same purity guarantee as MulIOp/AddIOp — pure index/integer
-               // arithmetic, no side effects, safe to hoist.
-               arith::DivUIOp, arith::DivSIOp>(op);
+  auto isHoistable = [](Operation *op) -> bool {
+    if (isa<memref::DimOp, arith::ConstantOp, arith::ConstantIndexOp,
+            arith::MulIOp, arith::AddIOp, arith::SubIOp, arith::IndexCastOp,
+            // Division: needed when a Reshape is decomposed into
+            // expand_shape(input, [..., dyn/K, K, ...]) + collapse_shape,
+            // which emits `arith.divui %dim, K` for the dynamic absorber.
+            // Same purity guarantee as MulIOp/AddIOp — pure index/integer
+            // arithmetic, no side effects, safe to hoist.
+            arith::DivUIOp, arith::DivSIOp,
+            // Range count formula
+            //   n = clamp((limit - start) / delta, 0) when delta != 0
+            // is emitted by ONNX->HIP Range lowering as a chain of
+            // cmpi / andi / ori / select / subi / ceildivsi / maxsi.
+            // Once `foldScalarMemrefArith` promotes the start/limit/delta
+            // loads to pure SSA arith, the entire chain is side-effect
+            // free and safe to hoist.  Keeping these in the whitelist
+            // restricted to integer/index arithmetic preserves the
+            // "no buffer reads or mutations" invariant.
+            arith::CeilDivSIOp, arith::CeilDivUIOp, arith::CmpIOp,
+            arith::AndIOp, arith::OrIOp, arith::XOrIOp, arith::SelectOp,
+            arith::MaxSIOp, arith::MinSIOp, arith::MaxUIOp, arith::MinUIOp,
+            arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(op))
+      return true;
+    // `memref.get_global` is a pure symbol lookup — no operands, no side
+    // effects, safe to hoist alongside arith ops that read from it.
+    if (isa<memref::GetGlobalOp>(op))
+      return true;
+    // `memref.load %get_global[%c0]` is hoistable when the underlying
+    // `memref.global` is either declared `constant` or carries the
+    // `hip.external_data` attribute.  Both flags mark the buffer as
+    // session-lifetime immutable (populated once by
+    // `hip-resolve-extern-constants` / the external-data loader and never
+    // written by the generated graph), so the load behaves as a pure read
+    // of a constant value — same hoist invariant as `arith.constant`.
+    //
+    // Originally added for ONNX `Range`'s start / limit / delta operands
+    // when conversion would extract them from external-data `memref<1xi64>`
+    // globals via `memref.load %g[%c0]`.  After the hybrid two-phase
+    // constant externalisation in `ConvertOnnxToHipPass`, RangeConversion
+    // materialises those scalars as pure-SSA `arith.constant` (via
+    // `getInlineScalarFromOnnxConstant` reading the inline `onnx.Constant
+    // value` attr before Phase 2 externalises it), so this branch no
+    // longer fires for Range.  It is kept as a defensive allowance for
+    // any future converter that legitimately needs to read a 1-element
+    // external constant at compile time (e.g. ConstantOfShape's dynamic
+    // path on a shape tensor that survived conversion).
+    if (auto load = dyn_cast<memref::LoadOp>(op)) {
+      auto getGlobal = load.getMemRef().getDefiningOp<memref::GetGlobalOp>();
+      if (!getGlobal)
+        return false;
+      auto symbol = SymbolTable::lookupNearestSymbolFrom(
+          getGlobal, getGlobal.getNameAttr());
+      auto globalOp = dyn_cast_or_null<memref::GlobalOp>(symbol);
+      if (!globalOp)
+        return false;
+      // `getConstant()` is true for `memref.global "..." constant @x : ...`.
+      // External-data globals emitted by this EP are not marked `constant`
+      // (they are populated at runtime from the .constants.bin sidecar);
+      // they advertise immutability via the `hip.external_data` attribute
+      // instead.  Both are honoured here.
+      return globalOp.getConstant() || globalOp->hasAttr("hip.external_data");
+    }
+    return false;
   };
   llvm::SetVector<Operation *> hoistWorklist;
   for (auto &info : dynamics)

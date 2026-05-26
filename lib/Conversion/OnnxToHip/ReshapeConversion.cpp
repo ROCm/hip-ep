@@ -75,22 +75,153 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
   return mlir::success();
 }
 
+/// Try to resolve `output_shape[outDim]` from the ONNX Reshape `shape` operand
+/// without `tensor.extract`.
+///
+/// Motivation: when a single reassociation group contains 2+ dynamic output
+/// dims (e.g. an ONNX Reshape from `tensor<?xi64>` to `tensor<?x?xi64>` for the
+/// mrope position_ids construction), the input alone only gives the group's
+/// TOTAL size — not per-dim sizes.  The previous helper fell back to
+/// `tensor.dim(input, srcDim)` for every dyn dim in the group, producing the
+/// same SSA value for every output dim.  After CSE that collapses to a single
+/// `memref.dim` and the resulting `expand_shape ... output_shape [%n, %n]`
+/// claims an `[N, N] = N*N` element layout backed by an `N`-element buffer —
+/// downstream `ExpandStridedMetadata` then trips on "There must be at most one
+/// dynamic size per group".
+///
+/// Canonical IR pattern this resolves (Qwen3-style mrope):
+///
+///   %bs    = onnx.Gather(Shape(input_ids), [0]) // tensor<1xi64>
+///   %ss    = onnx.Gather(Shape(input_ids), [1]) // tensor<1xi64>
+///   %shape = onnx.Concat(%bs, %ss)              // tensor<2xi64>
+///   %tot   = onnx.Mul(%bs, %ss)                 // tensor<1xi64>
+///   %r     = onnx.Range(0, %tot, 1)             // tensor<?xi64>, len = bs*ss
+///   %pos   = onnx.Reshape(%r, %shape)           // tensor<?x?xi64> = [bs, ss]
+///
+/// By the time `ReshapeToStdTensor` runs in the greedy driver, the earlier
+/// ShapeConversion/GatherShapeFold patterns have rewritten the inner
+/// Gather/Shape chain to `tensor.from_elements(arith.index_cast(tensor.dim))`
+/// and the Concat into a single `tensor.from_elements(e0, e1)`.  We peek
+/// through that and return the per-dim scalar directly so the resulting
+/// expand_shape sees `output_shape [bs, ss]` with two DISTINCT SSA values.
+///
+/// Returns `nullopt` on miss; the caller falls back to the input-dim formula
+/// (which is correct when the group has at most one dynamic output dim).
+static std::optional<mlir::Value>
+tryResolveOutputDimFromReshapeShape(mlir::Value shape, int64_t outDim,
+                                    mlir::Location loc,
+                                    mlir::PatternRewriter &rewriter) {
+  if (!shape)
+    return std::nullopt;
+
+  // -- tensor.from_elements(e0, e1, ...)
+  if (auto fromElts = shape.getDefiningOp<mlir::tensor::FromElementsOp>()) {
+    if (outDim < 0 || outDim >= (int64_t)fromElts.getNumOperands())
+      return std::nullopt;
+    mlir::Value elem = fromElts.getOperand(outDim);
+    // Strip an `arith.index_cast i64 <- index` round-trip so the caller sees
+    // the original index-typed dim directly (matches PoolAllocs' hoistable
+    // whitelist; an i64-typed value would not be hoistable on its own).
+    if (auto castOp = elem.getDefiningOp<mlir::arith::IndexCastOp>()) {
+      if (castOp.getIn().getType().isIndex())
+        return castOp.getIn();
+    }
+    if (elem.getType().isIndex())
+      return elem;
+    return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                            rewriter.getIndexType(), elem)
+        .getResult();
+  }
+
+  // -- compile-time constant tensor (onnx.Constant or any op with `value`)
+  if (auto *def = shape.getDefiningOp()) {
+    if (auto valueAttr =
+            def->getAttrOfType<mlir::DenseIntElementsAttr>("value")) {
+      if (outDim < 0 || outDim >= valueAttr.getNumElements())
+        return std::nullopt;
+      llvm::APInt val = *(valueAttr.value_begin<llvm::APInt>() + outDim);
+      int64_t signedVal = val.getSExtValue();
+      // The ONNX `-1` infer-this-dim sentinel cannot be turned into a
+      // compile-time index value — bail and let the caller's input-dim
+      // formula handle it (`-1` resolves to the group's leftover product).
+      if (signedVal < 0)
+        return std::nullopt;
+      return mlir::arith::ConstantIndexOp::create(rewriter, loc, signedVal)
+          .getResult();
+    }
+  }
+
+  // -- onnx.Concat(t0, t1, ...) over rank-1 statically-sized i64 tensors.
+  //    Compute which operand `outDim` falls in (relative to the concat axis-0
+  //    element index) and recurse into that operand with the local index.
+  //    The canonical mrope idiom hits this branch:
+  //        shape = Concat(GatherShapeFold(batch), GatherShapeFold(seq))
+  //    after `GatherShapeFold` rewrites each Gather(Shape, const) to a
+  //    1-element `tensor.from_elements` — the recursive call lands on the
+  //    `tensor.from_elements` arm above.
+  if (auto *def = shape.getDefiningOp()) {
+    if (def->getName().getStringRef() == "onnx.Concat") {
+      // ONNX Concat must be along axis 0 here (the shape is a 1-D vector).
+      // Read the raw APInt to avoid `IntegerAttr::getInt()`'s
+      // signless-only assertion — ONNX exports `axis` as `si64`, so
+      // `getInt()` would trip "must be signless integer" before we even
+      // reach the value check.
+      if (auto axisAttr = def->getAttrOfType<mlir::IntegerAttr>("axis"))
+        if (axisAttr.getValue().getSExtValue() != 0)
+          return std::nullopt;
+      int64_t cum = 0;
+      for (mlir::Value operand : def->getOperands()) {
+        auto opTy = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
+        if (!opTy || opTy.getRank() != 1 || opTy.isDynamicDim(0))
+          return std::nullopt;
+        int64_t len = opTy.getDimSize(0);
+        if (outDim >= cum && outDim < cum + len)
+          return tryResolveOutputDimFromReshapeShape(operand, outDim - cum, loc,
+                                                     rewriter);
+        cum += len;
+      }
+      return std::nullopt;
+    }
+  }
+
+  return std::nullopt;
+}
+
 /// Build output shape for expand_shape operations.
 /// Used by both Reshape and Unsqueeze when expanding dimensions.
 ///
 /// For static dimensions: use compile-time size from outputType.
 /// For dynamic dimensions: extract from input via DimOp, dividing out any
 /// static dimensions in the same reassociation group.
-llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
-    mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Value data,
-    mlir::RankedTensorType outputType,
-    llvm::ArrayRef<mlir::ReassociationIndices> reassoc) {
+///
+/// When a reassociation group contains 2+ dynamic output dims (typical of an
+/// ONNX Reshape from `tensor<?xi64>` to `tensor<?x?xi64>`), the input-dim-
+/// based formula is ambiguous — it would assign the same SSA value to every
+/// dynamic dim in the group (causing the downstream `[N, N]` failure described
+/// on `tryResolveOutputDimFromReshapeShape`).  In that case we read per-dim
+/// values from the optional ONNX Reshape `shape` operand instead.  When
+/// `shape` is null (`Unsqueeze` does not have one) or resolution misses, we
+/// fall through to the input-dim path — safe because Unsqueeze's groups
+/// always have at most one dynamic dim, and any leftover Reshape miss surfaces
+/// as a structural verifier failure rather than silent data corruption.
+llvm::SmallVector<mlir::OpFoldResult>
+buildExpandShapeOutputShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                            mlir::Value data, mlir::RankedTensorType outputType,
+                            llvm::ArrayRef<mlir::ReassociationIndices> reassoc,
+                            mlir::Value shape) {
   int64_t outputRank = outputType.getRank();
 
   llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
   for (auto [g, group] : llvm::enumerate(reassoc))
     for (int64_t idx : group)
       outDimToInDim[idx] = g;
+
+  // Count dynamic output dims per reassociation group.  A group with 2+ dyn
+  // dims is the case where the input alone is not enough information.
+  llvm::SmallVector<int64_t> dynPerGroup(reassoc.size(), 0);
+  for (int64_t i : llvm::seq<int64_t>(outputRank))
+    if (outputType.isDynamicDim(i) && outDimToInDim[i] >= 0)
+      dynPerGroup[outDimToInDim[i]]++;
 
   llvm::SmallVector<mlir::OpFoldResult> outputShape;
   for (int64_t i : llvm::seq<int64_t>(outputRank)) {
@@ -101,6 +232,22 @@ llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
 
     int64_t srcDim = outDimToInDim[i];
     const auto &group = reassoc[srcDim];
+
+    // For groups with 2+ dyn dims, attempt to resolve from the shape operand
+    // first.  On success we get a DISTINCT per-dim SSA value (e.g. batch_dim
+    // for output_shape[0], seq_dim for output_shape[1]) instead of the same
+    // total-size value being repeated.
+    if (shape && dynPerGroup[srcDim] >= 2) {
+      auto resolved =
+          tryResolveOutputDimFromReshapeShape(shape, i, loc, rewriter);
+      if (resolved) {
+        outputShape.push_back(*resolved);
+        continue;
+      }
+      // Fall through; the existing path is structurally wrong here but
+      // a downstream verifier ("at most one dynamic size per group") will
+      // catch it loudly rather than silently miscompiling.
+    }
 
     int64_t staticProduct = 1;
     for (int64_t idx : group)
@@ -169,9 +316,13 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
             op, "cannot compute reshape reassociation");
 
       if (outputRank > inputRank) {
-        // Expand: use shared helper to build output shape
-        auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
-                                                       outputType, *reassocOpt);
+        // Expand: use shared helper to build output shape.  Pass the ONNX
+        // Reshape `shape` operand so groups with 2+ dyn output dims can be
+        // resolved per-dim (see `tryResolveOutputDimFromReshapeShape`).
+        mlir::Value shapeOperand =
+            op->getNumOperands() >= 2 ? op->getOperand(1) : mlir::Value();
+        auto outputShape = buildExpandShapeOutputShape(
+            rewriter, loc, data, outputType, *reassocOpt, shapeOperand);
         auto expandOp = mlir::tensor::ExpandShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt, outputShape);
         rewriter.replaceOp(op, expandOp.getResult());
@@ -320,9 +471,12 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       // dynamic input dim is split into (dyn, static_factor) — exactly the
       // combine direction here. (PoolAllocs's hoistable whitelist must
       // include arith.divui for the resulting dim arithmetic to survive
-      // pool-base hoisting.)
-      auto intOutShape = buildExpandShapeOutputShape(rewriter, loc, data,
-                                                     intType, expandReassoc);
+      // pool-base hoisting.)  No shape operand is threaded here because the
+      // intermediate type is locally constructed (input dim grown into
+      // (dyn/K, K) or (K, smaller)) and has at most one dynamic dim per
+      // reassoc group by construction — the input-dim formula always works.
+      auto intOutShape = buildExpandShapeOutputShape(
+          rewriter, loc, data, intType, expandReassoc, /*shape=*/{});
 
       auto expanded = mlir::tensor::ExpandShapeOp::create(
           rewriter, loc, intType, data, expandReassoc, intOutShape);
@@ -409,8 +563,10 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
           op, "cannot compute unsqueeze reassociation");
 
     mlir::Location loc = op->getLoc();
-    auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
-                                                   outputType, *reassocOpt);
+    // Unsqueeze inserts only size-1 dims, so every reassoc group has at most
+    // one dynamic output dim — no shape operand is needed.
+    auto outputShape = buildExpandShapeOutputShape(
+        rewriter, loc, data, outputType, *reassocOpt, /*shape=*/{});
     auto expandOp = mlir::tensor::ExpandShapeOp::create(
         rewriter, loc, outputType, data, *reassocOpt, outputShape);
     rewriter.replaceOp(op, expandOp.getResult());
