@@ -210,6 +210,48 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                     (long long)out_n, (long long)out_c, (long long)out_h,
                     (long long)out_w, type_name, (long long)data_type);
 
+  // Integer Mul: MIOpen's miopenOpTensor only supports FLOAT/HALF/BFLOAT16.
+  // i64 / i32 shape arithmetic (Shape -> Gather -> Mul -> Range / Reshape)
+  // used to silently abort here with "unsupported data_type ... for MIOpen"
+  // and the output buffer kept whatever value preceded the call (typically
+  // zero for a fresh allocation). Downstream ops then consumed that garbage
+  // -- e.g. Range received limit=0/1 instead of the real B*S product and
+  // collapsed its output to a single element. Route the integer cases to
+  // the custom HIP kernel instead; it does NOT broadcast, so we require
+  // equal lhs / rhs / out shapes (which is always the case for the in-
+  // graph shape-arithmetic pattern we care about -- both gathered scalars
+  // are rank-1 length-1).
+  if (tensor_op == HIPDNN_EP_TENSOR_OP_MUL &&
+      (data_type == HIPDNN_EP_DATATYPE_INT64 ||
+       data_type == HIPDNN_EP_DATATYPE_INT32)) {
+    const bool shapes_match =
+        (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w &&
+         rhs_n == out_n && rhs_c == out_c && rhs_h == out_h && rhs_w == out_w);
+    if (!shapes_match) {
+      fprintf(stderr,
+              "wrap_miopenOpTensor: integer Mul broadcasting is not "
+              "supported by the custom kernel "
+              "(lhs=[%lld,%lld,%lld,%lld] rhs=[%lld,%lld,%lld,%lld] "
+              "out=[%lld,%lld,%lld,%lld]). Materialise the broadcast "
+              "with Expand upstream.\n",
+              (long long)lhs_n, (long long)lhs_c, (long long)lhs_h,
+              (long long)lhs_w, (long long)rhs_n, (long long)rhs_c,
+              (long long)rhs_h, (long long)rhs_w, (long long)out_n,
+              (long long)out_c, (long long)out_h, (long long)out_w);
+      return -1;
+    }
+    int64_t num_elements = out_n * out_c * out_h * out_w;
+    int hip_dtype = (data_type == HIPDNN_EP_DATATYPE_INT64) ? HIP_DTYPE_INT64
+                                                            : HIP_DTYPE_INT32;
+    void *stream = hipdnn_ep_state_get_stream(state);
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_miopenOpTensor: routing Mul(%s) "
+        "num=%lld -> hip_elementwise_mul (MIOpen has no integer path)\n",
+        type_name, (long long)num_elements);
+    return hip_elementwise_mul(stream, lhs, rhs, output, num_elements,
+                               hip_dtype);
+  }
+
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {

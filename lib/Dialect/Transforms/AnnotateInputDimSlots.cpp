@@ -383,10 +383,20 @@ public:
       return;
     MLIRContext *ctx = &getContext();
 
+    auto *hipDialect = ctx->getLoadedDialect<HipDialect>();
+    auto *memrefDialect = ctx->getLoadedDialect<memref::MemRefDialect>();
     mainFunc.walk([&](Operation *op) {
-      // Only annotate ops in the hip dialect — they are the only
-      // ones whose lowering knows how to honour the attribute.
-      if (op->getDialect() != ctx->getLoadedDialect<HipDialect>())
+      // Annotate consumer ops whose lowering knows how to honour
+      // `hipdnn.input_slot_buffers` / `hipdnn.input_dim_slots`. Today
+      // that's every Hip-dialect op (via extractContiguousMemRefPtr-
+      // WithSlot) plus `memref.copy` (special-cased in
+      // MemRefCopyOpLowering so dynamic-shape Reshape outputs that
+      // feed off a Cat-C publisher see the published slot pointer
+      // instead of the elided 0-byte placeholder).
+      bool isHipOp = op->getDialect() == hipDialect;
+      bool isMemrefCopy = op->getDialect() == memrefDialect &&
+                          op->getName().getStringRef() == "memref.copy";
+      if (!isHipOp && !isMemrefCopy)
         return;
       // Skip the producer ops themselves (they already know their slot
       // via the `slot_id` attribute and DON'T consume slot-driven

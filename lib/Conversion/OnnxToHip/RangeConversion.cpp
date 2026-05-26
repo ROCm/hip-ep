@@ -188,11 +188,42 @@ struct RangeToHip : public RewritePattern {
     if (!elemTy.isIntOrFloat())
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 
+    // ONNX Range accepts each of (start, limit, delta) as either a
+    // rank-0 scalar OR a rank-1 length-1 tensor (single element). The
+    // ONNX spec says "T: tensor(start)" with no rank constraint, and
+    // ORT CPU accepts both. Real-world models split on this:
+    //
+    //   * The minimal-test `_make_range_from_two_dim_product_model`
+    //     in `test_range_dyn_from_shape.py` inserts a Squeeze so the
+    //     Mul output is rank-0 before Range -- targets this pattern.
+    //   * The Qwen3.5 text.onnx mrope chains (see test
+    //     `test_range_from_bs_product_rank1_in_model_topology`) feed
+    //     Range three rank-1 length-1 i64 operands directly, with no
+    //     Squeeze. 16 nodes per text.onnx -- silently broke the whole
+    //     graph at MLIR pipeline (the op-was-not-bufferized error)
+    //     until the rank-1[1] path here was added.
+    //
+    // We deliberately do NOT accept higher-rank single-element
+    // tensors (e.g. rank-2 1x1): no production graph emits that
+    // pattern and broadening the surface here would invite latent
+    // operand-rank mismatches downstream.
+    SmallVector<bool, 3> operandIsRank1;
+    operandIsRank1.reserve(3);
     for (Value v : op->getOperands()) {
       auto t = dyn_cast<RankedTensorType>(v.getType());
-      if (!t || t.getRank() != 0 || t.getElementType() != elemTy)
+      if (!t || t.getElementType() != elemTy)
         return rewriter.notifyMatchFailure(
-            op, "expected 0-D operands matching result element type");
+            op, "expected ranked operands matching result element type");
+      int64_t r = t.getRank();
+      if (r == 0) {
+        operandIsRank1.push_back(false);
+      } else if (r == 1 && t.getDimSize(0) == 1) {
+        operandIsRank1.push_back(true);
+      } else {
+        return rewriter.notifyMatchFailure(
+            op, "expected each operand to be rank-0 or rank-1 length-1 "
+                "(observed in Qwen text.onnx)");
+      }
     }
 
     Location loc = op->getLoc();
@@ -200,12 +231,24 @@ struct RangeToHip : public RewritePattern {
     if (failed(verifyConstantDeltaNonZero(op, op->getOperand(2), elemTy)))
       return failure();
 
-    Value startE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(0),
-                                             ValueRange{});
-    Value limitE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(1),
-                                             ValueRange{});
-    Value deltaE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(2),
-                                             ValueRange{});
+    // tensor.extract index list depends on operand rank:
+    //   rank-0 scalar      -> ValueRange{} (no indices)
+    //   rank-1 length-1    -> {%c0} (one index, constant 0)
+    // Bundling the helper local keeps the per-operand calls below
+    // readable.
+    Value c0Index;
+    auto extractScalar = [&](Value tensorV, bool isRank1) -> Value {
+      if (!isRank1)
+        return tensor::ExtractOp::create(rewriter, loc, tensorV, ValueRange{});
+      if (!c0Index)
+        c0Index = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      return tensor::ExtractOp::create(rewriter, loc, tensorV,
+                                       ValueRange{c0Index});
+    };
+
+    Value startE = extractScalar(op->getOperand(0), operandIsRank1[0]);
+    Value limitE = extractScalar(op->getOperand(1), operandIsRank1[1]);
+    Value deltaE = extractScalar(op->getOperand(2), operandIsRank1[2]);
 
     Value len = llvm::TypeSwitch<Type, Value>(elemTy)
                     .Case<IntegerType>([&](IntegerType ity) {

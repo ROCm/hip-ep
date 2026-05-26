@@ -46,16 +46,26 @@ proves:
 4. The per-Compute runtime state (dyn pool, autotune cache,
    GQA seqlens cache, etc.) does not leak state across shape switches.
 
-``image_features``
-------------------
+``image_features`` (model contract)
+-----------------------------------
 
-In the 9B graph ``image_features`` is a static initializer, NOT a
-graph input. To get a single InferenceSession that handles all four
-``K`` values we replace it once at fixture-construction time with a
-``[2*K_MAX, 2048]`` synthetic tensor; the per-call Slice into it only
-consumes ``K * 4096`` flat elements, so any K in ``[0, K_MAX]`` runs
-correctly against the same initializer. We pick ``K_MAX = 4`` because
-that is the largest K in the parametrization above.
+In the current
+``Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu/embedding.onnx`` checkpoint
+``image_features`` is a graph INPUT of shape
+``[num_logical_patches, 4096]`` fp16, NOT a static initializer.
+(Older snapshots of this checkpoint family shipped it as an
+initializer with second dim ``2048``; if you hit the in-tree static
+test
+``test_nonzero_qwen_embedding.py::_substitute_image_features`` raising
+``image_features initializer not present in graph`` that is the model
+contract drift, not a regression here.)
+
+The per-call ``Reshape(image_features, [-1]) -> Slice([0:K*4096])``
+chain expects exactly ``K * 4096`` flat fp16 elements. The natural
+sizing is ``image_features.shape = (K, 4096)`` -- one row per
+IMAGE_TOKEN_ID slot. ``K=0`` is the legal empty tensor ``(0, 4096)``.
+Each test call feeds a fresh, deterministically-filled fp16 buffer of
+that exact size; no graph-level shape rewriting is needed.
 
 ``assert_subgraph_on_ep`` (Phase 0) is called via ``make_session``
 inside the EP backend's session-creation path, so a silent CPU
@@ -65,7 +75,6 @@ yielding (potentially correct-looking) CPU outputs.
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 
 import numpy as np
@@ -86,15 +95,19 @@ _QWEN_EMBEDDING_ONNX = Path(
 
 _IMAGE_TOKEN_ID = 248056
 _HIDDEN = 4096
-_IMAGE_FEATURES_COLS = 2048
+# Width of every per-call image_features row. Pinned to 4096 to match
+# the current checkpoint's declared dim_param-paired layout
+# (image_features: f16[num_logical_patches, 4096]); the Reshape->[-1]
+# downstream of it produces exactly K * 4096 flat elements when there
+# are K rows, which is what Slice consumes.
+_IMAGE_FEATURES_COLS = 4096
 
 # Per-call shape combinations. (B, S, K) where:
 #   B = batch_size  (left symbolic in the model)
 #   S = sequence_length (left symbolic in the model)
-#   K = number of IMAGE_TOKEN_ID positions injected into input_ids.
-#       Image_features is sized for K_MAX (see below); the Slice into
-#       it consumes K * 4096 elements per call, so each K in [0, K_MAX]
-#       is served by the same initializer.
+#   K = number of IMAGE_TOKEN_ID positions in input_ids. Each call
+#       feeds image_features.shape = (K, 4096) -- the natural per-call
+#       sizing for a graph that consumes K * 4096 flat features.
 _SHAPES: list[tuple[int, int, int]] = [
     (1, 128, 0),
     (1, 128, 4),
@@ -102,41 +115,15 @@ _SHAPES: list[tuple[int, int, int]] = [
     (1, 256, 1),
 ]
 
-_K_MAX = max(k for *_, k in _SHAPES)
-
-
-def _substitute_image_features(m: onnx.ModelProto, rows: int) -> onnx.ModelProto:
-    """Replace the empty ``image_features`` initializer with ``[rows, 2048]``.
-
-    Mirrors the helper in the static 9B test. The deterministic
-    ``arange * 0.01`` payload gives every position a recognisable value
-    so the post-Slice routing can be checked with bit-equality.
-    """
-    out = copy.deepcopy(m)
-    fill = np.arange(rows * _IMAGE_FEATURES_COLS, dtype=np.float16).reshape(
-        rows, _IMAGE_FEATURES_COLS
-    ) * np.float16(0.01)
-    new_init = onnx.numpy_helper.from_array(fill, name="image_features")
-    replaced = False
-    for i, ini in enumerate(out.graph.initializer):
-        if ini.name == "image_features":
-            out.graph.initializer[i].CopyFrom(new_init)
-            replaced = True
-            break
-    if not replaced:
-        raise RuntimeError("image_features initializer not present in graph")
-    return out
-
 
 @pytest.fixture(scope="module")
 def qwen_embedding_model_dyn():
     """Load the 9B embedding ONNX with ``batch_size`` / ``sequence_length`` symbolic.
 
     Both dim_params stay unbound at the graph level (the whole point of
-    this file). ``image_features`` is rewritten once at fixture-load
-    time to a ``[2*K_MAX, 2048]`` block so the SAME ModelProto -- and
-    therefore the same InferenceSession -- can service every
-    parametrized K.
+    this file). ``image_features`` is a graph input in this checkpoint
+    so there is nothing to substitute here -- the per-call feed dict
+    supplies the right ``(K, 4096)`` block.
     """
     if not _QWEN_EMBEDDING_ONNX.exists():
         pytest.skip(
@@ -146,13 +133,37 @@ def qwen_embedding_model_dyn():
 
     m = onnx.load(str(_QWEN_EMBEDDING_ONNX), load_external_data=True)
 
-    # DO NOT bind batch_size / sequence_length -- that is the entire
-    # contract of this test. Leave the symbolic dims in place so the
-    # EP gets a graph with `tensor<?x?xi64>` for input_ids and the
+    # DO NOT bind batch_size / sequence_length / num_logical_patches --
+    # that is the entire contract of this test. Leave every dim_param
+    # in place so the EP gets a graph with `tensor<?x?xi64>` for
+    # input_ids, `tensor<?x4096xf16>` for image_features, and the
     # corresponding `?x?x4096` for the embedding output.
-
-    m = _substitute_image_features(m, rows=2 * _K_MAX)
     return m
+
+
+def _make_image_features(k: int) -> np.ndarray:
+    """Synthesize ``image_features`` for ``K`` image-token positions.
+
+    Shape is exactly ``(K, 4096)`` fp16 -- the per-call sizing the
+    Reshape->Slice->ScatterND chain expects. The ``K=0`` case is a
+    legal empty ONNX tensor ``(0, 4096)`` and exercises the EP's
+    empty-input handling: ``hipdnn_ep_tensor_prepare_input`` detects
+    the zero-element shape, allocates a 1-byte sentinel from the
+    pool, and skips the H2D copy (the model still receives the
+    correct shape descriptor and downstream
+    ``Reshape->Slice->ScatterND`` no-ops). See CLAUDE.md
+    "Cat-C slot publishers MUST publish a non-null buffer even when
+    N=0" for the analogous documented pattern.
+
+    Values are a deterministic arange * 0.01 payload so each non-empty
+    row is distinguishable and the post-Scatter routing can be
+    validated structurally.
+    """
+    if k == 0:
+        return np.zeros((0, _IMAGE_FEATURES_COLS), dtype=np.float16)
+    return np.arange(k * _IMAGE_FEATURES_COLS, dtype=np.float16).reshape(
+        k, _IMAGE_FEATURES_COLS
+    ) * np.float16(0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -228,18 +239,31 @@ class TestQwen9bEmbeddingDyn:
         cpu_backend = OrtCpuBackend()
 
         try:
-            input_name = ep_sess.get_inputs()[0].name
+            # Pin the input names to what the model actually exports
+            # (input_ids first, image_features second per the graph).
+            ep_input_names = [i.name for i in ep_sess.get_inputs()]
+            assert ep_input_names == ["input_ids", "image_features"], (
+                f"unexpected input ordering from the EP session: "
+                f"{ep_input_names}. Model contract drift?"
+            )
+
             for b, s, k in _SHAPES:
                 positions, input_ids = _build_input_ids(b, s, k)
+                image_features = _make_image_features(k)
 
                 # CPU reference: fresh CPU session per shape is OK
                 # because the CPU side isn't what this test is gating on.
-                expected = cpu_backend.run(str(model_path), [input_ids])
+                # OrtCpuBackend.run() zips inputs to graph-input order,
+                # which matches our [input_ids, image_features] tuple.
+                expected = cpu_backend.run(str(model_path), [input_ids, image_features])
 
                 # EP: same session, new shape. ORT routes this back into
                 # the cached MorphiZen-compiled DLL whose runtime reads
                 # the per-call sizes from input_shapes.
-                actual = ep_sess.run(None, {input_name: input_ids})
+                actual = ep_sess.run(
+                    None,
+                    {"input_ids": input_ids, "image_features": image_features},
+                )
 
                 compare_outputs(actual, expected, atol=0.0, rtol=0.0)
 

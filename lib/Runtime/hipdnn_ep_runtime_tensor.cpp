@@ -134,7 +134,12 @@ static void check_gcnarch(const char *location) {
 }
 
 // Helper: Calculate total size in bytes for a tensor
-// Returns 0 on error (overflow or invalid dimensions)
+// Returns 0 on overflow, invalid dimensions, OR a legitimately empty tensor
+// (any dim == 0). Callers MUST distinguish "empty" from "error" themselves --
+// the easiest way is to check shape validity first (rank, non-null, no
+// negative dims) and then treat size_bytes==0 as the empty-tensor sentinel.
+// We deliberately do NOT log a warning when shape[i] == 0: empty tensors are
+// legal ONNX (e.g. text-only inference passes image_features=[0, H]).
 static size_t calculateTensorSize(const int64_t *shape, size_t rank,
                                   size_t element_size) {
   if (rank == 0) {
@@ -144,9 +149,12 @@ static size_t calculateTensorSize(const int64_t *shape, size_t rank,
     return 0;
   }
 
-  // Validate all dimensions are positive
+  // Validate dimensions: shape[i] < 0 is an error (corrupted descriptor);
+  // shape[i] == 0 produces total_elements == 0 below and the function
+  // returns 0 -- treated by callers as a legitimately empty tensor, not
+  // an error.
   for (size_t i = 0; i < rank; i++) {
-    if (shape[i] <= 0) {
+    if (shape[i] < 0) {
       fprintf(stderr, "Invalid dimension at index %zu: %lld\n", i,
               (long long)shape[i]);
       return 0;
@@ -268,13 +276,6 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     return HIPDNN_EP_ERR_NULL_POINTER; // Use generic error code
   }
 
-  // Validate tensor pointers
-  if (!tensor->data) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_input: tensor[%zu].data is null\n",
-            index);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
   if (!tensor->shape && tensor->rank != 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_input: tensor[%zu].shape is null\n",
@@ -301,17 +302,57 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     element_size = kDefaultElementSize;
   }
 
-  // Calculate buffer size
+  // Detect an empty input: any dim == 0 makes calculateTensorSize() return 0
+  // (it stopped treating shape[i]==0 as an error -- see the helper). Empty
+  // tensors are legal ONNX and arrive with `tensor->data == nullptr` (no
+  // backing storage for zero elements). They take a separate path here:
+  // we allocate a 1-byte sentinel from the pool so that
+  //   * downstream wrappers that null-check the buffer pointer don't
+  //     fail (mirrors the Cat-C "publish a non-null buffer even at N=0"
+  //     convention -- see CLAUDE.md);
+  //   * pool_release() (which asserts size_bytes > 0) still works in
+  //     free_input;
+  //   * the H2D copy is skipped (no source bytes).
+  // Negative dims still hit the `< 0` check inside calculateTensorSize and
+  // are surfaced as an INVALID_DIMENSION error.
   size_t size_bytes =
       calculateTensorSize(tensor->shape, tensor->rank, element_size);
-  if (size_bytes == 0) {
-    return HIPDNN_EP_ERR_INVALID_DIMENSION;
+  const bool is_empty_input = (size_bytes == 0);
+  if (is_empty_input) {
+    // Distinguish "empty" from "error": calculateTensorSize prints to
+    // stderr on overflow / negative dim; getting here with shape valid
+    // means all dims are non-negative and at least one is zero.
+    if (tensor->rank > 0 && tensor->shape) {
+      bool has_negative = false;
+      for (size_t i = 0; i < tensor->rank; i++) {
+        if (tensor->shape[i] < 0) {
+          has_negative = true;
+          break;
+        }
+      }
+      if (has_negative) {
+        return HIPDNN_EP_ERR_INVALID_DIMENSION;
+      }
+    }
+    // Sentinel size for the pool allocator; the real "this tensor has 0
+    // elements" signal lives in tensor->shape[i]==0 and is read by
+    // downstream wrappers from the shape descriptor.
+    size_bytes = 1;
+  } else {
+    // Non-empty input: tensor->data MUST be a real backing buffer.
+    if (!tensor->data) {
+      fprintf(stderr,
+              "hipdnn_ep_tensor_prepare_input: tensor[%zu].data is null\n",
+              index);
+      return HIPDNN_EP_ERR_NULL_POINTER;
+    }
   }
 
   RUNTIME_DEBUG_LOG(
       "[Runtime DEBUG] prepare_input[%zu]: rank=%zu element_size=%zu "
-      "size_bytes=%zu memory_type=%d\n",
-      index, tensor->rank, element_size, size_bytes, tensor->memory_type);
+      "size_bytes=%zu memory_type=%d%s\n",
+      index, tensor->rank, element_size, size_bytes, tensor->memory_type,
+      is_empty_input ? " (empty input -> sentinel buffer, H2D skipped)" : "");
 
   // Fast path: caller already placed `data` in GPU-accessible memory
   // (TENSOR_MEMORY_GPU), so we alias the buffer instead of pool_alloc + H2D.
@@ -325,12 +366,20 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // host H2D path below — preserves behaviour for hip-test-dll,
   // hip-onnx-runner, and the OGA path-B-only configuration where KV cache
   // still lives in host RAM.
-  const bool alias_caller_buffer = (tensor->memory_type == TENSOR_MEMORY_GPU);
+  //
+  // Empty inputs (is_empty_input) ALWAYS take the sentinel pool path
+  // regardless of memory_type -- caller's data pointer is null, so the
+  // alias fast-path would propagate that null to downstream consumers
+  // and trip the same null-pointer checks we're trying to avoid.
+  const bool alias_caller_buffer =
+      (tensor->memory_type == TENSOR_MEMORY_GPU) && !is_empty_input;
   void *gpu_ptr = nullptr;
   if (alias_caller_buffer) {
     gpu_ptr = tensor->data;
   } else {
-    // Allocate GPU buffer (pool reuses across inferences)
+    // Allocate GPU buffer (pool reuses across inferences). For
+    // is_empty_input this is a 1-byte sentinel; bucket re-use in
+    // pool_alloc makes that essentially free across calls.
     gpu_ptr = pool_alloc(size_bytes);
     if (!gpu_ptr) {
       fprintf(stderr,
@@ -408,8 +457,10 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   }
 
   // H2D transfer (skipped on the alias fast path — caller's buffer is
-  // already GPU-accessible, no copy needed).
-  if (!alias_caller_buffer) {
+  // already GPU-accessible, no copy needed -- and on the empty-input
+  // sentinel path, where tensor->data is null and there are no source
+  // bytes to copy).
+  if (!alias_caller_buffer && !is_empty_input) {
     if (hipMemcpyAsync(gpu_ptr, tensor->data, size_bytes, hipMemcpyHostToDevice,
                        static_cast<hipStream_t>(state->stream)) != hipSuccess) {
       fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");

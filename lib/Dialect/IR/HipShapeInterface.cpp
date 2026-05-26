@@ -5,7 +5,10 @@
 #include "hip/Dialect/IR/HipShapeInterface.h"
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BlockSupport.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -1025,6 +1028,365 @@ DimSpec resolveValueFromI64Tensor(mlir::Value v, int64_t flat_offset) {
   return emptySpec();
 }
 
+// Resolve "the value of element `flat_offset` of a rank-1 i64 memref"
+// as a DimSpec. Used by `resolveValueAsDimSpec` when it hits a
+// `memref.load %buf[%c]` post-bufferize: the value loaded from a
+// dynamic-shape-vector buffer at constant index `flat_offset` chases
+// through several producer patterns common in ReshapeConversion's
+// runtime shape-vector chain.
+//
+// Patterns recognised (each maps to a known DimSpec):
+//
+//   * `%buf` is a func-entry-block arg of i64 rank-1 type --
+//     `InputValueI64(epIdx, flat_offset)`.
+//   * `%buf` was written by a `memref.store %v, %buf[%c]` whose index
+//     matches `flat_offset` -- recurse on `%v`. Reinterpret_cast hops
+//     on either side are stripped before comparison.
+//   * `%buf` was written by `hip.gather(%data, %indices)` as DPS init
+//     -- look up `indices[flat_offset]` from a static constant memref
+//     OR from a host-readable input, then recurse on the data buffer
+//     at that index.
+//   * `%buf` was written by `hip.shape(%data)` as DPS init -- read
+//     the per-element DimSpec from the `element_dim_specs` attribute
+//     and recompose with any operand-relative leaves substituted
+//     against the actual `%data`.
+//
+// `reference_op` is the op at which the recursion is being performed
+// (typically the `memref.load`) -- used as the lower bound for the
+// "scan backwards in the same block for matching stores" walk.
+DimSpec resolveBufferElementAsDimSpec(mlir::Operation *reference_op,
+                                      mlir::Value buf, int64_t flat_offset);
+
+// Resolve an SSA scalar (i64 or index) into a DimSpec by tracing back
+// through the producer chain. Used by the tensor.expand_shape /
+// memref.expand_shape DimSpec builder to convert an `output_shape[i]`
+// operand into a DimSpec for the corresponding result dim. The chain
+// types we need to handle today come from `ReshapeConversion`:
+//
+//   * `arith.index_cast` / `arith.index_castui`: unwrap and recurse.
+//   * `arith.constant`: pin to `Static`.
+//   * `tensor.extract %t[%c]` where `%t` is a constant rank-1 i64 tensor
+//     produced by `tensor.from_elements`: trace into the indexed
+//     operand of `from_elements` and recurse.
+//   * `tensor.extract %t[%c]` where `%t` is the result of an op for
+//     which `resolveValueFromI64Tensor` returns a non-empty spec (i.e.
+//     the tensor is a func entry-block arg, an `onnx.Constant` etc.).
+//   * `tensor.dim` / `memref.dim`: resolve back to the producer's
+//     dim via `resolveDimFromValue`.
+//
+// Returns empty spec if any unrecognised op is hit; the caller falls
+// back to whatever else it has (often the static result-type lookup,
+// which gives `Static(?)` => empty and triggers the EP's legacy "-1
+// shape" path).
+DimSpec resolveValueAsDimSpec(mlir::Value v) {
+  if (!v)
+    return emptySpec();
+  mlir::Operation *def = v.getDefiningOp();
+  if (!def)
+    return emptySpec();
+
+  if (auto c = llvm::dyn_cast<mlir::arith::ConstantOp>(def)) {
+    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(c.getValue()))
+      return DimSpec::makeStatic(intAttr.getInt());
+    return emptySpec();
+  }
+  if (auto cast = llvm::dyn_cast<mlir::arith::IndexCastOp>(def))
+    return resolveValueAsDimSpec(cast.getIn());
+  if (auto cast = llvm::dyn_cast<mlir::arith::IndexCastUIOp>(def))
+    return resolveValueAsDimSpec(cast.getIn());
+  if (auto extract = llvm::dyn_cast<mlir::tensor::ExtractOp>(def)) {
+    // Only rank-1 extracts with a single constant index are recognised;
+    // higher-rank or runtime-indexed extracts cannot be statically
+    // mapped to a single from_elements operand.
+    if (extract.getIndices().size() != 1)
+      return emptySpec();
+    auto cstIdx =
+        extract.getIndices()[0].getDefiningOp<mlir::arith::ConstantIndexOp>();
+    if (!cstIdx)
+      return emptySpec();
+    int64_t i = cstIdx.value();
+    mlir::Value src = extract.getTensor();
+    // Trace through tensor.from_elements: the i-th element is the i-th
+    // SSA operand.
+    if (auto fe = src.getDefiningOp<mlir::tensor::FromElementsOp>()) {
+      auto elems = fe.getElements();
+      if (i < 0 || (size_t)i >= elems.size())
+        return emptySpec();
+      return resolveValueAsDimSpec(elems[i]);
+    }
+    // Fallback: treat the extract as a host-readable index into the
+    // source tensor and let resolveValueFromI64Tensor decide. The flat
+    // offset for a rank-1 tensor is the index itself.
+    return resolveValueFromI64Tensor(src, i);
+  }
+  if (auto load = llvm::dyn_cast<mlir::memref::LoadOp>(def)) {
+    // Post-bufferize counterpart of tensor.extract on a rank-1 memref.
+    // Only rank-1 loads at a constant index are recognised.
+    if (load.getIndices().size() != 1)
+      return emptySpec();
+    auto cstIdx =
+        load.getIndices()[0].getDefiningOp<mlir::arith::ConstantIndexOp>();
+    if (!cstIdx)
+      return emptySpec();
+    int64_t i = cstIdx.value();
+    mlir::Value buf = load.getMemRef();
+    return resolveBufferElementAsDimSpec(load.getOperation(), buf, i);
+  }
+  if (auto dim = llvm::dyn_cast<mlir::tensor::DimOp>(def)) {
+    auto cstIdx = dim.getIndex().getDefiningOp<mlir::arith::ConstantIndexOp>();
+    if (!cstIdx)
+      return emptySpec();
+    return resolveDimFromValue(dim.getSource(),
+                               static_cast<unsigned>(cstIdx.value()));
+  }
+  if (auto dim = llvm::dyn_cast<mlir::memref::DimOp>(def)) {
+    auto cstIdx = dim.getIndex().getDefiningOp<mlir::arith::ConstantIndexOp>();
+    if (!cstIdx)
+      return emptySpec();
+    return resolveDimFromValue(dim.getSource(),
+                               static_cast<unsigned>(cstIdx.value()));
+  }
+  if (auto mul = llvm::dyn_cast<mlir::arith::MulIOp>(def)) {
+    DimSpec lhs = resolveValueAsDimSpec(mul.getLhs());
+    DimSpec rhs = resolveValueAsDimSpec(mul.getRhs());
+    if (lhs.nodes().empty() || rhs.nodes().empty())
+      return emptySpec();
+    return DimSpec::makeBinary(DimSpecKind::Mul, lhs, rhs);
+  }
+  if (auto add = llvm::dyn_cast<mlir::arith::AddIOp>(def)) {
+    DimSpec lhs = resolveValueAsDimSpec(add.getLhs());
+    DimSpec rhs = resolveValueAsDimSpec(add.getRhs());
+    if (lhs.nodes().empty() || rhs.nodes().empty())
+      return emptySpec();
+    return DimSpec::makeBinary(DimSpecKind::Add, lhs, rhs);
+  }
+  if (auto sub = llvm::dyn_cast<mlir::arith::SubIOp>(def)) {
+    DimSpec lhs = resolveValueAsDimSpec(sub.getLhs());
+    DimSpec rhs = resolveValueAsDimSpec(sub.getRhs());
+    if (lhs.nodes().empty() || rhs.nodes().empty())
+      return emptySpec();
+    return DimSpec::makeBinary(DimSpecKind::Sub, lhs, rhs);
+  }
+  if (auto div = llvm::dyn_cast<mlir::arith::DivUIOp>(def)) {
+    DimSpec lhs = resolveValueAsDimSpec(div.getLhs());
+    DimSpec rhs = resolveValueAsDimSpec(div.getRhs());
+    if (lhs.nodes().empty() || rhs.nodes().empty())
+      return emptySpec();
+    return DimSpec::makeBinary(DimSpecKind::FloorDiv, lhs, rhs);
+  }
+  return emptySpec();
+}
+
+namespace {
+
+// Strip a chain of `memref.reinterpret_cast` ops back to the original
+// buffer SSA value. Used so that store-then-load pattern matching can
+// look through the casts ReshapeConversion emits to access slices of
+// the pool buffer.
+mlir::Value stripReinterpretCasts(mlir::Value v) {
+  while (auto rc = v.getDefiningOp<mlir::memref::ReinterpretCastOp>())
+    v = rc.getSource();
+  return v;
+}
+
+// True iff two memref SSA values refer to the same underlying buffer
+// when reinterpret_casts are stripped. This is a structural test, not
+// an alias-analysis result -- it only catches the common case of
+// "same SSA value optionally re-cast".
+bool sameUnderlyingBuffer(mlir::Value a, mlir::Value b) {
+  return stripReinterpretCasts(a) == stripReinterpretCasts(b);
+}
+
+// Try to read element `idx` of `%v` as a compile-time i64 constant.
+// Recognises arith.constant dense<...>, hip.get_constant pointing at
+// an externalised splat or initial_value, and memref.get_global with
+// an initial_value attribute. Returns failure when the value isn't a
+// statically resolvable constant.
+mlir::LogicalResult tryReadStaticI64FromBuffer(mlir::Value v, int64_t idx,
+                                               int64_t &out) {
+  if (!v)
+    return mlir::failure();
+  mlir::Operation *def = v.getDefiningOp();
+  if (!def)
+    return mlir::failure();
+  // arith.constant dense<...>.
+  if (auto c = llvm::dyn_cast<mlir::arith::ConstantOp>(def)) {
+    auto dense = llvm::dyn_cast<mlir::DenseElementsAttr>(c.getValue());
+    if (!dense)
+      return mlir::failure();
+    auto values = llvm::to_vector(dense.getValues<mlir::APInt>());
+    if (idx < 0 || (size_t)idx >= values.size())
+      return mlir::failure();
+    out = values[idx].getSExtValue();
+    return mlir::success();
+  }
+  // hip.get_constant: chase via the module-level constant_splat_elem_values /
+  // constant_source_kinds tables. Kind == 1 means splat.
+  if (def->getName().getStringRef() == "hip.get_constant") {
+    if (def->getNumOperands() < 2)
+      return mlir::failure();
+    auto idxCst = def->getOperand(1).getDefiningOp<mlir::arith::ConstantOp>();
+    if (!idxCst)
+      return mlir::failure();
+    auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(idxCst.getValue());
+    if (!intAttr)
+      return mlir::failure();
+    int64_t cst_idx = intAttr.getInt();
+    auto module = def->getParentOfType<mlir::ModuleOp>();
+    if (!module)
+      return mlir::failure();
+    auto kindsAttr = module->getAttrOfType<mlir::DenseI32ArrayAttr>(
+        "hipdnn.constant_source_kinds");
+    auto splatAttr = module->getAttrOfType<mlir::DenseI64ArrayAttr>(
+        "hipdnn.constant_splat_elem_values");
+    if (!kindsAttr || !splatAttr || cst_idx < 0 ||
+        cst_idx >= (int64_t)kindsAttr.size() ||
+        cst_idx >= (int64_t)splatAttr.size())
+      return mlir::failure();
+    // Only splat constants can be resolved without I/O.
+    if (kindsAttr.asArrayRef()[cst_idx] != 1)
+      return mlir::failure();
+    out = splatAttr.asArrayRef()[cst_idx];
+    return mlir::success();
+  }
+  // memref.get_global with an initial_value.
+  if (auto getGlobal = llvm::dyn_cast<mlir::memref::GetGlobalOp>(def)) {
+    auto module = def->getParentOfType<mlir::ModuleOp>();
+    if (!module)
+      return mlir::failure();
+    auto sym = mlir::SymbolTable::lookupSymbolIn(module, getGlobal.getName());
+    if (!sym)
+      return mlir::failure();
+    auto initAttr = sym->getAttr("initial_value");
+    auto dense = llvm::dyn_cast_or_null<mlir::DenseElementsAttr>(initAttr);
+    if (!dense)
+      return mlir::failure();
+    auto values = llvm::to_vector(dense.getValues<mlir::APInt>());
+    if (idx < 0 || (size_t)idx >= values.size())
+      return mlir::failure();
+    out = values[idx].getSExtValue();
+    return mlir::success();
+  }
+  return mlir::failure();
+}
+
+// Find the most recent DPS writer of `buf` that comes before `before`
+// in the same block. Walks reinterpret_cast hops on the writer's init
+// operand. Returns null if no Hip-dialect DPS writer is found in the
+// same block.
+mlir::Operation *findDpsWriterBefore(mlir::Operation *before, mlir::Value buf,
+                                     unsigned *initIdxOut) {
+  if (!before)
+    return nullptr;
+  mlir::Block *block = before->getBlock();
+  if (!block)
+    return nullptr;
+  mlir::Value bufRoot = stripReinterpretCasts(buf);
+  for (auto it = mlir::Block::reverse_iterator(before->getIterator());
+       it != block->rend(); ++it) {
+    mlir::Operation &op = *it;
+    auto dps = llvm::dyn_cast<mlir::DestinationStyleOpInterface>(&op);
+    if (!dps)
+      continue;
+    // Restrict to Hip-dialect DPS ops -- this is where the runtime
+    // semantics that produce shape buffers live. Generic DPS writers
+    // (linalg, etc.) are not covered today.
+    if (op.getDialect() !=
+        op.getContext()->getLoadedDialect<mlir::hip::HipDialect>())
+      continue;
+    auto inits = dps.getDpsInits();
+    for (auto [k, init] : llvm::enumerate(inits)) {
+      if (sameUnderlyingBuffer(init, bufRoot)) {
+        if (initIdxOut)
+          *initIdxOut = static_cast<unsigned>(k);
+        return &op;
+      }
+    }
+  }
+  return nullptr;
+}
+
+} // namespace
+
+DimSpec resolveBufferElementAsDimSpec(mlir::Operation *reference_op,
+                                      mlir::Value buf, int64_t flat_offset) {
+  if (!buf || flat_offset < 0)
+    return emptySpec();
+  // (1) Direct func-arg memref: the EP can read host-side, encode as
+  // InputValueI64.
+  DimSpec asInputArg = resolveValueFromI64Tensor(buf, flat_offset);
+  if (!asInputArg.nodes().empty())
+    return asInputArg;
+  // (2) Walk backwards in the same block for a matching memref.store.
+  mlir::Value bufRoot = stripReinterpretCasts(buf);
+  if (reference_op && reference_op->getBlock()) {
+    mlir::Block *block = reference_op->getBlock();
+    for (auto it = mlir::Block::reverse_iterator(reference_op->getIterator());
+         it != block->rend(); ++it) {
+      mlir::Operation &op = *it;
+      if (auto store = llvm::dyn_cast<mlir::memref::StoreOp>(&op)) {
+        if (!sameUnderlyingBuffer(store.getMemRef(), bufRoot))
+          continue;
+        if (store.getIndices().size() != 1)
+          continue;
+        auto storeIdx =
+            store.getIndices()[0].getDefiningOp<mlir::arith::ConstantIndexOp>();
+        if (!storeIdx)
+          continue;
+        if (storeIdx.value() != flat_offset)
+          continue;
+        return resolveValueAsDimSpec(store.getValueToStore());
+      }
+    }
+  }
+  // (3) Walk backwards for a Hip-dialect DPS writer of this buffer.
+  // The supported writers are `hip.shape` (carries element_dim_specs)
+  // and `hip.gather` (forwards element idx -> data idx).
+  unsigned initIdx = 0;
+  mlir::Operation *writer = findDpsWriterBefore(reference_op, buf, &initIdx);
+  if (!writer)
+    return emptySpec();
+  llvm::StringRef writerName = writer->getName().getStringRef();
+  if (writerName == "hip.shape") {
+    // hip.shape writes a rank-1 i64 buffer where each element is the
+    // size of an input dim. element_dim_specs[i] is the per-element
+    // DimSpec the converter recorded; substitute operand-relative
+    // leaves against the actual data operand of this hip.shape op.
+    auto elemSpecs =
+        writer->getAttrOfType<mlir::ArrayAttr>("element_dim_specs");
+    if (!elemSpecs || flat_offset >= (int64_t)elemSpecs.size())
+      return emptySpec();
+    auto perElem = llvm::dyn_cast<mlir::ArrayAttr>(elemSpecs[flat_offset]);
+    if (!perElem)
+      return emptySpec();
+    DimSpec spec = DimSpec::parseFromArrayAttr(perElem);
+    if (spec.nodes().empty())
+      return emptySpec();
+    // hip.shape's element_dim_specs were attached in EP-relative
+    // input-index space when the converter ran (the shape op's only
+    // data operand is operand 1, and the spec leaves reference
+    // EP-input indices already via resolveDimFromValue). Static /
+    // RuntimeSlot / InputDim / InputValueI64 leaves are universal --
+    // no further re-walking needed.
+    return spec;
+  }
+  if (writerName == "hip.gather") {
+    // hip.gather(ctx, data, indices) -> output[i] = data[indices[i]].
+    // We need a compile-time-readable indices vector to fold this.
+    // Operand layout: ctx@0, data@1, indices@2, output@3.
+    if (writer->getNumOperands() < 4)
+      return emptySpec();
+    mlir::Value data = writer->getOperand(1);
+    mlir::Value indices = writer->getOperand(2);
+    int64_t resolvedIdx = 0;
+    if (mlir::failed(
+            tryReadStaticI64FromBuffer(indices, flat_offset, resolvedIdx)))
+      return emptySpec();
+    return resolveBufferElementAsDimSpec(writer, data, resolvedIdx);
+  }
+  return emptySpec();
+}
+
 //===----------------------------------------------------------------------===//
 // Built-in DimSpec builders
 //===----------------------------------------------------------------------===//
@@ -1689,6 +2051,166 @@ DimSpec buildConcatDimSpec(mlir::Operation *op, unsigned result_index,
   return sum;
 }
 
+// expand_shape builder (tensor + memref flavours). For each output dim,
+// look at the reassociation group it belongs to:
+//
+//   - single dim in group   => pass-through to src dim group_idx (no
+//     extra work — the src dim's DimSpec is the result dim's DimSpec).
+//   - multi dim in group    => the operand carries one `output_shape`
+//     SSA per dynamic result dim; locate the entry for THIS result dim
+//     and resolve it as a DimSpec via `resolveValueAsDimSpec`.
+//
+// Static output dims are handled by strategy 3 in `getResultDimSpec`
+// so we return empty for them, which the caller treats as "fall back
+// to the type-system answer".
+template <typename ExpandShapeT>
+DimSpec buildExpandShapeDimSpecImpl(ExpandShapeT expand, unsigned dim_index) {
+  auto reassoc = expand.getReassociationIndices();
+  if (dim_index >= expand.getResultType().getRank())
+    return emptySpec();
+  // Find which group this output dim belongs to.
+  int64_t groupIdx = -1;
+  int64_t posInGroup = -1;
+  for (auto [g, grp] : llvm::enumerate(reassoc)) {
+    for (auto [p, idx] : llvm::enumerate(grp)) {
+      if (idx == static_cast<int64_t>(dim_index)) {
+        groupIdx = static_cast<int64_t>(g);
+        posInGroup = static_cast<int64_t>(p);
+        break;
+      }
+    }
+    if (groupIdx >= 0)
+      break;
+  }
+  if (groupIdx < 0)
+    return emptySpec();
+  const auto &group = reassoc[groupIdx];
+  if (group.size() == 1)
+    return resolveDimFromValue(expand.getSrc(),
+                               static_cast<unsigned>(groupIdx));
+  // Multi-dim group: look up the corresponding output_shape operand.
+  // The operand list has ONE entry per DYNAMIC output dim, in result
+  // dim order. Skip static dims to find our slot.
+  auto resultType = expand.getResultType();
+  if (!resultType.isDynamicDim(dim_index))
+    return emptySpec();
+  unsigned dynBefore = 0;
+  for (unsigned i = 0; i < dim_index; ++i)
+    if (resultType.isDynamicDim(i))
+      ++dynBefore;
+  auto outShape = expand.getOutputShape();
+  if (dynBefore >= outShape.size())
+    return emptySpec();
+  return resolveValueAsDimSpec(outShape[dynBefore]);
+}
+
+DimSpec buildTensorExpandShapeDimSpec(mlir::Operation *op,
+                                      unsigned result_index,
+                                      unsigned dim_index) {
+  if (result_index != 0)
+    return emptySpec();
+  auto expand = llvm::dyn_cast<mlir::tensor::ExpandShapeOp>(op);
+  if (!expand)
+    return emptySpec();
+  return buildExpandShapeDimSpecImpl(expand, dim_index);
+}
+
+DimSpec buildMemrefExpandShapeDimSpec(mlir::Operation *op,
+                                      unsigned result_index,
+                                      unsigned dim_index) {
+  if (result_index != 0)
+    return emptySpec();
+  auto expand = llvm::dyn_cast<mlir::memref::ExpandShapeOp>(op);
+  if (!expand)
+    return emptySpec();
+  return buildExpandShapeDimSpecImpl(expand, dim_index);
+}
+
+// collapse_shape builder (tensor + memref flavours). Output dim `d` =
+// product of src dims in the reassociation group at index `d`. Pure
+// arithmetic over operand dim DimSpecs — no shape operand to consult.
+template <typename CollapseShapeT>
+DimSpec buildCollapseShapeDimSpecImpl(CollapseShapeT collapse,
+                                      unsigned dim_index) {
+  auto reassoc = collapse.getReassociationIndices();
+  if (dim_index >= reassoc.size())
+    return emptySpec();
+  const auto &group = reassoc[dim_index];
+  if (group.empty())
+    return emptySpec();
+  DimSpec acc;
+  bool first = true;
+  for (int64_t srcDim : group) {
+    DimSpec d =
+        resolveDimFromValue(collapse.getSrc(), static_cast<unsigned>(srcDim));
+    if (d.nodes().empty())
+      return emptySpec();
+    if (first) {
+      acc = d;
+      first = false;
+    } else {
+      acc = DimSpec::makeBinary(DimSpecKind::Mul, acc, d);
+    }
+  }
+  return acc;
+}
+
+DimSpec buildTensorCollapseShapeDimSpec(mlir::Operation *op,
+                                        unsigned result_index,
+                                        unsigned dim_index) {
+  if (result_index != 0)
+    return emptySpec();
+  auto collapse = llvm::dyn_cast<mlir::tensor::CollapseShapeOp>(op);
+  if (!collapse)
+    return emptySpec();
+  return buildCollapseShapeDimSpecImpl(collapse, dim_index);
+}
+
+DimSpec buildMemrefCollapseShapeDimSpec(mlir::Operation *op,
+                                        unsigned result_index,
+                                        unsigned dim_index) {
+  if (result_index != 0)
+    return emptySpec();
+  auto collapse = llvm::dyn_cast<mlir::memref::CollapseShapeOp>(op);
+  if (!collapse)
+    return emptySpec();
+  return buildCollapseShapeDimSpecImpl(collapse, dim_index);
+}
+
+// memref.reinterpret_cast (emitted by LegalizeMultiDynExpandShape and by
+// OptimizeMemRefs for cross-shape slot reuse): output dim `d` is the
+// `sizes[d]` argument — partially-static via the op's mixed sizes API.
+DimSpec buildReinterpretCastDimSpec(mlir::Operation *op, unsigned result_index,
+                                    unsigned dim_index) {
+  if (result_index != 0)
+    return emptySpec();
+  auto rc = llvm::dyn_cast<mlir::memref::ReinterpretCastOp>(op);
+  if (!rc)
+    return emptySpec();
+  auto sizes = rc.getMixedSizes();
+  if (dim_index >= sizes.size())
+    return emptySpec();
+  mlir::OpFoldResult s = sizes[dim_index];
+  if (auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(s)) {
+    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
+      return DimSpec::makeStatic(intAttr.getInt());
+    return emptySpec();
+  }
+  return resolveValueAsDimSpec(llvm::cast<mlir::Value>(s));
+}
+
+// memref.cast: rank-preserving, layout-only metadata change. Forwards
+// dim queries straight to the source.
+DimSpec buildMemrefCastDimSpec(mlir::Operation *op, unsigned result_index,
+                               unsigned dim_index) {
+  if (result_index != 0)
+    return emptySpec();
+  auto cast = llvm::dyn_cast<mlir::memref::CastOp>(op);
+  if (!cast)
+    return emptySpec();
+  return resolveDimFromValue(cast.getSource(), dim_index);
+}
+
 } // namespace
 
 void populateBuiltinDimSpecBuilders() {
@@ -1750,6 +2272,25 @@ void populateBuiltinDimSpecBuilders() {
     // When the converter lands, this registration unlocks the
     // aggregating Cat-B compound automatically.
     registerOpDimSpecBuilder("hip.concat", buildConcatDimSpec);
+
+    // Standard tensor/memref reshape ops emitted by ReshapeConversion
+    // and downstream lowering (LegalizeMultiDynExpandShape +
+    // OptimizeMemRefs). Without these, dynamic-shape Reshape outputs
+    // lose their DimSpec chain through the bufferized expand/collapse/
+    // reinterpret_cast hop and resolve to `Static(?)` => empty, which
+    // the EP then writes as -1 in the result shape (triggering "Tensor
+    // shape.Size() must be >= 0" at OutputMLValue time).
+    registerOpDimSpecBuilder("tensor.expand_shape",
+                             buildTensorExpandShapeDimSpec);
+    registerOpDimSpecBuilder("tensor.collapse_shape",
+                             buildTensorCollapseShapeDimSpec);
+    registerOpDimSpecBuilder("memref.expand_shape",
+                             buildMemrefExpandShapeDimSpec);
+    registerOpDimSpecBuilder("memref.collapse_shape",
+                             buildMemrefCollapseShapeDimSpec);
+    registerOpDimSpecBuilder("memref.reinterpret_cast",
+                             buildReinterpretCastDimSpec);
+    registerOpDimSpecBuilder("memref.cast", buildMemrefCastDimSpec);
   });
 }
 
@@ -1899,7 +2440,8 @@ bool isIdentitySlice(mlir::Operation *op) {
     // Pattern 1: arith.constant dense<>
     if (defName == "arith.constant") {
       auto valueAttr = defOp->getAttr("value");
-      if (auto dense = llvm::dyn_cast_or_null<mlir::DenseElementsAttr>(valueAttr)) {
+      if (auto dense =
+              llvm::dyn_cast_or_null<mlir::DenseElementsAttr>(valueAttr)) {
         auto tType = llvm::dyn_cast<mlir::RankedTensorType>(dense.getType());
         if (!tType || tType.getRank() != 1)
           return false;
@@ -1935,8 +2477,7 @@ bool isIdentitySlice(mlir::Operation *op) {
     // Pattern 2: in-tree initial value (small constants that the
     // converter chose not to externalise).
     if (auto initAttr = symbol->getAttr("initial_value")) {
-      if (auto dense =
-              llvm::dyn_cast<mlir::DenseElementsAttr>(initAttr)) {
+      if (auto dense = llvm::dyn_cast<mlir::DenseElementsAttr>(initAttr)) {
         auto sType = llvm::dyn_cast<mlir::ShapedType>(dense.getType());
         if (!sType || sType.getRank() != 1)
           return false;
@@ -1966,18 +2507,15 @@ bool isIdentitySlice(mlir::Operation *op) {
     auto splatAttr = module->getAttrOfType<mlir::DenseI64ArrayAttr>(
         "hipdnn.constant_splat_elem_values");
     if (!kindsAttr || !splatAttr || idx < 0 ||
-        idx >= (int64_t)kindsAttr.size() ||
-        idx >= (int64_t)splatAttr.size())
+        idx >= (int64_t)kindsAttr.size() || idx >= (int64_t)splatAttr.size())
       return false;
     // kind=1 is Splat (see lib/Conversion/OnnxToHip/OnnxToHip.cpp); any
     // other kind (file-ref / sidecar / dense external) means we can't
     // recover the value without I/O, so bail.
     if (kindsAttr.asArrayRef()[idx] != 1)
       return false;
-    auto globalTy =
-        llvm::dyn_cast<mlir::ShapedType>(symbol->getAttrOfType<mlir::TypeAttr>(
-                                              "type")
-                                              .getValue());
+    auto globalTy = llvm::dyn_cast<mlir::ShapedType>(
+        symbol->getAttrOfType<mlir::TypeAttr>("type").getValue());
     if (!globalTy || globalTy.getRank() != 1)
       return false;
     int64_t numElements = globalTy.getNumElements();

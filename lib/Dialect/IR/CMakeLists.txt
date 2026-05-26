@@ -17,7 +17,10 @@ add_dependencies(HipDialectIR
 target_link_libraries(HipDialectIR PUBLIC
   MLIRIR
   MLIRSupport
+  MLIRArithDialect
   MLIRFuncDialect
+  MLIRTensorDialect
+  MLIRMemRefDialect
   MLIRDestinationStyleOpInterface
   MLIRFuncDialect
 )

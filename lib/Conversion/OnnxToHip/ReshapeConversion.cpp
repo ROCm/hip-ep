@@ -81,6 +81,13 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
 /// For static dimensions: use compile-time size from outputType.
 /// For dynamic dimensions: extract from input via DimOp, dividing out any
 /// static dimensions in the same reassociation group.
+///
+/// LIMITATION: this helper only handles the "one dynamic output dim per
+/// reassociation group" case. When a group has >= 2 dynamic dims (e.g.
+/// rank-1 [B*S] -> rank-2 [B, S] with both B and S dynamic), the
+/// "inputSize / staticProduct" recovery cannot disambiguate the
+/// individual sizes. Use `buildExpandShapeOutputShapeFromShape` instead
+/// for that case.
 llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
     mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Value data,
     mlir::RankedTensorType outputType,
@@ -123,6 +130,159 @@ llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
   return outputShape;
 }
 
+/// True iff every dynamic dim in `outputType` can be recovered from
+/// `(inputType, reassoc)` alone — i.e. each reassociation group contains
+/// at most one dynamic output dim. When this returns false the caller
+/// must read sizes from the Reshape shape operand instead (see
+/// `buildExpandShapeOutputShapeFromShape`).
+static bool
+canRecoverDynDimsFromInput(mlir::RankedTensorType outputType,
+                           llvm::ArrayRef<mlir::ReassociationIndices> reassoc) {
+  for (const auto &group : reassoc) {
+    int64_t dynCount = 0;
+    for (int64_t idx : group)
+      if (outputType.isDynamicDim(idx))
+        ++dynCount;
+    if (dynCount > 1)
+      return false;
+  }
+  return true;
+}
+
+/// If `shapeOperand` is a compile-time-known rank-1 integer tensor, fill
+/// `out` with one APInt per element and return success. Recognizes
+/// arith.constant + tensor.from_elements (the latter folds in caller via
+/// OpFoldResult, but we resolve it here so we can also catch literal -1
+/// / 0 dim markers). Returns failure when the shape can only be resolved
+/// at runtime (`tensor.from_elements` with non-constant elements, etc.).
+static mlir::LogicalResult
+tryGetStaticShapeOperandValues(mlir::Value shapeOperand,
+                               llvm::SmallVectorImpl<int64_t> &out) {
+  mlir::Operation *def = shapeOperand.getDefiningOp();
+  if (!def)
+    return mlir::failure();
+
+  // Direct arith.constant dense<...>.
+  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(def)) {
+    auto dense = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
+    if (!dense)
+      return mlir::failure();
+    for (auto v : dense.getValues<mlir::APInt>())
+      out.push_back(v.getSExtValue());
+    return mlir::success();
+  }
+
+  // Externalized constant: memref.get_global -> bufferization.to_tensor
+  // would normally carry a "value" attribute on the original onnx.Constant
+  // but after lowering it's opaque. Pattern handled at the .from_elements
+  // case below instead (since most shape vectors arrive as that op after
+  // Concat conversion).
+  if (auto fromElems = mlir::dyn_cast<mlir::tensor::FromElementsOp>(def)) {
+    for (mlir::Value elem : fromElems.getElements()) {
+      mlir::Operation *eDef = elem.getDefiningOp();
+      if (!eDef)
+        return mlir::failure();
+      if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(eDef)) {
+        if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(cst.getValue())) {
+          out.push_back(intAttr.getInt());
+          continue;
+        }
+      }
+      return mlir::failure();
+    }
+    return mlir::success();
+  }
+
+  return mlir::failure();
+}
+
+/// Build `tensor.expand_shape`'s output_shape operands by reading the
+/// Reshape's shape operand element-by-element. This is the only correct
+/// path when a reassociation group has > 1 dynamic output dim — there is
+/// no way to recover individual sizes from the input tensor alone, the
+/// frontend must have computed them and stored them in the shape input.
+///
+/// `shapeOperand` must be a rank-1 integer tensor of length == outputRank.
+/// Static output dims are pinned to compile-time `index` attrs (so the
+/// expand_shape verifier sees them as constants, not dynamic operands).
+/// Dynamic output dims are read via `tensor.extract` + `arith.index_cast`.
+/// When `shapeOperand` is itself `tensor.from_elements`, the extract
+/// folds back to the original SSA value automatically (the same dim
+/// value that fed the upstream Concat-and-shape-builder chain).
+///
+/// Handles the ONNX `shape == 0` / `shape == -1` cases statically when
+/// the shape tensor is a compile-time constant; otherwise emits an
+/// arith.muli / arith.divui chain to resolve -1 at runtime, which we
+/// have not seen in any current model. To keep this fix focused, we
+/// reject runtime -1 / 0 markers and let the conversion fall back so
+/// the issue is visible at compile time. (No production graph we've
+/// audited puts a runtime -1 in a shape vector that also has dynamic
+/// EP-input dims; the -1 form is always paired with a fully-static
+/// reshape and folds away.)
+static mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>>
+buildExpandShapeOutputShapeFromShape(mlir::PatternRewriter &rewriter,
+                                     mlir::Location loc,
+                                     mlir::Value shapeOperand,
+                                     mlir::RankedTensorType outputType) {
+  auto shapeType =
+      mlir::dyn_cast<mlir::RankedTensorType>(shapeOperand.getType());
+  if (!shapeType || shapeType.getRank() != 1)
+    return mlir::failure();
+  if (!shapeType.getElementType().isIntOrIndex())
+    return mlir::failure();
+
+  int64_t outputRank = outputType.getRank();
+  if (shapeType.isDynamicDim(0) || shapeType.getDimSize(0) != outputRank)
+    return mlir::failure();
+
+  // Best-effort static fold of the shape operand: lets us detect the
+  // -1 / 0 ONNX markers, validate consistency with outputType, and
+  // emit pure index attrs (no runtime extract) when everything is
+  // compile-time known.
+  llvm::SmallVector<int64_t> staticShape;
+  bool haveStatic = mlir::succeeded(
+      tryGetStaticShapeOperandValues(shapeOperand, staticShape));
+  if (haveStatic && static_cast<int64_t>(staticShape.size()) != outputRank)
+    haveStatic = false;
+
+  auto indexType = rewriter.getIndexType();
+
+  llvm::SmallVector<mlir::OpFoldResult> outputShape;
+  outputShape.reserve(outputRank);
+
+  for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+    if (!outputType.isDynamicDim(i)) {
+      outputShape.push_back(rewriter.getIndexAttr(outputType.getDimSize(i)));
+      continue;
+    }
+
+    if (haveStatic) {
+      int64_t v = staticShape[i];
+      if (v < 0 || v == 0) {
+        // Static -1 or 0 means "infer" / "copy from input": we'd need
+        // to compute the value from the input tensor's dims. Defer to
+        // the buildExpandShapeOutputShape path -- which can handle a
+        // single dynamic dim per group via DimOp + division. If the
+        // caller couldn't use that path (multiple dyn dims per group)
+        // we conservatively fail here.
+        return mlir::failure();
+      }
+      outputShape.push_back(rewriter.getIndexAttr(v));
+      continue;
+    }
+
+    // Runtime extract: shape[i] -> index.
+    mlir::Value idx = mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
+    mlir::Value v = mlir::tensor::ExtractOp::create(rewriter, loc, shapeOperand,
+                                                    mlir::ValueRange{idx});
+    if (v.getType() != indexType)
+      v = mlir::arith::IndexCastOp::create(rewriter, loc, indexType, v);
+    outputShape.push_back(v);
+  }
+
+  return outputShape;
+}
+
 //===----------------------------------------------------------------------===//
 // Reshape -> standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
@@ -160,7 +320,7 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       return mlir::success();
     }
 
-    // Different rank: expand or collapse
+    // Different rank: expand or collapse.
     if (outputRank != inputRank) {
       auto reassocOpt =
           mlir::getReassociationIndicesForReshape(inputType, outputType);
@@ -169,14 +329,39 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
             op, "cannot compute reshape reassociation");
 
       if (outputRank > inputRank) {
-        // Expand: use shared helper to build output shape
-        auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
-                                                       outputType, *reassocOpt);
+        // Expand. Two strategies:
+        //   (a) Inputs alone are enough to recover every dyn output dim
+        //       (each reassoc group has at most one dyn output dim) --
+        //       use the input-only `buildExpandShapeOutputShape` so we
+        //       don't introduce extra extract ops or a dependency on a
+        //       shape operand that may not yet be in a known form.
+        //   (b) Otherwise (multiple dyn dims per group, e.g. rank-1
+        //       [batch_seq] -> rank-2 [B, S]) read sizes element-by-
+        //       element from op->getOperand(1).
+        llvm::SmallVector<mlir::OpFoldResult> outputShape;
+        if (canRecoverDynDimsFromInput(outputType, *reassocOpt)) {
+          outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
+                                                    outputType, *reassocOpt);
+        } else {
+          // Need the Reshape shape operand (2nd ONNX operand).
+          if (op->getNumOperands() < 2)
+            return rewriter.notifyMatchFailure(
+                op, "Reshape needs shape operand for multi-dyn expand");
+          auto built = buildExpandShapeOutputShapeFromShape(
+              rewriter, loc, op->getOperand(1), outputType);
+          if (mlir::failed(built))
+            return rewriter.notifyMatchFailure(
+                op,
+                "cannot derive output_shape for multi-dyn expand from shape "
+                "operand (need rank-1 int tensor whose elements resolve at "
+                "compile or runtime)");
+          outputShape = std::move(*built);
+        }
         auto expandOp = mlir::tensor::ExpandShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt, outputShape);
         rewriter.replaceOp(op, expandOp.getResult());
       } else {
-        // Collapse: no dynamic shape computation needed
+        // Collapse: no dynamic shape computation needed.
         auto collapseOp = mlir::tensor::CollapseShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt);
         rewriter.replaceOp(op, collapseOp.getResult());
@@ -185,16 +370,36 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     }
 
     // Same rank, different shape: collapse to 1-D then expand.
-    if (!inputType.hasStaticShape() || !outputType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "same-rank dynamic reshape not supported");
+    //
+    // The static-shape path uses compile-time index attrs for the expand
+    // output_shape. The dynamic-shape path reads sizes from the Reshape
+    // shape operand the same way the multi-dyn expand above does, so
+    // dynamic same-rank reshapes (e.g. text.onnx's [B, S*H_q, 256] ->
+    // [B, S, H_q*256] family) lower without any runtime kernel.
 
-    int64_t numElems = inputType.getNumElements();
-    if (numElems != outputType.getNumElements())
+    // For the collapse-to-1D step we need the total element count. It is
+    // either a compile-time constant (both shapes static, or only the
+    // batch dim dyn but a known product on either side) or a runtime
+    // product of input dims via tensor.dim + arith.muli.
+    int64_t inputElems = inputType.hasStaticShape()
+                             ? inputType.getNumElements()
+                             : mlir::ShapedType::kDynamic;
+    int64_t outputElems = outputType.hasStaticShape()
+                              ? outputType.getNumElements()
+                              : mlir::ShapedType::kDynamic;
+    if (inputElems != mlir::ShapedType::kDynamic &&
+        outputElems != mlir::ShapedType::kDynamic && inputElems != outputElems)
       return rewriter.notifyMatchFailure(op, "element count mismatch");
 
-    auto flatType =
-        mlir::RankedTensorType::get({numElems}, inputType.getElementType());
+    auto flatType = mlir::RankedTensorType::get({mlir::ShapedType::kDynamic},
+                                                inputType.getElementType());
+
+    // Static path: keep using a statically-sized flat tensor so downstream
+    // canonicalisation / bufferisation has the most information.
+    if (inputType.hasStaticShape() && outputType.hasStaticShape()) {
+      flatType =
+          mlir::RankedTensorType::get({inputElems}, inputType.getElementType());
+    }
 
     mlir::ReassociationIndices allInputDims;
     for (int64_t i : llvm::seq<int64_t>(inputRank))
@@ -209,10 +414,30 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       allOutputDims.push_back(i);
     llvm::SmallVector<mlir::ReassociationIndices> expandReassoc = {
         allOutputDims};
+
     llvm::SmallVector<mlir::OpFoldResult> flatOutputShape;
-    for (int64_t i : llvm::seq<int64_t>(outputRank))
-      flatOutputShape.push_back(
-          rewriter.getIndexAttr(outputType.getDimSize(i)));
+    if (outputType.hasStaticShape()) {
+      for (int64_t i : llvm::seq<int64_t>(outputRank))
+        flatOutputShape.push_back(
+            rewriter.getIndexAttr(outputType.getDimSize(i)));
+    } else {
+      // Dynamic same-rank reshape: derive each output dim from the
+      // Reshape shape operand. The collapse-then-expand pair degenerates
+      // into a single buffer reinterpretation after bufferisation, so
+      // there's still no runtime kernel.
+      if (op->getNumOperands() < 2)
+        return rewriter.notifyMatchFailure(
+            op, "Reshape needs shape operand for dynamic same-rank reshape");
+      auto built = buildExpandShapeOutputShapeFromShape(
+          rewriter, loc, op->getOperand(1), outputType);
+      if (mlir::failed(built))
+        return rewriter.notifyMatchFailure(
+            op, "cannot derive output_shape for dynamic same-rank reshape from "
+                "shape operand (need rank-1 int tensor whose elements resolve "
+                "at compile or runtime)");
+      flatOutputShape = std::move(*built);
+    }
+
     auto expanded = mlir::tensor::ExpandShapeOp::create(
         rewriter, loc, outputType, collapsed.getResult(), expandReassoc,
         flatOutputShape);

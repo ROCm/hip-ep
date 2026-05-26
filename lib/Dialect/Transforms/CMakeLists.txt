@@ -12,6 +12,7 @@ add_library(HipDialectTransforms STATIC
   ElideSlotPublisherAllocs.cpp
   GenerateInterface.cpp
   IdentityPropagatorRebind.cpp
+  LegalizeMultiDynExpandShape.cpp
   LowerAllocs.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp

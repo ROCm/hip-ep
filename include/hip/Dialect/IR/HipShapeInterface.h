@@ -275,6 +275,16 @@ DimSpec resolveDimFromValue(mlir::Value v, unsigned dim_index);
 // C / RuntimeSlot dispatch).
 DimSpec resolveValueFromI64Tensor(mlir::Value v, int64_t flat_offset);
 
+// Try to derive a DimSpec for an SSA scalar value (i64 or index) by
+// tracing back through the producer chain (arith.muli / .addi / .index_cast,
+// tensor.extract of from_elements, tensor/memref.dim, etc.). Used by the
+// expand_shape / collapse_shape DimSpec builders to convert their
+// `output_shape` operand SSA values into DimSpecs.
+//
+// Returns empty when the chain hits an unrecognised op — callers should
+// then fall back to the static-type result lookup.
+DimSpec resolveValueAsDimSpec(mlir::Value v);
+
 //===----------------------------------------------------------------------===//
 // Phase 4 of the slot-buffer-coalesce design
 // (docs/design/slot-buffer-coalesce.md): identity-propagator registry.
