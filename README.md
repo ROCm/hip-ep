@@ -227,6 +227,22 @@ For prerequisites, environment setup, and step-by-step build instructions, see
 
 ---
 
+## Plugin extension API
+
+`hip-compiler` ships a public plugin loader (`HIP_EP_PLUGINS` env var,
+semicolon-separated paths) that lets a vendor-side DLL contribute MLIR
+passes, runtime LLVM bitcode, and external libraries without forking
+this repo. The full design rationale lives in
+[docs/design/plugin-extension-api.md](docs/design/plugin-extension-api.md);
+the practical authoring guide is
+[docs/plugin_authoring.md](docs/plugin_authoring.md). A working in-tree
+example sits under `test/plugin/sample_plugin/`.
+
+The ABI is currently in proposal status — see the design doc for the
+freeze timeline.
+
+---
+
 ## Contributing
 
 This repo follows the LLVM project's
