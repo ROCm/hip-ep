@@ -25,6 +25,9 @@ add_library(OnnxToHip STATIC
   GatherShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
+  InferOnnxShapes.cpp
+  OnnxResultTypeInference.cpp
+  ProjectorOpsRewrites.cpp
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
   WhereConversion.cpp

@@ -247,6 +247,7 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
     ++input_idx;
   }
 
+  int output_idx = 0;
   for (const auto &output : graphRef.outputs()) {
     auto *output_proto = metadata.add_outputs();
     output_proto->set_name(output.name());
@@ -260,50 +261,104 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
       const std::vector<std::string> *dp =
           (it != all_dim_params.end()) ? &it->second : nullptr;
 
+      // MLIR-refined output shape from the compiler (post `InferOnnxShapes`).
+      // Drives `DimSource.static_value` for dims the original ONNX export
+      // declared as symbolic but the compiler tightened to a static int.
+      const std::vector<int64_t> *refined =
+          (output_idx < static_cast<int>(artifact.refined_output_shapes.size()))
+              ? &artifact.refined_output_shapes[output_idx]
+              : nullptr;
+
+      // Per-output-dim SSA origin from the compiler (post
+      // `InferOnnxShapes` backward-trace). Each entry is
+      // `(graph_arg_index, dim_idx)` into the function arguments;
+      // `(-1, -1)` means no traceable origin. Drives
+      // `DimSource.input_idx + dim_idx` for dims that are genuinely
+      // dynamic AND whose dim_param doesn't match any input dim_param —
+      // i.e. the as-shipped Gemma-3 vision case where input dim 0 is
+      // `num_images` but output dim 0 is `num_image_tokens` (same
+      // value, different label).
+      const std::vector<CompilationArtifact::DimOriginTriple> *origins =
+          (output_idx <
+           static_cast<int>(artifact.refined_output_dim_origins.size()))
+              ? &artifact.refined_output_dim_origins[output_idx]
+              : nullptr;
+
       for (int d = 0; d < static_cast<int>(shape_ptr->size()); ++d) {
         int64_t dim_val = normalizeDim((*shape_ptr)[d]);
         output_proto->add_shape(dim_val);
 
-        // For dynamic dims, look up the symbolic name and resolve to the
-        // input tensor that defines it.  Static dims emit explicit sentinel
-        // values (input_idx=-1, dim_idx=-1, resolved=false) so the wire
-        // format is unambiguous: a `resolved=false` DimSource that carries
-        // -1 sentinels can never be confused with a real (input 0, dim 0)
-        // source by a future consumer that bug-skips the `resolved` check.
-        // marshal_output_tensors ignores unresolved entries and falls back
-        // to Output.shape regardless.
+        // DimSource carries one of three states; see metadata.proto for
+        // the consumer precedence (`static_value > 0` first, then
+        // `resolved`).
         auto *ds = output_proto->add_dim_sources();
-        if (dim_val == -1) {
-          // Fail at compile time rather than at runtime so the user sees a
-          // clear error naming the output, dim index, and dim_param name
-          // instead of a generic "dim still -1" CHECK from the EP.
-          CHECK(dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty())
-              << "Output '" << output.name() << "' dim " << d
-              << " is dynamic but has no symbolic name in dim_params_map; "
-              << "cannot emit DimSource. Either fix the model to expose a "
-              << "dim_param for this dimension, or freeze it to a constant.";
-          const auto &param_name = (*dp)[d];
-          auto pit = dim_param_map.find(param_name);
-          CHECK(pit != dim_param_map.end())
-              << "Output '" << output.name() << "' dim " << d
-              << " has dim_param '" << param_name
-              << "' but no graph input declares this symbolic name; cannot "
-              << "resolve at runtime. Outputs can only carry symbolic dims "
-              << "that also appear on at least one input.";
-          ds->set_input_idx(pit->second.first);
-          ds->set_dim_idx(pit->second.second);
-          ds->set_resolved(true);
-        } else {
-          // Static dim: emit explicit sentinels so the wire format
-          // unambiguously distinguishes "not populated" from
-          // "intentionally references (input 0, dim 0)" without relying
-          // on the proto-default-zero convention.  Consumers that read
-          // `resolved` first see the same behavior as before; consumers
-          // that don't see -1 instead of a misleading 0.
+
+        // STATIC: either declared static in the original graph, or
+        // tightened to a static positive value by InferOnnxShapes during
+        // compile. The pass never widens, so `max(graph, refined)` is
+        // well-defined — pick the larger of the two when both are
+        // positive (the refined value is at least as precise; the
+        // graph value is at most as precise).
+        int64_t static_v = dim_val;
+        if (refined && d < static_cast<int>(refined->size()) &&
+            (*refined)[d] > 0)
+          static_v = std::max(static_v, (*refined)[d]);
+        if (static_v > 0) {
           ds->set_input_idx(-1);
           ds->set_dim_idx(-1);
           ds->set_resolved(false);
+          ds->set_static_value(static_v);
+          continue;
         }
+
+        // RUNTIME-INPUT-LOOKUP via dim_param name match.
+        if (dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty()) {
+          auto pit = dim_param_map.find((*dp)[d]);
+          if (pit != dim_param_map.end()) {
+            ds->set_input_idx(pit->second.first);
+            ds->set_dim_idx(pit->second.second);
+            ds->set_resolved(true);
+            continue;
+          }
+        }
+
+        // RUNTIME-INPUT-LOOKUP via SSA origin trace from the compiler.
+        // Kicks in when dim_param names don't match across the EP <-> ONNX
+        // boundary (e.g. Gemma-3 vision's `num_image_tokens` output dim
+        // vs `num_images` input dim — semantically equivalent, labelled
+        // differently). The InferOnnxShapes backward-trace walked
+        // through Cast/Transpose/MatMul/Conv/Reshape/etc. and recorded
+        // that this output dim ultimately reads from input `arg_idx`'s
+        // dim `arg_dim_idx` with a scalar multiplier `mult` accumulated
+        // across any Reshape ops that resize dim 0 (e.g. Qwen vision's
+        // patch merger contributes mult=0.25 for divide-by-4).
+        if (origins && d < static_cast<int>(origins->size())) {
+          int64_t arg_idx = (*origins)[d].arg_idx;
+          int64_t arg_dim = (*origins)[d].dim_idx;
+          double mult = (*origins)[d].mult;
+          if (arg_idx >= 0 && arg_idx < input_idx && arg_dim >= 0) {
+            ds->set_input_idx(static_cast<int>(arg_idx));
+            ds->set_dim_idx(static_cast<int>(arg_dim));
+            ds->set_resolved(true);
+            ds->set_mult(mult);
+            MY_LOG(2) << "Output '" << output.name() << "' dim " << d
+                      << " resolved via SSA-origin trace to input[" << arg_idx
+                      << "].dim[" << arg_dim << "] * " << mult;
+            continue;
+          }
+        }
+
+        // UNRESOLVED: genuinely dynamic, no name match, no static
+        // refinement, no SSA-traceable origin. Fail loudly so the user
+        // sees a clear error pointing at the offending output / dim.
+        LOG(FATAL)
+            << "Output '" << output.name() << "' dim " << d
+            << " is dynamic AND has no matching input dim_param AND "
+            << "InferOnnxShapes did not tighten it to a static value AND "
+            << "the SSA-origin backward-trace could not find a function-"
+            << "argument origin. Either fix the model (add a dim_param "
+            << "matching some input) or extend InferOnnxShapes' trace "
+            << "rules to cover the producing op.";
       }
     } else {
       output_proto->set_rank(-1);
@@ -311,6 +366,7 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
 
     MY_LOG(2) << "Output " << output.name() << ": rank=" << output_proto->rank()
               << ", elem_type=" << output_proto->elem_type();
+    ++output_idx;
   }
 
   std::string json;

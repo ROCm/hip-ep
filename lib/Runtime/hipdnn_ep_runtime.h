@@ -495,8 +495,13 @@ int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
 
 // MIOpen convolution forward operation
 // Full wrapper with descriptor creation, algorithm finding, workspace
-// management Follows opaque RuntimeState pattern - extracts handle/stream
-// internally Parameters match generated LLVM IR from HipToLLVM pass
+// management. Follows opaque RuntimeState pattern - extracts handle/stream
+// internally. Parameters match generated LLVM IR from HipToLLVM pass.
+//
+// `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
+// input / weights / output tensor descriptors — MIOpen requires all three to
+// share the same element type. The host-side lowering derives this from the
+// hip.conv result memref's element type.
 int wrap_miopenConvolutionForward(
     RuntimeState
         *state, // RuntimeState (opaque - extracts handle/stream internally)
@@ -521,7 +526,8 @@ int wrap_miopenConvolutionForward(
     int64_t pad_right,   // Padding right
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
-    int64_t group);      // Number of groups
+    int64_t group,       // Number of groups
+    int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations
@@ -539,16 +545,31 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // Computes output = A @ B for each batch
 // A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
 // output: [batch_count x M x N]
+//
+// `b_batch_stride` is hipBLASLt's STRIDED_BATCH_OFFSET on layA when
+// `batch_count > 1`: the per-batch advance in elements through B. It MUST be:
+//   * 0   when B is a broadcast weight — one matrix reused across all
+//         batches. Includes both rank-2 `[K, N]` and rank-N
+//         `[1, ..., 1, K, N]` (any leading-dim product == 1).
+//   * K*N when B is per-batch — leading-dim product > 1, so the buffer
+//         actually holds multiple `[K, N]` matrices laid out contiguously.
+// Mis-setting this to K*N for a broadcast B causes hipBLASLt to step K*N
+// elements past the end of the weight buffer on every batch beyond the
+// first, reading uninitialised memory into the GEMM and producing wrong
+// (often NaN) outputs for batch > 0. For batch_count == 1 the value is
+// ignored. Always pass an exact stride; the compiler computes 0 vs K*N
+// at compile time when B's leading dims are static, else at runtime.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
-    const void *A,       // Matrix A GPU pointer
-    const void *B,       // Matrix B GPU pointer
-    void *output,        // Output GPU pointer
-    int64_t M,           // Rows of A (per batch)
-    int64_t N,           // Columns of B
-    int64_t K,           // Columns of A / Rows of B
-    int64_t batch_count, // Number of batches
-    int64_t elem_size);  // Element size in bytes (2=f16, 4=f32)
+    const void *A,           // Matrix A GPU pointer
+    const void *B,           // Matrix B GPU pointer
+    void *output,            // Output GPU pointer
+    int64_t M,               // Rows of A (per batch)
+    int64_t N,               // Columns of B
+    int64_t K,               // Columns of A / Rows of B
+    int64_t batch_count,     // Number of batches
+    int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
+    int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering

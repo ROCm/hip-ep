@@ -39,6 +39,35 @@ struct CompilationArtifact {
   std::string filename;
   std::vector<uint8_t> bytes;
   ArtifactFormat format;
+  // Per-output (in declaration order), per-dim refined shape from the
+  // MLIR-level `InferOnnxShapes` pre-lowering pass. Positive integers
+  // are static dims; -1 is genuinely dynamic. Empty when the compiler
+  // didn't emit refined shapes (older plugin or empty graph). Consumed
+  // by `pass_main.cpp::build_metadata_json` to populate
+  // `DimSource.static_value`.
+  std::vector<std::vector<int64_t>> refined_output_shapes;
+  // Per-output (in declaration order), per-dim SSA origin. Each triple
+  // is `(graph_arg_index, dim_idx, mult)` — runtime computes
+  // `round(inputs[arg].shape[dim] * mult)`. `mult == 1.0` is the
+  // identity passthrough (most LLM dynshape outputs); `mult == 1/K`
+  // covers Reshape-induced spatial mergers (e.g. Qwen vision's
+  // `num_patches -> num_patches/4` patch merger contributes mult=0.25).
+  // `(-1, -1, 1.0)` means no traceable origin. Populated by
+  // InferOnnxShapes' backward-trace from each function output. Consumed
+  // by `pass_main.cpp::build_metadata_json` to populate
+  // `DimSource.input_idx + dim_idx + mult` for dynamic output dims whose
+  // dim_param names don't match any input dim_param — which lets the
+  // EP work on models that ship outputs with auto-generated /
+  // semantically-different symbolic names (e.g. Gemma-3 vision.onnx's
+  // `image_features: [num_image_tokens, MatMulimage_features_dim_1,
+  // 2560]` vs the input's `pixel_values: [num_images, 3, 896, 896]`)
+  // WITHOUT modifying the ONNX file.
+  struct DimOriginTriple {
+    int64_t arg_idx;
+    int64_t dim_idx;
+    double mult;
+  };
+  std::vector<std::vector<DimOriginTriple>> refined_output_dim_origins;
 };
 
 /**
