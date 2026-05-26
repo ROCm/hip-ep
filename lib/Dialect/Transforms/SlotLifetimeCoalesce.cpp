@@ -38,6 +38,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -138,6 +139,39 @@ DimSpec readOutputDimSpec(Operation *op, unsigned r, unsigned d) {
   return DimSpec::parseFromArrayAttr(specAttr);
 }
 
+// Return the type for the i-th "logical result" of `op`. For ops with
+// SSA results (tensor form), this is `op->getResult(i).getType()`. For
+// DestinationStyleOpInterface ops in DPS/buffer form (no SSA results,
+// outputs are passed in as `outs` operands), this returns the i-th
+// DPS init operand's type. Returns null when `i` is out of range for
+// both forms or `op` has neither.
+Type logicalResultType(Operation *op, unsigned i) {
+  const unsigned nrSsa = op->getNumResults();
+  if (nrSsa > 0) {
+    if (i < nrSsa)
+      return op->getResult(i).getType();
+    return Type();
+  }
+  if (auto dps = llvm::dyn_cast<DestinationStyleOpInterface>(op)) {
+    auto inits = dps.getDpsInits();
+    if (i < inits.size())
+      return inits[i].getType();
+  }
+  return Type();
+}
+
+// Return the count of "logical results" -- see logicalResultType. In
+// tensor form this is just `getNumResults()`; in DPS/buffer form it is
+// the number of `outs` operands.
+unsigned numLogicalResults(Operation *op) {
+  const unsigned nrSsa = op->getNumResults();
+  if (nrSsa > 0)
+    return nrSsa;
+  if (auto dps = llvm::dyn_cast<DestinationStyleOpInterface>(op))
+    return (unsigned)dps.getDpsInits().size();
+  return 0;
+}
+
 // Read the slot id grid attached to `op`, falling back to the legacy
 // scalar `slot_id` / array-form `slot_ids` schemas. Returns one entry
 // per (result, dim), -1 entries where no slot was published.
@@ -146,13 +180,25 @@ DimSpec readOutputDimSpec(Operation *op, unsigned r, unsigned d) {
 // legacy `slot_id` (scalar) attr is used, the grid is filled in for
 // result 0 dim D where D is the first dynamic dim of result 0 (matching
 // the publisher convention).
+//
+// IMPORTANT: This pass runs AFTER bufferization, so Hip DPS ops have
+// `getNumResults() == 0` (their outputs are exposed as `outs` operands
+// via DestinationStyleOpInterface, not SSA results). The grid shape is
+// driven by `numLogicalResults(op)` which returns the DPS init count
+// when the op is a DPS op in buffer form.
 SmallVector<SmallVector<int32_t, 4>, 1> readSlotGrid(Operation *op) {
   SmallVector<SmallVector<int32_t, 4>, 1> grid;
-  const unsigned nr = op->getNumResults();
-  grid.reserve(nr);
+  const unsigned nr = numLogicalResults(op);
 
   if (auto outer = op->getAttrOfType<ArrayAttr>("hipdnn.output_slot_ids")) {
-    for (unsigned r = 0; r < nr; ++r) {
+    // When the publisher attribute is present we trust its outer shape
+    // for the per-result count -- in DPS/buffer form `nr` may differ
+    // from the original tensor-form result count if a result was
+    // dropped during lowering. Use max(nr, attr.size()) so we never
+    // truncate the attribute.
+    const unsigned outerN = std::max((unsigned)outer.size(), nr);
+    grid.reserve(outerN);
+    for (unsigned r = 0; r < outerN; ++r) {
       SmallVector<int32_t, 4> perDim;
       if (r < outer.size()) {
         if (auto pr = llvm::dyn_cast<DenseI32ArrayAttr>(outer[r])) {
@@ -164,6 +210,7 @@ SmallVector<SmallVector<int32_t, 4>, 1> readSlotGrid(Operation *op) {
     }
     return grid;
   }
+  grid.reserve(nr);
   if (auto slotIds = op->getAttrOfType<DenseI32ArrayAttr>("slot_ids")) {
     // Legacy: one dim grid per result-0; treat as result-0 array.
     SmallVector<int32_t, 4> perDim0;
@@ -178,7 +225,7 @@ SmallVector<SmallVector<int32_t, 4>, 1> readSlotGrid(Operation *op) {
     // Scalar legacy: bind to the first dynamic dim of result 0.
     SmallVector<int32_t, 4> perDim0;
     if (nr > 0) {
-      if (auto rt = llvm::dyn_cast<ShapedType>(op->getResult(0).getType())) {
+      if (auto rt = llvm::dyn_cast<ShapedType>(logicalResultType(op, 0))) {
         if (rt.hasRank()) {
           int32_t found = (int32_t)slot.getInt();
           for (int64_t d = 0; d < rt.getRank(); ++d) {

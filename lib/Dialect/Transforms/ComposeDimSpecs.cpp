@@ -21,6 +21,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -322,17 +323,31 @@ public:
             // Some DPS ops have results that mirror their init operands
             // (e.g. tensor world), others (after bufferize-to-out-params)
             // have ZERO results and write only into the out-param in
-            // place. The two-stage lookup below tries the result-list
-            // first, then falls back to the operand index. Either index
-            // is only consulted by callers that read producer-attached
-            // `output_dim_specs`, which is keyed on the original op
-            // result index — so for 0-result ops we leave the result
-            // index at 0 and rely on the attribute itself to be present
-            // with a single per-result entry.
+            // place. Try the result list first (tensor form); if that
+            // fails, look up the DPS-init operand index via
+            // `DestinationStyleOpInterface::getDpsInits()` since
+            // `output_dim_specs` is keyed on the same logical result
+            // index as the DPS init (not the flat operand index).
+            // The flat operand index `k` covers `ins + outs`, so a
+            // direct `dps_result_index = k` would be wrong for any op
+            // with non-zero inputs.
+            bool resolved = false;
             for (unsigned r = 0; r < op.getNumResults(); ++r) {
               if (op.getResult(r) == outArg) {
                 info.dps_result_index = r;
+                resolved = true;
                 break;
+              }
+            }
+            if (!resolved) {
+              if (auto dps = llvm::dyn_cast<DestinationStyleOpInterface>(&op)) {
+                auto inits = dps.getDpsInits();
+                for (auto [initIdx, initVal] : llvm::enumerate(inits)) {
+                  if (initVal == outArg) {
+                    info.dps_result_index = (unsigned)initIdx;
+                    break;
+                  }
+                }
               }
             }
             return info;
