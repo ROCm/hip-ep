@@ -277,3 +277,73 @@ func.func @dynamic_metadata(
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
   return %alloc1 : memref<?x8xf32>
 }
+
+// ===== Dynamic: dim-op hoisted above firstPooledAlloc =====
+//
+// Bufferization places `memref.dim` right next to its consumer alloc.
+// PoolAllocs must hoist that `memref.dim` so the dyn byte-size computation
+// (and the `hip.get_pool` that consumes it) dominates the first pooled
+// `memref.view`. Verifies the hoisting fix that unlocks fully-symbolic
+// embedding models (qwen3-35b-a3b).
+//
+// CHECK-LABEL: func.func @dynamic_dim_hoisted
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[A:.*]]: memref<8x8xf32{{.*}}>, %[[B:.*]]: memref<?x8xf32>)
+// CHECK:         %[[C0:.*]] = arith.constant 0 : index
+// CHECK:         %[[DIM:.*]] = memref.dim %[[B]], %[[C0]]
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         memref.view {{.*}} : memref<?xi8> to memref<8x8xf32>
+// CHECK:         hip.matmul
+// CHECK:         memref.view {{.*}} : memref<?xi8> to memref<?x8xf32>
+// CHECK:         return
+func.func @dynamic_dim_hoisted(
+    %ctx: !hip.context,
+    %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
+    %b: memref<?x8xf32>) -> memref<?x8xf32> {
+  // static alloc first -> firstPooledAlloc is here
+  %alloc0 = memref.alloc() : memref<8x8xf32>
+  hip.matmul(%ctx) ins(%a, %a : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  // memref.dim is created AFTER the static alloc -- the pass must hoist it.
+  %c0 = arith.constant 0 : index
+  %dim = memref.dim %b, %c0 : memref<?x8xf32>
+  %alloc1 = memref.alloc(%dim) : memref<?x8xf32>
+  hip.miopen.softmax(%ctx) ins(%b : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
+  return %alloc1 : memref<?x8xf32>
+}
+
+// ===== Dynamic: non-hoistable load leaves alloc unpooled =====
+//
+// When a dyn-size operand transitively depends on a non-pure op (here a
+// `memref.load` of a shape buffer that an earlier `hip.shape` writes to),
+// PoolAllocs cannot hoist the chain above `firstPooledAlloc` without
+// reordering the load past the store, which would change semantics. The
+// pass leaves the alloc as `memref.alloc` and `LowerAllocs` +
+// `MemoryLowering` route it through `hipdnn_ep_state_dyn_pool_alloc`.
+//
+// The pooled allocs (the static shape buffer + the static input matmul
+// output) still go through the static pool; the load-dependent alloc
+// remains a `memref.alloc`.
+//
+// CHECK-LABEL: func.func @dynamic_load_dependent_unpooled
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK-DAG:     memref.view {{.*}} : memref<?xi8> to memref<3xi64>
+// CHECK-DAG:     memref.view {{.*}} : memref<?xi8> to memref<8x8xf32>
+// CHECK:         hip.shape{{.*}}outs({{.*}} : memref<3xi64>)
+// CHECK:         memref.load
+// CHECK:         arith.index_cast
+// CHECK:         memref.alloc({{.*}}) {{.*}}: memref<?xi8>
+// CHECK:         return
+func.func @dynamic_load_dependent_unpooled(
+    %ctx: !hip.context,
+    %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
+    %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,
+    %src: memref<2x3x4xf32>) -> memref<8x8xf32> {
+  %alloc0 = memref.alloc() : memref<8x8xf32>
+  hip.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  %shape = memref.alloc() : memref<3xi64>
+  hip.shape(%ctx) ins(%src : memref<2x3x4xf32>) outs(%shape : memref<3xi64>) {element_dim_specs = [[array<i64: 0, 2, 0, 0, 0, -1, -1, -1>], [array<i64: 0, 3, 0, 0, 0, -1, -1, -1>], [array<i64: 0, 4, 0, 0, 0, -1, -1, -1>]]}
+  %c0 = arith.constant 0 : index
+  %d0_i64 = memref.load %shape[%c0] : memref<3xi64>
+  %d0 = arith.index_cast %d0_i64 : i64 to index
+  %unpooled = memref.alloc(%d0) : memref<?xi8>
+  return %alloc0 : memref<8x8xf32>
+}

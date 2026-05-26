@@ -41,6 +41,17 @@ struct CompilationArtifact {
   ArtifactFormat format;
 };
 
+// Result of a compilation attempt. On success `artifact` is populated.
+// On failure `error_message` carries the diagnostic from the hip-compiler
+// plugin (or the higher-level reason — plugin missing, file IO failure, ...).
+// Used by pass_main.cpp to surface compile failures rather than silently
+// falling back to another EP. See the "Phase 0 — strict fallback" gotcha in
+// CLAUDE.md for the rationale.
+struct CompilationResult {
+  std::optional<CompilationArtifact> artifact;
+  std::string error_message;
+};
+
 /**
  * Simplified MLIR compiler that uses the hip-compiler plugin C API.
  *
@@ -59,13 +70,15 @@ public:
    *
    * @param mlir_bytecode  MLIR bytecode (as from Graph.save_string())
    * @param config         Compilation configuration
-   * @return               Compiled artifact (bytes + metadata), or nullopt on
-   * failure
+   * @return               CompilationResult — on success `.artifact` is set;
+   *                       on failure `.error_message` carries the diagnostic
+   *                       from the hip-compiler plugin (or a higher-level
+   *                       failure description) so callers can surface it
+   *                       loudly instead of silently dropping the subgraph.
    */
-  static std::optional<CompilationArtifact>
-  compileFromBytecode(const std::string &mlir_bytecode,
-                      const CompilationConfig &config,
-                      morphizen::FileSystem *fs);
+  static CompilationResult compileFromBytecode(const std::string &mlir_bytecode,
+                                               const CompilationConfig &config,
+                                               morphizen::FileSystem *fs);
 };
 
 } // namespace hipdnn::level1pass

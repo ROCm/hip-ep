@@ -129,46 +129,92 @@ inline bool operandIsFuncEntryBlockArg(mlir::Value v) {
 /// have the kernel read past the 1-element constant buffer and produce
 /// uninitialised junk.
 ///
-/// `targetType` MUST be fully static -- this helper materialises the
-/// expand `shape` operand as an `arith.constant dense<...> :
-/// tensor<RxI64>`.  Callers that need to broadcast to a dynamic shape
-/// should build the shape operand themselves and create the
-/// `hip.expand` directly.
+/// Dynamic target dims are sourced from `shapeSource`, which MUST have
+/// the same shape as `targetType`. The standard caller is a binary
+/// elementwise op: `shapeSource` is the operand whose shape already
+/// equals the result type (i.e. the "wide" side of the broadcast).
+/// For each dynamic dim of `targetType`, the helper emits a
+/// `tensor.dim shapeSource, i` and uses those values to (a) size the
+/// `tensor.empty` for the DPS init operand and (b) build the
+/// `hip.expand` shape operand via `tensor.from_elements`. Static dims
+/// are baked into the shape operand as `arith.constant index` literals
+/// so the IR remains valid even when targetType is fully static.
+///
+/// All `tensor.dim` SSA values are created at the current rewriter
+/// insertion point — which is the user op's rewrite location — so they
+/// dominate the consuming `tensor.empty` and `hip.expand`. This is
+/// load-bearing for dynamic-shape graphs (SSA dominance violations are
+/// the leading failure class when broadcastToShape is called from a
+/// binary op converter; see Phase 2a in
+/// docs/bisecting-ep-compile-failures.md).
 inline mlir::Value broadcastToShape(mlir::PatternRewriter &rewriter,
                                     mlir::Location loc, mlir::Value context,
                                     mlir::Value operand,
-                                    mlir::RankedTensorType targetType) {
+                                    mlir::RankedTensorType targetType,
+                                    mlir::Value shapeSource) {
   auto opType = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
   if (opType && opType.getShape() == targetType.getShape())
     return operand;
 
-  assert(targetType.hasStaticShape() &&
-         "broadcastToShape only handles static targets today");
+  // Materialise one tensor.dim per dynamic target dim, pulled from
+  // shapeSource. Static dims become arith.constant index literals so
+  // we can build the rank-1 shape tensor uniformly via
+  // tensor.from_elements (which takes any mix of dynamic + static
+  // index values).
+  int64_t targetRank = targetType.getRank();
+  llvm::SmallVector<mlir::Value> dynSizes;
+  llvm::SmallVector<mlir::Value> shapeElements;
+  shapeElements.reserve(targetRank);
+  for (int64_t i = 0; i < targetRank; ++i) {
+    mlir::Value dim;
+    if (targetType.isDynamicDim(i)) {
+      assert(shapeSource && "broadcastToShape needs a shapeSource with the "
+                            "result shape when target has dynamic dims");
+      dim = mlir::tensor::DimOp::create(rewriter, loc, shapeSource, i);
+      dynSizes.push_back(dim);
+    } else {
+      dim = mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                 targetType.getDimSize(i));
+    }
+    // hip.expand expects an i64 shape tensor; tensor.dim / arith.constant
+    // index produce `index`, so cast through arith.index_cast.
+    shapeElements.push_back(mlir::arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getI64Type(), dim));
+  }
 
-  // Build a tensor.empty for the DPS init operand (no dynamic sizes
-  // since targetType is static -- we asserted above).
   mlir::Type elemType =
       opType ? opType.getElementType() : targetType.getElementType();
   auto resultType =
       mlir::RankedTensorType::get(targetType.getShape(), elemType);
-  mlir::Value init = mlir::tensor::EmptyOp::create(
-      rewriter, loc, resultType.getShape(), resultType.getElementType(),
-      /*dynSizes=*/mlir::ValueRange{});
+  mlir::Value init =
+      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynSizes);
 
-  // The shape tensor is a static 1-D int64 constant carrying the target
-  // dims -- exactly what ExpandConversion would have given hip.expand
-  // when lowering an explicit onnx.Expand whose target is static.
-  llvm::SmallVector<int64_t> dimValues(targetType.getShape().begin(),
-                                       targetType.getShape().end());
-  auto shapeAttrType = mlir::RankedTensorType::get(
-      {static_cast<int64_t>(dimValues.size())}, rewriter.getI64Type());
-  mlir::Value shapeTensor = mlir::arith::ConstantOp::create(
-      rewriter, loc, shapeAttrType,
-      mlir::DenseElementsAttr::get(shapeAttrType, llvm::ArrayRef(dimValues)));
+  auto shapeTensorType =
+      mlir::RankedTensorType::get({targetRank}, rewriter.getI64Type());
+  mlir::Value shapeTensor = mlir::tensor::FromElementsOp::create(
+      rewriter, loc, shapeTensorType, shapeElements);
 
   return mlir::hip::ExpandOp::create(rewriter, loc, resultType, context,
                                      operand, shapeTensor, init)
       ->getResult(0);
+}
+
+/// Static-only overload kept for callers that have always-static target
+/// shapes (the historical signature; covered by the assertion in the
+/// dynamic path). Forwards to the dynamic overload with no shapeSource
+/// — safe because targetType.hasStaticShape() means no tensor.dim is
+/// emitted.
+inline mlir::Value broadcastToShape(mlir::PatternRewriter &rewriter,
+                                    mlir::Location loc, mlir::Value context,
+                                    mlir::Value operand,
+                                    mlir::RankedTensorType targetType) {
+  assert(targetType.hasStaticShape() &&
+         "static-only overload of broadcastToShape called with a "
+         "dynamic targetType; use the 5-arg overload and pass a "
+         "shapeSource value with the result shape");
+  return broadcastToShape(rewriter, loc, context, operand, targetType,
+                          /*shapeSource=*/nullptr);
 }
 
 /// Get !hip.context from function argument 0. Returns failure if the

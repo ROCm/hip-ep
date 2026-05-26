@@ -58,3 +58,50 @@ def make_model_from_nodes(
     if extra_opsets is None:
         onnx.checker.check_model(model)
     return model
+
+
+def bind_dims_partial(model, dim_map):
+    """Rebind selected ``dim_param`` slots in ``model`` to concrete values.
+
+    Unlike the historical "freeze every dim" helpers used by the static
+    embedding tests (e.g. ``_bind_num_logical_patches``), this helper
+    only rewrites dims whose ``dim_param`` is a key in ``dim_map`` and
+    leaves every other dim_param untouched. Dim slots with ``dim_value``
+    set are also preserved.
+
+    Parameters
+    ----------
+    model : onnx.ModelProto
+        The input model. NOT mutated -- a deep copy is returned so
+        repeated calls with different ``dim_map``s share the original.
+    dim_map : Mapping[str, int]
+        ``{ dim_param_name: concrete_value }`` for each dim that should
+        be pinned. Missing entries stay symbolic.
+
+    Returns
+    -------
+    onnx.ModelProto
+        A deep copy of ``model`` with the requested dims rebound. The
+        ONNX checker is not re-run because partial-rebind graphs are
+        intentionally still dynamic, which is the whole point of the
+        helper.
+
+    Notes
+    -----
+    - Walks both ``graph.input`` and ``graph.output`` (matching the
+      pattern used in the static fixtures), so an output-only dim_param
+      with no corresponding input slot is still rebound.
+    - Skips ``value_info`` deliberately: the MorphiZen importer
+      re-derives intermediate shapes, and rebinding them here would
+      create spurious mismatches if the user's ``dim_map`` doesn't
+      cover every internal symbol.
+    """
+    import copy
+
+    out = copy.deepcopy(model)
+    for tv in list(out.graph.input) + list(out.graph.output):
+        for d in tv.type.tensor_type.shape.dim:
+            if d.HasField("dim_param") and d.dim_param in dim_map:
+                d.Clear()
+                d.dim_value = int(dim_map[d.dim_param])
+    return out

@@ -14,6 +14,7 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 // Protobuf
@@ -87,7 +88,40 @@ static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
 
   MY_LOG(1) << "MLIR bytecode size: " << bytecode->size() << " bytes";
 
-  // Dump bytecode to file for troubleshooting if env var is set
+  // Dump-path resolution (Phase 1 — bisection repro):
+  //
+  //   1. HIPDNN_EP_BYTECODE_DUMP_PATH=<file>   -> dump bytecode here
+  //      (most convenient; bypasses provider-options and cache-key
+  //      hashing). A model that fails under the EP can be exported with
+  //      one env var and then bisected with `hip-mlir-opt`. Triggers
+  //      even if MORPHIZEN_DEBUG_MLIR_BACKEND is not set.
+  //
+  //      Distinct from the legacy `HIPDNN_EP_IR_DUMP_PATH` (consumed by
+  //      `lib/Compiler/CompilerDriver.cpp::runMLIRPasses` to emit
+  //      "IR after each pass" text via `pm.enableIRPrinting`). That
+  //      path would overwrite a binary bytecode dump.
+  //
+  //   2. MORPHIZEN_DEBUG_MLIR_BACKEND>=2 -> dump to
+  //      `<dump_dir>/mlir_bytecode_dump.mlir`. `dump_dir` is the
+  //      `dump_dir` provider option if set, else
+  //      `C:\temp\morphizen_dumps\<cache_key>` (Linux: `/tmp/...`).
+  //
+  // Both paths emit MLIR bytecode (the same format `Graph.save_string()`
+  // produces). Convert to readable MLIR for diffing/inspection with
+  // `hip-mlir-opt -o out.mlir <dump>`. See `tools/dump_imported_mlir.py`
+  // and `docs/bisecting-ep-compile-failures.md` for the end-to-end
+  // workflow.
+  const char *env_dump_path = std::getenv("HIPDNN_EP_BYTECODE_DUMP_PATH");
+  if (env_dump_path != nullptr && env_dump_path[0] != '\0') {
+    LOG(INFO) << "Dumping MLIR bytecode to HIPDNN_EP_BYTECODE_DUMP_PATH = "
+              << env_dump_path;
+    if (!std::ofstream(env_dump_path, std::ios::binary)
+             .write(bytecode->data(), bytecode->size())
+             .good()) {
+      LOG(WARNING) << "Failed to write MLIR bytecode dump to " << env_dump_path;
+    }
+  }
+
   if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 2) {
     auto dump_path = ctx->get_dump_directory() / "mlir_bytecode_dump.mlir";
     MY_LOG(1) << "Dumping MLIR bytecode to " << dump_path;
@@ -102,10 +136,55 @@ static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
 }
 
 // Step 3: Compile MLIR bytecode to artifact
-static std::optional<CompilationArtifact>
-compile_mlir(const std::string &mlir_bytecode, const CompilationConfig &config,
-             morphizen::FileSystem *fs) {
+static CompilationResult compile_mlir(const std::string &mlir_bytecode,
+                                      const CompilationConfig &config,
+                                      morphizen::FileSystem *fs) {
   return MlirCompiler::compileFromBytecode(mlir_bytecode, config, fs);
+}
+
+// True when the user has opted in to silent CPU fallback on compile failure.
+// Default is strict (returns false) so a compile failure throws an exception
+// — matches the "Phase 0 — strict fallback" UX where a model that fails to
+// lower to HIP must not look identical to a successful GPU run.
+//
+// Why throw and not abort: morphizen's outer std::exception catch will
+// either skip the subgraph (XLNX_ENABLE_SKIP_FATAL=1, the morphizen default)
+// or abort the process (XLNX_ENABLE_SKIP_FATAL=0). Either way the EP's
+// supported-node list ends up empty, which ORT then catches IF the caller
+// set `session.disable_cpu_ep_fallback=1` (e.g. our numeric test suite's
+// `OrtEpBackend`). That converts our throw into a Python-visible
+// `Fail`/`RuntimeError` from `InferenceSession.__init__` — caught cleanly
+// by `pytest.raises` / `xfail(raises=Exception)`. Bare abort would crash
+// pytest itself and break the K=0 xfail flow.
+//
+// Production callers who do NOT set `disable_cpu_ep_fallback=1` and want
+// loud failures can additionally set `XLNX_ENABLE_SKIP_FATAL=0` to convert
+// the morphizen catch into a process abort.
+//
+// Setting `HIPDNN_EP_ALLOW_CPU_FALLBACK=1` restores the legacy
+// silent-skip behavior for users who knowingly want partial-EP execution.
+static bool cpu_fallback_allowed() {
+  const char *v = std::getenv("HIPDNN_EP_ALLOW_CPU_FALLBACK");
+  return v != nullptr && v[0] == '1' && v[1] == '\0';
+}
+
+// Surface a fatal MLIR compile failure. By default this throws — see
+// `cpu_fallback_allowed()` for the rationale (morphizen + ORT cooperate to
+// turn the throw into a Python-visible session-init failure). Opt out with
+// `HIPDNN_EP_ALLOW_CPU_FALLBACK=1`.
+[[noreturn]] static void throw_on_compile_failure(const std::string &reason) {
+  std::fprintf(stderr,
+               "\n[MorphiZen EP] FATAL: MLIR compilation failed and "
+               "HIPDNN_EP_ALLOW_CPU_FALLBACK is not set.\n"
+               "  Reason: %s\n"
+               "  Set HIPDNN_EP_ALLOW_CPU_FALLBACK=1 to let ORT route the "
+               "failing subgraph to another EP (CPU). This hides real EP "
+               "bugs - only use when you explicitly want partial-EP "
+               "execution.\n\n",
+               reason.c_str());
+  std::fflush(stderr);
+  LOG(ERROR) << "MorphiZen EP throwing on compile failure: " << reason;
+  throw std::runtime_error("MorphiZen EP MLIR compilation failed: " + reason);
 }
 
 // Step 4: Write artifact to EPContext
@@ -243,12 +322,28 @@ struct Level1MlirPass {
 
     // Step 3: Compile bytecode to artifact
     auto fs = self.get_context()->get_file_system();
-    auto artifactOpt = compile_mlir(mlir_bytecode, config, fs.get());
-    if (!artifactOpt) {
-      LOG(WARNING) << "MLIR compilation failed, skipping";
+    auto compileOutcome = compile_mlir(mlir_bytecode, config, fs.get());
+    if (!compileOutcome.artifact) {
+      // Strict by default: a compile failure means the EP would silently
+      // hand the subgraph back to ORT, which then routes it to CPU. That
+      // would mask real bugs (e.g. dominance violations from dyn input
+      // shapes) as "EP succeeded" since pure-CPU and EP-on-CPU look
+      // identical from the Python side. Throw so that — when combined
+      // with `session.disable_cpu_ep_fallback=1` on the caller side —
+      // session creation fails with a Python-visible exception.
+      const std::string reason =
+          compileOutcome.error_message.empty()
+              ? "MLIR compilation failed (no diagnostic captured)"
+              : compileOutcome.error_message;
+      if (!cpu_fallback_allowed()) {
+        throw_on_compile_failure(reason);
+      }
+      LOG(WARNING) << "MLIR compilation failed, falling back to CPU "
+                      "(HIPDNN_EP_ALLOW_CPU_FALLBACK=1): "
+                   << reason;
       return;
     }
-    CompilationArtifact artifact = *artifactOpt;
+    CompilationArtifact artifact = std::move(*compileOutcome.artifact);
 
     TIMING_LOG("[Session] MLIR compilation (CompilerDriver): %.3fs\n",
                record_elapsed(t_prev));

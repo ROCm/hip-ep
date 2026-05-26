@@ -13,7 +13,21 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// --- AllocOp: hip.alloc(%ctx, %dyn...) -> hipMalloc(bytes) + memref descriptor
+// --- AllocOp: hip.alloc(%ctx, %dyn...) ->
+//             hipdnn_ep_state_dyn_pool_alloc(state, bytes)
+//             + memref descriptor
+//
+// Reaches this lowering for `memref.alloc` ops that PoolAllocs Phase 4
+// left unpooled (because their dyn-size operands depended on
+// non-hoistable ops, e.g. `memref.load` of a shape buffer written by an
+// earlier `hip.shape`). LowerAllocs then converted them to `hip.alloc`.
+//
+// We route through the existing dyn-pool (already used by Category-C
+// wrappers like NonZero / ConstantOfShape) instead of `hip_device_malloc`
+// because: (a) the runtime does NOT export `hip_device_malloc`; (b) the
+// dyn-pool resets per-Compute via `dyn_slot_reset` so per-alloc
+// `hip.free` is unnecessary; and (c) the dyn-pool grows geometrically
+// and reuses segments across Compute() invocations.
 struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -27,25 +41,32 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
     if (!isConvertibleAndHasIdentityMaps(memRefType))
       return rewriter.notifyMatchFailure(op, "incompatible memref type");
 
-    // Declare hipMalloc(size: i64) -> ptr
-    Type indexType = getIndexType();
+    auto llvmFn = op->getParentOfType<LLVM::LLVMFuncOp>();
+    if (!llvmFn)
+      return rewriter.notifyMatchFailure(op, "expected parent llvm.func");
+    if (llvmFn.getNumArguments() == 0)
+      return rewriter.notifyMatchFailure(
+          op, "parent llvm.func has no state pointer arg");
+
     Type ptrType = getPtrType();
-    FailureOr<LLVM::LLVMFuncOp> mallocFn = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipMalloc, indexType, ptrType);
-    if (failed(mallocFn))
+    Type i64Type = rewriter.getI64Type();
+    FailureOr<LLVM::LLVMFuncOp> dynPoolAllocFn = LLVM::lookupOrCreateFn(
+        rewriter, module, "hipdnn_ep_state_dyn_pool_alloc", {ptrType, i64Type},
+        ptrType);
+    if (failed(dynPoolAllocFn))
       return failure();
 
-    // Compute sizes and sizeBytes (dynamic sizes are after the ctx).
     SmallVector<Value, 4> sizes;
     SmallVector<Value, 4> strides;
     Value sizeBytes;
     getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
                              rewriter, sizes, strides, sizeBytes, true);
 
-    Value allocatedPtr =
-        LLVM::CallOp::create(rewriter, loc, *mallocFn, sizeBytes).getResult();
+    Value statePtr = llvmFn.getArgument(0);
+    Value allocatedPtr = LLVM::CallOp::create(rewriter, loc, *dynPoolAllocFn,
+                                              ValueRange{statePtr, sizeBytes})
+                             .getResult();
 
-    // Cast to memref address space if needed
     Type elementPtrType = getElementPtrType(memRefType);
     if (!elementPtrType)
       return rewriter.notifyMatchFailure(op,
@@ -68,33 +89,19 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
   }
 };
 
-// --- FreeOp: hip.free(%ctx, %memref) -> llvm.call @hipFree(allocated_ptr)
+// --- FreeOp: hip.free(%ctx, %memref) -> erased
+//
+// Pairs with `AllocOpLowering` above. The dyn-pool buffers are reset
+// per-Compute (via `hipdnn_ep_state_dyn_slots_reset`, called from the EP
+// between Compute() invocations) so individual `hip.free` ops are
+// unnecessary -- they would be no-ops at best, double-free hazards at
+// worst.
 struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(FreeOp op, OpAdaptor adaptor,
+  matchAndRewrite(FreeOp op, OpAdaptor /*adaptor*/,
                   ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
-    Type ptrType = getPtrType();
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kHipFree, ptrType, voidType);
-    if (failed(funcOp))
-      return failure();
-
-    Value memrefDesc = adaptor.getMemref();
-    Value allocatedPtr =
-        MemRefDescriptor(memrefDesc).allocatedPtr(rewriter, loc);
-    // hipFree expects void*; if memref is in non-default address space, cast
-    auto ptrTy = allocatedPtr.getType();
-    if (cast<LLVM::LLVMPointerType>(ptrTy).getAddressSpace() != 0)
-      allocatedPtr =
-          LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, allocatedPtr);
-
-    LLVM::CallOp::create(rewriter, loc, *funcOp, allocatedPtr);
     rewriter.eraseOp(op);
     return success();
   }
@@ -213,8 +220,24 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
   }
 };
 
-// --- memref.alloc -> hip_device_malloc (produced by bufferization for
-// tensor.empty)
+// --- memref.alloc -> hipdnn_ep_state_dyn_pool_alloc(state, bytes)
+//
+// Reaches this lowering when PoolAllocs Phase 4 (see PoolAllocs.cpp) left
+// the alloc unpooled because its dynamic-size operands depended on
+// non-hoistable ops (e.g. `memref.load` of a shape buffer written by an
+// earlier `hip.shape`). The static pool requires `hip.get_pool(%size)`
+// to dominate every pooled `memref.view`; if a dyn-size operand is
+// defined AFTER the first pooled alloc and cannot be hoisted, the only
+// alternative is a runtime allocator that returns a fresh GPU pointer
+// per call.
+//
+// We route through the existing dyn-pool (used by Category-C wrappers
+// like NonZero / ConstantOfShape) instead of `hip_device_malloc`
+// because: (a) the runtime does NOT export `hip_device_malloc`; (b)
+// the dyn-pool resets per-Compute via `dyn_slot_reset` so per-alloc
+// `hip.free` is unnecessary; and (c) the dyn-pool grows geometrically
+// and reuses segments across Compute() invocations, matching the
+// usage pattern of these transient compute-time buffers.
 struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -228,11 +251,19 @@ struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
     if (!isConvertibleAndHasIdentityMaps(memRefType))
       return rewriter.notifyMatchFailure(op, "incompatible memref type");
 
-    Type indexType = getIndexType();
+    auto llvmFn = op->getParentOfType<LLVM::LLVMFuncOp>();
+    if (!llvmFn)
+      return rewriter.notifyMatchFailure(op, "expected parent llvm.func");
+    if (llvmFn.getNumArguments() == 0)
+      return rewriter.notifyMatchFailure(
+          op, "parent llvm.func has no state pointer arg");
+
     Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
-    FailureOr<LLVM::LLVMFuncOp> mallocFn = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipMalloc, indexType, ptrType);
-    if (failed(mallocFn))
+    Type i64Type = rewriter.getI64Type();
+    FailureOr<LLVM::LLVMFuncOp> dynPoolAllocFn = LLVM::lookupOrCreateFn(
+        rewriter, module, "hipdnn_ep_state_dyn_pool_alloc", {ptrType, i64Type},
+        ptrType);
+    if (failed(dynPoolAllocFn))
       return failure();
 
     SmallVector<Value, 4> sizes;
@@ -241,8 +272,10 @@ struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
     getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
                              rewriter, sizes, strides, sizeBytes, true);
 
-    Value allocatedPtr =
-        LLVM::CallOp::create(rewriter, loc, *mallocFn, sizeBytes).getResult();
+    Value statePtr = llvmFn.getArgument(0);
+    Value allocatedPtr = LLVM::CallOp::create(rewriter, loc, *dynPoolAllocFn,
+                                              ValueRange{statePtr, sizeBytes})
+                             .getResult();
 
     MemRefDescriptor desc = createMemRefDescriptor(
         loc, memRefType, allocatedPtr, allocatedPtr, sizes, strides, rewriter);
@@ -251,34 +284,19 @@ struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
   }
 };
 
-// --- memref.dealloc -> hip_device_free (produced by bufferization)
+// --- memref.dealloc -> erased (dyn-pool buffers are reset per-Compute)
+//
+// Pairs with `MemRefAllocOpLowering` above. The runtime dyn-pool that
+// hosts these allocations is reset (via `hipdnn_ep_state_dyn_slots_reset`,
+// called from the EP between Compute() invocations) instead of being
+// freed per-alloc. So memref.dealloc has nothing to do.
 struct MemRefDeallocOpLowering
     : public ConvertOpToLLVMPattern<memref::DeallocOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(memref::DeallocOp op, OpAdaptor adaptor,
+  matchAndRewrite(memref::DeallocOp op, OpAdaptor /*adaptor*/,
                   ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
-    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kHipFree, ptrType, voidType);
-    if (failed(funcOp))
-      return failure();
-
-    // Must use allocatedPtr (not alignedPtr) -- hipFree requires the original
-    // allocation base.  With memref.view, alignedPtr points into the pool
-    // interior while allocatedPtr is the pool base.
-    Value allocatedPtr =
-        MemRefDescriptor(adaptor.getMemref()).allocatedPtr(rewriter, loc);
-    if (cast<LLVM::LLVMPointerType>(allocatedPtr.getType()).getAddressSpace() !=
-        0)
-      allocatedPtr =
-          LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, allocatedPtr);
-    LLVM::CallOp::create(rewriter, loc, *funcOp, allocatedPtr);
     rewriter.eraseOp(op);
     return success();
   }

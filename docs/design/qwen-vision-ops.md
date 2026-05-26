@@ -489,10 +489,21 @@ known remaining blockers:
 - **`castlike_model` E2E test** still fails — pre-existing,
   unrelated to this work.
 
-- **Dynamic shape support.** `vision.onnx` is fixed-shape (the perf
-  test harness runs `fix_shapes()` first), but the production OGA
-  pipeline may want dynamic image-patch counts. The compiler does
-  not yet support symbolic dims.
+- **Dynamic shape support.** `embedding.onnx` (both 9B and 35B-A3B
+  variants) is now exercised end-to-end with every input `dim_param`
+  symbolic -- `batch_size`, `sequence_length`, and (for 35B-A3B)
+  `num_logical_patches`. A single `InferenceSession` services every
+  parametrised `(B, S, K)` combination, including switching K=1 ->
+  K=4 and back across consecutive calls without recompile. The
+  regression nets live in
+  [test/numeric/tests/test_nonzero_qwen_embedding_dyn.py](../../test/numeric/tests/test_nonzero_qwen_embedding_dyn.py)
+  and
+  [test/numeric/tests/test_nonzero_qwen3_35b_a3b_embedding_dyn.py](../../test/numeric/tests/test_nonzero_qwen3_35b_a3b_embedding_dyn.py).
+  `vision.onnx` itself is still fixed-shape via `fix_shapes()` -- the
+  embedding work is the proof-of-concept that the EP can ingest fully
+  symbolic dims on a real multi-op Cat-C graph; extending the same
+  treatment to `vision.onnx` would only need the per-op LIT coverage
+  added in Phase 2c (`Slice` / `Unsqueeze` / `Squeeze` dyn tests).
 
 - **`SkipLayerNormalization` and `BiasAdd` fusions** that ORT applies
   to LN-heavy paths are not implemented here. The

@@ -128,16 +128,37 @@ class OrtEpBackend(Backend):
             )
         return ep_device
 
-    def run(
-        self,
-        model_path: str,
-        inputs: list[np.ndarray],
-    ) -> list[np.ndarray]:
+    def make_session(self, model_path: str) -> ort.InferenceSession:
+        """Build an ORT InferenceSession bound to this EP.
+
+        Exposed (in addition to ``run``) so dynamic-shape tests can
+        verify that a SINGLE session accepts multiple shape combinations
+        across consecutive ``sess.run`` calls -- the canonical promise
+        of leaving dim_params symbolic. Tests that don't care about
+        session reuse should keep using ``run`` (which destroys the
+        session per call, matching the surrounding numeric-test
+        memory discipline).
+        """
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
         opts.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
         opts.add_provider_for_devices([self._ep_device], dict(self._provider_options))
         sess = ort.InferenceSession(model_path, sess_options=opts)
+        # Belt-and-braces: even with `disable_cpu_ep_fallback=1` set above,
+        # confirm the session actually picked up the EP and didn't quietly
+        # route the subgraph elsewhere. See framework/ep_diagnostics.py for
+        # the rationale (Phase 0 "strict fallback").
+        from .ep_diagnostics import assert_subgraph_on_ep
+
+        assert_subgraph_on_ep(sess, self._ep_name)
+        return sess
+
+    def run(
+        self,
+        model_path: str,
+        inputs: list[np.ndarray],
+    ) -> list[np.ndarray]:
+        sess = self.make_session(model_path)
         input_dict = {sess.get_inputs()[i].name: inp for i, inp in enumerate(inputs)}
         outputs = sess.run(None, input_dict)
         del sess

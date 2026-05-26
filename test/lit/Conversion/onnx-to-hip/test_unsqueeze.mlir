@@ -65,6 +65,28 @@ module {
     %result = "onnx.Unsqueeze"(%data, %axes) : (tensor<128x4096xf16>, tensor<1xi64>) -> tensor<128x4096x1xf16>
     return %result : tensor<128x4096x1xf16>
   }
+
+  // --- Dynamic input dim preserved through expand_shape ---
+  // The dynamic input dim must be reflected in `output_shape` of the
+  // emitted `tensor.expand_shape` via a `tensor.dim` SSA value so the
+  // downstream pipeline knows the runtime size. Regression guard for
+  // the embedding / NonZero path which calls Unsqueeze on tensors with
+  // a dynamic batch / sequence dim.
+  func.func @test_unsqueeze_dynamic_input(%data: tensor<?x2048xf16>) -> tensor<?x2048x1xf16> {
+    %axes = "onnx.Constant"() {value = dense<[2]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %result = "onnx.Unsqueeze"(%data, %axes) : (tensor<?x2048xf16>, tensor<1xi64>) -> tensor<?x2048x1xf16>
+    return %result : tensor<?x2048x1xf16>
+  }
+
+  // --- Fully dynamic 2D input ---
+  // Both input dims dynamic; the inserted axis (axis=2) is the only
+  // size-1 dim. The result type must carry two `?`s with `tensor.dim`
+  // bindings so the expand_shape is rank-correct.
+  func.func @test_unsqueeze_fully_dynamic(%data: tensor<?x?xf16>) -> tensor<?x?x1xf16> {
+    %axes = "onnx.Constant"() {value = dense<[2]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %result = "onnx.Unsqueeze"(%data, %axes) : (tensor<?x?xf16>, tensor<1xi64>) -> tensor<?x?x1xf16>
+    return %result : tensor<?x?x1xf16>
+  }
 }
 
 // CHECK-LABEL: func.func @test_unsqueeze_front
@@ -96,3 +118,19 @@ module {
 // CHECK-NOT: onnx.Unsqueeze
 // CHECK: %[[RESULT:.*]] = tensor.expand_shape %[[DATA]] {{\[\[}}0], [1, 2]] output_shape [128, 4096, 1] : tensor<128x4096xf16> into tensor<128x4096x1xf16>
 // CHECK: return %[[RESULT]] : tensor<128x4096x1xf16>
+
+// CHECK-LABEL: func.func @test_unsqueeze_dynamic_input
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x2048xf16>)
+// CHECK-NOT: onnx.Unsqueeze
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[DIM:.*]] = tensor.dim %[[DATA]], %[[C0]] : tensor<?x2048xf16>
+// CHECK: tensor.expand_shape %[[DATA]] {{\[\[}}0], [1, 2]] output_shape [%[[DIM]], 2048, 1] : tensor<?x2048xf16> into tensor<?x2048x1xf16>
+
+// CHECK-LABEL: func.func @test_unsqueeze_fully_dynamic
+// CHECK-SAME: %[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?xf16>)
+// CHECK-NOT: onnx.Unsqueeze
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[D0:.*]] = tensor.dim %[[DATA]], %[[C0]] : tensor<?x?xf16>
+// CHECK-DAG: %[[D1:.*]] = tensor.dim %[[DATA]], %[[C1]] : tensor<?x?xf16>
+// CHECK: tensor.expand_shape %[[DATA]] {{\[\[}}0], [1, 2]] output_shape [%[[D0]], %[[D1]], 1] : tensor<?x?xf16> into tensor<?x?x1xf16>

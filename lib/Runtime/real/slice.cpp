@@ -236,13 +236,30 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     step_per_axis[axis] = step;
   }
 
-  // Sanity check: derived output extents must match the IR-supplied
-  // output shape. Mismatches are programming bugs (lowering or upstream
-  // shape-inference disagreement) and would silently corrupt data, so
-  // fail loud rather than launch a broken kernel.
+  // Resolve the runtime output shape from start/end/step.
+  //
+  // ABI convention for dynamic outputs (Category-C chains like
+  // NonZero -> ... -> Slice): the lowering passes `-1` in
+  // `output_shape[d]` for any dim whose size is only known at runtime.
+  // The static-output case (`output_shape[d] >= 0`) keeps its strict
+  // equality check -- a mismatch there IS a lowering bug. For the
+  // dynamic case we trust the derived extent and feed it to the kernel
+  // through `resolved_output_shape` below; otherwise the pool's
+  // upper-bound size would over-launch the slice kernel and write past
+  // the per-call valid prefix.
+  int64_t resolved_output_shape[kSliceRuntimeMaxRank];
   for (int d = 0; d < data_rank; ++d) {
-    if (!axis_set[d])
-      continue; // unmodified axis: output extent must == data extent.
+    resolved_output_shape[d] = output_shape[d];
+  }
+  for (int d = 0; d < data_rank; ++d) {
+    if (!axis_set[d]) {
+      // unmodified axis: output extent must == data extent. Materialise
+      // the runtime data extent for the dynamic-output sentinel case
+      // (the static case is already correct in the descriptor).
+      if (resolved_output_shape[d] == -1)
+        resolved_output_shape[d] = data_shape[d];
+      continue;
+    }
     int64_t dim = data_shape[d];
     int64_t start = start_per_axis[d];
     int64_t step = step_per_axis[d];
@@ -272,6 +289,11 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       expected = (end - start + step + 1) / step;
     if (expected < 0)
       expected = 0;
+    if (output_shape[d] == -1) {
+      // Dynamic output dim: trust the derived extent.
+      resolved_output_shape[d] = expected;
+      continue;
+    }
     if (expected != output_shape[d]) {
       fprintf(stderr,
               "[REAL] wrap_slice: derived output extent on axis %d "
@@ -295,6 +317,6 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                     hipdnn_ep_datatype_name(data_type));
 
   return hip_slice(hipdnn_ep_state_get_stream(state), data, output, data_shape,
-                   output_shape, start_per_axis, step_per_axis,
+                   resolved_output_shape, start_per_axis, step_per_axis,
                    static_cast<int>(data_rank), hip_dtype);
 }

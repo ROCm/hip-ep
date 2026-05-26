@@ -44,24 +44,38 @@ struct EqualToHip : public mlir::RewritePattern {
     // whichever operand needs it; the existing `wrap_expand` path
     // handles every dtype the elementwise kernels accept (including
     // i64 for this case).
+    //
+    // Phase 2a: also covers the dynamic-result case (Qwen-VL embedding
+    // with batch_size / sequence_length symbolic). The wide operand --
+    // the one whose shape already matches resultType -- is used as the
+    // `shapeSource` so broadcastToShape can materialise tensor.dim ops
+    // at the user op's insertion point (preserving SSA dominance).
     auto aShapeT = mlir::dyn_cast<mlir::RankedTensorType>(a.getType());
     auto bShapeT = mlir::dyn_cast<mlir::RankedTensorType>(b.getType());
-    bool resultIsStatic = resultType.hasStaticShape();
-    if (resultIsStatic && aShapeT && aShapeT.hasStaticShape() &&
-        aShapeT.getShape() != resultType.getShape())
-      a = broadcastToShape(rewriter, loc, context, a, resultType);
-    if (resultIsStatic && bShapeT && bShapeT.hasStaticShape() &&
-        bShapeT.getShape() != resultType.getShape())
-      b = broadcastToShape(rewriter, loc, context, b, resultType);
+    bool aMatches = aShapeT && aShapeT.getShape() == resultType.getShape();
+    bool bMatches = bShapeT && bShapeT.getShape() == resultType.getShape();
 
-    // After (potential) broadcast both operands have the result shape,
-    // so either is a fine source for createEmptyTensor's dynamic-dim
-    // probes.  Keep the original "pick the rank-matching side" rule
-    // for safety on dynamic-shape paths where broadcastToShape sat
-    // out.
-    auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-    mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+    // The "wide" operand is the one whose shape already matches the
+    // result type -- exactly one side should match for a real broadcast,
+    // or both for the trivial "no broadcast needed" case. If neither
+    // matches the result, we can't proceed (this happens if both sides
+    // need broadcasting, which ONNX rarely emits -- bail to let some
+    // other pattern try).
+    if (!aMatches && !bMatches)
+      return rewriter.notifyMatchFailure(
+          op, "neither operand of Equal matches result shape; "
+              "broadcast source ambiguous");
+
+    mlir::Value shapeSource = aMatches ? a : b;
+
+    if (!aMatches)
+      a = broadcastToShape(rewriter, loc, context, a, resultType, shapeSource);
+    if (!bMatches)
+      b = broadcastToShape(rewriter, loc, context, b, resultType, shapeSource);
+
+    // After broadcast both operands have the result shape; either is a
+    // fine source for createEmptyTensor's dynamic-dim probes.
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, a);
 
     auto hipOp = mlir::hip::EqualOp::create(rewriter, loc, resultType, context,
                                             a, b, init);
