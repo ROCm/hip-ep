@@ -200,6 +200,8 @@ void populateSizeConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateConcatConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir
