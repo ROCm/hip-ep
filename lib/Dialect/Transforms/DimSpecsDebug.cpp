@@ -31,6 +31,7 @@
 #include "mlir/IR/BuiltinOps.h" // mlir::ModuleOp
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
 
@@ -357,6 +358,22 @@ public:
     }
     DenseMap<int32_t, Operation *> firstPublisherOfSlot;
     auto mainFunc = module.lookupSymbol<func::FuncOp>("main_graph");
+    // After one-shot bufferize every `Hip_DpsOp` has zero SSA results --
+    // its "logical result" types live on the DestinationStyleOpInterface
+    // `outs` operands. Iterating per-result using `op->getNumResults()`
+    // would silently skip the slot-on-static-dim leak check on every
+    // real publisher. Treat the DPS init type as the per-result type
+    // when the op is in buffer form.
+    auto logicalResultType = [](Operation *op, unsigned r) -> Type {
+      if (op->getNumResults() > 0)
+        return r < op->getNumResults() ? op->getResult(r).getType() : Type();
+      if (auto dps = llvm::dyn_cast<DestinationStyleOpInterface>(op)) {
+        auto inits = dps.getDpsInits();
+        if (r < inits.size())
+          return inits[r].getType();
+      }
+      return Type();
+    };
     if (mainFunc) {
       mainFunc.walk([&](Operation *op) {
         auto ns = op->getDialect() ? op->getDialect()->getNamespace()
@@ -366,11 +383,14 @@ public:
         // (i) `hipdnn.output_slot_ids` grid vs. dynamic-dim mask.
         if (auto arr = op->getAttrOfType<::mlir::ArrayAttr>(
                 "hipdnn.output_slot_ids")) {
-          for (unsigned r = 0; r < arr.size() && r < op->getNumResults(); ++r) {
+          // Bound: trust the attribute's outer rank (publisher convention).
+          // `logicalResultType` returns null for indices beyond both the
+          // SSA result list AND the DPS init list, which we skip.
+          for (unsigned r = 0; r < arr.size(); ++r) {
             auto perResult = llvm::dyn_cast<::mlir::DenseI32ArrayAttr>(arr[r]);
             if (!perResult)
               continue;
-            auto rt = llvm::dyn_cast<ShapedType>(op->getResult(r).getType());
+            auto rt = llvm::dyn_cast<ShapedType>(logicalResultType(op, r));
             if (!rt || !rt.hasRank())
               continue;
             for (int64_t d = 0;
