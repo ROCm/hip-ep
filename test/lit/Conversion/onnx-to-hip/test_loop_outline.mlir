@@ -31,6 +31,10 @@
 // - Non-passthrough cond keeps cond_out in the body's return tuple and omits
 //   the `cond_is_passthrough` attribute, so the LLVM lowering picks the slow
 //   path `hipdnn_ep_run_loop` instead of `hipdnn_ep_run_counted_loop`
+// - Missing `cond_init` (operand is `onnx.NoValue` -> `none`) synthesizes an
+//   i1-true and forces `cond_is_passthrough` so the runtime takes the fast
+//   counted-loop path -- matches ONNX spec where missing cond means M is the
+//   only termination condition
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --onnx-loop-outline --split-input-file %s | FileCheck %s
@@ -162,4 +166,50 @@ module {
   // CHECK: %[[ADD:.*]] = "onnx.Add"
   // CHECK: %[[NOT:.*]] = "onnx.Not"
   // CHECK: return %[[NOT]], %[[ADD]] : tensor<i1>, tensor<16xf32>
+}
+
+// -----
+
+// Test 4: missing cond_init (counted loop).  ONNX Loop spec marks operand 1
+// as optional; importers spell its absence as `onnx.NoValue` with `none`
+// type.  ONNX semantics is "cond stays true forever; only max_trip_count
+// terminates" so the body's yielded cond_out is ignored.  The outliner
+// synthesizes `arith.constant true : i1` for hip.loop's cond_init and
+// forces `cond_is_passthrough` -- the LLVM lowering then picks the fast
+// path `hipdnn_ep_run_counted_loop`, identical to a dynamically-detected
+// passthrough case.  Matches Qwen3.5 vision encoder loop topology.
+module {
+  func.func @main_graph_no_cond(%A: tensor<16xf32>, %B: tensor<16xf32>) -> tensor<16xf32> {
+    %M = "onnx.Constant"() {value = dense<4> : tensor<i64>} : () -> tensor<i64>
+    %cond_init = "onnx.NoValue"() {value} : () -> none
+    %v_final = "onnx.Loop"(%M, %cond_init, %A) ({
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<i1>, %acc_in: tensor<16xf32>):
+      %acc_out = "onnx.Add"(%acc_in, %B) : (tensor<16xf32>, tensor<16xf32>) -> tensor<16xf32>
+      %cond_out = "onnx.Constant"() {value = dense<1> : tensor<i1>} : () -> tensor<i1>
+      "onnx.Yield"(%cond_out, %acc_out) : (tensor<i1>, tensor<16xf32>) -> ()
+    }) : (tensor<i64>, none, tensor<16xf32>) -> tensor<16xf32>
+    return %v_final : tensor<16xf32>
+  }
+
+  // CHECK-LABEL: func.func @main_graph_no_cond
+  //
+  // Trip count folds as before; cond_init is synthesized (no source
+  // operand to fold).
+  // CHECK-DAG: %[[M_IDX:.*]] = arith.constant 4 : index
+  // CHECK-DAG: %[[TRUE:.*]] = arith.constant true
+  //
+  // hip.loop op: passthrough forced, 1 loop-carried (%A), 1 capture (%B).
+  // CHECK: hip.loop({{.*}}, %[[M_IDX]], %[[TRUE]])
+  // CHECK-SAME: cond_is_passthrough
+  // CHECK-SAME: num_loop_carried = 1 : i32
+  //
+  // Body func skips the cond return slot (passthrough mode).  cond_in arg
+  // is preserved as tensor<i1> (block-arg type copied verbatim).
+  // CHECK-LABEL: func.func private @main_graph_no_cond_loop_body_n0
+  // CHECK-SAME: %{{.*}}: tensor<i1>,
+  // CHECK-SAME: %[[V_IN:.*]]: tensor<16xf32>,
+  // CHECK-SAME: %[[CAP:.*]]: tensor<16xf32>) -> tensor<16xf32>
+  //
+  // CHECK: %[[ADD:.*]] = "onnx.Add"(%[[V_IN]], %[[CAP]])
+  // CHECK: return %[[ADD]] : tensor<16xf32>
 }
