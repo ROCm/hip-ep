@@ -37,6 +37,7 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
 #define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
 #define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
+#define HIPDNN_EP_DATATYPE_UINT8 7    // ui8, 1 byte
 
 //===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
@@ -80,6 +81,8 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 8;
   case HIPDNN_EP_DATATYPE_INT8:
     return 1;
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return 1;
   case HIPDNN_EP_DATATYPE_DOUBLE:
     return 8;
   default:
@@ -101,6 +104,8 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "i64";
   case HIPDNN_EP_DATATYPE_INT8:
     return "i8";
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return "ui8";
   case HIPDNN_EP_DATATYPE_DOUBLE:
     return "f64";
   default:
@@ -407,6 +412,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 // GQA GEMM cache lifecycle (managed by RuntimeState)
 void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
 
+// MultiHeadAttention GEMM cache lifecycle (managed by RuntimeState)
+void hipdnn_ep_mha_gemm_cache_destroy(void *cache);
+
 // CausalConvWithState descriptor/algo cache lifecycle (managed by RuntimeState)
 void hipdnn_ep_causal_conv_cache_destroy(void *cache);
 
@@ -557,6 +565,44 @@ int wrap_group_query_attention(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
 
+// MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
+// Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
+//
+// Today this is a stub: the function only logs its parameters and throws a
+// std::runtime_error indicating the op is not yet implemented. The full MS
+// MultiHeadAttention spec covers 1-10 inputs (query, optional key/value,
+// bias, key_padding_mask, attention_bias, past_key/value, past_seq_len,
+// cache_indirection) and 1-4 outputs (output, optional present_key/value,
+// qk). See lib/Conversion/OnnxToHip/MultiHeadAttentionConversion.cpp for
+// the input layout the compiler emits.
+//
+// Optional pointer args: pass nullptr if the corresponding input/output is
+// absent. Shape parameters describe the query layout the compiler observed:
+//   query_rank      = 3 (standard [B, S, hidden]) or
+//                     5 (packed QKV [B, S_kv, num_heads, 3, head_size])
+//   query_hidden    = query.shape[2] when rank==3 (else 0)
+//   head_size       = query.shape[-1] when rank==5 (else 0; runtime derives
+//                                                   from hidden / num_heads)
+//   seq_len_kv      = key.shape[1] when key is provided else 0
+//                     (self-attention: == seq_len_q at runtime)
+//   v_hidden        = value.shape[2] when value is provided else 0
+int wrap_multi_head_attention(
+    RuntimeState *state,
+    // Inputs 1-10 (10 pointers - some may be nullptr)
+    void *query, void *key, void *value, void *bias, void *key_padding_mask,
+    void *attention_bias, void *past_key, void *past_value,
+    void *past_sequence_length, void *cache_indirection,
+    // Outputs 1-4 (last 3 may be nullptr)
+    void *output, void *present_key, void *present_value, void *qk,
+    // Attributes (4)
+    int64_t num_heads, float mask_filter_value, float scale,
+    int64_t unidirectional,
+    // Shape info (8: batch, seq_q, seq_kv, query_hidden, v_hidden, head_size,
+    //              query_rank, element_size_bytes)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t query_hidden, int64_t v_hidden, int64_t head_size,
+    int64_t query_rank, int64_t element_size_bytes);
+
 // Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
 // Each operand is described by 4D shape (N, C, H, W) to enable MIOpen-native
@@ -636,6 +682,13 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes);
 
+// ReduceMax operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
+                    int64_t data_num_elements, int64_t output_num_elements,
+                    int64_t axes_num_elements, int64_t data_type,
+                    int64_t keepdims, int64_t noop_with_empty_axes);
+
 // Cast operation wrapper (element type conversion)
 // src_data_type and dst_data_type are HIPDNN_EP_DATATYPE_* enum values.
 int wrap_cast(RuntimeState *state, void *input, void *output,
@@ -677,6 +730,15 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
                                   float epsilon, int64_t stash_type);
+
+// LayerNormalization operation wrapper (standard ONNX opset 17+)
+// bias, mean, inv_std may be nullptr when optional inputs/outputs are absent
+int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
+                             void *bias, void *output, void *mean,
+                             void *inv_std, int64_t input_num_elements,
+                             int64_t scale_num_elements,
+                             int64_t element_size_bytes, int64_t axis,
+                             float epsilon, int64_t stash_type);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
@@ -820,6 +882,220 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               void *output, int64_t M, int64_t N, int64_t K, float alpha,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
               int64_t cDim0, int64_t cDim1);
+
+int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
+               int64_t num_elements, int64_t data_type);
+
+// Element-wise logical AND wrapper. Inputs / output share the same data_type
+// (HIPDNN_EP_DATATYPE_*); ONNX `And` is defined on bool tensors, which the
+// EP marshals as i8/uint8 elements (1 byte per element). Today this is a
+// stub: the function returns success without computing anything so models
+// that include And can still link and lower end-to-end while a real
+// element-wise AND kernel is being built.
+int wrap_and(RuntimeState *state, void *a, void *b, void *output,
+             int64_t num_elements, int64_t data_type);
+
+int wrap_neg(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
+int wrap_not(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
+
+// ONNX NonZero wrapper.
+// Returns the indices of the non-zero elements of `input` in row-major
+// order, packed into `output` as a [R, N] int64 tensor where R is the
+// input rank and N is the (data-dependent) number of non-zero entries.
+// The caller pre-allocates the output buffer with capacity `output_capacity`
+// elements along the N dim (the OnnxToHip pass uses `input_num_elements`
+// as the upper bound).
+//
+// `input_data_type` is the HIPDNN_EP_DATATYPE_* value of the input tensor.
+// Bool (ONNX `tensor(bool)`) is marshalled as 1-byte uint8 by the EP and
+// reuses the INT8 slot here. Today this is a stub: it logs its parameters
+// and throws std::runtime_error so an inference path that actually
+// reaches NonZero fails loudly instead of producing uninitialised output.
+int wrap_nonzero(RuntimeState *state, void *input, void *output,
+                 int64_t input_num_elements, int64_t input_rank,
+                 int64_t output_capacity, int64_t input_data_type);
+
+// ONNX Size wrapper (dynamic-shape path only).
+//
+// Static-shape Size ops are folded into arith.constant at OnnxToHip time
+// and never reach this symbol. For inputs with at least one dynamic dim
+// the HipToLLVM lowering computes `num_elements = prod(input.shape)` as
+// a runtime i64 value (compile-time constants for static dims, MemRef
+// descriptor `sizes[]` for dynamic dims) and calls this wrapper, which
+// stores the 8-byte value into the rank-0 i64 output buffer on the GPU.
+int wrap_size(RuntimeState *state, void *output, int64_t num_elements);
+int wrap_cos(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
+int wrap_sin(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
+
+int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
+             int64_t num_elements, int64_t data_type);
+
+// CumSum operation wrapper (cumulative sum along an axis).
+// `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the
+// reduction axis; the runtime is responsible for reading it (typically a
+// single hipMemcpyAsync D2H or kernel-side load).
+// `axis_dtype` is HIPDNN_EP_DATATYPE_INT32 / _INT64.
+// `data_type` is HIPDNN_EP_DATATYPE_* of the data tensor.
+int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
+                const int64_t *data_shape, int64_t data_rank,
+                int64_t num_elements, int64_t data_type, int64_t axis_dtype,
+                int64_t exclusive, int64_t reverse);
+
+// Pad operation wrapper (constant / reflect / edge / wrap modes).
+// pads:           int64 1-D tensor [2 * num_axes]
+//                 -- formatted as [x1_begin, ..., x1_end, ...]
+// constant_value: nullable scalar tensor (only used when mode_id == 0)
+// axes:           nullable int64 1-D tensor selecting axes; nullptr/empty
+//                 means "all axes"
+// mode_id:        0=constant, 1=reflect, 2=edge, 3=wrap
+int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
+             void *axes, void *output, const int64_t *data_shape,
+             int64_t data_rank, const int64_t *output_shape,
+             int64_t output_rank, int64_t pads_num_elements,
+             int64_t axes_num_elements, int64_t data_type, int64_t mode_id);
+
+// Tile operation wrapper.
+// repeats: int64 1-D tensor of length `data_rank`.
+int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
+              const int64_t *input_shape, int64_t input_rank,
+              const int64_t *output_shape, int64_t output_rank,
+              int64_t data_type);
+
+// Expand operation wrapper (NumPy-style broadcasting to a target shape).
+int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
+                const int64_t *input_shape, int64_t input_rank,
+                const int64_t *output_shape, int64_t output_rank,
+                int64_t data_type);
+
+// ReduceProd operation wrapper. Same calling convention as wrap_reduce_sum
+// / wrap_reduce_max.
+int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
+                     int64_t data_num_elements, int64_t output_num_elements,
+                     int64_t axes_num_elements, int64_t data_type,
+                     int64_t keepdims, int64_t noop_with_empty_axes);
+
+// Less operation wrapper (element-wise C = A < B). Output is bool (1 byte).
+int wrap_less(RuntimeState *state, void *a, void *b, void *output,
+              int64_t num_elements, int64_t data_type);
+
+// GatherND operation wrapper. data_shape has rank `data_rank`; indices has
+// rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
+int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
+                   const int64_t *data_shape, int64_t data_rank,
+                   const int64_t *indices_shape, int64_t indices_rank,
+                   const int64_t *output_shape, int64_t output_rank,
+                   int64_t batch_dims, int64_t data_type);
+
+// Sign operation wrapper (element-wise sign(x)).
+int wrap_sign(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type);
+
+// Mod operation wrapper (element-wise modulo / fmod).
+//   fmod = 0  -> integer modulo (Python %); requires integer data_type
+//   fmod = 1  -> C fmod         ; requires float data_type
+int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
+             int64_t num_elements, int64_t data_type, int64_t fmod);
+
+// Slice operation wrapper (ONNX Slice native fallback).
+//
+// Today this is a stub: the OnnxToHip decompose pattern handles the common
+// case (compile-time constant starts/ends/axes/steps with positive unit
+// stride) by rewriting onnx.Slice to tensor.extract_slice, so this runtime
+// entry is only called for non-constant-indices or negative-step Slices.
+// The stub only logs its parameters and returns success — models that
+// exercise it will produce incorrect Slice output but will still link and
+// run end-to-end for IR-shape debugging.
+//
+// axes / steps may be nullptr when the corresponding optional input is absent.
+int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
+               void *axes, void *steps, void *output, const int64_t *data_shape,
+               int64_t data_rank, const int64_t *output_shape,
+               int64_t output_rank, int64_t starts_num_elements,
+               int64_t axes_num_elements, int64_t steps_num_elements,
+               int64_t data_type);
+
+// ScatterND: output = copy(data), then output[indices[i]] (reduction)
+// updates[i].
+//
+// `reduction_id` encodes the ONNX `reduction` attribute as a small enum
+// (must match ScatterNDOpLowering::reductionIdFromString):
+//
+//   0 = "none" (overwrite, default)
+//   1 = "add"
+//   2 = "mul"
+//   3 = "min"
+//   4 = "max"
+//
+// Today this is a stub: it only logs its parameters and returns success.
+// The runtime is responsible (when implemented) for both the initial
+// data -> output copy and the per-index scatter writes.
+int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
+                    void *updates, void *output, const int64_t *data_shape,
+                    int64_t data_rank, const int64_t *indices_shape,
+                    int64_t indices_rank, const int64_t *updates_shape,
+                    int64_t updates_rank, const int64_t *output_shape,
+                    int64_t output_rank, int64_t reduction_id,
+                    int64_t data_type);
+
+//===----------------------------------------------------------------------===//
+// ONNX Loop Drivers
+//===----------------------------------------------------------------------===//
+//
+// Body callback signature shared by both loop drivers. Emitted as a small
+// trampoline LLVMFuncOp by the HipToLLVM lowering pass; one trampoline per
+// `hip.loop`. The trampoline unpacks the descriptor-pointer arrays and
+// invokes the outlined ONNX body function with its actual (variable-arity)
+// positional memref-descriptor signature.
+//
+// Args:
+//   state              : RuntimeState pointer.
+//   iter_dev_ptr       : device int64_t holding the current iteration index.
+//                        Driver writes the host iter value into this buffer
+//                        each iter before calling the trampoline.
+//   cond_dev_ptr       : device bool (i1, 1 byte) holding the current cond.
+//                        Aliased between cond_in and cond_out -- the body
+//                        reads it as cond_in and writes the next-iter cond
+//                        in place. The driver re-reads it on the slow path
+//                        to decide whether to continue.
+//   loop_carried_descs : array of pointers to memref descriptors for each
+//                        loop-carried slot. The trampoline passes the same
+//                        descriptor for both the v_in and v_out positions
+//                        of the body -- one buffer per slot, body reads-
+//                        and-writes in place (safe under single-pass kernel
+//                        semantics).
+//   capture_descs      : array of pointers to memref descriptors for each
+//                        captured value. Treated read-only by the body.
+// Returns 0 on success, non-zero on body failure.
+typedef int (*HipdnnEpLoopBodyFn)(RuntimeState *state, void *iter_dev_ptr,
+                                  void *cond_dev_ptr, void **loop_carried_descs,
+                                  void **capture_descs);
+
+// Fast-path: counted loop. Selected by the HipToLLVM lowering when the
+// outlining pass proves cond_out == cond_in (SSA-equality, i.e. the body's
+// returned cond passes through unchanged). Skips per-iter D2H cond sync,
+// which is the dominant cost in the slow path.
+//
+// Equivalent to `for (i = 0; i < max_trip_count; ++i) body(i)` -- the
+// cheapest possible CPU-driven loop. Inspired by counted-loop hoisting in
+// classic optimizing compilers; no analogue in ORT CUDA EP or MIGraphX
+// (both always read cond_out every iter, even for trivially-counted loops).
+int hipdnn_ep_run_counted_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
+                               int64_t max_trip_count, bool cond_init,
+                               int32_t num_loop_carried, int32_t num_captures,
+                               void **loop_carried_descs, void **capture_descs);
+
+// Slow-path: dynamic-cond loop. Reads cond_out each iter via D2H sync
+// (matches the behavior of ORT CUDA EP `LoopImpl::Execute` and MIGraphX
+// `run_loop`). Used when the body's returned cond is the result of a body-
+// internal computation rather than a passthrough of cond_in.
+int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
+                       int64_t max_trip_count, bool cond_init,
+                       int32_t num_loop_carried, int32_t num_captures,
+                       void **loop_carried_descs, void **capture_descs);
 
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers

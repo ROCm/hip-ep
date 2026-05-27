@@ -46,6 +46,18 @@ dist/
 *.dat
 test_output/
 
+# Numeric test suite (test/numeric/)
+#   python_test_output/    -- single root for all runtime output:
+#       intermediate/      per-test ephemeral artefacts (model + inputs + actual/expected outputs);
+#                          deleted on pass, retained on fail for postmortem
+#       cache/             persistent reference-output cache, keyed by sanitised pytest node id
+#   .pytest_cache/         pytest's own metadata (--lf last-failed, etc.); also self-ignores
+#   run_numeric_tests.bat  per-developer convenience wrapper; not part of the suite
+#                          (each contributor wraps the README example to suit their layout)
+test/numeric/python_test_output/
+test/numeric/.pytest_cache/
+test/numeric/run_numeric_tests.bat
+
 # OS
 .DS_Store
 Thumbs.db

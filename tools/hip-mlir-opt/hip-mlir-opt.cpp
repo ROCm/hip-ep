@@ -30,6 +30,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/InitAllPasses.h"
 
@@ -132,6 +133,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SubOp>>(*ctx);
     mlir::hip::ReduceSumOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ReduceSumOp>>(*ctx);
+    mlir::hip::ReduceMaxOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ReduceMaxOp>>(*ctx);
     mlir::hip::MatMulNBitsOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::MatMulNBitsOp>>(*ctx);
     mlir::hip::QMoEOp::attachInterface<
@@ -144,6 +147,54 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::HipDNNGraphOp>>(*ctx);
     mlir::hip::WhereOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::WhereOp>>(*ctx);
+    mlir::hip::LayerNormOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LayerNormOp>>(*ctx);
+    mlir::hip::MinOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::MinOp>>(*ctx);
+    mlir::hip::NegOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::NegOp>>(*ctx);
+    mlir::hip::EqualOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::EqualOp>>(*ctx);
+    mlir::hip::DivOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::DivOp>>(*ctx);
+    mlir::hip::NotOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::NotOp>>(*ctx);
+    mlir::hip::AndOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::AndOp>>(*ctx);
+    mlir::hip::CosOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::CosOp>>(*ctx);
+    mlir::hip::SinOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SinOp>>(*ctx);
+    mlir::hip::CumSumOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::CumSumOp>>(*ctx);
+    mlir::hip::PadOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::PadOp>>(*ctx);
+    mlir::hip::TileOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::TileOp>>(*ctx);
+    mlir::hip::ExpandOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ExpandOp>>(*ctx);
+    mlir::hip::ReduceProdOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ReduceProdOp>>(*ctx);
+    mlir::hip::LessOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LessOp>>(*ctx);
+    mlir::hip::GatherNDOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GatherNDOp>>(*ctx);
+    mlir::hip::SignOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SignOp>>(*ctx);
+    mlir::hip::ModOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ModOp>>(*ctx);
+    mlir::hip::SliceOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SliceOp>>(*ctx);
+    mlir::hip::ScatterNDOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ScatterNDOp>>(*ctx);
+    mlir::hip::MultiHeadAttentionOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::MultiHeadAttentionOp>>(*ctx);
+    mlir::hip::NonZeroOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::NonZeroOp>>(*ctx);
+    mlir::hip::SizeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SizeOp>>(*ctx);
+    mlir::hip::LoopOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LoopOp>>(*ctx);
   });
 }
 
@@ -176,6 +227,9 @@ int main(int argc, char **argv) {
   mlir::hip::registerHipPipelines();
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::hip::createOutlineOnnxToHipDNNPass();
+  });
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::hip::createOnnxLoopOutlinePass();
   });
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();

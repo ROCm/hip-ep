@@ -15,10 +15,11 @@ add_library(HipToLLVM STATIC
   GatherLowering.cpp
   RangeLowering.cpp
   CastLowering.cpp
-  ReduceSumLowering.cpp
+  ReduceLowering.cpp
   TransposeLowering.cpp
   RopeLowering.cpp
   GqaLowering.cpp
+  MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp
   QMoELowering.cpp
   GraphLowering.cpp
@@ -26,7 +27,23 @@ add_library(HipToLLVM STATIC
   GemmLowering.cpp
   DumpTensorLowering.cpp
   WhereLowering.cpp
+  EqualLowering.cpp
+  AndLowering.cpp
+  DivLowering.cpp
   LinearAttentionLowering.cpp
+  UnaryElementwiseLowering.cpp
+  CumSumLowering.cpp
+  PadLowering.cpp
+  TileLowering.cpp
+  ExpandLowering.cpp
+  LessLowering.cpp
+  GatherNDLowering.cpp
+  ModLowering.cpp
+  SliceLowering.cpp
+  ScatterNDLowering.cpp
+  NonZeroLowering.cpp
+  SizeLowering.cpp
+  LoopLowering.cpp
 )
 
 add_dependencies(HipToLLVM

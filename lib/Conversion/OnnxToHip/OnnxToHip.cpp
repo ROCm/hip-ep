@@ -521,6 +521,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateNormConversionPatterns(patterns, ctx);
   populateRotaryEmbeddingConversionPatterns(patterns, ctx);
   populateGqaConversionPatterns(patterns, ctx);
+  populateMultiHeadAttentionConversionPatterns(patterns, ctx);
   populateMatMulNBitsConversionPatterns(patterns, ctx);
   populateQMoEConversionPatterns(patterns, ctx);
   populateReshapeConversionPatterns(patterns, ctx);
@@ -529,6 +530,30 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateWhereConversionPatterns(patterns, ctx);
   populateLinearAttentionConversionPatterns(patterns, ctx);
   populateRangeConversionPatterns(patterns, ctx);
+  populateEqualConversionPatterns(patterns, ctx);
+  populateDivConversionPatterns(patterns, ctx);
+  populateReduceMaxConversionPatterns(patterns, ctx);
+  populateMinConversionPatterns(patterns, ctx);
+  populateNotConversionPatterns(patterns, ctx);
+  populateCosConversionPatterns(patterns, ctx);
+  populateSinConversionPatterns(patterns, ctx);
+  populateCumSumConversionPatterns(patterns, ctx);
+  populatePadConversionPatterns(patterns, ctx);
+  populateTileConversionPatterns(patterns, ctx);
+  populateExpandConversionPatterns(patterns, ctx);
+  populateReduceProdConversionPatterns(patterns, ctx);
+  populateLessConversionPatterns(patterns, ctx);
+  populateGatherNDConversionPatterns(patterns, ctx);
+  populateSignConversionPatterns(patterns, ctx);
+  populateModConversionPatterns(patterns, ctx);
+  populateConstantOfShapeConversionPatterns(patterns, ctx);
+  populateSliceConversionPatterns(patterns, ctx);
+  populateScatterNDConversionPatterns(patterns, ctx);
+  populateIdentityConversionPatterns(patterns, ctx);
+  populateAndConversionPatterns(patterns, ctx);
+  populateSizeConversionPatterns(patterns, ctx);
+  populateNonZeroConversionPatterns(patterns, ctx);
+  populateConcatConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -704,7 +729,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // writer is opened here.
   }
 
-  // Capture original function signatures as module metadata before lowering.
+  // NOTE: onnx.CastLike -> onnx.Cast + dead-type-donor function-argument
+  // drop is handled by the standalone simplify-onnx pass, which must run
+  // upstream of this one (see lib/Dialect/Transforms/Pipelines.cpp). We
+  // capture metadata directly from the (already-simplified) signatures.
   if (mlir::failed(generateModuleMetadata(module)))
     return signalPassFailure();
   logSubpass("metadata");
@@ -713,6 +741,20 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
+    // Run ConstantOfShape folding BEFORE `lowerOnnxConstants` so it can
+    // still see the original `onnx.Constant` (or `onnx.Shape`) as the
+    // shape input.  Once `lowerOnnxConstants` externalises the constant,
+    // the IR becomes `memref.global` with a null `initial_value` (data
+    // lives in `constants.bin`) and the fold can no longer reach it.
+    {
+      mlir::RewritePatternSet preFoldPatterns(ctx);
+      populateConstantOfShapeConversionPatterns(preFoldPatterns, ctx);
+      mlir::GreedyRewriteConfig cfg;
+      cfg.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+      if (mlir::failed(mlir::applyPatternsGreedily(
+              funcOp, std::move(preFoldPatterns), cfg)))
+        return signalPassFailure();
+    }
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();

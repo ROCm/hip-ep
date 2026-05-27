@@ -83,11 +83,40 @@ SqrtToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Neg -> hip.neg
+/// Negation: y = -x. Lowered via wrap_power(alpha=0, beta=-1, gamma=1).
+struct NegToHip : public mlir::RewritePattern {
+  NegToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Neg", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value input = op->getOperand(0);
+    if (!mlir::isa<mlir::RankedTensorType>(input.getType()))
+      return rewriter.notifyMatchFailure(
+          op, "onnx.Neg lowering expects a ranked tensor input");
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    auto hipOp = mlir::hip::NegOp::create(rewriter, loc, resultType, context,
+                                          input, init);
+    rewriter.replaceOp(op, hipOp->getResult(0));
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populatePowerConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx) {
-  patterns.add<ReciprocalToHip, SqrtToHip>(ctx);
+  patterns.add<ReciprocalToHip, SqrtToHip, NegToHip>(ctx);
 }
 
 } // namespace hip

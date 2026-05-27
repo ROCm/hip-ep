@@ -116,6 +116,113 @@ int hip_elementwise_where(
     int hip_dtype);
 
 /* =========================================================================
+ * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
+ * =========================================================================
+ *
+ * Per-op launchers for the 5 ONNX unary ops added for the Qwen3.5 vision
+ * model. All five share a single .hip translation unit
+ * (3rd-party/custom_kernels/hip/elementwise_unary_kernel.hip).
+ *
+ * Supported hip_dtype (per op, may differ):
+ *   Neg/Sign  : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
+ *   Cos/Sin   : FLOAT16, FLOAT32
+ *   Not       : bool (i.e. 1-byte; pass element_size_bytes is unused -- the
+ *               kernel reads/writes 1 byte unconditionally and ignores
+ *               hip_dtype)
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+int hip_elementwise_neg(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_sign(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_cos(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_sin(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_not(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements);
+
+/* =========================================================================
+ * Elementwise Binary (Div / Mod / Equal / Less)
+ * =========================================================================
+ *
+ * Same-shape binary elementwise ops added for the Qwen3.5 vision model.
+ * All four share a single .hip TU (elementwise_binary_kernel.hip).
+ *
+ * Important: broadcasting is NOT performed in these kernels. lhs and rhs
+ * must already have identical shape (broadcasting is materialised
+ * upstream via Expand).
+ *
+ * Output dtype for Equal/Less is bool (1 byte); their hip_dtype refers to
+ * the INPUT type. For Div/Mod, output dtype matches input dtype.
+ */
+int hip_elementwise_div(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_mod(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype,
+    int fmod_flag);
+
+int hip_elementwise_equal(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_less(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+/* And over bool (1-byte) tensors. No hip_dtype: bool is the only supported
+ * input/output type (mirrors ORT v1.22.2 SPECIALIZED_BINARY_ELEMENTWISE_IMPL(And, bool)).
+ */
+int hip_elementwise_and(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements);
+
+/* =========================================================================
  * Elementwise reciprocal (1 / x)
  * =========================================================================
  *
@@ -507,6 +614,251 @@ int hip_reduce_sum(
     int64_t num_input_elements,
     int64_t num_output_elements,
     int hip_dtype);
+
+/* =========================================================================
+ * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
+ * =========================================================================
+ *
+ * Both share the structure: one block reduces `reduce_size = num_input /
+ * num_output` consecutive input elements into a single output. The reduce
+ * axes must already be collapsed into the trailing dimension of `data`
+ * (the upstream lowering arranges this for us).
+ *
+ * - hip_reduce_max  : Max op, init = -INF (FP) / TYPE_MIN (INT). NaN propagating
+ *                     on the FP path (matches ORT _Max<float>).
+ * - hip_reduce_prod : Mul op, init = 1.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
+ * (FP16 accumulates in float, narrows on write).
+ */
+int hip_reduce_max(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int hip_dtype);
+
+int hip_reduce_prod(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int hip_dtype);
+
+/* =========================================================================
+ * Tile / Expand (shape replication)
+ * =========================================================================
+ *
+ * Both ops copy `input` into a larger `output`. Shapes are passed as
+ * host-side int64 arrays from the lowering, so neither op needs to D2H
+ * the GPU-side shape / repeats tensors.
+ *
+ * - Tile  : output_shape[d] = input_shape[d] * repeats[d].
+ *           in_coord[d] = out_coord[d] % input_shape[d].
+ * - Expand: output_shape[d] is the broadcast result; any input dim that is 1
+ *           is replicated. in_coord[d] = (in_shape[d] == 1) ? 0
+ *                                       : out_coord[d - rank_diff].
+ *
+ * Both kernels are bounded to kTileMaxRank = 8 input/output dimensions
+ * (matches ORT's TArray<int64, 8> default).
+ */
+int hip_tile(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape_host,
+    const int64_t* output_shape_host,
+    int rank,
+    int hip_dtype);
+
+int hip_expand(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape_host,
+    int input_rank,
+    const int64_t* output_shape_host,
+    int output_rank,
+    int hip_dtype);
+
+/* =========================================================================
+ * GatherND
+ * =========================================================================
+ *
+ * Pick slices of `data` along the first K = indices.shape[-1] dims (after
+ * `batch_dims`), one slice per row of `indices`. INT64 indices only.
+ *
+ * Shapes pass as host int64 arrays (no GPU shape D2H). K and the rank
+ * decomposition are computed on the host; the kernel runs one thread per
+ * output element and reads K indices inline (no scratch buffer).
+ */
+int hip_gather_nd(
+    void* stream,
+    const void* input,
+    const void* indices,
+    void* output,
+    const int64_t* data_shape_host,
+    int data_rank,
+    const int64_t* indices_shape_host,
+    int indices_rank,
+    int batch_dims,
+    int hip_dtype);
+
+/* =========================================================================
+ * Slice (ONNX-13+ — non-constant indices / negative-step fallback)
+ * =========================================================================
+ *
+ * The compile-time-constant + positive-stride case is folded to
+ * `tensor.extract_slice` upstream of the runtime, so this kernel only
+ * services slices whose `starts` / `ends` / `axes` / `steps` are NOT
+ * graph-constant (or have negative steps).
+ *
+ * The host wrapper D2Hs the (typically tiny) index tensors and resolves
+ * them into per-axis `(start, step)` pairs in INPUT-space, one entry per
+ * data dimension. Axes not listed default to `(0, 1)`. The kernel runs
+ * one thread per output element and computes:
+ *
+ *     in_offset = sum_d ( start[d] + out_coord[d] * step[d] ) * input_stride[d]
+ *     output[out_idx] = input[in_offset]
+ *
+ * `step[d]` may be negative; correctness relies on the host wrapper
+ * having already resolved start / end to absolute positions per ONNX's
+ * negative-index and clamping rules (see lib/Runtime/real/slice.cpp).
+ *
+ * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
+ *
+ * Supported dtypes: f16, f32, i32, i64.
+ */
+int hip_slice(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape_host,
+    const int64_t* output_shape_host,
+    const int64_t* starts_per_axis_host,  /* length = rank */
+    const int64_t* steps_per_axis_host,   /* length = rank */
+    int rank,
+    int hip_dtype);
+
+/* =========================================================================
+ * ScatterND (ONNX-13+ with optional `reduction`)
+ * =========================================================================
+ *
+ * Produces an output tensor with the shape of `data` whose values are
+ * `data` copied, then `updates` overwritten / reduced into at positions
+ * specified by `indices`.
+ *
+ * The host wrapper does the data->output D2D copy first (one
+ * hipMemcpyAsync). The kernel then runs one thread per (updates_slice,
+ * inner) pair = num_updates_slices * slice_size threads total. Each
+ * thread reads K = indices.shape[-1] int64 indices inline and writes
+ * one element into output.
+ *
+ *   num_updates_slices = product(indices.shape[:-1])
+ *                      = product(updates.shape[:indices_rank-1])
+ *   slice_size         = product(data.shape[K:])
+ *
+ * `reduction_id`:
+ *   0 = none ("replace")  — last-writer-wins for duplicate indices,
+ *                           matching ONNX's "undefined" guarantee.
+ *   1 = add               — atomicAdd (or CAS-emulation for fp16).
+ *   2 = mul               — CAS-emulated atomic multiply.
+ *   3 = min               — CAS-emulated atomic min.
+ *   4 = max               — CAS-emulated atomic max.
+ *
+ * Bounded to rank <= 8.
+ *
+ * Supported dtypes: f16, f32, i32, i64. INT64 indices only.
+ */
+int hip_scatter_nd(
+    void* stream,
+    const void* data,
+    const void* indices,
+    const void* updates,
+    void* output,
+    const int64_t* data_shape_host,
+    int data_rank,
+    const int64_t* indices_shape_host,
+    int indices_rank,
+    int reduction_id,
+    int hip_dtype);
+
+/* =========================================================================
+ * CumSum
+ * =========================================================================
+ *
+ * One thread per (outer, inner) slice; each thread sequentially scans
+ * `axis_size` elements with stride `inner`. The host wrapper decomposes
+ *   outer = product(shape[:axis]); axis_size = shape[axis];
+ *   inner = product(shape[axis+1:])
+ * and synchronously D2H-reads the axis scalar.
+ *
+ * FP16 accumulates in float to avoid precision loss for long axes.
+ */
+int hip_cumsum(
+    void* stream,
+    const void* x,
+    void* y,
+    int64_t outer,
+    int64_t axis_size,
+    int64_t inner,
+    int hip_dtype,
+    int exclusive,
+    int reverse);
+
+/* =========================================================================
+ * Pad (constant / reflect / edge / wrap)
+ * =========================================================================
+ *
+ * One thread per output element. For each output coord, walk the dims and
+ * either copy input or fill from the pad_value depending on mode.
+ *
+ * `pad_mode`:    0 = Constant, 1 = Reflect, 2 = Edge, 3 = Wrap.
+ * `lower_pads_host`: per-dim begin pad (length = rank), already filtered
+ *                    by the `axes` attribute (defaults to 0 for unaffected
+ *                    dims). Upper bound implied by output_shape.
+ * `pad_value_host` : host pointer to a scalar of the data type (used only
+ *                    when pad_mode == Constant). May be null -> default 0.
+ */
+int hip_pad(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape_host,
+    const int64_t* output_shape_host,
+    const int64_t* lower_pads_host,
+    int rank,
+    int hip_dtype,
+    int pad_mode,
+    const void* pad_value_host);
+
+/* =========================================================================
+ * LayerNormalization (ONNX-17)
+ * =========================================================================
+ *
+ *   y = (x - mean) * rsqrt(var + epsilon) * scale + bias
+ *
+ * Per-row reduction with FP32 accumulators. Bias and the optional `mean` /
+ * `inv_std` outputs may be null.
+ *
+ * `hip_dtype`   : I/O type for input/scale/bias/output -- FLOAT16 or FLOAT32.
+ * `mean_dtype`  : type of mean/inv_std output buffers -- FLOAT16 or FLOAT32.
+ */
+int hip_layer_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,         // optional
+    void* output,
+    void* mean_out,           // optional
+    void* inv_std_out,        // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int hip_dtype,
+    int mean_dtype);
 
 /* =========================================================================
  * Range (1-D sequence generation)

@@ -220,6 +220,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
   state->gqa_gemm_cache = nullptr;
+  state->mha_gemm_cache = nullptr;
   state->causal_conv_cache = nullptr;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
@@ -229,6 +230,12 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
+  state->loop_iter_cpu_buf = nullptr;
+  state->loop_iter_capacity = 0;
+  state->loop_iter_dev = nullptr;
+  state->loop_cond_host = nullptr;
+  state->loop_cond_dev = nullptr;
+  state->loop_event = nullptr;
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -854,6 +861,23 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
   }
 
+  // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
+  // allocated). The stream sync at the top of cleanup has already drained
+  // any in-flight kernel that may have been holding loop_*_dev pointers,
+  // so hipHostFree is safe here.
+  if (state->loop_event) {
+    HIP_CLEANUP(hipEventDestroy(static_cast<hipEvent_t>(state->loop_event)));
+  }
+  if (state->loop_iter_cpu_buf) {
+    HIP_CLEANUP(hipHostFree(state->loop_iter_cpu_buf));
+  }
+  if (state->loop_iter_dev) {
+    HIP_CLEANUP(hipFree(state->loop_iter_dev));
+  }
+  if (state->loop_cond_host) {
+    HIP_CLEANUP(hipHostFree(state->loop_cond_host));
+  }
+
   if (state->device_error_flag) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
   }
@@ -893,6 +917,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->gqa_gemm_cache) {
     hipdnn_ep_gqa_gemm_cache_destroy(state->gqa_gemm_cache);
     state->gqa_gemm_cache = nullptr;
+  }
+
+  // Free MultiHeadAttention GEMM descriptor cache
+  if (state->mha_gemm_cache) {
+    hipdnn_ep_mha_gemm_cache_destroy(state->mha_gemm_cache);
+    state->mha_gemm_cache = nullptr;
   }
 
   // Free CausalConvWithState descriptor/algo cache
@@ -1105,7 +1135,7 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
         stderr,
         "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
         alloc_size);
-    return -1;
+    std::abort();
   }
 
   state->workspace_size = alloc_size;

@@ -220,18 +220,35 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGatherLoweringPatterns(typeConverter, patterns);
   populateRangeLoweringPatterns(typeConverter, patterns);
   populateCastLoweringPatterns(typeConverter, patterns);
-  populateReduceSumLoweringPatterns(typeConverter, patterns);
+  populateReduceLoweringPatterns(typeConverter, patterns);
   populateTransposeLoweringPatterns(typeConverter, patterns);
   populateRopeLoweringPatterns(typeConverter, patterns);
   populateGqaLoweringPatterns(typeConverter, patterns);
+  populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateQMoELoweringPatterns(typeConverter, patterns);
   populateGemmLoweringPatterns(typeConverter, patterns);
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
+  populateLoopLoweringPatterns(typeConverter, patterns);
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
   populateDumpTensorLoweringPatterns(typeConverter, patterns);
   populateWhereLoweringPatterns(typeConverter, patterns);
+  populateEqualLoweringPatterns(typeConverter, patterns);
+  populateAndLoweringPatterns(typeConverter, patterns);
+  populateDivLoweringPatterns(typeConverter, patterns);
+  populateUnaryElementwiseLoweringPatterns(typeConverter, patterns);
+  populateCumSumLoweringPatterns(typeConverter, patterns);
+  populatePadLoweringPatterns(typeConverter, patterns);
+  populateTileLoweringPatterns(typeConverter, patterns);
+  populateExpandLoweringPatterns(typeConverter, patterns);
+  populateLessLoweringPatterns(typeConverter, patterns);
+  populateGatherNDLoweringPatterns(typeConverter, patterns);
+  populateModLoweringPatterns(typeConverter, patterns);
+  populateSliceLoweringPatterns(typeConverter, patterns);
+  populateScatterNDLoweringPatterns(typeConverter, patterns);
+  populateNonZeroLoweringPatterns(typeConverter, patterns);
+  populateSizeLoweringPatterns(typeConverter, patterns);
 
   // Standard dialect lowerings
   // Bundle func/memref/arith/cf lowering with HIP lowering to minimize

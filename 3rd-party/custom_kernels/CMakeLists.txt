@@ -36,6 +36,14 @@ hip_add_library(hip_custom_kernels STATIC
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip
     hip/elementwise_where_kernel.hip
+    hip/elementwise_unary_kernel.hip
+    hip/elementwise_binary_kernel.hip
+    hip/tile_kernel.hip
+    hip/expand_kernel.hip
+    hip/gather_nd_kernel.hip
+    hip/cumsum_kernel.hip
+    hip/pad_kernel.hip
+    hip/layer_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip
@@ -45,6 +53,8 @@ hip_add_library(hip_custom_kernels STATIC
     hip/linear_attention_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
+    hip/slice_kernel.hip
+    hip/scatter_nd_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

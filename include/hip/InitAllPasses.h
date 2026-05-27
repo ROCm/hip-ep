@@ -73,6 +73,7 @@ inline void registerAllPasses() {
   mlir::hip::registerOptimizeMemRefsPass();
   mlir::hip::registerPoolAllocsPass();
   mlir::hip::registerInsertTensorDumpPass();
+  mlir::hip::registerSimplifyOnnxPass();
   registerConversionPasses();
 }
 
