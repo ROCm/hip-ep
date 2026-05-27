@@ -4,6 +4,7 @@
  */
 #include "ir-converter.hpp"
 #include "ort-graph-wrapper.hpp"
+#include <unordered_map>
 namespace morphizen {
 class IRConverterImp : public ApiPtrs {
 
@@ -49,5 +50,10 @@ private:
 
   OrtGraphWrapper graph_;
   IRConverterConfig config_;
+  // Symbolic dimension names keyed by tensor name (e.g. "input_ids" →
+  // ["batch_size", "sequence_length"]). Serialized as model metadata
+  // "dim_params_map" so the level-1 pass can build DimSource entries.
+  mutable std::unordered_map<std::string, std::vector<std::string>>
+      dim_params_map_;
 };
 } // namespace morphizen
