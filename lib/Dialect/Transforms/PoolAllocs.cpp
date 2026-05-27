@@ -568,9 +568,34 @@ static bool opMayWriteToAlias(Operation *op, Value target,
     return !same.has_value() || *same;
   };
 
-  // memref.store writes to its memref operand.
+  // memref.store writes to its memref operand.  Use STRICT SSA-equality
+  // (not BufferOriginAnalysis::isSameAllocation) here: in the canonical
+  // host-scratch pattern produced by `--hip-materialize-host-scalars` —
+  //
+  //   %0 = hip.get_host_scratch(...) : memref<?xi8>
+  //   %view   = memref.view %0[%c0]   : memref<?xi8> to memref<i64>  ;; slot 0 (batch)
+  //   memref.store %batch, %view[]
+  //   %view_2 = memref.view %0[%c64]  : memref<?xi8> to memref<i64>  ;; slot 1 (seq)
+  //   memref.store %seq, %view_2[]
+  //   %view_3 = memref.view %0[%c128] : memref<?xi8> to memref<i64>  ;; slot 2 (mul)
+  //   hip.mul ins(%view, %view_2) outs(%view_3)
+  //
+  // BufferOriginAnalysis says all three views share the same root
+  // allocation (%0), so under `mayAlias` semantics a `store %seq, %view_2`
+  // would be classified as "may write to alias of %view" — and the latest
+  // such writer (the seq-store at offset 64) would shadow the batch-store
+  // at offset 0.  `materializeScalarFromMemref(%view)` then folds %view's
+  // scalar to %seq instead of %batch, and `hip.mul`'s output materializes
+  // as `arith.muli %seq, %seq` instead of `arith.muli %batch, %seq` —
+  // silently corrupting the dynamic Range/Reshape alloc size on every
+  // asymmetric (batch != seq) shape.
+  //
+  // Two views with different offsets are distinct scalar slots even though
+  // they share a root buffer; SSA-equality on the store target is the
+  // correct discrimination (canonicalize/CSE keeps `memref.view %0[%c64]`
+  // unique per offset).
   if (auto store = dyn_cast<memref::StoreOp>(op))
-    return mayAlias(store.getMemRef());
+    return store.getMemRef() == target;
 
   // hip dialect DPS ops write to their `output` operand (last memref operand
   // by convention; matches the Hip_DpsOp layout used across the dialect).
