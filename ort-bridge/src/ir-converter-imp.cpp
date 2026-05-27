@@ -52,7 +52,6 @@ ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
 }
 
 OrtStatus* IRConverterImp::convert_to_model(morphizen::Model& model) const {
-  // This is a stub implementation. Replace with actual conversion logic.
   MY_LOG(1) << "graph name =" << graph_.name();
   auto& main_graph = MORPHIZEN_ORT_API(model_main_graph)(model);
 
@@ -62,6 +61,23 @@ OrtStatus* IRConverterImp::convert_to_model(morphizen::Model& model) const {
   // resolved by the backend when graph_add_node consumes their
   // attr_proto_new_graph attribute.
   morphizen_cxx::GraphRef(main_graph).resolve(true);
+
+  // Serialize dim_params as model metadata for the level-1 pass.
+  // Format: "name1:p0,p1;name2:p0,p1,p2;..." (parsed by parse_dim_params_map)
+  if (!dim_params_map_.empty()) {
+    std::string encoded;
+    for (const auto& [name, params] : dim_params_map_) {
+      if (!encoded.empty())
+        encoded += ';';
+      encoded += name + ':';
+      for (size_t i = 0; i < params.size(); ++i) {
+        if (i > 0)
+          encoded += ',';
+        encoded += params[i];
+      }
+    }
+    MORPHIZEN_ORT_API(model_set_meta_data)(model, "dim_params_map", encoded);
+  }
 
   // Save converted model to file for debugging if enabled
   save_model_for_debugging(model);
@@ -405,6 +421,31 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
   } else {
     *node_arg = &morphizen::node_arg_new(graph, name, &shape, element_type);
   }
+
+  // Collect ONNX symbolic dimension names (dim_param) for each tensor.
+  // Data flow: ORT GetSymbolicDimensions → dim_params_map_ → model metadata
+  // "dim_params_map" → level-1 pass builds DimSource entries → custom op
+  // resolves dynamic output shapes at runtime from input tensor shapes.
+  auto onnx_type = type_info.GetONNXType();
+  if (onnx_type == ONNX_TYPE_TENSOR) {
+    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+    auto symbolic_dims = tensor_info.GetSymbolicDimensions();
+    std::vector<std::string> dim_params;
+    dim_params.reserve(symbolic_dims.size());
+    bool has_any = false;
+    for (const char* s : symbolic_dims) {
+      if (s && s[0] != '\0') {
+        dim_params.emplace_back(s);
+        has_any = true;
+      } else {
+        dim_params.emplace_back();
+      }
+    }
+    if (has_any) {
+      dim_params_map_[name] = std::move(dim_params);
+    }
+  }
+
   return nullptr;
 };
 OrtStatus*
