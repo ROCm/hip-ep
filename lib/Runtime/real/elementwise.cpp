@@ -210,6 +210,48 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                     (long long)out_n, (long long)out_c, (long long)out_h,
                     (long long)out_w, type_name, (long long)data_type);
 
+  // INT64 (and other non-float) fallback: MIOpen's miopenOpTensor has no
+  // INT64 path, so we route through a custom HIP elementwise kernel. The
+  // only path observed in production today is the Qwen3 mrope chain
+  //   /model/layers.N/attn/{q,k}_mrope/total/Mul (16 ops/graph)
+  // which multiplies two scalar int64s (batch_size * sequence_length) to
+  // build the upper bound of a Range op. Without this dispatch the model
+  // silently runs no-op for these nodes and downstream attention reads
+  // uninitialised garbage from the pool. We only handle equal-shape inputs
+  // (no broadcasting) -- broadcasting int64 is not produced by any current
+  // model and adding it would need a separate broadcasting kernel.
+  if (data_type == HIPDNN_EP_DATATYPE_INT64) {
+    const bool shapes_equal =
+        (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w &&
+         rhs_n == out_n && rhs_c == out_c && rhs_h == out_h && rhs_w == out_w);
+    if (!shapes_equal) {
+      fprintf(stderr,
+              "wrap_miopenOpTensor: int64 fallback requires equal shapes, "
+              "got lhs=[%lld,%lld,%lld,%lld] rhs=[%lld,%lld,%lld,%lld] "
+              "out=[%lld,%lld,%lld,%lld]\n",
+              (long long)lhs_n, (long long)lhs_c, (long long)lhs_h,
+              (long long)lhs_w, (long long)rhs_n, (long long)rhs_c,
+              (long long)rhs_h, (long long)rhs_w, (long long)out_n,
+              (long long)out_c, (long long)out_h, (long long)out_w);
+      return -1;
+    }
+    const int64_t num_elements = out_n * out_c * out_h * out_w;
+    void *stream = hipdnn_ep_state_get_stream(state);
+    if (tensor_op == HIPDNN_EP_TENSOR_OP_MUL) {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: dispatching INT64 MUL to "
+                        "hip_elementwise_mul (num=%lld)\n",
+                        (long long)num_elements);
+      return hip_elementwise_mul(stream, lhs, rhs, output, num_elements,
+                                 HIP_DTYPE_INT64);
+    }
+    fprintf(stderr,
+            "wrap_miopenOpTensor: int64 fallback for tensor_op %lld (%s) is "
+            "not implemented (only MUL is supported today; if you hit this, "
+            "add a hip_elementwise_<op> kernel and route it here)\n",
+            (long long)tensor_op, op_name);
+    return -1;
+  }
+
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
