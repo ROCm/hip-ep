@@ -67,6 +67,15 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
                int64_t data_type) {
+  fprintf(stderr,
+          "[slice-entry] state=%p data=%p starts=%p ends=%p output=%p "
+          "data_shape=%p data_rank=%lld output_shape=%p output_rank=%lld "
+          "K=%lld dtype=%lld\n",
+          (void *)state, data, starts, ends, output, (const void *)data_shape,
+          (long long)data_rank, (const void *)output_shape,
+          (long long)output_rank, (long long)starts_num_elements,
+          (long long)data_type);
+  fflush(stderr);
   OP_PROFILE(
       "slice",
       [&] {
@@ -273,11 +282,47 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     if (expected < 0)
       expected = 0;
     if (expected != output_shape[d]) {
+      // Empty-slice corner case: ONNX permits `Slice(start==end)` as a no-op
+      // producing an empty tensor along that axis. Compiler-side
+      // bufferization may have sized the output memref to the FULL input
+      // axis (since the slice output type is fully dynamic), so output_shape
+      // > 0 while the runtime extent is 0. Treat this as a no-op success --
+      // the output buffer is allocated but no bytes are produced; downstream
+      // ops are responsible for honouring the empty-tensor semantics
+      // (typically a hip.loop with zero iterations consuming this tensor).
+      if (expected == 0) {
+        // Bufferization sized the output for the IR's static guess (which
+        // here exceeds 0 because the slice output type was fully dynamic);
+        // the buffer is real and downstream consumers will dereference it
+        // (e.g. a hip.loop iter_args carrying it forward). Zero the buffer
+        // so reads return deterministic data instead of pool garbage.
+        int64_t out_total = 1;
+        for (int dd = 0; dd < output_rank; ++dd)
+          out_total *= output_shape[dd];
+        int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+        size_t bytes = static_cast<size_t>(out_total) *
+                       static_cast<size_t>(elem_bytes);
+        if (bytes > 0) {
+          void *stream = hipdnn_ep_state_get_stream(state);
+          hipMemsetAsync(output, 0, bytes,
+                         static_cast<hipStream_t>(stream));
+        }
+        RUNTIME_DEBUG_LOG(
+            "[REAL] wrap_slice: empty-slice on axis %d "
+            "(start=%lld end=%lld step=%lld dim=%lld; IR output_shape says "
+            "%lld) -- zeroed %zu bytes\n",
+            d, (long long)start, (long long)end, (long long)step,
+            (long long)dim, (long long)output_shape[d], bytes);
+        return 0;
+      }
       fprintf(stderr,
               "[REAL] wrap_slice: derived output extent on axis %d "
-              "(%lld) != IR output_shape (%lld) -- aborting to avoid "
-              "writing out-of-bounds\n",
-              d, (long long)expected, (long long)output_shape[d]);
+              "(%lld) != IR output_shape (%lld) -- aborting "
+              "(start=%lld end=%lld step=%lld dim=%lld data_rank=%lld "
+              "K=%lld)\n",
+              d, (long long)expected, (long long)output_shape[d],
+              (long long)start, (long long)end, (long long)step,
+              (long long)dim, (long long)data_rank, (long long)K);
       return -1;
     }
   }

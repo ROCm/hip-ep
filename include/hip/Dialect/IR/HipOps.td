@@ -97,6 +97,31 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
   let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
 }
 
+def Hip_HostSyncOp : Hip_Op<"host_sync",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize the runtime stream so host loads see GPU writes";
+  let description = [{
+    Blocks the host until every kernel previously dispatched on the runtime
+    stream has completed. Inserted by `hip-materialize-host-scalars` in front
+    of any `memref.load` whose memref aliases a `hip.get_host_scratch`
+    region AND for which an unsynced GPU `hip.*` op precedes the load in the
+    same block. Without the sync the host load races the GPU writer on
+    targets where `hipHostMallocMapped` memory updates are not yet visible
+    to the CPU at the time of the read.
+
+    Example:
+    ```mlir
+    hip.cast(%ctx) ins(%i64v : memref<i64>) outs(%scratch_view : memref<f32>)
+    hip.host_sync(%ctx)
+    %val = memref.load %scratch_view[] : memref<f32>
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx);
+  let results = (outs);
+  let assemblyFormat = "`(` $ctx `)` attr-dict";
+}
+
 // ===== Control flow ==========================================================
 
 def Hip_LoopOp : Hip_Op<"loop",

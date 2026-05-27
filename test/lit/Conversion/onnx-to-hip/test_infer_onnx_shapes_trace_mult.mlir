@@ -32,7 +32,7 @@
 // 4599676419421066581. The bit-cast lives in the encoded payload as
 // the third int per dim (arg_idx, dim_idx, mult_bits). For arg 0
 // dim 0 with mult = 1/3 the triple is `[0, 0, 4599676419421066581]`.
-func.func @reshape_k3_mult(%x: tensor<?x3xf32>) -> tensor<?x9xf32> {
+func.func @main_graph(%x: tensor<?x3xf32>) -> tensor<?x9xf32> {
   %shape = "onnx.Constant"() {value = dense<[-1, 9]> : tensor<2xi64>}
       : () -> tensor<2xi64>
   %r = "onnx.Reshape"(%x, %shape)

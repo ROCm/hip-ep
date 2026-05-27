@@ -398,5 +398,56 @@ RankedTensorType inferBinaryBroadcastResultType(RankedTensorType lhsType,
   return RankedTensorType::get(dims, lhsType.getElementType());
 }
 
+RankedTensorType inferConcatResultType(ValueRange operands, int64_t axis) {
+  if (operands.empty())
+    return {};
+  // First ranked operand seeds rank + element type.
+  RankedTensorType refType;
+  for (Value v : operands) {
+    if (auto rt = dyn_cast<RankedTensorType>(v.getType())) {
+      refType = rt;
+      break;
+    }
+  }
+  if (!refType)
+    return {};
+  int64_t rank = refType.getRank();
+  if (axis < 0)
+    axis += rank;
+  if (axis < 0 || axis >= rank)
+    return {};
+
+  // Sum sizes along `axis`; tighten other axes from the first operand that
+  // is static at that position. An operand with mismatched rank or
+  // dynamic-along-axis collapses the axis result to dynamic but does not
+  // poison the non-axis tightening (other ranked operands may still
+  // supply static dims).
+  llvm::SmallVector<int64_t> outShape(rank, ShapedType::kDynamic);
+  for (int64_t i : llvm::seq<int64_t>(rank)) {
+    if (i == axis)
+      continue;
+    for (Value v : operands) {
+      auto rt = dyn_cast<RankedTensorType>(v.getType());
+      if (!rt || rt.getRank() != rank || rt.isDynamicDim(i))
+        continue;
+      outShape[i] = rt.getDimSize(i);
+      break;
+    }
+  }
+  bool axisDyn = false;
+  int64_t axisSum = 0;
+  for (Value v : operands) {
+    auto rt = dyn_cast<RankedTensorType>(v.getType());
+    if (!rt || rt.getRank() != rank || rt.isDynamicDim(axis)) {
+      axisDyn = true;
+      continue;
+    }
+    axisSum += rt.getDimSize(axis);
+  }
+  outShape[axis] = axisDyn ? ShapedType::kDynamic : axisSum;
+
+  return RankedTensorType::get(outShape, refType.getElementType());
+}
+
 } // namespace hip
 } // namespace mlir

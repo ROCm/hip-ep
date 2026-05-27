@@ -130,6 +130,25 @@ static std::optional<double> getScalarFloatConstant(mlir::Value v) {
     return std::sqrt(*inner);
   }
 
+  // Reciprocal of a constant. Exact-Gelu inlined chains in HF Qwen-VL-style
+  // exports encode 1/sqrt(2) as `Reciprocal(Sqrt(Constant(2)))` rather than
+  // a baked literal, so the chain to a constant goes through both Sqrt and
+  // Reciprocal before reaching the leaf onnx.Constant.
+  if (opName == "onnx.Reciprocal" && def->getNumOperands() >= 1) {
+    auto inner = getScalarFloatConstant(def->getOperand(0));
+    if (!inner || *inner == 0.0)
+      return std::nullopt;
+    return 1.0 / *inner;
+  }
+
+  // Div of two constants — sometimes 1/sqrt(2) ships as Div(1, Sqrt(2)).
+  if (opName == "onnx.Div" && def->getNumOperands() == 2) {
+    auto num = getScalarFloatConstant(def->getOperand(0));
+    auto den = getScalarFloatConstant(def->getOperand(1));
+    if (num && den && *den != 0.0)
+      return *num / *den;
+  }
+
   return std::nullopt;
 }
 
@@ -544,11 +563,139 @@ struct InlinedFastGeluToGelu : public mlir::RewritePattern {
   }
 };
 
+/// Exact-Gelu (approximate="none") inlined chain — Erf-based.
+///
+/// Some ORT exports inline `Gelu(approximate="none")` instead of the Tanh
+/// approximation. Canonical inlined form:
+///
+///   scaled = Mul(x, 1/sqrt(2))      // 0.70710678...
+///   erf    = Erf(scaled)
+///   phi    = Sum(1.0, erf)          // or Add(1.0, erf); commutative
+///   half_x = Mul(0.5, x)            // or Mul(x, 0.5); commutative
+///   y      = Mul(half_x, phi)       // or Mul(phi, half_x); commutative
+///
+/// Rewritten to `onnx.Gelu(x) {approximate = "none"}` which is then handled
+/// by the existing `GeluToHip` converter (lowers to `hip.gelu` with the
+/// non-tanh runtime kernel).
+///
+/// Anchored on `onnx.Erf` to keep the matcher cheap — Erf is rare in non-
+/// Gelu graphs. The pattern walks forward from Erf to its Sum/Add consumer
+/// and then to the final Mul, checking the half-x branch resolves to the
+/// same SSA `x` as the `Mul(x, 1/sqrt(2))` operand. Multi-use Erf or Sum
+/// results break the pattern (we'd then duplicate the chain when rewriting
+/// to Gelu — fine for correctness but pessimises the IR; leave it for now).
+///
+/// Before:
+///   %scaled = onnx.Mul(%x, %const_invsqrt2)
+///   %erf    = onnx.Erf(%scaled)
+///   %phi    = onnx.Sum(%const_one, %erf)
+///   %hx     = onnx.Mul(%const_half, %x)
+///   %y      = onnx.Mul(%hx, %phi) : tensor<?xf16>
+///
+/// After:
+///   %y = onnx.Gelu(%x) {approximate = "none"} : tensor<?xf16>
+struct InlinedExactGeluToGelu : public mlir::RewritePattern {
+  InlinedExactGeluToGelu(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Erf", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *erfOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (erfOp->getNumOperands() != 1 || erfOp->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(erfOp, "erf.arity");
+
+    // scaled = Mul(x, 1/sqrt(2))
+    mlir::Operation *scaledOp = erfOp->getOperand(0).getDefiningOp();
+    mlir::Value invSqrt2, x;
+    if (!isBinaryOpWithConst(scaledOp, "onnx.Mul", /*1/sqrt(2)*/ 0.7071067811865,
+                             invSqrt2, x))
+      return rewriter.notifyMatchFailure(erfOp, "erf.in.mul_invsqrt2");
+
+    // erf has exactly one user, which must be the Sum/Add producing phi.
+    if (!erfOp->getResult(0).hasOneUse())
+      return rewriter.notifyMatchFailure(erfOp, "erf.multi_use");
+    mlir::Operation *phiOp = *erfOp->getResult(0).getUsers().begin();
+    if (!phiOp || (phiOp->getName().getStringRef() != "onnx.Sum" &&
+                   phiOp->getName().getStringRef() != "onnx.Add") ||
+        phiOp->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(erfOp, [&](mlir::Diagnostic &d) {
+        d << "phi.sum_or_add (observed: "
+          << (phiOp ? phiOp->getName().getStringRef() : "<null>") << ")";
+      });
+    mlir::Value oneConst, erfVal;
+    // The non-erf operand must be the constant 1.0.
+    mlir::Value lhs = phiOp->getOperand(0), rhs = phiOp->getOperand(1);
+    if (lhs == erfOp->getResult(0) && isScalarFloatNear(rhs, 1.0)) {
+      erfVal = lhs;
+      oneConst = rhs;
+    } else if (rhs == erfOp->getResult(0) && isScalarFloatNear(lhs, 1.0)) {
+      erfVal = rhs;
+      oneConst = lhs;
+    } else {
+      return rewriter.notifyMatchFailure(erfOp, "phi.no_one_constant");
+    }
+
+    // phi has exactly one user, the final Mul.
+    if (!phiOp->getResult(0).hasOneUse())
+      return rewriter.notifyMatchFailure(erfOp, "phi.multi_use");
+    mlir::Operation *finalMul = *phiOp->getResult(0).getUsers().begin();
+    if (!finalMul || finalMul->getName().getStringRef() != "onnx.Mul" ||
+        finalMul->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(erfOp, "final_mul.shape");
+
+    // Other operand of finalMul must be a `Mul(0.5, x)` or `Mul(x, 0.5)`
+    // where x matches the scaled-input x.
+    mlir::Value otherOperand =
+        (finalMul->getOperand(0) == phiOp->getResult(0))
+            ? finalMul->getOperand(1)
+            : finalMul->getOperand(0);
+    if (otherOperand == phiOp->getResult(0))
+      return rewriter.notifyMatchFailure(erfOp, "final_mul.no_phi_operand");
+    mlir::Operation *halfMulOp = otherOperand.getDefiningOp();
+    mlir::Value halfConst, halfX;
+    if (!isBinaryOpWithConst(halfMulOp, "onnx.Mul", /*0.5*/ 0.5, halfConst,
+                             halfX))
+      return rewriter.notifyMatchFailure(erfOp, "half_mul.no_half_constant");
+    if (halfX != x)
+      return rewriter.notifyMatchFailure(erfOp,
+                                         "half_mul.x_mismatch_scaled_x");
+
+    // All checks passed — replace finalMul with onnx.Gelu(x, "none").
+    mlir::Type resultTy = finalMul->getResult(0).getType();
+    mlir::OperationState gelu(finalMul->getLoc(), "onnx.Gelu");
+    gelu.addOperands(x);
+    gelu.addTypes(resultTy);
+    gelu.addAttribute("approximate", rewriter.getStringAttr("none"));
+    mlir::Value y = rewriter.create(gelu)->getResult(0);
+    rewriter.replaceOp(finalMul, y);
+    // Erase the now-dead chain explicitly in reverse-topological order. The
+    // module-level DCE walk in OnnxToHip is a backstop but doesn't always
+    // catch arith subtrees emitted by other patterns once their consumers
+    // get rewritten — explicit erasure here mirrors the canonical FastGelu
+    // pattern's discipline and keeps the IR clean for the structural
+    // "no onnx.* should survive" check.
+    if (halfMulOp && halfMulOp->use_empty())
+      rewriter.eraseOp(halfMulOp);
+    if (phiOp && phiOp->use_empty())
+      rewriter.eraseOp(phiOp);
+    if (erfOp && erfOp->use_empty())
+      rewriter.eraseOp(erfOp);
+    if (scaledOp && scaledOp->use_empty())
+      rewriter.eraseOp(scaledOp);
+    ++NumFastGeluFused;
+    LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE
+                            "] fused exact (Erf-based) Gelu at "
+                            << finalMul->getLoc() << "\n");
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateFastGeluFusionPatterns(mlir::RewritePatternSet &patterns,
                                     mlir::MLIRContext *ctx) {
-  patterns.add<InlinedFastGeluToGelu, InlinedFastGeluVisionToGelu>(ctx);
+  patterns.add<InlinedFastGeluToGelu, InlinedFastGeluVisionToGelu,
+               InlinedExactGeluToGelu>(ctx);
 }
 
 } // namespace hip

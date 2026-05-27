@@ -63,11 +63,15 @@ func.func @two_scalars_one_scratch(%ctx: !hip.context, %x: i64, %y: i32) -> (i64
   return %va, %vb : i64, i32
 }
 
-// --- Float element type: NOT a candidate (likely a real GPU buffer). ---
-// CHECK-LABEL: func.func @rank0_f32_left_alone
-// CHECK-NOT:   hip.get_host_scratch
-// CHECK:       memref.alloc() : memref<f32>
-func.func @rank0_f32_left_alone(%ctx: !hip.context, %x: f32) -> f32 {
+// --- Float scalar with host I/O: candidate (canonical ONNX Range trip-count
+//     pattern uses `arith.divf` on f32 scalars loaded from a memref<f32> that
+//     was produced by a preceding hip.cast(i64) -> f32). Without host-mapped
+//     backing the host arith dereferences a GPU pointer on some targets. ---
+// CHECK-LABEL: func.func @rank0_f32_host_scalar
+// CHECK-NOT:   memref.alloc()
+// CHECK:       hip.get_host_scratch
+// CHECK:       memref.view {{.*}} : memref<?xi8> to memref<f32>
+func.func @rank0_f32_host_scalar(%ctx: !hip.context, %x: f32) -> f32 {
   %a = memref.alloc() : memref<f32>
   memref.store %x, %a[] : memref<f32>
   %v = memref.load %a[] : memref<f32>
@@ -138,4 +142,98 @@ func.func @no_context_arg_left_alone(%x: i64) -> i64 {
   %v = memref.load %a[] : memref<i64>
   memref.dealloc %a : memref<i64>
   return %v : i64
+}
+
+// --- GPU producer -> host load: pass must insert hip.host_sync ahead of
+//     the load so the host sees fresh GPU writes through the host-mapped
+//     view. This is the canonical Range(start, limit, delta) trip-count
+//     pattern from vision encoders: hip.cast writes start as f32 to a
+//     scratch view, the host then reads it for arith.divf trip-count
+//     computation. Without the sync the load returns stale bytes (0.0),
+//     trip count comes out 0, downstream hip.alloc(0) returns NULL, SEGV.
+// CHECK-LABEL: func.func @gpu_write_then_host_load_gets_sync
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context
+// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch(%[[CTX]],
+// CHECK:         %[[V:.*]] = memref.view %[[SCRATCH]]{{.*}} : memref<?xi8> to memref<f32>
+// CHECK:         hip.cast{{.*}} outs(%[[V]] : memref<f32>)
+// CHECK:         hip.host_sync(%[[CTX]])
+// CHECK:         memref.load %[[V]][] : memref<f32>
+func.func @gpu_write_then_host_load_gets_sync(%ctx: !hip.context,
+                                              %src: memref<i64>) -> f32 {
+  %a = memref.alloc() : memref<f32>
+  hip.cast(%ctx) ins(%src : memref<i64>) outs(%a : memref<f32>) {to = 1 : i64}
+  %v = memref.load %a[] : memref<f32>
+  memref.dealloc %a : memref<f32>
+  return %v : f32
+}
+
+// --- Alloc reachable to host I/O via memref.reinterpret_cast: must be
+//     redirected. Without this the alloc lands in the GPU pool while
+//     downstream host code reads through the recast. Canonical vision
+//     encoder shape-arithmetic pattern (sub-graph of a `tensor.gather`
+//     index chain).
+// CHECK-LABEL: func.func @recast_then_host_load
+// CHECK-NOT:   memref.alloc()
+// CHECK:       hip.get_host_scratch
+func.func @recast_then_host_load(%ctx: !hip.context,
+                                 %src: memref<i64>) -> i64 {
+  %a = memref.alloc() : memref<i64>
+  hip.cast(%ctx) ins(%src : memref<i64>) outs(%a : memref<i64>) {to = 7 : i64}
+  %rc = memref.reinterpret_cast %a to offset: [0], sizes: [1], strides: [1]
+      : memref<i64> to memref<1xi64>
+  %c0 = arith.constant 0 : index
+  %v = memref.load %rc[%c0] : memref<1xi64>
+  memref.dealloc %a : memref<i64>
+  return %v : i64
+}
+
+// --- memref.copy users count as host I/O (host-side memcpy on bufferized
+//     shape vectors).
+// CHECK-LABEL: func.func @copy_user_counts_as_host_io
+// CHECK-NOT:   memref.alloc()
+// CHECK:       hip.get_host_scratch
+func.func @copy_user_counts_as_host_io(%ctx: !hip.context,
+                                       %dst: memref<1xi64, strided<[1]>>) {
+  %a = memref.alloc() : memref<i64>
+  %c0 = arith.constant 0 : index
+  %c0_i64 = arith.constant 0 : i64
+  memref.store %c0_i64, %a[] : memref<i64>
+  %rc = memref.reinterpret_cast %a to offset: [0], sizes: [1], strides: [1]
+      : memref<i64> to memref<1xi64>
+  memref.copy %rc, %dst : memref<1xi64> to memref<1xi64, strided<[1]>>
+  memref.dealloc %a : memref<i64>
+  return
+}
+
+// --- Pure host store -> host load (no hip op in between): no sync needed.
+//     The block is never "dirty" because no hip op produced the data. ---
+// CHECK-LABEL: func.func @host_only_load_no_sync
+// CHECK-NOT:   hip.host_sync
+func.func @host_only_load_no_sync(%ctx: !hip.context, %x: i64) -> i64 {
+  %a = memref.alloc() : memref<i64>
+  memref.store %x, %a[] : memref<i64>
+  %v = memref.load %a[] : memref<i64>
+  memref.dealloc %a : memref<i64>
+  return %v : i64
+}
+
+// --- Multiple host loads after a single GPU producer: only the FIRST load
+//     needs the sync. After the sync, GPU writes are visible to all
+//     subsequent host reads in the block until the next hip op runs. ---
+// CHECK-LABEL: func.func @one_sync_per_dirty_block
+// CHECK:         hip.cast{{.*}} outs(
+// CHECK:         hip.host_sync
+// CHECK:         memref.load
+// CHECK-NOT:     hip.host_sync
+// CHECK:         memref.load
+func.func @one_sync_per_dirty_block(%ctx: !hip.context,
+                                    %src: memref<i64>) -> (f32, f32) {
+  %a = memref.alloc() : memref<f32>
+  %b = memref.alloc() : memref<f32>
+  hip.cast(%ctx) ins(%src : memref<i64>) outs(%a : memref<f32>) {to = 1 : i64}
+  %va = memref.load %a[] : memref<f32>
+  %vb = memref.load %b[] : memref<f32>
+  memref.dealloc %a : memref<f32>
+  memref.dealloc %b : memref<f32>
+  return %va, %vb : f32, f32
 }

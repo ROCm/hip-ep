@@ -292,11 +292,37 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   //   args1..2+N : iter_t, cond_in_t, v_in_1..N  (same as the original body
   //                                                block args)
   //   args2+N..end : captures (in iteration order of the SetVector)
+  // Build arg types from:
+  //   * !hip.context (we synthesize)
+  //   * iter + cond_in: copy verbatim from the body block (always i64/i1
+  //     tensor types)
+  //   * v_in_1..N: prefer the loop op's v_init operand types over the body
+  //     block arg types. The body block arg types come from the ONNX model's
+  //     iter_var annotation, which some exporters set to the v_init's
+  //     declared static type (e.g. tensor<f16> for a rank-0 sentinel
+  //     accumulator) even when the actual runtime value flowing through
+  //     v_init has a different rank (e.g. tensor<?x?x?xf16> for an
+  //     accumulator that grows via Concat across iterations). The loop
+  //     op's v_init operand types are the source of truth because they
+  //     reflect the actual SSA values being passed in. Without this
+  //     alignment, downstream conversions inside the body (Concat,
+  //     Reshape, etc.) see arguments typed as rank-0 scalars while the
+  //     model's intent is a higher-rank tensor, and the conversion fails.
+  //   * captures: copy verbatim from the capture values' types.
+  //
+  // Canonical site: Qwen-style dynamic-shape vision encoders whose loop
+  // bodies accumulate a Concat output across iterations and the model
+  // annotates the iter_var with v_init's rank-0 sentinel type.
   Type ctxType = ContextType::get(ctx);
   SmallVector<Type> argTypes;
   argTypes.push_back(ctxType);
-  for (BlockArgument a : bodyBlock.getArguments())
+  auto bodyArgs = bodyBlock.getArguments();
+  // iter (idx 0) + cond_in (idx 1)
+  for (BlockArgument a : bodyArgs.take_front(2))
     argTypes.push_back(a.getType());
+  // v_in_1..N (idx 2..N+1): use loop op's v_init operand types
+  for (Value vInit : vInitTensors)
+    argTypes.push_back(vInit.getType());
   for (Value c : captureVals)
     argTypes.push_back(c.getType());
 

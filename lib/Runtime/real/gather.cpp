@@ -13,6 +13,7 @@
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
+                int64_t axis_size, int64_t inner_size,
                 int64_t element_size_bytes) {
   OP_PROFILE(
       "gather",
@@ -31,12 +32,15 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_gather: axis=%lld, data_num=%lld, indices_num=%lld, "
-      "output_num=%lld, elem_size=%lld -> calling hip_gather\n",
+      "output_num=%lld, axis_size=%lld, inner=%lld, elem_size=%lld -> "
+      "calling hip_gather\n",
       (long long)axis, (long long)data_num_elements,
       (long long)indices_num_elements, (long long)output_num_elements,
+      (long long)axis_size, (long long)inner_size,
       (long long)element_size_bytes);
 
   return hip_gather(stream, data, indices, output, axis, data_num_elements,
                     indices_num_elements, output_num_elements,
+                    axis_size, inner_size,
                     static_cast<int>(element_size_bytes));
 }

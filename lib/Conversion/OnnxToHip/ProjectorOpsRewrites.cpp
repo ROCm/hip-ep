@@ -612,10 +612,228 @@ struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
 
 } // namespace
 
+//===----------------------------------------------------------------------===//
+// PatchEmbedConvToGemm — Conv with kernel covering entire spatial input.
+//
+// Vision-encoder "patch embedding" Convs have the unusual shape that the
+// kernel matches the input spatial dims exactly, so each output spatial dim
+// is 1: e.g. input `[N, 3, 2, 16, 16]`, weight `[1152, 3, 2, 16, 16]`,
+// strides `[2, 16, 16]`, output `[N, 1152, 1, 1, 1]`. Mathematically this is
+// a per-batch dot product of the flattened input row with each weight row:
+//
+//   out[n, m] = bias[m] + sum_{c, kd, kh, kw}
+//                 input[n, c, kd, kh, kw] * W[m, c, kd, kh, kw]
+//
+// which is exactly an `onnx.Gemm` with `transB=1`:
+//
+//   input_flat = Reshape(input, [-1, C*kD*kH*kW])
+//   weight_flat = Reshape(W, [M, C*kD*kH*kW])
+//   y_flat = Gemm(input_flat, weight_flat, bias, transA=0, transB=1)
+//   y = Reshape(y_flat, [-1, M, 1, 1, ..., 1])
+//
+// Rewriting at the ONNX level (before bufferization) avoids needing a new
+// 5D-Conv runtime / lowering path: the existing MatMul/Gemm path handles it
+// natively. Restricted to:
+//   - input rank >= 4 (covers 2D Conv with kernel == input spatial too)
+//   - rank-5 in practice today (3D Conv from typical ViT patch embeddings)
+//   - all output spatial dims static and equal to 1
+//   - all input spatial dims static (so the flatten K is compile-time known)
+//   - pads all zero
+//   - group = 1
+//   - weight has fully static shape (so we can flatten it with a Constant
+//     shape operand)
+//
+// Bias is optional. When absent we still emit Gemm with a zero C operand
+// because the converter requires three inputs; α=1 β=1.
+//
+// Before (ONNX dialect snippet, 3-D patch embed):
+//   %y = onnx.Conv(%x, %w, %b)
+//     {pads=[0,0,0,0,0,0], strides=[2,16,16], dilations=[1,1,1], group=1}
+//     : (tensor<?x3x2x16x16xf16>, tensor<1152x3x2x16x16xf16>,
+//        tensor<1152xf16>) -> tensor<?x1152x1x1x1xf16>
+//
+// After:
+//   %xf = onnx.Reshape(%x,  const [-1, 1536]) : -> tensor<?x1536xf16>
+//   %wf = onnx.Reshape(%w,  const [1152, 1536]) : -> tensor<1152x1536xf16>
+//   %y2 = onnx.Gemm(%xf, %wf, %b) {transA=0, transB=1, alpha=1.0, beta=1.0}
+//           : (tensor<?x1536xf16>, tensor<1152x1536xf16>, tensor<1152xf16>)
+//           -> tensor<?x1152xf16>
+//   %y  = onnx.Reshape(%y2, const [-1, 1152, 1, 1, 1])
+//           : -> tensor<?x1152x1x1x1xf16>
+struct PatchEmbedConvToGemm : public mlir::RewritePattern {
+  PatchEmbedConvToGemm(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Conv", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() < 2 || op->getNumOperands() > 3 ||
+        op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "conv.arity");
+    mlir::Value x = op->getOperand(0);
+    mlir::Value w = op->getOperand(1);
+    mlir::Value bias = op->getNumOperands() == 3 ? op->getOperand(2) : nullptr;
+
+    auto xType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+    auto wType = mlir::dyn_cast<mlir::RankedTensorType>(w.getType());
+    auto yType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!xType || !wType || !yType)
+      return rewriter.notifyMatchFailure(op, "conv.not_ranked");
+    int64_t rank = xType.getRank();
+    if (rank < 4 || rank != wType.getRank() || rank != yType.getRank())
+      return rewriter.notifyMatchFailure(op, "conv.rank_mismatch");
+
+    // group must be 1 (default).
+    if (auto g = op->getAttrOfType<mlir::IntegerAttr>("group"))
+      if (g.getValue().getSExtValue() != 1)
+        return rewriter.notifyMatchFailure(op, "conv.group_ne_1");
+
+    // pads all zero (any padding would make patch embed non-trivial).
+    if (auto pads = op->getAttrOfType<mlir::ArrayAttr>("pads"))
+      for (mlir::Attribute a : pads) {
+        auto ia = mlir::dyn_cast<mlir::IntegerAttr>(a);
+        if (!ia || ia.getValue().getSExtValue() != 0)
+          return rewriter.notifyMatchFailure(op, "conv.has_padding");
+      }
+
+    int64_t nSpatial = rank - 2;
+    // Input/weight spatial dims must be fully static AND equal to each other
+    // (kernel covers entire spatial), and output spatial dims must all be 1.
+    int64_t K = 1; // C * product(spatial)
+    int64_t Cin = xType.getDimSize(1);
+    if (Cin == mlir::ShapedType::kDynamic)
+      return rewriter.notifyMatchFailure(op, "conv.cin_dynamic");
+    K = Cin;
+    for (int64_t i : llvm::seq<int64_t>(0, nSpatial)) {
+      int64_t xs = xType.getDimSize(2 + i);
+      int64_t ws = wType.getDimSize(2 + i);
+      int64_t ys = yType.getDimSize(2 + i);
+      if (xs == mlir::ShapedType::kDynamic ||
+          ws == mlir::ShapedType::kDynamic)
+        return rewriter.notifyMatchFailure(op, "conv.spatial_dynamic");
+      if (xs != ws)
+        return rewriter.notifyMatchFailure(op, "conv.kernel_neq_input");
+      if (ys != 1)
+        return rewriter.notifyMatchFailure(op, "conv.out_spatial_ne_1");
+      K *= ws;
+    }
+    int64_t M = wType.getDimSize(0); // out_channels
+    if (M == mlir::ShapedType::kDynamic)
+      return rewriter.notifyMatchFailure(op, "conv.m_dynamic");
+
+    mlir::Location loc = op->getLoc();
+    mlir::Type elemType = xType.getElementType();
+    auto i64Type = rewriter.getI64Type();
+    auto buildShapeConst =
+        [&](mlir::ArrayRef<int64_t> dims) -> mlir::Value {
+      auto t = mlir::RankedTensorType::get({static_cast<int64_t>(dims.size())},
+                                           i64Type);
+      auto attr = mlir::DenseElementsAttr::get(t, dims);
+      mlir::OperationState s(loc, "onnx.Constant");
+      s.addTypes(t);
+      s.addAttribute("value", attr);
+      return rewriter.create(s)->getResult(0);
+    };
+
+    // Reshape input to [N, K] using -1 for dynamic batch.
+    int64_t N = xType.getDimSize(0);
+    auto xFlatType = mlir::RankedTensorType::get({N, K}, elemType);
+    mlir::OperationState rIn(loc, "onnx.Reshape");
+    rIn.addOperands({x, buildShapeConst({-1, K})});
+    rIn.addTypes(xFlatType);
+    rIn.addAttribute(
+        "allowzero", mlir::IntegerAttr::get(
+                         mlir::IntegerType::get(rewriter.getContext(), 64,
+                                                mlir::IntegerType::Signed),
+                         0));
+    mlir::Value xFlat = rewriter.create(rIn)->getResult(0);
+
+    // Reshape weight to [M, K] (fully static).
+    auto wFlatType = mlir::RankedTensorType::get({M, K}, wType.getElementType());
+    mlir::OperationState rW(loc, "onnx.Reshape");
+    rW.addOperands({w, buildShapeConst({M, K})});
+    rW.addTypes(wFlatType);
+    rW.addAttribute(
+        "allowzero", mlir::IntegerAttr::get(
+                         mlir::IntegerType::get(rewriter.getContext(), 64,
+                                                mlir::IntegerType::Signed),
+                         0));
+    mlir::Value wFlat = rewriter.create(rW)->getResult(0);
+
+    // Build Gemm. Bias is required by the GemmConversion (which calls
+    // ConvertOnnxGemm with 3 operands). When absent, synthesize a zero
+    // bias of shape [M]. The bias-add overhead is one element-wise
+    // op on a small tensor — negligible vs the GEMM itself.
+    mlir::Value cOp;
+    if (bias) {
+      cOp = bias;
+    } else {
+      // Zero bias constant. Use the input element type (Gemm expects all
+      // operands to share the dtype on this path).
+      auto bType = mlir::RankedTensorType::get({M}, elemType);
+      mlir::Attribute zeroAttr;
+      if (auto ft = mlir::dyn_cast<mlir::FloatType>(elemType)) {
+        llvm::SmallVector<llvm::APFloat> zeros(
+            M, llvm::APFloat::getZero(ft.getFloatSemantics()));
+        zeroAttr = mlir::DenseElementsAttr::get(bType, zeros);
+      } else {
+        return rewriter.notifyMatchFailure(op, "conv.bias_unsupported_dtype");
+      }
+      mlir::OperationState zState(loc, "onnx.Constant");
+      zState.addTypes(bType);
+      zState.addAttribute("value", zeroAttr);
+      cOp = rewriter.create(zState)->getResult(0);
+    }
+
+    auto gemmType = mlir::RankedTensorType::get({N, M}, elemType);
+    mlir::OperationState gemm(loc, "onnx.Gemm");
+    gemm.addOperands({xFlat, wFlat, cOp});
+    gemm.addTypes(gemmType);
+    gemm.addAttribute(
+        "transA", mlir::IntegerAttr::get(
+                      mlir::IntegerType::get(rewriter.getContext(), 64,
+                                             mlir::IntegerType::Signed),
+                      0));
+    gemm.addAttribute(
+        "transB", mlir::IntegerAttr::get(
+                      mlir::IntegerType::get(rewriter.getContext(), 64,
+                                             mlir::IntegerType::Signed),
+                      1));
+    gemm.addAttribute("alpha", rewriter.getF32FloatAttr(1.0f));
+    gemm.addAttribute("beta", rewriter.getF32FloatAttr(1.0f));
+    mlir::Value gemmOut = rewriter.create(gemm)->getResult(0);
+
+    // Reshape Gemm output [N, M] back to the Conv output shape (which has
+    // trailing 1s for every spatial dim).
+    llvm::SmallVector<int64_t> outShape;
+    outShape.push_back(-1); // batch
+    outShape.push_back(M);
+    for (int64_t i : llvm::seq<int64_t>(0, nSpatial))
+      (void)i, outShape.push_back(1);
+    mlir::OperationState rOut(loc, "onnx.Reshape");
+    rOut.addOperands({gemmOut, buildShapeConst(outShape)});
+    rOut.addTypes(yType);
+    rOut.addAttribute(
+        "allowzero", mlir::IntegerAttr::get(
+                         mlir::IntegerType::get(rewriter.getContext(), 64,
+                                                mlir::IntegerType::Signed),
+                         0));
+    mlir::Value reshaped = rewriter.create(rOut)->getResult(0);
+
+    rewriter.replaceOp(op, reshaped);
+    LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] PatchEmbedConvToGemm: rank-"
+                            << rank << " Conv " << xType << " * " << wType
+                            << " -> Gemm + Reshape (K=" << K << ", M=" << M
+                            << ")\n");
+    return mlir::success();
+  }
+};
+
 void populateProjectorOpsRewritePatterns(mlir::RewritePatternSet &patterns,
                                          mlir::MLIRContext *ctx) {
   patterns.add<PowToMul, ReduceMeanToReduceSumDiv, AveragePoolToReshapeMean,
-               BroadcastDivToMulReciprocal>(ctx);
+               BroadcastDivToMulReciprocal, PatchEmbedConvToGemm>(ctx);
 }
 
 } // namespace hip

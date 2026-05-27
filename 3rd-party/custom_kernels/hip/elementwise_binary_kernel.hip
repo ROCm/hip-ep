@@ -447,6 +447,319 @@ extern "C" int hip_elementwise_and(void *stream, const void *lhs,
   return static_cast<int>(err);
 }
 
+// =====================================================================
+// Mul / Add / Sub (typed). Dispatched from wrap_miopenOpTensor as the
+// integer-dtype fallback, because MIOpen's miopenOpTensor doesn't support
+// integer element types. Same-shape only -- broadcasting is materialised
+// upstream (see wrap_miopenOpTensor's 2-D broadcast fallback for the
+// general case; this kernel is only reached when shapes already match).
+// =====================================================================
+
+template <typename T>
+__global__ void elementwise_mul_kernel(const T *__restrict__ lhs,
+                                       const T *__restrict__ rhs,
+                                       T *__restrict__ output,
+                                       int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = lhs[idx] * rhs[idx];
+  }
+}
+
+template <>
+__global__ void elementwise_mul_kernel<__half>(const __half *__restrict__ lhs,
+                                               const __half *__restrict__ rhs,
+                                               __half *__restrict__ output,
+                                               int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __half2float(lhs[idx]);
+    float b = __half2float(rhs[idx]);
+    output[idx] = __float2half(a * b);
+  }
+}
+
+template <typename T>
+__global__ void elementwise_add_kernel(const T *__restrict__ lhs,
+                                       const T *__restrict__ rhs,
+                                       T *__restrict__ output,
+                                       int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = lhs[idx] + rhs[idx];
+  }
+}
+
+template <>
+__global__ void elementwise_add_kernel<__half>(const __half *__restrict__ lhs,
+                                               const __half *__restrict__ rhs,
+                                               __half *__restrict__ output,
+                                               int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __half2float(lhs[idx]);
+    float b = __half2float(rhs[idx]);
+    output[idx] = __float2half(a + b);
+  }
+}
+
+extern "C" int hip_elementwise_mul(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+  switch (hip_dtype) {
+  case HIP_DTYPE_INT64:
+    hipLaunchKernelGGL(elementwise_mul_kernel<int64_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int64_t *>(lhs),
+                       static_cast<const int64_t *>(rhs),
+                       static_cast<int64_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT32:
+    hipLaunchKernelGGL(elementwise_mul_kernel<int32_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t *>(lhs),
+                       static_cast<const int32_t *>(rhs),
+                       static_cast<int32_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT16:
+    hipLaunchKernelGGL(elementwise_mul_kernel<__half>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(lhs),
+                       static_cast<const __half *>(rhs),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    hipLaunchKernelGGL(elementwise_mul_kernel<float>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(lhs),
+                       static_cast<const float *>(rhs),
+                       static_cast<float *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr, "[custom_kernels] hip_elementwise_mul: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+  return static_cast<int>(hipGetLastError());
+}
+
+extern "C" int hip_elementwise_add(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+  switch (hip_dtype) {
+  case HIP_DTYPE_INT64:
+    hipLaunchKernelGGL(elementwise_add_kernel<int64_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int64_t *>(lhs),
+                       static_cast<const int64_t *>(rhs),
+                       static_cast<int64_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT32:
+    hipLaunchKernelGGL(elementwise_add_kernel<int32_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t *>(lhs),
+                       static_cast<const int32_t *>(rhs),
+                       static_cast<int32_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT16:
+    hipLaunchKernelGGL(elementwise_add_kernel<__half>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(lhs),
+                       static_cast<const __half *>(rhs),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    hipLaunchKernelGGL(elementwise_add_kernel<float>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(lhs),
+                       static_cast<const float *>(rhs),
+                       static_cast<float *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr, "[custom_kernels] hip_elementwise_add: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+  return static_cast<int>(hipGetLastError());
+}
+
+// =====================================================================
+// Min / Max (typed). Dispatched from wrap_miopenOpTensor as the
+// integer-dtype fallback for tensor_op = MIN / MAX, because MIOpen's
+// miopenOpTensor only supports floating-point element types. Same-shape
+// only -- broadcasting is materialised upstream by wrap_miopenOpTensor
+// via hip_expand, identical to the Mul/Add integer path above.
+//
+// Ternary form `(a < b) ? a : b` is used (rather than the HIP built-in
+// `min(a, b)`) so the integer specialisations don't accidentally pick up
+// a float overload, and so the FP16 path can promote to float without
+// special intrinsics.
+// =====================================================================
+
+template <typename T>
+__global__ void elementwise_min_kernel(const T *__restrict__ lhs,
+                                       const T *__restrict__ rhs,
+                                       T *__restrict__ output,
+                                       int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    T a = lhs[idx];
+    T b = rhs[idx];
+    output[idx] = (a < b) ? a : b;
+  }
+}
+
+template <>
+__global__ void elementwise_min_kernel<__half>(const __half *__restrict__ lhs,
+                                               const __half *__restrict__ rhs,
+                                               __half *__restrict__ output,
+                                               int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __half2float(lhs[idx]);
+    float b = __half2float(rhs[idx]);
+    output[idx] = __float2half((a < b) ? a : b);
+  }
+}
+
+template <typename T>
+__global__ void elementwise_max_kernel(const T *__restrict__ lhs,
+                                       const T *__restrict__ rhs,
+                                       T *__restrict__ output,
+                                       int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    T a = lhs[idx];
+    T b = rhs[idx];
+    output[idx] = (a > b) ? a : b;
+  }
+}
+
+template <>
+__global__ void elementwise_max_kernel<__half>(const __half *__restrict__ lhs,
+                                               const __half *__restrict__ rhs,
+                                               __half *__restrict__ output,
+                                               int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __half2float(lhs[idx]);
+    float b = __half2float(rhs[idx]);
+    output[idx] = __float2half((a > b) ? a : b);
+  }
+}
+
+extern "C" int hip_elementwise_min(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+  switch (hip_dtype) {
+  case HIP_DTYPE_INT64:
+    hipLaunchKernelGGL(elementwise_min_kernel<int64_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int64_t *>(lhs),
+                       static_cast<const int64_t *>(rhs),
+                       static_cast<int64_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT32:
+    hipLaunchKernelGGL(elementwise_min_kernel<int32_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t *>(lhs),
+                       static_cast<const int32_t *>(rhs),
+                       static_cast<int32_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT16:
+    hipLaunchKernelGGL(elementwise_min_kernel<__half>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(lhs),
+                       static_cast<const __half *>(rhs),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    hipLaunchKernelGGL(elementwise_min_kernel<float>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(lhs),
+                       static_cast<const float *>(rhs),
+                       static_cast<float *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr, "[custom_kernels] hip_elementwise_min: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+  return static_cast<int>(hipGetLastError());
+}
+
+extern "C" int hip_elementwise_max(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+  switch (hip_dtype) {
+  case HIP_DTYPE_INT64:
+    hipLaunchKernelGGL(elementwise_max_kernel<int64_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int64_t *>(lhs),
+                       static_cast<const int64_t *>(rhs),
+                       static_cast<int64_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT32:
+    hipLaunchKernelGGL(elementwise_max_kernel<int32_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t *>(lhs),
+                       static_cast<const int32_t *>(rhs),
+                       static_cast<int32_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT16:
+    hipLaunchKernelGGL(elementwise_max_kernel<__half>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(lhs),
+                       static_cast<const __half *>(rhs),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    hipLaunchKernelGGL(elementwise_max_kernel<float>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(lhs),
+                       static_cast<const float *>(rhs),
+                       static_cast<float *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr, "[custom_kernels] hip_elementwise_max: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+  return static_cast<int>(hipGetLastError());
+}
+
 extern "C" int hip_elementwise_div(void *stream, const void *lhs,
                                    const void *rhs, void *output,
                                    int64_t num_elements, int hip_dtype) {

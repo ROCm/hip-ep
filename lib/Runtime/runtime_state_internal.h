@@ -204,7 +204,7 @@ struct RuntimeState {
   // per-depth stack and lift the constraint.
   void *loop_iter_cpu_buf; // hipHostMalloc(default)-allocated, int64[capacity]
   size_t loop_iter_capacity; // current size of loop_iter_cpu_buf (in int64s)
-  void *loop_iter_dev;       // hipMalloc'd, sizeof(int64), passed to body
+  void *loop_iter_dev;       // hipHostMalloc(Mapped), sizeof(int64), passed to body
   void *loop_cond_host;      // hipHostMalloc-allocated, host-side view (int8*)
   void
       *loop_cond_dev; // hipHostGetDevicePointer(loop_cond_host), passed to body

@@ -43,6 +43,26 @@
 //   %seqlens_k = hip.cast %view                      // GPU still reads at
 //                : memref<i64> to memref<1xi32>      // the same VA (UMA)
 //
+// Reverse direction: GPU producer -> host load needs a stream sync
+// ----------------------------------------------------------------
+// The mirror pattern also occurs: a hip op writes a tiny scalar to a
+// host-scratch view, and the host then reads it back to do shape arith
+// (e.g. ONNX `Range(start, limit, delta)` where `start` arrives via
+// `hip.cast(i64) -> f32` and the trip count is computed on the host as
+// `(limit - start) / delta`). On `hipHostMallocMapped` memory the GPU
+// kernel is async with respect to the host; without a stream sync the
+// host load returns stale bytes, the trip count comes out 0, the
+// downstream `hip.alloc(0)` returns NULL, and the model SEGVs.
+//
+// After this pass: for any `memref.load` whose source memref aliases the
+// runtime host-scratch AND for which an unsynced `hip.*` op precedes the
+// load in the same block, a `hip.host_sync(%ctx)` is inserted ahead of
+// the load.
+//
+//   hip.cast(%ctx) ins(%x) outs(%scratch_view)
+//   hip.host_sync(%ctx)                           // <-- inserted
+//   %val = memref.load %scratch_view[]
+//
 // Multiple candidates in one function share ONE `hip.get_host_scratch`
 // emitted at the entry block; each candidate gets its own 64-byte-aligned
 // offset.  See test/lit/Dialect/hip-materialize-host-scalars.mlir for the
@@ -92,6 +112,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
@@ -99,6 +121,8 @@
 
 STATISTIC(NumAllocsMaterialized,
           "Number of memref.alloc redirected to host-mapped scratch");
+STATISTIC(NumHostSyncsInserted,
+          "Number of hip.host_sync inserted before host loads of scratch");
 
 namespace mlir {
 namespace hip {
@@ -138,12 +162,50 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   if (type.getNumElements() > 16)
     return false;
   Type elem = type.getElementType();
-  if (!elem.isIntOrIndex())
+  // Integer / index types are the canonical host-scalar shape (loop counters,
+  // dim arithmetic, GQA `seqlens_k`, etc.). Float types also appear in vision
+  // encoder graphs: e.g. an ONNX `Range(start_f32, limit_f32, delta_f32)`
+  // computes its output element count from the scalar operands via
+  // `arith.divf + arith.ceildivsi + ...` host arithmetic, and the operands
+  // arrive as `memref<f32>` from a preceding `hip.cast(i64) -> f32`. Without
+  // host-mapped backing, the host-side arith.divf dereferences a GPU pointer
+  // → access violation (same bug class as the documented i64 SEGV).
+  //
+  // Index-typed scalars are also accepted — they reach this point via
+  // bufferized `tensor.from_elements` of an `index` value, and behave
+  // identically to integer scalars.
+  if (!elem.isIntOrIndex() && !mlir::isa<mlir::FloatType>(elem))
     return false;
 
+  // Walk the alloc's transitive view-like users to discover host I/O. The
+  // canonical regression pattern is
+  //   %a = memref.alloc() : memref<i64>
+  //   %rc = memref.reinterpret_cast %a ... to memref<1xi64>
+  //   hip.gather(...) outs(%a : memref<i64>)        // GPU writer
+  //   %v = memref.load %rc[%c0] : memref<1xi64>     // HOST reader via alias
+  // The host load is reachable through `memref.reinterpret_cast` (and its
+  // siblings), not directly on the alloc, so a flat user check misses it
+  // and leaves the alloc in the GPU pool — racing the next host load. The
+  // walk treats view-like ops as transparent: their users count for both
+  // hostIO detection and user-kind filtering. Bails on truly unknown
+  // dialects (the original safety net).
   bool hasHostIO = false;
-  for (Operation *user : allocOp->getUsers()) {
+  llvm::SmallVector<Operation *, 8> worklist;
+  llvm::SmallPtrSet<Operation *, 8> seen;
+  for (Operation *u : allocOp->getUsers())
+    if (seen.insert(u).second)
+      worklist.push_back(u);
+  while (!worklist.empty()) {
+    Operation *user = worklist.pop_back_val();
     if (isa<memref::StoreOp, memref::LoadOp>(user)) {
+      hasHostIO = true;
+      continue;
+    }
+    // memref.copy is a host-side memcpy on the bufferized IR. It indicates
+    // that the bytes participate in host-side memory motion (e.g. building
+    // a small `tensor.from_elements` shape vector), and it requires both
+    // operands to be host-accessible. Treat it as host I/O.
+    if (isa<memref::CopyOp>(user)) {
       hasHostIO = true;
       continue;
     }
@@ -153,8 +215,17 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
     // produce a GPU i32 for GQA) are fine — see comment above.
     if (user->getDialect() && user->getDialect()->getNamespace() == "hip")
       continue;
-    // Anything else (view-likes, casts that escape the function, unknown
-    // dialects) — bail out: we can't reason about its memory expectations.
+    // View-like memref ops are transparent — enqueue their users. memref.reshape
+    // is also accepted (the runtime-shape fallback for tensor.reshape).
+    if (isa<memref::ViewOp, memref::SubViewOp, memref::CastOp,
+            memref::ReinterpretCastOp, memref::ExpandShapeOp,
+            memref::CollapseShapeOp, memref::ReshapeOp>(user)) {
+      for (Operation *u2 : user->getUsers())
+        if (seen.insert(u2).second)
+          worklist.push_back(u2);
+      continue;
+    }
+    // Truly unknown dialect / op — bail.
     return false;
   }
   return hasHostIO;
@@ -248,6 +319,82 @@ void MaterializeHostScalarsPass::runOnOperation() {
     ++NumAllocsMaterialized;
     LLVM_DEBUG(llvm::dbgs()
                << "  Materialized " << view << " at offset " << offset << "\n");
+  }
+
+  // ---------------------------------------------------------------------
+  // Insert hip.host_sync before any memref.load whose source memref aliases
+  // the runtime host-scratch AND for which an unsynced hip.* op precedes the
+  // load in the same block. The scratch is hipHostMallocMapped — the host
+  // CAN read it, but GPU writes are async and not visible until the stream
+  // is synced.
+  //
+  // The alias check walks back through memref view-likes (view, subview,
+  // cast, reinterpret_cast, expand_shape, collapse_shape) until either the
+  // scratch base (`hip.get_host_scratch` result, here just `scratch`) is
+  // reached or a non-view producer is hit. Conservative: any hip-dialect op
+  // in source order before the load marks the block "dirty"; the next
+  // dirty-block load gets a sync inserted ahead of it, after which the
+  // block becomes clean again until the next hip op.
+  //
+  // Before:
+  //   hip.cast(%ctx) ins(%x) outs(%view : memref<f32>)
+  //   %v = memref.load %view[] : memref<f32>
+  // After:
+  //   hip.cast(%ctx) ins(%x) outs(%view : memref<f32>)
+  //   hip.host_sync(%ctx)
+  //   %v = memref.load %view[] : memref<f32>
+  auto aliasesScratch = [scratch](Value v) -> bool {
+    llvm::SmallPtrSet<Operation *, 8> seen;
+    while (v) {
+      if (v == scratch)
+        return true;
+      Operation *def = v.getDefiningOp();
+      if (!def || !seen.insert(def).second)
+        return false;
+      if (isa<memref::ViewOp, memref::SubViewOp, memref::CastOp,
+              memref::ReinterpretCastOp, memref::ExpandShapeOp,
+              memref::CollapseShapeOp>(def)) {
+        v = def->getOperand(0);
+        continue;
+      }
+      return false;
+    }
+    return false;
+  };
+
+  for (Block &block : funcOp.getBody()) {
+    bool dirty = false;
+    for (Operation &op : llvm::make_early_inc_range(block)) {
+      if (auto loadOp = dyn_cast<memref::LoadOp>(&op)) {
+        if (dirty && aliasesScratch(loadOp.getMemRef())) {
+          OpBuilder b(&op);
+          HostSyncOp::create(b, op.getLoc(), ctx);
+          dirty = false;
+          ++NumHostSyncsInserted;
+        }
+        continue;
+      }
+      // memref.copy is a host-side memcpy; the source is read on the host
+      // just like memref.load. Treat it the same way for sync insertion.
+      if (auto copyOp = dyn_cast<memref::CopyOp>(&op)) {
+        if (dirty && (aliasesScratch(copyOp.getSource()) ||
+                      aliasesScratch(copyOp.getTarget()))) {
+          OpBuilder b(&op);
+          HostSyncOp::create(b, op.getLoc(), ctx);
+          dirty = false;
+          ++NumHostSyncsInserted;
+        }
+        continue;
+      }
+      // Any hip op (other than the sync we just inserted) marks the block
+      // dirty. Be conservative — even hip ops that don't touch scratch may
+      // be followed by ones that do via an aliasing chain we don't see.
+      if (op.getDialect() &&
+          op.getDialect()->getNamespace() == "hip" &&
+          !isa<HostSyncOp, GetHostScratchOp, GetPoolOp, GetConstantOp>(&op)) {
+        dirty = true;
+      }
+    }
   }
 }
 

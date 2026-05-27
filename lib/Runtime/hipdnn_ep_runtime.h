@@ -686,10 +686,13 @@ int wrap_power(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha,
                double beta, double gamma);
 
-// Gather operation wrapper
+// Gather operation wrapper.
+// `axis_size` = data.shape[axis]; `inner_size` = product of data.shape[axis+1:].
+// outer_size is derived as data_num_elements / (axis_size * inner_size).
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
+                int64_t axis_size, int64_t inner_size,
                 int64_t element_size_bytes);
 
 // Range operation wrapper

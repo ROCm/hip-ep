@@ -48,6 +48,26 @@ module {
     return %output : tensor<1x128x32xf16>
   }
 
+  // Test 3: Outer-broadcast dynamic add ([?x1] + [1x?] -> [?x?]).
+  // Dim 0 must come from lhs; dim 1 from rhs (not lhs's static 1).
+  func.func @test_add_outer_broadcast_dynamic(%lhs: tensor<?x1xi64>,
+                                              %rhs: tensor<1x?xi64>)
+      -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_add_outer_broadcast_dynamic
+    // CHECK-SAME: (%[[CTX3:.*]]: !hip.context, %[[LHS:.*]]: tensor<?x1xi64>, %[[RHS:.*]]: tensor<1x?xi64>) -> tensor<?x?xi64>
+
+    %output = "onnx.Add"(%lhs, %rhs) :
+        (tensor<?x1xi64>, tensor<1x?xi64>) -> tensor<?x?xi64>
+
+    // CHECK: %[[D0:.*]] = tensor.dim %[[LHS]], %c0
+    // CHECK: %[[D1:.*]] = tensor.dim %[[RHS]], %c1
+    // CHECK-NOT: tensor.dim %[[LHS]], %c1
+    // CHECK: %[[INIT:.*]] = tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?xi64>
+    // CHECK: hip.add(%[[CTX3]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1xi64>, tensor<1x?xi64>) outs(%[[INIT]] : tensor<?x?xi64>) : tensor<?x?xi64>
+
+    return %output : tensor<?x?xi64>
+  }
+
   func.func @main_graph(%arg0: tensor<1x128x32xf16>, %arg1: tensor<1x128x32xf16>) -> tensor<1x128x32xf16> {
     return %arg0 : tensor<1x128x32xf16>
   }
