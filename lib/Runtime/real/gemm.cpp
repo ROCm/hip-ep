@@ -7,6 +7,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -27,6 +28,14 @@ static constexpr int64_t kTypeFloat16 = 0;
 static constexpr int64_t kTypeFloat32 = 1;
 static constexpr int64_t kTypeFloat64 = 2;
 static constexpr int64_t kTypeBFloat16 = 3;
+
+// Opt-in path for experimenting with the custom WMMA fp16 GEMM kernel. Keep it
+// disabled by default because the kernel only implements the narrow C=A*B
+// contract; hipBLASLt remains the general ONNX Gemm implementation.
+static bool gemm_wmma_dispatch_enabled() {
+  static const bool enabled = hipdnn_ep_env_enabled("HIPDNN_EP_GEMM_WMMA");
+  return enabled;
+}
 
 static bool resolveGemmTypes(int64_t typeCode, hipDataType &dataType,
                              hipblasComputeType_t &computeType,
@@ -509,6 +518,24 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   if (!handle || !stream) {
     fprintf(stderr, "wrap_gemm: null handle or stream\n");
     return -1;
+  }
+
+  // hip_gemm_wmma_fp16 assumes row-major fp16 A[M,K] and B[K,N], writes exactly
+  // output=A*B, and has no bias/scale/transpose handling. Non-matching Gemm
+  // calls fall through to the hipBLASLt path below.
+  if (gemm_wmma_dispatch_enabled() && typeCode == kTypeFloat16 && transA == 0 &&
+      transB == 0 && C == nullptr && alpha == 1.0f && (K % 16) == 0 &&
+      (N % 16) == 0) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: dispatch=WMMA M=%lld N=%lld K=%lld\n",
+                      (long long)M, (long long)N, (long long)K);
+    int rc = hip_gemm_wmma_fp16(stream, A, B, output, static_cast<int>(M),
+                                static_cast<int>(K), static_cast<int>(N));
+    if (rc == 0)
+      return 0;
+    fprintf(stderr,
+            "wrap_gemm: hip_gemm_wmma_fp16 failed (rc=%d) for M=%lld N=%lld "
+            "K=%lld; falling back to hipBLASLt path\n",
+            rc, (long long)M, (long long)N, (long long)K);
   }
 
   GemmState *gs = GemmState::get_op_state(state, op_state_slot);
