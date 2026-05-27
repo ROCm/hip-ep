@@ -528,24 +528,49 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     // to be identity row-major (the canonical alloc shape) so dst-pitch is
     // simply the product of inner sizes.
     //
-    // Runtime invariant assumed (NOT verified at compile time): the source's
-    // outer dims [0..rank-2) collapse into a single height — i.e.
-    // `src.stride[i] == src.stride[i+1] * src.size[i+1]` for i in
-    // [0..rank-2).  This holds for any subview of a contiguous parent, which
-    // is the only producer of these copies in the current pipeline.
+    // To express the copy as a single 2D pitched memcpy we split the dims
+    // into two groups (mirrors the static-path algorithm below):
+    //   * a "width" group: contiguous suffix [splitDim..rank-1] whose dims
+    //     are guaranteed to multiply tightly because
+    //       stride[i] == stride[i+1] * shape[i+1]
+    //     holds for all i in [splitDim..rank-2) at TYPE level (i.e. the
+    //     equality is statically provable -- which requires all three
+    //     terms to be static integers);
+    //   * a "height" group: prefix [0..splitDim), collapsed at runtime into
+    //     a single product.
+    //
+    // Dynamic strides act as a HARD BARRIER for the suffix check: we cannot
+    // verify the equality at compile time, so we stop extending the suffix
+    // there.  Hard-coding splitDim = rank-1 (the previous behaviour) silently
+    // misreads the source whenever an inner dim is non-contiguously sized --
+    // e.g. when subview-ing a tensor that already has a stride hole between
+    // its inner dims (transformer QKV split into [B,S,H,D] from a packed
+    // [B,S,3*H*D] is a typical producer).
+    //
+    // Runtime invariant assumed (NOT verified at compile time): the prefix
+    // dims [0..splitDim) collapse uniformly into one height pitch, i.e.
+    //   src.stride[i] == src.stride[i+1] * src.size[i+1]  for i in
+    //   [0..splitDim-1)
+    // This holds for any subview of a contiguous parent, which is the only
+    // producer of these copies in the current pipeline.
     //
     // Before:
     //   memref.copy %sv, %tmp
-    //     : memref<?x?x16x256xf16, strided<[?, ?, 256, 1], offset: ?>>
-    //       to memref<?x?x16x256xf16>
-    // After:
-    //   %h_outer = mul %size0, %size1     ; B * S
-    //   %height  = mul %h_outer, 16       ; B * S * H
-    //   %width   = const(256 * 2)         ; D * elem_bytes (statically known)
-    //   %src_pitch = mul %src.stride[2], elem_bytes
-    //   %dst_pitch = const(256 * 2)        ; dense dst
-    //   call @wrap_hipMemcpy2DAsync(state, dst, dst_pitch,
-    //                                src, src_pitch, width, height)
+    //     : memref<?x?x16x128xf16, strided<[?, 8192, 128, 1], offset: ?>>
+    //       to memref<?x?x16x128xf16>
+    //   ; sv comes from a subview of a packed [B,S,8192] (= QKV concatenated
+    //   ; into 16*128 = 2048 q + 2*16*128 = 4096 kv + ... layout).  Between
+    //   ; each (b,s) row the source has a 8192-2048 = 6144-element hole.
+    // After (with the fix, splitDim = 2):
+    //   %height = mul %size0, %size1               ; B * S
+    //   %width  = const(16 * 128 * 2)              ; H * D * elem_bytes
+    //   %src_pitch = mul %src.stride[1], elem_bytes ; runtime = 8192 * 2
+    //   call @wrap_hipMemcpy2DAsync(state, dst, %width, src, %src_pitch,
+    //                                %width, %height)
+    // Without the fix (splitDim = rank-1 = 3) the inner row would be
+    // `width = const(128 * 2)` and `src_pitch = src.stride[2] * 2 = 128 * 2`,
+    // i.e. equal -- the kernel would silently copy the whole [B*S*16*128]
+    // contiguously starting at `src` and step right through the QKV hole.
     // ---------------------------------------------------------------------
     if (failed(srcStridesOr) || failed(dstStridesOr)) {
       if (!isLastDimStrideOne(srcTy) || !isLastDimStrideOne(dstTy))
@@ -594,23 +619,70 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
         return success();
       }
 
-      // Width = size[rank-1] * elem_bytes.
-      Value innerElems = runtimeDim(srcDesc, rank - 1);
-      Value widthBytes =
-          LLVM::MulOp::create(rewriter, loc, innerElems, elemBytesVal);
+      // Pull type-level strides (statically known values + dynamic sentinels).
+      SmallVector<int64_t> typeStrides;
+      int64_t typeOffset = 0;
+      if (failed(srcTy.getStridesAndOffset(typeStrides, typeOffset)))
+        return rewriter.notifyMatchFailure(
+            op, "source has no stride layout (cannot derive pitch)");
 
-      // Height = product of all outer dims (sizes [0..rank-2]).
+      // Find the longest contiguous inner suffix [splitDim..rank-1] using
+      // type-level strides.  A dim is included iff
+      //   stride[i] == stride[i+1] * shape[i+1]
+      // is statically provable.  Dynamic strides / dynamic shapes BREAK the
+      // walk -- we cannot verify the equality, so we conservatively bail at
+      // that boundary.  The walk starts from the last dim (already verified
+      // by isLastDimStrideOne to have stride 1).
+      int64_t splitDim = rank - 1;
+      for (int64_t i = rank - 2; i >= 0; --i) {
+        if (ShapedType::isDynamic(typeStrides[i]) ||
+            ShapedType::isDynamic(typeStrides[i + 1]) ||
+            ShapedType::isDynamic(shape[i + 1]))
+          break;
+        if (typeStrides[i] != typeStrides[i + 1] * shape[i + 1])
+          break;
+        splitDim = i;
+      }
+
+      // Width = product of sizes [splitDim..rank-1] * elem_bytes.  Each size
+      // is either static (-> emitted as a constant) or dynamic (-> read from
+      // the descriptor); `runtimeDim` handles both.
+      Value widthElems = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+      for (int64_t i = splitDim; i < rank; ++i)
+        widthElems =
+            LLVM::MulOp::create(rewriter, loc, widthElems,
+                                runtimeDim(srcDesc, static_cast<unsigned>(i)));
+      Value widthBytes =
+          LLVM::MulOp::create(rewriter, loc, widthElems, elemBytesVal);
+
+      // splitDim == 0 means the entire memref is contiguous from `srcPtr`;
+      // collapse to a flat memcpy.  src.stride[splitDim-1] is undefined here.
+      if (splitDim == 0) {
+        FailureOr<LLVM::LLVMFuncOp> memcpyFn = LLVM::lookupOrCreateFn(
+            rewriter, module, kWrapHipMemcpyAsync,
+            {ptrType, ptrType, ptrType, i64Type}, i32Type);
+        if (failed(memcpyFn))
+          return failure();
+        LLVM::CallOp::create(rewriter, loc, *memcpyFn,
+                             ValueRange{statePtr, dstPtr, srcPtr, widthBytes});
+        rewriter.eraseOp(op);
+        return success();
+      }
+
+      // Height = product of runtime sizes [0..splitDim).
       Value height = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                               rewriter.getI64IntegerAttr(1));
-      for (int64_t i = 0; i + 1 < rank; ++i)
+      for (int64_t i = 0; i < splitDim; ++i)
         height =
             LLVM::MulOp::create(rewriter, loc, height,
                                 runtimeDim(srcDesc, static_cast<unsigned>(i)));
 
-      // Src pitch = src.stride[rank-2] * elem_bytes (runtime — descriptor
-      // holds the actual stride even when the type-level value is dynamic).
+      // Src pitch = src.stride[splitDim-1] * elem_bytes (runtime -- the
+      // descriptor holds the actual stride even when the type-level value
+      // is dynamic).
       Value srcStrideOuter =
-          srcDesc.stride(rewriter, loc, static_cast<unsigned>(rank - 2));
+          srcDesc.stride(rewriter, loc, static_cast<unsigned>(splitDim - 1));
       Value srcPitchBytes =
           LLVM::MulOp::create(rewriter, loc, srcStrideOuter, elemBytesVal);
 
