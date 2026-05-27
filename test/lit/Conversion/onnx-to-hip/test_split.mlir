@@ -104,12 +104,12 @@ module {
     return %out0, %out1, %out2 : tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>
   }
 
-  // --- Invalid: custom split lengths don't sum to axis dimension (pattern should not match) ---
-  func.func @test_split_invalid_sum(%data: tensor<10x64xf32>) -> (tensor<3x64xf32>, tensor<3x64xf32>, tensor<3x64xf32>) {
-    %split_lengths = "onnx.Constant"() {value = dense<[3, 3, 3]> : tensor<3xi64>} : () -> tensor<3xi64>
-    %out0, %out1, %out2 = "onnx.Split"(%data, %split_lengths) {axis = 0 : si64} : (tensor<10x64xf32>, tensor<3xi64>) -> (tensor<3x64xf32>, tensor<3x64xf32>, tensor<3x64xf32>)
-    return %out0, %out1, %out2 : tensor<3x64xf32>, tensor<3x64xf32>, tensor<3x64xf32>
-  }
+  // Note: the malformed-input negative case (custom split lengths that
+  // don't sum to the axis dimension — the converter must refuse to match,
+  // leaving onnx.Split in the IR) is now its own file
+  // (test_split_invalid.mlir). convert-onnx-to-hip's surviving-op
+  // diagnostic catches such cases as a hard error, so it can no longer
+  // live next to the successful conversions in a single FileCheck run.
 }
 
 // CHECK-LABEL: func.func @test_split_equal_static
@@ -188,8 +188,3 @@ module {
 // CHECK: tensor.extract_slice{{.*}}[0, 0] [2, 64] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[{{.*}}] [5, 64] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[{{.*}}] [3, 64] [1, 1]
-
-// CHECK-LABEL: func.func @test_split_invalid_sum
-// Validation should prevent conversion - onnx.Split should remain
-// CHECK: onnx.Split
-// CHECK-NOT: tensor.extract_slice

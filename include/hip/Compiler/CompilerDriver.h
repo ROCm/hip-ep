@@ -10,6 +10,7 @@
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,17 @@ class FileSystem;
 } // namespace morphizen
 
 namespace hip::compiler {
+
+/// One traced origin for a dynamic output dim. Encodes "this dim's runtime
+/// value is `round(inputs[arg_idx].shape[dim_idx] * mult)`". Mirrors the
+/// `DimOriginInfo` produced by `lib/Conversion/OnnxToHip/InferOnnxShapes.cpp`;
+/// duplicated here to avoid leaking MLIR types into the public driver header.
+/// `arg_idx == -1` is the "no traceable origin" sentinel.
+struct DimOriginTriple {
+  int64_t arg_idx;
+  int64_t dim_idx;
+  double mult;
+};
 
 /// End-to-end compilation driver for MLIR → DLL/Object/IR.
 ///
@@ -71,6 +83,24 @@ public:
   /// Validate MLIR input without compiling.
   bool validate(llvm::StringRef input_mlir, std::string &error_message);
 
+  /// After a successful `compile()`, returns per-function-result refined
+  /// shapes (outer vec by result index, inner by dim — positive ints for
+  /// static dims, -1 for genuinely dynamic). Populated by reading the
+  /// module attributes that `InferOnnxShapes` attaches inside the pass
+  /// pipeline; captures the snapshot WHILE the function is still
+  /// `func::FuncOp` (before HipToLLVM converts it to `llvm.func`).
+  const std::vector<std::vector<int64_t>> &refinedOutputShapes() const {
+    return refinedOutputShapes_;
+  }
+
+  /// After a successful `compile()`, returns per-result, per-dim SSA
+  /// origins traced from `InferOnnxShapes`. Same indexing convention as
+  /// `refinedOutputShapes()`.
+  const std::vector<std::vector<DimOriginTriple>> &
+  refinedOutputDimOrigins() const {
+    return refinedOutputDimOrigins_;
+  }
+
 private:
   bool compileImpl(mlir::ModuleOp module, const std::string &output_path,
                    const mlir::hip::CompilationOptionsT &options,
@@ -106,9 +136,19 @@ private:
 
   void cleanupIntermediates(const std::string &basePath);
 
+  /// Read module-level attributes attached by `InferOnnxShapes` and
+  /// populate `refinedOutputShapes_` / `refinedOutputDimOrigins_`. Called
+  /// inside `compileImpl` once `runMLIRPasses` succeeds — the module is
+  /// still in memory at that point and the attributes survive the
+  /// `func.func → llvm.func` conversion. No-op when the attributes are
+  /// missing (e.g. a future pipeline that skips InferOnnxShapes).
+  void readRefinedOutputsFromModule(mlir::ModuleOp module);
+
   morphizen::FileSystem *fileSystem_ = nullptr;
   void *hipdnnHandle_ = nullptr;
   mlir::hip::CompiledGraphMap compiledGraphs_;
+  std::vector<std::vector<int64_t>> refinedOutputShapes_;
+  std::vector<std::vector<DimOriginTriple>> refinedOutputDimOrigins_;
 };
 
 } // namespace hip::compiler

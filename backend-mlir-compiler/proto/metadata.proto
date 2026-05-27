@@ -12,15 +12,50 @@ message Metadata {
   repeated Input inputs = 3;
 }
 
-// Tracks which input tensor dimension provides a dynamic output dimension's
-// runtime value. `resolved` disambiguates the {input_idx=0, dim_idx=0}
-// default — a real (input 0, dim 0) source has resolved=true; an
-// unresolved dim (or a static dim with no source needed) has resolved=false.
-// Consumers MUST treat resolved=false as "do not use input_idx/dim_idx".
+// Per-output-dim resolution info. Three states encoded across the
+// fields below:
+//
+//   STATIC (`static_value > 0`):
+//     The dim is fixed at this value. Either the original ONNX graph
+//     declared it as a positive int, OR the compiler's `InferOnnxShapes`
+//     pre-lowering pass tightened a symbolic dim down to a static value
+//     (e.g. Gemma-3 vision's output dim 1 from `MatMulimage_features_dim_1`
+//     to `256`). Consumers MUST use this value directly and skip the
+//     input-lookup step. This is the channel that lets the EP work on
+//     models whose output dim_params don't match any input dim_param
+//     WITHOUT modifying the ONNX file.
+//
+//   RUNTIME-INPUT-LOOKUP (`resolved == true` AND `static_value == 0`):
+//     The dim is genuinely dynamic; its runtime value comes from
+//     `round(inputs[input_idx].shape[dim_idx] * mult)`. For most LLM
+//     dynshape outputs the relationship is identity (mult == 1.0, or
+//     left unset which proto3 treats as 0.0 — runtime treats 0.0 as 1.0).
+//     `mult == 1/K` covers Reshape-induced spatial mergers like Qwen
+//     vision's patch merger (input `num_patches`, output
+//     `num_patches / 4`, encoded as mult == 0.25). `mult > 1.0` is
+//     reserved for future multiply-by-K (spatial upsamplers).
+//
+//   UNRESOLVED (`resolved == false` AND `static_value == 0`):
+//     Truly dynamic AND the compiler couldn't tighten it AND there's no
+//     matching input dim_param. The EP cannot resolve this at runtime;
+//     `pass_main.cpp` aborts at metadata-build time so the user sees a
+//     clear "fix the model" error.
+//
+// Consumer precedence: check `static_value > 0` first, then `resolved`.
+// Static dim 0 is degenerate and not supported (zero-size tensors aren't
+// used in this codebase), so `static_value == 0` is unambiguously
+// "field unset".
 message DimSource {
   int32 input_idx = 1;
   int32 dim_idx = 2;
   bool resolved = 3;
+  int64 static_value = 4;
+  // Positive scalar; proto3 default 0.0 is treated as 1.0 by the runtime.
+  // Only meaningful when `resolved == true`. A single `double` field
+  // unifies both directions: `mult < 1.0` represents division (Qwen
+  // vision patch merger sets mult=0.25 for divide-by-4), `mult > 1.0`
+  // is reserved for future multiplication (spatial upsamplers).
+  double mult = 5;
 }
 
 message Input {

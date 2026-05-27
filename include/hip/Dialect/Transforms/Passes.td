@@ -111,6 +111,36 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
   ];
 }
 
+def InferOnnxShapesPass : Pass<"infer-onnx-shapes", "mlir::func::FuncOp"> {
+  let summary = "Forward result-type refinement for onnx.* ops";
+  let description = [{
+    Tightens every `onnx.*` op result type to the maximum static info
+    derivable from the (still-symbolic) graph inputs, then refines the
+    enclosing func.func signature so a tightened return-op operand updates
+    the declared output type. After the type walk, traces each function
+    output dim backward through SSA to record its (graph_arg, dim_idx)
+    origin. Refined shapes + per-dim origins are attached to the enclosing
+    `ModuleOp` as `hip.refined_output_shapes` and
+    `hip.refined_output_dim_origins` ArrayAttrs; those survive the
+    `func.func → llvm.func` conversion in later pipeline stages and are
+    read by `CompilerDriver` after `runMLIRPasses` returns so they can
+    flow through `hip_compile_with_fs` into the caller's
+    `CompilationOutputs` buffers (and ultimately into DimSource entries
+    in metadata.proto).
+
+    Per-op rules — see lib/Conversion/OnnxToHip/InferOnnxShapes.cpp for
+    the canonical list. Pure function-level transformation: no IR
+    creation, no constant folding, no greedy rewriter.
+
+    Standalone availability is for testing / pipeline composition. In
+    production this pass runs inside the per-function pre-lowering loop
+    in convert-onnx-to-hip.
+  }];
+  let dependentDialects = [
+    "mlir::func::FuncDialect"
+  ];
+}
+
 def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
   let summary = "Convert HIP dialect to LLVM dialect";
   let description = [{

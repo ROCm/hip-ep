@@ -224,6 +224,36 @@ void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
 void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 
+/// Forward shape inference for `onnx.*` ops. Walks the function in
+/// topological order, refining each op's result type to the maximum
+/// static info derivable from its operand types + op semantics + constant
+/// operands. Reshape uses a shape-operand resolver that traces back
+/// through `onnx.Concat / Slice / Shape / Gather / Unsqueeze / Cast /
+/// Constant` and handles ONNX's `-1` "infer from total size" via dyn-dim
+/// cancellation. Also refines the function signature when return-op
+/// operand types tighten (no `tensor.cast` bridge needed; the EP-side
+/// metadata reads from the morphizen graph, not from this MLIR type).
+///
+/// Must run BEFORE `lowerOnnxConstants` so the index / shape constants
+/// are still inline in `onnx.Constant` `value` attributes (the Reshape
+/// shape-operand resolver in `OnnxResultTypeInference.cpp` reads them).
+/// See `InferOnnxShapes.cpp` for the per-op rule set and the SSA-origin
+/// backward trace.
+///
+/// `changed` (optional out-param): when non-null, set to `true` if any op
+/// result type or the function signature was refined; left untouched
+/// otherwise. Used by the pre-lowering round loop in `OnnxToHip.cpp` to
+/// detect quiescence and skip the remaining safety-cap rounds.
+LogicalResult inferOnnxShapes(func::FuncOp funcOp, bool *changed = nullptr);
+
+/// Pre-lowering pattern set: decompose `onnx.Pow` / `onnx.ReduceMean` /
+/// `onnx.AveragePool` into compositions of ops that already have HIP
+/// converters. Currently scoped to patterns surfaced by Gemma-3's
+/// multimodal projector — see ProjectorOpsRewrites.cpp for the supported
+/// shapes and fallback policy.
+void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+
 } // namespace hip
 } // namespace mlir
 
