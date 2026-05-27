@@ -255,13 +255,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     return HIPDNN_EP_ERR_NULL_POINTER; // Use generic error code
   }
 
-  // Validate tensor pointers
-  if (!tensor->data) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_input: tensor[%zu].data is null\n",
-            index);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
+  // Shape must be present (or rank==0 for scalars).
   if (!tensor->shape && tensor->rank != 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_input: tensor[%zu].shape is null\n",
@@ -291,8 +285,34 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // Calculate buffer size
   size_t size_bytes =
       calculateTensorSize(tensor->shape, tensor->rank, element_size);
+
+  // Empty tensors (any dim == 0 -> size_bytes == 0) are legitimate inputs --
+  // e.g. KV cache `past_key_values.*.key/value` with shape [B, H, 0, D] on
+  // the prefill step (past_sequence_length == 0).  ORT supplies these with
+  // `data == nullptr` because there is nothing to copy; we must accept that
+  // and let downstream compiled kernels see an empty dim and iterate zero
+  // times.  Skip the null-data check, skip pool_alloc + H2D, and return
+  // SUCCESS with a zero-size buffer (gpu_ptr=nullptr is fine because
+  // compiled MLIR kernels never dereference it when the corresponding dim
+  // is zero).
   if (size_bytes == 0) {
-    return HIPDNN_EP_ERR_INVALID_DIMENSION;
+    out_buffer->gpu_ptr = nullptr;
+    out_buffer->host_ptr = tensor->data;
+    out_buffer->shape_ptr = tensor->shape;
+    out_buffer->rank = tensor->rank;
+    out_buffer->size_bytes = 0;
+    out_buffer->is_pooled = false;
+    out_buffer->is_aliased = false;
+    return HIPDNN_EP_SUCCESS;
+  }
+
+  // Non-empty: data must be non-null now.
+  if (!tensor->data) {
+    fprintf(stderr,
+            "hipdnn_ep_tensor_prepare_input: tensor[%zu].data is null but "
+            "size_bytes=%zu (rank=%zu)\n",
+            index, size_bytes, tensor->rank);
+    return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
   RUNTIME_DEBUG_LOG(
@@ -440,13 +460,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   // Extract tensor from span
   tensor_t *tensor = &outputs->data[index];
 
-  // Validate tensor pointers
-  if (!tensor->data) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: tensor[%zu].data is null\n",
-            index);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
+  // Shape must be present (or rank==0 for scalars).
   if (!tensor->shape && tensor->rank != 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_output: tensor[%zu].shape is null\n",
@@ -476,8 +490,30 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   // Calculate buffer size
   size_t size_bytes =
       calculateTensorSize(tensor->shape, tensor->rank, element_size);
+
+  // Empty output tensors (any dim == 0) are legitimate -- e.g. an op
+  // producing a slice with a zero-length dim.  Skip allocation and return
+  // success with a zero-size buffer.  Compiled kernels never dereference
+  // gpu_ptr when the corresponding dim is zero (the iteration range is
+  // empty).
   if (size_bytes == 0) {
-    return HIPDNN_EP_ERR_INVALID_DIMENSION;
+    out_buffer->gpu_ptr = nullptr;
+    out_buffer->host_ptr = tensor->data;
+    out_buffer->shape_ptr = tensor->shape;
+    out_buffer->rank = tensor->rank;
+    out_buffer->size_bytes = 0;
+    out_buffer->is_pooled = false;
+    out_buffer->is_aliased = false;
+    return HIPDNN_EP_SUCCESS;
+  }
+
+  // Non-empty: data must be non-null now.
+  if (!tensor->data) {
+    fprintf(stderr,
+            "hipdnn_ep_tensor_prepare_output: tensor[%zu].data is null but "
+            "size_bytes=%zu (rank=%zu)\n",
+            index, size_bytes, tensor->rank);
+    return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
   RUNTIME_DEBUG_LOG(
@@ -533,6 +569,12 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
   if (!buffer) {
     fprintf(stderr, "hipdnn_ep_tensor_finalize_output: null buffer\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
+  }
+
+  // Empty output (zero-sized dim): nothing to copy, nothing to release.
+  // prepare_output set gpu_ptr=nullptr and size_bytes=0 in this case.
+  if (buffer->size_bytes == 0) {
+    return HIPDNN_EP_SUCCESS;
   }
 
   int result = HIPDNN_EP_SUCCESS;
@@ -641,6 +683,13 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
   (void)state;
   if (!buffer) {
     fprintf(stderr, "hipdnn_ep_tensor_free_input: null buffer\n");
+    return;
+  }
+
+  // Empty input (size_bytes == 0, e.g. KV cache with past_sequence_length==0
+  // on prefill): no pool allocation was made; nothing to release.
+  if (buffer->size_bytes == 0) {
+    buffer->gpu_ptr = nullptr;
     return;
   }
 

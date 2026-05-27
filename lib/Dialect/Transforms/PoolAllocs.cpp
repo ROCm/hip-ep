@@ -44,6 +44,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <cstdlib>
 #include <functional>
 
 #define DEBUG_TYPE "hip-pool-allocs"
@@ -843,6 +844,18 @@ void PoolAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
+
+  // Debug-only escape hatch: HIPDNN_EP_DISABLE_POOL_PACKING=1 skips the pool
+  // packing transformation entirely, leaving each memref.alloc as a separate
+  // hip.alloc/hip.free pair.  Useful for isolating "is this a pool aliasing
+  // bug or a real op bug?" without rebuilding repeatedly.
+  if (const char *env = std::getenv("HIPDNN_EP_DISABLE_POOL_PACKING")) {
+    if (env[0] == '1') {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[hip-pool-allocs] DISABLED by env var\n");
+      return;
+    }
+  }
 
   // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
   // instead of sequential op indices.
