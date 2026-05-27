@@ -49,6 +49,8 @@ inline constexpr const char *kWrapMiopenT5LayerNormForward =
     "wrap_miopenT5LayerNormForward";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
+inline constexpr const char *kWrapLayerNormalization =
+    "wrap_layer_normalization";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
@@ -66,7 +68,10 @@ inline constexpr const char *kWrapCast = "wrap_cast";
 inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
+inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
+inline constexpr const char *kWrapMultiHeadAttention =
+    "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
@@ -76,6 +81,26 @@ inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
 inline constexpr const char *kWrapWhere = "wrap_where";
+inline constexpr const char *kWrapEqual = "wrap_equal";
+inline constexpr const char *kWrapAnd = "wrap_and";
+inline constexpr const char *kWrapNeg = "wrap_neg";
+inline constexpr const char *kWrapNot = "wrap_not";
+inline constexpr const char *kWrapCos = "wrap_cos";
+inline constexpr const char *kWrapSin = "wrap_sin";
+inline constexpr const char *kWrapDiv = "wrap_div";
+inline constexpr const char *kWrapCumSum = "wrap_cumsum";
+inline constexpr const char *kWrapPad = "wrap_pad";
+inline constexpr const char *kWrapTile = "wrap_tile";
+inline constexpr const char *kWrapExpand = "wrap_expand";
+inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
+inline constexpr const char *kWrapLess = "wrap_less";
+inline constexpr const char *kWrapGatherND = "wrap_gather_nd";
+inline constexpr const char *kWrapSign = "wrap_sign";
+inline constexpr const char *kWrapMod = "wrap_mod";
+inline constexpr const char *kWrapSlice = "wrap_slice";
+inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
+inline constexpr const char *kWrapNonZero = "wrap_nonzero";
+inline constexpr const char *kWrapSize = "wrap_size";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -106,7 +131,9 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return 3; // HIPDNN_EP_DATATYPE_INT32
   if (elemType.isInteger(64))
     return 4; // HIPDNN_EP_DATATYPE_INT64
-  if (elemType.isInteger(8))
+  if (elemType.isUnsignedInteger(8))
+    return 7; // HIPDNN_EP_DATATYPE_UINT8
+  if (elemType.isSignedInteger(8) || elemType.isSignlessInteger(8))
     return 5; // HIPDNN_EP_DATATYPE_INT8
   if (elemType.isF64())
     return 6; // HIPDNN_EP_DATATYPE_DOUBLE
@@ -308,14 +335,20 @@ void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
-void populateReduceSumLoweringPatterns(const LLVMTypeConverter &converter,
-                                       RewritePatternSet &patterns);
+// Shared lowering for hip.reduce_sum / hip.reduce_max / hip.reduce_prod.
+// All three use the same wrap_reduce_{sum,max,prod} signature, so we
+// template a single ReduceOpLowering and register all variants from one
+// populate function.
+void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
 void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
+void populateMultiHeadAttentionLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
@@ -332,6 +365,38 @@ void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateDumpTensorLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
+void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
+void populateAndLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
+void populateDivLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
+void populateUnaryElementwiseLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateCumSumLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populatePadLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
+void populateTileLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateExpandLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populateLessLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateGatherNDLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
+void populateModLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
+void populateSliceLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
+void populateScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
+                                       RewritePatternSet &patterns);
+void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
+                                     RewritePatternSet &patterns);
+void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

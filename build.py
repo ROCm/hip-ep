@@ -21,6 +21,8 @@ Usage:
     python build.py                # Full setup + build
     python build.py --skip-build   # Setup only (download deps)
     python build.py --clean        # Remove install/ and start fresh
+    python build.py --build-oga    # Also build the onnxruntime-genai fork
+    python build.py --build-vulkan # Also build the Vulkan baseline (llama.cpp)
 """
 
 import argparse
@@ -45,9 +47,24 @@ BUILD = INSTALL / "build"
 DIST = INSTALL / "dist"
 OGA_SOURCE = INSTALL / "oga-source"
 OGA_BUILD = INSTALL / "oga-build"
+VULKAN_SDK = INSTALL / "vulkan-sdk"
+LLAMACPP_SRC = INSTALL / "llama.cpp"
+LLAMACPP_BUILD = INSTALL / "llama.cpp-build"
+LLAMACPP_DIST = INSTALL / "llama-vulkan"
 
 THEROCK_URL = (
     "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1151-7.11.0.tar.gz"
+)
+
+# Pinned llama.cpp commit + Vulkan SDK version for reproducible Vulkan baselines.
+LLAMACPP_REPO = "https://github.com/ggml-org/llama.cpp.git"
+LLAMACPP_REF = "683c5acb90478a9e7e20eb65a1bfee334635216d"
+VULKAN_VERSION = "1.4.341.1"
+VULKAN_INSTALLER_NAME = f"vulkansdk-windows-X64-{VULKAN_VERSION}.exe"
+# ?Human=true disables LunarG's download-token throttling for direct fetches.
+VULKAN_INSTALLER_URL = (
+    f"https://sdk.lunarg.com/sdk/download/{VULKAN_VERSION}/windows/"
+    f"{VULKAN_INSTALLER_NAME}?Human=true"
 )
 
 # Prebuilt deps — keep in sync with scripts/setup-prebuilt.sh
@@ -160,6 +177,18 @@ def _read_ci_env(*keys):
 
 
 def fetch_therock():
+    # set THEROCK if the env var THEROCK_DIST is valid
+    log("Looking for TheRock ROCm SDK via THEROCK_DIST ...")
+    custom_therock = os.environ.get("THEROCK_DIST")
+    if custom_therock:
+        therock_path = Path(custom_therock)
+        if not therock_path.exists():
+            log(f"  ERROR: THEROCK_DIST points to non-existent path: {therock_path}")
+            sys.exit(1)
+        THEROCK = therock_path
+        log(f"  Using custom TheRock from THEROCK_DIST: {THEROCK}")
+        return
+
     log("Setting up TheRock ROCm SDK ...")
     sentinel = THEROCK / ".ok"
     if sentinel.exists():
@@ -323,6 +352,14 @@ def _detect_gpu_arch():
             text=True,
             timeout=10,
         )
+        # Recent TheRock builds emit an informational "HIP Library Path: ..."
+        # line on stdout before the arch line; pick the first line that
+        # actually looks like a gfx target.
+        for line in r.stdout.strip().splitlines():
+            tok = line.strip()
+            if tok.startswith("gfx"):
+                return tok
+        # Fallback: legacy single-line output.
         lines = r.stdout.strip().splitlines()
         return lines[0].strip() if lines else None
     except Exception:
@@ -656,6 +693,180 @@ def build_oga():
 
 
 # ---------------------------------------------------------------------------
+# Vulkan baseline (llama.cpp built against the LunarG Vulkan SDK)
+# ---------------------------------------------------------------------------
+
+
+def _download_with_browser_ua(url, dest):
+    """Wrap download() with a Mozilla UA opener. LunarG's CDN returns 403/404
+    to the default Python urllib User-Agent."""
+    prev_opener = urllib.request._opener
+    opener = urllib.request.build_opener()
+    opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+    urllib.request.install_opener(opener)
+    try:
+        download(url, dest)
+    finally:
+        urllib.request.install_opener(prev_opener)
+
+
+def fetch_vulkan_sdk():
+    log("Setting up Vulkan SDK ...")
+    sentinel = VULKAN_SDK / ".ok"
+    if sentinel.exists():
+        log("  Already installed.")
+        return
+
+    installer = CACHE / VULKAN_INSTALLER_NAME
+    _download_with_browser_ua(VULKAN_INSTALLER_URL, installer)
+
+    if VULKAN_SDK.exists():
+        shutil.rmtree(VULKAN_SDK)
+    VULKAN_SDK.mkdir(parents=True, exist_ok=True)
+
+    # Qt Installer Framework based; --root makes it install user-writable
+    # (no admin/UAC) and the silent flags suppress the GUI. Default component
+    # set covers what llama.cpp needs (Headers, Loader, glslc, validation).
+    log(f"  Running installer (silent) -> {VULKAN_SDK}")
+    r = subprocess.run(
+        [
+            str(installer),
+            "--root",
+            str(VULKAN_SDK),
+            "--accept-licenses",
+            "--default-answer",
+            "--confirm-command",
+            "install",
+        ]
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Vulkan SDK installer exited with code {r.returncode}. "
+            "If a UAC prompt was dismissed, re-run from an elevated shell."
+        )
+
+    must_exist = [
+        VULKAN_SDK / "Include" / "vulkan" / "vulkan.h",
+        VULKAN_SDK / "Lib" / "vulkan-1.lib",
+        VULKAN_SDK / "Bin" / "glslc.exe",
+    ]
+    missing = [p for p in must_exist if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "Vulkan SDK install looks incomplete. Missing:\n  "
+            + "\n  ".join(str(p) for p in missing)
+        )
+
+    sentinel.touch()
+    log(f"  Vulkan SDK {VULKAN_VERSION} ready.")
+
+
+def fetch_llamacpp():
+    log("Setting up llama.cpp source ...")
+    sentinel = LLAMACPP_SRC / ".ok"
+    if sentinel.exists():
+        # Verify the pinned commit is checked out — if HEAD moved we don't
+        # want to silently build the wrong thing.
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(LLAMACPP_SRC),
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if head == LLAMACPP_REF:
+            log(f"  Already at pinned commit {LLAMACPP_REF[:8]}.")
+            return
+        log(f"  HEAD is {head[:8]}, expected {LLAMACPP_REF[:8]} — re-checking out.")
+
+    if not LLAMACPP_SRC.exists():
+        LLAMACPP_SRC.parent.mkdir(parents=True, exist_ok=True)
+        log(f"  Cloning {LLAMACPP_REPO} ...")
+        subprocess.run(
+            ["git", "clone", "--filter=blob:none", LLAMACPP_REPO, str(LLAMACPP_SRC)],
+            check=True,
+        )
+
+    log(f"  Fetching pinned commit {LLAMACPP_REF[:8]} ...")
+    subprocess.run(
+        ["git", "fetch", "--depth=1", "origin", LLAMACPP_REF],
+        cwd=str(LLAMACPP_SRC),
+        check=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "--detach", LLAMACPP_REF],
+        cwd=str(LLAMACPP_SRC),
+        check=True,
+    )
+
+    sentinel.touch()
+    log("  llama.cpp ready.")
+
+
+def build_vulkan():
+    """Fetch the Vulkan SDK + llama.cpp source, then build llama.cpp with
+    GGML_VULKAN=ON. Installs binaries into install/llama-vulkan/bin."""
+    log("Building Vulkan baseline (llama.cpp) ...")
+
+    fetch_vulkan_sdk()
+    fetch_llamacpp()
+
+    _ensure_msvc_env()
+    for tool in ("cmake", "ninja"):
+        if not shutil.which(tool):
+            log(f"  ERROR: {tool} not found. Run: conda activate hipdnn-ep")
+            sys.exit(1)
+
+    # Make the SDK visible to CMake's FindVulkan via the standard env var.
+    os.environ["VULKAN_SDK"] = str(VULKAN_SDK)
+    os.environ["PATH"] = str(VULKAN_SDK / "Bin") + os.pathsep + os.environ["PATH"]
+
+    LLAMACPP_BUILD.mkdir(parents=True, exist_ok=True)
+
+    cmake_args = [
+        "cmake",
+        "-S",
+        str(LLAMACPP_SRC),
+        "-B",
+        str(LLAMACPP_BUILD),
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        f"-DCMAKE_INSTALL_PREFIX={LLAMACPP_DIST}",
+        "-DGGML_VULKAN=ON",
+        "-DGGML_NATIVE=ON",
+        "-DGGML_CUDA=OFF",
+        "-DGGML_HIP=OFF",
+        "-DLLAMA_BUILD_TESTS=OFF",
+        "-DLLAMA_CURL=OFF",
+        f"-DVulkan_INCLUDE_DIR={VULKAN_SDK / 'Include'}",
+        f"-DVulkan_LIBRARY={VULKAN_SDK / 'Lib' / 'vulkan-1.lib'}",
+        f"-DVulkan_GLSLC_EXECUTABLE={VULKAN_SDK / 'Bin' / 'glslc.exe'}",
+    ]
+
+    if shutil.which("sccache"):
+        cmake_args += [
+            "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
+            "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
+        ]
+
+    log("  Configuring ...")
+    subprocess.run(cmake_args, check=True)
+
+    log("  Compiling ...")
+    subprocess.run(
+        ["cmake", "--build", str(LLAMACPP_BUILD), "--config", "Release"],
+        check=True,
+    )
+
+    log("  Installing ...")
+    subprocess.run(
+        ["cmake", "--install", str(LLAMACPP_BUILD), "--config", "Release"],
+        check=True,
+    )
+    log(f"  Vulkan baseline ready -> {LLAMACPP_DIST}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -678,6 +889,11 @@ def main():
         "--build-oga",
         action="store_true",
         help="Build and install onnxruntime-genai fork with MorphiZen EP device support",
+    )
+    parser.add_argument(
+        "--build-vulkan",
+        action="store_true",
+        help="Build the Vulkan baseline (llama.cpp + LunarG Vulkan SDK)",
     )
     args = parser.parse_args()
 
@@ -703,6 +919,9 @@ def main():
     if args.build_oga:
         build_oga()
 
+    if args.build_vulkan:
+        build_vulkan()
+
     log(f"  TheRock SDK:    {THEROCK}")
     log(f"  Dependencies:   {DEPS}")
     log(f"  ONNX Runtime:   {ORT}")
@@ -712,6 +931,10 @@ def main():
     if args.build_oga:
         log(f"  OGA source:     {OGA_SOURCE}")
         log(f"  OGA build:      {OGA_BUILD}")
+    if args.build_vulkan:
+        log(f"  Vulkan SDK:     {VULKAN_SDK}")
+        log(f"  llama.cpp src:  {LLAMACPP_SRC} (commit {LLAMACPP_REF[:8]})")
+        log(f"  Vulkan binaries:{LLAMACPP_DIST}")
 
 
 if __name__ == "__main__":

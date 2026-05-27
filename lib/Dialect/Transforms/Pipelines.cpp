@@ -93,7 +93,19 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs) {
+  // Pre-lowering ONNX-dialect simplifications (currently: CastLike -> Cast
+  // + drop dead type-donor function arguments). Pure ONNX dialect; runs
+  // BEFORE hip-add-context-arg so it operates in the original ONNX
+  // function index space and has no HIP-dialect dependency.
+  pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
+
+  // Outline onnx.Loop bodies into separate func.func ops before the main
+  // onnx-to-hip conversion runs. That way each outlined body's onnx.* ops
+  // get the same treatment as ops in main_graph (constant lowering, op
+  // mapping, etc.) -- the conversion pass already iterates all func.func
+  // ops in the module.
+  pm.addPass(createOnnxLoopOutlinePass());
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
@@ -113,7 +125,10 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        morphizen::FileSystem *fs,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
+  // See sibling overload for rationale.
+  pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
+  pm.addPass(createOnnxLoopOutlinePass());
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());

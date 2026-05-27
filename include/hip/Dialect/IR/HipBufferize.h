@@ -88,6 +88,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);
     SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
     ReduceSumOp::attachInterface<HipDstBufferizableModel<ReduceSumOp>>(*ctx);
+    ReduceMaxOp::attachInterface<HipDstBufferizableModel<ReduceMaxOp>>(*ctx);
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
@@ -99,6 +100,31 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
+    LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
+    MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
+    NegOp::attachInterface<HipDstBufferizableModel<NegOp>>(*ctx);
+    EqualOp::attachInterface<HipDstBufferizableModel<EqualOp>>(*ctx);
+    DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
+    NotOp::attachInterface<HipDstBufferizableModel<NotOp>>(*ctx);
+    AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);
+    CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
+    SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
+    CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);
+    PadOp::attachInterface<HipDstBufferizableModel<PadOp>>(*ctx);
+    TileOp::attachInterface<HipDstBufferizableModel<TileOp>>(*ctx);
+    ExpandOp::attachInterface<HipDstBufferizableModel<ExpandOp>>(*ctx);
+    ReduceProdOp::attachInterface<HipDstBufferizableModel<ReduceProdOp>>(*ctx);
+    LessOp::attachInterface<HipDstBufferizableModel<LessOp>>(*ctx);
+    GatherNDOp::attachInterface<HipDstBufferizableModel<GatherNDOp>>(*ctx);
+    SignOp::attachInterface<HipDstBufferizableModel<SignOp>>(*ctx);
+    ModOp::attachInterface<HipDstBufferizableModel<ModOp>>(*ctx);
+    SliceOp::attachInterface<HipDstBufferizableModel<SliceOp>>(*ctx);
+    ScatterNDOp::attachInterface<HipDstBufferizableModel<ScatterNDOp>>(*ctx);
+    MultiHeadAttentionOp::attachInterface<
+        HipDstBufferizableModel<MultiHeadAttentionOp>>(*ctx);
+    NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
+    SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
+    LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
   });
 }
 
