@@ -787,7 +787,19 @@ int hip_slice(
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,
+    const int64_t* output_shape_host,     /* physical alloc shape       */
+    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
+                                             may be NULL, in which case the
+                                             kernel treats it as identical to
+                                             output_shape_host (i.e. no
+                                             over-alloc; entire physical
+                                             buffer is filled by the slice).
+                                             When set and logical[d] <
+                                             output_shape[d] for some d,
+                                             positions in the over-allocated
+                                             tail are filled with zero — the
+                                             host wrapper does not need to
+                                             pre-memset the buffer.        */
     const int64_t* starts_per_axis_host,  /* length = rank */
     const int64_t* steps_per_axis_host,   /* length = rank */
     int rank,
