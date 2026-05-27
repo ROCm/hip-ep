@@ -54,6 +54,17 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
+  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
+  // GPU pool by hip-materialize-host-scalars.
+  // hipHostMalloc(hipHostMallocMapped): host-writable AND GPU-readable.
+  // Grow-on-demand via hipdnn_ep_get_host_scratch_base(); never shrinks.
+  // hipHostFree'd in cleanup. Why: on some targets the regular GPU pool is
+  // real device memory; host stores into it SEGV. Other targets silently
+  // worked because hipMalloc returned UMA-mapped host memory there, masking
+  // the bug.
+  void *host_scratch_base;
+  size_t host_scratch_size;
+
   // Per-state scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
   // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
@@ -62,7 +73,7 @@ struct RuntimeState {
   // call, every layer, every inference. On 24-layer gpt-oss-20b that's 192
   // mallocs + 192 frees per token; HIP's hipMalloc takes ~50 us each on
   // Windows, so the storm cost ~10-12 ms/token and bottlenecked decode TPS to
-  // ~40 tok/s versus a Vulkan baseline of ~70 on the same gfx1151.
+  // roughly half the Vulkan baseline on the same hardware.
   //
   // Layout policy: one contiguous buffer sized to fit ALL sub-buffers for the
   // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
@@ -129,8 +140,8 @@ struct RuntimeState {
   // Decode runs 32 GQA layers per token, all reading the same seqlens_k
   // from device memory. The decomposed-path readback in gqa.cpp issues a
   // hipMemcpyAsync(D2H) + hipStreamSynchronize per layer (31 redundant
-  // pipeline stalls, ~30-45 ms/token on Strix Halo with the asym Llama
-  // sliding-window path). The cache is on by default
+  // pipeline stalls, tens of ms per token on long-context decode). The cache
+  // is on by default
   // (HIPDNN_EP_GQA_CACHE_SEQLENS=1, set to 0 to disable): the first GQA
   // in a forward pass populates the cache and the remaining 31 layers
   // reuse it.

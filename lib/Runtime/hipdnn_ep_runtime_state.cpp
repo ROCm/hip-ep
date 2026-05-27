@@ -74,13 +74,16 @@ static int prepare_constants_array(RuntimeState *state,
                                    const mlir::hip::HipModelMetaInfo *meta);
 static size_t
 compute_constants_total_size(const mlir::hip::HipModelMetaInfo *meta);
+static uint64_t
+compute_constants_fingerprint(const mlir::hip::HipModelMetaInfo *meta);
 static int hipmalloc_and_fixup(RuntimeState *state,
                                const mlir::hip::HipModelMetaInfo *meta,
                                size_t total_size);
 static bool try_attach_shared_constants(RuntimeState *state,
                                         const mlir::hip::HipModelMetaInfo *meta,
                                         size_t total_size);
-static void publish_shared_constants(RuntimeState *state, size_t total_size);
+static void publish_shared_constants(RuntimeState *state, size_t total_size,
+                                     uint64_t fingerprint);
 static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
                                const char *constants_filename);
 static int per_entry_load_constants(RuntimeState *state,
@@ -129,6 +132,11 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // 2. Try to attach a process-wide shared constants blob (OGA pipeline
   //    optimization: prefill+decode share the same constants, so the
   //    second model can skip both hipMalloc and the data load entirely).
+  //    Cache key includes a fingerprint over the per-constant descriptors
+  //    (offset/size/source) so two compiled DLLs that happen to have the
+  //    same total_size but different constants content -- e.g. a fixed-shape
+  //    and dynamic-shape variant of the same model whose compiler folded
+  //    different shape constants -- never collide.
   size_t total_size = compute_constants_total_size(meta);
   if (try_attach_shared_constants(*out_state, meta, total_size)) {
     TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs "
@@ -178,7 +186,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   // 5. Publish the freshly loaded blob to the shared cache (best-effort;
   //    failure means subsequent models won't be able to share).
-  publish_shared_constants(*out_state, total_size);
+  publish_shared_constants(*out_state, total_size,
+                           compute_constants_fingerprint(meta));
 
   TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
              elapsed_since(t0));
@@ -215,6 +224,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->host_scratch_base = nullptr;
+  state->host_scratch_size = 0;
   state->qmoe_scratch = nullptr;
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
@@ -341,6 +352,108 @@ static int prepare_constants_array(RuntimeState *state,
   return 0;
 }
 
+// 64-bit FNV-1a fingerprint over per-constant descriptor metadata.
+//
+// What this hashes:
+//   * meta->constants_filename() once at the top (the single external-data
+//     file all FileRefSource entries reference in the current EP design)
+//   * a fixed 32-byte descriptor PER constant: (offset, size, source_type,
+//     source_specific_u64) where source_specific_u64 is the splat value
+//     bytes / file_offset / sidecar_offset depending on the kind.
+//
+// What this does NOT hash (and why this is fast):
+//   * The multi-GB constants blob itself is never touched. The cost is
+//     O(num_constants) descriptor scans -- ~22 KB for gemma3 (687 entries).
+//   * Per-constant FileRefSource.path is intentionally skipped: every
+//     FileRefSource in a single model points to meta->constants_filename
+//     (the EP only emits one external-data file per model), and that is
+//     already covered by the global constants_filename hash above. If a
+//     future EP design ever produces per-constant FileRefSource paths that
+//     differ from constants_filename, this fingerprint would alias models
+//     that share blob layout but read from different files -- update this
+//     function then.
+//
+// Correctness contract: identical fingerprint <=> the constants blob bytes
+// loaded will also be identical (modulo the path-uniqueness assumption
+// above). Sole purpose: extend the SHARED_CONSTANTS cache key beyond just
+// total_size so that two DLLs whose constants happen to be the same size
+// but with different content (different splat values, different file
+// offsets, ...) do not silently alias.
+static uint64_t
+compute_constants_fingerprint(const mlir::hip::HipModelMetaInfo *meta) {
+  constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
+  constexpr uint64_t kFnvPrime = 1099511628211ULL;
+  uint64_t h = kFnvOffset;
+  auto fnv_update = [&h](const void *data, size_t len) {
+    const uint8_t *p = static_cast<const uint8_t *>(data);
+    for (size_t i = 0; i < len; ++i) {
+      h ^= p[i];
+      h *= kFnvPrime;
+    }
+  };
+  if (!meta)
+    return h;
+  if (auto *fname = meta->constants_filename())
+    fnv_update(fname->c_str(), fname->size());
+
+  auto *constants = meta->constants();
+  if (!constants)
+    return h;
+
+  // Pack each constant into a fixed-size 32-byte descriptor:
+  //   [0..7]  : offset    (u64)
+  //   [8..15] : size      (u64)
+  //   [16..23]: source_type (u8 in [16]; [17..23] zero-padded for stability)
+  //   [24..31]: source-specific scalar (splat elem_bytes / file_offset /
+  //             sidecar_offset / 0)
+  // Hashed in a single fnv_update per constant -- no per-source switch in
+  // the hot loop.
+  uint8_t buf[32];
+  for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
+    auto *c = constants->Get(i);
+    std::memset(buf, 0, sizeof(buf));
+    uint64_t off = c->offset();
+    uint64_t sz = c->size();
+    std::memcpy(buf + 0, &off, 8);
+    std::memcpy(buf + 8, &sz, 8);
+    buf[16] = static_cast<uint8_t>(c->source_type());
+
+    switch (c->source_type()) {
+    case mlir::hip::ConstantSource::SplatSource: {
+      auto *splat = c->source_as_SplatSource();
+      if (splat) {
+        if (auto *eb = splat->elem_bytes()) {
+          size_t n_bytes = std::min<size_t>(eb->size(), 8);
+          if (n_bytes > 0)
+            std::memcpy(buf + 24, eb->data(), n_bytes);
+        }
+      }
+      break;
+    }
+    case mlir::hip::ConstantSource::FileRefSource: {
+      auto *fref = c->source_as_FileRefSource();
+      if (fref) {
+        int64_t fo = fref->file_offset();
+        std::memcpy(buf + 24, &fo, 8);
+      }
+      break;
+    }
+    case mlir::hip::ConstantSource::SidecarSource: {
+      auto *side = c->source_as_SidecarSource();
+      if (side) {
+        int64_t so = side->sidecar_offset();
+        std::memcpy(buf + 24, &so, 8);
+      }
+      break;
+    }
+    default:
+      break;
+    }
+    fnv_update(buf, sizeof(buf));
+  }
+  return h;
+}
+
 // Sum of max(end = offset + size) across all constants -- this is the
 // size of the single VRAM blob that backs gpu_constants_blob.
 static size_t
@@ -407,9 +520,11 @@ static bool try_attach_shared_constants(RuntimeState *state,
   if (total_size == 0)
     return false;
 
+  uint64_t fp = compute_constants_fingerprint(meta);
   char shm_name[128];
-  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
-           (unsigned long)GetCurrentProcessId(), total_size);
+  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu_%016llx",
+           (unsigned long)GetCurrentProcessId(), total_size,
+           (unsigned long long)fp);
 
   void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
   if (!existing_map)
@@ -450,17 +565,20 @@ static bool try_attach_shared_constants(RuntimeState *state,
 // later models with the same total_size can attach. Best-effort:
 // failures are silently tolerated (the model still works, just no
 // sharing). On non-Windows: no-op.
-static void publish_shared_constants(RuntimeState *state, size_t total_size) {
+static void publish_shared_constants(RuntimeState *state, size_t total_size,
+                                     uint64_t fingerprint) {
 #ifndef _WIN32
   (void)state;
   (void)total_size;
+  (void)fingerprint;
 #else
   if (total_size == 0)
     return;
 
   char shm_name[128];
-  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
-           (unsigned long)GetCurrentProcessId(), total_size);
+  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu_%016llx",
+           (unsigned long)GetCurrentProcessId(), total_size,
+           (unsigned long long)fingerprint);
 
   void *new_map =
       CreateFileMappingA((void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
@@ -882,6 +1000,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
   }
 
+  // Free host-mapped scratch buffer (if allocated)
+  if (state->host_scratch_base) {
+    HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+  }
+
   // Free memory pool (if allocated)
   if (state->pool_base) {
     HIP_CLEANUP(hipFree(state->pool_base));
@@ -1074,12 +1197,86 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
   return pool_ptr + offset;
 }
 
-void *hipdnn_ep_get_pool_base(RuntimeState *state) {
+void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
   }
+  // Grow-on-demand: when dynamic shapes produce larger intermediates than
+  // the static pool allocated at inference_init, reallocate. The pool
+  // never shrinks — subsequent calls with smaller needed_size are no-ops.
+  if (needed_size > state->pool_size) {
+    // Sync the stream before freeing: the previous inference may have
+    // dispatched async kernels that still hold pointers into the pool.
+    // hipFree on an in-flight buffer is undefined behavior — synchronize
+    // first to drain pending work. Grow events are rare (only when an
+    // input shape exceeds anything seen before) so the cost is amortized.
+    if (state->pool_base) {
+      if (state->stream)
+        HIP_CLEANUP(hipStreamSynchronize(state->stream));
+      fprintf(stderr,
+              "hipdnn_ep_get_pool_base: growing pool %zu -> %zu bytes "
+              "(rare; first time this large input shape was seen)\n",
+              state->pool_size, needed_size);
+      fflush(stderr);
+      HIP_CLEANUP(hipFree(state->pool_base));
+    }
+    void *new_base = nullptr;
+    if (hipMalloc(&new_base, needed_size) != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_get_pool_base: hipMalloc failed for pool grow "
+              "(%zu -> %zu bytes)\n",
+              state->pool_size, needed_size);
+      state->pool_base = nullptr;
+      state->pool_size = 0;
+      return nullptr;
+    }
+    state->pool_base = new_base;
+    state->pool_size = needed_size;
+  }
   return state->pool_base;
+}
+
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
+  if (!state) {
+    fprintf(stderr,
+            "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");
+    return nullptr;
+  }
+  // Mirrors hipdnn_ep_get_pool_base growth semantics for the host-mapped
+  // scratch buffer that backs hip.get_host_scratch. One allocation per
+  // function for all tiny host-fed scalars routed away from the GPU pool by
+  // hip-materialize-host-scalars; grown only when shape changes increase the
+  // total demand; never shrinks. hipHostMalloc(hipHostMallocMapped) memory is
+  // host-writable AND GPU-readable via the device pointer mapping, so the
+  // same pointer can be stored into from host code and then read by
+  // subsequent GPU kernels.
+  if (needed_size > state->host_scratch_size) {
+    if (state->host_scratch_base) {
+      if (state->stream)
+        HIP_CLEANUP(hipStreamSynchronize(state->stream));
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: growing host scratch "
+              "%zu -> %zu bytes (rare; first time this large)\n",
+              state->host_scratch_size, needed_size);
+      fflush(stderr);
+      HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+    }
+    void *new_base = nullptr;
+    if (hipHostMalloc(&new_base, needed_size, hipHostMallocMapped) !=
+        hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: hipHostMalloc failed "
+              "(%zu -> %zu bytes)\n",
+              state->host_scratch_size, needed_size);
+      state->host_scratch_base = nullptr;
+      state->host_scratch_size = 0;
+      return nullptr;
+    }
+    state->host_scratch_base = new_base;
+    state->host_scratch_size = needed_size;
+  }
+  return state->host_scratch_base;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1123,7 +1320,7 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   // old workspace buffer (prevents use-after-free on async GPU execution).
   if (state->workspace) {
     if (state->stream) {
-      hipStreamSynchronize(state->stream);
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
     HIP_CLEANUP(hipFree(state->workspace));
     state->workspace = nullptr;
@@ -1144,6 +1341,49 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
       alloc_size, needed_size);
   return 0;
 }
+
+//===----------------------------------------------------------------------===//
+// QMoE scratch helpers (device + pinned-host)
+//===----------------------------------------------------------------------===//
+//
+// Why this lives in the dynseqlen PR
+// ----------------------------------
+// Conceptually independent of dynamic sequence length, but the same
+// grow-on-demand infrastructure (1.5x amortization, sync-before-free,
+// monotonic-grow, never-shrink) introduced by dynseqlen for the runtime
+// pool and the shared workspace already encodes the policy this code
+// wants.  Bundling keeps the policy in one place and avoids repeating
+// the same sync-and-free dance in three near-identical helpers.
+//
+// Sub-buffer offset validation
+// ----------------------------
+// `wrap_qmoe` (lib/Runtime/real/qmoe.cpp) is the sole writer of
+// sub-buffer offsets, and it sums them into `total_scratch` before
+// calling `hipdnn_ep_state_ensure_qmoe_scratch`.  No defensive bound
+// check is performed at the use sites today; that is intentional in the
+// hot path but means a future refactor that adds a sub-buffer without
+// updating `total_scratch` would silently overrun the allocation.  A
+// follow-up should add a `qmoe_scratch_size` parameter exchange so the
+// caller can `assert(offset + size <= cap)` per sub-buffer.
+//
+// Cleanup-after-sync ordering
+// ---------------------------
+// Both grow paths sync the stream BEFORE freeing the old buffer
+// (`HIP_CLEANUP(hipStreamSynchronize) → HIP_CLEANUP(hipFree)`) and BEFORE
+// hipMalloc'ing the replacement.  Synchronizing first is required by HIP
+// semantics: hipFree on a buffer with in-flight kernel reads is undefined
+// behavior.  Both calls go through HIP_CLEANUP so a sync/free failure is
+// logged but does not abort the runtime — losing this scratch is a
+// recoverable error (the next call re-allocates).
+//
+// Mock-CI coverage
+// ----------------
+// The mock GPU (`lib/Runtime/mock/mock_gpu.cpp`) stubs `hipMalloc` /
+// `hipHostMalloc` so the grow path runs under mock CI, but no mock-CI
+// test exercises a shape progression that triggers an actual
+// reallocation.  Real-CI dynamic-shape benchmarks DO exercise the grow
+// path; document this gap rather than paper over it with mock fixtures.
+//===----------------------------------------------------------------------===//
 
 // qmoe device scratch (single contiguous buffer, sub-buffer offsets computed
 // per-call by wrap_qmoe). Same grow-on-demand policy as workspace; never
@@ -1173,7 +1413,7 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
 
   if (state->qmoe_scratch) {
     if (state->stream) {
-      hipStreamSynchronize(state->stream);
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
     HIP_CLEANUP(hipFree(state->qmoe_scratch));
     state->qmoe_scratch = nullptr;
@@ -1220,7 +1460,7 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
     // Sync first: any in-flight hipMemcpyAsync(D2H) targeting this pinned
     // buffer must complete before we free it. Cheap relative to alloc.
     if (state->stream) {
-      hipStreamSynchronize(state->stream);
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
     state->qmoe_host_scratch = nullptr;

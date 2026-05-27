@@ -142,6 +142,8 @@ void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateShapeConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
@@ -202,6 +204,25 @@ void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+
+/// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
+/// idiom into tensor.from_elements over a tensor.dim of x. Must run
+/// BEFORE lowerOnnxConstants so the index value is still inline in the
+/// onnx.Constant `value` attribute. See GatherShapeFold.cpp for the
+/// dynseqlen-regression rationale.
+void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+
+/// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
+/// chain (Pow / Mul / Sum / Tanh) back into a single
+/// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
+/// for some loading paths (notably dynamic-shape models) and the inlined
+/// primitives have no MorphiZen converters. Must run BEFORE
+/// `lowerOnnxConstants` so the literal float values of the embedded
+/// constants (3.0, 0.044715, sqrt(2/π), 1.0, 0.5) are still inline.
+/// See FastGeluFusion.cpp.
+void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir
