@@ -19,9 +19,14 @@
 // See docs/design/plugin-extension-api.md for design notes,
 // rationale, and the alignment matrix against upstream.
 //
-// STATUS (2026-05): proposal under vendor-team review. The struct
-// layout is not yet frozen. Until PRs 1-5 land, plugins should treat
-// HIP_EP_PLUGIN_API_VERSION as a moving target.
+// STATUS (2026-05): PRs 1-5 of the rollout have landed in private
+// review; PR 6 is a cleanup pass driven by the design self-review
+// (silent-failure-mode fixes, doc corrections, defensive idempotency,
+// host-owned bitcode buffers, etc.). The struct layout is **not yet
+// frozen** -- vendor-team review is still outstanding -- and Open
+// Question 6 (cross-DLL `mlir::PassRegistration`) remains open.
+// Plugins should treat `HIP_EP_PLUGIN_API_VERSION` as a moving
+// target until the design doc Status flips to "Stable".
 
 namespace hip::compiler {
 class HipEpPluginRegistry;
@@ -102,9 +107,13 @@ struct HipEpPluginLibraryInfo {
 ///       "MyVendorPlugin",
 ///       "0.1.0",
 ///       [](::hip::compiler::HipEpPluginRegistry &R) {
-///         // PR 2: R.registerPass<MyPass>() + R.requestPipelineSlot(...)
-///         // PR 3: R.addRuntimeBitcode(my_bc, my_bc_size)
-///         // PR 4: R.addLibraryPath(...) + R.addLibrary(...)
+///         R.registerPass<MyPass>();
+///         R.requestPipelineSlot(
+///             ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip,
+///             "my-pass");
+///         R.addRuntimeBitcode(my_bc, my_bc_size);
+///         R.addLibraryPath("/path/to/libs");
+///         R.addLibrary("vendor_kernels");
 ///       }};
 /// }
 /// ```

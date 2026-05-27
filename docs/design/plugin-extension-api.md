@@ -12,12 +12,17 @@ Licensed under the MIT License.
 [`include/hip/Compiler/PluginLoader.h`](../../include/hip/Compiler/PluginLoader.h)
 
 > **Status note (2026-05-26).** This document describes a multi-PR
-> plan; PRs 1–5 of the rollout have now landed in private review.
-> PR 1 introduced the C ABI header and the loader skeleton with no
-> hook sites; PR 2 wired the pipeline-slot dispatch and the vtable
+> plan; PRs 1–5 of the rollout have landed in private review, plus a
+> PR-6 cleanup pass driven by the design self-review (silent-failure
+> fixes, doc corrections, defensive idempotency, host-owned bitcode
+> buffers, slot bounds-checks, exception containment). PR 1
+> introduced the C ABI header and the loader skeleton with no hook
+> sites; PR 2 wired the pipeline-slot dispatch and the vtable
 > registry; PR 3 added LLVM bitcode contribution with override-from-
 > source semantics; PR 4 added external library + library-path
-> contribution; PR 5 (this one) finalised the documentation. The
+> contribution; PR 5 finalised the documentation; PR 6 hardened the
+> implementation against the issues found in self-review (see the
+> "Implementation status" section below for the per-issue list). The
 > API surface is **not yet frozen** — vendor-team review and the
 > shared-MLIR work in Open Question 6 are still outstanding — and
 > should not be depended on by external consumers until the doc
@@ -645,23 +650,98 @@ Scope as landed:
 
 Risk as landed: zero. Docs only.
 
-### PR 6 — Vendor-Side Bring-Up (Vendor Repo, Not Public)
+### PR 6 — Self-Review Cleanup **(landed 2026-05-26)**
+
+PR 6 is a hardening pass driven by a careful self-review of the
+PR 1–5 surface. No new capability; every fix is mechanical or
+documentation, motivated by a concrete misuse mode that reading
+the LLVM source confirmed could bite a real plugin author.
+
+Scope as landed:
+
+- **Loader behaviour.** Bad plugin paths in `HIP_EP_PLUGINS` now
+  emit a single-line `[plugin-loader] WARNING:` to stderr instead
+  of being silenced behind `HIPDNN_EP_DEBUG`. Duplicate paths
+  (`foo.dll;foo.dll`) are deduplicated so `RegisterCallbacks` is
+  invoked exactly once per unique entry. A throwing
+  `RegisterCallbacks` is contained by a `try { ... } catch
+  (std::exception &) { ... } catch (...) { ... }` block that
+  warns and continues with the next plugin, bounding the blast
+  radius of CRT / libstdc++ mismatches across the plugin DLL
+  boundary.
+- **Registry behaviour.** Out-of-range `PipelineSlot` casts in
+  `requestPipelineSlot` are bounds-checked against the V1 enum
+  size, warned, and dropped (rather than recorded silently and
+  later mismatched). `addRuntimeBitcode` now copies the plugin's
+  bytes into host-owned storage and skips empty buffers with a
+  warning (instead of either trusting plugin lifetime or letting
+  a 0-byte call propagate as a cryptic
+  `llvm::parseBitcodeFile` error). `pluginLibraryPaths` and
+  `pluginLibraries` return owning `std::string` copies rather
+  than `StringRef` views, eliminating the StringRef-stability
+  hazard entirely.
+- **Defensive idempotency.** Each accessor (`pluginPassesForSlot`,
+  `pluginBitcodeBuffers`, `pluginLibraryPaths`, `pluginLibraries`)
+  now calls `dispatchPluginRegistrationsOnce` itself, so a future
+  tool that bypasses `CompilerDriver::compile` / `hip-mlir-opt`
+  still observes plugin-contributed state. The guard is
+  `std::call_once`, so it is essentially free after the first
+  call.
+- **Doc + assertion fixes.** The `registerPass<>()` docstring no
+  longer claims the pass joins the host's MLIR registry (it
+  doesn't, per Open Question 6 — the plugin DLL writes into its
+  own copy of `mlir::passRegistry` because both host and plugin
+  link MLIR statically). Appendix D.2 of this doc no longer
+  claims plugins link `HipCInterface.lib` (they don't — the
+  vtable is exactly what avoids needing an import lib). The
+  authoring guide gained a "Symbol naming and override
+  semantics" section explaining that
+  `Linker::Flags::OverrideFromSrc` is unconditional and
+  all-or-nothing per `llvm/lib/Linker/LinkModules.cpp`. A
+  `static_assert` on `sizeof(VTable)` is a tripwire forcing
+  maintainers to bump `HIP_EP_PLUGIN_API_VERSION` whenever the
+  vtable layout changes.
+
+What we did **not** do in PR 6:
+
+- The cross-DLL `mlir::PassRegistration` problem (Open Question 6)
+  is unchanged; the docstring is honest about it but the fix is
+  a separate PR. Reading LLVM's `PassPluginLibraryInfo` shows the
+  fix path: route `registerPass<>()` through the vtable so the
+  host TU calls `mlir::registerPass(allocator)`, mirroring LLVM's
+  `void (*RegisterPassBuilderCallbacks)(PassBuilder &)` design.
+- The `OverrideFromSrc` semantic itself is unchanged. Whether to
+  switch to per-symbol opt-in is a design call that needs vendor
+  input, and warrants its own PR + discussion. The authoring
+  guide warns about it loudly in the meantime.
+
+Risk as landed: low. Every change is either documentation, a
+defensive no-op (idempotent dispatch), a stricter check that
+turns silent failures into loud warnings (slot bounds, zero-byte
+bitcode, throwing callbacks), or a contract tightening that
+makes the existing tests clearer (StringRef → std::string,
+host-owned bitcode). No behaviour change for the sample plugin
+or for any well-formed vendor plugin.
+
+### Vendor-Side Bring-Up (Vendor Repo, Not Public)
 
 **Prerequisite (not yet met)**: the confidential vendor repo must
 exist and be set up to consume the public install tree. As of
 2026-05 it does not.
 
-Scope:
+Scope (vendor work, **not a public-repo PR**):
 
 - Vendor sets up their (new) confidential repo with a CMake target
-  that consumes the public `hip-compiler` install tree (or a build
-  artifact) for the headers + import library.
+  that consumes the public `hip-compiler` install tree's headers.
+  Per Appendix D.2: no host import library is needed; the registry
+  vtable is filled by the host and the plugin links only against
+  the headers + MLIR for `mlir::PassRegistration<T>`'s definition.
 - Vendor builds `vendor_extension.dll` and smoke tests by loading
   their plugin into the public `hip-compiler` and reproducing the
   public sample-plugin test, then layering in their own ops.
 
-This PR does not land in the public repo. PRs 1–5 do not depend on
-this PR; they can land in any order relative to vendor-side work.
+This work does not land in the public repo. PRs 1–6 do not depend
+on it; they can land in any order relative to vendor-side work.
 
 ## 7. Open Questions
 
@@ -991,6 +1071,15 @@ Three views: who owns what, build-time, and runtime composition.
 
 ### D.2 Build-time dependency
 
+The vendor DLL needs **headers only** from the public install tree
+(plus MLIR transitively, for `mlir::PassRegistration<T>` in
+`registerPass<>()`). It does **not** link against any
+`hip-compiler` library: the `HipEpPluginRegistry` thunks dispatch
+through a vtable populated by the host at load time, so the plugin
+has no host-side symbols to resolve. This is why the host can ship
+as a static library (`LibHipCompiler.lib`) embedded in the EP DLL
+without forcing every host to also export an import lib.
+
 ```
 ┌──────────────────────────────────────────┐
 │  PUBLIC repo (cloned by vendor team)     │
@@ -1005,8 +1094,6 @@ Three views: who owns what, build-time, and runtime composition.
 │    PREFIX/include/hip/Compiler/PluginRegistry.h    │
 │    PREFIX/include/hip/Dialect/IR/HipOps.h.inc      │
 │    PREFIX/include/...  (MLIR headers, transitive)  │
-│    PREFIX/lib/HipCInterface.lib  (import lib)      │
-│    PREFIX/bin/hip-compiler.dll                     │
 └──────────────────────────────────────────┘
                   │
                   │  no fork; vendor pins to a specific
@@ -1022,13 +1109,17 @@ Three views: who owns what, build-time, and runtime composition.
 │  cmake --build build                     │
 │                                          │
 │  Build links against:                    │
-│    PREFIX/lib/HipCInterface.lib          │
-│      (so the vendor DLL can resolve      │
-│       HipEpPluginRegistry symbols at     │
-│       load time)                         │
 │    PREFIX/include/hip/Compiler/PluginAPI.h         │
 │    PREFIX/include/hip/Compiler/PluginRegistry.h    │
 │    PREFIX/include/...  (MLIR pass APIs)  │
+│    (MLIR libs from the same tree, for    │
+│     mlir::PassRegistration<T>'s defn.)   │
+│                                          │
+│  Does NOT link against any hip-compiler  │
+│  static or import lib: the plugin's      │
+│  HipEpPluginRegistry calls go through a  │
+│  host-supplied vtable, no host symbols   │
+│  cross the DLL boundary.                 │
 │                                          │
 │  Build outputs:                          │
 │    build/vendor_extension.dll            │

@@ -87,14 +87,29 @@ private:
   HipEpPluginLibraryInfo info_;
 };
 
-/// Read `HIP_EP_PLUGINS` (semicolon-separated paths) and load every
-/// plugin listed. The list is loaded **once per process**; subsequent
-/// calls return the same vector. Plugins that fail to load are logged
-/// (when `HIPDNN_EP_DEBUG` is set) and skipped — a single bad path
-/// does not abort the rest of compilation.
+/// Read `HIP_EP_PLUGINS` (semicolon-separated paths, on every
+/// platform — colon clashes with Windows drive letters) and load
+/// every plugin listed. Returns owning copies of each loaded plugin.
 ///
-/// Empty / unset env var is a normal "no plugins" case and returns
-/// an empty vector.
+/// Lifetime / caching:
+///   - The list is loaded **once per process**; subsequent calls
+///     return the same vector. The env var is read on the first call
+///     only — later changes to `HIP_EP_PLUGINS` in the same process
+///     are ignored. Set the env var before the first compilation.
+///   - Duplicate paths in `HIP_EP_PLUGINS` are deduplicated, so
+///     `foo.dll;foo.dll` produces exactly one loaded plugin (and
+///     thus exactly one `RegisterCallbacks` invocation).
+///
+/// Failure handling:
+///   - A plugin that fails to load (bad path, missing symbol, API
+///     mismatch) is **always** logged to stderr as a single-line
+///     `[plugin-loader] WARNING: ...` and skipped. The rest of the
+///     plugin list continues to load. We deliberately do not gate
+///     this warning on `HIPDNN_EP_DEBUG`, because the most common
+///     failure mode is a typo in `HIP_EP_PLUGINS` and a silent skip
+///     led to "is my plugin loaded?" debugging sessions.
+///   - Empty / unset env var is the normal "no plugins" case and
+///     returns an empty vector.
 const std::vector<HipEpPluginLoader> &loadPluginsOnce();
 
 /// Load all plugins (via `loadPluginsOnce`) and invoke each plugin's
@@ -103,12 +118,26 @@ const std::vector<HipEpPluginLoader> &loadPluginsOnce();
 /// from every entry point that might run before pipelines are built
 /// (`hip-compiler` driver, `hip-mlir-opt` main, etc.).
 ///
+/// A throwing plugin is contained: the loader catches `std::exception`
+/// and `...` from `RegisterCallbacks` and logs a `[plugin-loader]
+/// WARNING: ...` line, then continues with the next plugin. This
+/// matters because a plugin built against a different MSVC CRT or
+/// libstdc++ version can hit cross-DLL exception-propagation
+/// undefined behaviour; we bound the blast radius rather than crash
+/// the host.
+///
 /// After this returns:
-///   - every plugin pass is in `mlir::PassRegistry` (global)
-///   - every (slot, passName) request is queryable via
-///     `hip::compiler::pluginPassesForSlot(slot)`
-///   - every (future) bitcode buffer / library entry recorded by
-///     plugins is queryable via the corresponding accessor
+///   - every plugin's `requestPipelineSlot(slot, name)` request is
+///     queryable via `hip::compiler::pluginPassesForSlot(slot)`
+///   - every plugin's `addRuntimeBitcode` buffer is queryable via
+///     `hip::compiler::pluginBitcodeBuffers()`
+///   - every plugin's `addLibraryPath` / `addLibrary` entry is
+///     queryable via the corresponding accessor
+///   - every plugin's `registerPass<T>()` call has run (but see the
+///     CAVEAT on `HipEpPluginRegistry::registerPass` -- the pass is
+///     registered in the **plugin DLL's** copy of MLIR's static
+///     `passRegistry`, not the host's, so it is not yet resolvable
+///     by name from `parsePassPipeline`).
 ///
 /// Cost when no plugins are configured: one `getenv` lookup, no DLL
 /// loads.

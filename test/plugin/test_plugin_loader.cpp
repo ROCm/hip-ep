@@ -36,10 +36,11 @@
 //   7. PR 4: After the callback runs, the registry records the
 //      library search path + library name the plugin contributed
 //      via `addLibraryPath` / `addLibrary`. Both round-trip across
-//      the DLL boundary as recorded `std::string` copies, so the
-//      `StringRef`s returned by the accessors are stable for the
-//      lifetime of the process even though the plugin's source
-//      string was a stack-bound `llvm::StringRef`.
+//      the DLL boundary as recorded `std::string` copies returned
+//      directly by the accessors, even though the plugin's source
+//      string was a stack-bound `llvm::StringRef`. Owning copies
+//      (rather than `StringRef`) avoid any aliasing of the
+//      registry's internal storage.
 //   8. A clearly-bad path yields an `llvm::Error` with a useful
 //      message rather than a crash.
 //
@@ -159,9 +160,13 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
     return;
   }
 
-  // Snapshot the registry's view of `AfterConvertOnnxToHip` BEFORE we
-  // dispatch any callbacks -- if some other test has already done so
-  // during this process, we want to detect only the increment we add.
+  // Snapshot the registry's view BEFORE we manually invoke
+  // registerCallbacks. The accessors below auto-trigger
+  // `dispatchPluginRegistrationsOnce` (PR 6 made the read paths
+  // defensive), so by the time we read `beforeCount` the auto
+  // dispatch has already run -- the snapshot reflects whatever
+  // production dispatch contributed, and our manual call below
+  // adds one more increment that we then assert on.
   auto beforeCount = hip::compiler::pluginPassesForSlot(
                          hip::compiler::PipelineSlot::AfterConvertOnnxToHip)
                          .size();
@@ -171,7 +176,12 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
 
   // The registry is a process-wide handle whose methods dispatch
   // through a vtable into the per-process storage in
-  // lib/Compiler/PluginRegistry.cpp.
+  // lib/Compiler/PluginRegistry.cpp. We exercise the manual API
+  // surface (HipEpPluginLoader::registerCallbacks) to verify the
+  // lower-level control path that tools other than `hip-compiler`
+  // / `hip-mlir-opt` may take. Production code uses
+  // dispatchPluginRegistrationsOnce instead, which is idempotent
+  // and called automatically from the accessors.
   hip::compiler::HipEpPluginRegistry &registry =
       hip::compiler::getProcessPluginRegistry();
   plugins[0].registerCallbacks(registry);
@@ -248,8 +258,8 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
                "pluginLibraries grew by 1 after registerCallbacks");
 
   bool foundSampleLibName = false;
-  for (auto name : afterLibraries) {
-    if (name == llvm::StringRef("hip_ep_sample_lib")) {
+  for (const auto &name : afterLibraries) {
+    if (llvm::StringRef(name) == llvm::StringRef("hip_ep_sample_lib")) {
       foundSampleLibName = true;
       break;
     }
@@ -260,13 +270,11 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
 
   // The path is a build-tree directory we cannot hard-code in the
   // test; we verify only that *some* non-empty path was recorded
-  // and that it points to an existing directory (so a malformed
-  // contribution is caught).
+  // (a malformed contribution would surface as an empty string).
   if (!afterLibraryPaths.empty()) {
-    auto path = afterLibraryPaths.back();
+    const std::string &path = afterLibraryPaths.back();
     HIP_EP_CHECK(!path.empty(), "Last contributed library path is non-empty");
-    std::fprintf(stdout, "  contributed lib path: %.*s\n",
-                 static_cast<int>(path.size()), path.data());
+    std::fprintf(stdout, "  contributed lib path: %s\n", path.c_str());
   }
 }
 

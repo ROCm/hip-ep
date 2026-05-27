@@ -8,9 +8,12 @@ Licensed under the MIT License.
 that ships proprietary ONNX ops, custom kernels, or MLIR passes on top
 of `onnx-hipdnn-ep`.
 
-**Status:** the ABI is in proposal status; PRs 1–4 of the rollout have
-landed. Do not ship a plugin against the in-tree headers until the
-design status flips to "Stable" in
+**Status:** the ABI is in proposal status; PRs 1–5 of the rollout
+have landed plus a PR-6 cleanup pass (defensive idempotency, stderr
+warnings on bad plugin paths, host-owned bitcode buffers, slot
+bounds-checks, exception containment around `RegisterCallbacks`).
+Do not ship a plugin against the in-tree headers until the design
+status flips to "Stable" in
 [`docs/design/plugin-extension-api.md`](design/plugin-extension-api.md).
 
 This guide is the practical companion to the full design doc. It covers
@@ -192,7 +195,7 @@ needs to run.
 
 Bitcode contributions are the right path when you need to
 *override* an in-tree symbol — the host links plugin bitcode with
-`Linker::Flags::OverrideFromSrc`, so a vendor `wrap_*` symbol cleanly
+`Linker::Flags::OverrideFromSrc`, so a vendor symbol cleanly
 shadows the in-tree definition of the same name.
 
 Pattern:
@@ -215,12 +218,58 @@ that converts the bytes to a C array. See
 `test/plugin/sample_plugin/CMakeLists.txt` for a working end-to-end
 example.
 
-Constraints:
+### Symbol naming and override semantics — important caveat
 
-- The buffer must remain valid for the lifetime of `hip-compiler`.
-  The registry stores the pointer + size by reference; it does not
-  copy. Plugin DLLs achieve this naturally by putting the bytes in
-  the read-only data segment via a `static const unsigned char[]`.
+`Linker::Flags::OverrideFromSrc` is **unconditional and
+all-or-nothing**. Reading the LLVM source
+([`lib/Linker/LinkModules.cpp::shouldLinkFromSource`](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Linker/LinkModules.cpp)),
+you can see the flag is the very first check in the linkage decision:
+
+```cpp
+if (shouldOverrideFromSrc()) {
+  LinkFromSrc = true;
+  return false;
+}
+```
+
+There is **no per-symbol opt-in** today. Every name collision between
+your plugin's bitcode and the in-tree runtime resolves in favour of
+your plugin. That is exactly what you want for the symbols you are
+deliberately overriding (`wrap_*` or vendor-prefixed entry points).
+But it also silently shadows any *accidental* name collision.
+
+Practical implications:
+
+- **Prefix your symbols.** Use `vendor_wrap_alloc` rather than
+  `wrap_alloc`, `amd_internal_kernel_x` rather than `kernel_x`. This
+  keeps deliberate overrides explicit and accidents impossible.
+- **Audit your bitcode's symbol table** before shipping. `nm`,
+  `llvm-nm`, or `dumpbin /symbols` will list everything your
+  bitcode defines; cross-check against the in-tree runtime's
+  `runtime_bc_data` symbols.
+- If your design genuinely needs to override a specific named
+  in-tree symbol, document it in your plugin's README so reviewers
+  can audit it explicitly.
+
+A future PR may switch this to per-symbol opt-in
+(`addRuntimeBitcodeWithOverrides(buf, {"wrap_alloc"})`) — the
+current behaviour is a starting point, not a final decision.
+
+### Other constraints
+
+- **Buffer lifetime: don't worry about it.** As of PR 6 the host
+  copies the bytes during `addRuntimeBitcode`, so a stack buffer or
+  transient allocation is fine. (Earlier wording on this guide and
+  the public header asked you to keep the buffer alive forever; that
+  requirement is gone. The sample plugin still uses a
+  `static const unsigned char[]` because that's the simplest way to
+  embed bytes from a build-time-generated C array, not because the
+  host needs it.)
+- **Empty buffers are a no-op.** `addRuntimeBitcode(nullptr, 0)`
+  emits a `[plugin-loader] WARNING: ...` line and returns. You do
+  not need to gate the call on `if (kVendorBitcodeSize != 0)` —
+  the `if` check in the snippet above is illustrative, not
+  required.
 - The bitcode must be parseable by `llvm::parseBitcodeFile` against
   the LLVM version `hip-compiler` was built with. In practice this
   means compiling with the same clang that `hip-compiler` was built
