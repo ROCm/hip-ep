@@ -257,6 +257,15 @@ void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
+/// Pre-lowering pattern set: rewrite the Reshape(_, Shape(x)) idiom so the
+/// shape operand becomes `tensor.from_elements(dim_0, ..., dim_{n-1})` of x's
+/// dims. Sibling to GatherShapeFold (which folds Gather(Shape, idx)). Needed
+/// to unblock multi-dyn-per-group expand_shape in ReshapeConversion, which
+/// already recognises tensor.from_elements but does not look through
+/// onnx.Shape. See ReshapeShapeFold.cpp.
+void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
