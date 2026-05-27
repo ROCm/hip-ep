@@ -32,6 +32,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/gqa_kernel.hip
     hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
+    hip/elementwise_mul_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip

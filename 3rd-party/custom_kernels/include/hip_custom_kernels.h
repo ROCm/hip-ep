@@ -74,6 +74,28 @@ int hip_elementwise_sub(
     int hip_dtype);
 
 /* =========================================================================
+ * Elementwise Multiplication (no broadcasting)
+ * =========================================================================
+ *
+ * Computes output[i] = lhs[i] * rhs[i] for num_elements elements.
+ * Caller must ensure lhs/rhs/output have identical layout (no broadcasting).
+ *
+ * Provided so wrap_miopenOpTensor (Add/Mul) can fall back to a custom kernel
+ * for dtypes MIOpen does not support (currently: INT64). Float dtypes still
+ * go through MIOpen for performance + autotuning.
+ *
+ * Currently supported types: HIP_DTYPE_INT64
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_elementwise_mul(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+/* =========================================================================
  * Elementwise Where (NumPy-style multidirectional broadcasting, arbitrary rank)
  * =========================================================================
  *
