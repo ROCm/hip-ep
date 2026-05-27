@@ -16,6 +16,8 @@
 
 #include <cstring>
 #include <string>
+#include <utility>
+#include <vector>
 
 #ifdef HIPDNN_GRAPH_RUNTIME_AVAILABLE
 #include "../HipDNNGraphRuntime/hipdnn_graph_runtime.h"
@@ -54,11 +56,84 @@ static void setError(CompilerError *error, const std::string &message) {
   }
 }
 
+// Pack `driver`'s post-compile refined output shapes into `outputs->shapes_buf`
+// using the legacy packed-int64 layout. Always writes `*shapes_needed` even
+// when the buffer is too small (caller can resize and re-invoke compile, or
+// just log a warning — InferOnnxShapes output sizes are bounded by the model
+// graph signature, so the buffer size is easy to pick up front).
+static void packShapes(const CompilerDriver &driver,
+                       CompilationOutputs *outputs) {
+  if (!outputs)
+    return;
+  const auto &shapes = driver.refinedOutputShapes();
+  int64_t needed = 1; // num_outputs
+  for (const auto &dims : shapes)
+    needed += 1 + static_cast<int64_t>(dims.size());
+  outputs->shapes_needed = needed;
+  if (!outputs->shapes_buf || outputs->shapes_capacity <= 0)
+    return;
+  int64_t cap = outputs->shapes_capacity;
+  int64_t cursor = 0;
+  auto put = [&](int64_t v) {
+    if (cursor < cap)
+      outputs->shapes_buf[cursor] = v;
+    ++cursor;
+  };
+  put(static_cast<int64_t>(shapes.size()));
+  for (const auto &dims : shapes) {
+    put(static_cast<int64_t>(dims.size()));
+    for (int64_t d : dims)
+      put(d);
+  }
+}
+
+// Pack `driver`'s post-compile per-output, per-dim SSA origins into
+// `outputs->origins_buf` using the legacy packed-int64 layout (3 slots per
+// dim: arg_idx, dim_idx, mult_bits). mult_bits is the IEEE 754 binary64 bit
+// pattern of `DimOriginTriple::mult` so the entire payload is one int64 stream.
+static void packOrigins(const CompilerDriver &driver,
+                        CompilationOutputs *outputs) {
+  if (!outputs)
+    return;
+  const auto &origins = driver.refinedOutputDimOrigins();
+  int64_t needed = 1; // num_outputs
+  for (const auto &dims : origins)
+    needed += 1 + 3 * static_cast<int64_t>(dims.size());
+  outputs->origins_needed = needed;
+  if (!outputs->origins_buf || outputs->origins_capacity <= 0)
+    return;
+  int64_t cap = outputs->origins_capacity;
+  int64_t cursor = 0;
+  auto put = [&](int64_t v) {
+    if (cursor < cap)
+      outputs->origins_buf[cursor] = v;
+    ++cursor;
+  };
+  put(static_cast<int64_t>(origins.size()));
+  for (const auto &dims : origins) {
+    put(static_cast<int64_t>(dims.size()));
+    for (const auto &info : dims) {
+      put(info.arg_idx);
+      put(info.dim_idx);
+      int64_t mult_bits;
+      std::memcpy(&mult_bits, &info.mult, sizeof(double));
+      put(mult_bits);
+    }
+  }
+}
+
 extern "C" {
 
 COMPILER_API CompilerErrorCode hip_compile_with_fs(
     const void *input_mlir, size_t input_size, const char *output_path,
-    const char *options_json, CompilerError *error, void *fs) {
+    const char *options_json, CompilerError *error, void *fs,
+    CompilationOutputs *outputs) {
+  // Default-initialise the OUT fields so callers always see a defined
+  // value even on error paths (no thread-local stash to consult).
+  if (outputs) {
+    outputs->shapes_needed = 0;
+    outputs->origins_needed = 0;
+  }
   if (!input_mlir || input_size == 0 || !output_path) {
     setError(error, "Invalid input: input_mlir, input_size, and output_path "
                     "must be valid");
@@ -98,6 +173,14 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
       setError(error, error_message);
       return COMPILER_ERROR_COMPILATION_FAILED;
     }
+
+    // After a successful compile, harvest the InferOnnxShapes results
+    // (shapes + origins) the driver captured from module attributes.
+    // packShapes / packOrigins always write *_needed; only fill the
+    // caller's buffer when they passed a non-NULL pointer + positive
+    // capacity.
+    packShapes(driver, outputs);
+    packOrigins(driver, outputs);
 
 #ifdef HIPDNN_GRAPH_RUNTIME_AVAILABLE
     if (hipdnn_handle) {

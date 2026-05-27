@@ -682,43 +682,103 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // writer is opened here.
   }
 
-  // NOTE: onnx.CastLike -> onnx.Cast + dead-type-donor function-argument
-  // drop is handled by the standalone simplify-onnx pass, which must run
-  // upstream of this one (see lib/Dialect/Transforms/Pipelines.cpp). We
-  // capture metadata directly from the (already-simplified) signatures.
-  if (mlir::failed(generateModuleMetadata(module)))
-    return signalPassFailure();
-  logSubpass("metadata");
-
   for (auto funcOp :
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
-    // Pre-lowering ONNX rewrites that must run BEFORE constants are
-    // externalized:
-    //   * Gather(Shape(x), const_idx) -> tensor.from_elements(tensor.dim),
-    //     collapsing the dynseqlen runtime-shape arithmetic chain to a
-    //     single 0-D / 1-element result (narrows the host-store-into-pool
-    //     footprint the late `--hip-materialize-host-scalars` pass must
-    //     redirect out of the GPU pool).
-    //   * Inlined FastGelu primitive chain (Pow/Mul/Sum/Tanh) ->
-    //     onnx.Gelu(approximate="tanh"), restoring the MorphiZen-supported
-    //     form for ORT paths that inline the Gelu function body.
-    // Both patterns are value-based and require the literal constants to
-    // still be inline in `onnx.Constant` `value` attributes — once the
-    // constants are externalized to memref.get_global the matchers break.
-    // ExistingOps strictness is sufficient: neither pattern produces an
-    // op the other root-matches on (Gather rewrites to tensor.*; FastGelu
-    // rewrites to onnx.Gelu, never producing a fresh onnx.Tanh).
+
+    // Pre-lowering: iterate {rewrite patterns, shape inference} until the
+    // function stops changing. Capped at 4 rounds as a safety net, but the
+    // loop breaks as soon as a single round leaves the IR unchanged — both
+    // the pattern application AND the shape-inference walk must report zero
+    // mutations. Typical counts (a quiescence-confirmation round counts
+    // towards the total): LLMs ~2 rounds (round 0 mutates, round 1 is the
+    // no-op confirmation). Vision encoders ~3 rounds (round 0 refines the
+    // ViT body so the projector's AveragePool sees `<?x1152x64x64>`; round 1
+    // decomposes the AveragePool and refines the emitted Reshape +
+    // ReduceMean; round 2 confirms quiescence).
+    //
+    // Patterns in one set (ExistingOps strictness):
+    //   * FastGeluFusion — value-based, idempotent across rounds
+    //   * ProjectorOpsRewrites — emits new ops that the next round's
+    //     pattern application visits (they're "existing" by then)
+    //
+    // InferOnnxShapes runs AFTER each pattern application so newly-emitted
+    // ops get their types propagated through the SSA flow before the next
+    // round of patterns inspects them.
+    //
+    // Change tracking: a tiny RewriterBase::Listener flips a flag on any
+    // notifyOperation{Inserted,Modified,Replaced,Erased}; InferOnnxShapes
+    // takes a bool* out-param that it sets when any setType / function-
+    // signature edit fires. Both flags must be false at end of round to
+    // break early.
+    struct ChangeFlagListener final : public mlir::RewriterBase::Listener {
+      bool changed = false;
+      void notifyOperationInserted(mlir::Operation *,
+                                   mlir::OpBuilder::InsertPoint) override {
+        changed = true;
+      }
+      void notifyOperationModified(mlir::Operation *) override {
+        changed = true;
+      }
+      void notifyOperationReplaced(mlir::Operation *,
+                                   mlir::ValueRange) override {
+        changed = true;
+      }
+      void notifyOperationErased(mlir::Operation *) override { changed = true; }
+    };
+    constexpr int kMaxRounds = 4;
+    bool quiesced = false;
+    for (int round = 0; round < kMaxRounds; ++round) {
+      mlir::RewritePatternSet patterns(ctx);
+      populateFastGeluFusionPatterns(patterns, ctx);
+      populateProjectorOpsRewritePatterns(patterns, ctx);
+      ChangeFlagListener listener;
+      mlir::GreedyRewriteConfig cfg;
+      cfg.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+      cfg.setListener(&listener);
+      if (mlir::failed(
+              mlir::applyPatternsGreedily(funcOp, std::move(patterns), cfg)))
+        return signalPassFailure();
+      bool inferenceChanged = false;
+      if (mlir::failed(inferOnnxShapes(funcOp, &inferenceChanged)))
+        return signalPassFailure();
+      if (!listener.changed && !inferenceChanged) {
+        quiesced = true;
+        break;
+      }
+    }
+    // If we exited the loop without reaching quiescence the function
+    // may still have refinable types or applicable rewrites left on
+    // the table — a future pattern set could rely on something the
+    // safety cap silently dropped. Surface this so the next maintainer
+    // can either raise the cap or look at which pattern is bouncing
+    // (FastGeluFusion / ProjectorOpsRewrites / InferOnnxShapes are the
+    // only producers here).
+    if (!quiesced)
+      funcOp.emitWarning()
+          << "convert-onnx-to-hip: pre-lowering round loop hit the "
+             "kMaxRounds="
+          << kMaxRounds
+          << " safety cap without reaching quiescence; raise the cap or "
+             "investigate which pattern keeps firing";
+
+    // GatherShapeFold runs AFTER shape inference: it rewrites
+    // Gather(Shape(x), const_idx) into tensor.from_elements(tensor.dim).
+    // That output form is intentionally outside the onnx.* op set so
+    // InferOnnxShapes won't trace through it — running fold first would
+    // mean the resolver couldn't see the Gather/Shape chain. Order is
+    // also intentional vs the gfx1151 dynseqlen regression: fold runs
+    // late enough that the inferred types narrow more shape arithmetic
+    // to compile-time constants (less host-store-into-pool surface for
+    // --hip-materialize-host-scalars to redirect).
     {
-      mlir::RewritePatternSet preLoweringPatterns(ctx);
-      populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
-      populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
-      mlir::GreedyRewriteConfig preLoweringConfig;
-      preLoweringConfig.setStrictness(
-          mlir::GreedyRewriteStrictness::ExistingOps);
+      mlir::RewritePatternSet foldPatterns(ctx);
+      populateGatherShapeFoldPatterns(foldPatterns, ctx);
+      mlir::GreedyRewriteConfig cfg;
+      cfg.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
       if (mlir::failed(mlir::applyPatternsGreedily(
-              funcOp, std::move(preLoweringPatterns), preLoweringConfig)))
+              funcOp, std::move(foldPatterns), cfg)))
         return signalPassFailure();
     }
     // Run ConstantOfShape folding BEFORE `lowerOnnxConstants` so it can
@@ -745,6 +805,22 @@ void ConvertOnnxToHipPass::runOnOperation() {
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
       return signalPassFailure();
   }
+
+  // Module-level metadata. Runs AFTER per-function shape inference + body
+  // conversion so the captured function signature is the REFINED type
+  // (e.g. `tensor<?x256x2560>` instead of the original ONNX
+  // `tensor<?x?x2560>` for Gemma-3 vision). The compiled DLL writes
+  // buffers of the inferred size; pass_main.cpp's `build_metadata_json`
+  // separately reads the ORT-side graph for DimSource resolution, so
+  // there is no MLIR ↔ EP-boundary drift.
+  //
+  // NOTE: onnx.CastLike -> onnx.Cast + dead-type-donor function-argument
+  // drop is handled by the standalone simplify-onnx pass, which must run
+  // upstream of this one (see lib/Dialect/Transforms/Pipelines.cpp). We
+  // capture metadata from the (already-simplified + refined) signatures.
+  if (mlir::failed(generateModuleMetadata(module)))
+    return signalPassFailure();
+  logSubpass("metadata");
 
   if (timing && extState) {
     std::string detail;
@@ -785,6 +861,30 @@ void ConvertOnnxToHipPass::runOnOperation() {
   });
   for (auto *op : toErase)
     op->erase();
+
+  // Any `onnx.*` op that survived to this point (after the DCE walk that
+  // erased use-empty leftovers) is a structural failure: either no
+  // converter matched (convertComputeOps did not handle this op kind) or
+  // a pre-lowering rewrite that was supposed to fire didn't. The next
+  // pipeline stage (OneShotBufferize) would then trip with the terse
+  // `error: op was not bufferized` — silent CPU fallback at the EP
+  // level because accuracy tests compare CPU-vs-CPU and pass cosine=1.0.
+  // Fail loudly here instead so the next bring-up sees exactly which
+  // op needs a converter and where to add it.
+  bool survivedAny = false;
+  module.walk([&](mlir::Operation *op) {
+    llvm::StringRef name = op->getName().getStringRef();
+    if (name.starts_with("onnx.")) {
+      op->emitError() << name
+                      << " survived convert-onnx-to-hip: no converter or "
+                         "rewrite matched. Add a conversion in "
+                         "lib/Conversion/OnnxToHip/ or a pre-lowering "
+                         "rewrite in ProjectorOpsRewrites / FastGeluFusion.";
+      survivedAny = true;
+    }
+  });
+  if (survivedAny)
+    return signalPassFailure();
 
   // ONNX-MLIR attaches per-result attributes (e.g. "onnx_node_name") to
   // func.func results. The downstream buffer-results-to-out-params pass
