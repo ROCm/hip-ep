@@ -106,45 +106,77 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value vQuantType = createI64Const(quantTypeToEnum(op.getVQuantType()));
 
     // Extract shape info from query memref: [batch, seq_q, num_heads *
-    // head_dim]
-    // NOTE: Currently only supports static shapes. Dynamic shape support would
-    // require extracting dimensions at runtime using MemRefDescriptor::size()
-    // and computing headDim dynamically.
+    // head_dim]. Uses getMemRefDimSize() to handle both static and dynamic
+    // dimensions — static dims become LLVM constants, dynamic dims are
+    // extracted from the memref descriptor at runtime.
     auto queryType = cast<MemRefType>(op.getQuery().getType());
-    auto queryShape = queryType.getShape();
-    int64_t batchSize = queryShape[0];
-    int64_t seqLenQ = queryShape[1];
-    int64_t queryHidden = queryShape[2];
+    Value batchSizeVal =
+        getMemRefDimSize(queryType, 0, adaptor.getQuery(), rewriter, loc);
+    Value seqLenQVal =
+        getMemRefDimSize(queryType, 1, adaptor.getQuery(), rewriter, loc);
+    Value queryHiddenVal =
+        getMemRefDimSize(queryType, 2, adaptor.getQuery(), rewriter, loc);
+
     // Packed QKV: query shape is [B, S, (H + 2*G)*d] instead of [B, S, H*d].
     // Derive head_dim accordingly: d = hidden / (H + 2*G) vs hidden / H.
     bool packedQKV = !op.getKey();
-    int64_t headDim =
-        packedQKV ? queryHidden / (op.getNumHeads() + 2 * op.getKvNumHeads())
-                  : queryHidden / op.getNumHeads();
+    int64_t headDimDivisor = packedQKV
+                                 ? (op.getNumHeads() + 2 * op.getKvNumHeads())
+                                 : op.getNumHeads();
+    // Compile-time sanity: when query_hidden is static, it must be evenly
+    // divisible by the divisor. A mismatch means num_heads/kv_num_heads is
+    // wrong for this model — fail loudly here rather than silently producing
+    // a truncated head_dim at runtime via integer SDiv.
+    //
+    // When query_hidden is DYNAMIC, divisibility cannot be checked here.
+    // The lowering proceeds with SDiv as before, but emits a one-time
+    // build-time advisory so the warning shows up in the compile log;
+    // a runtime mismatch (model with wrong num_heads/kv_num_heads) would
+    // silently truncate head_dim via integer division — there is no
+    // runtime helper to abort cleanly, and the locked design choice for
+    // this PR is "warn and continue" rather than "assert and abort".
+    if (!queryType.isDynamicDim(2)) {
+      int64_t queryHidden = queryType.getDimSize(2);
+      if (headDimDivisor <= 0 || queryHidden % headDimDivisor != 0)
+        return op.emitOpError()
+               << "query_hidden (" << queryHidden << ") not divisible by "
+               << (packedQKV ? "(H + 2*G)" : "H") << " = " << headDimDivisor
+               << " (num_heads=" << op.getNumHeads()
+               << ", kv_num_heads=" << op.getKvNumHeads()
+               << (packedQKV ? ", packed QKV)" : ")");
+    } else {
+      op.emitWarning()
+          << "hip.gqa: dynamic query_hidden — divisibility by "
+          << (packedQKV ? "(H + 2*G)" : "H") << " = " << headDimDivisor
+          << " cannot be verified at compile time; runtime SDiv will "
+          << "silently truncate on a model with mismatched num_heads "
+          << "(num_heads=" << op.getNumHeads()
+          << ", kv_num_heads=" << op.getKvNumHeads()
+          << (packedQKV ? ", packed QKV)" : ")");
+    }
+    Value headDimVal = LLVM::SDivOp::create(rewriter, loc, queryHiddenVal,
+                                            createI64Const(headDimDivisor));
     unsigned elementSizeBytes =
         queryType.getElementType().getIntOrFloatBitWidth() / 8;
 
     // Extract seq_len_kv from present_key shape.
     // ONNX GQA uses BNSD layout: [batch, kv_num_heads, total_seq, head_dim]
     auto presentKeyType = cast<MemRefType>(op.getPresentKey().getType());
-    auto pkShape = presentKeyType.getShape();
-    int64_t seqLenKV = (pkShape.size() == 4) ? pkShape[2] : pkShape[1];
+    unsigned pkSeqDim = (presentKeyType.getRank() == 4) ? 2 : 1;
+    Value seqLenKVVal = getMemRefDimSize(
+        presentKeyType, pkSeqDim, adaptor.getPresentKey(), rewriter, loc);
 
     // past_buf_seq: buffer dimension of past_key (may be max_length for
     // pre-allocated caches, which is larger than actual valid past tokens).
     // Needed so gqa_forward can distinguish buffer stride from valid length.
-    int64_t pastBufSeq = 0;
+    Value pastBufSeqVal = createI64Const(0);
     if (op.getPastKey()) {
       auto pastKeyType = cast<MemRefType>(op.getPastKey().getType());
-      auto pastShape = pastKeyType.getShape();
-      pastBufSeq = (pastShape.size() == 4) ? pastShape[2] : pastShape[1];
+      unsigned pastSeqDim = (pastKeyType.getRank() == 4) ? 2 : 1;
+      pastBufSeqVal = getMemRefDimSize(pastKeyType, pastSeqDim,
+                                       adaptor.getPastKey(), rewriter, loc);
     }
 
-    Value batchSizeVal = createI64Const(batchSize);
-    Value seqLenQVal = createI64Const(seqLenQ);
-    Value seqLenKVVal = createI64Const(seqLenKV);
-    Value pastBufSeqVal = createI64Const(pastBufSeq);
-    Value headDimVal = createI64Const(headDim);
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     // Function signature matches wrap_group_query_attention() in gqa.cpp
