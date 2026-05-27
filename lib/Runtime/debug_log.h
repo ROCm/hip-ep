@@ -27,15 +27,17 @@ inline bool check_env(const char *name) {
 } // namespace detail
 #endif
 
-inline bool hipdnn_ep_debug_enabled() {
-  static const bool enabled = [] {
+inline bool hipdnn_ep_env_enabled(const char *name) {
 #ifdef _WIN32
-    return detail::check_env("HIPDNN_EP_DEBUG");
+  return detail::check_env(name);
 #else
-    const char *v = std::getenv("HIPDNN_EP_DEBUG");
-    return v && v[0] >= '1';
+  const char *v = std::getenv(name);
+  return v && v[0] >= '1';
 #endif
-  }();
+}
+
+inline bool hipdnn_ep_debug_enabled() {
+  static const bool enabled = hipdnn_ep_env_enabled("HIPDNN_EP_DEBUG");
   return enabled;
 }
 
@@ -46,14 +48,7 @@ inline bool hipdnn_ep_debug_enabled() {
 // only useful as a diagnostic to find ops whose real cost is being masked by
 // stream-queue depth in normal profiling.
 inline bool hipdnn_ep_perf_isolate_enabled() {
-  static const bool enabled = [] {
-#ifdef _WIN32
-    return detail::check_env("HIPDNN_EP_PERF_ISOLATE");
-#else
-    const char *v = std::getenv("HIPDNN_EP_PERF_ISOLATE");
-    return v && v[0] >= '1';
-#endif
-  }();
+  static const bool enabled = hipdnn_ep_env_enabled("HIPDNN_EP_PERF_ISOLATE");
   return enabled;
 }
 
@@ -65,17 +60,9 @@ inline bool hipdnn_ep_perf_enabled() {
   // [Runtime DEBUG] traces should not pay that cost.
   // ISOLATE implies PERF.
   static const bool enabled = [] {
-#ifdef _WIN32
-    if (detail::check_env("HIPDNN_EP_PERF"))
+    if (hipdnn_ep_env_enabled("HIPDNN_EP_PERF"))
       return true;
-    return detail::check_env("HIPDNN_EP_PERF_ISOLATE");
-#else
-    const char *v = std::getenv("HIPDNN_EP_PERF");
-    if (v && v[0] >= '1')
-      return true;
-    const char *v2 = std::getenv("HIPDNN_EP_PERF_ISOLATE");
-    return v2 && v2[0] >= '1';
-#endif
+    return hipdnn_ep_env_enabled("HIPDNN_EP_PERF_ISOLATE");
   }();
   return enabled;
 }
