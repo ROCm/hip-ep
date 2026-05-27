@@ -70,6 +70,23 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     not trigger extra hipMalloc calls per inference).
   pm.addNestedPass<func::FuncOp>(hip::createPromoteStridedHipOperandsPass());
 
+  // 6b. Redirect tiny host-fed memref.alloc ops (bufferized
+  //     `tensor.from_elements` for shape arithmetic — rank-0 / 1xi64) away
+  //     from the GPU pool to a runtime-owned host-mapped scratch buffer.
+  //
+  //     Placement is load-bearing: MUST run AFTER PromoteStridedHipOperands
+  //     (so any contiguous-temporary memref.alloc that pass introduces is
+  //     also visible to the candidate scan) and BEFORE PoolAllocs (so
+  //     candidates are removed from its input set).  If PoolAllocs runs
+  //     first, it absorbs the alloc into a memref.view over GPU pool memory
+  //     and the subsequent host store SEGVs on targets where the GPU pool is
+  //     real device memory (other targets silently worked because hipMalloc
+  //     returned UMA-mapped host memory there, masking the bug).  See
+  //     MaterializeHostScalars.cpp file header for the full pinned-mapped
+  //     story; the static-shape lockdown test under
+  //     test/lit/Pipelines/ asserts this ordering does not regress.
+  pm.addNestedPass<func::FuncOp>(hip::createMaterializeHostScalarsPass());
+
   pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
 
   // 7. Lower remaining bufferization ops to memref

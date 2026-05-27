@@ -215,6 +215,45 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def MaterializeHostScalarsPass
+    : Pass<"hip-materialize-host-scalars", "mlir::func::FuncOp"> {
+  let summary = "Redirect tiny host-fed memref.alloc ops to a host-mapped "
+                "scratch buffer";
+  let description = [{
+    Walks `memref.alloc` ops in the function and redirects ones that look
+    like host-fed scalar staging buffers — small static-shape, integer-or-
+    index memrefs (up to 16 elements) that have at least one host I/O user
+    (memref.store / load) — away from the GPU pool.  They are replaced with
+    `memref.view` ops over a single per-function
+    `hip.get_host_scratch(%ctx, %total_size)` buffer
+    (hipHostMalloc(hipHostMallocMapped), host-writable AND GPU-readable at
+    the same VA on UMA targets).
+
+    Hip-dialect users are explicitly accepted (the implementation classifies
+    `hip.*` ops as legal users alongside memref.store/load/dim/dealloc).
+    The canonical
+    `tensor.from_elements -> reduce_sum + sub + cast -> seqlens_k` GQA
+    pattern produces an alloc with a host store followed by `hip.cast`
+    reading it; rejecting it left the host store crashing inside the GPU
+    pool, so the pass intentionally allows it.
+
+    Why: on some targets the GPU pool is real device memory; the bufferized
+    `tensor.from_elements` lowering emits `memref.alloc + memref.store`
+    which, once absorbed by `hip-pool-allocs`, becomes a host store into
+    device memory and SEGVs.  (Other targets silently worked because hipMalloc
+    returned UMA-mapped host memory there, masking the bug.)  This pass runs
+    BEFORE `hip-pool-allocs` so candidates never enter the GPU pool.
+
+    Pipeline placement is load-bearing — see Pipelines.cpp for the exact
+    ordering and the static-shape lockdown LIT under `test/lit/Pipeline/`.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   let summary = "Lower memref.alloc to hip.alloc and insert hip.free";
   let description = [{

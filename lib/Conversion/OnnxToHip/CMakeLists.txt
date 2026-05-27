@@ -22,12 +22,15 @@ add_library(OnnxToHip STATIC
   GqaConversion.cpp
   MultiHeadAttentionConversion.cpp
   GatherConversion.cpp
+  GatherShapeFold.cpp
+  ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
   WhereConversion.cpp
   LinearAttentionConversion.cpp
   RangeConversion.cpp
+  FastGeluFusion.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp

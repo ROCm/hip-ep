@@ -42,6 +42,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <functional>
+
 #define DEBUG_TYPE "hip-pool-allocs"
 
 STATISTIC(NumAllocsPooled, "Number of allocations pooled into byte buffer");
@@ -302,6 +304,160 @@ struct PoolAllocsPass : public impl::PoolAllocsPassBase<PoolAllocsPass> {
   void runOnOperation() override;
 };
 
+/// Recursively resolve `dim(src, i)` through any chain of
+/// `memref.collapse_shape` / `memref.expand_shape`, emitting pure arithmetic
+/// (`arith.muli` for collapse, `arith.divui` for the dynamic dim of an expand
+/// group) over `memref.dim` of the chain's root memref. Both intermediate ops
+/// are pure descriptor edits, so this rewrite preserves semantics; it pushes
+/// every dim query down to the chain root, where the source is hoistable
+/// (function arg, alloc, or memref.view).
+///
+/// IR example (collapse case — dim of a collapse_shape becomes a product
+/// of dims of the source memref):
+///
+///   Before:
+///     %c = memref.collapse_shape %src [[0], [1, 2]]
+///             : memref<?x?x4xf16> into memref<?x?xf16>
+///     %d = memref.dim %c, %c1 : memref<?x?xf16>     // i = 1
+///
+///   After (one step of the recursion, with K = 4 absorbed from the source):
+///     %d_src = memref.dim %src, %c1 : memref<?x?x4xf16>
+///     %k     = arith.constant 4 : index
+///     %d     = arith.muli %d_src, %k : index
+///
+/// IR example (expand case — dynamic output dim becomes div of the input
+/// dim by the static partner factor):
+///
+///   Before:
+///     %e = memref.expand_shape %src [[0, 1]] output_shape [%n, %k]
+///             : memref<?xf16> into memref<?x4xf16>     // K = 4
+///     %d = memref.dim %e, %c0 : memref<?x4xf16>        // i = 0 (dynamic)
+///
+///   After:
+///     %d_src = memref.dim %src, %c0 : memref<?xf16>
+///     %k     = arith.constant 4 : index
+///     %d     = arith.divui %d_src, %k : index
+///
+/// Bounded recursion: each step strips one reshape layer, so depth equals the
+/// reshape-chain depth. In practice ≤ 2 (typical case: a same-rank dynamic
+/// Reshape pair around a per-head norm op).
+static Value resolveDimAtSource(OpBuilder &b, Location loc, Value src,
+                                int64_t i) {
+  Operation *def = src.getDefiningOp();
+  // memref.dim(memref.alloc(d0, d1, ...), i) -> i-th dyn operand of alloc.
+  // The dyn operand is the actual SSA value the alloc was sized by — its
+  // defining op (typically `memref.dim` of a function arg or another alloc,
+  // possibly via arith) is hoistable through the rest of the chain. Crucially
+  // we DO NOT emit a fresh `memref.dim %alloc, i` here, because after Phase 5
+  // the alloc gets replaced by a `memref.view` placed at the pool prelude;
+  // hoisted dim ops would then reference a view that lives later in the
+  // block (dominance error). Returning the dyn operand SSA value directly
+  // sidesteps the entire problem.
+  if (auto alloc = dyn_cast_or_null<memref::AllocOp>(def)) {
+    auto srcType = cast<MemRefType>(src.getType());
+    if (i < 0 || i >= srcType.getRank())
+      return Value();
+    if (!srcType.isDynamicDim(i))
+      return arith::ConstantIndexOp::create(b, loc, srcType.getDimSize(i));
+    int64_t dynIdx = 0;
+    for (int64_t j = 0; j < i; ++j)
+      if (srcType.isDynamicDim(j))
+        ++dynIdx;
+    auto dynSizes = alloc.getDynamicSizes();
+    if (dynIdx < static_cast<int64_t>(dynSizes.size()))
+      return dynSizes[dynIdx];
+  }
+  if (auto collapse = dyn_cast_or_null<memref::CollapseShapeOp>(def)) {
+    auto reassoc = collapse.getReassociationIndices();
+    if (i >= 0 && i < static_cast<int64_t>(reassoc.size())) {
+      Value collSrc = collapse.getSrc();
+      Value acc;
+      for (int64_t srcDim : reassoc[i]) {
+        Value d = resolveDimAtSource(b, loc, collSrc, srcDim);
+        acc = acc ? b.createOrFold<arith::MulIOp>(loc, acc, d) : d;
+      }
+      if (acc)
+        return acc;
+    }
+  } else if (auto expand = dyn_cast_or_null<memref::ExpandShapeOp>(def)) {
+    auto resultType = cast<MemRefType>(expand.getResult().getType());
+    if (i >= 0 && i < resultType.getRank() && !resultType.isDynamicDim(i))
+      return arith::ConstantIndexOp::create(b, loc, resultType.getDimSize(i));
+    auto reassoc = expand.getReassociationIndices();
+    int64_t srcIdx = -1;
+    for (int64_t j = 0; j < static_cast<int64_t>(reassoc.size()) && srcIdx < 0;
+         ++j)
+      if (llvm::is_contained(reassoc[j], i))
+        srcIdx = j;
+    if (srcIdx >= 0) {
+      const auto &group = reassoc[srcIdx];
+      int64_t staticProduct = 1;
+      bool ok = true;
+      for (int64_t outIdx : group) {
+        if (outIdx == i)
+          continue;
+        if (resultType.isDynamicDim(outIdx)) {
+          ok = false;
+          break;
+        }
+        staticProduct *= resultType.getDimSize(outIdx);
+      }
+      if (ok) {
+        Value srcDim = resolveDimAtSource(b, loc, expand.getSrc(), srcIdx);
+        if (staticProduct == 1)
+          return srcDim;
+        Value div = arith::ConstantIndexOp::create(b, loc, staticProduct);
+        return b.createOrFold<arith::DivUIOp>(loc, srcDim, div);
+      }
+    }
+  }
+  // Base case: emit memref.dim on src directly. The source is the chain root
+  // (alloc / function arg / view / non-reshape op) — `memref.dim` on it is
+  // hoistable.
+  auto srcType = cast<MemRefType>(src.getType());
+  if (!srcType.isDynamicDim(i))
+    return arith::ConstantIndexOp::create(b, loc, srcType.getDimSize(i));
+  Value idxVal = arith::ConstantIndexOp::create(b, loc, i);
+  return memref::DimOp::create(b, loc, src, idxVal);
+}
+
+/// Fold `memref.dim(memref.collapse_shape(src), i)` and
+/// `memref.dim(memref.expand_shape(src), i)` into pure arithmetic on
+/// `memref.dim(root, ...)`. Required for PoolAllocs's hoisting to succeed
+/// when dim queries originate from reshape chains produced by the same-rank
+/// dynamic Reshape decomposition (expand_shape + collapse_shape).
+///
+/// MLIR's stock canonicalizer leaves these alone for dynamic dims; without
+/// this fold the surviving `memref.dim %some_reshape` would be hoisted (it's
+/// in `isHoistable`) but its operand `%some_reshape` is not hoistable —
+/// yielding an SSA dominance error in Phase 4.
+///
+/// The replacement uses `arith.muli` (collapse) and `arith.divui` (expand
+/// with absorbed static factor); both are in `isHoistable`.
+static void foldDimOfReshape(func::FuncOp funcOp) {
+  SmallVector<memref::DimOp> worklist;
+  funcOp.walk([&](memref::DimOp op) {
+    Operation *def = op.getSource().getDefiningOp();
+    if (def &&
+        (isa<memref::AllocOp>(def) || isa<memref::CollapseShapeOp>(def) ||
+         isa<memref::ExpandShapeOp>(def)))
+      worklist.push_back(op);
+  });
+
+  for (memref::DimOp dimOp : worklist) {
+    auto idxAttr = getConstantIntValue(dimOp.getIndex());
+    if (!idxAttr)
+      continue; // dynamic index — can't fold structurally
+    OpBuilder b(dimOp);
+    Value replacement =
+        resolveDimAtSource(b, dimOp.getLoc(), dimOp.getSource(), *idxAttr);
+    if (replacement && replacement != dimOp.getResult()) {
+      dimOp.replaceAllUsesWith(replacement);
+      dimOp.erase();
+    }
+  }
+}
+
 void PoolAllocsPass::runOnOperation() {
   func::FuncOp funcOp = getOperation();
 
@@ -314,6 +470,13 @@ void PoolAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
+
+  // Pre-pass: simplify `memref.dim` of `memref.collapse_shape`/
+  // `memref.expand_shape` so the hoist worklist below can ascend through to
+  // the original source memref. Without this, a surviving dim-of-collapse
+  // breaks Phase 4's SSA dominance for any same-rank dynamic Reshape
+  // decomposed into expand_shape + collapse_shape.
+  foldDimOfReshape(funcOp);
   // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
   // instead of sequential op indices.
   if (!funcOp.getBody().hasOneBlock()) {
@@ -397,10 +560,116 @@ void PoolAllocsPass::runOnOperation() {
   Location loc = funcOp.getLoc();
   OpBuilder builder(funcOp.getContext());
 
+  // Pool setup must be inserted before the first alloc. Dynamic allocs use
+  // SSA values for their sizes (e.g. memref.dim extracting a dimension from
+  // a function argument). These ops may appear between allocs in the block.
+  // Move them before the first alloc so they dominate the pool size
+  // computation. Safe because they only depend on function arguments.
   Operation *firstPooledAlloc = allInfos.front().allocOp.getOperation();
   for (auto &info : allInfos)
     if (info.allocOp->isBeforeInBlock(firstPooledAlloc))
       firstPooledAlloc = info.allocOp.getOperation();
+
+  // Recursively hoist the def-chain that computes each dynamic size in
+  // front of the first pooled alloc.  A single-level hoist is not enough:
+  // dynamic sizes are typically computed as `arith.muli %dim, %const` where
+  // %dim itself comes from `memref.dim %arg, %i` and %const from
+  // `arith.constant`.  Moving only the muli but leaving its operands behind
+  // breaks SSA dominance for the pool-size arithmetic emitted in Phase 5.
+  //
+  // Whitelist intentionally narrow: only side-effect-free pure ops whose
+  // operands are themselves trivial (block args, constants, or other
+  // whitelisted ops).  This guarantees the move never reorders observable
+  // behavior — the ops are restricted to shape/index arithmetic, never any
+  // op that might read or mutate buffers.
+  auto isHoistable = [](Operation *op) {
+    return isa<memref::DimOp, arith::ConstantOp, arith::ConstantIndexOp,
+               arith::MulIOp, arith::AddIOp, arith::SubIOp, arith::IndexCastOp,
+               // Division: needed when a Reshape is decomposed into
+               // expand_shape(input, [..., dyn/K, K, ...]) + collapse_shape,
+               // which emits `arith.divui %dim, K` for the dynamic absorber.
+               // Same purity guarantee as MulIOp/AddIOp — pure index/integer
+               // arithmetic, no side effects, safe to hoist.
+               arith::DivUIOp, arith::DivSIOp>(op);
+  };
+  llvm::SetVector<Operation *> hoistWorklist;
+  for (auto &info : dynamics)
+    for (Value dynDim : info.allocOp.getDynamicSizes())
+      if (auto *defOp = dynDim.getDefiningOp())
+        hoistWorklist.insert(defOp);
+
+  // Worklist grows as we walk operands of ops we visit; SetVector preserves
+  // the discovery order while preventing duplicate visits.  We process
+  // index-by-index instead of pop_back so additions during the loop are
+  // visited before we exit.
+  for (size_t idx = 0; idx < hoistWorklist.size(); ++idx) {
+    Operation *op = hoistWorklist[idx];
+    if (!isHoistable(op))
+      continue; // Not hoistable; leave it alone — Phase 5's createOrFold
+                // will see the original SSA value at its current position.
+                // If that position post-dominates firstPooledAlloc the
+                // verifier will catch the SSA error so we fail loudly.
+    for (Value operand : op->getOperands())
+      if (auto *defOp = operand.getDefiningOp())
+        hoistWorklist.insert(defOp);
+  }
+
+  // Move ops so their final layout has each operand defined before its uses.
+  // Each `moveBefore(firstPooledAlloc)` places the op immediately before
+  // firstPooledAlloc, displacing any previously-moved ops up by one slot. So
+  // the final top-to-bottom order in the prelude is the REVERSE of the move
+  // order. To make operands dominate uses, we therefore want move order:
+  //   uses (consumers) first, operands (producers) last.
+  //
+  // The previous implementation used `hoistWorklist` directly via reverse
+  // iteration, which works for linear chains (BFS produces consumer-first,
+  // reverse gives operand-first move order, final layout = operand-then-
+  // consumer). It breaks for shared producers reached through multiple
+  // consumers: BFS may add the consumer before the producer, but the
+  // producer can also be added directly by a different alloc's worklist
+  // entry, ending up later in `hoistWorklist`. Reverse iteration then moves
+  // the producer EARLIER than the consumer that uses it, leaving the final
+  // layout with the consumer above the producer — SSA dominance error.
+  //
+  // Fix: depth-first post-order topological sort over the hoistable subset,
+  // then iterate the sort in reverse for the move order. DFS post-order
+  // guarantees operands precede uses; reversing gives the consumer-first
+  // move sequence we need.
+  llvm::DenseSet<Operation *> hoistSet;
+  for (Operation *op : hoistWorklist)
+    if (isHoistable(op))
+      hoistSet.insert(op);
+
+  SmallVector<Operation *> sorted;
+  llvm::DenseSet<Operation *> visited;
+  std::function<void(Operation *)> visit = [&](Operation *op) {
+    if (!op || !hoistSet.count(op))
+      return;
+    if (!visited.insert(op).second)
+      return;
+    for (Value operand : op->getOperands())
+      visit(operand.getDefiningOp());
+    sorted.push_back(op);
+  };
+  for (Operation *op : hoistWorklist)
+    visit(op);
+
+  // `sorted` is DFS post-order: operands precede uses. Iterate FORWARD so
+  // operands are moved first; each subsequent `moveBefore(firstPooledAlloc)`
+  // places the next op at -1 and displaces all earlier moves up by one.
+  // Final layout: first-moved (operands) at the top, last-moved (uses) at
+  // the bottom of the prelude — exactly the dominance order we need.
+  for (auto it = sorted.begin(); it != sorted.end(); ++it) {
+    Operation *defOp = *it;
+    if (defOp->getBlock() != firstPooledAlloc->getBlock())
+      continue; // Defined in a different region/block — already dominates.
+    if (defOp == firstPooledAlloc)
+      continue;
+    if (defOp->isBeforeInBlock(firstPooledAlloc))
+      continue; // Already in the right place.
+    defOp->moveBefore(firstPooledAlloc);
+  }
+
   builder.setInsertionPoint(firstPooledAlloc);
 
   auto dynBuckets = packDynamicAllocs(dynamics, builder, loc, align);
