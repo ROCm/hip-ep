@@ -751,6 +751,15 @@ void ConvertOnnxToHipPass::runOnOperation() {
     {
       mlir::RewritePatternSet preLoweringPatterns(ctx);
       populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
+      // Sibling fold for `Reshape(_, Shape(x))` -> `Reshape(_,
+      // tensor.from_elements(tensor.dim x, *))`.  Unblocks
+      // ReshapeConversion's multi-dyn-per-group expand_shape path, which
+      // recognises tensor.from_elements as a shape source but does not
+      // peek through onnx.Shape.  See ReshapeShapeFold.cpp for the
+      // root-cause analysis (Qwen3.5 mrope `Reshape(Range, Shape(input))`
+      // producing `[seq², seq²]` instead of `[batch, seq]` on every
+      // asymmetric shape).
+      populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
       populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
       mlir::GreedyRewriteConfig preLoweringConfig;
       preLoweringConfig.setStrictness(
