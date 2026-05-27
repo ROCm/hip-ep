@@ -11,19 +11,28 @@
 #include "llvm/ADT/StringRef.h"
 
 #include <cstddef>
+#include <string>
 
 // Public registry passed to a plugin's RegisterCallbacks.
 //
-// As of PR 2, registerPass and requestPipelineSlot are live: a
-// plugin's callback hands its passes to MLIR's global pass registry
-// and records (slot, passName) pairs that lib/Dialect/Transforms/
-// Pipelines.cpp consults at each pipeline slot. The remaining
-// methods are still stubs, filled in by subsequent PRs:
+// As of PR 5, all five plugin contributions are live and wired:
 //
-//   PR 3: addRuntimeBitcode(...)
-//         (wired into lib/Target/LLVM/LLVMBackend.cpp)
-//   PR 4: addLibraryPath(...), addLibrary(...)
-//         (wired into lib/Compiler/CompilerDriver.cpp)
+//   * registerPass<T>()        -- adds T to MLIR's pass registry
+//                                 (CAVEAT: cross-DLL behaviour is
+//                                 not yet correct, see Open Question
+//                                 6 in the design doc; tracked as
+//                                 a follow-up to this rollout).
+//   * requestPipelineSlot(...) -- consulted by
+//                                 lib/Dialect/Transforms/Pipelines.cpp
+//                                 at each PipelineSlot enum value.
+//   * addRuntimeBitcode(...)   -- linked into the model module by
+//                                 lib/Target/LLVM/LLVMBackend.cpp
+//                                 with `OverrideFromSrc` semantics
+//                                 (see CAVEAT on `addRuntimeBitcode`
+//                                 below).
+//   * addLibraryPath(...)      -- appended to the lld-link
+//   * addLibrary(...)             argument vector by
+//                                 lib/Compiler/CompilerDriver.cpp.
 //
 // This shape -- registry-passed-by-reference rather than five
 // separate callbacks in the C struct -- matches LLVM
@@ -107,6 +116,15 @@ public:
   ///   - Each function takes the `self` opaque pointer first, the
   ///     same convention COM and the V8 embedder API use.
   ///   - **Append-only** across `HIP_EP_PLUGIN_API_VERSION` bumps.
+  ///
+  /// IMPORTANT for maintainers: any change to this struct (adding a
+  /// new function pointer, changing a signature) MUST bump
+  /// `HIP_EP_PLUGIN_API_VERSION` in PluginAPI.h. The static_assert
+  /// below is a tripwire: if you grow the layout without updating
+  /// the size sentinel, compilation fails and you remember to bump
+  /// the version. This mirrors how LLVM upstream protects
+  /// `PassPluginLibraryInfo` -- they bump their version on every
+  /// layout change.
   struct VTable {
     void (*requestPipelineSlot)(void *self, int slot, const char *name,
                                 std::size_t nameLen);
@@ -115,6 +133,14 @@ public:
     void (*addLibraryPath)(void *self, const char *path, std::size_t pathLen);
     void (*addLibrary)(void *self, const char *name, std::size_t nameLen);
   };
+
+  /// Tripwire: the V1 vtable layout has exactly four function pointers.
+  /// Any change to `VTable` makes this assertion fire; the compiler
+  /// error is your reminder to bump `HIP_EP_PLUGIN_API_VERSION` in
+  /// PluginAPI.h before the new layout ships.
+  static_assert(sizeof(VTable) == 4 * sizeof(void (*)()),
+                "VTable layout changed -- bump HIP_EP_PLUGIN_API_VERSION "
+                "and update this assertion to match the new entry count.");
 
   /// Constructed only by the host. The vtable must outlive the
   /// registry; in practice it is a process-static (see
@@ -127,14 +153,34 @@ public:
   HipEpPluginRegistry &operator=(const HipEpPluginRegistry &) = delete;
 
   // ---------- MLIR passes (upstream-shaped) ---------------------------
-  /// Equivalent of `mlir::PassRegistration<PassT>`. The plugin's pass
-  /// is added to MLIR's global pass registry; the public pipeline
-  /// instantiates it by name at the requested `PipelineSlot`.
+  /// Wraps `mlir::PassRegistration<PassT>()`. The intent is that the
+  /// plugin's pass becomes resolvable by name from `parsePassPipeline`
+  /// at the requested `PipelineSlot`.
   ///
-  /// Defined inline in this header (templates must be visible at the
-  /// instantiation site -- the plugin DLL). The plugin DLL therefore
-  /// links against MLIR for `mlir::PassRegistration<T>`'s definition.
-  /// No hip-compiler symbol is needed.
+  /// **Known limitation (Open Question 6, tracked as follow-up to
+  /// PR 5).** When `hip-compiler` is statically linked into the host
+  /// (its only shipping mode today) AND the plugin DLL also links
+  /// MLIR statically, the call below writes to the **plugin DLL's**
+  /// copy of `mlir::passRegistry`, not the host's. The host's
+  /// `parsePassPipeline` then fails to find the pass and emits a
+  /// `[plugin-loader] WARNING: pass '...' not registered in MLIR's
+  /// pass registry` line. The PR-2 LIT test for the sample plugin's
+  /// pass is XFAIL'd for exactly this reason.
+  ///
+  /// Workarounds today:
+  ///   - Plugin pass is registered but never executed (everything
+  ///     else, including bitcode and library contribution, still
+  ///     works). Useful for "show me the slot wiring" demos.
+  ///
+  /// Planned fix: route registerPass through the vtable so the host
+  /// TU calls `mlir::registerPass(allocator)`, mirroring LLVM's
+  /// `PassBuilder &`-based plugin pattern. See Open Question 6 in
+  /// docs/design/plugin-extension-api.md.
+  ///
+  /// Defined inline because templates must be visible at the
+  /// instantiation site (the plugin DLL). The plugin DLL therefore
+  /// links against MLIR for `mlir::PassRegistration<T>`'s definition;
+  /// no hip-compiler symbol is needed.
   template <typename PassT> void registerPass() {
     mlir::PassRegistration<PassT>();
   }
@@ -153,12 +199,36 @@ public:
   // ---------- Extensions beyond upstream ------------------------------
   /// Contribute LLVM bitcode that will be linked into model.dll via
   /// `llvm::Linker` AFTER the in-tree `runtime_bc_data` is linked.
-  /// The buffer must remain valid for the lifetime of hip-compiler
-  /// (typically static storage in the plugin DLL).
   ///
-  /// PR 3: wired into `LLVMBackend.cpp::linkRuntimeModule` with
-  /// `Linker::Flags::OverrideFromSrc` so vendor `wrap_*` symbols
-  /// shadow in-tree ones.
+  /// Buffer ownership: the host **copies** the bytes during this call.
+  /// The plugin's pointer/lifetime do not need to outlive
+  /// `RegisterCallbacks` -- a stack buffer or transient allocation
+  /// is fine. (Earlier versions of this design borrowed the pointer;
+  /// PR 6 switched to a copy after we measured the cost: vendor
+  /// runtime bitcode is 100 kB-1 MB, and the copy happens once per
+  /// process at startup, well below noise.)
+  ///
+  /// `sizeBytes == 0` is treated as a no-op (with a one-line stderr
+  /// warning) so a plugin that conditionally produces bitcode does
+  /// not break the host's link with a cryptic
+  /// `llvm::parseBitcodeFile` "file too small to contain bitcode
+  /// header" error. See the impl in PluginRegistry.cpp.
+  ///
+  /// **Symbol override semantics (CAVEAT).** PR 3 wires this with
+  /// `Linker::Flags::OverrideFromSrc`. Per the LLVM source
+  /// (`llvm/lib/Linker/LinkModules.cpp::shouldLinkFromSource`), that
+  /// flag is **unconditional and all-or-nothing**: every name
+  /// collision between plugin bitcode and in-tree bitcode resolves
+  /// to the plugin's definition, with no per-symbol opt-in. There
+  /// is no facility today for "override these symbols and only
+  /// these." Implication: any function or global in the plugin's
+  /// bitcode that happens to share a name with an in-tree symbol
+  /// silently shadows the in-tree definition. Vendors should
+  /// prefix their symbols (`amd_internal_wrap_alloc` rather than
+  /// `wrap_alloc`) until we either (a) switch to per-symbol opt-in
+  /// override or (b) explicitly bless `OverrideFromSrc` as the
+  /// design intent. See docs/plugin_authoring.md, "Symbol naming
+  /// and override semantics."
   void addRuntimeBitcode(const void *data, std::size_t sizeBytes) {
     vtable_->addRuntimeBitcode(self_, data, sizeBytes);
   }
@@ -205,29 +275,37 @@ HipEpPluginRegistry &getProcessPluginRegistry();
 llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot);
 
 /// One bitcode buffer contributed by a plugin's `addRuntimeBitcode`
-/// call. Borrowed view into plugin-DLL-owned static storage; valid for
-/// the lifetime of the process.
+/// call. The bytes are owned by the per-process plugin registry
+/// (the host copies the plugin's data during the
+/// `addRuntimeBitcode` call) and remain valid for the lifetime of
+/// the process. `data` is stable across the lifetime of the
+/// returned buffer view.
 struct PluginBitcodeBuffer {
   const void *data;
   std::size_t sizeBytes;
 };
 
 /// Read the bitcode buffers recorded by every loaded plugin's
-/// `addRuntimeBitcode` call, in the order they were registered. The
-/// returned vector references storage owned by the per-process
-/// plugin registry; each `data` pointer is stable for the lifetime
-/// of the process.
+/// `addRuntimeBitcode` call, in the order they were registered.
+/// Each `data` pointer is host-owned and stable for the lifetime of
+/// the process.
 ///
 /// Used by `lib/Target/LLVM/LLVMBackend.cpp::linkRuntimeModule` to
 /// link plugin-contributed bitcode into the model module after the
 /// in-tree runtime, with `Linker::Flags::OverrideFromSrc` so vendor
-/// definitions shadow in-tree ones.
+/// definitions shadow in-tree ones. See `addRuntimeBitcode` for the
+/// caveat on what "shadow" means in that flag's actual LLVM
+/// semantics.
 llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers();
 
 /// Read the library search paths recorded by every loaded plugin's
-/// `addLibraryPath` call, in the order they were registered. Each
-/// `StringRef` is backed by a `std::string` owned by the per-process
-/// plugin registry and is stable for the lifetime of the process.
+/// `addLibraryPath` call, in the order they were registered.
+///
+/// Returns owning `std::string` copies (rather than `StringRef`s
+/// into the per-process registry) so callers cannot accidentally
+/// alias internal storage. The cost is one short-string copy per
+/// entry, which is negligible -- there are typically 0-2 entries
+/// per process.
 ///
 /// Used by `lib/Compiler/CompilerDriver.cpp::discoverLibraries` to
 /// extend the `library_paths` argument vector handed to lld-link
@@ -235,11 +313,12 @@ llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers();
 /// on Linux). Paths are appended *after* the in-tree paths so that
 /// in-tree libraries continue to resolve from their canonical
 /// location.
-llvm::SmallVector<llvm::StringRef> pluginLibraryPaths();
+llvm::SmallVector<std::string> pluginLibraryPaths();
 
 /// Read the library names (or full library paths) recorded by every
 /// loaded plugin's `addLibrary` call, in the order they were
-/// registered.
+/// registered. Returns owning `std::string` copies; see
+/// `pluginLibraryPaths` for the rationale.
 ///
 /// Used by `lib/Compiler/CompilerDriver.cpp::discoverLibraries` to
 /// extend the `libraries` argument vector handed to lld-link.
@@ -247,9 +326,9 @@ llvm::SmallVector<llvm::StringRef> pluginLibraryPaths();
 /// command-line search order means a plugin lib later in the list
 /// only contributes new symbols, it does not shadow in-tree ones.
 /// Vendors who need to override an in-tree symbol should use the
-/// bitcode mechanism (`addRuntimeBitcode`) instead, which is wired
-/// with `Linker::Flags::OverrideFromSrc` for that purpose.
-llvm::SmallVector<llvm::StringRef> pluginLibraries();
+/// bitcode mechanism (`addRuntimeBitcode`) instead -- see the
+/// caveat on its symbol override semantics.
+llvm::SmallVector<std::string> pluginLibraries();
 
 } // namespace hip::compiler
 

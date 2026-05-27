@@ -7,10 +7,12 @@
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/debug_log.h"
 
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <exception>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -32,16 +34,31 @@ llvm::Error makeError(const llvm::Twine &msg) {
   return llvm::createStringError(llvm::inconvertibleErrorCode(), msg);
 }
 
+// Split `HIP_EP_PLUGINS` on `;`, trim whitespace, and skip empties.
+//
+// Deduplicates by exact-string match so `foo.dll;foo.dll` produces
+// one entry. We deliberately do not canonicalize paths (no
+// `realpath` / `GetFullPathName`): a vendor pinning their plugin
+// through both an absolute path and a symlink should ideally pin
+// once; if they accidentally list both spellings the worst case is
+// two plugin loads, which the underlying OS deduplicates at the
+// HMODULE / dlopen-refcount level. The visible-to-the-user
+// dedup catches the common `foo.dll;foo.dll` typo and keeps the
+// implementation honest about what it guarantees.
 void splitPluginPaths(llvm::StringRef envValue,
                       std::vector<std::string> &outPaths) {
+  llvm::SmallSet<std::string, 4> seen;
   llvm::StringRef remainder = envValue;
   while (!remainder.empty()) {
     auto sep = remainder.find(kPluginsEnvSeparator);
     llvm::StringRef token =
         (sep == llvm::StringRef::npos) ? remainder : remainder.substr(0, sep);
     token = token.trim();
-    if (!token.empty())
-      outPaths.emplace_back(token.str());
+    if (!token.empty()) {
+      std::string canonical = token.str();
+      if (seen.insert(canonical).second)
+        outPaths.emplace_back(std::move(canonical));
+    }
     if (sep == llvm::StringRef::npos)
       break;
     remainder = remainder.substr(sep + 1);
@@ -118,14 +135,12 @@ const std::vector<HipEpPluginLoader> &loadPluginsOnce() {
     for (const std::string &path : paths) {
       auto plugin = HipEpPluginLoader::Load(path);
       if (!plugin) {
-        // Bad plugin path is non-fatal: log under HIPDNN_EP_DEBUG and
-        // continue. We do not want a typo in HIP_EP_PLUGINS to block
-        // compilation when the user is iterating.
-        std::string msg;
-        llvm::raw_string_ostream(msg)
-            << "[plugin-loader] failed to load '" << path
-            << "': " << llvm::toString(plugin.takeError()) << "\n";
-        COMPILER_DEBUG_LOG(msg);
+        // Bad plugin path is non-fatal but loud: warn unconditionally
+        // (not gated on HIPDNN_EP_DEBUG) so a typo or missing-DLL
+        // mistake surfaces immediately rather than producing a silent
+        // "is my plugin loaded?" mystery.
+        llvm::errs() << "[plugin-loader] WARNING: failed to load '" << path
+                     << "': " << llvm::toString(plugin.takeError()) << "\n";
         continue;
       }
 
@@ -152,7 +167,25 @@ void dispatchPluginRegistrationsOnce() {
     // registry instance.
     HipEpPluginRegistry &registry = getProcessPluginRegistry();
     for (const auto &plugin : loadPluginsOnce()) {
-      plugin.registerCallbacks(registry);
+      // A plugin that throws across the DLL boundary is technically
+      // undefined behaviour (CRT / libstdc++ versions may not match
+      // between host and plugin). We bound the blast radius: catch
+      // anything escaping `RegisterCallbacks`, log it, and continue
+      // with the next plugin. This is similar in spirit to
+      // `mlir-opt`'s handling of plugin-load failures, which also
+      // chooses degrade-and-continue over abort-the-host.
+      try {
+        plugin.registerCallbacks(registry);
+      } catch (const std::exception &e) {
+        llvm::errs() << "[plugin-loader] WARNING: '" << plugin.getPluginName()
+                     << "' RegisterCallbacks threw std::exception: " << e.what()
+                     << "; skipping further callbacks for this "
+                     << "plugin.\n";
+      } catch (...) {
+        llvm::errs() << "[plugin-loader] WARNING: '" << plugin.getPluginName()
+                     << "' RegisterCallbacks threw a non-std exception; "
+                     << "skipping further callbacks for this plugin.\n";
+      }
     }
   });
 }

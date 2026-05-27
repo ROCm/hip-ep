@@ -548,11 +548,11 @@ void CompilerDriver::discoverLibraries(
   // is wired with `Linker::Flags::OverrideFromSrc` for that
   // purpose. The doc comment on `pluginLibraries()` in
   // include/hip/Compiler/PluginRegistry.h documents this contract.
-  for (auto path : ::hip::compiler::pluginLibraryPaths()) {
+  for (const auto &path : ::hip::compiler::pluginLibraryPaths()) {
     library_paths.emplace_back(path);
     COMPILER_DEBUG_LOG("  Plugin library path: " << path << "\n");
   }
-  for (auto lib : ::hip::compiler::pluginLibraries()) {
+  for (const auto &lib : ::hip::compiler::pluginLibraries()) {
     libraries.emplace_back(lib);
     COMPILER_DEBUG_LOG("  Plugin library: " << lib << "\n");
   }
