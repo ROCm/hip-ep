@@ -177,6 +177,18 @@ def _read_ci_env(*keys):
 
 
 def fetch_therock():
+    # set THEROCK if the env var THEROCK_DIST is valid
+    log("Looking for TheRock ROCm SDK via THEROCK_DIST ...")
+    custom_therock = os.environ.get("THEROCK_DIST")
+    if custom_therock:
+        therock_path = Path(custom_therock)
+        if not therock_path.exists():
+            log(f"  ERROR: THEROCK_DIST points to non-existent path: {therock_path}")
+            sys.exit(1)
+        THEROCK = therock_path
+        log(f"  Using custom TheRock from THEROCK_DIST: {THEROCK}")
+        return
+
     log("Setting up TheRock ROCm SDK ...")
     sentinel = THEROCK / ".ok"
     if sentinel.exists():
