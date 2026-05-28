@@ -751,16 +751,23 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 }
 
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t num_elements,
-                         int64_t element_size_bytes) {
+                         void *output, int64_t lhs_n, int64_t lhs_c,
+                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                         int64_t out_n, int64_t out_c, int64_t out_h,
+                         int64_t out_w, int64_t data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_elementwise_sub\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_elementwise_sub(num_elements=%lld, "
-             "element_size=%lld)\n",
-             (long long)num_elements, (long long)element_size_bytes);
+  MOCK_PRINT("[MOCK] wrap_elementwise_sub lhs=[%lld,%lld,%lld,%lld] "
+             "rhs=[%lld,%lld,%lld,%lld] out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+             (long long)lhs_n, (long long)lhs_c, (long long)lhs_h,
+             (long long)lhs_w, (long long)rhs_n, (long long)rhs_c,
+             (long long)rhs_h, (long long)rhs_w, (long long)out_n,
+             (long long)out_c, (long long)out_h, (long long)out_w,
+             hipdnn_ep_datatype_name(data_type));
 
   return 0;
 }
@@ -1103,13 +1110,21 @@ int wrap_and(RuntimeState *state, void *a, void *b, void *output,
 }
 
 int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type) {
+             int64_t lhs_n, int64_t lhs_c, int64_t lhs_h, int64_t lhs_w,
+             int64_t rhs_n, int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+             int64_t out_n, int64_t out_c, int64_t out_h, int64_t out_w,
+             int64_t data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_div\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_div(num_elements=%lld, data_type=%s)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+  MOCK_PRINT("[MOCK] wrap_div lhs=[%lld,%lld,%lld,%lld] "
+             "rhs=[%lld,%lld,%lld,%lld] out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+             (long long)lhs_n, (long long)lhs_c, (long long)lhs_h,
+             (long long)lhs_w, (long long)rhs_n, (long long)rhs_c,
+             (long long)rhs_h, (long long)rhs_w, (long long)out_n,
+             (long long)out_c, (long long)out_h, (long long)out_w,
+             hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 

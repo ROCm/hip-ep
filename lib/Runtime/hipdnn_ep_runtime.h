@@ -659,11 +659,16 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t out_c, int64_t out_h, int64_t out_w,
                         int64_t data_type, int64_t tensor_op);
 
-// Element-wise subtraction wrapper
-// Computes output = lhs - rhs element-wise
+// Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
+// Computes output = lhs - rhs; materialises broadcast via hip_expand when
+// an operand shape differs from the output shape. Sub is not commutative --
+// operands are never swapped.
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t num_elements,
-                         int64_t element_size_bytes);
+                         void *output, int64_t lhs_n, int64_t lhs_c,
+                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                         int64_t out_n, int64_t out_c, int64_t out_h,
+                         int64_t out_w, int64_t data_type);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
@@ -977,8 +982,14 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
+// Element-wise division with 4D ONNX broadcast (rank <= 4, left-padded).
+// Computes output = lhs / rhs; materialises broadcast via hip_expand when
+// an operand shape differs from the output shape.
 int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type);
+             int64_t lhs_n, int64_t lhs_c, int64_t lhs_h, int64_t lhs_w,
+             int64_t rhs_n, int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+             int64_t out_n, int64_t out_c, int64_t out_h, int64_t out_w,
+             int64_t data_type);
 
 // CumSum operation wrapper (cumulative sum along an axis).
 // `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the

@@ -590,19 +590,37 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 // Element-wise Subtraction via Custom HIP Kernel
 //===----------------------------------------------------------------------===//
 //
-// For types unsupported by MIOpen (e.g. int64), dispatches to
-// hip_elementwise_sub from the custom kernels library. The caller passes
-// element_size_bytes; we map it to the corresponding hip_dtype_t.
-//===----------------------------------------------------------------------===//
+// MIOpen has no subtract op; dispatches to hip_elementwise_sub after optional
+// hip_expand broadcast materialisation (4D shapes, rank <= 4).
+
+static int sub_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
+  switch (hipdnn_type) {
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_INT32:
+    return HIP_DTYPE_INT32;
+  case HIPDNN_EP_DATATYPE_INT64:
+    return HIP_DTYPE_INT64;
+  default:
+    return -1;
+  }
+}
 
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t num_elements,
-                         int64_t element_size_bytes) {
+                         void *output, int64_t lhs_n, int64_t lhs_c,
+                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                         int64_t out_n, int64_t out_c, int64_t out_h,
+                         int64_t out_w, int64_t data_type) {
   OP_PROFILE(
       "sub",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld",
+                 (long long)out_n, (long long)out_c, (long long)out_h,
+                 (long long)out_w);
         return std::string(b);
       },
       state);
@@ -611,36 +629,82 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
     return -1;
   }
 
-  void *stream = hipdnn_ep_state_get_stream(state);
+  const int64_t out_vol = out_n * out_c * out_h * out_w;
+  if (out_vol <= 0)
+    return 0;
 
-  // element_size_bytes is the only dtype hint plumbed from the lowering.
-  // 2 = fp16 (vision/text activations), 4 = fp32 / i32 (treat as fp32 since
-  // i32 sub from MIOpen would have been routed elsewhere), 8 = i64 (shape
-  // arithmetic). The kernel performs subtraction; fp16 vs i32 with the same
-  // 4-byte layout would need disambiguation, but in practice the elementwise
-  // sub call site only emits fp arithmetic at 4 bytes (Range / norm chains).
-  int hip_dtype;
-  switch (element_size_bytes) {
-  case 2:
-    hip_dtype = HIP_DTYPE_FLOAT16;
-    break;
-  case 4:
-    hip_dtype = HIP_DTYPE_FLOAT32;
-    break;
-  case 8:
-    hip_dtype = HIP_DTYPE_INT64;
-    break;
-  default:
-    RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_elementwise_sub: unsupported element_size=%lld\n",
-        (long long)element_size_bytes);
+  int hip_dtype = sub_hipdnn_to_hip_dtype(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr,
+            "wrap_elementwise_sub: unsupported data_type=%s(%lld)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_elementwise_sub: num_elements=%lld, "
-      "element_size=%lld, dtype=%d -> calling hip_elementwise_sub\n",
-      (long long)num_elements, (long long)element_size_bytes, hip_dtype);
+  void *stream = hipdnn_ep_state_get_stream(state);
 
-  return hip_elementwise_sub(stream, lhs, rhs, output, num_elements, hip_dtype);
+  const bool lhs_eq_out =
+      (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w);
+  const bool rhs_eq_out =
+      (rhs_n == out_n && rhs_c == out_c && rhs_h == out_h && rhs_w == out_w);
+
+  void *lhs_use = lhs;
+  void *rhs_use = rhs;
+
+  if (!lhs_eq_out || !rhs_eq_out) {
+    const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+    const size_t per_side = static_cast<size_t>(out_vol * elem_bytes);
+    const size_t needed =
+        per_side * static_cast<size_t>((!lhs_eq_out ? 1 : 0) +
+                                       (!rhs_eq_out ? 1 : 0));
+    if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
+      fprintf(stderr,
+              "wrap_elementwise_sub: workspace ensure failed (%zu bytes)\n",
+              needed);
+      return -1;
+    }
+    void *ws = hipdnn_ep_state_get_workspace(state);
+    uint8_t *ws_byte = static_cast<uint8_t *>(ws);
+    const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
+
+    if (!lhs_eq_out) {
+      const int64_t in_lhs[4] = {lhs_n, lhs_c, lhs_h, lhs_w};
+      int rc = hip_expand(stream, lhs, ws_byte, in_lhs, 4, out_shape, 4,
+                          hip_dtype);
+      if (rc != 0) {
+        fprintf(stderr,
+                "wrap_elementwise_sub: hip_expand(lhs) failed (%d)\n", rc);
+        return -1;
+      }
+      lhs_use = ws_byte;
+      ws_byte += per_side;
+    }
+    if (!rhs_eq_out) {
+      const int64_t in_rhs[4] = {rhs_n, rhs_c, rhs_h, rhs_w};
+      int rc = hip_expand(stream, rhs, ws_byte, in_rhs, 4, out_shape, 4,
+                          hip_dtype);
+      if (rc != 0) {
+        fprintf(stderr,
+                "wrap_elementwise_sub: hip_expand(rhs) failed (%d)\n", rc);
+        return -1;
+      }
+      rhs_use = ws_byte;
+    }
+
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_elementwise_sub: broadcast expand lhs%s rhs%s -> "
+        "out=[%lld,%lld,%lld,%lld], dtype=%s\n",
+        lhs_eq_out ? "(ok)" : "(expanded)", rhs_eq_out ? "(ok)" : "(expanded)",
+        (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w,
+        hipdnn_ep_datatype_name(data_type));
+  } else {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_elementwise_sub: same-shape out=[%lld,%lld,%lld,%lld], "
+        "dtype=%s\n",
+        (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w,
+        hipdnn_ep_datatype_name(data_type));
+  }
+
+  return hip_elementwise_sub(stream, lhs_use, rhs_use, output, out_vol,
+                             hip_dtype);
 }
