@@ -201,6 +201,33 @@ struct GetHostScratchOpLowering
   }
 };
 
+// --- HostSyncOp: hip.host_sync(%ctx) -> llvm.call
+// @hipdnn_ep_stream_sync(state). Issued by `hip-materialize-host-scalars` ahead
+// of a host `memref.load` whose source memref aliases the runtime host-scratch
+// and whose preceding writer was a `hip.*` GPU op.  Without the sync the host
+// load races the GPU write on `hipHostMallocMapped` memory.
+struct HostSyncOpLowering : public ConvertOpToLLVMPattern<HostSyncOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(HostSyncOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipdnnEpStreamSync, {ptrType}, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, ValueRange{adaptor.getCtx()});
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // GetConstantOp Lowering
 //===----------------------------------------------------------------------===//
@@ -586,9 +613,10 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
-  patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
-               GetHostScratchOpLowering, GetConstantOpLowering,
-               MemRefAllocOpLowering, MemRefDeallocOpLowering>(converter);
+  patterns
+      .add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
+           GetHostScratchOpLowering, HostSyncOpLowering, GetConstantOpLowering,
+           MemRefAllocOpLowering, MemRefDeallocOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 

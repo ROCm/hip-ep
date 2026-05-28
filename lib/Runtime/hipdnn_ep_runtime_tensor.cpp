@@ -590,6 +590,8 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
 // Synchronize GPU stream once (called after all finalize_output calls).
 int hipdnn_ep_stream_sync(RuntimeState *state) {
+  fprintf(stderr, "[stream_sync] enter state=%p\n", (void *)state);
+  fflush(stderr);
   if (!state) {
     fprintf(stderr, "hipdnn_ep_stream_sync: null state\n");
     return HIPDNN_EP_ERR_NULL_POINTER;

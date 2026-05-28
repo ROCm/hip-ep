@@ -210,6 +210,16 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // Returns: GPU base pointer (NULL on allocation failure)
 void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size);
 
+// Pool-depth push/pop. Called by the loop runtime around outlined
+// hip.loop body_fn invocations so the body's hip.get_pool gets a
+// physically distinct buffer from main_graph's (otherwise both would
+// allocate from offset 0 of state->pool_base and the body's writes
+// would corrupt main_graph values that need to live across the loop
+// call). thread_local so two parallel inference sessions on different
+// threads don't share the counter.
+void hipdnn_ep_push_pool_depth();
+void hipdnn_ep_pop_pool_depth();
+
 // Get the host-mapped scratch buffer base, growing it if needed. Called from
 // hip.get_host_scratch (emitted by hip-materialize-host-scalars) once per
 // inference for tiny host-fed scalar memrefs that would otherwise land in the
@@ -250,7 +260,10 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // the GQA seqlens_k cache (default on, set HIPDNN_EP_GQA_CACHE_SEQLENS=0
 // to disable) to be correct -- without this hook the cache would persist
 // across forward passes and return stale values.
-void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+    void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
@@ -649,11 +662,16 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t out_c, int64_t out_h, int64_t out_w,
                         int64_t data_type, int64_t tensor_op);
 
-// Element-wise subtraction wrapper
-// Computes output = lhs - rhs element-wise
+// Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
+// Computes output = lhs - rhs; materialises broadcast via hip_expand when
+// an operand shape differs from the output shape. Sub is not commutative --
+// operands are never swapped.
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t num_elements,
-                         int64_t element_size_bytes);
+                         void *output, int64_t lhs_n, int64_t lhs_c,
+                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                         int64_t out_n, int64_t out_c, int64_t out_h,
+                         int64_t out_w, int64_t data_type);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
@@ -686,10 +704,14 @@ int wrap_power(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha,
                double beta, double gamma);
 
-// Gather operation wrapper
+// Gather operation wrapper.
+// `axis_size` = data.shape[axis]; `inner_size` = product of
+// data.shape[axis+1:]. outer_size is derived as data_num_elements / (axis_size
+// * inner_size).
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
+                int64_t axis_size, int64_t inner_size,
                 int64_t element_size_bytes);
 
 // Range operation wrapper
@@ -964,8 +986,14 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
+// Element-wise division with 4D ONNX broadcast (rank <= 4, left-padded).
+// Computes output = lhs / rhs; materialises broadcast via hip_expand when
+// an operand shape differs from the output shape.
 int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type);
+             int64_t lhs_n, int64_t lhs_c, int64_t lhs_h, int64_t lhs_w,
+             int64_t rhs_n, int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+             int64_t out_n, int64_t out_c, int64_t out_h, int64_t out_w,
+             int64_t data_type);
 
 // CumSum operation wrapper (cumulative sum along an axis).
 // `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the

@@ -6,6 +6,7 @@
 add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
   BufferUtils.cpp
+  FixLoopAccumulatorOffset.cpp
   GenerateInterface.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp

@@ -44,6 +44,8 @@ typedef enum {
     HIP_DTYPE_FLOAT64  = 4,
     HIP_DTYPE_BFLOAT16 = 5,
     HIP_DTYPE_INT16    = 6,
+    HIP_DTYPE_UINT8    = 7,
+    HIP_DTYPE_INT8     = 8,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -180,6 +182,43 @@ int hip_elementwise_not(
  * the INPUT type. For Div/Mod, output dtype matches input dtype.
  */
 int hip_elementwise_div(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+// Element-wise Mul / Add / Min / Max, same-shape only (caller materialises
+// broadcast). Reached from wrap_miopenOpTensor for integer element types
+// that MIOpen rejects (e.g. INT64 scalar shape arithmetic like the
+// seqlens_k = Min(total_seq_len, max_seq_len) clamp in GQA). Supports
+// FP16, FP32, INT32, INT64.
+int hip_elementwise_mul(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_add(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_min(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_max(
     void* stream,
     const void* lhs,
     const void* rhs,
@@ -576,7 +615,10 @@ int hip_cast(
  *   output_num_elements  - total elements in output tensor
  *   element_size_bytes   - byte size per element (used for raw copy)
  *
- * Currently supports: axis=0
+ * Generic axis support. data has logical shape [outer, axis_size, inner];
+ * output has logical shape [outer, indices_num, inner]. The caller computes
+ * axis_size = data.shape[axis] and inner_size = product(data.shape[axis+1:]);
+ * outer_size is derived as data_num / (axis_size * inner_size).
  * Supported element sizes: 2 (f16/bf16), 4 (f32/i32), 8 (i64/f64)
  * Returns: 0 on success, non-zero on failure
  */
@@ -589,6 +631,8 @@ int hip_gather(
     int64_t data_num_elements,
     int64_t indices_num_elements,
     int64_t output_num_elements,
+    int64_t axis_size,
+    int64_t inner_size,
     int element_size_bytes);
 
 /* =========================================================================
@@ -743,7 +787,19 @@ int hip_slice(
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,
+    const int64_t* output_shape_host,     /* physical alloc shape       */
+    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
+                                             may be NULL, in which case the
+                                             kernel treats it as identical to
+                                             output_shape_host (i.e. no
+                                             over-alloc; entire physical
+                                             buffer is filled by the slice).
+                                             When set and logical[d] <
+                                             output_shape[d] for some d,
+                                             positions in the over-allocated
+                                             tail are filled with zero — the
+                                             host wrapper does not need to
+                                             pre-memset the buffer.        */
     const int64_t* starts_per_axis_host,  /* length = rank */
     const int64_t* steps_per_axis_host,   /* length = rank */
     int rank,

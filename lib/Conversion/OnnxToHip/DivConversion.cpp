@@ -28,12 +28,14 @@ struct DivToHip : public mlir::RewritePattern {
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-    auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-    mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+    mlir::FailureOr<mlir::Value> initOrFailure =
+        createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+    if (mlir::failed(initOrFailure))
+      return rewriter.notifyMatchFailure(
+          op, "Div: no ranked operand spans dynamic result dim");
 
     auto hipOp = mlir::hip::DivOp::create(rewriter, loc, resultType, context, a,
-                                          b, init);
+                                          b, *initOrFailure);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

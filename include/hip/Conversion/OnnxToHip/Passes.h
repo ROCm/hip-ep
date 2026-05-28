@@ -36,6 +36,22 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass(
 /// available as the parent function's arg 0.
 std::unique_ptr<Pass> createOnnxLoopOutlinePass();
 
+/// Creates a pass that re-infers `onnx.*` result types inside every
+/// outlined `hip.loop` body function from the (already-refined) operand
+/// types, then propagates the refined yield operand types into the
+/// function signature and the enclosing `hip.loop` op's result types.
+///
+/// Necessary because `--onnx-loop-outline` rebuilds each body func's
+/// signature from the v_init operand types (the source of truth for
+/// runtime values flowing in), but the body's cloned `onnx.*` ops still
+/// carry the stale result types annotated on the ORIGINAL `onnx.Loop`
+/// body block — typically a degenerate rank-0 sentinel type set by some
+/// ONNX exporters for accumulator iter_vars. Without this pass,
+/// downstream `--convert-onnx-to-hip` rejects the cloned ops because
+/// their result types don't match what their (now-refined) operands
+/// imply. Runs BETWEEN `--onnx-loop-outline` and `--convert-onnx-to-hip`.
+std::unique_ptr<Pass> createRefineLoopBodyTypesPass();
+
 } // namespace hip
 } // namespace mlir
 

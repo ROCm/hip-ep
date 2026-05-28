@@ -15,6 +15,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
+#include "mlir/Pass/PassInstrumentation.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
@@ -219,6 +220,40 @@ bool CompilerDriver::runMLIRPasses(
   if (hipdnn_ep_timing_enabled())
     pm.enableTiming();
 
+  // In STRICT mode, force MLIR to print the offending op + the failing
+  // pass name on every diagnostic — the default error format strips
+  // location info and prints just the message ("operand #0 does not
+  // dominate this use") with no way to identify which pass produced
+  // the bad IR. Cheap diagnostic; only fires when strict is set.
+  if (!hip_get_env("HIPDNN_EP_STRICT").empty()) {
+    module.getContext()->printOpOnDiagnostic(true);
+    pm.enableVerifier(true);
+    pm.getContext()->printStackTraceOnDiagnostic(true);
+    // Trace every pass to stderr right before it runs so a crash on
+    // pass N+1 surfaces "Pass N completed; Pass N+1 starting" lines
+    // in the output. PassInstrumentation is the standard hook.
+    struct PassTracer : public mlir::PassInstrumentation {
+      static llvm::StringRef opName(mlir::Operation *op) {
+        if (auto fn = mlir::dyn_cast<mlir::func::FuncOp>(op))
+          return fn.getName();
+        return op->getName().getStringRef();
+      }
+      void runBeforePass(mlir::Pass *pass, mlir::Operation *op) override {
+        llvm::errs() << "[PassTracer] BEFORE " << pass->getName() << " on "
+                     << opName(op) << "\n";
+      }
+      void runAfterPass(mlir::Pass *pass, mlir::Operation *op) override {
+        llvm::errs() << "[PassTracer] AFTER  " << pass->getName() << " on "
+                     << opName(op) << "\n";
+      }
+      void runAfterPassFailed(mlir::Pass *pass, mlir::Operation *op) override {
+        llvm::errs() << "[PassTracer] FAILED " << pass->getName() << " on "
+                     << opName(op) << "\n";
+      }
+    };
+    pm.addInstrumentation(std::make_unique<PassTracer>());
+  }
+
   if (options.verbose) {
     COMPILER_DEBUG_LOG("Running ONNX->HIP->LLVM->Interface passes\n");
   }
@@ -275,7 +310,11 @@ bool CompilerDriver::runMLIRPasses(
 
   if (mlir::failed(pm.run(module))) {
     error_message = "MLIR pass pipeline failed";
-    if (options.verbose) {
+    // Always dump the failing IR when STRICT mode is active — at that
+    // point we're about to abort anyway and the IR is what tells the
+    // next session which pass produced it. Without this, the
+    // cpptrace backtrace lands inside pm.run with no IR context.
+    if (options.verbose || !hip_get_env("HIPDNN_EP_STRICT").empty()) {
       llvm::errs() << "\n=== Failed Module IR ===\n";
       module.print(llvm::errs());
       llvm::errs() << "\n========================\n";

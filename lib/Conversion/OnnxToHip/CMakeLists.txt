@@ -59,6 +59,7 @@ add_library(OnnxToHip STATIC
   NonZeroConversion.cpp
   ConcatConversion.cpp
   LoopOutline.cpp
+  RefineLoopBodyTypes.cpp
 )
 
 add_dependencies(OnnxToHip

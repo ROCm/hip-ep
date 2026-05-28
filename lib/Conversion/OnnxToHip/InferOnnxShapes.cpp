@@ -74,6 +74,8 @@
 #include "OnnxResultTypeInference.h"
 #include "OnnxToHipUtils.h"
 
+#include "hip/Dialect/IR/HipDialect.h"
+
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -478,6 +480,11 @@ struct DimOrigin {
 /// concurrently.
 struct TraceContext {
   llvm::DenseSet<llvm::StringRef> warned;
+  // Visited (value, dim) pairs to break cycles. Without this, a trace
+  // through a Loop body whose v_carried output points back to an outer
+  // op that traces into the Loop again would diverge.
+  llvm::DenseSet<std::pair<void *, int64_t>> visited;
+  int depth = 0;
 };
 
 static std::optional<DimOrigin> traceDimOrigin(mlir::Value v, int64_t dim,
@@ -1009,6 +1016,71 @@ static std::optional<DimOrigin> traceGather(mlir::Operation *op, int64_t dim,
   return traceDimOrigin(op->getOperand(0), dataDim, ctx);
 }
 
+// Split: input X is split along `axis` into N pieces. For the dim we're
+// tracing:
+//   * d == axis → output size = split_sizes[result_idx]. If split_sizes is
+//                 not a compile-time constant we can't resolve to an SSA
+//                 origin; refuse. If it IS a constant AND this result's
+//                 split size equals the input dim along axis, the split
+//                 degenerates to identity and we passthrough.
+//   * d != axis → strict passthrough to input dim d.
+//
+// Canonical site: Qwen vision encoder's final `Split(linear_109, val_2207)
+// {axis = 0}` with a single output (degenerate Split where split_sizes is a
+// runtime tensor whose value is the input dim along axis 0). Output dim 0
+// = input dim 0 in that case, so we conservatively passthrough when the
+// op has exactly one result (split_sizes[0] must equal input.dim[axis] for
+// the Split to be well-formed).
+//
+// Trace IR before/after example (axis = 0, single-output degenerate Split):
+//
+//   Before (trace request: dim 0 of %y):
+//     %y = onnx.Split(%x, %split) {axis = 0} : tensor<?x4096xf16>
+//   After (passthrough):
+//     traceDimOrigin(%x, 0)
+static std::optional<DimOrigin> traceSplit(mlir::Operation *op, int64_t dim,
+                                           TraceContext &ctx) {
+  if (op->getNumOperands() < 1)
+    return std::nullopt;
+  auto inType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+  if (!inType)
+    return std::nullopt;
+  int64_t inRank = inType.getRank();
+  int64_t axis = 0;
+  if (auto a = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+    axis = a.getSInt();
+  if (axis < 0)
+    axis += inRank;
+  if (dim != axis)
+    return traceDimOrigin(op->getOperand(0), dim, ctx);
+  // axis case: degenerate single-result Split is identity along axis.
+  if (op->getNumResults() == 1)
+    return traceDimOrigin(op->getOperand(0), dim, ctx);
+  // Multi-output Split with non-constant split_sizes — can't trace.
+  return std::nullopt;
+}
+
+// Gemm: `Y = alpha * op(A) * op(B) + beta * C` where op() is optional
+// transpose. Output is always 2-D `[M, N]`:
+//   * M = A.dim[transA ? 1 : 0]
+//   * N = B.dim[transB ? 0 : 1]
+static std::optional<DimOrigin> traceGemm(mlir::Operation *op, int64_t dim,
+                                          TraceContext &ctx) {
+  if (op->getNumOperands() < 2)
+    return std::nullopt;
+  int64_t transA = 0, transB = 0;
+  if (auto a = op->getAttrOfType<mlir::IntegerAttr>("transA"))
+    transA = a.getSInt();
+  if (auto a = op->getAttrOfType<mlir::IntegerAttr>("transB"))
+    transB = a.getSInt();
+  if (dim == 0)
+    return traceDimOrigin(op->getOperand(0), transA ? 1 : 0, ctx);
+  if (dim == 1)
+    return traceDimOrigin(op->getOperand(1), transB ? 0 : 1, ctx);
+  return std::nullopt;
+}
+
 //===----------------------------------------------------------------------===//
 // Trace registry + dispatch
 //===----------------------------------------------------------------------===//
@@ -1037,6 +1109,8 @@ static void populateTraceRules(llvm::StringMap<TraceFn> &r) {
   r["onnx.Concat"] = traceConcat;
   r["onnx.Slice"] = traceSlice;
   r["onnx.Gather"] = traceGather;
+  r["onnx.Split"] = traceSplit;
+  r["onnx.Gemm"] = traceGemm;
 }
 
 static const llvm::StringMap<TraceFn> &getTraceRegistry() {
@@ -1055,11 +1129,45 @@ static std::optional<DimOrigin> traceDimOrigin(mlir::Value v, int64_t dim,
   mlir::Operation *op = v.getDefiningOp();
   if (!op)
     return std::nullopt;
+  // Cycle / depth guard. The (value, dim) visited set prevents infinite
+  // recursion on op chains where a result eventually feeds back into a
+  // value already on the call stack (rare but possible with hip.loop
+  // body traversal). Depth cap is a defensive cutoff for very deep
+  // chains in encoder-style graphs (28+ transformer layers).
+  if (ctx.depth > 4000)
+    return std::nullopt;
+  auto key = std::make_pair(v.getAsOpaquePointer(), dim);
+  if (!ctx.visited.insert(key).second)
+    return std::nullopt;
+  ctx.depth++;
   llvm::StringRef name = op->getName().getStringRef();
   const auto &reg = getTraceRegistry();
   auto it = reg.find(name);
   if (it != reg.end())
     return it->second(op, dim, ctx);
+  // hip.loop preserves the shape of each loop-carried tensor across all
+  // iterations (ONNX Loop semantic: v_final[i] and v_init[i] must have
+  // identical shape). The result type matches v_init's type, so any dim of
+  // result[i] traces directly to dim of v_init[i]. Necessary for vision /
+  // multi-block decoder graphs where the per-layer activation flows through
+  // an outlined Loop (OnnxLoopOutlinePass replaces the inlined-body
+  // onnx.Loop with a hip.loop pointing at a separate body function before
+  // InferOnnxShapes runs).
+  //
+  // Result index -> v_init index is direct (both are sequenced by the
+  // op's `num_loop_carried` attribute; non-tensor scan outputs aren't
+  // exposed as MLIR results — the op's `results` list is only the
+  // tensor-typed loop-carried values).
+  if (auto loopOp = mlir::dyn_cast<mlir::hip::LoopOp>(op)) {
+    auto opResult = mlir::dyn_cast<mlir::OpResult>(v);
+    if (!opResult)
+      return std::nullopt;
+    unsigned resultIdx = opResult.getResultNumber();
+    auto vInit = loopOp.getVInit();
+    if (resultIdx < vInit.size())
+      return traceDimOrigin(vInit[resultIdx], dim, ctx);
+    return std::nullopt;
+  }
   // Unknown op kind. Warn once per function per kind so the next
   // model-bring-up sees exactly which trace rules to add. Limited to
   // `onnx.*` producers — unknown non-onnx ops (memref ops, hip dialect
@@ -1250,7 +1358,17 @@ mlir::LogicalResult inferOnnxShapes(mlir::func::FuncOp funcOp, bool *changed) {
   // survive the `func.func → llvm.func` conversion that happens later in
   // the pipeline; reading them from the post-`runMLIRPasses` module is
   // safe.
-  if (auto module = funcOp->getParentOfType<mlir::ModuleOp>()) {
+  // Only the @main_graph function's signature drives the EP-side metadata
+  // (`pass_main.cpp::build_metadata_json` reads `hip.refined_output_shapes`
+  // / `hip.refined_output_dim_origins` from the module and applies them to
+  // the main graph's outputs). Outlined `main_graph_loop_body_*` funcs are
+  // internal implementation detail; their signatures don't surface at the
+  // EP boundary, and since both attach helpers OVERWRITE the module attr,
+  // calling them per-function would let the last-processed loop body's
+  // signature replace main_graph's — silently breaking DimSource for the
+  // real outputs.
+  if (auto module = funcOp->getParentOfType<mlir::ModuleOp>();
+      module && funcOp.getSymName() == "main_graph") {
     attachShapesAttr(funcOp, module);
     attachOriginsAttr(funcOp, module);
   }

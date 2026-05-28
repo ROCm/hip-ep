@@ -411,6 +411,34 @@ static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
     LOG(WARNING) << "Failed to create MLIR fusion: " << fuse_error.comments;
     return false;
   }
+  // morphizen-core's `IPass_try_fuse` augments meta_def's inputs/outputs
+  // with values discovered during a reverse DFS of the body nodes:
+  // "arguments" (inputs the body needs that weren't explicitly listed,
+  // typically internal values produced by Cast(Constant) chains the DFS
+  // didn't trace into body_nodes) and "return_values" (intermediates that
+  // happen to escape the fused region's notion of "output"). Both lists
+  // can grow far beyond the actual graph inputs/outputs.
+  //
+  // ORT, on the other hand, computes the fused node's actual input/output
+  // arity from the graph boundary, which matches the explicit lists we
+  // passed. The downstream `update_argument_indice` in morphizen-ep.cpp
+  // compares meta_def's lists against the ORT node's actual lists with
+  // `CHECK_LE(meta_def_args.size(), node_value_infos.size())` and aborts
+  // on mismatch.
+  //
+  // Fix: clamp meta_def's inputs/outputs to the EXACT lists we passed to
+  // try_fuse before handing it off. We do this post-try_fuse rather than
+  // patching morphizen-core because the morphizen submodule is shared
+  // across consumers; our use case (whole-graph fusion with explicit
+  // boundary lists) is unusual enough that the upstream auto-augment is
+  // wrong for us specifically. constant_initializers / nodes are kept
+  // intact — the EP runtime doesn't compare those against the ORT node.
+  meta_def->mutable_inputs()->Clear();
+  for (const auto &n : input_names)
+    meta_def->add_inputs(n);
+  meta_def->mutable_outputs()->Clear();
+  for (const auto &n : output_names)
+    meta_def->add_outputs(n);
 
   MY_LOG(1) << "Fusion successful, attaching metadata";
 
