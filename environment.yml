@@ -25,7 +25,17 @@ dependencies:
     - pytest
     - onnx
     - onnx_ir
-    - onnxruntime-directml
+    # Bumped from onnxruntime-directml (pinned at 1.24.4 max on pip) to
+    # base onnxruntime — needed for the contrib op schemas Qwen 3.5 9B
+    # depends on (com.microsoft:CausalConvWithState / LinearAttention).
+    # MorphiZenEP provides GPU compute on AMD; DML EP is unused.
+    # Must stay in lockstep with build.py::ORT_VERSION (per CLAUDE.md
+    # gotcha "ORT version must match pip").
+    - onnxruntime==1.26.0
+    # PIL/Pillow: image loader used by the Qwen 3.5 OGA multimodal E2E
+    # test (test/python/test_qwen3_5_9b.py::TestQwen3_5_9BMultimodal) to
+    # synthesize a deterministic RGB test image.
+    - Pillow
     # huggingface_hub for gated-repo downloads in test/python (e.g. the AMD
     # gemma3-4b-it ONNX repo that test_gemma3_4b.py pulls). Authenticate once
     # per machine via `hf auth login` (formerly `huggingface-cli login`).

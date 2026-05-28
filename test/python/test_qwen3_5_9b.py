@@ -2,17 +2,32 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Qwen3.5-9B vision dynshape micro-test.
+"""Qwen3.5-9B test suite — vision encoder + OGA text + OGA text+image E2E.
 
-Single-test placeholder for the full per-model test (which will follow the
-ModelSpec / BaseORTTests / BaseOGATests pattern in conftest once the EP
-covers the vision encoder's full op set — today blocked by Loop/If
-support).
+Three layers of coverage:
 
-Synthesizes the specific ONNX pattern Qwen3.5 vision uses for its 2x2
-patch merger — a `[num_patches, hidden]` Reshape into
-`[num_patches/4, 4*hidden]` — and verifies the EP's DimSource SSA-origin
-trace resolves the output dim via `mult=0.25` end-to-end:
+  1. Vision encoder (ORT-direct, `TestQwen3_5_9BVisionDynShape` + the
+     synthetic patch-merger micro-test below) — exercises the
+     dynshape `vision.onnx` end-to-end on MorphiZenEP. Pre-existing.
+
+  2. OGA text-only generation (`TestQwen3_5_9BOGAText`, inherited
+     from `BaseOGATests`) — text decoder + embedding sub-model run via
+     OGA's standard generator loop on MorphiZenEP. No image inputs; the
+     vision sub-session is loaded but never invoked.
+
+  3. OGA text + image E2E (`TestQwen3_5_9BMultimodal`) — the MS Build
+     demo path: load all three sub-sessions (embedding, vision, text)
+     on MorphiZenEP, run the Qwen multimodal processor over a
+     synthesized RGB image, then generate. The test runs in a
+     subprocess with `HIPDNN_EP_DEBUG=1` so stderr captures the
+     `[REAL] wrap_*` runtime markers, and asserts that wrappers
+     belonging to each of the three sub-sessions appear — i.e. all
+     three were claimed by MorphiZenEP rather than silently falling
+     back to CPU.
+
+The synthetic patch-merger micro-test below verifies that
+`InferOnnxShapes`'s Reshape SSA-trace resolves `num_logical_patches =
+num_patches / 4` via the `mult=0.25` slot through the entire chain:
 
   InferOnnxShapes  Reshape trace → DimOrigin{arg=0, dim=0, mult=0.25}
   C ABI             3-int64 triple, mult bit-cast through int64 slot
@@ -25,7 +40,11 @@ falls to priority-3 SSA trace — not name match. A regression in any link
 of the chain produces a wrong output shape that the assertion catches.
 """
 
+import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -34,7 +53,15 @@ import onnx.helper as oh
 import onnx.numpy_helper as nph
 import pytest
 
-from conftest import REPO_ROOT, create_ep_session
+from conftest import (
+    BaseOGATests,
+    ModelSpec,
+    REPO_ROOT,
+    create_ep_session,
+    register_model_fixtures,
+)
+
+# ruff: noqa: F811
 
 
 # Local model dir (vision.onnx + vision.onnx.data ~915 MB). Downloaded by
@@ -264,4 +291,441 @@ class TestQwen3_5_9BVisionDynShape:
         )
         assert cos >= 0.999, (
             f"vision EP output diverges from CPU (cosine={cos:.6f}); expected >= 0.999"
+        )
+
+
+# ── Qwen3.5-9B OGA E2E (text-only + text+image) ──────────────────────────
+#
+# The release/msbuild merge brings the three EP capabilities Qwen 3.5 OGA
+# E2E depends on:
+#   * VLM embedding sub-model bit-exact (Equal scalar broadcast / ordered
+#     NonZero / Slice partial-fill / ScatterND count_ptr — five coupled
+#     fixes in feat/qwen35-9b-embedding-and-text).
+#   * Dynamic-shape vision encoder with hip.loop + strided memrefCopy +
+#     FixLoopAccumulatorOffset (dynshapes_v3).
+#   * Dynamic Range/Reshape + RelaxMultiDynExpandShape + INT64
+#     wrap_miopenOpTensor for the text decoder's mrope path
+#     (feat/qwen35-9b-embedding-and-text).
+#
+# OGA's `qwen3_5` model_type (introduced upstream in PR #2019, already
+# present in our AMDmoore fork) loads all three sub-models as one
+# multimodal pipeline. Each sub-session gets MorphiZenEP wired in via
+# `patch_genai_config_for_morphizen`, so a regression that breaks
+# graph-claim on ANY sub-session aborts under HIPDNN_EP_STRICT=1
+# (conftest default) instead of silently falling back to CPU.
+
+
+def _make_qwen35_oga_text_prompt():
+    """Conservative prompt tokens for OGA text-only generation tests.
+
+    No image, no chat template — just a short token list that lands in
+    Qwen 3.5's vocabulary range. EOS is shared with BOS / PAD
+    (248044) so picking it as the prompt prefix is fine; OGA only
+    stops on EOS in the MODEL OUTPUT, not in the prompt.
+    """
+    # bos + arbitrary mid-vocab tokens. Vocab size is 248320, so any int
+    # under 248044 is safe. The list isn't decoded — only fed into
+    # `Generator.append_tokens` to drive an end-to-end forward pass.
+    return [248044, 1234, 5678, 9012, 3456, 7890, 12345]
+
+
+QWEN35 = ModelSpec(
+    name="qwen3_5_9b",
+    model_dir=QWEN35_MODEL_DIR,
+    onnx_file="text.onnx",
+    data_files=["text.onnx.data"],
+    extra_data_files=[
+        "embedding.onnx",
+        "embedding.onnx.data",
+        "vision.onnx",
+        "vision.onnx.data",
+    ],
+    hf_repo="amd/Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu",
+    # Architecture knobs — only consumed by BaseORTTests (which we do NOT
+    # subclass here; Qwen 3.5's text.onnx uses inputs_embeds + 3-rank
+    # mrope position_ids that the input builders in conftest don't model).
+    # Kept as placeholders so the ModelSpec validator is happy.
+    num_layers=32,
+    num_kv_heads=4,
+    head_dim=256,
+    has_position_ids=True,
+    # bos == eos == pad == 248044 in Qwen 3.5's config. Filler tokens are
+    # arbitrary mid-vocab ints; we never decode them.
+    bos_token=248044,
+    filler_tokens=[1234, 5678, 9012, 3456, 7890, 12345],
+    oga_files=[
+        "chat_template.jinja",
+        "config.json",
+        "genai_config.json",
+        "model_config.json",
+        "processor_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+    ],
+    # All three sub-sessions (embedding / vision / text) are expected to
+    # claim+compile on MorphiZenEP. STRICT=1 turns any compile failure
+    # into a hard abort with a stack trace — the right diagnostic for a
+    # regression. If a real kernel gap turns up here, flip to False AND
+    # file an issue identifying the missing op.
+    oga_strict=True,
+    # 9B model + multimodal pipeline → don't reuse OGA Model across
+    # tests (each test creates / tears down its own Model to bound the
+    # peak working set at one session's worth of constants).
+    reuse_oga_default_model=False,
+    markers={
+        # CPU baseline for chunked-prefill accuracy needs a full
+        # CPU-EP run of the 9B text decoder + 9B embedding pipeline.
+        # That's minutes per token and would dominate the CI budget,
+        # for a check that's already covered by the LLM-family
+        # chunked-prefill tests (Llama 8B etc.).
+        "test_oga_ep_chunked_prefill": pytest.mark.skip(
+            reason=(
+                "CPU baseline for 9B + embedding sub-model is too slow to "
+                "include in the standard test budget. Chunked-prefill "
+                "correctness is covered by Llama-8B et al."
+            )
+        ),
+    },
+)
+
+
+(
+    dynamic_model_path,
+    fixed_decode_path,
+    fixed_prefill_128_path,
+    ep_dynamic_session,
+    ep_fixed_decode_session,
+    ep_fixed_prefill_128_session,
+    oga_default_model,
+) = register_model_fixtures(QWEN35)
+
+
+class TestQwen3_5_9BOGAText(BaseOGATests):
+    """Qwen 3.5 9B text-only OGA E2E on MorphiZenEP.
+
+    Inherits the canonical 4 OGA tests (chunked_prefill is skipped above).
+    No images — the vision sub-session is loaded by OGA's multimodal
+    pipeline but never invoked by `append_tokens(...) → generate_next_token`.
+    Exercise of the embedding sub-session is implicit: OGA routes
+    `input_ids → embedding.onnx → text.onnx` even when no image_features
+    are supplied (the embedding graph short-circuits the scatter path on
+    empty image_features).
+    """
+
+    spec = QWEN35
+
+
+# ── Qwen 3.5 OGA text + image E2E ────────────────────────────────────────
+#
+# The MS Build demo path. Runs in a subprocess for two reasons:
+#  (1) HIPDNN_EP_DEBUG=1 is a process-startup-time decision in the EP DLL
+#      (`hipdnn_ep_debug_enabled()` is a `static const bool` evaluated on
+#      first call). A test that flips the env var mid-process can't enable
+#      debug logging — and the EP DLL has already been loaded by the
+#      conftest module-scope ORT/OGA setup. Spawning a fresh subprocess
+#      with the env var pre-set is the only way to capture the
+#      `[REAL] wrap_*` markers we use as proof of GPU dispatch.
+#  (2) The 9B + multimodal pipeline holds ~10 GB resident at peak. Putting
+#      it in a subprocess means the parent pytest process recovers all of
+#      that memory the moment the test finishes, instead of leaking into
+#      subsequent tests in the file.
+
+
+_QWEN35_MULTIMODAL_WORKER = textwrap.dedent(
+    r"""
+    # -*- coding: utf-8 -*-
+    import os, sys, json, tempfile, traceback
+    from pathlib import Path
+
+    MODEL_DIR = Path(sys.argv[1])
+    EP_DLL = Path(sys.argv[2])
+    IMAGE_PATH = Path(sys.argv[3])
+    MAX_NEW = int(sys.argv[4])
+
+    # Add EP + ROCm DLL dirs to PATH so the model.dll lld-link step finds
+    # amdhip64.lib / MIOpen.lib at compile time. (The parent test already
+    # set these but a child process inherits a snapshot; we re-add as a
+    # defensive belt-and-braces.)
+    repo_root = MODEL_DIR.parent.parent
+    for d in (repo_root / "install" / "dist" / "bin", repo_root / "install" / "therock" / "bin"):
+        if d.exists() and str(d) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+
+    try:
+        import onnxruntime_genai as og
+    except ImportError as e:
+        print("WORKER_SKIP onnxruntime-genai missing:", e, file=sys.stderr)
+        sys.exit(2)
+
+    if not hasattr(og, "register_execution_provider_library"):
+        print("WORKER_SKIP OGA build lacks register_execution_provider_library", file=sys.stderr)
+        sys.exit(2)
+
+    og.register_execution_provider_library("MorphiZenEP", str(EP_DLL))
+
+    try:
+        model = og.Model(str(MODEL_DIR))
+    except RuntimeError as e:
+        print(f"WORKER_FAIL og.Model load: {e}", file=sys.stderr)
+        sys.exit(3)
+
+    processor = model.create_multimodal_processor()
+    tokenizer_stream = processor.create_stream()
+    images = og.Images.open(str(IMAGE_PATH))
+
+    # Qwen 3.5 / Qwen-VL chat template: vision span wraps a single
+    # `<|image_pad|>` slot that the processor expands to N image tokens
+    # based on the input grid. Use the documented assistant-prompt form so
+    # we exercise both the system / user channels and the multimodal
+    # processor's tokenization path.
+    prompt = (
+        "<|im_start|>user\n"
+        "<|vision_start|><|image_pad|><|vision_end|>"
+        "Describe this image in one short sentence.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    inputs = processor(prompt, images=images)
+
+    params = og.GeneratorParams(model)
+    # Cap total length so a runaway generation can't hang the test budget.
+    params.set_search_options(max_length=512, do_sample=False)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+
+    generated = []
+    decoded = ""
+    while not generator.is_done() and len(generated) < MAX_NEW:
+        generator.generate_next_token()
+        tok = int(generator.get_next_tokens()[0])
+        generated.append(tok)
+        try:
+            decoded += tokenizer_stream.decode(tok)
+        except Exception:
+            pass  # decoder may stall on partial UTF-8; tokens are the truth
+
+    # Emit a structured result line on stdout for the parent to parse.
+    print("WORKER_OK " + json.dumps({"tokens": generated, "decoded": decoded}))
+    """
+)
+
+
+def _synth_qwen35_test_image(path):
+    """Save a deterministic 336x336 RGB image for the multimodal test.
+
+    336x336 ≥ Qwen 2.5 VL processor's min_pixels=65536 (256x256) and is a
+    multiple of the patch_size=16 / merge_size=2 (so it lands on the
+    processor's smart-resize fast path without rescaling). Pattern is a
+    diagonal gradient with a centered solid square — chosen so the model
+    has actual content to describe, not pure noise.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        pytest.skip(
+            "PIL not installed — `conda install pillow` or add to environment.yml"
+        )
+    W = H = 336
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    xs, ys = np.meshgrid(np.arange(W), np.arange(H))
+    img[..., 0] = (xs * 255 // W).astype(np.uint8)
+    img[..., 1] = (ys * 255 // H).astype(np.uint8)
+    img[..., 2] = ((xs + ys) * 255 // (W + H)).astype(np.uint8)
+    s = 96
+    cx, cy = W // 2, H // 2
+    img[cy - s // 2 : cy + s // 2, cx - s // 2 : cx + s // 2, :] = 255
+    Image.fromarray(img).save(str(path))
+
+
+class TestQwen3_5_9BMultimodal:
+    """Qwen 3.5 9B text + image E2E via OGA + MorphiZenEP.
+
+    Skipped when the model files aren't present (gated AMD repo). Runs in
+    a subprocess so HIPDNN_EP_DEBUG=1 takes effect at EP-DLL load time
+    and we can grep the captured stderr for `[REAL] wrap_*` runtime
+    dispatch markers as proof that the embedding, vision, AND text
+    sub-sessions all executed kernels on the GPU (rather than silently
+    falling back to CPU).
+    """
+
+    spec = QWEN35
+
+    @pytest.fixture(scope="class")
+    def workspace(self, tmp_path_factory, repo_root):
+        # Required model files. Skip cleanly if any are missing — they're
+        # multi-GB and only fetched explicitly by the user (the OGA suite
+        # downloads them on first OGA test, but if you're cherry-picking
+        # only this multimodal test we don't want a 12 GB surprise).
+        for f in (
+            self.spec.model_dir / x
+            for x in (
+                "text.onnx",
+                "text.onnx.data",
+                "embedding.onnx",
+                "embedding.onnx.data",
+                "vision.onnx",
+                "vision.onnx.data",
+                "genai_config.json",
+                "chat_template.jinja",
+                "tokenizer.json",
+                "processor_config.json",
+            )
+        ):
+            if not f.exists():
+                pytest.skip(f"Qwen 3.5 9B file missing: {f.name}")
+
+        from conftest import (
+            patch_genai_config_for_morphizen,
+            restore_genai_config,
+            setup_oga_ep,
+        )
+
+        # Register the EP in the parent process so the subprocess inherits
+        # the cached DLL location + PATH additions. Returns the absolute
+        # ep_dll path the subprocess needs.
+        _, ep_dll = setup_oga_ep(repo_root)
+        patch_genai_config_for_morphizen(self.spec.model_dir, ep_dll)
+        tmp_dir = tmp_path_factory.mktemp("qwen35_multimodal")
+        image_path = tmp_dir / "test_image.png"
+        _synth_qwen35_test_image(image_path)
+        yield {
+            "tmp_dir": tmp_dir,
+            "image_path": image_path,
+            "ep_dll": ep_dll,
+            "repo_root": repo_root,
+        }
+        restore_genai_config(self.spec.model_dir)
+
+    def _run_worker(self, workspace, max_new, *, debug=False):
+        worker_py = workspace["tmp_dir"] / "worker.py"
+        # Explicit UTF-8 — the worker template ships with a coding
+        # declaration but Python's default text-write encoding on Windows
+        # is cp1252, which will mangle any non-ASCII char in a comment
+        # before the worker can even parse the declaration.
+        worker_py.write_text(_QWEN35_MULTIMODAL_WORKER, encoding="utf-8")
+        env = os.environ.copy()
+        # STRICT=1 makes any sub-session graph-claim-then-compile-failure
+        # a hard abort with a stack trace — the right signal for a real
+        # regression instead of a silent CPU fallback.
+        env["HIPDNN_EP_STRICT"] = "1"
+        if debug:
+            env["HIPDNN_EP_DEBUG"] = "1"
+        else:
+            env.pop("HIPDNN_EP_DEBUG", None)
+        # THEROCK_DIST must be set without trailing whitespace — see the
+        # CLAUDE.md "cmd.exe set quoting" gotcha. os.environ.copy()
+        # already gives clean values; just ensure it's set.
+        therock = workspace["repo_root"] / "install" / "therock"
+        env.setdefault("THEROCK_DIST", str(therock))
+        # Bound by a generous timeout: cold-cache EP compile of text.onnx
+        # (~6.7 GB ONNX) plus generation can take 10+ min on a clean tree.
+        # Warm cache: ~30 s.
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(worker_py),
+                str(self.spec.model_dir),
+                str(workspace["ep_dll"]),
+                str(workspace["image_path"]),
+                str(max_new),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=1200,
+        )
+        return result
+
+    def test_oga_multimodal_runs(self, workspace):
+        """Smoke test: image+text prompt produces at least a few tokens
+        and the worker exits 0. No HIPDNN_EP_DEBUG — keeps stderr quiet
+        so a failure here is unambiguous (any cosine drift / silent CPU
+        fallback shows up as a slow run or as a strict-mode abort).
+        """
+        result = self._run_worker(workspace, max_new=5, debug=False)
+        if result.returncode == 2:
+            pytest.skip(result.stderr.strip().splitlines()[-1])
+        assert result.returncode == 0, (
+            f"Worker exited {result.returncode}.\n"
+            f"--- stderr (tail) ---\n{result.stderr[-2000:]}"
+        )
+        # Parse the WORKER_OK JSON line. There may be other stdout noise
+        # from OGA / ORT init — scan for the marker.
+        ok_lines = [
+            ln for ln in result.stdout.splitlines() if ln.startswith("WORKER_OK ")
+        ]
+        assert ok_lines, (
+            f"Worker did not emit WORKER_OK line.\n"
+            f"--- stdout (tail) ---\n{result.stdout[-2000:]}\n"
+            f"--- stderr (tail) ---\n{result.stderr[-2000:]}"
+        )
+        import json as _json
+
+        payload = _json.loads(ok_lines[-1][len("WORKER_OK ") :])
+        assert len(payload["tokens"]) >= 1, (
+            f"No tokens generated. Decoded: {payload['decoded']!r}"
+        )
+
+    def test_oga_multimodal_gpu_dispatch(self, workspace):
+        """Run with HIPDNN_EP_DEBUG=1; assert that `[REAL] wrap_*` markers
+        from kernel wrappers exercised by ALL THREE sub-sessions show up
+        on stderr. Proof that the embedding (Equal/NonZero/ScatterND),
+        vision (Conv/LayerNorm/MatMul/Loop), and text (matmul_nbits/GQA)
+        all dispatched on the GPU rather than silently falling back to
+        CPU — the canonical CLAUDE.md hygiene gotcha.
+
+        Just 3 generated tokens — we're looking for the kernel dispatch
+        fingerprint, not perf.
+        """
+        result = self._run_worker(workspace, max_new=3, debug=True)
+        if result.returncode == 2:
+            pytest.skip(result.stderr.strip().splitlines()[-1])
+        assert result.returncode == 0, (
+            f"Worker exited {result.returncode} under HIPDNN_EP_DEBUG=1.\n"
+            f"--- stderr (tail) ---\n{result.stderr[-3000:]}"
+        )
+        stderr = result.stderr
+        # Per-sub-session fingerprints. Each marker is chosen because it
+        # appears in EXACTLY ONE sub-session's runtime dispatch trace, so a
+        # positive count proves that sub-session is on the GPU:
+        #   * embedding: scatter_nd is the image-placeholder substitution's
+        #     final write. nonzero precedes it. Neither vision nor text
+        #     dispatches them.
+        #   * vision: wrap_gelu (Qwen vision MLP) and wrap_layer_normalization
+        #     (the unfused-LN form vision uses). Text's LN is the
+        #     wrap_skip_simplified_layer_norm fused form; text's activation
+        #     is wrap_miopenActivationForward(sigmoid) for SwiGLU.
+        #     PatchEmbedConvToGemm rewrites the patch embed to wrap_gemm
+        #     (which is why "Conv" markers do NOT appear — kept off this
+        #     list).
+        #   * text: wrap_matmul_nbits (AWQ INT4) is the per-layer hot path
+        #     and is text-only — vision and embedding use fp16 wrap_gemm.
+        embedding_markers = ("wrap_scatter_nd", "wrap_nonzero")
+        vision_markers = ("wrap_gelu", "wrap_layer_normalization")
+        text_markers = ("wrap_matmul_nbits",)
+
+        def _count(markers):
+            return sum(stderr.count(f"[REAL] {m}") for m in markers)
+
+        emb_n = _count(embedding_markers)
+        vis_n = _count(vision_markers)
+        txt_n = _count(text_markers)
+        print("\n  Sub-session GPU dispatch counts:")
+        print(f"    embedding (NonZero/ScatterND):                  {emb_n}")
+        print(f"    vision    (Gelu/LayerNormalization):            {vis_n}")
+        print(f"    text      (matmul_nbits):                       {txt_n}")
+        # All three must show GPU activity. A zero count means the
+        # sub-session silently fell back to CPU even though we patched
+        # genai_config for MorphiZenEP on every sub-session — the
+        # canonical CLAUDE.md silent-fallback gotcha.
+        assert emb_n > 0, (
+            f"No embedding sub-session GPU dispatch (looked for {embedding_markers}). "
+            f"Embedding ran on CPU? --- stderr (tail) ---\n{stderr[-3000:]}"
+        )
+        assert vis_n > 0, (
+            f"No vision sub-session GPU dispatch (looked for {vision_markers}). "
+            f"Vision ran on CPU? --- stderr (tail) ---\n{stderr[-3000:]}"
+        )
+        assert txt_n > 0, (
+            f"No text sub-session GPU dispatch (looked for {text_markers}). "
+            f"Text ran on CPU? --- stderr (tail) ---\n{stderr[-3000:]}"
         )
