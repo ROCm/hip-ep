@@ -266,6 +266,64 @@ struct FixLoopAccumulatorOffsetPass
     if (dimCandidates.empty())
       return;
 
+    // PASS 1: identify and DELETE the "self-copy" Concat-grow preamble.
+    // The body's first subview is shaped [dim_8, dim_9, dim_10] with all-
+    // static-zero offsets, and the copy is from %v_in (the arg) into a
+    // subview of %v_out (same buffer in-place). It's a literal self-copy
+    // -- arg3 and arg9 share the same alloc/aligned pointer. Removing it
+    // is a NO-OP semantically (buffer state unchanged) and an UN-bug
+    // physically (memrefCopy iterates rank*N elements through the index
+    // space; even a true no-op in semantics, it touches the same memory
+    // 147k+ times for our (1, 128, 1152) accumulator, which on some
+    // backends can race with the subsequent chunk-append's write at
+    // offset 0 when the iter-driven offset rewrite folds it to 0).
+    // Detection: memref.copy where (a) source is a function arg whose
+    // index < 3 + numLC (v_in), and (b) dest is a memref.subview whose
+    // offsets are all-static-0 AND whose source is the matching v_out
+    // arg (bufferize.result-marked). When found, delete the copy AND the
+    // subview (no other users).
+    {
+      unsigned numLC = numLoopCarriedIn(funcOp);
+      SmallVector<memref::CopyOp> selfCopies;
+      funcOp.walk([&](memref::CopyOp cp) {
+        auto srcArg = dyn_cast<BlockArgument>(cp.getSource());
+        if (!srcArg || srcArg.getOwner() != &entry)
+          return;
+        if (srcArg.getArgNumber() < 3 ||
+            srcArg.getArgNumber() >= 3 + numLC)
+          return;
+        if (funcOp.getArgAttr(srcArg.getArgNumber(), "bufferize.result"))
+          return;
+        auto sv = cp.getTarget().getDefiningOp<memref::SubViewOp>();
+        if (!sv)
+          return;
+        // All static offsets must be 0.
+        bool allZero = true;
+        for (int64_t so : sv.getStaticOffsets())
+          if (so != 0) {
+            allZero = false;
+            break;
+          }
+        if (!allZero)
+          return;
+        // No dynamic offsets either.
+        if (!sv.getOffsets().empty())
+          return;
+        // Source of the subview must be an out-param (bufferize.result).
+        auto svSrcArg = dyn_cast<BlockArgument>(sv.getSource());
+        if (!svSrcArg ||
+            !funcOp.getArgAttr(svSrcArg.getArgNumber(), "bufferize.result"))
+          return;
+        selfCopies.push_back(cp);
+      });
+      for (memref::CopyOp cp : selfCopies) {
+        auto sv = cp.getTarget().getDefiningOp<memref::SubViewOp>();
+        cp.erase();
+        if (sv && sv->use_empty())
+          sv.erase();
+      }
+    }
+
     int rewriteCount = 0;
     for (memref::DimOp dimOp : dimCandidates) {
       // For each user that is a memref.subview where this dim appears in
