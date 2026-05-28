@@ -67,15 +67,8 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
                int64_t data_type) {
-  fprintf(stderr,
-          "[slice-entry] state=%p data=%p starts=%p ends=%p output=%p "
-          "data_shape=%p data_rank=%lld output_shape=%p output_rank=%lld "
-          "K=%lld dtype=%lld\n",
-          (void *)state, data, starts, ends, output, (const void *)data_shape,
-          (long long)data_rank, (const void *)output_shape,
-          (long long)output_rank, (long long)starts_num_elements,
-          (long long)data_type);
-  fflush(stderr);
+  // (Slice runtime entry trace removed; was used for the slice-empty-buffer
+  // root-cause investigation. Re-add with a HIPDNN_EP_DEBUG gate if needed.)
   OP_PROFILE(
       "slice",
       [&] {

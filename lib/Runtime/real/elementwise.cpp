@@ -229,6 +229,98 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   const char *op_name = hipdnn_ep_tensor_op_name(tensor_op);
+
+  // Empty-operand identity-copy path.
+  //
+  // ONNX broadcast semantics are undefined when one operand has a dim
+  // that's 0 and the other has the same dim > 1. In practice, model
+  // exporters that emit "empty placeholder + Loop concat accumulator"
+  // patterns produce downstream Add/Sub/Mul/Div ops where the empty
+  // operand is meant as an additive/multiplicative identity (no
+  // contribution). Some exporters' shape inference then sizes the
+  // output OUT to MAX(LHS_dim, RHS_dim), which gives a non-empty OUT
+  // even when one operand is empty. The MIOpen tensor-op API rejects
+  // 0-dim descriptors, so we must handle this here.
+  //
+  // Treatment: if one operand is empty and the other has the same
+  // shape as OUT, copy the non-empty operand into OUT. If both
+  // operands are empty OR OUT itself is empty, the call is a no-op.
+  const bool out_empty = (out_n == 0 || out_c == 0 || out_h == 0 || out_w == 0);
+  const bool lhs_empty = (lhs_n == 0 || lhs_c == 0 || lhs_h == 0 || lhs_w == 0);
+  const bool rhs_empty = (rhs_n == 0 || rhs_c == 0 || rhs_h == 0 || rhs_w == 0);
+  if (out_empty || lhs_empty || rhs_empty) {
+    static int dbg_count = 0;
+    if (dbg_count++ < 4) {
+      fprintf(stderr,
+              "[elementwise-empty] op=%s dtype=%s "
+              "lhs=[%lld,%lld,%lld,%lld]%s "
+              "rhs=[%lld,%lld,%lld,%lld]%s "
+              "out=[%lld,%lld,%lld,%lld]%s\n",
+              op_name, type_name, (long long)lhs_n, (long long)lhs_c,
+              (long long)lhs_h, (long long)lhs_w, lhs_empty ? "(E)" : "",
+              (long long)rhs_n, (long long)rhs_c, (long long)rhs_h,
+              (long long)rhs_w, rhs_empty ? "(E)" : "", (long long)out_n,
+              (long long)out_c, (long long)out_h, (long long)out_w,
+              out_empty ? "(E)" : "");
+    }
+    if (out_empty)
+      return 0;
+    // Pick the non-empty operand whose shape matches OUT.
+    bool lhs_matches_out = !lhs_empty && lhs_n == out_n && lhs_c == out_c &&
+                           lhs_h == out_h && lhs_w == out_w;
+    bool rhs_matches_out = !rhs_empty && rhs_n == out_n && rhs_c == out_c &&
+                           rhs_h == out_h && rhs_w == out_w;
+    if (lhs_matches_out || rhs_matches_out) {
+      size_t elem_size = 0;
+      switch (data_type) {
+      case HIPDNN_EP_DATATYPE_HALF:
+        elem_size = 2;
+        break;
+      case HIPDNN_EP_DATATYPE_FLOAT:
+        elem_size = 4;
+        break;
+      case HIPDNN_EP_DATATYPE_INT32:
+        elem_size = 4;
+        break;
+      case HIPDNN_EP_DATATYPE_INT64:
+        elem_size = 8;
+        break;
+      default:
+        fprintf(stderr,
+                "[elementwise-empty] unsupported dtype %lld for identity-copy\n",
+                (long long)data_type);
+        return -1;
+      }
+      size_t bytes = static_cast<size_t>(out_n) * out_c * out_h * out_w *
+                     elem_size;
+      void *src = lhs_matches_out ? lhs : rhs;
+      hipStream_t stream =
+          static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+      hipError_t err =
+          hipMemcpyAsync(output, src, bytes, hipMemcpyDeviceToDevice, stream);
+      if (err != hipSuccess) {
+        fprintf(stderr, "[elementwise-empty] hipMemcpyAsync failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
+      return 0;
+    }
+    // Neither operand matches OUT — undefined broadcast. Zero-fill OUT
+    // as a safe default (matches CPU treating empty as additive identity
+    // and the other operand contributing nothing meaningful).
+    fprintf(stderr,
+            "[elementwise-empty] no operand matches OUT shape; "
+            "zero-filling output as a safe default\n");
+    hipStream_t stream =
+        static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+    size_t elem_size = (data_type == HIPDNN_EP_DATATYPE_HALF) ? 2 : 4;
+    size_t bytes = static_cast<size_t>(out_n) * out_c * out_h * out_w *
+                   elem_size;
+    hipError_t err = hipMemsetAsync(output, 0, bytes, stream);
+    if (err != hipSuccess)
+      return -1;
+    return 0;
+  }
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: op=%s, "
                     "lhs=[%lld,%lld,%lld,%lld], "
                     "rhs=[%lld,%lld,%lld,%lld], "

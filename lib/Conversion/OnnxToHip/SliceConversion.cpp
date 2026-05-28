@@ -42,11 +42,22 @@ namespace {
 //   4. Anything else → fall back to the data-dim upper bound (the legacy
 //      over-alloc contract; the kernel's zero-padded tail keeps it safe).
 //
-// In every runtime-extent case the result is wrapped in
-// `select(extent==0, upper_bound, extent)` because downstream MIOpen
-// broadcast tensor descriptors reject dim 0 — genuine empty slices (e.g.
-// past_kv on first decode token) revert to the legacy upper-bound + zero
-// padding so the downstream chain still functions.
+// Empty-slice (extent == 0) policy:
+// The TRUE logical extent (possibly 0) is always used for the output
+// buffer dim. Earlier code wrapped the result in
+// `select(extent==0, upper_bound, extent)` to keep downstream MIOpen
+// broadcast descriptors (which reject dim 0) happy. That patch silently
+// over-allocated the empty-slice output to the data dim and cascaded
+// padding garbage: in `Slice(x, k, k, axis) -> Loop` (an empty slice
+// used as a Loop accumulator's v_init), `tensor.dim(acc, axis)` inside
+// the body returns the upper bound instead of 0, so the Concat-grown
+// accumulator starts at upper_bound + chunk and the downstream Reshape
+// chain operates on a wildly oversized buffer. Tolerating dim 0 in the
+// MIOpen wrapper (`wrap_miopenOpTensor` identity-copies LHS->OUT when
+// one operand has any dim 0 and the other matches OUT) is cheaper than
+// silently corrupting the accumulator. Past_kv-on-first-decode-token
+// (the original motivator) also benefits: downstream Concat/Reshape now
+// see the correct dim 0 and short-circuit naturally.
 //
 // Constants are resolved via `tryFoldToDenseAttr`, which peels
 // `bufferization.to_tensor` / `memref.cast` / `tensor.cast` wrappers, reads
@@ -69,9 +80,8 @@ namespace {
 //     %s0 = tensor.extract %s[%c0] : tensor<1xi64>
 //     %e0 = tensor.extract %e[%c0] : tensor<1xi64>
 //     // ONNX neg-index + clamp arith on index
-//     %extent = ...
-//     %sized = arith.select %extent==0, %upper, %extent
-//     // tensor.empty dyn-size for axis 1 = %sized
+//     %extent = ...   // possibly 0 at runtime
+//     // tensor.empty dyn-size for axis 1 = %extent (no zero-guard)
 
 // ---------------------------------------------------------------------------
 // Constant resolution
@@ -527,19 +537,21 @@ struct SliceToHip : public mlir::RewritePattern {
     mlir::Value startsTensor = op->getOperand(1);
     mlir::Value endsTensor = op->getOperand(2);
 
-    auto guardWithUpper = [&](mlir::Value extent, mlir::Value upper) {
-      // When the logical extent is 0 at runtime (genuine empty slice —
-      // e.g. past_kv on first decode token), substitute the upper bound.
-      // Downstream MIOpen broadcast descriptors reject dim 0; the over-
-      // alloc + zero-pad fallback preserves the legacy contract on those
-      // edge cases.
-      mlir::Value zero =
-          mlir::arith::ConstantIndexOp::create(rewriter, loc, 0);
-      mlir::Value isZero = mlir::arith::CmpIOp::create(
-          rewriter, loc, mlir::arith::CmpIPredicate::eq, extent, zero);
-      return mlir::arith::SelectOp::create(rewriter, loc, isZero, upper,
-                                           extent)
-          .getResult();
+    auto guardWithUpper = [&](mlir::Value extent, mlir::Value /*upper*/) {
+      // Produce the TRUE logical extent (possibly 0). The previous
+      // "select(extent==0, upper, extent)" silently substituted the data
+      // dim's upper bound for genuine empty slices. That kept downstream
+      // MIOpen broadcast descriptors happy (they reject dim 0) but cost
+      // correctness: in patterns like `Slice(x, k, k, axis) → Loop` (an
+      // empty placeholder used as a Loop accumulator's v_init), the
+      // upper-bound buffer's `tensor.dim(acc, axis)` returns the upper
+      // bound at every Concat in the loop body, so the accumulator
+      // grows from `upper_bound` instead of `0` and the downstream
+      // Reshape chain operates on a wildly oversized buffer. Producing
+      // dim 0 makes Concat / insert_slice / Reshape do the right thing;
+      // the MIOpen elementwise wrapper handles 0-dim operands separately
+      // (see `wrap_miopenOpTensor`'s empty-operand identity-copy path).
+      return extent;
     };
 
     auto extractI64ToIndex = [&](mlir::Value tensor1D, int64_t k) {
@@ -612,11 +624,11 @@ struct SliceToHip : public mlir::RewritePattern {
         continue;
       }
       if (sliceInfo[i].staticSize >= 0) {
-        if (sliceInfo[i].staticSize == 0)
-          dynSizes.push_back(upper);
-        else
-          dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
-              rewriter, loc, sliceInfo[i].staticSize));
+        // Compile-time-known extent (possibly 0). Use it verbatim;
+        // downstream consumers handle empty buffers per the
+        // empty-operand contract documented on `guardWithUpper`.
+        dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
+            rewriter, loc, sliceInfo[i].staticSize));
         continue;
       }
       if (sliceInfo[i].runtimeFromDim) {
