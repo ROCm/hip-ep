@@ -797,7 +797,9 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
 // ---------------------------------------------------------------------------
 
 int main(int argc, char *argv[]) {
-  hip::install_crash_handlers("hip-onnx-runner");
+  // Disabled: cpptrace terminate handler turns uncaught ORT/MorphiZen throws
+  // into a stack trace without reaching the catch blocks below.
+  // hip::install_crash_handlers("hip-onnx-runner");
   MiniOptions mo;
   mo.add_option("m", "model", "Path to .onnx model", "");
   mo.add_option("L", "l2norm",
@@ -827,6 +829,11 @@ int main(int argc, char *argv[]) {
       "p", "positive-only",
       "Generate positive-only random inputs (for Sqrt/Reciprocal testing)",
       "false", true);
+  mo.add_option(
+      "E", "strict-ep",
+      "Set session.disable_cpu_ep_fallback=1 (fail if any node is not on "
+      "MorphiZen EP)",
+      "false", true);
 
   try {
     mo.parse(argc, argv);
@@ -850,6 +857,7 @@ int main(int argc, char *argv[]) {
   const bool use_input_files = !input_dir_str.empty();
   const int graph_optimization_level = mo.get<int>("graph-opt-level");
   const bool positive_only = mo.get<bool>("positive-only");
+  const bool strict_ep = mo.get<bool>("strict-ep");
 
   if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
       !l2norm_arg[1].empty()) {
@@ -949,7 +957,9 @@ int main(int argc, char *argv[]) {
     // older ORT version we still link against on Windows.
     session_opts.AppendExecutionProvider_V2(
         env, devices, std::unordered_map<std::string, std::string>{});
-    session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+    if (strict_ep) {
+      session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+    }
   }
 
   // Create session
@@ -968,47 +978,81 @@ int main(int argc, char *argv[]) {
           env, model_path.u8string().c_str(), session_opts);
 #endif
     } catch (const Ort::Exception &e) {
-      std::cerr << "Session creation failed: " << e.what() << "\n";
+      std::cerr << "Session creation failed (Ort::Exception): " << e.what()
+                << "\n";
+      return 1;
+    } catch (const std::exception &e) {
+      std::cerr << "Session creation failed (std::exception): " << e.what()
+                << "\n";
+      return 1;
+    } catch (...) {
+      std::cerr << "Session creation failed: unknown exception\n";
       return 1;
     }
     std::cout << "Session created in "
               << static_cast<int>(elapsed_since(t0) * 1000) << " ms\n";
+    std::cout.flush();
   }
 
+  std::cerr << "[STEP] AllocatorWithDefaultOptions" << std::endl;
   Ort::AllocatorWithDefaultOptions allocator;
 
-  // Collect input info
-  size_t input_count = session->GetInputCount();
+  size_t input_count = 0;
+  size_t output_count = 0;
   std::vector<std::string> input_names_str;
   std::vector<const char *> input_names;
   std::vector<std::vector<int64_t>> input_shapes;
   std::vector<ONNXTensorElementDataType> input_types;
-
-  for (size_t i = 0; i < input_count; ++i) {
-    auto name_ptr = session->GetInputNameAllocated(i, allocator);
-    input_names_str.push_back(name_ptr.get());
-    auto type_info = session->GetInputTypeInfo(i);
-    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-    input_shapes.push_back(tensor_info.GetShape());
-    input_types.push_back(tensor_info.GetElementType());
-  }
-  for (auto &s : input_names_str)
-    input_names.push_back(s.c_str());
-
-  // Collect output info
-  size_t output_count = session->GetOutputCount();
   std::vector<std::string> output_names_str;
   std::vector<const char *> output_names;
 
-  for (size_t i = 0; i < output_count; ++i) {
-    auto name_ptr = session->GetOutputNameAllocated(i, allocator);
-    output_names_str.push_back(name_ptr.get());
+  try {
+    std::cerr << "[STEP] GetInputCount" << std::endl;
+    input_count = session->GetInputCount();
+    std::cerr << "[STEP] input_count=" << input_count << std::endl;
+
+    for (size_t i = 0; i < input_count; ++i) {
+      std::cerr << "[STEP] GetInputNameAllocated[" << i << "]" << std::endl;
+      auto name_ptr = session->GetInputNameAllocated(i, allocator);
+      input_names_str.push_back(name_ptr.get());
+      std::cerr << "[STEP]   name=" << input_names_str.back() << std::endl;
+      std::cerr << "[STEP] GetInputTypeInfo[" << i << "]" << std::endl;
+      auto type_info = session->GetInputTypeInfo(i);
+      auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+      input_shapes.push_back(tensor_info.GetShape());
+      input_types.push_back(tensor_info.GetElementType());
+    }
+    for (auto &s : input_names_str)
+      input_names.push_back(s.c_str());
+
+    std::cerr << "[STEP] GetOutputCount" << std::endl;
+    output_count = session->GetOutputCount();
+    std::cerr << "[STEP] output_count=" << output_count << std::endl;
+
+    for (size_t i = 0; i < output_count; ++i) {
+      std::cerr << "[STEP] GetOutputNameAllocated[" << i << "]" << std::endl;
+      auto name_ptr = session->GetOutputNameAllocated(i, allocator);
+      output_names_str.push_back(name_ptr.get());
+      std::cerr << "[STEP]   name=" << output_names_str.back() << std::endl;
+    }
+    for (auto &s : output_names_str)
+      output_names.push_back(s.c_str());
+  } catch (const Ort::Exception &e) {
+    std::cerr << "I/O metadata collection failed (Ort::Exception): " << e.what()
+              << std::endl;
+    return 1;
+  } catch (const std::exception &e) {
+    std::cerr << "I/O metadata collection failed (std::exception): " << e.what()
+              << std::endl;
+    return 1;
+  } catch (...) {
+    std::cerr << "I/O metadata collection failed: unknown exception"
+              << std::endl;
+    return 1;
   }
-  for (auto &s : output_names_str)
-    output_names.push_back(s.c_str());
 
   std::cout << "Inputs: " << input_count << "  Outputs: " << output_count
-            << "\n";
+            << std::endl;
 
   std::filesystem::path input_dir_path;
   if (use_input_files) {
@@ -1020,7 +1064,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Build input tensors (from files or random)
+  std::cerr << "[STEP] build input tensors" << std::endl;
   std::vector<std::vector<char>> input_buffers(input_count);
   std::vector<Ort::Value> input_tensors;
 
@@ -1028,34 +1072,126 @@ int main(int argc, char *argv[]) {
     auto shape = input_shapes[i];
     if (!shape.empty() && shape[0] == -1)
       shape[0] = 1;
+    // Any remaining dynamic dim becomes 1 so we have a concrete shape.
+    for (auto &d : shape) {
+      if (d < 0)
+        d = 1;
+    }
 
     size_t elem_size = element_byte_size(input_types[i]);
     int64_t n_elems = calculate_product(shape);
-    input_buffers[i].resize(n_elems * elem_size);
+    std::cerr << "[STEP]   input[" << i << "] elem_size=" << elem_size
+              << " n_elems=" << n_elems << " shape=[";
+    for (auto d : shape)
+      std::cerr << d << ",";
+    std::cerr << "]" << std::endl;
 
     if (use_input_files) {
       const auto bin_path = tensor_dump_bin_path(
           input_dir_path, "input", i, input_names_str[i], input_types[i]);
+      std::cerr << "[STEP]   bin_path=" << bin_path.string() << std::endl;
       std::error_code ec;
       if (!std::filesystem::exists(bin_path, ec)) {
-        std::cerr << "Missing input file: " << bin_path.string() << "\n";
+        std::cerr << "Missing input file: " << bin_path.string() << std::endl;
         return 1;
       }
+      // Sidecar `.shape` file: comma-separated concrete dims. Required when
+      // the ONNX has dynamic dims AND the dim split isn't a 1-D vector --
+      // file size alone cannot tell `[1,8]` from `[8,1]` for input_ids.
+      const auto shape_path = bin_path.string() + ".shape";
+      if (std::filesystem::exists(shape_path, ec)) {
+        std::ifstream sf(shape_path);
+        std::string line;
+        std::getline(sf, line);
+        std::vector<int64_t> from_shape_file;
+        size_t pos = 0;
+        while (pos < line.size()) {
+          size_t comma = line.find(',', pos);
+          std::string tok = line.substr(pos, comma - pos);
+          if (!tok.empty()) {
+            try {
+              from_shape_file.push_back(std::stoll(tok));
+            } catch (...) {
+              std::cerr << "Bad value in " << shape_path << ": '" << tok << "'"
+                        << std::endl;
+              return 1;
+            }
+          }
+          if (comma == std::string::npos)
+            break;
+          pos = comma + 1;
+        }
+        if (from_shape_file.size() != shape.size()) {
+          std::cerr << "Rank mismatch in " << shape_path << ": got "
+                    << from_shape_file.size() << " dims, ONNX rank "
+                    << shape.size() << std::endl;
+          return 1;
+        }
+        shape = from_shape_file;
+        std::cerr << "[STEP]   shape from sidecar: [";
+        for (auto d : shape)
+          std::cerr << d << ",";
+        std::cerr << "]" << std::endl;
+      } else {
+        // Fallback: replace any remaining -1 dim by file-size split on first
+        // dynamic dim found.  Only safe when there's exactly one dyn dim.
+        int dyn_idx = -1;
+        int dyn_count = 0;
+        for (size_t d = 0; d < shape.size(); ++d) {
+          if (shape[d] < 0) {
+            dyn_idx = static_cast<int>(d);
+            ++dyn_count;
+          }
+        }
+        if (dyn_count > 1) {
+          std::cerr << "Input '" << input_names_str[i] << "' has " << dyn_count
+                    << " dynamic dims; create " << shape_path
+                    << " with concrete shape (comma-separated)." << std::endl;
+          return 1;
+        }
+        if (dyn_count == 1) {
+          std::ifstream f(bin_path, std::ios::binary | std::ios::ate);
+          const std::streamsize file_sz = f.tellg();
+          f.close();
+          int64_t inner = elem_size;
+          for (size_t d = 0; d < shape.size(); ++d) {
+            if (static_cast<int>(d) != dyn_idx)
+              inner *= shape[d];
+          }
+          if (inner > 0 && file_sz > 0 && (file_sz % inner) == 0) {
+            shape[dyn_idx] = file_sz / inner;
+            std::cerr
+                << "[STEP]   shape inferred from file (single dyn dim): [";
+            for (auto d : shape)
+              std::cerr << d << ",";
+            std::cerr << "]" << std::endl;
+          }
+        }
+      }
+
+      n_elems = calculate_product(shape);
+      const size_t expected_bytes = static_cast<size_t>(n_elems) * elem_size;
+      input_buffers[i].resize(expected_bytes);
       if (!load_raw_file(bin_path, input_buffers[i].data(),
-                         input_buffers[i].size()))
+                         input_buffers[i].size())) {
+        std::cerr << "[STEP]   load_raw_file FAILED" << std::endl;
         return 1;
-      std::cout << "Loaded input " << i << " from " << bin_path.string()
-                << "\n";
+      }
+      std::cout << "Loaded input " << i << " from " << bin_path.string() << " ("
+                << expected_bytes << " bytes)" << std::endl;
     } else {
+      input_buffers[i].resize(n_elems * elem_size);
       fill_random_input_buffer(input_buffers[i].data(), input_buffers[i].size(),
                                input_types[i], rng, positive_only);
     }
 
+    std::cerr << "[STEP]   CreateTensor[" << i << "]" << std::endl;
     Ort::MemoryInfo mem =
         Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     input_tensors.push_back(Ort::Value::CreateTensor(
         mem, input_buffers[i].data(), input_buffers[i].size(), shape.data(),
         shape.size(), input_types[i]));
+    std::cerr << "[STEP]   CreateTensor[" << i << "] OK" << std::endl;
   }
 
   const std::string dump_stem = model_path.stem().string();
@@ -1074,8 +1210,8 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Run inference
-  std::cout << "Running inference...\n";
+  std::cerr << "[STEP] Run" << std::endl;
+  std::cout << "Running inference..." << std::endl;
   std::vector<Ort::Value> outputs;
   {
     auto t0 = std::chrono::steady_clock::now();
@@ -1087,7 +1223,12 @@ int main(int argc, char *argv[]) {
                 << static_cast<int64_t>(elapsed_since(t0) * 1e6) << " us\n";
       std::cout << "OK - " << outputs.size() << " output tensor(s)\n";
     } catch (const Ort::Exception &e) {
-      std::cerr << "Inference failed: " << e.what() << "\n";
+      std::cerr << "Inference failed (Ort::Exception): " << e.what()
+                << std::endl;
+      return 1;
+    } catch (const std::exception &e) {
+      std::cerr << "Inference failed (std::exception): " << e.what()
+                << std::endl;
       return 1;
     }
   }

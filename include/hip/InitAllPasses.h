@@ -17,6 +17,8 @@
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -50,21 +52,26 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
+  registry.insert<mlir::linalg::LinalgDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
+  // Register BufferDeallocationOpInterface external model for arith — required
+  // by the upstream buildBufferDeallocationPipeline when arith.constant /
+  // arith.select / arith.constant_index appear in bufferized IR (e.g. via
+  // rank-1 size-1 scalar extraction in Range lowering).
+  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
+  // linalg.* ops (in particular linalg.map / linalg.fill emitted by the
+  // upstream tensor bufferization of tensor.splat / tensor.empty + Where)
+  // need their own external bufferizable interface model.  Without this
+  // the OneShotBufferizePass fails on graphs containing onnx.ConstantOfShape
+  // -> tensor.splat -> linalg.map (e.g. multimodal embedding.onnx).
+  mlir::linalg::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
-  // BufferDeallocation interface external models. Required after the
-  // RefineLoopBodyTypes pass enables vision-encoder outlined-loop bodies
-  // to reach bufferize: ownership-based dealloc walks every operand /
-  // result through the interface, and some `arith.*` ops (e.g.
-  // `arith.select` on tensor operands) need the interface to declare
-  // they don't own memref values.
-  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
 }
 
 /// Load all required dialects into an MLIRContext.

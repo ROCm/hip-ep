@@ -14,6 +14,7 @@ add_library(HipDialectTransforms STATIC
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
+  RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp
 )
 
@@ -46,6 +47,9 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRMemRefToLLVM
   MLIRFuncToLLVM
   MLIRAffineToStandard
+  MLIRLinalgDialect
+  MLIRLinalgTransforms
+  MLIRSCFToControlFlow
   MLIRReconcileUnrealizedCasts
   flatbuffers::flatbuffers
 )

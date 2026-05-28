@@ -12,11 +12,6 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// Map MLIR element type -> HIPDNN_EP_DATATYPE_* enum used by the runtime
-// stub. Only the subset that NonZero supports today is enumerated here;
-// any other element type fails conversion explicitly so that adding a new
-// type later surfaces the gap loudly instead of silently mis-classifying
-// the input.
 static int64_t getHipdnnInputDataType(mlir::Type elemType) {
   if (elemType.isF32())
     return 0; // HIPDNN_EP_DATATYPE_FLOAT
@@ -36,18 +31,15 @@ static int64_t getHipdnnInputDataType(mlir::Type elemType) {
 
 // onnx.NonZero -> hip.nonzero
 //
-// Input  X: ranked tensor of shape [D0, ..., D{R-1}]. Static dims are
-//           used directly; dynamic dims are read via `tensor.dim` at
-//           runtime and multiplied into the upper-bound capacity for the
-//           output `N` dim.
-// Output Y: tensor<R x ? x i64>. The N dim is data-dependent (number of
-//           non-zero elements at runtime); the upper bound is numel(X)
-//           and is materialised as the runtime `dynSize` of the
-//           `tensor.empty` init operand so the buffer is large enough to
-//           hold the worst case.
+// Input  X: ranked tensor of shape [D0, ..., D{R-1}].
+// Output Y: tensor<R x ? x i64>. The N dim is data-dependent; upper bound
+//           is numel(X).
+// Output count_buf: tensor<1xi32>. Receives the actual nonzero count at
+//           runtime (written by the kernel via atomicAdd). Downstream ops
+//           (ScatterND) can backtrace to this value to limit processing.
 struct NonZeroToHip : public mlir::RewritePattern {
   NonZeroToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.NonZero", /*benefit=*/1, ctx) {}
+      : RewritePattern("onnx.NonZero", /*benefit=*/2, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -77,8 +69,6 @@ struct NonZeroToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "NonZero result element type must be i64");
 
-    // First result dim must be the input rank (static); the N dim is
-    // dynamic and the upper bound is numel(X).
     int64_t inputRank = inputType.getRank();
     if (resultType.getDimSize(0) != inputRank)
       return rewriter.notifyMatchFailure(
@@ -91,13 +81,7 @@ struct NonZeroToHip : public mlir::RewritePattern {
 
     mlir::Location loc = op->getLoc();
 
-    // Materialise the upper-bound size for the dynamic N dim. When every
-    // input dim is static we fold `numel` to a single `arith.constant`
-    // (matches the legacy fast path so LIT tests stay intact). With at
-    // least one dynamic dim we emit `tensor.dim` per dim and chain the
-    // running product as `index` math. The resulting value is the worst
-    // case `N` (every element non-zero) and becomes the dynsize operand
-    // of the destination `tensor.empty`.
+    // Compute upper-bound for the dynamic N dim.
     mlir::Value upperBound;
     if (inputType.hasStaticShape()) {
       int64_t numel = 1;
@@ -119,13 +103,24 @@ struct NonZeroToHip : public mlir::RewritePattern {
             mlir::arith::MulIOp::create(rewriter, loc, upperBound, dim);
       }
     }
-    mlir::Value init = mlir::tensor::EmptyOp::create(
+
+    // Output indices buffer: [R, upper_bound]
+    mlir::Value indicesInit = mlir::tensor::EmptyOp::create(
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
         mlir::ValueRange{upperBound});
 
+    // Count buffer: tensor<1xi32> — holds the actual nonzero count
+    auto countType = mlir::RankedTensorType::get({1}, rewriter.getI32Type());
+    mlir::Value countInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, countType.getShape(), countType.getElementType(),
+        mlir::ValueRange{});
+
     auto hipOp = mlir::hip::NonZeroOp::create(
-        rewriter, loc, resultType, context, op->getOperand(0), init,
+        rewriter, loc, mlir::TypeRange{resultType, countType}, context,
+        op->getOperand(0), indicesInit, countInit,
         rewriter.getI64IntegerAttr(inputDataType));
+
+    // The ONNX op has a single result (indices); replace it with result[0]
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

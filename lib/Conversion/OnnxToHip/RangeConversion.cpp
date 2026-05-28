@@ -187,11 +187,18 @@ struct RangeToHip : public RewritePattern {
     if (!elemTy.isIntOrFloat())
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 
+    // Check operands: ONNX Range takes scalar inputs, which can be either
+    // rank-0 tensors (tensor<i64>) or rank-1 tensors with shape [1]
+    // (tensor<1xi64>). Both representations are valid.
     for (Value v : op->getOperands()) {
       auto t = dyn_cast<RankedTensorType>(v.getType());
-      if (!t || t.getRank() != 0 || t.getElementType() != elemTy)
+      if (!t || t.getElementType() != elemTy)
         return rewriter.notifyMatchFailure(
-            op, "expected 0-D operands matching result element type");
+            op, "expected operands with matching result element type");
+      int64_t rank = t.getRank();
+      if (rank != 0 && (rank != 1 || t.getDimSize(0) != 1))
+        return rewriter.notifyMatchFailure(
+            op, "expected rank-0 or rank-1 size-1 scalar operands");
     }
 
     Location loc = op->getLoc();
@@ -199,12 +206,96 @@ struct RangeToHip : public RewritePattern {
     if (failed(verifyConstantDeltaNonZero(op, op->getOperand(2), elemTy)))
       return failure();
 
-    Value startE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(0),
-                                             ValueRange{});
-    Value limitE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(1),
-                                             ValueRange{});
-    Value deltaE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(2),
-                                             ValueRange{});
+    // Extract scalar values for Range start/limit/delta operands.
+    //
+    // Naively emitting `tensor.extract %v[%c0]` on a rank-1 size-1 input
+    // bufferizes to `memref.load %buf[0]`, and `hip-pool-allocs` only hoists
+    // pure SSA shape arithmetic (memref.dim / arith.* / index_cast) — not
+    // memref.load. If %v traces back to a `tensor.from_elements(%single)`
+    // (typical for Unsqueeze(scalar, [0])-style ONNX shape arithmetic), the
+    // resulting `memref.load` from a shared shape scratch buffer leaves the
+    // pool-size computation undefined w.r.t. block dominance and produces
+    // `operand #0 does not dominate this use` later in the pipeline.
+    //
+    // Same playbook as ExpandConversion: peek through value-preserving
+    // rank-changing ops (tensor.expand_shape / tensor.collapse_shape) and
+    // `tensor.from_elements` to reach the scalar producer; only fall back to
+    // `tensor.extract` when traceback is impossible (opaque function args
+    // etc.).
+    auto peekScalarProducer = [](Value v) -> Value {
+      while (true) {
+        Operation *defOp = v.getDefiningOp();
+        if (!defOp)
+          return v;
+        if (auto exp = dyn_cast<tensor::ExpandShapeOp>(defOp)) {
+          v = exp.getSrc();
+          continue;
+        }
+        if (auto col = dyn_cast<tensor::CollapseShapeOp>(defOp)) {
+          v = col.getSrc();
+          continue;
+        }
+        return v;
+      }
+    };
+
+    auto extractScalar = [&](Value v) -> Value {
+      // Case A (NEW, hybrid externalisation path): producer is an inline
+      // `onnx.Constant` with a 1-element `value` attr that the hybrid
+      // Phase 1 left in place. Materialize a pure-SSA `arith.constant` of
+      // the stored scalar value. This is what keeps the Range count
+      // formula (sub/ceildivsi/clamp) free of `memref.load` for the very
+      // common case where start/limit/delta are compile-time literals
+      // -- which is exactly what `hip-pool-allocs` needs in order to
+      // hoist the dynamic-size `memref.alloc` for the Range output.
+      // Peek both before and after rank-changing reshape views so we
+      // catch `Reshape(<1xi64>) -> <i64>`-style chains too.
+      if (auto attr = getInlineScalarFromOnnxConstant(v)) {
+        Value scalar = materializeScalarFromDenseAttr(rewriter, loc, *attr);
+        if (scalar && scalar.getType() == elemTy)
+          return scalar;
+      }
+
+      // Try traceback first: walk through rank-changing reshape views to the
+      // underlying scalar producer.
+      Value peek = peekScalarProducer(v);
+
+      if (auto attr = getInlineScalarFromOnnxConstant(peek)) {
+        Value scalar = materializeScalarFromDenseAttr(rewriter, loc, *attr);
+        if (scalar && scalar.getType() == elemTy)
+          return scalar;
+      }
+
+      // Case B: producer is a single-element tensor.from_elements.
+      if (auto fromElts = peek.getDefiningOp<tensor::FromElementsOp>()) {
+        if (fromElts.getNumOperands() == 1) {
+          Value elem = fromElts.getOperand(0);
+          if (elem.getType() == elemTy)
+            return elem;
+        }
+      }
+
+      // Case C: producer is itself a rank-0 tensor — extract with empty
+      // indices. Bufferizes to a memref.load on a 0-D buffer, which is small
+      // enough that hip-materialize-host-scalars routes it through the
+      // runtime-owned host scratch buffer (not the GPU pool), so pool-allocs
+      // hoist still works.
+      if (auto peekTy = dyn_cast<RankedTensorType>(peek.getType())) {
+        if (peekTy.getRank() == 0)
+          return tensor::ExtractOp::create(rewriter, loc, peek, ValueRange{});
+      }
+
+      // Fallback: rank-0 = empty indices, rank-1 size-1 = [0].
+      auto t = cast<RankedTensorType>(v.getType());
+      if (t.getRank() == 0)
+        return tensor::ExtractOp::create(rewriter, loc, v, ValueRange{});
+      Value idx = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      return tensor::ExtractOp::create(rewriter, loc, v, ValueRange{idx});
+    };
+
+    Value startE = extractScalar(op->getOperand(0));
+    Value limitE = extractScalar(op->getOperand(1));
+    Value deltaE = extractScalar(op->getOperand(2));
 
     Value len = llvm::TypeSwitch<Type, Value>(elemTy)
                     .Case<IntegerType>([&](IntegerType ity) {

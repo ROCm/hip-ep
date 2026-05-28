@@ -31,6 +31,36 @@ int wrap_hipFree(void *ptr) {
   return 0;
 }
 
+// MemoryLowering.cpp emits llvm.call @hip_device_malloc(size) -> ptr for
+// hip.alloc (and the fallback memref.alloc path).  Static-shape models pool
+// every alloc into the runtime byte pool so this entrypoint is never hit;
+// PR #254 first exercises it on dynamic-Range models (alloc(seq*batch) for
+// position_ids), and lld-link fails with "undefined symbol: hip_device_free"
+// at the EP fallback point if the runtime doesn't ship these symbols.
+//
+// Signature: (i64) -> ptr.  Returns nullptr on failure (callers check), no
+// HIP_CHECK that would terminate the host process from inside the model DLL.
+extern "C" void *hip_device_malloc(int64_t size) {
+  void *ptr = nullptr;
+  hipError_t err = hipMalloc(&ptr, size);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hip_device_malloc(%lld) failed: %s\n", (long long)size,
+            hipGetErrorString(err));
+    return nullptr;
+  }
+  return ptr;
+}
+
+extern "C" void hip_device_free(void *ptr) {
+  if (!ptr)
+    return;
+  hipError_t err = hipFree(ptr);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hip_device_free(%p) failed: %s\n", ptr,
+            hipGetErrorString(err));
+  }
+}
+
 int wrap_hipMemcpyH2D(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyHostToDevice,
                            static_cast<hipStream_t>(stream)));
@@ -46,35 +76,6 @@ int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
 int wrap_hipStreamSynchronize(void *stream) {
   HIP_CHECK(hipStreamSynchronize(static_cast<hipStream_t>(stream)));
   return 0;
-}
-
-// Single-argument allocator emitted by the standard MLIR memref->LLVM
-// lowering for any `memref.alloc` that survived the hip-pool-allocs pass
-// (e.g. an alloc whose dynamic size traces back to a value computed by a
-// non-hoistable runtime op — too late for inclusion in the pool prelude).
-// Signature must match MLIR's convention: `i64 size -> ptr`, with `ptr`
-// returned by value (no out-parameter).
-extern "C" void *hip_device_malloc(int64_t size) {
-  fprintf(stderr, "[hip_device_malloc] size=%lld\n", (long long)size);
-  fflush(stderr);
-  void *ptr = nullptr;
-  hipError_t err = hipMalloc(&ptr, size);
-  if (err != hipSuccess) {
-    fprintf(stderr, "hip_device_malloc(%lld) failed: %s\n",
-            static_cast<long long>(size), hipGetErrorString(err));
-    return nullptr;
-  }
-  return ptr;
-}
-
-extern "C" void hip_device_free(void *ptr) {
-  if (!ptr)
-    return;
-  hipError_t err = hipFree(ptr);
-  if (err != hipSuccess) {
-    fprintf(stderr, "hip_device_free(%p) failed: %s\n", ptr,
-            hipGetErrorString(err));
-  }
 }
 
 // MLIR's standard memref dialect lowering for `memref.copy` calls a runtime

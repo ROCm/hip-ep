@@ -32,6 +32,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/gqa_kernel.hip
     hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
+    hip/elementwise_mul_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip
@@ -56,6 +57,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
     hip/softmax_kernel.hip
+    hip/nonzero_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

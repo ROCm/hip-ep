@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -23,16 +25,26 @@ namespace {
 // shape and produces a tensor of that shape filled with the optional `value`
 // attribute (defaulting to a single fp32 zero).
 //
-// Two paths are provided, in benefit order:
+// Three paths are provided, in benefit order:
 //
-//   1. ConstantOfShapeFold (benefit=2): when the shape input is a recognised
+//   1. ConstantOfShapeAsScalar (benefit=3): when the result is only consumed
+//      by ops that already broadcast a scalar input across the result shape
+//      (today: `onnx.Where`), replace the op with a rank-0 `arith.constant`
+//      of the fill value.  The consumer broadcasts the scalar at no extra
+//      memory cost (stride==0 along every output axis in the runtime
+//      kernel), avoiding the `tensor.splat` -> `linalg.map` -> `scf.for`
+//      bufferization chain that the dynamic path would otherwise produce.
+//      This is the Qwen3.5-35B `embedding.onnx` mask-fill pattern
+//      (`Shape -> ConstantOfShape(value=V) -> Where(mask, _, input_ids)`).
+//
+//   2. ConstantOfShapeFold (benefit=2): when the shape input is a recognised
 //      compile-time constant AND the result type is fully static, the op
 //      collapses to a single splat `arith.constant`. No runtime work; the
 //      whole computation is materialised at compile time. This is the
 //      common case for transformer-style "allocate a zero KV/mask tensor"
 //      patterns once shape inference + constant folding have run.
 //
-//   2. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
+//   3. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
 //      input OR a result type with at least one dynamic dim. Each dynamic
 //      dim is materialised from the shape input via `tensor.extract` +
 //      `arith.index_cast`, the fill value is built as a scalar
@@ -170,6 +182,158 @@ static mlir::LogicalResult buildScalarFillValue(mlir::Operation *op,
   return rewriter.notifyMatchFailure(op,
                                      "unsupported default result element type");
 }
+
+/// Build a rank-0 DenseElementsAttr from a `value` attribute that may have
+/// been emitted by different upstream paths:
+///   * `DenseElementsAttr` -- the canonical ONNX form (TensorProto value
+///     unpacked by the importer).
+///   * `IntegerAttr` / `FloatAttr` -- the form the morphizen ir-converter
+///     occasionally emits for single-element TensorProtos
+///     (e.g. Qwen3.5-35B `embedding.onnx` ConstantOfShape value).
+///   * `nullptr` (attribute missing) -- ONNX spec default of zero, retyped
+///     to the result element type.
+///
+/// Returns std::nullopt if no scalar form can be derived.
+static std::optional<mlir::DenseElementsAttr>
+buildRank0ScalarAttr(mlir::Attribute valueAttr, mlir::Type elemType) {
+  auto scalarType = mlir::RankedTensorType::get({}, elemType);
+
+  if (auto dense = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(valueAttr)) {
+    if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType)) {
+      mlir::APFloat scalar = *dense.getValues<mlir::APFloat>().begin();
+      return mlir::DenseElementsAttr::get(scalarType, scalar);
+    }
+    if (mlir::isa<mlir::IntegerType>(elemType)) {
+      mlir::APInt scalar = *dense.getValues<mlir::APInt>().begin();
+      return mlir::DenseElementsAttr::get(scalarType, scalar);
+    }
+    return std::nullopt;
+  }
+
+  if (auto intAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(valueAttr)) {
+    auto intTy = mlir::dyn_cast<mlir::IntegerType>(elemType);
+    if (!intTy)
+      return std::nullopt;
+    mlir::APInt scalar = intAttr.getValue();
+    // Re-fit to result element bit-width; the attribute is most commonly
+    // i64 because that's what ORT/morphizen unpacks for single-element
+    // TensorProtos, but the result element type can be any integer width.
+    scalar = scalar.sextOrTrunc(intTy.getWidth());
+    return mlir::DenseElementsAttr::get(scalarType, scalar);
+  }
+
+  if (auto floatAttr = mlir::dyn_cast_or_null<mlir::FloatAttr>(valueAttr)) {
+    auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType);
+    if (!floatTy)
+      return std::nullopt;
+    mlir::APFloat scalar = floatAttr.getValue();
+    bool losesInfo = false;
+    scalar.convert(floatTy.getFloatSemantics(),
+                   mlir::APFloat::rmNearestTiesToEven, &losesInfo);
+    return mlir::DenseElementsAttr::get(scalarType, scalar);
+  }
+
+  if (!valueAttr) {
+    // ONNX spec default: f32 0, retyped to the result element type.
+    if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemType)) {
+      mlir::APFloat zero(floatTy.getFloatSemantics(), 0);
+      return mlir::DenseElementsAttr::get(scalarType, zero);
+    }
+    if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elemType)) {
+      return mlir::DenseElementsAttr::get(scalarType,
+                                          mlir::APInt(intTy.getWidth(), 0));
+    }
+  }
+
+  return std::nullopt;
+}
+
+/// `onnx.Where(mask, _, _)` already broadcasts every input across the output
+/// shape (stride==0 along axes where the operand has dim 1 or smaller rank)
+/// via `elementwise_where_kernel.hip::make_broadcast_layout`. So when the
+/// ConstantOfShape's only purpose is to materialise a fill-value buffer for
+/// such an op, the buffer can be elided entirely and the consumer can read
+/// from a rank-0 scalar instead.  This saves the tensor.splat -> linalg.map
+/// -> scf.for -> cf chain on every inference.
+///
+/// IMPORTANT: we do NOT emit `arith.constant dense<v> : tensor<>` here.
+/// After bufferization that lowers to a `memref.global "private" constant`
+/// that lives in the DLL's `.data` section -- a *host* pointer that the GPU
+/// where-kernel cannot dereference.  The text-only path masked the bug
+/// because the mask was all-false, so the kernel never actually read
+/// `x[0]`; the moment a multimodal prompt sets even one mask bit, `x[0]`
+/// is read on-device and the kernel faults with `unspecified launch
+/// failure (719)`.
+///
+/// Instead, build the rank-0 constant via `tensor.splat`, which bufferizes
+/// to a fresh `memref.alloc()` + `linalg.fill` placed in the GPU pool by
+/// the standard pipeline.  The where kernel then reads the scalar at a
+/// device-side virtual address, which is correct.  For rank-0 the
+/// downstream chain stays trivial: the fill is a single store, no nested
+/// loops, no scf-for / linalg-map blow-up.
+struct ConstantOfShapeAsScalar : public mlir::RewritePattern {
+  ConstantOfShapeAsScalar(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.ConstantOfShape", /*benefit=*/3, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected 1 result");
+    mlir::Value result = op->getResult(0);
+
+    // Only fold when every consumer is `onnx.Where`.  Future broadcasts
+    // (Mul / Add / ...) can be added incrementally as their lowerings are
+    // verified to handle a rank-0 operand.
+    if (result.use_empty())
+      return rewriter.notifyMatchFailure(op, "dead op, leave to DCE");
+    for (auto &use : result.getUses()) {
+      if (use.getOwner()->getName().getStringRef() != "onnx.Where")
+        return rewriter.notifyMatchFailure(
+            op, "consumer is not onnx.Where; scalar broadcast not yet "
+                "supported for this consumer");
+    }
+
+    auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(result.getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
+
+    mlir::Type elemType = resultType.getElementType();
+    mlir::Location loc = op->getLoc();
+    mlir::Value scalar;
+    if (mlir::failed(buildScalarFillValue(op, rewriter, loc, elemType, scalar)))
+      return mlir::failure();
+
+    // rank-0 buffer materialised via `tensor.empty + linalg.fill`. This
+    // intentionally avoids `tensor.splat(scalar_const)` because the MLIR
+    // canonicalizer would fold that to `arith.constant dense<v> : tensor<>`,
+    // which bufferizes to a *host* `memref.global "private" constant`. That
+    // global lives in the compiled DLL's `.data` section -- a virtual
+    // address the GPU cannot dereference even on UMA targets (gfx1151), so
+    // any consumer kernel that actually reads `x[0]` (e.g. `hip.where` on
+    // a multimodal prompt where the mask has a True bit) faults with HIP
+    // 719 ("unspecified launch failure"). The text-only path masked the
+    // bug because the mask is all-False there and the kernel never reads
+    // the operand.
+    //
+    // `tensor.empty + linalg.fill` survives canonicalization and bufferizes
+    // to `memref.alloc + linalg.fill`. `hip-materialize-host-scalars` then
+    // catches the small static-shape memref.alloc with a host store on it
+    // and redirects it to host-mapped scratch (`hipHostMalloc(Mapped)`),
+    // giving us a buffer that is *both* host-writable AND GPU-readable at
+    // the same VA on UMA targets. The end result is identical perf-wise
+    // (one i64 store at inference start, no per-step overhead) while
+    // remaining correct under the where kernel's `x[0]` read.
+    auto scalarTensorTy = mlir::RankedTensorType::get({}, elemType);
+    mlir::Value empty =
+        mlir::tensor::EmptyOp::create(rewriter, loc, scalarTensorTy,
+                                      /*dynamicSizes=*/mlir::ValueRange{});
+    auto fill = mlir::linalg::FillOp::create(
+        rewriter, loc, mlir::ValueRange{scalar}, mlir::ValueRange{empty});
+    rewriter.replaceOp(op, fill.getResult(0));
+    return mlir::success();
+  }
+};
 
 struct ConstantOfShapeFold : public mlir::RewritePattern {
   ConstantOfShapeFold(mlir::MLIRContext *ctx)
@@ -337,7 +501,8 @@ struct ConstantOfShapeDynamic : public mlir::RewritePattern {
 
 void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
-  patterns.add<ConstantOfShapeFold, ConstantOfShapeDynamic>(ctx);
+  patterns.add<ConstantOfShapeAsScalar, ConstantOfShapeFold,
+               ConstantOfShapeDynamic>(ctx);
 }
 
 } // namespace hip
