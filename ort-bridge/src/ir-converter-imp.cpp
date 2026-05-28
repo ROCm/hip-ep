@@ -737,6 +737,35 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
                           make_subgraph_attribute(graph, *node, attr_name));
         break;
       }
+      case OrtOpAttrType::ORT_OP_ATTR_TENSOR: {
+        // ONNX ops like Constant and ConstantOfShape carry a `value` TENSOR
+        // attribute that is not pre-folded into the graph initializer list.
+        // ORT exposes it via OpAttr_GetTensorAttributeAsOrtValue (returns a
+        // freshly-created OrtValue we must release).  Mirror the initializer
+        // copy path in convert_initializers above: extract shape /
+        // element_type / raw bytes, build a morphizen TensorProto, attach it
+        // as the attribute, then free both the TensorProto and the OrtValue.
+        OrtValue* raw_tensor = nullptr;
+        throw_if_error(
+            ort_api.OpAttr_GetTensorAttributeAsOrtValue(attr, &raw_tensor));
+        Ort::Value tensor_value{raw_tensor}; // takes ownership
+        auto type_info = tensor_value.GetTypeInfo();
+        auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+        auto element_type = tensor_info.GetElementType();
+        auto shape = tensor_info.GetShape();
+        const void* tensor_data = tensor_value.GetTensorRawData();
+        size_t data_size = tensor_value.GetTensorSizeInBytes();
+
+        morphizen::TensorProto* raw_proto =
+            MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
+                attr_name, shape, element_type, tensor_data, data_size);
+        MY_LOG(3) << "Attribute " << attr_name
+                  << " is of type TENSOR, shape=" << shape.size()
+                  << "D, elem_type=" << element_type << ", size=" << data_size;
+        attrs_builder.add(attr_name, *raw_proto);
+        MORPHIZEN_ORT_API(tensor_proto_delete)(raw_proto);
+        break;
+      }
       default: {
         MY_LOG(2) << "Unsupported attribute type: " << attr_type
                   << " for attribute: " << attr_name;
