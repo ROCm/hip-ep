@@ -10,10 +10,12 @@
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // Map HIPDNN_EP_DATATYPE_* -> hip_dtype_t for custom kernels (e.g. hip_expand
 // used as the broadcast-materialise fallback when MIOpen rejects double-side
