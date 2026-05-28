@@ -80,8 +80,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       },
       state);
 
-  if (!state || !data || !starts || !ends || !output || !data_shape ||
-      !output_shape) {
+  if (!state || !starts || !ends || !output || !data_shape || !output_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_slice: null required argument\n");
     return -1;
   }
@@ -91,6 +90,51 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
         "[REAL] wrap_slice: invalid ranks (data_rank=%lld, output_rank=%lld)\n",
         (long long)data_rank, (long long)output_rank);
     return -1;
+  }
+  // Empty input fast path: ORT passes a null `data` pointer for a tensor
+  // with zero elements (e.g. `image_features` with shape[0]==0 in the VLM
+  // embedding sub-model on a text-only call). Slicing an empty input
+  // necessarily produces an empty logical output; the physical output buffer
+  // is over-allocated by SliceToHip to the IR static dim and must be
+  // zero-filled so downstream consumers (e.g. ScatterND's updates buffer)
+  // see the zero tail the existing logical-extent==0 kernel path would have
+  // written. Returning -1 here would leave the buffer at its pool-init
+  // value and silently feed downstream ops garbage / zero, masking the
+  // missing-write as "EP produced zero output".
+  int64_t data_num_elements = 1;
+  for (int d = 0; d < data_rank; ++d)
+    data_num_elements *= data_shape[d];
+  if (!data || data_num_elements == 0) {
+    int64_t out_num_elements = 1;
+    for (int d = 0; d < output_rank; ++d)
+      out_num_elements *= output_shape[d];
+    int64_t elem_size = hipdnn_ep_datatype_size(data_type);
+    if (elem_size <= 0) {
+      fprintf(stderr,
+              "[REAL] wrap_slice: empty-input path -- unsupported "
+              "data_type=%s(%lld)\n",
+              hipdnn_ep_datatype_name(data_type), (long long)data_type);
+      return -1;
+    }
+    if (output && out_num_elements > 0) {
+      hipStream_t s =
+          static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+      hipError_t err = hipMemsetAsync(output, 0,
+                                      static_cast<size_t>(out_num_elements) *
+                                          static_cast<size_t>(elem_size),
+                                      s);
+      if (err != hipSuccess) {
+        fprintf(stderr,
+                "[REAL] wrap_slice: empty-input hipMemsetAsync failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
+    }
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_slice: empty input (data=%p data_num_elements=%lld) "
+        "-- zeroed output and returning success\n",
+        data, (long long)data_num_elements);
+    return 0;
   }
   if (data_rank > kSliceRuntimeMaxRank) {
     fprintf(stderr, "[REAL] wrap_slice: data_rank=%lld exceeds max %d\n",
