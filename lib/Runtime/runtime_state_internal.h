@@ -44,10 +44,33 @@ struct RuntimeState {
   void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
 
   // Memory pooling support
-  void *pool_base;        // Single large memory pool
-  size_t pool_size;       // Total pool size in bytes
+  void *pool_base;        // Single large memory pool (depth-0 / main_graph)
+  size_t pool_size;       // Total pool size in bytes (depth-0)
   size_t *buffer_offsets; // Offset for each buffer in the pool
   size_t num_buffers;     // Number of buffers in the pool
+
+  // Per-depth pool slots for outlined hip.loop body functions.
+  // Why: main_graph and body functions BOTH call `hipdnn_ep_get_pool_base`
+  // and (previously) received the same `pool_base` pointer, with offsets
+  // starting at 0 in BOTH functions. That meant the body's kernels would
+  // overwrite main_graph's live values stored at the same physical pool
+  // addresses — corrupting any value that needed to live across a
+  // `hip.loop` call (e.g. the rope-encoding `embedding_*` buffers fed via
+  // captures to the loop body). The fix: each outlined body call runs at
+  // a non-zero "pool depth" (incremented by `runLoopImpl` around the
+  // body_fn call); `hipdnn_ep_get_pool_base` returns a different
+  // backing buffer per depth. depth-0 stays in `pool_base/pool_size`
+  // above; depth >=1 lives in these grow-on-demand slots.
+  //
+  // Slot ownership: each entry has its own hipMalloc'd buffer (we DO NOT
+  // reuse depth-0's pool with an offset — that would couple growth events
+  // across depths and require coordinated stream sync). Slots grow on
+  // demand the same way `pool_base` does (sync stream, free old, malloc
+  // new). All slots freed in `hipdnn_ep_state_cleanup`. Allocated lazily
+  // so a model with no `hip.loop` ops pays nothing.
+  void **nested_pool_bases;   // length = nested_pool_count; per-depth buffer
+  size_t *nested_pool_sizes;  // length = nested_pool_count; per-depth size
+  size_t nested_pool_count;   // current capacity of the two arrays above
 
   // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.

@@ -210,6 +210,16 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // Returns: GPU base pointer (NULL on allocation failure)
 void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size);
 
+// Pool-depth push/pop. Called by the loop runtime around outlined
+// hip.loop body_fn invocations so the body's hip.get_pool gets a
+// physically distinct buffer from main_graph's (otherwise both would
+// allocate from offset 0 of state->pool_base and the body's writes
+// would corrupt main_graph values that need to live across the loop
+// call). thread_local so two parallel inference sessions on different
+// threads don't share the counter.
+void hipdnn_ep_push_pool_depth();
+void hipdnn_ep_pop_pool_depth();
+
 // Get the host-mapped scratch buffer base, growing it if needed. Called from
 // hip.get_host_scratch (emitted by hip-materialize-host-scalars) once per
 // inference for tiny host-fed scalar memrefs that would otherwise land in the

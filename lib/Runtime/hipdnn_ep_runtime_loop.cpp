@@ -289,8 +289,16 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
     fprintf(stderr, "[loop] iter %lld/%lld: calling body_fn=%p\n",
             (long long)i, (long long)max_trip_count, (void *)body_fn);
     fflush(stderr);
+    // Bracket the body call with a pool-depth push/pop so the body's
+    // hip.get_pool returns a different physical buffer than main_graph's.
+    // Without this, both call sites land at offset 0 of state->pool_base
+    // and the body's kernels silently overwrite main_graph values that
+    // need to live across the loop call. See the comment on
+    // `g_pool_depth` in hipdnn_ep_runtime_state.cpp.
+    hipdnn_ep_push_pool_depth();
     int rc =
         body_fn(state, iter_dev, cond_dev, loop_carried_descs, capture_descs);
+    hipdnn_ep_pop_pool_depth();
     fprintf(stderr, "[loop] iter %lld: body_fn returned %d\n",
             (long long)i, rc);
     fflush(stderr);

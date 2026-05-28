@@ -80,6 +80,11 @@ def main():
     ap.add_argument(
         "--ep-only", action="store_true", help="skip CPU baseline (faster smoke test)"
     )
+    ap.add_argument(
+        "--taps",
+        default=None,
+        help="explicit comma-separated tap output names (overrides --n)",
+    )
     args = ap.parse_args()
 
     ops = set(args.ops.split(","))
@@ -111,15 +116,22 @@ def main():
         candidates = candidates[cand_lo:cand_hi]
         print(f"[+{time.time() - t0:.1f}s] Restricted to [{lo}, {hi}]: {len(candidates)}", flush=True)
 
-    n_taps = min(args.n, len(candidates))
-    if n_taps == 0:
-        print("ERROR: no candidates after filtering", flush=True)
-        return 1
-    # Evenly spread taps across topo order.
-    idxs = sorted(
-        set(int(len(candidates) * (i + 0.5) / n_taps) for i in range(n_taps))
-    )
-    taps = [candidates[i] for i in idxs]
+    if args.taps:
+        wanted = set(args.taps.split(","))
+        taps = [c for c in candidates if c[2] in wanted]
+        missing = wanted - {c[2] for c in taps}
+        if missing:
+            print(f"WARNING: --taps not found in candidate set: {sorted(missing)}", flush=True)
+    else:
+        n_taps = min(args.n, len(candidates))
+        if n_taps == 0:
+            print("ERROR: no candidates after filtering", flush=True)
+            return 1
+        # Evenly spread taps across topo order.
+        idxs = sorted(
+            set(int(len(candidates) * (i + 0.5) / n_taps) for i in range(n_taps))
+        )
+        taps = [candidates[i] for i in idxs]
     print(f"[+{time.time() - t0:.1f}s] Selected {len(taps)} tap points:", flush=True)
     for op, name, o in taps:
         print(f"    [{op:18s}] {name} -> {o}", flush=True)
