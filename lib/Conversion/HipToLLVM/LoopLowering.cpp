@@ -237,6 +237,18 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
     emitRank0DescriptorFields(b, loc, condPtr, bodyCallArgs);
   }
   // v_out_i == v_in_i (same buffer, single-pass kernel safety).
+  //
+  // CAVEAT: this aliasing is fundamentally incompatible with body funcs
+  // whose Concat-grow accumulator pattern computes the chunk offset from
+  // `memref.dim %v_in, %cN` — that dim stays frozen at the v_init
+  // descriptor's value because MLIR memref descriptors are immutable SSA
+  // and the body cannot mutate the slot, so the next iter reloads the
+  // same descriptor. The `hip-fix-loop-accumulator-offset` pass
+  // (lib/Dialect/Transforms/FixLoopAccumulatorOffset.cpp) is a
+  // post-bufferize patch that rewrites the body's offset to iter-driven.
+  // See that pass's header for the full set of architecturally correct
+  // alternatives (separate v_out buffer, side channel, etc.) if you ever
+  // want to retire the post-bufferize patch.
   for (Value d : lcDescs)
     expandMemRefStruct(b, loc, d, memrefRankFromStructType(d.getType()),
                        bodyCallArgs);

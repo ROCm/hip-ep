@@ -537,21 +537,23 @@ struct SliceToHip : public mlir::RewritePattern {
     mlir::Value startsTensor = op->getOperand(1);
     mlir::Value endsTensor = op->getOperand(2);
 
-    auto guardWithUpper = [&](mlir::Value extent, mlir::Value /*upper*/) {
-      // Produce the TRUE logical extent (possibly 0). The previous
-      // "select(extent==0, upper, extent)" silently substituted the data
-      // dim's upper bound for genuine empty slices. That kept downstream
-      // MIOpen broadcast descriptors happy (they reject dim 0) but cost
-      // correctness: in patterns like `Slice(x, k, k, axis) → Loop` (an
-      // empty placeholder used as a Loop accumulator's v_init), the
-      // upper-bound buffer's `tensor.dim(acc, axis)` returns the upper
-      // bound at every Concat in the loop body, so the accumulator
-      // grows from `upper_bound` instead of `0` and the downstream
-      // Reshape chain operates on a wildly oversized buffer. Producing
-      // dim 0 makes Concat / insert_slice / Reshape do the right thing;
-      // the MIOpen elementwise wrapper handles 0-dim operands separately
-      // (see `wrap_miopenOpTensor`'s empty-operand identity-copy path).
-      return extent;
+    auto guardWithUpper = [&](mlir::Value extent, mlir::Value upper) {
+      // Empty-slice (extent == 0) gets sized to the data-dim upper bound.
+      // For the `Slice(x, k, k, axis) -> Loop` pattern (an empty placeholder
+      // used as a Loop accumulator's v_init), the v_init buffer MUST be
+      // large enough to hold the loop body's accumulated writes — the
+      // `hip-fix-loop-accumulator-offset` pass replaces the body's
+      // frozen-dim offset with `iter * chunk_size`, which only writes safely
+      // when the underlying buffer covers `max_trip * chunk_size` rows.
+      // `upper` = `data.dim(axis)` is exactly that bound for the canonical
+      // Qwen-style windowed-attention pattern.
+      mlir::Value zero =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, 0);
+      mlir::Value isZero = mlir::arith::CmpIOp::create(
+          rewriter, loc, mlir::arith::CmpIPredicate::eq, extent, zero);
+      return mlir::arith::SelectOp::create(rewriter, loc, isZero, upper,
+                                           extent)
+          .getResult();
     };
 
     auto extractI64ToIndex = [&](mlir::Value tensor1D, int64_t k) {
@@ -624,11 +626,11 @@ struct SliceToHip : public mlir::RewritePattern {
         continue;
       }
       if (sliceInfo[i].staticSize >= 0) {
-        // Compile-time-known extent (possibly 0). Use it verbatim;
-        // downstream consumers handle empty buffers per the
-        // empty-operand contract documented on `guardWithUpper`.
-        dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
-            rewriter, loc, sliceInfo[i].staticSize));
+        if (sliceInfo[i].staticSize == 0)
+          dynSizes.push_back(upper);
+        else
+          dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
+              rewriter, loc, sliceInfo[i].staticSize));
         continue;
       }
       if (sliceInfo[i].runtimeFromDim) {
