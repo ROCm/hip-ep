@@ -120,8 +120,28 @@ static void check_gcnarch(const char *location) {
   }
 }
 
-// Helper: Calculate total size in bytes for a tensor
-// Returns 0 on error (overflow or invalid dimensions)
+// Helper: Calculate total size in bytes for a tensor.
+//
+// Return value semantics:
+//   * size_bytes > 0  -- regular non-empty tensor.
+//   * size_bytes == 0 -- legitimate zero-element tensor (any shape[i] == 0),
+//                        OR genuinely invalid input (rank>0 with null shape,
+//                        any shape[i] < 0, or overflow). Callers that need
+//                        to distinguish must inspect shape themselves.
+//
+// Zero-sized dims are legal under the ONNX spec and are produced routinely
+// in practice (e.g. KV-cache `past_key_values.*.key/value` with shape
+// [B, H, 0, D] on the first prefill step when past_sequence_length==0;
+// OGA VLM decode supplies image_features as [0, hidden_size] every step
+// after the prompt has been processed). The prepare_input / prepare_output
+// path treats size_bytes==0 as a successful empty pass-through; this helper
+// therefore must return 0 silently for zero-sized dims rather than logging
+// "Invalid dimension" to stderr, which (a) is misleading because the input
+// is correct, and (b) used to spam once per zero-dim tensor per inference
+// step on every VLM model.
+//
+// Strictly-negative dims still indicate corrupt metadata and remain a
+// reported error.
 static size_t calculateTensorSize(const int64_t *shape, size_t rank,
                                   size_t element_size) {
   if (rank == 0) {
@@ -131,23 +151,28 @@ static size_t calculateTensorSize(const int64_t *shape, size_t rank,
     return 0;
   }
 
-  // Validate all dimensions are positive
+  // Reject strictly-negative dims (corrupt metadata). Zero is allowed.
   for (size_t i = 0; i < rank; i++) {
-    if (shape[i] <= 0) {
+    if (shape[i] < 0) {
       fprintf(stderr, "Invalid dimension at index %zu: %lld\n", i,
               (long long)shape[i]);
       return 0;
     }
   }
 
-  // Calculate total number of elements with overflow check
+  // Multiply with overflow check. Skip the division guard when the current
+  // dim is zero -- a zero factor cannot overflow, and SIZE_MAX/0 would be
+  // undefined behavior. Once total_elements hits zero it stays there, which
+  // is the correct answer for any zero-element tensor regardless of the
+  // remaining dims.
   size_t total_elements = 1;
   for (size_t i = 0; i < rank; i++) {
-    if (total_elements > SIZE_MAX / static_cast<size_t>(shape[i])) {
+    size_t dim = static_cast<size_t>(shape[i]);
+    if (dim != 0 && total_elements > SIZE_MAX / dim) {
       fprintf(stderr, "Tensor size overflow at dimension %zu\n", i);
       return 0;
     }
-    total_elements *= static_cast<size_t>(shape[i]);
+    total_elements *= dim;
   }
 
   if (total_elements > SIZE_MAX / element_size) {
