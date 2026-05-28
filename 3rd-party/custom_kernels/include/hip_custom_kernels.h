@@ -74,6 +74,28 @@ int hip_elementwise_sub(
     int hip_dtype);
 
 /* =========================================================================
+ * Elementwise Multiplication (no broadcasting)
+ * =========================================================================
+ *
+ * Computes output[i] = lhs[i] * rhs[i] for num_elements elements.
+ * Caller must ensure lhs/rhs/output have identical layout (no broadcasting).
+ *
+ * Provided so wrap_miopenOpTensor (Add/Mul) can fall back to a custom kernel
+ * for dtypes MIOpen does not support (currently: INT64). Float dtypes still
+ * go through MIOpen for performance + autotuning.
+ *
+ * Currently supported types: HIP_DTYPE_INT64
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_elementwise_mul(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+/* =========================================================================
  * Elementwise Where (NumPy-style multidirectional broadcasting, arbitrary rank)
  * =========================================================================
  *
@@ -235,12 +257,23 @@ int hip_elementwise_mod(
     int hip_dtype,
     int fmod_flag);
 
+/*
+ * Element-wise Equal with optional scalar broadcast.
+ *
+ * `lhs_num_elements` / `rhs_num_elements` may each be 1 (scalar broadcast)
+ * or equal to `out_num_elements` (no broadcast). Other mismatches are
+ * rejected by the host wrapper.
+ *
+ * Output type is always uint8 (1-byte bool).
+ */
 int hip_elementwise_equal(
     void* stream,
     const void* lhs,
     const void* rhs,
     void* output,
-    int64_t num_elements,
+    int64_t lhs_num_elements,
+    int64_t rhs_num_elements,
+    int64_t out_num_elements,
     int hip_dtype);
 
 int hip_elementwise_less(
@@ -841,11 +874,41 @@ int hip_scatter_nd(
     const void* indices,
     const void* updates,
     void* output,
+    const int32_t* count_ptr,
     const int64_t* data_shape_host,
     int data_rank,
     const int64_t* indices_shape_host,
     int indices_rank,
     int reduction_id,
+    int hip_dtype);
+
+/* =========================================================================
+ * NonZero
+ * =========================================================================
+ *
+ * Single-pass atomic kernel: each thread checks one element. If nonzero,
+ * atomicAdd on count_ptr gives the write position, then coordinates are
+ * written into output[rank, capacity] at stride = capacity.
+ *
+ * count_ptr is zeroed by the launcher before the kernel. After completion,
+ * *count_ptr holds the actual number of nonzero elements (on GPU — no D2H
+ * needed; downstream ops read it directly).
+ *
+ * input_dims_host: host pointer to int64_t[rank] holding the input
+ * shape (copied to device internally before the kernel launch).
+ *
+ * Supported dtypes: f16, f32, i32, i64, i8, u8.
+ * Bounded to rank <= 8.
+ */
+int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    int* count_ptr,
+    int64_t input_num_elements,
+    int64_t input_rank,
+    const int64_t* input_dims_host,
+    int64_t output_capacity,
     int hip_dtype);
 
 /* =========================================================================

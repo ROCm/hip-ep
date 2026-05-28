@@ -41,6 +41,8 @@ target_link_libraries(hip-mlir-opt PRIVATE
   MLIRArithTransforms
   MLIRSCFTransforms
   MLIRTensorTransforms
+  MLIRLinalgDialect
+  MLIRLinalgTransforms
   MLIRFuncTransforms
   MLIRLLVMDialect
   MLIRLLVMCommonConversion

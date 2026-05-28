@@ -50,6 +50,24 @@ namespace {
 // Constant externalization helpers
 //===----------------------------------------------------------------------===//
 
+/// Minimum element count for a constant to be externalized in Phase 1 of the
+/// hybrid two-phase split.  Constants with fewer elements stay as inline
+/// `onnx.Constant value=...` through `convertComputeOps`, letting conversion
+/// patterns (e.g. RangeConversion's start/delta scalar extraction,
+/// GatherShapeFold's index, FastGeluFusion's literals, ConstantOfShape's
+/// shape) read the inline `value` attr directly instead of going through
+/// a `bufferization.to_tensor(memref.get_global)` chain that loses the
+/// compile-time value.  Phase 2 (post-convert) then externalises whatever
+/// survived conversion, so the IR reaching bufferization contains only
+/// `memref.get_global` for all constants (kernel-side operand form unchanged).
+///
+/// Threshold rationale: every pre-fold pattern's literal is <= 16 elements
+/// in practice (Gather index = 1, FastGelu literals = 1, ConstantOfShape
+/// shape <= 8); the smallest real weight tile we've seen is >= 1024
+/// (LayerNorm gamma/beta = hidden_size).  64 sits in the safe window with
+/// margin on both sides.
+constexpr int64_t kPhase1Threshold = 64;
+
 static std::string elementTypeToString(mlir::Type elemType) {
   if (elemType.isF16())
     return "f16";
@@ -394,10 +412,28 @@ resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
 
 /// Lower onnx.Constant ops to either externalized constants (constants.bin)
 /// or inline arith.constant ops.
+///
+/// `keepBelowThreshold` (default false) controls what happens to inline
+/// `value`-bearing `onnx.Constant`s whose element count is below
+/// `minNumElements`:
+///   * false (today's behavior, used by Phase 2 / single-phase callers) ->
+///     replace with an inline `arith.constant` tensor.
+///   * true (used by Phase 1 of the hybrid two-phase split) -> leave the
+///     `onnx.Constant` in place so a later conversion pattern can still
+///     read its `value` attr (e.g. RangeConversion's count-formula scalars
+///     or GatherShapeFold's index). The leftover `onnx.Constant`s must be
+///     processed by a second `lowerOnnxConstants` call (Phase 2) after
+///     `convertComputeOps`, otherwise bufferization will fail on them.
+///
+/// `location`-based `onnx.Constant`s are always processed (via
+/// `resolveExternalLocationConstant`) regardless of `keepBelowThreshold` --
+/// these are large weights from the ORT bridge and never need to be
+/// readable by conversion patterns.
 static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                                               mlir::func::FuncOp funcOp,
                                               int64_t minNumElements,
-                                              ExternalizationState *extState) {
+                                              ExternalizationState *extState,
+                                              bool keepBelowThreshold = false) {
 
   llvm::SmallVector<mlir::Operation *> constants;
   funcOp.walk([&](mlir::Operation *op) {
@@ -449,9 +485,12 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                             foldAttr);
       }
 
-    } else {
+    } else if (!keepBelowThreshold) {
       replaceWithArithConstant(constOp, valueAttr);
     }
+    // else: leave onnx.Constant in place for a later Phase-2 pass to
+    // externalise. Conversion patterns can still read its `value` attr
+    // through the standard `getAttrOfType<DenseElementsAttr>("value")`.
   }
   return mlir::success();
 }
@@ -780,18 +819,26 @@ void ConvertOnnxToHipPass::runOnOperation() {
           << " safety cap without reaching quiescence; raise the cap or "
              "investigate which pattern keeps firing";
 
-    // GatherShapeFold runs AFTER shape inference: it rewrites
-    // Gather(Shape(x), const_idx) into tensor.from_elements(tensor.dim).
-    // That output form is intentionally outside the onnx.* op set so
-    // InferOnnxShapes won't trace through it — running fold first would
-    // mean the resolver couldn't see the Gather/Shape chain. Order is
-    // also intentional vs the gfx1151 dynseqlen regression: fold runs
-    // late enough that the inferred types narrow more shape arithmetic
-    // to compile-time constants (less host-store-into-pool surface for
-    // --hip-materialize-host-scalars to redirect).
+    // GatherShapeFold + ReshapeShapeFold run AFTER shape inference.
+    // GatherShapeFold rewrites Gather(Shape(x), const_idx) into
+    // tensor.from_elements(tensor.dim); ReshapeShapeFold rewrites
+    // Reshape(_, Shape(x)) into Reshape(_, tensor.from_elements(tensor.dim …)).
+    // Both output forms are intentionally outside the onnx.* op set so
+    // InferOnnxShapes won't trace through them — running these folds before
+    // the quiescence loop would prevent the resolver from seeing the
+    // Gather/Shape and Reshape/Shape chains. Order is also intentional vs
+    // the dynseqlen regression: folding runs late enough that the inferred
+    // types narrow more shape arithmetic to compile-time constants (less
+    // host-store-into-pool surface for --hip-materialize-host-scalars to
+    // redirect). ReshapeShapeFold specifically unblocks ReshapeConversion's
+    // multi-dyn-per-group expand_shape path, which recognises
+    // tensor.from_elements as a shape source but does not peek through
+    // onnx.Shape (see ReshapeShapeFold.cpp for the Qwen3.5 mrope
+    // `Reshape(Range, Shape(input))` root-cause analysis).
     {
       mlir::RewritePatternSet foldPatterns(ctx);
       populateGatherShapeFoldPatterns(foldPatterns, ctx);
+      populateReshapeShapeFoldPatterns(foldPatterns, ctx);
       mlir::GreedyRewriteConfig cfg;
       cfg.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
       if (mlir::failed(mlir::applyPatternsGreedily(
@@ -815,11 +862,41 @@ void ConvertOnnxToHipPass::runOnOperation() {
               funcOp, std::move(preFoldPatterns), cfg)))
         return signalPassFailure();
     }
-    if (mlir::failed(
-            lowerOnnxConstants(module, funcOp, minElems, extState.get())))
+    // Hybrid two-phase constant externalisation:
+    //
+    //   Phase 1 (here): externalise only LARGE inline constants
+    //   (numElements >= kPhase1Threshold). Small / scalar `onnx.Constant`s
+    //   are LEFT in place (keepBelowThreshold=true) so conversion patterns
+    //   can read their inline `value` attr directly during convertComputeOps.
+    //   location-based constants (large ORT-bridged weights) are still
+    //   externalised here unconditionally via resolveExternalLocationConstant.
+    //
+    //   Phase 2 (after convertComputeOps): externalise whatever
+    //   `onnx.Constant`s survived conversion (i.e. small ones that the
+    //   converter consumed only as a tensor-typed memref operand, never
+    //   as a compile-time value). Threshold == minElems so the kernel-side
+    //   operand form matches today's externalised-only behaviour for the
+    //   downstream bufferize / pool-allocs pipeline.
+    //
+    // Effect on the SSA dominance regression: Range's start/delta scalars
+    // are now materialised as pure `arith.constant` SSA values by
+    // RangeConversion (which reads `onnx.Constant.value` directly), so the
+    // alloc-length chain feeding `hip.range`'s dynamic output dimension is
+    // fully hoistable by `hip-pool-allocs` without needing
+    // `memref.load %get_global` in the hoist whitelist.
+    int64_t phase1Min = minElems > 0 ? std::max(minElems, kPhase1Threshold) : 0;
+    if (mlir::failed(lowerOnnxConstants(module, funcOp, phase1Min,
+                                        extState.get(),
+                                        /*keepBelowThreshold=*/true)))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
+      return signalPassFailure();
+    // Phase 2: clean up any remaining `onnx.Constant`s that conversion did
+    // not fold away.
+    if (mlir::failed(lowerOnnxConstants(module, funcOp, minElems,
+                                        extState.get(),
+                                        /*keepBelowThreshold=*/false)))
       return signalPassFailure();
   }
 

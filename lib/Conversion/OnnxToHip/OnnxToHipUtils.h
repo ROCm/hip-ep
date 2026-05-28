@@ -152,6 +152,52 @@ createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                                     resultType.getElementType(), dynSizes));
 }
 
+/// If \p v is the result of an inline `onnx.Constant` with a 1-element
+/// `value` DenseElementsAttr, return that attr.  Returns std::nullopt for
+/// any other producer (location-based external constants, non-constant SSA
+/// chains, larger constants, missing/non-dense value attr, etc.).
+///
+/// Used by converters that need a compile-time scalar (e.g. Range's
+/// start/delta in the count-formula chain) to materialize as pure-SSA
+/// `arith.constant` instead of `tensor.extract` -> `memref.load`.  Relies
+/// on the hybrid two-phase externalisation in `ConvertOnnxToHipPass`:
+/// Phase 1 keeps small constants as inline `onnx.Constant`, Phase 2
+/// (post-convert) externalises whatever survived.  Without that ordering,
+/// the converter would see `bufferization.to_tensor(memref.get_global)`
+/// instead of `onnx.Constant` and this helper would return std::nullopt.
+inline std::optional<mlir::DenseElementsAttr>
+getInlineScalarFromOnnxConstant(mlir::Value v) {
+  mlir::Operation *def = v.getDefiningOp();
+  if (!def || def->getName().getStringRef() != "onnx.Constant")
+    return std::nullopt;
+  auto attr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
+      def->getAttrOfType<mlir::ElementsAttr>("value"));
+  if (!attr || attr.getNumElements() != 1)
+    return std::nullopt;
+  return attr;
+}
+
+/// Materialize a scalar SSA value (integer or float) from a 1-element
+/// DenseElementsAttr.  Element type of the resulting `arith.constant`
+/// matches the attr's stored element type, NOT the surrounding tensor type
+/// (which the caller wraps separately if needed).  Returns null Value if
+/// the attr is not int / float (e.g. complex, opaque).  Mirrors the
+/// `buildScalarFillValue` idiom in `ConstantOfShapeConversion.cpp`.
+inline mlir::Value
+materializeScalarFromDenseAttr(mlir::OpBuilder &builder, mlir::Location loc,
+                               mlir::DenseElementsAttr attr) {
+  mlir::Type elemTy = attr.getElementType();
+  if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elemTy)) {
+    llvm::APInt v = *attr.getValues<llvm::APInt>().begin();
+    return mlir::arith::ConstantIntOp::create(builder, loc, intTy, v);
+  }
+  if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemTy)) {
+    llvm::APFloat v = *attr.getValues<llvm::APFloat>().begin();
+    return mlir::arith::ConstantFloatOp::create(builder, loc, floatTy, v);
+  }
+  return {};
+}
+
 /// Get !hip.context from function argument 0. Returns failure if the
 /// function has no arguments or the first argument is not !hip.context.
 inline mlir::FailureOr<mlir::Value>
@@ -311,6 +357,34 @@ LogicalResult inferOnnxShapes(func::FuncOp funcOp, bool *changed = nullptr);
 /// shapes and fallback policy.
 void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+
+/// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
+/// idiom into tensor.from_elements over a tensor.dim of x. Must run
+/// BEFORE lowerOnnxConstants so the index value is still inline in the
+/// onnx.Constant `value` attribute. See GatherShapeFold.cpp for the
+/// dynseqlen-regression rationale.
+void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+
+/// Pre-lowering pattern set: rewrite the Reshape(_, Shape(x)) idiom so the
+/// shape operand becomes `tensor.from_elements(dim_0, ..., dim_{n-1})` of x's
+/// dims. Sibling to GatherShapeFold (which folds Gather(Shape, idx)). Needed
+/// to unblock multi-dyn-per-group expand_shape in ReshapeConversion, which
+/// already recognises tensor.from_elements but does not look through
+/// onnx.Shape. See ReshapeShapeFold.cpp.
+void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+
+/// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
+/// chain (Pow / Mul / Sum / Tanh) back into a single
+/// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
+/// for some loading paths (notably dynamic-shape models) and the inlined
+/// primitives have no MorphiZen converters. Must run BEFORE
+/// `lowerOnnxConstants` so the literal float values of the embedded
+/// constants (3.0, 0.044715, sqrt(2/π), 1.0, 0.5) are still inline.
+/// See FastGeluFusion.cpp.
+void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

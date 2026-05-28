@@ -23,6 +23,7 @@ add_library(OnnxToHip STATIC
   MultiHeadAttentionConversion.cpp
   GatherConversion.cpp
   GatherShapeFold.cpp
+  ReshapeShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   InferOnnxShapes.cpp
@@ -75,6 +76,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRFuncDialect
   MLIRArithDialect
   MLIRTensorDialect
+  MLIRLinalgDialect
   MLIRMemRefDialect
   MLIRBufferizationDialect
   MLIRIR
