@@ -309,8 +309,79 @@ struct FixLoopAccumulatorOffsetPass
             chunkSize =
                 arith::ConstantIndexOp::create(b, loc, attr.getInt());
           }
-          Value iterIdx = getIterIdx();
-          Value newOff = arith::MulIOp::create(b, loc, iterIdx, chunkSize);
+          // Prefer using the body's already-computed `start` position
+          // (= seqlens_k[iter], the actual chunk position in the source
+          // tensor) as the offset, falling back to iter*chunk_size when
+          // we can't find it. The start is more accurate when chunks
+          // are not equal-sized — it directly matches how the body
+          // slices its captures (arg7/arg8) for the per-iter Q/K/V.
+          //
+          // Detection: the body emits this canonical sequence right
+          // after gathering seqlens_k:
+          //   hip.gather(%argN_seqlens_k, %iter_buf) -> %alloc_start
+          //   %x = memref.load %alloc_start[%c0] : memref<1xi32>
+          //   %start_idx = arith.index_cast %x : i32 to index
+          // We pick the FIRST such index_cast in the body whose source
+          // load reads from a memref<1xi32> alloc that's the output of
+          // a hip.gather op (any capture-fed gather will do — typically
+          // arg4 = seqlens_k).
+          Value existingStart;
+          funcOp.walk([&](arith::IndexCastOp ic) -> WalkResult {
+            if (existingStart)
+              return WalkResult::interrupt();
+            auto loadOp = ic.getIn().getDefiningOp<memref::LoadOp>();
+            if (!loadOp)
+              return WalkResult::advance();
+            auto loadSrcTy =
+                dyn_cast<MemRefType>(loadOp.getMemref().getType());
+            if (!loadSrcTy || loadSrcTy.getRank() != 1 ||
+                !loadSrcTy.getElementType().isInteger(32))
+              return WalkResult::advance();
+            // The loaded alloc must be the output of a hip.gather op
+            // whose data operand is a function arg (a capture).
+            for (Operation *u : loadOp.getMemref().getUsers()) {
+              if (u == loadOp)
+                continue;
+              if (u->getName().getStringRef() != "hip.gather")
+                continue;
+              if (u->getNumOperands() < 3)
+                continue;
+              // Last operand of hip.gather is the output (outs).
+              // First non-ctx operand is the data; check that's a
+              // function arg.
+              for (Value gOpnd : u->getOperands()) {
+                if (auto ga = dyn_cast<BlockArgument>(gOpnd)) {
+                  if (ga.getOwner() == &entry &&
+                      ga.getArgNumber() >= 3) {
+                    existingStart = ic.getResult();
+                    return WalkResult::interrupt();
+                  }
+                }
+              }
+            }
+            return WalkResult::advance();
+          });
+          Value newOff;
+          if (existingStart) {
+            // Use the actual seqlens_k[iter] start. The subview offset
+            // is in DIM-1 ELEMENTS, and `existingStart` is exactly that.
+            newOff = existingStart;
+          } else {
+            // Fall back to iter * chunk_size (equal-chunk assumption).
+            Value iterIdx = getIterIdx();
+            newOff = arith::MulIOp::create(b, loc, iterIdx, chunkSize);
+          }
+          // The newOff Op (if newly created) was inserted at `b`'s
+          // current insertion point — make sure it dominates the
+          // subview by moving it just before sv. existingStart values
+          // are pre-existing in the IR and already dominate sv (they
+          // come from earlier in the same block).
+          if (auto *defOp = newOff.getDefiningOp()) {
+            if (defOp->isBeforeInBlock(sv) == false &&
+                defOp->getBlock() == sv->getBlock()) {
+              defOp->moveBefore(sv);
+            }
+          }
 
           // memref.subview's operand list is: source, then DYNAMIC offsets
           // in dim order, then DYNAMIC sizes, then DYNAMIC strides. To
