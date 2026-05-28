@@ -10,9 +10,12 @@
 
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
@@ -53,6 +56,14 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
+
+  // 5a. Convert linalg.* (in particular linalg.map / linalg.fill emitted by
+  //     the upstream tensor bufferization of tensor.splat) to scf loops.
+  //     ConvertHipToLLVM has no linalg patterns, so any surviving linalg op
+  //     would lower to builtin.unrealized_conversion_cast and abort with
+  //     "LLVM Translation failed for operation: ...".  Required for ONNX
+  //     ConstantOfShape support (multimodal embedding graphs).
+  pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
   // 6. HIP-specific buffer optimizations
   pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
@@ -183,7 +194,23 @@ void mlir::hip::buildHipToLLVMPipeline(
   // final LLVM IR and "Failed to translate MLIR to LLVM IR" aborts compile.
   pm.addPass(createLowerAffinePass());
 
+  // Lower scf.for / scf.if loops introduced by convert-linalg-to-loops
+  // (and any other source) to cf.br / cf.cond_br before LLVM conversion.
+  // ConvertHipToLLVM has no SCF patterns; without this, scf.for survives
+  // through ConvertHipToLLVMPass and the embedded index <-> i64 conversion
+  // casts left behind by upstream get wrapped as
+  // `builtin.unrealized_conversion_cast` which then fails LLVM IR
+  // translation.  Required for embedding.onnx (multimodal
+  // Equal/NonZero/ScatterND chain).
+  pm.addPass(createSCFToControlFlowPass());
+
   pm.addPass(createConvertHipToLLVMPass());
+
+  // Final cleanup: any leftover builtin.unrealized_conversion_cast pairs
+  // (e.g. introduced as type bridge for upstream dialects whose conversion
+  // ran out-of-band) are folded away so the IR is purely in the LLVM
+  // dialect when translated to LLVM IR.
+  pm.addPass(createReconcileUnrealizedCastsPass());
 
   mlir::hip::CompilationOptionsT compOpts;
   compOpts.constants_file = options.constantsFile;
