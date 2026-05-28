@@ -62,7 +62,14 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     ConvertHipToLLVM has no linalg patterns, so any surviving linalg op
   //     would lower to builtin.unrealized_conversion_cast and abort with
   //     "LLVM Translation failed for operation: ...".  Required for ONNX
-  //     ConstantOfShape support (multimodal embedding graphs).
+  //     ConstantOfShape support (multimodal embedding graphs) whose lowering
+  //     to `tensor.splat` survives the `ConstantOfShapeAsScalar` fast-path
+  //     (i.e. the splat's consumer is NOT a broadcast-aware op like
+  //     `onnx.Where`).  Empirically a no-op on the Qwen3.5-35B embedding
+  //     graph because that case falls through to the scalar fold, but kept
+  //     to keep the fall-back lowering chain intact for future models
+  //     (linalg.fill / linalg.matmul / non-Where ConstantOfShape consumers
+  //     etc.).
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
   // 6. HIP-specific buffer optimizations
@@ -200,8 +207,12 @@ void mlir::hip::buildHipToLLVMPipeline(
   // through ConvertHipToLLVMPass and the embedded index <-> i64 conversion
   // casts left behind by upstream get wrapped as
   // `builtin.unrealized_conversion_cast` which then fails LLVM IR
-  // translation.  Required for embedding.onnx (multimodal
-  // Equal/NonZero/ScatterND chain).
+  // translation.  Required for any scf.for that survives to here, including
+  // the loops produced by `createConvertLinalgToLoopsPass` above.  Like
+  // that pass, this is a no-op on graphs whose linalg ops are all folded
+  // out upstream (e.g. Qwen3.5-35B embedding after the
+  // `ConstantOfShapeAsScalar` fold), but kept to preserve the fall-back
+  // chain for future models that exercise other linalg lowerings.
   pm.addPass(createSCFToControlFlowPass());
 
   pm.addPass(createConvertHipToLLVMPass());
@@ -209,7 +220,8 @@ void mlir::hip::buildHipToLLVMPipeline(
   // Final cleanup: any leftover builtin.unrealized_conversion_cast pairs
   // (e.g. introduced as type bridge for upstream dialects whose conversion
   // ran out-of-band) are folded away so the IR is purely in the LLVM
-  // dialect when translated to LLVM IR.
+  // dialect when translated to LLVM IR.  Standard MLIR practice for any
+  // tensor/memref-to-LLVM pipeline; cheap on clean IR.
   pm.addPass(createReconcileUnrealizedCastsPass());
 
   mlir::hip::CompilationOptionsT compOpts;
