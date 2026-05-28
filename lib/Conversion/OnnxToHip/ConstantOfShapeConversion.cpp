@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -253,6 +255,22 @@ buildRank0ScalarAttr(mlir::Attribute valueAttr, mlir::Type elemType) {
 /// such an op, the buffer can be elided entirely and the consumer can read
 /// from a rank-0 scalar instead.  This saves the tensor.splat -> linalg.map
 /// -> scf.for -> cf chain on every inference.
+///
+/// IMPORTANT: we do NOT emit `arith.constant dense<v> : tensor<>` here.
+/// After bufferization that lowers to a `memref.global "private" constant`
+/// that lives in the DLL's `.data` section -- a *host* pointer that the GPU
+/// where-kernel cannot dereference.  The text-only path masked the bug
+/// because the mask was all-false, so the kernel never actually read
+/// `x[0]`; the moment a multimodal prompt sets even one mask bit, `x[0]`
+/// is read on-device and the kernel faults with `unspecified launch
+/// failure (719)`.
+///
+/// Instead, build the rank-0 constant via `tensor.splat`, which bufferizes
+/// to a fresh `memref.alloc()` + `linalg.fill` placed in the GPU pool by
+/// the standard pipeline.  The where kernel then reads the scalar at a
+/// device-side virtual address, which is correct.  For rank-0 the
+/// downstream chain stays trivial: the fill is a single store, no nested
+/// loops, no scf-for / linalg-map blow-up.
 struct ConstantOfShapeAsScalar : public mlir::RewritePattern {
   ConstantOfShapeAsScalar(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ConstantOfShape", /*benefit=*/3, ctx) {}
@@ -280,15 +298,39 @@ struct ConstantOfShapeAsScalar : public mlir::RewritePattern {
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "result must be ranked tensor");
 
-    std::optional<mlir::DenseElementsAttr> splat =
-        buildRank0ScalarAttr(op->getAttr("value"), resultType.getElementType());
-    if (!splat.has_value())
-      return rewriter.notifyMatchFailure(
-          op, "value attribute kind / element type not supported");
+    mlir::Type elemType = resultType.getElementType();
+    mlir::Location loc = op->getLoc();
+    mlir::Value scalar;
+    if (mlir::failed(buildScalarFillValue(op, rewriter, loc, elemType, scalar)))
+      return mlir::failure();
 
-    mlir::Value scalar =
-        mlir::arith::ConstantOp::create(rewriter, op->getLoc(), *splat);
-    rewriter.replaceOp(op, scalar);
+    // rank-0 buffer materialised via `tensor.empty + linalg.fill`. This
+    // intentionally avoids `tensor.splat(scalar_const)` because the MLIR
+    // canonicalizer would fold that to `arith.constant dense<v> : tensor<>`,
+    // which bufferizes to a *host* `memref.global "private" constant`. That
+    // global lives in the compiled DLL's `.data` section -- a virtual
+    // address the GPU cannot dereference even on UMA targets (gfx1151), so
+    // any consumer kernel that actually reads `x[0]` (e.g. `hip.where` on
+    // a multimodal prompt where the mask has a True bit) faults with HIP
+    // 719 ("unspecified launch failure"). The text-only path masked the
+    // bug because the mask is all-False there and the kernel never reads
+    // the operand.
+    //
+    // `tensor.empty + linalg.fill` survives canonicalization and bufferizes
+    // to `memref.alloc + linalg.fill`. `hip-materialize-host-scalars` then
+    // catches the small static-shape memref.alloc with a host store on it
+    // and redirects it to host-mapped scratch (`hipHostMalloc(Mapped)`),
+    // giving us a buffer that is *both* host-writable AND GPU-readable at
+    // the same VA on UMA targets. The end result is identical perf-wise
+    // (one i64 store at inference start, no per-step overhead) while
+    // remaining correct under the where kernel's `x[0]` read.
+    auto scalarTensorTy = mlir::RankedTensorType::get({}, elemType);
+    mlir::Value empty =
+        mlir::tensor::EmptyOp::create(rewriter, loc, scalarTensorTy,
+                                      /*dynamicSizes=*/mlir::ValueRange{});
+    auto fill = mlir::linalg::FillOp::create(
+        rewriter, loc, mlir::ValueRange{scalar}, mlir::ValueRange{empty});
+    rewriter.replaceOp(op, fill.getResult(0));
     return mlir::success();
   }
 };

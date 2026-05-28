@@ -70,6 +70,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRFuncDialect
   MLIRArithDialect
   MLIRTensorDialect
+  MLIRLinalgDialect
   MLIRMemRefDialect
   MLIRBufferizationDialect
   MLIRIR
