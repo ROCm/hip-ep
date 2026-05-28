@@ -228,7 +228,13 @@ def fetch_prebuilt_deps():
 # ONNX Runtime
 # ---------------------------------------------------------------------------
 
-ORT_VERSION = "1.24.4"  # must match pip onnxruntime-directml for Python API compat
+ORT_VERSION = "1.26.0"  # must match pip `onnxruntime` for Python API compat.
+# Bumped from 1.24.4 to pick up contrib op schemas required by Qwen 3.5 9B
+# (com.microsoft:CausalConvWithState and com.microsoft:LinearAttention are
+# absent from the schemas shipped with 1.24.4 and break graph parsing).
+# We switched from onnxruntime-directml (pinned at 1.24.4 max on pip) to
+# the base `onnxruntime` package (1.26.0 available); MorphiZenEP is what
+# does GPU compute on AMD GPUs, DML EP isn't used by this project.
 
 
 def fetch_onnxruntime():
