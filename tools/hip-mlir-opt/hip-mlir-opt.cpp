@@ -231,6 +231,9 @@ int main(int argc, char **argv) {
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::hip::createOnnxLoopOutlinePass();
   });
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::hip::createRefineLoopBodyTypesPass();
+  });
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();
   mlir::registerConvertBufferizationToMemRefPass();

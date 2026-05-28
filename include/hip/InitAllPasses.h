@@ -11,6 +11,7 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
@@ -57,6 +58,13 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
+  // BufferDeallocation interface external models. Required after the
+  // RefineLoopBodyTypes pass enables vision-encoder outlined-loop bodies
+  // to reach bufferize: ownership-based dealloc walks every operand /
+  // result through the interface, and some `arith.*` ops (e.g.
+  // `arith.select` on tensor operands) need the interface to declare
+  // they don't own memref values.
+  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
 }
 
 /// Load all required dialects into an MLIRContext.

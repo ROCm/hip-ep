@@ -60,6 +60,16 @@ void GetHostScratchOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
+void HostSyncOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Has externally-visible side effects (stream sync). Modeled as Write to
+  // the default resource so CSE / canonicalizer / dead-store elimination
+  // don't reorder it across loads or remove it.
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
 void FreeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {

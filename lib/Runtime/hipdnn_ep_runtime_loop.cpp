@@ -57,7 +57,11 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -115,9 +119,19 @@ int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
     state->loop_iter_capacity = new_cap;
   }
   if (!state->loop_iter_dev) {
-    if (hipMalloc(&state->loop_iter_dev, sizeof(int64_t)) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipMalloc for iter dev buffer failed\n");
+    // Host-mapped: the generated loop body reads the iter value from CPU code
+    // (memref.load on a rank-0 memref<i64> lowers to llvm.load). On GPUs whose
+    // hipMalloc returns true device memory (i.e. not UMA-mapped), a CPU load of
+    // a hipMalloc'd pointer SEGVs. Mirrors the same fix used for loop_cond_host
+    // below and matches the host-scratch design (CLAUDE.md "gfx1151 dynseqlen
+    // host-scalar SEGV"). hipMemcpyAsync(H2D) from loop_iter_cpu_buf still
+    // stream-orders the per-iter update vs the body launch -- async memcpys
+    // into host-mapped memory work the same way and preserve correctness.
+    if (hipHostMalloc(&state->loop_iter_dev, sizeof(int64_t),
+                      hipHostMallocMapped) != hipSuccess) {
+      fprintf(
+          stderr,
+          "hipdnn_ep_run_*_loop: hipHostMalloc for iter dev buffer failed\n");
       state->loop_iter_dev = nullptr;
       return -1;
     }
@@ -194,8 +208,16 @@ struct DynamicCondPolicy {
 template <class CondPolicy>
 int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                 int64_t max_trip_count, bool cond_init,
-                int32_t /*num_loop_carried*/, int32_t /*num_captures*/,
+                int32_t num_loop_carried, int32_t num_captures,
                 void **loop_carried_descs, void **capture_descs) {
+  fprintf(stderr,
+          "[loop] ENTER runLoopImpl: max_trip_count=%lld cond_init=%d "
+          "num_carried=%d num_captures=%d state=%p body_fn=%p "
+          "carried_descs=%p capture_descs=%p\n",
+          (long long)max_trip_count, (int)cond_init, (int)num_loop_carried,
+          (int)num_captures, (void *)state, (void *)body_fn,
+          (void *)loop_carried_descs, (void *)capture_descs);
+  fflush(stderr);
   if (!state || !body_fn)
     return -1;
   if (max_trip_count < 0)
@@ -210,6 +232,30 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
     return 0;
   if (ensureLoopBuffers(state, max_trip_count) != 0)
     return -1;
+  // Diagnostic: when HIPDNN_EP_LOOP_SKIP=1, return without invoking the body.
+  // Loop-carried descriptors keep their input values (zero work done) so the
+  // pipeline continues; downstream consumers see the v_init values as v_final.
+  // Used to isolate "does main_graph itself crash, or only the body?"
+  //
+  // Uses GetEnvironmentVariableA (Win32) because the model.dll is compiled
+  // /MT and has its own CRT instance — std::getenv() won't see env vars set
+  // by the host process. See CLAUDE.md "Static CRT means separate CRT per
+  // DLL" gotcha.
+  {
+    char skip_env[8] = {0};
+#ifdef _WIN32
+    GetEnvironmentVariableA("HIPDNN_EP_LOOP_SKIP", skip_env, sizeof(skip_env));
+#else
+    if (const char *e = std::getenv("HIPDNN_EP_LOOP_SKIP"))
+      std::snprintf(skip_env, sizeof(skip_env), "%s", e);
+#endif
+    if (skip_env[0] == '1') {
+      fprintf(stderr,
+              "[loop] HIPDNN_EP_LOOP_SKIP=1: skipping %lld iterations\n",
+              static_cast<long long>(max_trip_count));
+      return 0;
+    }
+  }
 
   void *iter_dev = state->loop_iter_dev;
   void *cond_dev = state->loop_cond_dev;
@@ -242,8 +288,22 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
               static_cast<long long>(i));
       return -1;
     }
+    fprintf(stderr, "[loop] iter %lld/%lld: calling body_fn=%p\n", (long long)i,
+            (long long)max_trip_count, (void *)body_fn);
+    fflush(stderr);
+    // Bracket the body call with a pool-depth push/pop so the body's
+    // hip.get_pool returns a different physical buffer than main_graph's.
+    // Without this, both call sites land at offset 0 of state->pool_base
+    // and the body's kernels silently overwrite main_graph values that
+    // need to live across the loop call. See the comment on
+    // `g_pool_depth` in hipdnn_ep_runtime_state.cpp.
+    hipdnn_ep_push_pool_depth();
     int rc =
         body_fn(state, iter_dev, cond_dev, loop_carried_descs, capture_descs);
+    hipdnn_ep_pop_pool_depth();
+    fprintf(stderr, "[loop] iter %lld: body_fn returned %d\n", (long long)i,
+            rc);
+    fflush(stderr);
     if (rc != 0)
       return rc;
     if constexpr (CondPolicy::consultsCond()) {

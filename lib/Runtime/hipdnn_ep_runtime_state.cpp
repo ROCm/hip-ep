@@ -222,6 +222,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->pool_size = 0;
   state->buffer_offsets = nullptr;
   state->num_buffers = 0;
+  state->nested_pool_bases = nullptr;
+  state->nested_pool_sizes = nullptr;
+  state->nested_pool_count = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
   state->host_scratch_base = nullptr;
@@ -477,12 +480,23 @@ static int hipmalloc_and_fixup(RuntimeState *state,
                                const mlir::hip::HipModelMetaInfo *meta,
                                size_t total_size) {
   auto t_prev = timing_now();
-  if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
-    fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
+  // hipHostMalloc(hipHostMallocMapped|hipHostMallocNonCoherent) makes the
+  // blob host-writable AND GPU-readable via the same address on UMA. We need
+  // host access because vision-encoder shape arithmetic does `memref.load`
+  // on scalar constants (e.g. Range start / delta as f32) from host code; a
+  // plain `hipMalloc` returns true device memory on UMA-but-not-aliased
+  // architectures (gfx1151) and host-side loads on those pointers SEGV.
+  // NonCoherent (coarse-grained) skips the per-load cache snoop that
+  // hipHostMallocCoherent forces — irrelevant here since the blob is
+  // write-once at init and read-many at inference.
+  if (hipHostMalloc(&state->gpu_constants_blob, total_size,
+                    hipHostMallocMapped | hipHostMallocNonCoherent) !=
+      hipSuccess) {
+    fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
             total_size);
     return 1;
   }
-  TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
+  TIMING_LOG("[Session] hipHostMalloc VRAM: %.3fs (%zu bytes)\n",
              record_elapsed(t_prev), total_size);
   auto *constants = meta->constants();
   for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
@@ -990,7 +1004,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->loop_iter_cpu_buf));
   }
   if (state->loop_iter_dev) {
-    HIP_CLEANUP(hipFree(state->loop_iter_dev));
+    HIP_CLEANUP(hipHostFree(state->loop_iter_dev));
   }
   if (state->loop_cond_host) {
     HIP_CLEANUP(hipHostFree(state->loop_cond_host));
@@ -1012,6 +1026,15 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->buffer_offsets) {
     free(state->buffer_offsets);
   }
+  // Free nested-depth pool slots (one per outlined hip.loop nesting level).
+  if (state->nested_pool_bases) {
+    for (size_t i = 0; i < state->nested_pool_count; ++i)
+      if (state->nested_pool_bases[i])
+        HIP_CLEANUP(hipFree(state->nested_pool_bases[i]));
+    free(state->nested_pool_bases);
+  }
+  if (state->nested_pool_sizes)
+    free(state->nested_pool_sizes);
 
   // Free the single constants blob and the pointer array.
   // With shared constants, only the last reference frees the GPU memory.
@@ -1022,7 +1045,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
       long remaining = shm_ref_dec(&smeta->ref_count);
       fprintf(stderr, "[SHARED_CONSTANTS] Cleanup: ref_count=%ld\n", remaining);
       if (remaining <= 0) {
-        HIP_CLEANUP(hipFree(state->gpu_constants_blob));
+        HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
       }
       UnmapViewOfFile(state->shared_constants_view);
       if (state->shared_constants_mapping)
@@ -1030,7 +1053,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     } else
 #endif
     {
-      HIP_CLEANUP(hipFree(state->gpu_constants_blob));
+      HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
     }
   }
   if (state->gpu_constants)
@@ -1197,47 +1220,107 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
   return pool_ptr + offset;
 }
 
+// Pool nesting depth — incremented by `runLoopImpl` around outlined
+// body_fn calls so that the body's `hip.get_pool` returns a different
+// physical buffer than main_graph's. Without this, both functions
+// allocate at offset 0 of the SAME `pool_base` and the body's kernels
+// silently overwrite main_graph values that need to live across the
+// `hip.loop` call (canonical site: the Qwen 3.5 vision encoder rope
+// position-embedding tables, fed into the windowed-attention loop body
+// as captures — overwritten on each iteration before the post-loop
+// chain could read them).
+//
+// thread_local is the simplest correct scope: the runtime is invoked
+// single-threaded per inference, but a multi-session host could run two
+// inferences in parallel on separate threads, each with its own depth.
+static thread_local int g_pool_depth = 0;
+
+void hipdnn_ep_push_pool_depth() { ++g_pool_depth; }
+void hipdnn_ep_pop_pool_depth() {
+  if (g_pool_depth > 0)
+    --g_pool_depth;
+}
+
 void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
+  fprintf(stderr, "[pool_base] enter state=%p depth=%d needed=%zu\n",
+          (void *)state, g_pool_depth, needed_size);
+  fflush(stderr);
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
   }
+
+  // Depth-0 (main_graph) uses the original `pool_base / pool_size` slot.
+  // Depth >=1 (outlined hip.loop body) uses `nested_pool_bases[depth-1]`.
+  // Both slots grow-on-demand identically; the only difference is which
+  // pointer the runtime maintains.
+  void **basePtr = nullptr;
+  size_t *sizePtr = nullptr;
+  if (g_pool_depth == 0) {
+    basePtr = &state->pool_base;
+    sizePtr = &state->pool_size;
+  } else {
+    size_t idx = static_cast<size_t>(g_pool_depth - 1);
+    if (idx >= state->nested_pool_count) {
+      size_t newCount = idx + 1;
+      void **newBases = static_cast<void **>(
+          std::realloc(state->nested_pool_bases, newCount * sizeof(void *)));
+      size_t *newSizes = static_cast<size_t *>(
+          std::realloc(state->nested_pool_sizes, newCount * sizeof(size_t)));
+      if (!newBases || !newSizes) {
+        fprintf(stderr,
+                "hipdnn_ep_get_pool_base: realloc nested slot arrays "
+                "failed (depth=%d, needed_count=%zu)\n",
+                g_pool_depth, newCount);
+        return nullptr;
+      }
+      for (size_t i = state->nested_pool_count; i < newCount; ++i) {
+        newBases[i] = nullptr;
+        newSizes[i] = 0;
+      }
+      state->nested_pool_bases = newBases;
+      state->nested_pool_sizes = newSizes;
+      state->nested_pool_count = newCount;
+    }
+    basePtr = &state->nested_pool_bases[idx];
+    sizePtr = &state->nested_pool_sizes[idx];
+  }
+
   // Grow-on-demand: when dynamic shapes produce larger intermediates than
-  // the static pool allocated at inference_init, reallocate. The pool
-  // never shrinks — subsequent calls with smaller needed_size are no-ops.
-  if (needed_size > state->pool_size) {
-    // Sync the stream before freeing: the previous inference may have
-    // dispatched async kernels that still hold pointers into the pool.
-    // hipFree on an in-flight buffer is undefined behavior — synchronize
-    // first to drain pending work. Grow events are rare (only when an
-    // input shape exceeds anything seen before) so the cost is amortized.
-    if (state->pool_base) {
+  // the current slot, reallocate. The slot never shrinks. Sync the stream
+  // before freeing: the previous inference may have dispatched async
+  // kernels that still hold pointers into the slot.
+  if (needed_size > *sizePtr) {
+    if (*basePtr) {
       if (state->stream)
         HIP_CLEANUP(hipStreamSynchronize(state->stream));
       fprintf(stderr,
-              "hipdnn_ep_get_pool_base: growing pool %zu -> %zu bytes "
-              "(rare; first time this large input shape was seen)\n",
-              state->pool_size, needed_size);
+              "hipdnn_ep_get_pool_base: growing depth=%d pool %zu -> %zu "
+              "bytes (rare; first time this large input shape was seen)\n",
+              g_pool_depth, *sizePtr, needed_size);
       fflush(stderr);
-      HIP_CLEANUP(hipFree(state->pool_base));
+      HIP_CLEANUP(hipFree(*basePtr));
     }
     void *new_base = nullptr;
     if (hipMalloc(&new_base, needed_size) != hipSuccess) {
       fprintf(stderr,
               "hipdnn_ep_get_pool_base: hipMalloc failed for pool grow "
-              "(%zu -> %zu bytes)\n",
-              state->pool_size, needed_size);
-      state->pool_base = nullptr;
-      state->pool_size = 0;
+              "(depth=%d, %zu -> %zu bytes)\n",
+              g_pool_depth, *sizePtr, needed_size);
+      *basePtr = nullptr;
+      *sizePtr = 0;
       return nullptr;
     }
-    state->pool_base = new_base;
-    state->pool_size = needed_size;
+    *basePtr = new_base;
+    *sizePtr = needed_size;
   }
-  return state->pool_base;
+  return *basePtr;
 }
 
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
+  fprintf(stderr, "[host_scratch] enter state=%p needed=%zu\n", (void *)state,
+          needed_size);
+  fflush(stderr);
   if (!state) {
     fprintf(stderr,
             "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");

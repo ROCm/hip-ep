@@ -255,6 +255,13 @@ void ConvertHipToLLVMPass::runOnOperation() {
   // stages would require a reconcile-unrealized-casts cleanup pass.
   populateFuncToLLVMConversionPatterns(typeConverter, patterns);
   populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
+  // arith.ceildivsi / arith.ceildivui / arith.floordivsi don't have direct
+  // LLVM-IR translation; survivors get rejected at MLIR-to-LLVM-IR translation
+  // with "missing LLVMTranslationDialectInterface". Expand them here into
+  // divsi + addi + cmpi + select so the partial conversion fully eliminates
+  // them. Canonical site: `onnx.Range`'s lowering emits `arith.ceildivsi` for
+  // the iteration count, which survives bufferization unchanged.
+  arith::populateCeilFloorDivExpandOpsPatterns(patterns);
   arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
   cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
 

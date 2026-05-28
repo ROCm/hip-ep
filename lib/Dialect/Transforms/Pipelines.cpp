@@ -54,6 +54,15 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
 
+  // 5b. Fix Concat-grow loop-body accumulator offsets to be iter-driven
+  //     instead of v_in-dim-driven. See FixLoopAccumulatorOffset.cpp for
+  //     the full mechanism. Must run AFTER BufferResultsToOutParams (the
+  //     pattern we rewrite only exists post-conversion) and AFTER the
+  //     deallocation pipeline (so dealloc ops are stable), but BEFORE
+  //     OptimizeMemRefs / PoolAllocs (so the new iter-driven arith chain
+  //     is visible to subsequent optimisation).
+  pm.addNestedPass<func::FuncOp>(hip::createFixLoopAccumulatorOffsetPass());
+
   // 6. HIP-specific buffer optimizations
   pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
 
@@ -124,6 +133,15 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // ops in the module.
   pm.addPass(createOnnxLoopOutlinePass());
 
+  // Re-infer onnx.* result types inside each outlined body func from the
+  // refined operand types (loop-outline already corrected the function
+  // signature; the cloned ops still carry stale result types from the
+  // original onnx.Loop body annotation). Propagates the refined return
+  // type into the body func signature and the enclosing hip.loop op's
+  // result types. Runs BEFORE convert-onnx-to-hip so the body converts
+  // with correct types.
+  pm.addPass(createRefineLoopBodyTypesPass());
+
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
         fs, options.externalizeMinNumElements, options.skipConstantData));
@@ -146,6 +164,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createRefineLoopBodyTypesPass());
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());

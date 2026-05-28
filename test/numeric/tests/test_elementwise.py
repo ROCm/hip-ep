@@ -3,11 +3,13 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for elementwise operations: Sub, Mul, Add.
+"""Tests for elementwise operations: Sub, Mul, Add, Min, Max.
 
 The Llama-3.1-8B-fixed model uses:
   Sub: [1, 1] - [1] (broadcast) in the attention mask subgraph
   Mul: [1, S, 14336] * [1, S, 14336] for the SiLU gate (gate * sigmoid)
+  Min: int32/int64 clamp in the seqlens_k computation
+       (seqlens_k = Min(total_seq_len, max_seq_len) - 1)
 """
 
 import numpy as np
@@ -311,3 +313,137 @@ class TestElementwiseMulBroadcast:
 
         actual, expected = model_runner.run_sample(model, [lhs, rhs])
         compare_outputs(actual, expected, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Min / Max
+#
+# Both ops go through wrap_miopenOpTensor. MIOpen's miopenOpTensor handles
+# floating-point natively (miopenTensorOpMin / miopenTensorOpMax) but rejects
+# integer element types -- the integer fallback dispatches to
+# hip_elementwise_min / hip_elementwise_max in the custom-kernels library.
+# Both same-shape and broadcasting (scalar rhs) cases are exercised because
+# the int fallback materialises broadcasts via hip_expand before the flat
+# kernel runs.
+#
+# The canonical real-world hit is the attention seqlens_k clamp:
+#     seqlens_k = Min(total_seq_len, max_seq_len) - 1
+# which lives in attention-mask preprocessing chains and is i32 / i64 typed.
+# ---------------------------------------------------------------------------
+class TestElementwiseMin:
+    @pytest.mark.parametrize(
+        "dtype,shape",
+        [
+            (np.int32, [32]),
+            (np.int64, [32]),
+            (np.int32, [2, 128]),
+            (np.int64, [2, 128]),
+            (np.float16, [4, 8]),
+            (np.float32, [4, 8]),
+        ],
+    )
+    def test_min_same_shape(self, model_runner, dtype, shape):
+        model = _make_binary_model("Min", dtype, shape)
+        rng = np.random.default_rng(301)
+        if np.issubdtype(dtype, np.integer):
+            lhs = rng.integers(-100, 100, shape, dtype=dtype)
+            rhs = rng.integers(-100, 100, shape, dtype=dtype)
+        else:
+            lhs = rng.uniform(-3.0, 3.0, shape).astype(dtype)
+            rhs = rng.uniform(-3.0, 3.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [lhs, rhs])
+        atol = 0 if np.issubdtype(dtype, np.integer) else 1e-5
+        compare_outputs(actual, expected, atol=atol)
+
+    @pytest.mark.parametrize("dtype", [np.int32, np.int64])
+    def test_min_seqlens_k_clamp(self, model_runner, dtype):
+        """Integer Min with scalar broadcast rhs, mirroring the
+        seqlens_k = Min(total_seq_len, max_seq_len) pattern that produced
+        the original a-1-shaped bug before the integer fallback wired
+        MIN/MAX through hip_elementwise_min.
+
+        Reproduces the bug repro: a is a length-32 int vector and b is a
+        scalar (rank-0) constant. Output must equal numpy's elementwise
+        minimum exactly (no -1 leakage from the prior CPU-side input
+        buffer when the runtime fails silently).
+        """
+        shape = [32]
+        model = _make_broadcast_binary_model("Min", dtype, shape, [], shape)
+        a = np.array(
+            [
+                1,
+                2,
+                4,
+                5,
+                7,
+                8,
+                10,
+                11,
+                13,
+                14,
+                16,
+                17,
+                19,
+                20,
+                22,
+                23,
+                25,
+                26,
+                28,
+                29,
+                31,
+                32,
+                34,
+                35,
+                37,
+                38,
+                40,
+                41,
+                43,
+                44,
+                46,
+                48,
+            ],
+            dtype=dtype,
+        )
+        b = np.array(47, dtype=dtype)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        compare_outputs(actual, expected, atol=0)
+
+
+class TestElementwiseMax:
+    @pytest.mark.parametrize(
+        "dtype,shape",
+        [
+            (np.int32, [32]),
+            (np.int64, [32]),
+            (np.int32, [2, 128]),
+            (np.int64, [2, 128]),
+            (np.float16, [4, 8]),
+            (np.float32, [4, 8]),
+        ],
+    )
+    def test_max_same_shape(self, model_runner, dtype, shape):
+        model = _make_binary_model("Max", dtype, shape)
+        rng = np.random.default_rng(302)
+        if np.issubdtype(dtype, np.integer):
+            lhs = rng.integers(-100, 100, shape, dtype=dtype)
+            rhs = rng.integers(-100, 100, shape, dtype=dtype)
+        else:
+            lhs = rng.uniform(-3.0, 3.0, shape).astype(dtype)
+            rhs = rng.uniform(-3.0, 3.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [lhs, rhs])
+        atol = 0 if np.issubdtype(dtype, np.integer) else 1e-5
+        compare_outputs(actual, expected, atol=atol)
+
+    @pytest.mark.parametrize("dtype", [np.int32, np.int64])
+    def test_max_scalar_floor(self, model_runner, dtype):
+        """Integer Max with scalar broadcast rhs (floor), the dual of
+        the seqlens_k clamp above."""
+        shape = [32]
+        model = _make_broadcast_binary_model("Max", dtype, shape, [], shape)
+        rng = np.random.default_rng(303)
+        a = rng.integers(-50, 50, shape, dtype=dtype)
+        b = np.array(0, dtype=dtype)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        compare_outputs(actual, expected, atol=0)

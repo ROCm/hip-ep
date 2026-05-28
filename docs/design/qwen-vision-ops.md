@@ -380,16 +380,15 @@ and `output_num` plus `axes_num_elements` (and a `noop_with_empty_axes`
 flag for the short-circuit). The actual axes vector is gone by the
 time we get the call — the lowering has consumed it.
 
-Same story for the binary elementwise ops: `wrap_div` / `wrap_mod` /
-`wrap_equal` / `wrap_less` take only a single `num_elements` and
-require both inputs already broadcast to that shape. No per-input
-shape, no broadcast factors. The MLIR side does the work, and the
-runtime stays simple.
-
-When adding a new reduction or binary op, **do not** request shape info
-that the lowering didn't volunteer — that's a sign the op needs to be
-expressed differently in the MLIR pipeline rather than worked around in
-C++.
+Same story for most binary elementwise ops: `wrap_mod` / `wrap_equal` /
+`wrap_less` take only a single `num_elements` and require both inputs
+already broadcast to that shape. **`wrap_div` and `wrap_elementwise_sub`
+are exceptions** — their HipToLLVM lowerings pass per-operand 4D shapes
+(rank <= 4, left-padded) and the runtime materialises broadcast via
+`hip_expand` when an operand shape differs from the output. When adding
+a new reduction or binary op, follow the `wrap_div` /
+`wrap_elementwise_sub` pattern if runtime broadcast is needed; otherwise
+keep the flat `num_elements`-only contract.
 
 ## 7. ONNX corner cases handled
 

@@ -36,6 +36,7 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
 #include "llvm/ADT/ArrayRef.h"
 
 namespace mlir {
@@ -79,6 +80,13 @@ RankedTensorType inferUnarySameShapeResultType(RankedTensorType inputType);
 /// right-aligned broadcast. Element type from `lhsType`.
 RankedTensorType inferBinaryBroadcastResultType(RankedTensorType lhsType,
                                                 RankedTensorType rhsType);
+
+/// Concat: along `axis`, sizes sum (or dynamic if any input is dynamic at
+/// `axis`); other axes tighten to the first operand that is static at
+/// that position (matches the most-refined view of the shared shape).
+/// Rank / element type taken from the first ranked operand. `axis` is
+/// the raw ONNX attribute (may be negative).
+RankedTensorType inferConcatResultType(ValueRange operands, int64_t axis);
 
 } // namespace hip
 } // namespace mlir

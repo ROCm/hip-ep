@@ -130,11 +130,11 @@ static int64_t writeAlignmentPadding(ExternalizationState *extState,
 /// Updates ExternalizationState counters, emits the JSON manifest entry,
 /// creates the extern memref.global with hip.external_data, and replaces
 /// the original op with memref.get_global + bufferization.to_tensor.
-static void finalizeExternalizedConstant(mlir::ModuleOp module,
-                                         mlir::Operation *constOp,
-                                         mlir::RankedTensorType tensorType,
-                                         int64_t byteSize, int64_t entryOffset,
-                                         ExternalizationState *extState) {
+static void finalizeExternalizedConstant(
+    mlir::ModuleOp module, mlir::Operation *constOp,
+    mlir::RankedTensorType tensorType, int64_t byteSize, int64_t entryOffset,
+    ExternalizationState *extState,
+    mlir::DenseElementsAttr foldAttr = mlir::DenseElementsAttr()) {
   constexpr int64_t kAlignment = 64;
   auto memrefType =
       mlir::MemRefType::get(tensorType.getShape(), tensorType.getElementType());
@@ -195,6 +195,16 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
       /*constant=*/false,
       /*alignment=*/moduleBuilder.getI64IntegerAttr(kAlignment));
   globalOp->setAttr("hip.external_data", externalDataAttr);
+  // Sidecar attribute: small shape-arithmetic constants stash their dense
+  // value alongside the global so compute-op converters (SliceConversion,
+  // ReshapeConversion, ConstantOfShapeConversion) can compile-time-fold
+  // against them without setting `initial_value` on the global — which
+  // subtly perturbs downstream bufferize / lowering passes (seen as a
+  // kernel-launch SEGV in dynamic-shape vision encoders). The runtime
+  // ignores this attribute; data continues to come from constants.bin via
+  // `hip.external_data`.
+  if (foldAttr)
+    globalOp->setAttr("hipdnn.fold_value", foldAttr);
 
   mlir::OpBuilder builder(constOp);
   auto getGlobal = mlir::memref::GetGlobalOp::create(builder, constOp->getLoc(),
@@ -211,23 +221,18 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
 
 /// Write one constant's raw data to constants.bin and replace the op with
 /// an extern memref.global + bufferization.to_tensor bridge.
-static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
-                                mlir::RankedTensorType tensorType,
-                                const void *rawPtr, int64_t byteSize,
-                                ExternalizationState *extState) {
+static void externalizeConstant(
+    mlir::ModuleOp module, mlir::Operation *constOp,
+    mlir::RankedTensorType tensorType, const void *rawPtr, int64_t byteSize,
+    ExternalizationState *extState,
+    mlir::DenseElementsAttr foldAttr = mlir::DenseElementsAttr()) {
   int64_t entryOffset = writeAlignmentPadding(extState);
-  // Always collect layout + host pointer. The finalize step decides whether
-  // to emit constants.bin (skipDataWrite=false) or module attrs encoding
-  // the per-constant source (skipDataWrite=true). DenseElementsAttr raw
-  // data / ORT mmap addresses
-  // remain valid through runOnOperation, so recording the pointer here is
-  // safe for both consumers.
   ExternalizationState::HostEntry entry;
   entry.ptr = rawPtr;
   extState->constantHostPtrs.push_back(std::move(entry));
   extState->currentOffset += byteSize;
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
-                               entryOffset, extState);
+                               entryOffset, extState, foldAttr);
 }
 
 /// Record a file-ref entry: data lives on disk at (filePath, fileOffset)
@@ -264,12 +269,11 @@ static void replaceWithArithConstant(mlir::Operation *constOp,
 /// element value on the fly, so we never allocate a full-size buffer here.
 /// DenseElementsAttr's raw data is owned by the MLIRContext and stays
 /// valid through runOnOperation.
-static void externalizeSplatConstant(mlir::ModuleOp module,
-                                     mlir::Operation *constOp,
-                                     mlir::RankedTensorType tensorType,
-                                     mlir::DenseElementsAttr valueAttr,
-                                     int64_t byteSize,
-                                     ExternalizationState *extState) {
+static void externalizeSplatConstant(
+    mlir::ModuleOp module, mlir::Operation *constOp,
+    mlir::RankedTensorType tensorType, mlir::DenseElementsAttr valueAttr,
+    int64_t byteSize, ExternalizationState *extState,
+    mlir::DenseElementsAttr foldAttr = mlir::DenseElementsAttr()) {
   auto rawData = valueAttr.getRawData();
   int64_t entryOffset = writeAlignmentPadding(extState);
   ExternalizationState::HostEntry entry;
@@ -278,7 +282,7 @@ static void externalizeSplatConstant(mlir::ModuleOp module,
   extState->constantHostPtrs.push_back(std::move(entry));
   extState->currentOffset += byteSize;
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
-                               entryOffset, extState);
+                               entryOffset, extState, foldAttr);
 }
 
 /// Resolve an onnx.Constant that carries a `location` attribute (zero-copy
@@ -424,12 +428,25 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
       int64_t elemBits = tensorType.getElementTypeBitWidth();
       int64_t byteSize = valueAttr.getNumElements() * ((elemBits + 7) / 8);
 
+      // Stash dense value as a sidecar attr for small integer 1-D constants
+      // (Slice axes/starts/ends, Reshape target, Gather indices). The
+      // runtime path still loads from constants.bin via `hip.external_data`;
+      // the sidecar exists only for compile-time folding in pattern-rewrite
+      // passes. Capped at 64 elements so host memory growth stays bounded
+      // (~512 B per constant).
+      auto elemTy = tensorType.getElementType();
+      mlir::DenseElementsAttr foldAttr;
+      if ((elemTy.isInteger(32) || elemTy.isInteger(64)) &&
+          tensorType.getRank() <= 1 && valueAttr.getNumElements() <= 64)
+        foldAttr = valueAttr;
+
       if (valueAttr.isSplat()) {
         externalizeSplatConstant(module, constOp, tensorType, valueAttr,
-                                 byteSize, extState);
+                                 byteSize, extState, foldAttr);
       } else {
         externalizeConstant(module, constOp, tensorType,
-                            valueAttr.getRawData().data(), byteSize, extState);
+                            valueAttr.getRawData().data(), byteSize, extState,
+                            foldAttr);
       }
 
     } else {

@@ -18,6 +18,7 @@
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
@@ -40,6 +41,7 @@ inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
 inline constexpr const char *kHipGetHostScratch =
     "hipdnn_ep_get_host_scratch_base";
+inline constexpr const char *kHipdnnEpStreamSync = "hipdnn_ep_stream_sync";
 
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
