@@ -224,6 +224,24 @@ through the alloc / pool sizing computations and removes spurious
 The pass is idempotent: a second invocation that finds no further
 refinements is a no-op.
 
+### Current pipeline status (intentionally dormant)
+
+`--hip-infer-shapes` is **registered for `hip-mlir-opt` (so LIT can
+exercise it) but NOT yet inserted into `lib/Dialect/Transforms/Pipelines.cpp`**.
+Reason: `hip.matmul` is the only op carrying
+`ReifyRankedShapedTypeOpInterface` today, so wiring the pass into the
+production pipeline now would walk every function for one-op coverage
+and yield no measurable refinement on the supported transformer
+models (whose matmul shapes are already fully static end-to-end after
+the symbolic-dim binding done in `MorphiZenEP::GetCapability`).
+
+The pass is intended to be enabled once a critical mass of HIP DPS ops
+(GQA, RmsNorm, SkipRmsNorm, Attention, RotaryEmbedding, ...) carry the
+interface. At that point the wiring is one line in
+`buildOnnxToHipPipeline` between `convert-onnx-to-hip` and
+`one-shot-bufferize`. Until then, the infrastructure is exercised
+exclusively through the LIT suite.
+
 ## How to add a new op
 
 A new HIP op participates in shape inference in **five** small edits,
@@ -339,6 +357,21 @@ matmul ones:
 
 The current first-pass coverage is intentionally narrow:
 
+* **`hip.matmul` rejects rank-1 operands.** The new verifier requires
+  both `A` and `B` to have rank ≥ 2. ONNX `MatMul` semantics permit
+  rank-1 operands (vector·matrix / matrix·vector) by implicitly
+  promoting them to rank-2 with a unit dim and stripping the unit dim
+  from the result. None of the supported transformer models exercise
+  this case (every matmul in the supported model set is rank ≥ 2 and
+  was rank ≥ 2 before this PR). For models that do, the right fix is
+  in `lib/Conversion/OnnxToHip/MatMulConversion.cpp`: insert a
+  `tensor.expand_shape` to rank-2 before constructing `hip.matmul`,
+  then `tensor.collapse_shape` the result. The runtime / lowering
+  paths assume rank ≥ 2 today (`MatmulLowering.cpp` indexes
+  `aShape[rank-2]` for M, `bShape[rank-1]` for N), so without ONNX-spec
+  promotion in the converter a rank-1 `onnx.MatMul` would have
+  produced a silently-wrong hipBLASLt call before this PR — the
+  verifier turns that latent miscompile into an explicit diagnostic.
 * **Producer refinement is `tensor.empty` only.** Adding refinement for
   other "shape-malleable" producers (`bufferization.alloc_tensor`, other
   HIP DPS ops) is a follow-up. The cleanest extension is to teach the
