@@ -164,5 +164,11 @@ OpFoldResult mlir::hip::reifyDimOrConstant(OpBuilder &b, Location loc,
     return tensor::getMixedSize(b, loc, source, sourceDim);
   // memref-mode operand: emit memref.dim. The op canonicalises to a
   // constant when the source memref type has a static size at sourceDim.
+  //
+  // Note: `reifyResultShapes` is only invoked on tensor-result ops
+  // (`ReifyRankedShapedTypeOpInterface` contract), and the
+  // `--hip-infer-shapes` pass walks only `RankedTensorType` results.
+  // No current caller reaches this branch — it's kept as defensive
+  // code in case a future op exposes reify on a memref result type.
   return memref::DimOp::create(b, loc, source, sourceDim).getResult();
 }
