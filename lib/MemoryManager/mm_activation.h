@@ -33,7 +33,7 @@ public:
     std::size_t reserved_size = 0;
   };
 
-  Status init(Hal *hal, const Config &config, std::size_t budget_bytes);
+  Status init(Hal *hal, const Config &config);
   void shutdown(Hal *hal);
 
   Allocation alloc(std::size_t size, std::size_t alignment, Hal *hal);
@@ -67,7 +67,6 @@ private:
   std::mutex allocations_mutex_;
   std::atomic<std::size_t> total_bytes_{0};
   std::atomic<std::size_t> peak_bytes_{0};
-  std::size_t budget_bytes_ = 0;
   bool initialized_ = false;
 };
 
