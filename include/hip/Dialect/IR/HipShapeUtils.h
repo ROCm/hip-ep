@@ -28,8 +28,15 @@ namespace hip {
 /// `ShapedType::kDynamic` is treated as a wildcard:
 ///   - K_a or K_b dynamic -> contraction match passes (result K is dropped
 ///     anyway).
-///   - Any batch dim dynamic -> result batch dim is `kDynamic`.
-///   - 1 broadcasts against any dim.
+///   - Batch dim broadcast follows NumPy / TF / ONNX MatMul semantics
+///     (delegated to `mlir::OpTrait::util::getBroadcastedShape`):
+///       * 1 broadcasts against any dim.
+///       * dynamic + static>1 -> static (the dynamic side must be 1 or
+///         match the static side at runtime per the broadcast contract;
+///         taking the static side is the strictly-correct tightening).
+///       * dynamic + dynamic -> dynamic.
+///       * static + static, equal -> static; unequal and neither is 1
+///         -> error.
 SmallVector<int64_t>
 inferContractionShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                       function_ref<InFlightDiagnostic()> emitError);

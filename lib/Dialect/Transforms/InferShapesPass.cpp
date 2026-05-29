@@ -152,22 +152,20 @@ static LogicalResult refineTensorEmptyProducer(RewriterBase &rewriter,
   if (curType.getShape().size() != newShape.size())
     return failure();
 
-  // Rebuild the dyn-dim operand list: keep an operand iff the dim was
-  // dynamic before AND remains dynamic after. We never see a "now-dynamic
-  // formerly-static" case because composeRefinedShape only narrows.
+  // Walk each dim; for dims that were dynamic in the OLD type, advance the
+  // operand cursor (every old-dynamic dim has exactly one operand). Keep
+  // that operand only if the dim is STILL dynamic post-refinement. Static
+  // dims (old or new) consume nothing from the operand list. We never see
+  // a "now-dynamic formerly-static" case because composeRefinedShape only
+  // narrows.
   SmallVector<Value> newDyn;
   unsigned operandIdx = 0;
   for (size_t d : llvm::seq<size_t>(0, newShape.size())) {
-    bool curDynamic = curType.isDynamicDim(d);
-    bool newDynamic = ShapedType::isDynamic(newShape[d]);
-    if (curDynamic && !newDynamic) {
-      ++operandIdx;
+    if (!curType.isDynamicDim(d))
       continue;
-    }
-    if (curDynamic && newDynamic) {
-      newDyn.push_back(emptyOp.getDynamicSizes()[operandIdx++]);
-      continue;
-    }
+    if (ShapedType::isDynamic(newShape[d]))
+      newDyn.push_back(emptyOp.getDynamicSizes()[operandIdx]);
+    ++operandIdx;
   }
 
   // `clone(shape)` preserves the encoding attr; plain
