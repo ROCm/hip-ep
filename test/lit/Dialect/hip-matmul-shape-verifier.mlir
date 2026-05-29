@@ -127,7 +127,7 @@ func.func @matmul_batch_broadcast_fail(%ctx: !hip.context,
                                        %a: memref<2x4x8xf16, 1>,
                                        %b: memref<3x8x16xf16, 1>,
                                        %c: memref<2x4x16xf16, 1>) {
-  // expected-error @below {{matmul batch dim broadcast failure}}
+  // expected-error @below {{matmul batch broadcast failure}}
   hip.matmul(%ctx)
     ins(%a, %b : memref<2x4x8xf16, 1>, memref<3x8x16xf16, 1>)
     outs(%c : memref<2x4x16xf16, 1>)

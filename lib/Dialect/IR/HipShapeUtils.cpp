@@ -15,6 +15,7 @@
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Traits.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "llvm/ADT/STLExtras.h"
@@ -68,34 +69,21 @@ mlir::hip::inferContractionShape(ArrayRef<int64_t> aShape,
     return {};
   }
 
-  // NumPy-style batch broadcast: right-align, pad missing dims with 1.
+  // NumPy / ONNX MatMul batch broadcast: right-align, pad with 1, then
+  // per-dim equal-or-1 rule. Delegated to upstream MLIR's helper, which
+  // also implements the TF/ONNX-style "dynamic + static>1 -> static"
+  // tightening: a dynamic side that meets a static side > 1 must be
+  // either 1 (broadcast) or matching the static side at runtime, so the
+  // static side is the inferred result.
   ArrayRef<int64_t> aBatch = aShape.drop_back(2);
   ArrayRef<int64_t> bBatch = bShape.drop_back(2);
-  size_t batchRank = std::max(aBatch.size(), bBatch.size());
-  size_t aPad = batchRank - aBatch.size();
-  size_t bPad = batchRank - bBatch.size();
-
   SmallVector<int64_t> result;
-  result.reserve(batchRank + 2);
-  for (size_t i : llvm::seq<size_t>(0, batchRank)) {
-    int64_t aDim = i < aPad ? 1 : aBatch[i - aPad];
-    int64_t bDim = i < bPad ? 1 : bBatch[i - bPad];
-    int64_t resDim;
-    if (ShapedType::isDynamic(aDim) || ShapedType::isDynamic(bDim))
-      resDim = ShapedType::kDynamic;
-    else if (aDim == 1)
-      resDim = bDim;
-    else if (bDim == 1)
-      resDim = aDim;
-    else if (aDim == bDim)
-      resDim = aDim;
-    else {
-      emitError() << "matmul batch dim broadcast failure at index " << i
-                  << ": A=" << aDim << " B=" << bDim;
-      return {};
-    }
-    result.push_back(resDim);
+  if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, result)) {
+    emitError() << "matmul batch broadcast failure: A.batch="
+                << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
+    return {};
   }
+  result.reserve(result.size() + 2);
   result.push_back(M);
   result.push_back(N);
   return result;
