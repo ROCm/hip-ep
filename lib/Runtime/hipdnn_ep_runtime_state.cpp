@@ -1242,9 +1242,10 @@ void hipdnn_ep_pop_pool_depth() {
 }
 
 void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
-  fprintf(stderr, "[pool_base] enter state=%p depth=%d needed=%zu\n",
-          (void *)state, g_pool_depth, needed_size);
-  fflush(stderr);
+  // Per-Compute entry trace; gated on HIPDNN_EP_DEBUG. The 'growing pool ...'
+  // info line below stays unconditional because it only fires on rare resize.
+  RUNTIME_DEBUG_LOG("[pool_base] enter state=%p depth=%d needed=%zu\n",
+                    (void *)state, g_pool_depth, needed_size);
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
@@ -1318,9 +1319,9 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
 }
 
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
-  fprintf(stderr, "[host_scratch] enter state=%p needed=%zu\n", (void *)state,
-          needed_size);
-  fflush(stderr);
+  // Per-Compute entry trace; gated on HIPDNN_EP_DEBUG.
+  RUNTIME_DEBUG_LOG("[host_scratch] enter state=%p needed=%zu\n", (void *)state,
+                    needed_size);
   if (!state) {
     fprintf(stderr,
             "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");

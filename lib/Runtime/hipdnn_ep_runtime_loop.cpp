@@ -210,14 +210,13 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                 int64_t max_trip_count, bool cond_init,
                 int32_t num_loop_carried, int32_t num_captures,
                 void **loop_carried_descs, void **capture_descs) {
-  fprintf(stderr,
-          "[loop] ENTER runLoopImpl: max_trip_count=%lld cond_init=%d "
-          "num_carried=%d num_captures=%d state=%p body_fn=%p "
-          "carried_descs=%p capture_descs=%p\n",
-          (long long)max_trip_count, (int)cond_init, (int)num_loop_carried,
-          (int)num_captures, (void *)state, (void *)body_fn,
-          (void *)loop_carried_descs, (void *)capture_descs);
-  fflush(stderr);
+  RUNTIME_DEBUG_LOG(
+      "[loop] ENTER runLoopImpl: max_trip_count=%lld cond_init=%d "
+      "num_carried=%d num_captures=%d state=%p body_fn=%p "
+      "carried_descs=%p capture_descs=%p\n",
+      (long long)max_trip_count, (int)cond_init, (int)num_loop_carried,
+      (int)num_captures, (void *)state, (void *)body_fn,
+      (void *)loop_carried_descs, (void *)capture_descs);
   if (!state || !body_fn)
     return -1;
   if (max_trip_count < 0)
@@ -288,9 +287,8 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
               static_cast<long long>(i));
       return -1;
     }
-    fprintf(stderr, "[loop] iter %lld/%lld: calling body_fn=%p\n", (long long)i,
-            (long long)max_trip_count, (void *)body_fn);
-    fflush(stderr);
+    RUNTIME_DEBUG_LOG("[loop] iter %lld/%lld: calling body_fn=%p\n",
+                      (long long)i, (long long)max_trip_count, (void *)body_fn);
     // Bracket the body call with a pool-depth push/pop so the body's
     // hip.get_pool returns a different physical buffer than main_graph's.
     // Without this, both call sites land at offset 0 of state->pool_base
@@ -301,9 +299,8 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
     int rc =
         body_fn(state, iter_dev, cond_dev, loop_carried_descs, capture_descs);
     hipdnn_ep_pop_pool_depth();
-    fprintf(stderr, "[loop] iter %lld: body_fn returned %d\n", (long long)i,
-            rc);
-    fflush(stderr);
+    RUNTIME_DEBUG_LOG("[loop] iter %lld: body_fn returned %d\n", (long long)i,
+                      rc);
     if (rc != 0)
       return rc;
     if constexpr (CondPolicy::consultsCond()) {
