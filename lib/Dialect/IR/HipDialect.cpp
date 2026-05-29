@@ -447,18 +447,13 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   if (aShape.empty() || bShape.empty())
     return failure();
 
-  // Recompute the static shape vector via the shared helper. We deliberately
-  // use a no-op error sink here: by the time reify runs, verify() has
-  // already approved the shapes, so any "error" path is unreachable. We
-  // bail out by returning failure() if the helper somehow produces empty,
-  // matching the upstream linalg pattern.
-  bool sawError = false;
+  // Recompute the static shape vector via the shared helper. By the time
+  // reify runs, verify() has already approved the shapes, so the error
+  // callback is unreachable in practice -- but we bail safely on empty()
+  // anyway, matching the upstream linalg pattern.
   SmallVector<int64_t> outShape = mlir::hip::inferContractionShape(
-      aShape, bShape, [&]() -> InFlightDiagnostic {
-        sawError = true;
-        return this->emitOpError();
-      });
-  if (sawError || outShape.empty())
+      aShape, bShape, [&]() { return this->emitOpError(); });
+  if (outShape.empty())
     return failure();
 
   // Lift each static dim to an IndexAttr; lift each dynamic dim to a
