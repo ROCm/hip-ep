@@ -73,8 +73,32 @@ int op_profile_acquire_event_pair(OpProfileState *ps) {
   int idx = ps->nextEventIndex++;
   if (idx >= (int)ps->eventPool.size()) {
     OpProfileState::EventPair ep;
-    hipEventCreate(&ep.start);
-    hipEventCreate(&ep.stop);
+    // hipEventDisableSystemFence: drop the system-scope acquire/release
+    // fence that hipEventRecord issues by default. We still get accurate
+    // GPU-side completion ordering and hipEventElapsedTime works
+    // unchanged -- the fence is only needed when the event is observed
+    // from a different device or by the CPU via cache-coherent reads
+    // outside the stream order, which is not how op_profile uses these
+    // events (elapsed time is read AFTER hipStreamSynchronize). Without
+    // this flag, each of the hundreds of records issued per inference
+    // adds a system fence; the cumulative cost dominates the per-op
+    // profile table and made HIPDNN_EP_PERF=1 misleading as a
+    // kernel-comparison instrument.
+    //
+    // NEVER set this flag on events that are observed without a
+    // follow-up stream (or device) sync -- e.g. cross-stream
+    // coordination, CPU polling via hipEventQuery, multi-device
+    // visibility. Those callers rely on the default flush semantics and
+    // would otherwise observe stale data; none of the EP profiler
+    // events fall into that category, but every new caller of
+    // hipEventCreateWithFlags(...DisableSystemFence) should re-derive
+    // this rationale before adopting the flag.
+    //
+    // Created once per pool slot then reused across all inferences --
+    // creation cost is absorbed by warmup, the win is on every
+    // subsequent record.
+    hipEventCreateWithFlags(&ep.start, hipEventDisableSystemFence);
+    hipEventCreateWithFlags(&ep.stop, hipEventDisableSystemFence);
     ps->eventPool.push_back(ep);
   }
   return idx;
