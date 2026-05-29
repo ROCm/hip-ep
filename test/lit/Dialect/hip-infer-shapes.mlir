@@ -117,23 +117,26 @@ func.func @noop_on_static(%ctx: !hip.context,
 
 // -----
 
-// --- Non-DPS reify-implementing op: tensor.pad's result has dynamic dims at
-//     the type level (its `low`/`high` operands here are SSA values), but
-//     when those operands are constants in IR `tensor.pad`'s own reify
-//     resolves them to integer attrs. We want to confirm: (a) the pass
-//     does not regress on non-DPS ops (no producer rewrite applies, but
-//     the result type is refined and a cast is inserted for non-DPS
-//     uses), and (b) the pass coexists with other ops that already
-//     implement the reify interface.
-// CHECK-LABEL: func.func @refine_tensor_pad
+// --- The pass restricts itself to HIP-dialect ops. Upstream ops like
+//     `tensor.pad` (which also carry `ReifyRankedShapedTypeOpInterface`)
+//     are intentionally left alone: their per-op invariants between
+//     operands and result shape — e.g. `tensor.empty(%dyn)`'s "operand
+//     count == #dynamic dims" — would desync if this pass narrowed the
+//     result in place without mirror-rewriting the operand list, and we
+//     deliberately do not duplicate every upstream op's folder/canonicalizer
+//     surface here.
+//
+//     This case pins that contract: a `tensor.pad` whose
+//     reify-implementing impl could narrow `tensor<?x?xf16>` to
+//     `tensor<6x10xf16>` is left as-is.  Refining non-HIP ops is the
+//     canonicalizer's job, not this pass's.
+// CHECK-LABEL: func.func @skip_non_hip_op
 // CHECK:         %[[P:.*]] = tensor.pad
-// CHECK:         tensor<4x8xf16> to tensor<6x10xf16>
-// CHECK:         %[[CAST:.*]] = tensor.cast %[[P]]{{.*}}: tensor<6x10xf16> to tensor<?x?xf16>
-// CHECK:         return %[[CAST]] : tensor<?x?xf16>
-func.func @refine_tensor_pad(%a: tensor<4x8xf16>) -> tensor<?x?xf16> {
-  %c0 = arith.constant 0 : index
+// CHECK:         tensor<4x8xf16> to tensor<?x?xf16>
+// CHECK-NOT:     tensor.cast
+// CHECK:         return %[[P]] : tensor<?x?xf16>
+func.func @skip_non_hip_op(%a: tensor<4x8xf16>) -> tensor<?x?xf16> {
   %c1 = arith.constant 1 : index
-  %c2 = arith.constant 2 : index
   %cst = arith.constant 0.0 : f16
   %padded = tensor.pad %a low[%c1, %c1] high[%c1, %c1] {
     ^bb0(%i: index, %j: index):

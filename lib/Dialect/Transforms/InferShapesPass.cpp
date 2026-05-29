@@ -5,10 +5,13 @@
 //===- InferShapesPass.cpp - Static shape refinement for HIP DPS ops ------===//
 //
 // Module-level pass that drives `ReifyRankedShapedTypeOpInterface` on every
-// HIP op (and any other ranked-tensor-result op that implements the
-// interface) to refine `?` (kDynamic) dims in result types into concrete
-// integer dims, using the per-op `inferContractionShape`-style helpers as
-// the source of truth.
+// HIP-dialect op that implements it, to refine `?` (kDynamic) dims in
+// result types into concrete integer dims using the per-op
+// `inferContractionShape`-style helpers as the source of truth. Upstream
+// ops that happen to carry the interface (e.g. `tensor::EmptyOp`) are
+// intentionally skipped: they have their own folders / invariants between
+// operand SSA values and result shape that an in-place result-type narrow
+// here would desync, and they are not the target of this pass.
 //
 // DPS-aware
 // ---------
@@ -266,11 +269,27 @@ void InferShapesPass::runOnOperation() {
   // walk on rebuilt ops or invalidate iterators. The walk is post-order
   // by default, so consumers come after producers in `ops`; we then iterate
   // forward, which gives producers-before-consumers (the safe order).
+  //
+  // Restrict to HIP-dialect ops. Upstream ops that also implement
+  // `ReifyRankedShapedTypeOpInterface` (e.g. `tensor::EmptyOp`,
+  // `tensor::ExtractSliceOp`, `tensor::PadOp`) carry their own per-op
+  // invariants between operand SSA values and the result shape that
+  // an in-place result-type narrow here can desync — concretely, a
+  // `tensor.empty(%c12)` whose constant index operand makes the dim
+  // statically reifiable would have its result narrowed to fully static
+  // while the now-stale operand stayed in the operand list, tripping the
+  // op verifier with `incorrect number of dynamic sizes`. Refining
+  // upstream tensor ops is also out of charter for this pass — they are
+  // already canonicalised by their own folders before bufferize. Keep
+  // the contract tight: HIP DPS ops only.
   SmallVector<ReifyRankedShapedTypeOpInterface> ops;
   module.walk([&](ReifyRankedShapedTypeOpInterface reifyOp) {
+    Operation *op = reifyOp.getOperation();
+    if (op->getDialect() != op->getContext()->getLoadedDialect<HipDialect>())
+      return;
     // memref-mode DPS ops have no tensor results: skip. Their shapes are
     // pinned at bufferization time.
-    if (llvm::none_of(reifyOp.getOperation()->getResults(), [](Value v) {
+    if (llvm::none_of(op->getResults(), [](Value v) {
           return isa<RankedTensorType>(v.getType());
         }))
       return;

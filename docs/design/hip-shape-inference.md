@@ -88,6 +88,17 @@ operands that became static. Producers we don't know how to refine
 today (function args, other DPS ops higher in the chain) are skipped —
 the pass then leaves that result index at `?`.
 
+The pass restricts itself to **HIP-dialect ops**. Upstream ops that
+also implement the reify interface (`tensor::EmptyOp`,
+`tensor::ExtractSliceOp`, `tensor::PadOp`, …) carry per-op invariants
+between operand SSA values and the result shape (e.g.
+`tensor.empty(%dyn)` requires the dynamic-size operand count to equal
+the number of `?` dims in the result). An in-place `result.setType()`
+narrow on those would desync those invariants, and we deliberately do
+not duplicate every upstream op's folder/canonicalizer surface here.
+The canonicalizer is the right tool for upstream-op refinement; this
+pass is for HIP DPS op result types only.
+
 ### Why DPS-aware?
 
 In a non-DPS world the pass could simply rewrite the op's result type
@@ -207,40 +218,31 @@ op name, listed in `lib/Dialect/IR/CMakeLists.txt`.
 
 ## Pipeline placement
 
-`--hip-infer-shapes` is **optional** and runs on `mlir::ModuleOp`. The
-recommended placement is between `convert-onnx-to-hip` and
-`one-shot-bufferize`:
+`--hip-infer-shapes` runs on `mlir::ModuleOp`, immediately after
+`convert-onnx-to-hip` and before `one-shot-bufferize`:
 
 ```text
 simplify-onnx -> hip-add-context-arg -> convert-onnx-to-hip
-              -> hip-infer-shapes (NEW, optional)
+              -> hip-infer-shapes
               -> one-shot-bufferize -> ...
 ```
 
-Refining tensor result types BEFORE bufferize propagates static dims
-through the alloc / pool sizing computations and removes spurious
-`memref.dim` ops at the top of the function.
+Wired in `lib/Dialect/Transforms/Pipelines.cpp` at the top of
+`buildOnnxToHipPipelineTail` (the shared post-conversion segment used
+by both `buildOnnxToHipPipeline` overloads), so every production
+compile path gets it.
 
-The pass is idempotent: a second invocation that finds no further
-refinements is a no-op.
-
-### Current pipeline status (intentionally dormant)
-
-`--hip-infer-shapes` is **registered for `hip-mlir-opt` (so LIT can
-exercise it) but NOT yet inserted into `lib/Dialect/Transforms/Pipelines.cpp`**.
-Reason: `hip.matmul` is the only op carrying
-`ReifyRankedShapedTypeOpInterface` today, so wiring the pass into the
-production pipeline now would walk every function for one-op coverage
-and yield no measurable refinement on the supported transformer
-models (whose matmul shapes are already fully static end-to-end after
-the symbolic-dim binding done in `MorphiZenEP::GetCapability`).
-
-The pass is intended to be enabled once a critical mass of HIP DPS ops
-(GQA, RmsNorm, SkipRmsNorm, Attention, RotaryEmbedding, ...) carry the
-interface. At that point the wiring is one line in
-`buildOnnxToHipPipeline` between `convert-onnx-to-hip` and
-`one-shot-bufferize`. Until then, the infrastructure is exercised
-exclusively through the LIT suite.
+Why this placement: refining tensor result types BEFORE bufferize
+propagates static dims through the alloc / pool sizing computations
+and removes spurious `memref.dim` ops at the top of the function. The
+pass is idempotent — a second invocation that finds no further
+refinements is a no-op — and it is also a no-op on functions whose ops
+either don't carry the interface or expose no further refinable dims,
+so it's safe to run unconditionally even today when only `hip.matmul`
+carries the interface. As more HIP DPS ops (GQA, RmsNorm,
+SkipRmsNorm, Attention, RotaryEmbedding, …) get
+`ReifyRankedShapedTypeOpInterface` impls, this wiring lets each new op
+participate without touching the pipeline definition.
 
 ## How to add a new op
 

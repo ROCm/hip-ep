@@ -23,6 +23,21 @@ using namespace mlir;
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
 static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
+  // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
+  //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
+  //     refinements propagate through bufferize and into pool / alloc
+  //     sizing computations downstream, and run BEFORE the unrefined
+  //     `?` dims would otherwise materialise as `memref.dim` ops on the
+  //     pool buffer at the top of the function.
+  //
+  //     Idempotent and a no-op on functions whose ops either don't carry
+  //     the interface or expose no further refinable dims — safe to run
+  //     unconditionally regardless of how many HIP ops currently
+  //     implement the interface. See `docs/design/hip-shape-inference.md`
+  //     for the design and `test/lit/Dialect/hip-infer-shapes.mlir` for
+  //     the reference cases.
+  pm.addPass(hip::createInferShapesPass());
+
   // 2. Bufferize tensor IR to memref IR
   //
   // Use IdentityLayoutMap for function boundaries: all EP inputs/outputs come
