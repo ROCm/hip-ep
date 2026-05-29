@@ -892,11 +892,25 @@ class ModelSpec:
     # with STRICT=1 because they only exercise the text decoder.
     oga_strict: bool = True
 
+    # When False, fetch_model_files / fetch_oga_files do NOT contact HF; they
+    # only verify the required files are already present on disk. Use for
+    # locally-re-exported models (e.g. Qwen3.5-9B `-gpu-2`) where the upstream
+    # HF artifacts differ from what we test against.
+    auto_download: bool = True
+
     def __post_init__(self):
-        if (self.hf_base is None) == (self.hf_repo is None):
-            raise ValueError(
-                f"ModelSpec {self.name!r}: must set exactly one of hf_base / hf_repo"
-            )
+        if self.auto_download:
+            if (self.hf_base is None) == (self.hf_repo is None):
+                raise ValueError(
+                    f"ModelSpec {self.name!r}: must set exactly one of "
+                    "hf_base / hf_repo when auto_download=True"
+                )
+        else:
+            if self.hf_base is not None or self.hf_repo is not None:
+                raise ValueError(
+                    f"ModelSpec {self.name!r}: hf_base / hf_repo must be unset "
+                    "when auto_download=False"
+                )
         if not self.filler_tokens:
             raise ValueError(f"ModelSpec {self.name!r}: filler_tokens required")
         if self.prompt_tokens is None:
@@ -1027,7 +1041,14 @@ def fetch_model_files(spec):
     """
     spec.model_dir.mkdir(parents=True, exist_ok=True)
     required = [spec.onnx_file, *spec.data_files, *spec.extra_data_files]
-    if spec.hf_base is not None:
+    if not spec.auto_download:
+        missing = [f for f in required if not (spec.model_dir / f).exists()]
+        if missing:
+            pytest.skip(
+                f"{spec.name}: auto_download=False and required files missing "
+                f"from {spec.model_dir}: {missing}. Place them manually."
+            )
+    elif spec.hf_base is not None:
         for f in required:
             dst = spec.model_dir / f
             if not dst.exists():
@@ -1068,6 +1089,13 @@ def fetch_oga_files(spec):
             with open(cfg_path, "w") as f:
                 json.dump(spec.genai_config_template, f, indent=4)
             print(f"  Generated {cfg_path.name}")
+    elif not spec.auto_download:
+        missing = [f for f in spec.oga_files if not (spec.model_dir / f).exists()]
+        if missing:
+            pytest.skip(
+                f"{spec.name}: auto_download=False and OGA companion files "
+                f"missing from {spec.model_dir}: {missing}. Place them manually."
+            )
     elif spec.hf_base is not None:
         for fname in spec.oga_files:
             dst = spec.model_dir / fname
