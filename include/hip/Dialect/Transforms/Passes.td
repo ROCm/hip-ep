@@ -303,11 +303,15 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
 
     Pipeline placement
     ------------------
-    Optional, runs after `convert-onnx-to-hip` and before
-    `one-shot-bufferize`. Refining tensor result types BEFORE bufferize
-    propagates static dims through the alloc / pool sizing computations
-    and removes spurious `memref.dim` ops that the legalisation chain
-    would otherwise leave at the top of the function.
+    Wired into `buildOnnxToHipPipelineTail` (the shared post-conversion
+    segment of `buildOnnxToHipPipeline`) immediately after
+    `convert-onnx-to-hip` and before `one-shot-bufferize`. Refining
+    tensor result types BEFORE bufferize propagates static dims through
+    the alloc / pool sizing computations and removes spurious
+    `memref.dim` ops that the legalisation chain would otherwise leave
+    at the top of the function. The pass is also a no-op when no op in
+    the function carries the interface (or when no further refinement
+    is possible), so it is safe to run unconditionally on every model.
 
     Idempotent: a second invocation that finds no further refinements is
     a no-op.
