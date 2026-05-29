@@ -392,8 +392,7 @@ static int hipmalloc_and_fixup(RuntimeState *state,
   hints.mem_class = mm::MemoryClass::Weight;
   hints.lifetime = mm::Lifetime::Static;
   hints.alignment = 256;
-  mm::handle_t handle =
-      mm::alloc(total_size, &hints);
+  mm::handle_t handle = mm::alloc(total_size, &hints);
   if (handle == mm::kInvalidHandle) {
     fprintf(stderr, "mm::alloc failed for constants blob (%zu bytes)\n",
             total_size);
@@ -1190,7 +1189,7 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
 
   mm::AllocHints hints;
   hints.mem_class = mm::MemoryClass::Activation;
-  hints.lifetime = mm::Lifetime::Session;
+  hints.lifetime = mm::Lifetime::Request;
   mm::handle_t handle = mm::alloc(alloc_size, &hints);
   if (handle == mm::kInvalidHandle) {
     fprintf(
@@ -1290,7 +1289,7 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
 
   mm::AllocHints hints;
   hints.mem_class = mm::MemoryClass::Activation;
-  hints.lifetime = mm::Lifetime::Session;
+  hints.lifetime = mm::Lifetime::Request;
   mm::handle_t handle = mm::alloc(alloc_size, &hints);
   if (handle == mm::kInvalidHandle) {
     fprintf(stderr,
