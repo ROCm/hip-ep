@@ -189,10 +189,19 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
   //                                          hook (called from EP-side
   //                                          MlirCustomOp::Compute() entry)
+  //   hipdnn_ep_runtime_flush_op_profile   — HIPDNN_EP_PERF per-op resolve
+  //                                          + print hook (called by EP AFTER
+  //                                          its wall_ms window closes, so
+  //                                          the resolve cost doesn't pollute
+  //                                          the measured TPS)
   std::vector<std::string> export_symbols = {
-      "inference_init",    "inference_compute",
-      "inference_cleanup", "inference_get_metadata_json",
-      "test_hip_from_dll", "hipdnn_ep_runtime_begin_compute"};
+      "inference_init",
+      "inference_compute",
+      "inference_cleanup",
+      "inference_get_metadata_json",
+      "test_hip_from_dll",
+      "hipdnn_ep_runtime_begin_compute",
+      "hipdnn_ep_runtime_flush_op_profile"};
   std::vector<std::string> libraries;
   std::vector<std::string> library_paths;
   discoverLibraries(libraries, library_paths);

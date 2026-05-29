@@ -253,17 +253,57 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
-// Mark the start of a new Compute() call. Invalidates per-forward-pass
-// caches such as the GQA seqlens_k cache (see runtime_state_internal.h).
-// Called by the EP-side MlirCustomOp::Compute() entry once per inference;
-// safe to call unconditionally (cheap: writes a single bool). Required for
-// the GQA seqlens_k cache (default on, set HIPDNN_EP_GQA_CACHE_SEQLENS=0
-// to disable) to be correct -- without this hook the cache would persist
-// across forward passes and return stale values.
+// runtime caches -- today: the GQA seqlens_k cache (see
+// runtime_state_internal.h for the canonical list).
+//
+// Contract: the EP-side caller must invoke this exactly once at the top
+// of every MlirCustomOp::Compute(), before any input marshaling. The
+// pairing with Compute() is what defines "forward pass" for cache
+// invalidation purposes.
+//
+// Cost: writes a small number of fields on RuntimeState (no allocation,
+// no GPU work). Safe to call unconditionally on the hot path.
+//
+// Backwards compatibility: model.dlls predating this export are loaded
+// with a null cached function pointer on the EP side and the call is
+// silently skipped. Such DLLs MUST run with HIPDNN_EP_GQA_CACHE_SEQLENS=0;
+// otherwise stale seqlens_k values from the previous forward pass would
+// silently corrupt decode output from token 2 onward. The mismatch is
+// detected at session creation by InferenceState::create() and produces
+// a LOG(WARNING) containing the substring "GQA seqlens_k cache is
+// enabled ... but the loaded model.dll does not export
+// hipdnn_ep_runtime_begin_compute" -- greppable across logs and code.
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
     void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
+
+// Resolve and print the per-op profile table (HIPDNN_EP_PERF).
+//
+// Contract: the EP-side caller should invoke this AFTER the wall-clock
+// timing window for the current Compute() has closed (i.e. after the
+// post-compute hipDeviceSynchronize / event-elapsed-time reads). The
+// previous design ran the same resolve inside hipdnn_ep_stream_sync (on
+// the inference_compute hot path) and the cost showed up as Compute()
+// latency, inflating the very [PERF SUMMARY] numbers the table was
+// supposed to explain.
+//
+// Cost when enabled: one hipEventElapsedTime per pending event, plus a
+// std::map walk and one fprintf row per (op, shape) pair. Scales with
+// the number of profiled events per inference; roughly 1 ms / Compute
+// on a typical transformer decoder graph (several hundred profiled
+// ops). Charged to "between-Compute" time, never to wall_ms / gpu_ms /
+// fence_residual_ms.
+//
+// Cost when disabled (HIPDNN_EP_PERF unset): state->op_profile is null
+// and this function is a single null-check + early return. Safe to call
+// unconditionally from the hot path.
+//
+// Backwards compatibility: model.dlls predating this export are loaded
+// with a null cached function pointer on the EP side and the call is
+// silently skipped. Inference is correct; the per-op PERF block simply
+// will not appear in the stderr stream for runs against such DLLs.
+void hipdnn_ep_runtime_flush_op_profile(RuntimeState *state);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
