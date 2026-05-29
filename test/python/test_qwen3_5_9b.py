@@ -470,21 +470,24 @@ _QWEN35_MULTIMODAL_WORKER = textwrap.dedent(
         sys.exit(3)
 
     processor = model.create_multimodal_processor()
+    tokenizer = og.Tokenizer(model)
     tokenizer_stream = processor.create_stream()
     images = og.Images.open(str(IMAGE_PATH))
 
-    # Qwen 3.5 / Qwen-VL chat template: vision span wraps a single
-    # `<|image_pad|>` slot that the processor expands to N image tokens
-    # based on the input grid. Use the documented assistant-prompt form so
-    # we exercise both the system / user channels and the multimodal
-    # processor's tokenization path.
-    prompt = (
-        "<|im_start|>user\n"
-        "<|vision_start|><|image_pad|><|vision_end|>"
-        "Describe this image in one short sentence.<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    )
-    inputs = processor(prompt, images=images)
+    # Use the official chat template via apply_chat_template — pattern from
+    # the upstream Olive recipe (microsoft/olive-recipes Qwen-Qwen3.5-9B
+    # builtin/inference.py). The recipe-provided chat_template.jinja
+    # appends "<think>\n" so the model starts in reasoning mode (Qwen 3.5
+    # is a thinking-mode VLM). Hand-built templates omit this and put the
+    # model in a degraded mode.
+    messages = [{"role": "user", "content": [
+        {"type": "image"},
+        {"type": "text",
+         "text": "Describe this image in one short sentence."},
+    ]}]
+    full_prompt = tokenizer.apply_chat_template(
+        json.dumps(messages), add_generation_prompt=True)
+    inputs = processor(full_prompt, images=images)
 
     params = og.GeneratorParams(model)
     # Cap total length so a runaway generation can't hang the test budget.
@@ -777,16 +780,30 @@ class TestQwen3_5_9BMultimodal:
                 og.register_execution_provider_library("MorphiZenEP", str(EP_DLL))
                 model = og.Model(str(MODEL_DIR))
                 processor = model.create_multimodal_processor()
-                prompt_vlm = ("<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
-                              "Describe this image in one short sentence.<|im_end|>\n"
-                              "<|im_start|>assistant\n")
-                prompt_text = ("<|im_start|>user\nWrite one short sentence about Paris."
-                               "<|im_end|>\n<|im_start|>assistant\n")
+                tokenizer = og.Tokenizer(model)
+                # Use the official chat template via apply_chat_template — this
+                # is the pattern from the upstream Olive recipe
+                # (microsoft/olive-recipes/Qwen-Qwen3.5-9B/builtin/inference.py).
+                # The hand-built prompt strings we used previously were missing
+                # the trailing "<think>\n" the model expects (Qwen 3.5 is a
+                # thinking-mode model — the template appends 248068=<think>
+                # and a newline so the model starts in reasoning mode).
+                if WITH_IMAGE:
+                    messages = [{"role": "user", "content": [
+                        {"type": "image"},
+                        {"type": "text",
+                         "text": "Describe this image in one short sentence."},
+                    ]}]
+                else:
+                    messages = [{"role": "user",
+                                 "content": "Write one short sentence about Paris."}]
+                full_prompt = tokenizer.apply_chat_template(
+                    json.dumps(messages), add_generation_prompt=True)
                 if WITH_IMAGE:
                     images = og.Images.open(str(IMAGE_PATH))
-                    inputs = processor(prompt_vlm, images=images)
+                    inputs = processor(full_prompt, images=images)
                 else:
-                    inputs = processor(prompt_text)
+                    inputs = processor(full_prompt)
                 params = og.GeneratorParams(model)
                 params.set_search_options(max_length=256, do_sample=False)
                 gen = og.Generator(model, params)
