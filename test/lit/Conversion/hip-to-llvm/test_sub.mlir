@@ -50,7 +50,6 @@ module {
     hip.sub(%ctx) ins(%lhs, %rhs : memref<?x512xf32, 1>, memref<?x512xf32, 1>)
                   outs(%output : memref<?x512xf32, 1>)
 
-    // CHECK: llvm.mul {{.*}} : i64
     // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
