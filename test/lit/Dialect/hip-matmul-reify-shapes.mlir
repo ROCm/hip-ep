@@ -113,3 +113,37 @@ func.func @reify_dynamic_N(%ctx: !hip.context,
   %d1 = tensor.dim %r, %d1_idx : tensor<2x?xf16>
   return %d0, %d1 : index, index
 }
+
+// -----
+
+// --- Dynamic vs static>1 batch broadcast: A's batch dim is dynamic, B's is
+//     static-5, and the result type is intentionally left dynamic (`?x4x16`).
+//     Per NumPy / TF / ONNX MatMul broadcast contract, A's dynamic dim must
+//     be either 1 (broadcast) or 5 (matched) at runtime, so reify infers the
+//     batch dim from operand shapes as static-5 even though the result type
+//     itself is dynamic. tensor.dim of the result's batch dim therefore
+//     folds to the constant 5 (NOT a tensor.dim of A). This pins the
+//     "dynamic + static>1 -> static" tightening that we get for free by
+//     delegating batch broadcast to upstream MLIR's getBroadcastedShape
+//     helper (which implements TF / ONNX broadcast contract semantics).
+// CHECK-LABEL: func.func @reify_dyn_static_batch_broadcast
+// CHECK-NOT:   tensor.dim
+// CHECK-DAG:   %[[C5:.*]] = arith.constant 5 : index
+// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
+// CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
+// CHECK:       return %[[C5]], %[[C4]], %[[C16]]
+func.func @reify_dyn_static_batch_broadcast(%ctx: !hip.context,
+                                            %a: tensor<?x4x8xf16>,
+                                            %b: tensor<5x8x16xf16>,
+                                            %c: tensor<?x4x16xf16>) -> (index, index, index) {
+  %r = hip.matmul(%ctx)
+    ins(%a, %b : tensor<?x4x8xf16>, tensor<5x8x16xf16>)
+    outs(%c : tensor<?x4x16xf16>) : tensor<?x4x16xf16>
+  %d0_idx = arith.constant 0 : index
+  %d1_idx = arith.constant 1 : index
+  %d2_idx = arith.constant 2 : index
+  %d0 = tensor.dim %r, %d0_idx : tensor<?x4x16xf16>
+  %d1 = tensor.dim %r, %d1_idx : tensor<?x4x16xf16>
+  %d2 = tensor.dim %r, %d2_idx : tensor<?x4x16xf16>
+  return %d0, %d1, %d2 : index, index, index
+}
