@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # Memory Manager (MM) Architecture
 
 ## Overview
@@ -120,7 +124,7 @@ Model DLLs embed `runtime.bc` at link time — no separate `mm.lib` needed.
 
 2. **First inference**:
    - Constants blob allocated via `mm::alloc` with `MemoryClass::Weight` / `Lifetime::Static`.
-   - Workspace allocated via `mm::alloc` with `MemoryClass::Activation` / `Lifetime::Session`.
+   - Workspace allocated via `mm::alloc` with `MemoryClass::Activation` / `Lifetime::Request`.
    - KV cache blocks allocated via `mm::kv_alloc_block` — each block is a fixed-size
      region of GPU memory managed by the block manager.
 

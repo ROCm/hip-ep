@@ -87,8 +87,7 @@ handle_t KvManager::alloc_block(const KvBlockDesc &desc,
   return handle;
 }
 
-Status KvManager::free_block(handle_t handle,
-                             std::size_t *released_bytes) {
+Status KvManager::free_block(handle_t handle, std::size_t *released_bytes) {
   if (!hal_ || !handles_)
     return Status::ErrNotInitialized;
 

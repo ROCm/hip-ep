@@ -33,8 +33,7 @@ public:
               std::size_t budget_bytes);
   void shutdown();
 
-  handle_t alloc_block(const KvBlockDesc &desc,
-                       std::size_t *reserved_bytes);
+  handle_t alloc_block(const KvBlockDesc &desc, std::size_t *reserved_bytes);
   Status free_block(handle_t handle, std::size_t *released_bytes);
   handle_t fork_block(handle_t source);
   bool build_block_table(const handle_t *handles, std::size_t count,
