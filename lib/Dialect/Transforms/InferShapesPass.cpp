@@ -86,7 +86,6 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
-#include "mlir/Interfaces/InferTypeOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"

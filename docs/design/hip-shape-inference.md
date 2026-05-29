@@ -360,42 +360,20 @@ matmul ones:
 
 ## Open extensions
 
-The current first-pass coverage is intentionally narrow:
+The recipe in [How to add a new op](#how-to-add-a-new-op) is the canonical
+guide for adding shape inference to additional HIP DPS ops. Per-op rollout,
+dialect generalisation, and backward dim-origin tracing across `func.return`
+are tracked outside this document.
 
-* **Op coverage.** Only `hip.matmul` carries
-  `ReifyRankedShapedTypeOpInterface` today. Each additional HIP DPS op
-  that gets a reify impl participates in the pipeline-level pass for
-  free (no `Pipelines.cpp` change). Priority order, by frequency in
-  observed transformer graphs: GQA, RmsNorm, SkipRmsNorm,
-  RotaryEmbedding, MatMulNBits, then everything else. The recipe in
-  [How to add a new op](#how-to-add-a-new-op) is the canonical guide.
-* **`hip.matmul` rejects rank-1 operands.** The new verifier requires
-  both `A` and `B` to have rank ≥ 2. ONNX `MatMul` semantics permit
-  rank-1 operands (vector·matrix / matrix·vector) by implicitly
-  promoting them to rank-2 with a unit dim and stripping the unit dim
-  from the result. None of the supported transformer models exercise
-  this case (every matmul in the supported model set is rank ≥ 2 and
-  was rank ≥ 2 before this PR). For models that do, the right fix is
-  in `lib/Conversion/OnnxToHip/MatMulConversion.cpp`: insert a
-  `tensor.expand_shape` to rank-2 before constructing `hip.matmul`,
-  then `tensor.collapse_shape` the result. The runtime / lowering
-  paths assume rank ≥ 2 today (`MatmulLowering.cpp` indexes
-  `aShape[rank-2]` for M, `bShape[rank-1]` for N), so without ONNX-spec
-  promotion in the converter a rank-1 `onnx.MatMul` would have
-  produced a silently-wrong hipBLASLt call before this PR — the
-  verifier turns that latent miscompile into an explicit diagnostic.
-* **Producer refinement is `tensor.empty` only.** Adding refinement for
-  other "shape-malleable" producers (`bufferization.alloc_tensor`, other
-  HIP DPS ops) is a follow-up. The cleanest extension is to teach the
-  pass a small dispatch table keyed on the producer's op name.
-* **Element-type refinement is opt-in.** `verifyHipOpShape(... ,
-  checkElementType=true)` exists but is off by default; dtype-changing
-  ops (cast, equal, less, not, and) keep their op-local element-type
-  checks.
-* **Control-flow boundaries.** The pass does not propagate refined
-  types into `scf.if` / `scf.while` block argument types. That requires
-  a separate fixed-point pass keyed on `BranchOpInterface`.
-* **Auto-derived builders.** Once a few more ops carry the interface,
-  it becomes attractive to add a "shape-aware" op builder
-  (`MyOp::create(b, loc, ctx, A, B)` which derives the output type
-  automatically). Today every caller passes the explicit outs type.
+### `hip.matmul` rejects rank-1 operands
+
+The verifier requires both `A` and `B` to have rank >= 2. ONNX `MatMul`
+permits rank-1 operands (vector-matrix / matrix-vector) via implicit
+unit-dim promotion and result unit-dim stripping. None of the currently
+supported transformer models exercise this case. For future models that
+do, the fix belongs in `lib/Conversion/OnnxToHip/MatMulConversion.cpp`:
+insert a `tensor.expand_shape` to rank-2 before constructing `hip.matmul`,
+then `tensor.collapse_shape` the result. Lowering (`MatmulLowering.cpp`)
+and runtime assume rank >= 2 today (indexing `aShape[rank-2]` and
+`bShape[rank-1]`); the verifier turns what would have been a
+silently-wrong hipBLASLt call into an explicit diagnostic.

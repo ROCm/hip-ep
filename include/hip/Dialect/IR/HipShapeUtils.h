@@ -51,16 +51,18 @@ LogicalResult verifyHipOpShape(
     Operation *op,
     function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected);
 
-/// Build an `OpFoldResult` for one dimension of a result:
+/// Build an `OpFoldResult` for one dimension of a reify-callable op's
+/// result:
 ///   - if `staticDim` is not `kDynamic`, returns `b.getIndexAttr(staticDim)`
 ///     (no IR emitted).
-///   - otherwise emits `tensor.dim` / `memref.dim` against `source` at
-///     `sourceDim`. The dim op folds to an `arith.constant` automatically
-///     when `source.getType()` has a static size at `sourceDim`.
+///   - otherwise emits `tensor.dim` against `source` at `sourceDim`. The
+///     dim op folds to an `arith.constant` automatically when
+///     `source.getType()` has a static size at `sourceDim`.
 ///
-/// Implemented inline (and not as a thin wrapper around any external
-/// helper) to keep the HIP dialect IR library's link-time dependency
-/// surface minimal.
+/// `source` is required to have `RankedTensorType` -- the
+/// `ReifyRankedShapedTypeOpInterface` contract restricts its callers to
+/// ops with tensor results, so memref-typed sources cannot reach a reify
+/// path today.
 OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
                                 Value source, int64_t sourceDim);
 
