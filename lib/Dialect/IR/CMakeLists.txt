@@ -5,6 +5,7 @@
 
 add_library(HipDialectIR STATIC
   HipDialect.cpp
+  HipShapeUtils.cpp
 )
 
 add_dependencies(HipDialectIR
@@ -18,4 +19,7 @@ target_link_libraries(HipDialectIR PUBLIC
   MLIRSupport
   MLIRDestinationStyleOpInterface
   MLIRFuncDialect
+  MLIRInferTypeOpInterface
+  MLIRTensorDialect
+  MLIRMemRefDialect
 )
