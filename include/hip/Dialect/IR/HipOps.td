@@ -9,6 +9,7 @@
 include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
@@ -301,13 +302,29 @@ def Hip_ConvOp : Hip_DpsOp<"conv"> {
 
 // ===== hipBLASLt ops =========================================================
 
-def Hip_MatmulOp : Hip_DpsOp<"matmul"> {
+def Hip_MatmulOp : Hip_DpsOp<"matmul", [
+    DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
+      ["reifyResultShapes"]>
+  ]> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B
-    Supports batched operation (leading dimensions are batch dimensions).
+    Supports batched operation (leading dimensions are batch dimensions
+    with NumPy-style broadcast).
 
     Uses destination-passing style: output buffer is provided as argument.
+
+    Shape contract:
+      A:      [..., M, K]
+      B:      [..., K, N]
+      output: [broadcast(A.batch, B.batch), M, N]
+
+    `?` (kDynamic) is permitted on any dim and behaves as a wildcard for
+    verification; `reifyResultShapes` lifts dynamic dims into `tensor.dim` /
+    `memref.dim` of the corresponding operand so downstream
+    `--resolve-shaped-type-result-dims` can fold `tensor.dim` of the
+    `result_tensors` value to a concrete SSA dim. See
+    [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
     Unlike hip.gemm, this has no alpha/beta/transA/transB/bias — it maps
     directly to onnx.MatMul semantics.
@@ -339,6 +356,8 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//

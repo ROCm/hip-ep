@@ -270,6 +270,68 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
+  let summary = "Refine dynamic dims in HIP DPS op result types via "
+                "`ReifyRankedShapedTypeOpInterface`";
+  let description = [{
+    Walks every op that implements `ReifyRankedShapedTypeOpInterface` and
+    has at least one `RankedTensorType` result (memref-mode DPS ops are
+    skipped). For each such op, calls `reifyResultShapes` to discover
+    static dim values that the op contract knows but the IR types still
+    spell as `?`, and refines:
+
+      1. The DPS `outs` operand's producer result type, when the producer
+         is a `tensor.empty` -- the only zero-cost refinement we can do
+         today. The tensor.empty is rebuilt with the refined shape; any
+         dynamic dim operands that became static are dropped.
+      2. The op's own result type, in place.
+      3. Each consumer whose operand type no longer matches: a
+         `tensor.cast` is inserted on the use-edge to bridge the new
+         (more-static) type back to the original type. DPS consumers
+         that take the refined value as their `outs` operand are
+         deliberately NOT cast back -- they will be refined in turn on
+         the same module walk (topo-ordered by IR position).
+
+    Why DPS-aware
+    -------------
+    The upstream `--reify-result-shapes` pass (memref dialect, MLIR 22)
+    only handles `tensor::PadOp` / `tensor::ConcatOp` and skips DPS ops;
+    a generic upstream "infer static shapes" pass exists in main but is
+    not in the pinned MLIR. This pass closes the gap for HIP DPS ops:
+    the outs operand carries the result type by spec, so refining the
+    op's result without matching the outs operand's producer would
+    produce a verifier error.
+
+    Pipeline placement
+    ------------------
+    Optional, runs after `convert-onnx-to-hip` and before
+    `one-shot-bufferize`. Refining tensor result types BEFORE bufferize
+    propagates static dims through the alloc / pool sizing computations
+    and removes spurious `memref.dim` ops that the legalisation chain
+    would otherwise leave at the top of the function.
+
+    Idempotent: a second invocation that finds no further refinements is
+    a no-op.
+
+    Example:
+    ```mlir
+    // before
+    %empty = tensor.empty(%dynM, %dynN) : tensor<?x?xf16>
+    %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+                          outs(%empty : tensor<?x?xf16>) -> tensor<?x?xf16>
+
+    // after
+    %empty = tensor.empty() : tensor<2x8xf16>
+    %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+                          outs(%empty : tensor<2x8xf16>) -> tensor<2x8xf16>
+    ```
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
   let summary = "Replace extern memref.global constants with "

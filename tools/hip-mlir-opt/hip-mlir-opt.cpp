@@ -22,6 +22,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -240,6 +241,11 @@ int main(int argc, char **argv) {
   mlir::registerSCFToControlFlowPass();
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerReconcileUnrealizedCastsPass();
+  // --resolve-shaped-type-result-dims drives `tensor.dim` / `memref.dim`
+  // folding via `ReifyRankedShapedTypeOpInterface`. Registered for the
+  // hip-matmul-reify-shapes LIT and for end-to-end use after
+  // --hip-infer-shapes when callers want the dim ops collapsed too.
+  mlir::memref::registerResolveShapedTypeResultDimsPass();
   mlir::registerPass(
       []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
