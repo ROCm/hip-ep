@@ -1,13 +1,12 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// Verify the two ONNX Slice lowering paths:
+// Verify ONNX Slice lowering: all paths lower to hip.slice (SliceToHip).
 //
-//   1. SliceDecompose (preferred) — all slice params are compile-time
-//      constants with positive unit stride, so onnx.Slice is rewritten to
-//      a zero-cost tensor.extract_slice.
-//   2. SliceToHip (fallback) — non-constant indices or negative steps fall
-//      through to a native hip.slice op whose runtime is a stub today.
+// The SliceDecompose pattern (tensor.extract_slice for fully-const, all-static
+// slices) was intentionally dropped because strided subview descriptors are
+// incompatible with downstream HIP kernels that assume contiguous memrefs.
+// All slices now go through the hip.slice runtime copy path.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -16,8 +15,9 @@ module {
     return %arg0 : tensor<4xf32>
   }
 
-  // Test 1: classic prefix slice (axis 0, [1:3], stride 1) — decomposes to
-  // tensor.extract_slice.
+  // Test 1: classic prefix slice (axis 0, [1:3], stride 1) — goes through
+  // hip.slice (the SliceDecompose/tensor.extract_slice path was removed because
+  // strided subviews are incompatible with downstream HIP kernels).
   func.func @test_slice_decompose_simple(%input: tensor<4x6xf32>) -> tensor<2x6xf32> {
     // CHECK-LABEL: func.func @test_slice_decompose_simple
     %starts = arith.constant dense<[1]> : tensor<1xi64>
@@ -29,14 +29,13 @@ module {
            tensor<1xi64>, tensor<1xi64>) -> tensor<2x6xf32>
 
     // CHECK-NOT: onnx.Slice
-    // CHECK-NOT: hip.slice
-    // CHECK: tensor.extract_slice {{.*}}[1, 0] [2, 6] [1, 1]
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK: hip.slice({{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x6xf32>, tensor<1xi64>, tensor<1xi64>)
 
     return %r : tensor<2x6xf32>
   }
 
-  // Test 2: per-axis slice with stride > 1 — still decomposes (extract_slice
-  // supports strides).
+  // Test 2: per-axis slice with stride > 1 — also goes through hip.slice.
   func.func @test_slice_decompose_stride(%input: tensor<2x4xf32>) -> tensor<1x2xf32> {
     // CHECK-LABEL: func.func @test_slice_decompose_stride
     %starts = arith.constant dense<[1, 0]> : tensor<2xi64>
@@ -48,7 +47,8 @@ module {
            tensor<2xi64>, tensor<2xi64>) -> tensor<1x2xf32>
 
     // CHECK-NOT: onnx.Slice
-    // CHECK: tensor.extract_slice {{.*}}[1, 0] [1, 2] [1, 2]
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK: hip.slice({{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<2x4xf32>, tensor<2xi64>, tensor<2xi64>)
 
     return %r : tensor<1x2xf32>
   }
@@ -62,7 +62,8 @@ module {
         : (tensor<4x6xf32>, tensor<2xi64>, tensor<2xi64>) -> tensor<2x3xf32>
 
     // CHECK-NOT: onnx.Slice
-    // CHECK: tensor.extract_slice {{.*}}[0, 0] [2, 3] [1, 1]
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK: hip.slice({{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x6xf32>, tensor<2xi64>, tensor<2xi64>)
 
     return %r : tensor<2x3xf32>
   }
@@ -101,10 +102,9 @@ module {
     return %r : tensor<4xf32>
   }
 
-  // Test 6: SliceDecompose on a tensor with a dynamic non-sliced axis.
+  // Test 6: Slice on a tensor with a dynamic non-sliced axis.
   // axis 0 is sliced (input dim is static = 4), axis 1 is left alone
-  // (input dim is ? -> the corresponding extract_slice size is a
-  // tensor.dim Value, not a constant).
+  // (input dim is ? -> hip.slice output sized via tensor.dim).
   func.func @test_slice_decompose_dyn_untouched(%input: tensor<4x?xf32>) -> tensor<2x?xf32> {
     // CHECK-LABEL: func.func @test_slice_decompose_dyn_untouched
     %starts = arith.constant dense<[1]> : tensor<1xi64>
@@ -116,12 +116,12 @@ module {
            tensor<1xi64>, tensor<1xi64>) -> tensor<2x?xf32>
 
     // CHECK-NOT: onnx.Slice
-    // CHECK-NOT: hip.slice
+    // CHECK-NOT: tensor.extract_slice
     // CHECK-DAG: %[[A1:.*]] = arith.constant 1 : index
     // CHECK-DAG: %[[DIM:.*]] = tensor.dim %{{.*}}, %[[A1]] : tensor<4x?xf32>
-    // The first dim's slice is [start=1, size=2, step=1]; the second
-    // dim is untouched and uses the runtime dim value.
-    // CHECK: tensor.extract_slice %{{.*}}[1, 0] [2, %[[DIM]]] [1, 1]
+    // The non-sliced axis uses the runtime dim value for the output empty.
+    // CHECK: tensor.empty(%[[DIM]]) : tensor<2x?xf32>
+    // CHECK: hip.slice({{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x?xf32>, tensor<1xi64>, tensor<1xi64>)
     return %r : tensor<2x?xf32>
   }
 
@@ -141,8 +141,9 @@ module {
 
     // CHECK-NOT: tensor.extract_slice
     // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
-    // CHECK-DAG: %[[DIM:.*]] = tensor.dim %{{.*}}, %[[A0]] : tensor<?xf32>
-    // CHECK: tensor.empty(%[[DIM]]) : tensor<?xf32>
+    // CHECK-DAG: tensor.dim %{{.*}}, %[[A0]] : tensor<?xf32>
+    // Output size is the clamped slice extent (not the raw dim).
+    // CHECK: tensor.empty(%{{.*}}) : tensor<?xf32>
     // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<?xf32>, tensor<1xi64>, tensor<1xi64>)
     return %r : tensor<?xf32>
   }

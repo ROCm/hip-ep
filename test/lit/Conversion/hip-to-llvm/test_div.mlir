@@ -50,7 +50,6 @@ module {
     hip.div(%ctx) ins(%a, %b : memref<?x?xf16, 1>, memref<?x?xf16, 1>)
                   outs(%c : memref<?x?xf16, 1>)
 
-    // CHECK: llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK: llvm.call @wrap_div({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }

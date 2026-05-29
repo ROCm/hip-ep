@@ -85,8 +85,8 @@ def log(msg):
     print(f"[build] {msg}")
 
 
-def download(url, dest):
-    """Download *url* to *dest* with a progress indicator. Skips if cached."""
+def download(url, dest, *, max_retries=5):
+    """Download *url* to *dest* with progress, resume support, and retries."""
     if dest.exists():
         log(f"  Cached: {dest.name}")
         return
@@ -94,24 +94,49 @@ def download(url, dest):
     tmp = dest.with_suffix(dest.suffix + ".part")
     log(f"  Downloading {dest.name} ...")
 
-    def _progress(block, block_size, total):
-        done = block * block_size
-        if total > 0:
-            pct = min(100.0, done * 100.0 / total)
-            print(
-                f"\r  {done / 1048576:.1f} / {total / 1048576:.1f} MB ({pct:.0f}%)",
-                end="",
-                flush=True,
-            )
+    import time
 
-    try:
-        urllib.request.urlretrieve(url, str(tmp), reporthook=_progress)
-        print()
-        tmp.rename(dest)
-    except Exception as exc:
-        print()
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"Download failed: {url}") from exc
+    for attempt in range(max_retries):
+        offset = tmp.stat().st_size if tmp.exists() else 0
+        try:
+            req = urllib.request.Request(url)
+            if offset:
+                req.add_header("Range", f"bytes={offset}-")
+                log(f"  Resuming from {offset / 1048576:.1f} MB (attempt {attempt + 1})")
+            with urllib.request.urlopen(req) as resp:
+                total_from_header = int(resp.headers.get("Content-Length") or 0)
+                # For Range responses the Content-Length is the remaining bytes
+                total = (offset + total_from_header) if offset and resp.status == 206 else total_from_header
+                done = offset
+                mode = "ab" if offset and resp.status == 206 else "wb"
+                if mode == "wb":
+                    offset = 0
+                    done = 0
+                with open(tmp, mode) as f:
+                    while True:
+                        chunk = resp.read(1 << 17)  # 128 KB
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total > 0:
+                            pct = min(100.0, done * 100.0 / total)
+                            print(
+                                f"\r  {done / 1048576:.1f} / {total / 1048576:.1f} MB ({pct:.0f}%)",
+                                end="",
+                                flush=True,
+                            )
+            print()
+            tmp.rename(dest)
+            return
+        except Exception as exc:
+            print()
+            if attempt < max_retries - 1:
+                wait = 5 * (attempt + 1)
+                log(f"  Download error ({exc}), retrying in {wait}s ...")
+                time.sleep(wait)
+            else:
+                raise RuntimeError(f"Download failed after {max_retries} attempts: {url}") from exc
 
 
 def _tar_extract(archive, dest, *, strip=0):
@@ -177,6 +202,7 @@ def _read_ci_env(*keys):
 
 
 def fetch_therock():
+    global THEROCK
     # set THEROCK if the env var THEROCK_DIST is valid
     log("Looking for TheRock ROCm SDK via THEROCK_DIST ...")
     custom_therock = os.environ.get("THEROCK_DIST")

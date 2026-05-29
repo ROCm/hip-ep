@@ -63,7 +63,7 @@ module {
     // CHECK: %[[D1:.*]] = tensor.dim %[[RHS]], %c1
     // CHECK-NOT: tensor.dim %[[LHS]], %c1
     // CHECK: %[[INIT:.*]] = tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?xi64>
-    // CHECK: hip.add(%[[CTX3]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1xi64>, tensor<1x?xi64>) outs(%[[INIT]] : tensor<?x?xi64>) : tensor<?x?xi64>
+    // CHECK: hip.add(%[[CTX3]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1xi64>, tensor<1x?xi64>) outs(%[[INIT]] : tensor<?x?xi64>) -> tensor<?x?xi64>
 
     return %output : tensor<?x?xi64>
   }
