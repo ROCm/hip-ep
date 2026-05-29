@@ -294,13 +294,12 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
 
     Why DPS-aware
     -------------
-    The upstream `--reify-result-shapes` pass (memref dialect, MLIR 22)
-    only handles `tensor::PadOp` / `tensor::ConcatOp` and skips DPS ops;
-    a generic upstream "infer static shapes" pass exists in main but is
-    not in the pinned MLIR. This pass closes the gap for HIP DPS ops:
-    the outs operand carries the result type by spec, so refining the
-    op's result without matching the outs operand's producer would
-    produce a verifier error.
+    HIP DPS ops require `result_type == outs_operand_type`, so refining
+    the op's result without matching the outs operand's producer would
+    produce a verifier error. This pass handles the DPS contract by
+    rewriting the producer at the same time as the result type. See
+    [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
+    for the full design discussion.
 
     Pipeline placement
     ------------------

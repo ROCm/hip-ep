@@ -5,6 +5,7 @@
 
 add_library(HipDialectIR STATIC
   HipDialect.cpp
+  HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp
 )
 

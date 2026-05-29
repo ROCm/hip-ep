@@ -6,11 +6,11 @@
 //
 // `reifyResultShapes` lifts the statically-known dims of `hip.matmul` into
 // `OpFoldResult` (IntegerAttr for static dims; tensor.dim of the relevant
-// operand for kDynamic dims). It is exercised here through the upstream
-// `--resolve-shaped-type-result-dims` pass, which folds `tensor.dim` of an
-// op result into either a constant (for static result dims) or a
-// `tensor.dim` of an input (for dynamic dims that are resolved through
-// reify to one of the input operands).
+// operand for kDynamic dims). It is exercised here through the
+// `--resolve-shaped-type-result-dims` pass (see RUN line below), which
+// folds `tensor.dim` of an op result into either a constant (for static
+// result dims) or a `tensor.dim` of an input (for dynamic dims that are
+// resolved through reify to one of the input operands).
 //
 // The reify implementation honours the matmul shape contract:
 //   M (penultimate dim)  -> dim of A at A.rank-2

@@ -155,8 +155,12 @@ include/hip/Dialect/IR/
                               and `let hasVerifier = 1`
 
 lib/Dialect/IR/
-  HipShapeUtils.cpp        -- implementations + diagnostics
-  HipDialect.cpp           -- per-op `verify()` + `reifyResultShapes()`
+  HipShapeUtils.cpp                -- implementations + diagnostics
+  HipDialect.cpp                   -- per-op `verify()`, `getEffects()`,
+                                      `getDpsInitsMutable()`, custom
+                                      builders / printers / parsers
+  HipReifyResultShapesImpl.cpp     -- per-op `reifyResultShapes()`,
+                                      one `// <OpName>` section per op
 
 include/hip/Dialect/Transforms/
   Passes.td                -- `def InferShapesPass` registration
@@ -170,6 +174,36 @@ test/lit/Dialect/
                                        `--resolve-shaped-type-result-dims`
   hip-infer-shapes.mlir            -- propagation pass behaviour
 ```
+
+### Why the per-interface split
+
+`reifyResultShapes` lives in its own translation unit because it grows
+on a different schedule from the rest of an op's machinery. Verifiers,
+`getEffects`, `getDpsInitsMutable`, and op-local builders touch the op
+once and rarely need maintenance after that. Reify implementations are
+non-trivial shape arithmetic that benefits from being read alongside
+each other (every dynamic-shape op solves a small variant of the same
+"lift static dims to `IntegerAttr`, dynamic dims to `tensor.dim` of the
+right operand" problem). Keeping them together — and out of the
+already-large `HipDialect.cpp` — makes both files easier to navigate as
+the dialect picks up shape-inference support for more ops.
+
+This mirrors IREE's LinalgExt convention (`LinalgExtOps.cpp` keeps
+verifiers / builders; `TilingInterfaceImpl.cpp` and
+`AggregatedOpInterfaceImpl.cpp` keep per-interface impls), which in
+turn descends from the same upstream split between
+`mlir/lib/Dialect/Linalg/IR/LinalgOps.cpp` (op identity) and the
+various interface-impl `.cpp` files under
+`mlir/lib/Dialect/Linalg/Transforms/`. The interface impls are
+**member functions, not external models** — `attachInterface` /
+`ExternalModel<>` is only needed when implementing an interface from
+*outside* the op's owning dialect.
+
+When a future interface accumulates enough impls to deserve the same
+treatment (e.g. a dialect-defined op interface, a tiling interface, or
+a bufferization interface), follow the same pattern: a new
+`Hip<InterfaceName>Impl.cpp` next to the existing files, sectioned by
+op name, listed in `lib/Dialect/IR/CMakeLists.txt`.
 
 ## Pipeline placement
 
@@ -192,9 +226,10 @@ refinements is a no-op.
 
 ## How to add a new op
 
-A new HIP op participates in shape inference in **three** small edits.
-The matmul wiring is the canonical reference; the same pattern applies
-to every DPS compute op.
+A new HIP op participates in shape inference in **five** small edits,
+spread across the three files identified in the layout above. The
+matmul wiring is the canonical reference; the same pattern applies to
+every DPS compute op.
 
 ### 1. Add a shape helper (or reuse one)
 
@@ -230,10 +265,11 @@ def Hip_MyOp : Hip_DpsOp<"my_op", [
 `Hip_DpsOp` already declares `DestinationStyleOpInterface` and emits the
 `Variadic<AnyRankedTensor>:$result_tensors` result for tensor mode.
 
-### 3. Implement `verify()` and `reifyResultShapes()`
+### 3. Implement `verify()` in `HipDialect.cpp`
 
-In [HipDialect.cpp](../../lib/Dialect/IR/HipDialect.cpp), add the two methods
-next to your existing `getDpsInitsMutable()` / `getEffects()` impls:
+In [HipDialect.cpp](../../lib/Dialect/IR/HipDialect.cpp), under the
+`// MyOp` section banner alongside the existing
+`getDpsInitsMutable()` / `getEffects()`:
 
 ```cpp
 LogicalResult MyOp::verify() {
@@ -254,13 +290,26 @@ LogicalResult MyOp::verify() {
         return {std::move(outShape)};
       });
 }
+```
+
+### 4. Implement `reifyResultShapes()` in `HipReifyResultShapesImpl.cpp`
+
+In [HipReifyResultShapesImpl.cpp](../../lib/Dialect/IR/HipReifyResultShapesImpl.cpp),
+add a new `// MyOp` section banner at the bottom of the file and place
+the impl underneath it:
+
+```cpp
+//===----------------------------------------------------------------------===//
+// MyOp
+//===----------------------------------------------------------------------===//
 
 LogicalResult MyOp::reifyResultShapes(
     OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure(); // memref mode -- no tensor result
-  // ... compute outShape via the same helper, then for each dim:
-  //       reifyDimOrConstant(b, loc, outShape[d], operand, operandDimIdx)
+  // ... compute outShape via the same helper used in verify(), then for
+  //     each dim: reifyDimOrConstant(b, loc, outShape[d], operand,
+  //                                  operandDimIdx)
   // ... reifiedReturnShapes.assign({std::move(dims)});
   return success();
 }
@@ -270,7 +319,11 @@ LogicalResult MyOp::reifyResultShapes(
 `tensor.dim` / `memref.dim` otherwise, mirroring upstream
 `linalg::createFoldedDimOp`.
 
-### 4. (Optional) LIT coverage
+The interface declaration is already in TableGen (step 2), so no
+header / `attachInterface` changes are needed — the linker resolves the
+member function to whichever `.cpp` file defines it.
+
+### 5. (Optional) LIT coverage
 
 Add three small LIT tests under `test/lit/Dialect/`, modelled on the
 matmul ones:

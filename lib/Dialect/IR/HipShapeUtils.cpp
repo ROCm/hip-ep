@@ -105,9 +105,10 @@ LogicalResult mlir::hip::verifyHipOpShape(
     Operation *op,
     function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected) {
   // Required-by-construction: every op that wires up `verifyHipOpShape`
-  // also implements `DestinationStyleOpInterface` via TableGen. Asserting
-  // cast matches the upstream Linalg pattern in `verifyStructuredOpInterface`
-  // (`cast<LinalgOp>(op)` / `cast<IndexingMapOpInterface>(op)`).
+  // also implements `DestinationStyleOpInterface` via TableGen. Use
+  // asserting `cast<>` to express that contract — a missing interface is
+  // a programmer error in the op's TableGen def, not a user-facing
+  // diagnostic.
   auto dpsOp = cast<DestinationStyleOpInterface>(op);
 
   SmallVector<SmallVector<int64_t>> expected = computeExpected();
@@ -117,10 +118,9 @@ LogicalResult mlir::hip::verifyHipOpShape(
     return failure();
 
   // Programmer-error invariant: each shape helper returns one expected shape
-  // per DPS init operand by construction. Assert in debug builds (matches the
-  // upstream `assert(X.size() == Y.size() && "...")` idiom in
-  // `tensor::CastOp` folding); the `return failure()` keeps release builds
-  // safe by avoiding the out-of-bounds `expected[i]` in the loop below.
+  // per DPS init operand by construction. Assert in debug builds; the
+  // `return failure()` keeps release builds safe by avoiding the
+  // out-of-bounds `expected[i]` in the loop below.
   auto inits = dpsOp.getDpsInits();
   assert(expected.size() == inits.size() &&
          "shape helper must produce one expected shape per DPS init operand");

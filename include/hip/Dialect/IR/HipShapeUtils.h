@@ -58,8 +58,9 @@ LogicalResult verifyHipOpShape(
 ///     `sourceDim`. The dim op folds to an `arith.constant` automatically
 ///     when `source.getType()` has a static size at `sourceDim`.
 ///
-/// Functional equivalent of upstream `linalg::createFoldedDimOp` (inlined to
-/// avoid pulling a linalg dependency into the HIP dialect IR library).
+/// Implemented inline (and not as a thin wrapper around any external
+/// helper) to keep the HIP dialect IR library's link-time dependency
+/// surface minimal.
 OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
                                 Value source, int64_t sourceDim);
 

@@ -241,10 +241,9 @@ int main(int argc, char **argv) {
   mlir::registerSCFToControlFlowPass();
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerReconcileUnrealizedCastsPass();
-  // --resolve-shaped-type-result-dims drives `tensor.dim` / `memref.dim`
-  // folding via `ReifyRankedShapedTypeOpInterface`. Registered for the
-  // hip-matmul-reify-shapes LIT and for end-to-end use after
-  // --hip-infer-shapes when callers want the dim ops collapsed too.
+  // Registered so that LIT tests and end-to-end pipelines can fold
+  // `tensor.dim` / `memref.dim` of HIP op results through the reify
+  // implementation. Used in `hip-matmul-reify-shapes.mlir`.
   mlir::memref::registerResolveShapedTypeResultDimsPass();
   mlir::registerPass(
       []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
