@@ -121,14 +121,14 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   for (size_t i : llvm::seq<size_t>(0, outRank)) {
     if (i + 2 == outRank) {
       // M dim: comes from A's [-2].
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A,
-                                                   aRank - 2));
+      dims.push_back(
+          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aRank - 2));
       continue;
     }
     if (i + 1 == outRank) {
       // N dim: comes from B's [-1].
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B,
-                                                   bRank - 1));
+      dims.push_back(
+          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bRank - 1));
       continue;
     }
     // Batch dim: right-aligned over A's and B's batch shapes.

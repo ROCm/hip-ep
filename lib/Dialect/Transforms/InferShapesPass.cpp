@@ -185,10 +185,10 @@ static LogicalResult refineTensorEmptyProducer(RewriterBase &rewriter,
 /// Refine a single result of a single op. Returns success() iff at least
 /// one dim was narrowed; failure() means "nothing to do" or "couldn't
 /// safely refine here".
-static LogicalResult
-refineOneResult(RewriterBase &rewriter,
-                ReifyRankedShapedTypeOpInterface reifyOp, unsigned resultIdx,
-                ArrayRef<OpFoldResult> reifiedDims) {
+static LogicalResult refineOneResult(RewriterBase &rewriter,
+                                     ReifyRankedShapedTypeOpInterface reifyOp,
+                                     unsigned resultIdx,
+                                     ArrayRef<OpFoldResult> reifiedDims) {
   Operation *op = reifyOp.getOperation();
   auto curType = dyn_cast<RankedTensorType>(op->getResult(resultIdx).getType());
   if (!curType)
