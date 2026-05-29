@@ -11,8 +11,6 @@ namespace {
 
 mm::Config make_config() {
   mm::Config cfg = mm::config_default();
-  cfg.kv_cache_fraction = 0.10;
-  cfg.kv_cache_max_bytes = 64 * 1024 * 1024; // 64 MB budget for tests.
   cfg.kv_block_size_tokens = 16;
   cfg.activation_slab_bytes = 128 * 1024;
   return cfg;
@@ -41,8 +39,6 @@ TEST(MemoryManagerTest, BasicAllocFree) {
 
 TEST(MemoryManagerTest, ActivationArenaReusesBlocks) {
   mm::Config cfg = make_config();
-  cfg.kv_cache_fraction = 0.0; // dedicate memory to activation pool.
-  cfg.kv_cache_max_bytes = 0;
   ASSERT_EQ(mm::init(&cfg), mm::Status::Ok);
 
   mm::AllocHints hints;
@@ -69,8 +65,6 @@ TEST(MemoryManagerTest, ActivationArenaReusesBlocks) {
 
 TEST(MemoryManagerTest, KvAllocForkAndFree) {
   mm::Config cfg = make_config();
-  cfg.kv_cache_fraction = 0.0;
-  cfg.kv_cache_max_bytes = 8 * 1024 * 1024;
   ASSERT_EQ(mm::init(&cfg), mm::Status::Ok);
 
   mm::KvBlockDesc desc;

@@ -8,7 +8,7 @@ Licensed under the MIT License.
 
 The Memory Manager is a GPU memory allocator specialized for LLM inference.
 It manages three allocation classes — KV cache blocks, activation tensors, and
-generic buffers — with separate budget pools and allocation strategies for each.
+generic buffers — with separate allocation strategies for each.
 
 MM is compiled to LLVM bitcode and merged into `runtime.bc` via `llvm-link`,
 so model DLLs call MM functions directly with zero FFI overhead.
@@ -37,7 +37,7 @@ lib/MemoryManager/
 ┌─────────────────────────────────────┐
 │          mm::alloc / mm::free       │  Public API (mm_api.h)
 ├─────────────────────────────────────┤
-│            mm_core.cpp              │  Dispatch + budget + metrics
+│            mm_core.cpp              │  Dispatch + metrics
 ├──────────┬──────────┬───────────────┤
 │ Activation│ KV Mgr  │  HandleTable  │  Subsystems
 │  Arena    │         │               │
@@ -46,7 +46,7 @@ lib/MemoryManager/
 └─────────────────────────────────────┘
 ```
 
-- **mm_core**: routes allocations by `MemoryClass`, enforces total budget,
+- **mm_core**: routes allocations by `MemoryClass`,
   aggregates metrics from subsystems.
 - **ActivationArena**: 8-class segregated free-list (1 KB → 4 MB + fallback).
   Freed buffers return to the pool for reuse — no `hipFree` until shutdown.
@@ -66,7 +66,7 @@ mm::alloc(size, hints, stream)
  ├─ if MemoryClass::Activation → ActivationArena::alloc
  │    ├─ find size class (binary search on upper bounds)
  │    ├─ pop from free_list if available (zero hipMalloc)
- │    └─ else: budget CAS check → hal->malloc
+ │    └─ else: hal->malloc
  ├─ else → hal->malloc (generic / weight)
  ├─ HandleTable::insert(ptr, metadata)
  └─ update atomic counters (total_allocated, peak)
@@ -80,7 +80,6 @@ mm::kv_alloc_block(KvBlockDesc, stream)
  ├─ KvManager::alloc_block
  │    ├─ compute_block_bytes(desc)
  │    │    └─ format_size * num_kv_heads * head_dim * num_layers * 2 * block_size_tokens
- │    ├─ budget check (total + block ≤ kv_budget)
  │    ├─ hal->malloc
  │    └─ physical_[ptr] = { bytes, desc, refcount=1 }
  └─ return handle
@@ -101,16 +100,12 @@ mm::free(handle, stream)
  └─ HandleTable::erase
 ```
 
-## Budget Initialization
+## Allocation Model
 
-```
-init():
-  free_bytes ← hipMemGetInfo()
-  kv_budget  = min(kv_cache_fraction * free_bytes, kv_cache_max_bytes)
-  activation_budget = free_bytes - kv_budget
-```
-
-Default: 90% of free GPU memory to KV cache, remainder to activations.
+All allocations are on-demand — no pre-partitioned budgets. Each subsystem
+calls `hal->malloc` when needed and tracks usage via atomic counters for
+metrics. Memory is released back to the GPU via `hal->free` (KV blocks,
+generic buffers) or returned to the arena free-list (activation tensors).
 
 ## Build Integration
 

@@ -21,10 +21,8 @@ std::size_t align_up(std::size_t value, std::size_t alignment) {
 }
 } // namespace
 
-Status ActivationArena::init(Hal *hal, const Config &config,
-                             std::size_t budget_bytes) {
+Status ActivationArena::init(Hal *hal, const Config &config) {
   (void)hal;
-  budget_bytes_ = budget_bytes;
   allocation_sizes_.clear();
   for (auto &clazz : classes_) {
     std::lock_guard<std::mutex> lock(clazz.mutex);
@@ -110,7 +108,6 @@ ActivationArena::alloc(std::size_t size, std::size_t alignment, Hal *hal) {
   alloc_size = align_up(alloc_size, alignment);
 
   void *ptr = nullptr;
-  bool counted_budget = false;
 
   if (!fallback_class) {
     {
@@ -121,26 +118,11 @@ ActivationArena::alloc(std::size_t size, std::size_t alignment, Hal *hal) {
       }
     }
     if (!ptr) {
-      if (budget_bytes_ != 0) {
-        std::size_t total = total_bytes_.load(std::memory_order_relaxed);
-        while (true) {
-          if (total + alloc_size > budget_bytes_)
-            return result;
-          if (total_bytes_.compare_exchange_weak(total, total + alloc_size,
-                                                 std::memory_order_relaxed)) {
-            counted_budget = true;
-            break;
-          }
-        }
-      } else {
-        total_bytes_.fetch_add(alloc_size, std::memory_order_relaxed);
-        counted_budget = true;
-      }
+      total_bytes_.fetch_add(alloc_size, std::memory_order_relaxed);
 
       Status st = hal->malloc(&ptr, alloc_size);
       if (st != Status::Ok || !ptr) {
-        if (counted_budget)
-          total_bytes_.fetch_sub(alloc_size, std::memory_order_relaxed);
+        total_bytes_.fetch_sub(alloc_size, std::memory_order_relaxed);
         return result;
       }
       update_peak(total_bytes_.load(std::memory_order_relaxed));
