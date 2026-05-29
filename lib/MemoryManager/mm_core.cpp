@@ -10,8 +10,6 @@
 #include <mutex>
 #include <vector>
 
-#include <hip/hip_runtime_api.h>
-
 #include "mm/mm_config.h"
 #include "mm/mm_kv.h"
 #include "mm_activation.h"
@@ -34,8 +32,6 @@ struct ManagerState {
   KvManager kv_manager;
   Hal *hal = nullptr;
   bool initialized = false;
-  std::size_t activation_budget = 0;
-  std::size_t kv_budget = 0;
 
   std::atomic<std::size_t> total_allocated{0};
   std::atomic<std::size_t> peak_allocated{0};
@@ -63,21 +59,6 @@ void update_peak(std::size_t current) {
   }
 }
 
-bool query_device_memory(std::size_t &free_bytes, std::size_t &total_bytes,
-                         int device_id) {
-  hipError_t err = hipSetDevice(device_id);
-  if (err != hipSuccess)
-    return false;
-  size_t free_b = 0;
-  size_t total_b = 0;
-  err = hipMemGetInfo(&free_b, &total_b);
-  if (err != hipSuccess)
-    return false;
-  free_bytes = static_cast<std::size_t>(free_b);
-  total_bytes = static_cast<std::size_t>(total_b);
-  return true;
-}
-
 } // namespace
 
 Status init(const Config *config) {
@@ -94,36 +75,11 @@ Status init(const Config *config) {
   if (st != Status::Ok)
     return st;
 
-  std::size_t free_bytes = 0;
-  std::size_t total_bytes = 0;
-  if (!query_device_memory(free_bytes, total_bytes, g_state.config.device_id) ||
-      g_state.config.gpu_memory_limit != 0) {
-    free_bytes = g_state.config.gpu_memory_limit != 0
-                     ? g_state.config.gpu_memory_limit
-                     : free_bytes;
-    total_bytes = free_bytes;
-  }
-
-  std::size_t kv_budget = g_state.config.kv_cache_max_bytes;
-  if (kv_budget == 0 && free_bytes != 0) {
-    kv_budget = static_cast<std::size_t>(static_cast<double>(free_bytes) *
-                                         g_state.config.kv_cache_fraction);
-  }
-  if (free_bytes != 0 && kv_budget > free_bytes)
-    kv_budget = free_bytes;
-
-  std::size_t activation_budget =
-      (free_bytes > kv_budget) ? (free_bytes - kv_budget) : 0;
-
-  g_state.kv_budget = kv_budget;
-  g_state.activation_budget = activation_budget;
-
-  st = g_state.kv_manager.init(g_state.hal, &g_state.handles, g_state.config,
-                               kv_budget);
+  st = g_state.kv_manager.init(g_state.hal, &g_state.handles, g_state.config);
   if (st != Status::Ok)
     return st;
 
-  st = g_state.activation.init(g_state.hal, g_state.config, activation_budget);
+  st = g_state.activation.init(g_state.hal, g_state.config);
   if (st != Status::Ok)
     return st;
 

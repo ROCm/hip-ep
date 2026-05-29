@@ -22,13 +22,11 @@ void update_peak(std::atomic<std::size_t> &peak, std::size_t current) {
 }
 } // namespace
 
-Status KvManager::init(Hal *hal, HandleTable *handles, const Config &config,
-                       std::size_t budget_bytes) {
+Status KvManager::init(Hal *hal, HandleTable *handles, const Config &config) {
   if (!hal || !handles)
     return Status::ErrInvalidArgument;
   hal_ = hal;
   handles_ = handles;
-  budget_bytes_ = budget_bytes;
   physical_.clear();
   handle_to_ptr_.clear();
   total_bytes_.store(0, std::memory_order_relaxed);
@@ -64,11 +62,6 @@ handle_t KvManager::alloc_block(const KvBlockDesc &desc,
     return kInvalidHandle;
 
   std::lock_guard<std::mutex> lock(mutex_);
-  if (budget_bytes_ != 0 &&
-      total_bytes_.load(std::memory_order_relaxed) + block_bytes >
-          budget_bytes_) {
-    return kInvalidHandle;
-  }
 
   void *ptr = nullptr;
   Status st = hal_->malloc(&ptr, block_bytes);

@@ -29,8 +29,7 @@ class KvManager {
 public:
   KvManager() = default;
 
-  Status init(Hal *hal, HandleTable *handles, const Config &config,
-              std::size_t budget_bytes);
+  Status init(Hal *hal, HandleTable *handles, const Config &config);
   void shutdown();
 
   handle_t alloc_block(const KvBlockDesc &desc, std::size_t *reserved_bytes);
@@ -66,7 +65,6 @@ private:
 
   Hal *hal_ = nullptr;
   HandleTable *handles_ = nullptr;
-  std::size_t budget_bytes_ = 0;
 
   mutable std::mutex mutex_;
   std::unordered_map<void *, PhysicalEntry> physical_;
