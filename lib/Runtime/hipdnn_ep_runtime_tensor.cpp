@@ -657,8 +657,10 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
 // Synchronize GPU stream once (called after all finalize_output calls).
 int hipdnn_ep_stream_sync(RuntimeState *state) {
-  fprintf(stderr, "[stream_sync] enter state=%p\n", (void *)state);
-  fflush(stderr);
+  // Per-Compute entry trace; gated on HIPDNN_EP_DEBUG to keep the hot path
+  // silent (fires once per Compute -> tens of thousands of lines on a
+  // multi-token decode).
+  RUNTIME_DEBUG_LOG("[stream_sync] enter state=%p\n", (void *)state);
   if (!state) {
     fprintf(stderr, "hipdnn_ep_stream_sync: null state\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
