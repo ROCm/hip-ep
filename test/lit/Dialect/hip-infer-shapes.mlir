@@ -47,11 +47,10 @@ func.func @refine_single_matmul(%ctx: !hip.context,
 //     to keep the second matmul's signature well-formed.
 //
 //     Despite the cast on the ins edge, the second matmul still refines its
-//     M dim to 2 because `tensor.dim %cast, 0` folds through the cast (via
-//     upstream `tensor::DimOp::fold` / `foldTensorCast`) to the source's
-//     static dim — and our reify uses `tensor::getMixedSize`'s `createOrFold`
-//     form. Verifies that the per-op refinement in this pass cooperates
-//     correctly with upstream cast-folding instead of fighting it.
+//     M dim to 2 because `tensor.dim %cast, 0` folds through the cast to
+//     the source's static dim — `reifyDimOrConstant` emits the dim op via
+//     a folding builder. Verifies that the per-op refinement in this pass
+//     cooperates correctly with cast-folding instead of fighting it.
 // CHECK-LABEL: func.func @refine_chained_matmul
 // CHECK:         %[[E1:.*]] = tensor.empty() : tensor<2x8xf16>
 // CHECK:         %[[Y1:.*]] = hip.matmul
@@ -120,11 +119,12 @@ func.func @noop_on_static(%ctx: !hip.context,
 
 // --- Non-DPS reify-implementing op: tensor.pad's result has dynamic dims at
 //     the type level (its `low`/`high` operands here are SSA values), but
-//     when those operands are constants in IR the upstream pad reify
-//     resolves them to integer attrs. We want to confirm: (a) the pass does
-//     not regress on non-DPS ops (no producer rewrite applies, but the
-//     result type is refined and a cast is inserted for non-DPS uses), and
-//     (b) the pass coexists with upstream reify-supporting ops.
+//     when those operands are constants in IR `tensor.pad`'s own reify
+//     resolves them to integer attrs. We want to confirm: (a) the pass
+//     does not regress on non-DPS ops (no producer rewrite applies, but
+//     the result type is refined and a cast is inserted for non-DPS
+//     uses), and (b) the pass coexists with other ops that already
+//     implement the reify interface.
 // CHECK-LABEL: func.func @refine_tensor_pad
 // CHECK:         %[[P:.*]] = tensor.pad
 // CHECK:         tensor<4x8xf16> to tensor<6x10xf16>

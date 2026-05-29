@@ -168,9 +168,8 @@ static LogicalResult refineTensorEmptyProducer(RewriterBase &rewriter,
     }
   }
 
-  // `clone(shape)` preserves the encoding attr (mirrors upstream
-  // `RankedTensorType::clone`); plain `RankedTensorType::get(shape, et)`
-  // would drop it.
+  // `clone(shape)` preserves the encoding attr; plain
+  // `RankedTensorType::get(shape, elemType)` would drop it.
   auto newType = curType.clone(newShape);
   rewriter.setInsertionPoint(emptyOp);
   auto newEmpty =
@@ -216,10 +215,9 @@ refineOneResult(RewriterBase &rewriter,
   // In-place type narrow on the op's result. We don't `rewriter.replaceOp`
   // here because that would invalidate every existing use's `OpOperand`
   // pointer before we get to insert the cast. Type-only mutation followed
-  // by selective cast insertion is the same pattern upstream
-  // `ReifyResultShapesPass` uses, just expressed in-place on the same op
-  // instead of via clone+replace (we don't need the clone since the op's
-  // operand list is unchanged).
+  // by selective cast insertion on the use edges keeps the op (and its
+  // operand list) in place — there's no need for clone+replace because
+  // we are not changing operands.
   Value result = op->getResult(resultIdx);
   Type oldType = result.getType();
   result.setType(curType.clone(newShape));

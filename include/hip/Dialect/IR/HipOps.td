@@ -320,11 +320,10 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", [
       output: [broadcast(A.batch, B.batch), M, N]
 
     `?` (kDynamic) is permitted on any dim and behaves as a wildcard for
-    verification; `reifyResultShapes` lifts dynamic dims into `tensor.dim` /
-    `memref.dim` of the corresponding operand so downstream
-    `--resolve-shaped-type-result-dims` can fold `tensor.dim` of the
-    `result_tensors` value to a concrete SSA dim. See
-    [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
+    verification; `reifyResultShapes` lifts dynamic dims into `tensor.dim`
+    / `memref.dim` of the corresponding operand. See
+    [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
+    for the dim-source contract and the consuming pipeline.
 
     Unlike hip.gemm, this has no alpha/beta/transA/transB/bias — it maps
     directly to onnx.MatMul semantics.

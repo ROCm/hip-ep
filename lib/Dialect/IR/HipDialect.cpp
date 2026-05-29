@@ -6,7 +6,6 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -433,97 +432,9 @@ LogicalResult MatmulOp::verify() {
       });
 }
 
-LogicalResult
-MatmulOp::reifyResultShapes(OpBuilder &b,
-                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  // Skip in memref mode: reify is for ranked tensor result types only and
-  // by interface contract is only called on ops with `RankedTensorType`
-  // results (see InferTypeOpInterface.td).
-  if (getNumResults() == 0)
-    return failure();
-
-  ArrayRef<int64_t> aShape = getShapeOf(getA());
-  ArrayRef<int64_t> bShape = getShapeOf(getB());
-  if (aShape.empty() || bShape.empty())
-    return failure();
-
-  // Recompute the static shape vector via the shared helper. By the time
-  // reify runs, verify() has already approved the shapes, so the error
-  // callback is unreachable in practice -- but we bail safely on empty()
-  // anyway, matching the upstream linalg pattern.
-  SmallVector<int64_t> outShape = mlir::hip::inferContractionShape(
-      aShape, bShape, [&]() { return this->emitOpError(); });
-  if (outShape.empty())
-    return failure();
-
-  // Lift each static dim to an IndexAttr; lift each dynamic dim to a
-  // dim-of-input. Choosing which input to dim against follows the matmul
-  // shape contract:
-  //   - last 2 dims (M, N): A.shape[-2], B.shape[-1]
-  //   - batch dims (broadcast): prefer the side that contributed the dim
-  //     (the non-1, non-dynamic side); fall back to A then B if both sides
-  //     are dynamic.
-  Location loc = getLoc();
-  Value A = getA();
-  Value B = getB();
-  size_t outRank = outShape.size();
-  size_t aRank = aShape.size();
-  size_t bRank = bShape.size();
-
-  SmallVector<OpFoldResult> dims;
-  dims.reserve(outRank);
-  for (size_t i : llvm::seq<size_t>(0, outRank)) {
-    if (i + 2 == outRank) {
-      // M dim: comes from A's [-2].
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A,
-                                                   aRank - 2));
-      continue;
-    }
-    if (i + 1 == outRank) {
-      // N dim: comes from B's [-1].
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B,
-                                                   bRank - 1));
-      continue;
-    }
-    // Batch dim: right-aligned over A's and B's batch shapes.
-    size_t batchRank = outRank - 2;
-    size_t aBatchRank = aRank >= 2 ? aRank - 2 : 0;
-    size_t bBatchRank = bRank >= 2 ? bRank - 2 : 0;
-    size_t aPad = batchRank - aBatchRank;
-    size_t bPad = batchRank - bBatchRank;
-    int64_t aDim = i < aPad ? 1 : aShape[i - aPad];
-    int64_t bDim = i < bPad ? 1 : bShape[i - bPad];
-
-    // Static result -> IntegerAttr (no IR).
-    if (!ShapedType::isDynamic(outShape[i])) {
-      dims.push_back(b.getIndexAttr(outShape[i]));
-      continue;
-    }
-    // Dynamic result -> dim of whichever input is the actual source. If A's
-    // side is 1 or out-of-range, B is the source; otherwise A. This keeps
-    // the emitted dim op tied to the operand whose runtime size determines
-    // the result, which is the invariant downstream folds rely on.
-    bool aSourceCanonical =
-        i >= aPad && aDim != 1; // A contributes when it's in range and not 1
-    bool bSourceCanonical = i >= bPad && bDim != 1;
-    if (aSourceCanonical) {
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, ShapedType::kDynamic,
-                                                   A, i - aPad));
-    } else if (bSourceCanonical) {
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, ShapedType::kDynamic,
-                                                   B, i - bPad));
-    } else if (i >= aPad) {
-      // Both sides are 1 / dynamic — A is in range, prefer it.
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, ShapedType::kDynamic,
-                                                   A, i - aPad));
-    } else {
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, ShapedType::kDynamic,
-                                                   B, i - bPad));
-    }
-  }
-  reifiedReturnShapes.assign({std::move(dims)});
-  return success();
-}
+// `MatmulOp::reifyResultShapes` lives in
+// `lib/Dialect/IR/HipReifyResultShapesImpl.cpp`. See the header banner in
+// that file and `docs/design/hip-shape-inference.md` for the rationale.
 
 //===----------------------------------------------------------------------===//
 // RmsNormOp: ins(input, scale), outs(output)
