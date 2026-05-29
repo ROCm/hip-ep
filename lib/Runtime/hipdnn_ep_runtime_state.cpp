@@ -1065,6 +1065,27 @@ extern "C"
   state->seqlens_k_cached_ptr = nullptr;
 }
 
+// Per-op profile flush hook. Moved out of hipdnn_ep_stream_sync (which is on
+// the inference_compute hot path) so the resolve + map + fprintf cost lands
+// AFTER the EP closes its wall_ms timing window. Same dllexport contract as
+// begin_compute above so dlsym/GetProcAddress can find it; symbol is
+// optional from the EP's perspective (older DLLs no-op).
+//
+// Body intentionally minimal: op_profile_resolve_and_print itself is a no-op
+// when the pending queue is empty or the state pointer is null, so callers
+// don't need to gate on HIPDNN_EP_PERF.
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        void hipdnn_ep_runtime_flush_op_profile(RuntimeState *state) {
+  if (!state) {
+    return;
+  }
+  op_profile_resolve_and_print(
+      static_cast<OpProfileState *>(state->op_profile));
+}
+
 //===----------------------------------------------------------------------===//
 // Memory Pooling Support
 //===----------------------------------------------------------------------===//
