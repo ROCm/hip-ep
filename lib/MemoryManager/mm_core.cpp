@@ -225,7 +225,7 @@ Status free(handle_t handle) {
 
   if (info.mem_class == MemoryClass::KvCache) {
     std::size_t released = 0;
-    Status st = g_state.kv_manager.free_block(handle, stream, &released);
+    Status st = g_state.kv_manager.free_block(handle, &released);
     if (st == Status::Ok) {
       g_state.kv_free_count.fetch_add(1, std::memory_order_relaxed);
       if (released > 0)
