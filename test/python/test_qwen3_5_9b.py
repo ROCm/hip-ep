@@ -66,7 +66,7 @@ from conftest import (
 
 # Local model dir (vision.onnx + vision.onnx.data ~915 MB). Downloaded by
 # huggingface_hub from amd/Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu.
-QWEN35_MODEL_DIR = REPO_ROOT / "models" / "Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu"
+QWEN35_MODEL_DIR = REPO_ROOT / "models" / "Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu-2"
 
 
 def test_qwen_vision_patch_merger_dynshape():
@@ -340,7 +340,13 @@ QWEN35 = ModelSpec(
         "vision.onnx",
         "vision.onnx.data",
     ],
-    hf_repo="amd/Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu",
+    # Locally re-exported model; never auto-fetched. The on-disk files are
+    # the authoritative artifacts the test runs against; the upstream HF
+    # repo `amd/Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu` ships an older
+    # variant that does NOT match this directory. If `Qwen3.5-9B-rtn-int4-
+    # int8-128gs-fp16-onnx-gpu-2/` is absent, every test in this file
+    # pytest.skip's with a clear message.
+    auto_download=False,
     # Architecture knobs — only consumed by BaseORTTests (which we do NOT
     # subclass here; Qwen 3.5's text.onnx uses inputs_embeds + 3-rank
     # mrope position_ids that the input builders in conftest don't model).
@@ -512,36 +518,19 @@ _QWEN35_MULTIMODAL_WORKER = textwrap.dedent(
 )
 
 
-def _synth_qwen35_test_image(path):
-    """Save a deterministic, intentionally-simple 224x224 RGB test image.
-
-    Two flat colors, horizontally split: red top half, blue bottom half.
-    Chosen because earlier candidate images (RGB gradient + centered
-    white square; red circle on white) provoked the model into florid
-    hallucinations ("a cone of colored sand", "multi-colored cone-shaped
-    object") — making the CPU baseline output hard to eyeball as
-    "is this sensible?". A red/blue split is unambiguous: CPU should
-    describe colors and/or a "two-color" / "split" pattern, with little
-    room for hallucination.
-
-    Size 224x224 = 50176 pixels is below Qwen 2.5 VL processor's nominal
-    `min_pixels=65536`, but the processor's smart-resize policy upsamples
-    to satisfy that floor — the model still sees a valid input. We keep
-    the on-disk image at 224x224 to minimize vision-encoder patch count
-    for the CPU baseline test, which costs ~5 s/decode-token on this
-    hardware and benefits from every saved second.
-    """
-    try:
-        from PIL import Image
-    except ImportError:
-        pytest.skip(
-            "PIL not installed — `conda install pillow` or add to environment.yml"
-        )
-    W = H = 224
-    img = np.zeros((H, W, 3), dtype=np.uint8)
-    img[: H // 2, :, 0] = 220  # red top
-    img[H // 2 :, :, 2] = 220  # blue bottom
-    Image.fromarray(img).save(str(path))
+# Real test image: photo of the Eiffel Tower. Used for the CPU baseline
+# content assertion ("must produce 'eiffel' in the decoded text") AND for
+# the EP-vs-CPU token-match test. A real photo is preferable to a
+# synthesized one because:
+#   * synthetic flat-color images push the model into a degenerate output
+#     regime (it tends to either describe colors literally or hallucinate
+#     a "cone-shaped object" — neither is a meaningful CPU baseline);
+#   * the Eiffel Tower is unambiguous enough that an "identifies the
+#     subject" assertion (case-insensitive substring match on "eiffel")
+#     is a robust regression signal — a vision encoder that silently
+#     produces NaN or all-zero patch tokens cannot accidentally land on
+#     that word.
+QWEN35_TEST_IMAGE = REPO_ROOT / "test" / "python" / "images" / "tower.jpg"
 
 
 class TestQwen3_5_9BMultimodal:
@@ -593,11 +582,11 @@ class TestQwen3_5_9BMultimodal:
         _, ep_dll = setup_oga_ep(repo_root)
         patch_genai_config_for_morphizen(self.spec.model_dir, ep_dll)
         tmp_dir = tmp_path_factory.mktemp("qwen35_multimodal")
-        image_path = tmp_dir / "test_image.png"
-        _synth_qwen35_test_image(image_path)
+        if not QWEN35_TEST_IMAGE.exists():
+            pytest.skip(f"test image missing: {QWEN35_TEST_IMAGE}")
         yield {
             "tmp_dir": tmp_dir,
-            "image_path": image_path,
+            "image_path": QWEN35_TEST_IMAGE,
             "ep_dll": ep_dll,
             "repo_root": repo_root,
         }
@@ -673,69 +662,142 @@ class TestQwen3_5_9BMultimodal:
             f"No tokens generated. Decoded: {payload['decoded']!r}"
         )
 
-    def test_oga_multimodal_cpu_baseline(self, workspace):
-        """Smoke test: ORT CPU EP + OGA + Qwen 3.5 9B produces coherent
-        English from a text+image prompt. NO MorphiZenEP in this test.
+    def test_cpu_baseline_identifies_eiffel(self):
+        """CPU baseline: ORT CPU EP + OGA + Qwen 3.5 9B must identify the
+        Eiffel Tower in tower.jpg. NO MorphiZenEP in this test, no
+        subprocess — runs in-process like
+        `install/olive-recipes/Qwen-Qwen3.5-9B/builtin/inference.py`.
 
-        Purpose: gate the rest of the suite on a known-good baseline. If
-        this fails, the issue is in the ORT / OGA / model files / pip
-        environment — NOT in MorphiZenEP. Running this in CI before any
-        EP comparison test means a future ORT bump or genai_config
-        regression is caught with an unambiguous error.
+        Purpose: gate the rest of the suite on a known-good content-level
+        baseline. If this fails, the issue is in the ORT / OGA / model
+        files / pip environment — NOT in MorphiZenEP.
 
-        Cost: CPU runs ~0.15 tok/s on this hardware, so 3 generated
-        tokens ≈ 20 s of CPU work + ~3 s model load. The cost is
-        acceptable; it's the floor for any "CPU is a valid reference"
-        argument.
+        Wall-clock: aligned with the Olive recipe (~25 s of CPU at
+        ~15 tok/s for ~330 tokens of `<think>` reasoning + the final
+        sentence, plus a few seconds of model load). Does NOT use the
+        `workspace` fixture (which would load MorphiZenEP, patch
+        genai_config for EP, and spawn a worker subprocess — each step
+        adds seconds we don't need for a pure-CPU check).
 
-        We don't assert text contents (the model hallucinates about the
-        synthetic image), only that we got tokens AND the decode is
-        non-empty AND contains at least one ASCII letter. That bars
-        the failure modes that would point at a broken setup:
-          * zero tokens → model didn't load
-          * all-zero / all-EOS tokens → graph parses ran but model
-            produced NaN logits
-          * decoded == "" → tokenizer / decode path broken
+        Assertion: case-insensitive substring match on "eiffel". The
+        tower is the only globally-recognizable subject in the photo;
+        a vision encoder producing NaN / all-zero patch tokens cannot
+        accidentally hit that word.
         """
-        cpu_tokens, dev = self._run_oga_in_provider_mode(
-            workspace,
-            "cpu",
-            with_image=True,
-            max_new=3,
-        )
-        # Use OGA's bundled tokenizer to decode in the worker subprocess so
-        # we don't depend on `transformers`. For the smoke test we re-decode
-        # in the parent for the print.
+        import gc
+        import json
+        import shutil
 
-        # Worker already imports og; here we re-import for the decode helper.
-        # OGA's Tokenizer needs a Model, but we're avoiding a second load
-        # in this test — just print token ids and let the human eyeball them.
-        print(f"\n  CPU baseline tokens: {cpu_tokens}")
-        print(f"  CPU baseline device_type: {dev}")
-        assert dev.lower() == "cpu", (
-            f"Expected CPU device_type, got {dev!r}. genai_config patch "
-            f"did NOT route the sub-sessions through CPU EP."
-        )
-        assert len(cpu_tokens) >= 1, (
+        try:
+            import onnxruntime_genai as og
+        except ImportError:
+            pytest.skip("onnxruntime-genai not installed")
+
+        model_dir = self.spec.model_dir
+        for fname in (
+            "text.onnx",
+            "text.onnx.data",
+            "embedding.onnx",
+            "embedding.onnx.data",
+            "vision.onnx",
+            "vision.onnx.data",
+            "genai_config.json",
+            "chat_template.jinja",
+            "tokenizer.json",
+            "processor_config.json",
+        ):
+            if not (model_dir / fname).exists():
+                pytest.skip(f"Qwen 3.5 9B file missing: {fname}")
+        if not QWEN35_TEST_IMAGE.exists():
+            pytest.skip(f"test image missing: {QWEN35_TEST_IMAGE}")
+
+        # The repo's genai_config.json may have been patched by an earlier
+        # EP test (or by `patch_genai_config_for_morphizen` running for
+        # another fixture in this file). Force CPU EP for this test by
+        # zeroing provider_options on every sub-session, and restore the
+        # original file in `finally` so subsequent EP tests are unaffected.
+        cfg_path = model_dir / "genai_config.json"
+        cpu_bak = model_dir / "genai_config.json.cpu_baseline_bak"
+        shutil.copy2(cfg_path, cpu_bak)
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            for sub_key in ("decoder", "embedding", "vision"):
+                sub = cfg["model"].get(sub_key)
+                if isinstance(sub, dict):
+                    sub.setdefault("session_options", {})["provider_options"] = []
+            cfg_path.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+
+            # Mirror the Olive inference.py flow exactly: load, build
+            # chat-template prompt, processor, generator, decode.
+            model = og.Model(str(model_dir))
+            try:
+                processor = model.create_multimodal_processor()
+                tokenizer = og.Tokenizer(model)
+                images = og.Images.open(str(QWEN35_TEST_IMAGE))
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image"},
+                            {
+                                "type": "text",
+                                "text": "Describe this image in one short sentence.",
+                            },
+                        ],
+                    }
+                ]
+                full_prompt = tokenizer.apply_chat_template(
+                    json.dumps(messages), add_generation_prompt=True
+                )
+                inputs = processor(full_prompt, images=images)
+
+                params = og.GeneratorParams(model)
+                # max_length must exceed the image-tokenized prompt
+                # (~319 tokens for tower.jpg) plus the expected ~350-token
+                # thinking-mode response. 1024 leaves comfortable headroom.
+                params.set_search_options(max_length=1024, do_sample=False)
+                generator = og.Generator(model, params)
+                generator.set_inputs(inputs)
+
+                tokens = []
+                while not generator.is_done():
+                    generator.generate_next_token()
+                    tokens.append(int(generator.get_next_tokens()[0]))
+
+                decoded = tokenizer.decode(tokens)
+            finally:
+                # Release the 9 GB model before the next test runs.
+                # `del locals()[name]` does not work — locals() is not
+                # writable in CPython. Rebind each name to None so the
+                # OGA C++ objects are released on the next gc cycle.
+                model = processor = tokenizer = images = None
+                inputs = params = generator = None
+                gc.collect()
+        finally:
+            shutil.move(str(cpu_bak), str(cfg_path))
+
+        print(f"\n  CPU baseline tokens: {len(tokens)}")
+        print(f"  CPU baseline decoded:\n{decoded}")
+        assert len(tokens) >= 1, (
             "OGA+CPU produced zero tokens — model load or generation "
             "step failed silently."
         )
-        # Reject the "all zeros" / "all same token" failure modes that
-        # indicate NaN logits or argmax stuck (which is exactly what we
-        # see today on the EP path). For CPU these should NOT happen.
-        assert not all(t == 0 for t in cpu_tokens), (
-            f"CPU produced all-zero token sequence {cpu_tokens} — likely "
-            f"NaN/zero logits. ORT setup is broken; gate the rest of the "
-            f"suite on this before debugging EP-side issues."
+        assert not all(t == 0 for t in tokens), (
+            f"CPU produced all-zero token sequence — likely NaN/zero "
+            f"logits. ORT setup is broken; gate the rest of the suite "
+            f"on this before debugging EP-side issues."
         )
-        unique_tokens = len(set(cpu_tokens))
-        assert unique_tokens > 1 or len(cpu_tokens) == 1, (
-            f"CPU emitted {cpu_tokens} (only {unique_tokens} unique token "
-            f"across {len(cpu_tokens)} positions) — looks stuck in a "
-            f"loop, model state is corrupt."
+        assert "eiffel" in decoded.lower(), (
+            "CPU baseline did not identify the Eiffel Tower in tower.jpg. "
+            "Either the model files are wrong, the processor/chat-template "
+            "is misconfigured, or the vision sub-session produced garbage "
+            "embeddings on CPU.\n"
+            f"--- decoded ---\n{decoded}"
         )
 
-    def _run_oga_in_provider_mode(self, workspace, provider, *, with_image, max_new):
+    def _run_oga_in_provider_mode(
+        self, workspace, provider, *, with_image, max_new, max_length=None,
+    ):
         """Spawn an OGA worker patched to use either CPU EP or MorphiZenEP,
         with or without the test image, and return the generated token list.
 
@@ -750,6 +812,7 @@ class TestQwen3_5_9BMultimodal:
             MODEL_DIR = Path(sys.argv[1]); EP_DLL = Path(sys.argv[2])
             IMAGE_PATH = Path(sys.argv[3]); MAX_NEW = int(sys.argv[4])
             PROVIDER = sys.argv[5]; WITH_IMAGE = sys.argv[6] == "1"
+            MAX_LENGTH = int(sys.argv[7])
 
             # Re-add PATH defensively (child inherits a snapshot only).
             repo_root = MODEL_DIR.parent.parent
@@ -805,14 +868,19 @@ class TestQwen3_5_9BMultimodal:
                 else:
                     inputs = processor(full_prompt)
                 params = og.GeneratorParams(model)
-                params.set_search_options(max_length=256, do_sample=False)
+                params.set_search_options(max_length=MAX_LENGTH, do_sample=False)
                 gen = og.Generator(model, params)
                 gen.set_inputs(inputs)
                 tokens = []
                 while not gen.is_done() and len(tokens) < MAX_NEW:
                     gen.generate_next_token()
                     tokens.append(int(gen.get_next_tokens()[0]))
+                try:
+                    decoded = tokenizer.decode(tokens)
+                except Exception as e:
+                    decoded = f"<decode-error: {e}>"
                 print("WORKER_OK " + json.dumps({"tokens": tokens,
+                                                 "decoded": decoded,
                                                  "device_type": model.device_type}))
             finally:
                 shutil.move(backup, cfg_path)
@@ -826,6 +894,11 @@ class TestQwen3_5_9BMultimodal:
         env.setdefault(
             "THEROCK_DIST", str(workspace["repo_root"] / "install" / "therock")
         )
+        # Pad max_length above max_new so the image-tokenized prompt
+        # (~319 tokens for tower.jpg, less for text-only) still fits with
+        # room for the requested generation. 768 is a comfortable cushion;
+        # callers that want a tighter bound can pass `max_length` explicitly.
+        eff_max_length = max_length if max_length is not None else max_new + 768
         result = subprocess.run(
             [
                 sys.executable,
@@ -836,6 +909,7 @@ class TestQwen3_5_9BMultimodal:
                 str(max_new),
                 provider,
                 "1" if with_image else "0",
+                str(eff_max_length),
             ],
             env=env,
             capture_output=True,
@@ -860,7 +934,7 @@ class TestQwen3_5_9BMultimodal:
         import json as _json
 
         payload = _json.loads(ok_lines[-1][len("WORKER_OK ") :])
-        return payload["tokens"], payload["device_type"]
+        return payload["tokens"], payload.get("decoded", ""), payload["device_type"]
 
     # Greedy-decode token equivalence: CPU vs EP must match byte-for-byte
     # within the 5-token window. Was an `xfail` capturing the empty-image
@@ -882,14 +956,14 @@ class TestQwen3_5_9BMultimodal:
         present?" diagnostic and cache hides regression in the CPU run
         path itself.
         """
-        cpu_tokens_vlm, cpu_dev = self._run_oga_in_provider_mode(
+        cpu_tokens_vlm, _, cpu_dev = self._run_oga_in_provider_mode(
             workspace,
             "cpu",
             with_image=True,
             max_new=5,
         )
         assert cpu_dev.lower() == "cpu", f"CPU provider returned device_type={cpu_dev}"
-        ep_tokens_vlm, ep_dev = self._run_oga_in_provider_mode(
+        ep_tokens_vlm, _, ep_dev = self._run_oga_in_provider_mode(
             workspace,
             "ep",
             with_image=True,
@@ -897,13 +971,13 @@ class TestQwen3_5_9BMultimodal:
         )
         assert ep_dev == "MorphiZenEP", f"EP provider returned device_type={ep_dev}"
 
-        cpu_tokens_text, _ = self._run_oga_in_provider_mode(
+        cpu_tokens_text, _, _ = self._run_oga_in_provider_mode(
             workspace,
             "cpu",
             with_image=False,
             max_new=5,
         )
-        ep_tokens_text, _ = self._run_oga_in_provider_mode(
+        ep_tokens_text, _, _ = self._run_oga_in_provider_mode(
             workspace,
             "ep",
             with_image=False,
