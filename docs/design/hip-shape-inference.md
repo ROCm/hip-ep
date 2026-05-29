@@ -21,11 +21,14 @@ op into the same machinery.
    `--resolve-shaped-type-result-dims` then folds `tensor.dim` of the
    result into either an `arith.constant` (static dims) or a
    `tensor.dim` of the relevant input (dynamic dims).
-3. **Module-level refinement.** The optional `--hip-infer-shapes` pass
-   walks the module, calls `reifyResultShapes` on every op, and refines
-   `?` dims in result types in place — including the DPS `outs` operand's
-   `tensor.empty` producer, which is necessary to keep the IR
-   well-formed (DPS contract: `result_type == outs_operand_type`).
+3. **Module-level refinement.** The `--hip-infer-shapes` pass walks the
+   module, calls `reifyResultShapes` on every HIP-dialect op carrying
+   the interface, and refines `?` dims in result types in place —
+   including the DPS `outs` operand's `tensor.empty` producer, which is
+   necessary to keep the IR well-formed (DPS contract:
+   `result_type == outs_operand_type`). Wired into the production
+   pipeline immediately after `convert-onnx-to-hip` (see
+   [Pipeline placement](#pipeline-placement)).
 
 These three layers share **one** static shape function per op
 (`inferContractionShape`, future `broadcastShapes`, ...). The verifier
@@ -238,11 +241,11 @@ and removes spurious `memref.dim` ops at the top of the function. The
 pass is idempotent — a second invocation that finds no further
 refinements is a no-op — and it is also a no-op on functions whose ops
 either don't carry the interface or expose no further refinable dims,
-so it's safe to run unconditionally even today when only `hip.matmul`
-carries the interface. As more HIP DPS ops (GQA, RmsNorm,
-SkipRmsNorm, Attention, RotaryEmbedding, …) get
-`ReifyRankedShapedTypeOpInterface` impls, this wiring lets each new op
-participate without touching the pipeline definition.
+so it's safe to run unconditionally regardless of how much HIP-op
+coverage `ReifyRankedShapedTypeOpInterface` currently has. As more
+HIP DPS ops (GQA, RmsNorm, SkipRmsNorm, Attention, RotaryEmbedding,
+…) gain reify impls, the wiring lets each new op participate without
+any change to `Pipelines.cpp`.
 
 ## How to add a new op
 
@@ -359,6 +362,13 @@ matmul ones:
 
 The current first-pass coverage is intentionally narrow:
 
+* **Op coverage.** Only `hip.matmul` carries
+  `ReifyRankedShapedTypeOpInterface` today. Each additional HIP DPS op
+  that gets a reify impl participates in the pipeline-level pass for
+  free (no `Pipelines.cpp` change). Priority order, by frequency in
+  observed transformer graphs: GQA, RmsNorm, SkipRmsNorm,
+  RotaryEmbedding, MatMulNBits, then everything else. The recipe in
+  [How to add a new op](#how-to-add-a-new-op) is the canonical guide.
 * **`hip.matmul` rejects rank-1 operands.** The new verifier requires
   both `A` and `B` to have rank ≥ 2. ONNX `MatMul` semantics permit
   rank-1 operands (vector·matrix / matrix·vector) by implicitly
