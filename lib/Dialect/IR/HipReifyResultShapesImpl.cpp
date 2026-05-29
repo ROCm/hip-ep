@@ -28,7 +28,6 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
-#include "mlir/Interfaces/InferTypeOpInterface.h"
 
 using namespace mlir;
 using namespace mlir::hip;
