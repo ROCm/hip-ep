@@ -44,14 +44,12 @@ inferContractionShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
 /// shape-arithmetic helper already emitted a diagnostic — this function
 /// returns `failure()` without re-emitting.
 ///
-/// When `checkElementType` is true, also asserts that every init operand's
-/// element type equals the first DPS-input operand's element type. Opt-in:
-/// dtype-changing ops (cast, equal, less, not, and) keep their own
-/// element-type checks in their op-local verifiers.
+/// Element-type checks are intentionally not handled here: dtype-changing
+/// ops (cast, equal, less, not, and) keep their own element-type checks in
+/// their op-local verifiers.
 LogicalResult verifyHipOpShape(
     Operation *op,
-    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected,
-    bool checkElementType = false);
+    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected);
 
 /// Build an `OpFoldResult` for one dimension of a result:
 ///   - if `staticDim` is not `kDynamic`, returns `b.getIndexAttr(staticDim)`

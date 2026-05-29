@@ -4,34 +4,11 @@
  */
 //===- HipShapeUtils.cpp - Shape arithmetic + verifier helpers ------------===//
 //
-// Single source of truth for the static shape of every HIP DPS op.  Each
-// shape category (contraction, elementwise broadcast, axis-driven reduction,
-// ...) lives here as one helper that returns a `SmallVector<int64_t>` where
-// each element is either a concrete dim or `ShapedType::kDynamic`. The same
-// helper is consumed by:
-//
-//   1. The op's `verify()` -- via `verifyHipOpShape`, which compares the
-//      computed shape against the actual `outs` operand types.
-//   2. The op's `reifyResultShapes()` -- which lifts the same dims into
-//      `OpFoldResult`s (IntegerAttr for static, tensor.dim/memref.dim
-//      for kDynamic) so downstream `--resolve-shaped-type-result-dims`
-//      / `--canonicalize` can fold `tensor.dim` of the op's result into
-//      a constant or a dim-of-input.
-//
-// Per-op `reifyResultShapes` impls live next to the op's other methods in
-// `HipDialect.cpp`. They call `inferContractionShape(...)` (or the
-// equivalent for their op family) and pair each entry with
-// `reifyDimOrConstant` to materialise the right `OpFoldResult`.
-//
-// Adding a new shape category
-// ---------------------------
-// Add a free function next to `inferContractionShape` (e.g.
-// `broadcastShapes` for elementwise NumPy broadcast, `inferReductionShape`
-// for axis-driven reduce ops). The new helper takes the operand shapes and
-// any op-specific attributes (axes, perm, ...), and emits a diagnostic
-// through the supplied `emitError` callable on shape mismatch. The op then
-// wires up its `verify()` and `reifyResultShapes()` to call it through
-// `verifyHipOpShape`.
+// Implementation of the helpers declared in `HipShapeUtils.h`. See the
+// per-symbol Doxygen comments there for the API contract, and
+// `docs/design/hip-shape-inference.md` for the rationale, component
+// layout, and the recipe for wiring a new op (or a new shape category)
+// into the verify / reify / propagate pipeline.
 //
 //===----------------------------------------------------------------------===//
 
@@ -126,8 +103,7 @@ SmallVector<int64_t> mlir::hip::inferContractionShape(
 
 LogicalResult mlir::hip::verifyHipOpShape(
     Operation *op,
-    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected,
-    bool checkElementType) {
+    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected) {
   // Required-by-construction: every op that wires up `verifyHipOpShape`
   // also implements `DestinationStyleOpInterface` via TableGen. Asserting
   // cast matches the upstream Linalg pattern in `verifyStructuredOpInterface`
@@ -176,21 +152,6 @@ LogicalResult mlir::hip::verifyHipOpShape(
     }
   }
 
-  if (checkElementType) {
-    auto inputs = dpsOp.getDpsInputs();
-    if (!inputs.empty()) {
-      if (auto inputType = dyn_cast<ShapedType>(inputs[0].getType())) {
-        Type expectedET = inputType.getElementType();
-        for (auto [i, init] : llvm::enumerate(inits)) {
-          auto initType = dyn_cast<ShapedType>(init.getType());
-          if (initType && initType.getElementType() != expectedET)
-            return op->emitOpError("element type mismatch on result #")
-                   << i << ": expected " << expectedET << " but got "
-                   << initType.getElementType();
-        }
-      }
-    }
-  }
   return success();
 }
 
