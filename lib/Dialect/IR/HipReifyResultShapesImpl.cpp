@@ -88,8 +88,7 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
                             ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   // memref-mode matmul has no SSA results — by interface contract
   // `reifyResultShapes` is only called on ops with `RankedTensorType`
-  // results (see `InferTypeOpInterface.td`). Bail safely if invoked
-  // anyway.
+  // results. Bail safely if invoked anyway.
   if (getNumResults() == 0)
     return failure();
 
@@ -115,56 +114,41 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   size_t aRank = aShape.size();
   size_t bRank = bShape.size();
 
+  // Loop-invariant: right-alignment padding for A's and B's batch dims.
+  size_t batchRank = outRank - 2;
+  size_t aPad = batchRank - (aRank >= 2 ? aRank - 2 : 0);
+  size_t bPad = batchRank - (bRank >= 2 ? bRank - 2 : 0);
+
   SmallVector<OpFoldResult> dims;
   dims.reserve(outRank);
   for (size_t i : llvm::seq<size_t>(0, outRank)) {
+    // M dim: A[-2].
     if (i + 2 == outRank) {
-      // M dim: comes from A's [-2].
       dims.push_back(
           mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aRank - 2));
       continue;
     }
+    // N dim: B[-1].
     if (i + 1 == outRank) {
-      // N dim: comes from B's [-1].
       dims.push_back(
           mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bRank - 1));
       continue;
     }
-    // Batch dim: right-aligned over A's and B's batch shapes.
-    size_t batchRank = outRank - 2;
-    size_t aBatchRank = aRank >= 2 ? aRank - 2 : 0;
-    size_t bBatchRank = bRank >= 2 ? bRank - 2 : 0;
-    size_t aPad = batchRank - aBatchRank;
-    size_t bPad = batchRank - bBatchRank;
+    // Batch dim: pick whichever input contributes the runtime size. A
+    // contributes when it's in range AND its dim is not 1; B contributes
+    // symmetrically. When neither is canonical (both 1 / out-of-range /
+    // dynamic), prefer A when in range so downstream folds see a stable
+    // source. `reifyDimOrConstant` handles the static-vs-dynamic dispatch
+    // on `outShape[i]` -- no separate static-result fast path needed.
     int64_t aDim = i < aPad ? 1 : aShape[i - aPad];
     int64_t bDim = i < bPad ? 1 : bShape[i - bPad];
-
-    // Static result -> IntegerAttr (no IR).
-    if (!ShapedType::isDynamic(outShape[i])) {
-      dims.push_back(b.getIndexAttr(outShape[i]));
-      continue;
-    }
-    // Dynamic result -> dim of whichever input is the actual source. If A's
-    // side is 1 or out-of-range, B is the source; otherwise A. This keeps
-    // the emitted dim op tied to the operand whose runtime size determines
-    // the result, which is the invariant downstream folds rely on.
-    bool aSourceCanonical =
-        i >= aPad && aDim != 1; // A contributes when it's in range and not 1
-    bool bSourceCanonical = i >= bPad && bDim != 1;
-    if (aSourceCanonical) {
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, ShapedType::kDynamic,
-                                                   A, i - aPad));
-    } else if (bSourceCanonical) {
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, ShapedType::kDynamic,
-                                                   B, i - bPad));
-    } else if (i >= aPad) {
-      // Both sides are 1 / dynamic — A is in range, prefer it.
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, ShapedType::kDynamic,
-                                                   A, i - aPad));
-    } else {
-      dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, ShapedType::kDynamic,
-                                                   B, i - bPad));
-    }
+    bool aCanonical = i >= aPad && aDim != 1;
+    bool bCanonical = i >= bPad && bDim != 1;
+    bool pickA = aCanonical || (!bCanonical && i >= aPad);
+    Value src = pickA ? A : B;
+    size_t srcDim = pickA ? i - aPad : i - bPad;
+    dims.push_back(
+        mlir::hip::reifyDimOrConstant(b, loc, outShape[i], src, srcDim));
   }
   reifiedReturnShapes.assign({std::move(dims)});
   return success();
