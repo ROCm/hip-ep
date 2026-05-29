@@ -183,5 +183,10 @@ if(BUILD_HIP_TOOLS)
 
     # E2E integration tests (compile MLIR → DLL → execute)
     add_subdirectory(test/e2e)
+
+    # Memory manager unit tests (requires HIP)
+    if(NOT BUILD_MOCK_RUNTIME)
+      add_subdirectory(test/mm)
+    endif()
   endif()
 endif()
