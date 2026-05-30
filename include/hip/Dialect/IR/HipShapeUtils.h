@@ -16,18 +16,17 @@
 namespace mlir {
 namespace hip {
 
-/// Compute the shape of `A @ B` for a matmul / contraction with NumPy-style
-/// batch broadcast over the leading dims. Last two dims of `aShape` are
-/// `[M, K]`; last two dims of `bShape` are `[K, N]`. Leading dims are
-/// broadcast (right-aligned, missing dims treated as 1).
+/// Compute the shape of `A @ B` for matmul with NumPy-style batch broadcast
+/// over the leading dims. Last two dims of `aShape` are `[M, K]`; last two
+/// dims of `bShape` are `[K, N]`. Leading dims are broadcast (right-aligned,
+/// missing dims treated as 1).
 ///
 /// Returns the inferred shape on success. Returns an empty `SmallVector` and
-/// emits a diagnostic via `emitError` on rank-, contraction-K-, or
-/// batch-broadcast mismatch.
+/// emits a diagnostic via `emitError` on rank-, K-, or batch-broadcast
+/// mismatch.
 ///
 /// `ShapedType::kDynamic` is treated as a wildcard:
-///   - K_a or K_b dynamic -> contraction match passes (result K is dropped
-///     anyway).
+///   - K_a or K_b dynamic -> K match passes (result K is dropped anyway).
 ///   - Batch dim broadcast follows NumPy / TF / ONNX MatMul semantics
 ///     (delegated to `mlir::OpTrait::util::getBroadcastedShape`):
 ///       * 1 broadcasts against any dim.
@@ -38,8 +37,8 @@ namespace hip {
 ///       * static + static, equal -> static; unequal and neither is 1
 ///         -> error.
 SmallVector<int64_t>
-inferContractionShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
-                      function_ref<InFlightDiagnostic()> emitError);
+inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
+                 function_ref<InFlightDiagnostic()> emitError);
 
 /// Verify that the actual `outs` operand shapes of a DPS HIP op match the
 /// shapes returned by `computeExpected`. `op` must implement

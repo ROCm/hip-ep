@@ -45,7 +45,7 @@ std::string formatShape(ArrayRef<int64_t> shape) {
 } // namespace
 
 SmallVector<int64_t>
-mlir::hip::inferContractionShape(ArrayRef<int64_t> aShape,
+mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape,
                                  ArrayRef<int64_t> bShape,
                                  function_ref<InFlightDiagnostic()> emitError) {
   if (aShape.size() < 2) {

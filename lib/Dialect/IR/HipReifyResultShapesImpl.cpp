@@ -40,7 +40,7 @@ ArrayRef<int64_t> getShapeOf(Value v) {
 //===----------------------------------------------------------------------===//
 // MatmulOp
 //
-// Reify uses `inferContractionShape` to recompute the result shape, then
+// Reify uses `inferMatmulShape` to recompute the result shape, then
 // lifts each dim to an OpFoldResult: static -> IndexAttr, dynamic ->
 // tensor.dim of the operand that contributes the runtime size.
 // Source: M = A[-2], N = B[-1], batch dim = the broadcast-canonical side.
@@ -66,9 +66,9 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   if (aShape.empty() || bShape.empty())
     return failure();
 
-  // Re-run the contraction-shape helper. verify() has already passed by reify
+  // Re-run the matmul-shape helper. verify() has already passed by reify
   // time, but bail on empty() in case a pre-verify call sneaks in.
-  SmallVector<int64_t> outShape = mlir::hip::inferContractionShape(
+  SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
       aShape, bShape, [&]() { return this->emitOpError(); });
   if (outShape.empty())
     return failure();
