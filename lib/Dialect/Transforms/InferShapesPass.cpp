@@ -4,78 +4,26 @@
  */
 //===- InferShapesPass.cpp - Static shape refinement for HIP DPS ops ------===//
 //
-// Module-level pass that drives `ReifyRankedShapedTypeOpInterface` on every
-// HIP-dialect op that implements it, to refine `?` (kDynamic) dims in
-// result types into concrete integer dims using the per-op
-// `inferContractionShape`-style helpers as the source of truth. Upstream
-// ops that happen to carry the interface (e.g. `tensor::EmptyOp`) are
-// intentionally skipped: they have their own folders / invariants between
-// operand SSA values and result shape that an in-place result-type narrow
-// here would desync, and they are not the target of this pass.
+// Module-level pass: drive `ReifyRankedShapedTypeOpInterface` on every
+// HIP-dialect op that implements it, narrow `?` dims in the op's result
+// type, rebuild the `tensor.empty` producer of any refined DPS init, and
+// emit a `tensor.cast` barrier on every non-DPS-init use to preserve the
+// consumer's signature. Refinement is per-op, not whole-chain (the cast
+// is the barrier, not a propagation channel). Upstream interface ops
+// (e.g. `tensor::EmptyOp`) are intentionally skipped — they have their
+// own folders.
 //
-// DPS-aware
-// ---------
-// HIP DPS ops require `result_type == outs_operand_type`; refining the op's
-// result type without matching the outs operand's producer would produce a
-// verifier error.  This pass handles that by also rewriting the producer
-// when it is a `tensor.empty` (the only zero-cost refinement we can do
-// today: tensor.empty is a pure constructor that supports any rank / dyn-dim
-// arrangement, so we rebuild it with the new shape and drop any dynamic-dim
-// operands that became static).  Producers we don't know how to refine are
-// skipped, leaving the op's result type unchanged at that result index.
-//
-// Walk order and chained DPS ops
-// ------------------------------
-// Pre-collect candidates with `module.walk` (post-order). The walk order
-// gives us producers before consumers in a straight-line function. We
-// process candidates in that order and for each refined result we emit
-// exactly one `tensor.cast` that bridges the new (more-static) type back
-// to the original type for every non-DPS-init use; DPS-init uses are
-// skipped because for a DPS consumer `result_type == outs_operand_type`
-// is the spec contract -- if we cast on that edge, refining the consumer
-// would fail the "outs producer is tensor.empty" gate downstream.
-//
-// IMPORTANT: the cast is *the* propagation barrier, not a propagation
-// channel. A consumer reading the cast as an `ins` operand sees the OLD
-// type, so its own reify runs against the OLD operand type. Refinement
-// of the consumer's result therefore depends only on what the consumer's
-// own static reify can deduce from operand types it can still see -- it
-// does NOT transitively inherit the producer's narrowing across an `ins`
-// edge. Refinement is per-op, not whole-chain. This is intentional:
-// a transitive narrowing scheme would require either retyping the cast
-// (and re-checking every downstream signature) or skipping the cast on
-// trust (and breaking ops whose verify pins ins types). Per-op refinement
-// is the local, terminating, verifier-safe choice. See
-// `refine_chained_matmul` in test/lit/Dialect/hip-infer-shapes.mlir for
-// the canonical example.
-//
-// What this pass does NOT do
-// --------------------------
-//   * No control-flow analysis.  Result types inside `scf.if` / `scf.while`
-//     bodies are not propagated across the region boundary.  Block argument
-//     types stay as written.
-//   * No element-type refinement.  Only the shape (dim sizes) is touched.
-//   * No verifier replay.  Callers should run `mlir-opt --verify-diagnostics`
-//     once after this pass to confirm the refined IR still verifies.
-//
-// Example (matmul, dynamic batch becoming static)
-// -----------------------------------------------
+// See `docs/design/hip-shape-inference.md` for rationale, layout, and the
+// recipe for wiring a new op.
 //
 // Before:
-//
-//   %empty = tensor.empty(%c2) : tensor<?x4x8xf16>
-//   %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4x4xf16>,
-//                                       tensor<4x8xf16>)
-//                          outs(%empty : tensor<?x4x8xf16>)
-//                          -> tensor<?x4x8xf16>
-//
+//   %e = tensor.empty(%c2) : tensor<?x4x8xf16>
+//   %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4x4xf16>, tensor<4x8xf16>)
+//                         outs(%e : tensor<?x4x8xf16>) -> tensor<?x4x8xf16>
 // After:
-//
-//   %empty = tensor.empty() : tensor<2x4x8xf16>
-//   %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4x4xf16>,
-//                                       tensor<4x8xf16>)
-//                          outs(%empty : tensor<2x4x8xf16>)
-//                          -> tensor<2x4x8xf16>
+//   %e = tensor.empty() : tensor<2x4x8xf16>
+//   %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4x4xf16>, tensor<4x8xf16>)
+//                         outs(%e : tensor<2x4x8xf16>) -> tensor<2x4x8xf16>
 //
 //===----------------------------------------------------------------------===//
 
@@ -136,15 +84,11 @@ static bool composeRefinedShape(ArrayRef<int64_t> cur,
   return refined;
 }
 
-/// If `emptyOp`'s rank matches `newShape`, rebuild it with the refined
-/// shape and replace all uses; dynamic-dim operands whose corresponding
-/// dim has become static are dropped from the operand list.
+/// Rebuild `emptyOp` with the refined shape. Dynamic-dim operands whose
+/// corresponding dim became static are dropped.
 ///
-/// Before: `%init = tensor.empty(%d0, %d1) : tensor<?x4x?xf16>`
-///         and newShape = [2, 4, 8]
-/// After : `%init = tensor.empty() : tensor<2x4x8xf16>`
-///
-/// Returns failure() and leaves the producer untouched on rank mismatch.
+/// Before: %init = tensor.empty(%d0, %d1) : tensor<?x4x?xf16>; newShape=[2,4,8]
+/// After : %init = tensor.empty() : tensor<2x4x8xf16>
 static LogicalResult refineTensorEmptyProducer(RewriterBase &rewriter,
                                                tensor::EmptyOp emptyOp,
                                                ArrayRef<int64_t> newShape) {
@@ -152,12 +96,9 @@ static LogicalResult refineTensorEmptyProducer(RewriterBase &rewriter,
   if (curType.getShape().size() != newShape.size())
     return failure();
 
-  // Walk each dim; for dims that were dynamic in the OLD type, advance the
-  // operand cursor (every old-dynamic dim has exactly one operand). Keep
-  // that operand only if the dim is STILL dynamic post-refinement. Static
-  // dims (old or new) consume nothing from the operand list. We never see
-  // a "now-dynamic formerly-static" case because composeRefinedShape only
-  // narrows.
+  // For each old-dynamic dim, advance the operand cursor and keep the
+  // operand iff the dim is still dynamic. (composeRefinedShape only
+  // narrows, so we never see a static->dynamic transition.)
   SmallVector<Value> newDyn;
   unsigned operandIdx = 0;
   for (size_t d : llvm::seq<size_t>(0, newShape.size())) {
@@ -168,8 +109,8 @@ static LogicalResult refineTensorEmptyProducer(RewriterBase &rewriter,
     ++operandIdx;
   }
 
-  // `clone(shape)` preserves the encoding attr; plain
-  // `RankedTensorType::get(shape, elemType)` would drop it.
+  // `clone(shape)` preserves the encoding attr; `RankedTensorType::get`
+  // would drop it.
   auto newType = curType.clone(newShape);
   rewriter.setInsertionPoint(emptyOp);
   auto newEmpty =
@@ -195,10 +136,8 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
   if (!composeRefinedShape(curType.getShape(), reifiedDims, newShape))
     return failure();
 
-  // For DPS ops, the spec contract is `result_type == outs_operand_type`.
-  // The only producer we can rebuild zero-cost today is `tensor.empty`;
-  // everything else (function args, results of other DPS ops, etc.) is
-  // left alone -- skipping is the verifier-safe choice.
+  // DPS contract is `result_type == outs_operand_type`; only tensor.empty
+  // outs producers can be rebuilt zero-cost today, so we skip the rest.
   auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);
   if (dpsOp && resultIdx < dpsOp.getDpsInits().size()) {
     Value outsOperand = dpsOp.getDpsInits()[resultIdx];
@@ -212,26 +151,19 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
       return failure();
   }
 
-  // In-place type narrow on the op's result. We don't `rewriter.replaceOp`
-  // here because that would invalidate every existing use's `OpOperand`
-  // pointer before we get to insert the cast. Type-only mutation followed
-  // by selective cast insertion on the use edges keeps the op (and its
-  // operand list) in place — there's no need for clone+replace because
-  // we are not changing operands.
+  // In-place type mutation; can't replaceOp here because we still need the
+  // existing OpOperand pointers to insert casts on the use edges below.
   Value result = op->getResult(resultIdx);
   Type oldType = result.getType();
   result.setType(curType.clone(newShape));
   ++NumResultsRefined;
 
-  // Snapshot uses before mutation; iterating `result.getUses()` while
-  // simultaneously rewriting use edges is undefined.
+  // Snapshot uses before mutation (rewriting while iterating is UB). DPS-init
+  // uses skip the cast: result_type == outs_operand_type is the DPS contract,
+  // and casting on that edge would re-trigger the same producer-refinement
+  // gate on the consumer.
   SmallVector<OpOperand *> usesToCast;
   for (OpOperand &use : result.getUses()) {
-    // DPS-init uses on the consumer are intentionally NOT cast: for a
-    // DPS consumer, `result_type == outs_operand_type` is the spec, so
-    // a cast on that edge would force us to also retype the consumer's
-    // result, fighting the same gate this pass enforces in the
-    // producer-refinement step above.
     if (auto userDps = dyn_cast<DestinationStyleOpInterface>(use.getOwner())) {
       if (userDps.isDpsInit(&use))
         continue;
@@ -248,10 +180,7 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
 }
 
 struct InferShapesPass : public impl::InferShapesPassBase<InferShapesPass> {
-  // The TableGen `let dependentDialects = [...]` covers loading at pass-
-  // manager init, but stating it explicitly here too matches the style
-  // used elsewhere in this dialect (PromoteStridedHipOperands.cpp,
-  // PoolAllocs.cpp) and makes it grep-discoverable from the .cpp.
+  // Restated here (also in TableGen) to match other HIP passes' style.
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<HipDialect, tensor::TensorDialect>();
   }
@@ -262,30 +191,20 @@ struct InferShapesPass : public impl::InferShapesPassBase<InferShapesPass> {
 void InferShapesPass::runOnOperation() {
   ModuleOp module = getOperation();
 
-  // Collect candidates first; mutating the IR mid-walk can re-trigger the
-  // walk on rebuilt ops or invalidate iterators. The walk is post-order
-  // by default, so consumers come after producers in `ops`; we then iterate
-  // forward, which gives producers-before-consumers (the safe order).
+  // Collect first; mutating mid-walk would invalidate iterators. Post-order
+  // visits producers before consumers, the safe order for in-place result-
+  // type narrowing followed by cast insertion.
   //
-  // Restrict to HIP-dialect ops. Upstream ops that also implement
-  // `ReifyRankedShapedTypeOpInterface` (e.g. `tensor::EmptyOp`,
-  // `tensor::ExtractSliceOp`, `tensor::PadOp`) carry their own per-op
-  // invariants between operand SSA values and the result shape that
-  // an in-place result-type narrow here can desync — concretely, a
-  // `tensor.empty(%c12)` whose constant index operand makes the dim
-  // statically reifiable would have its result narrowed to fully static
-  // while the now-stale operand stayed in the operand list, tripping the
-  // op verifier with `incorrect number of dynamic sizes`. Refining
-  // upstream tensor ops is also out of charter for this pass — they are
-  // already canonicalised by their own folders before bufferize. Keep
-  // the contract tight: HIP DPS ops only.
+  // HIP-dialect ops only. Upstream ops with the same interface (e.g.
+  // tensor.empty) carry operand-shape invariants this pass would desync,
+  // and they have their own canonicalizers anyway.
   SmallVector<ReifyRankedShapedTypeOpInterface> ops;
   module.walk([&](ReifyRankedShapedTypeOpInterface reifyOp) {
     Operation *op = reifyOp.getOperation();
     if (op->getDialect() != op->getContext()->getLoadedDialect<HipDialect>())
       return;
-    // memref-mode DPS ops have no tensor results: skip. Their shapes are
-    // pinned at bufferization time.
+    // memref-mode DPS ops have no tensor results; their shapes are pinned
+    // at bufferization time.
     if (llvm::none_of(op->getResults(), [](Value v) {
           return isa<RankedTensorType>(v.getType());
         }))
