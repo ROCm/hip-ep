@@ -1,29 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
-//
-//===----------------------------------------------------------------------===//
-// FileCheck tests for `Hip_MatmulOp::reifyResultShapes`.
-//
-// `reifyResultShapes` lifts the statically-known dims of `hip.matmul` into
-// `OpFoldResult` (IntegerAttr for static dims; tensor.dim of the relevant
-// operand for kDynamic dims). It is exercised here through the
-// `--resolve-shaped-type-result-dims` pass (see RUN line below), which
-// folds `tensor.dim` of an op result into either a constant (for static
-// result dims) or a `tensor.dim` of an input (for dynamic dims that are
-// resolved through reify to one of the input operands).
-//
-// The reify implementation honours the matmul shape contract:
-//   M (penultimate dim)  -> dim of A at A.rank-2
-//   N (last dim)         -> dim of B at B.rank-1
-//   batch dim i          -> dim of A or B at the corresponding right-aligned
-//                           position; if either side has size 1 (broadcast)
-//                           or the side is out-of-range, the other side is
-//                           used.
-//===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
 
-// --- 2D matmul, fully static result -> tensor.dim folds to constants. ---
 // CHECK-LABEL: func.func @reify_2d_static
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
@@ -44,7 +23,6 @@ func.func @reify_2d_static(%ctx: !hip.context,
 
 // -----
 
-// --- Dynamic batch (M-side comes from A); reify routes tensor.dim through A. ---
 // CHECK-LABEL: func.func @reify_dynamic_batch
 // CHECK-SAME:   %[[A:[A-Za-z0-9_]+]]: tensor<?x4x8xf16>
 // CHECK-DAG:   %[[C0:.*]] = arith.constant 0 : index
@@ -70,7 +48,6 @@ func.func @reify_dynamic_batch(%ctx: !hip.context,
 
 // -----
 
-// --- Dynamic M (penultimate dim of A); reify routes tensor.dim of dim-0 to A. ---
 // CHECK-LABEL: func.func @reify_dynamic_M
 // CHECK-SAME:   %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>
 // CHECK-DAG:   %[[C0:.*]] = arith.constant 0 : index
@@ -93,7 +70,6 @@ func.func @reify_dynamic_M(%ctx: !hip.context,
 
 // -----
 
-// --- Dynamic N (last dim of B); reify routes tensor.dim of dim-1 to B. ---
 // CHECK-LABEL: func.func @reify_dynamic_N
 // CHECK-SAME:   %[[A:[A-Za-z0-9_]+]]: tensor<2x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<4x?xf16>
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
@@ -116,16 +92,12 @@ func.func @reify_dynamic_N(%ctx: !hip.context,
 
 // -----
 
-// --- Dynamic vs static>1 batch broadcast: A's batch dim is dynamic, B's is
-//     static-5, and the result type is intentionally left dynamic (`?x4x16`).
-//     Per NumPy / TF / ONNX MatMul broadcast contract, A's dynamic dim must
-//     be either 1 (broadcast) or 5 (matched) at runtime, so reify infers the
-//     batch dim from operand shapes as static-5 even though the result type
-//     itself is dynamic. tensor.dim of the result's batch dim therefore
-//     folds to the constant 5 (NOT a tensor.dim of A). This pins the
-//     "dynamic + static>1 -> static" tightening that we get for free by
-//     delegating batch broadcast to upstream MLIR's getBroadcastedShape
-//     helper (which implements TF / ONNX broadcast contract semantics).
+// Pin the "dynamic + static>1 -> static" tightening: A's batch dim is dynamic,
+// B's is static-5; per NumPy / TF / ONNX broadcast contract A must be 1 or 5
+// at runtime. Reify therefore picks the static side, so tensor.dim of the
+// result's batch dim folds to constant 5 (CHECK-NOT: tensor.dim) — even though
+// the result type is left as ?x4x16. Delegated to upstream
+// mlir::OpTrait::util::getBroadcastedShape.
 // CHECK-LABEL: func.func @reify_dyn_static_batch_broadcast
 // CHECK-NOT:   tensor.dim
 // CHECK-DAG:   %[[C5:.*]] = arith.constant 5 : index

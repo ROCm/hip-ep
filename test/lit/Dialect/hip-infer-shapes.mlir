@@ -1,26 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
-//
-//===----------------------------------------------------------------------===//
-// FileCheck tests for the `--hip-infer-shapes` propagation pass.
-//
-// The pass walks ops with `ReifyRankedShapedTypeOpInterface`, collects the
-// reified result shapes, and refines:
-//   1. The DPS outs operand's `tensor.empty` producer (the only refinable
-//      producer today),
-//   2. The op's own result type, in place,
-//   3. Each non-DPS use, by inserting a `tensor.cast` so consumers that
-//      expect the old type stay well-formed.
-//
-// DPS-outs use edges are NOT cast — chained DPS ops refine in turn on the
-// same module walk.
-//===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-infer-shapes %s | FileCheck %s
 
-// --- Single matmul with a fully-static result that the IR types still spell
-//     as `?` -> the empty producer + the matmul's result + the function
-//     return get refined to the static shape. ---
 // CHECK-LABEL: func.func @refine_single_matmul
 // CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x8xf16>
 // CHECK:         %[[Y:.*]] = hip.matmul
@@ -40,17 +22,6 @@ func.func @refine_single_matmul(%ctx: !hip.context,
 
 // -----
 
-// --- Chained matmul: `A @ B @ C`. After the pass, both empties should be
-//     refined to their static shapes. The first matmul's result is now
-//     `tensor<2x8xf16>`, but the second matmul's `ins` operand was originally
-//     typed `tensor<?x?xf16>`; we insert a `tensor.cast` on that non-DPS edge
-//     to keep the second matmul's signature well-formed.
-//
-//     Despite the cast on the ins edge, the second matmul still refines its
-//     M dim to 2 because `tensor.dim %cast, 0` folds through the cast to
-//     the source's static dim — `reifyDimOrConstant` emits the dim op via
-//     a folding builder. Verifies that the per-op refinement in this pass
-//     cooperates correctly with cast-folding instead of fighting it.
 // CHECK-LABEL: func.func @refine_chained_matmul
 // CHECK:         %[[E1:.*]] = tensor.empty() : tensor<2x8xf16>
 // CHECK:         %[[Y1:.*]] = hip.matmul
@@ -80,8 +51,6 @@ func.func @refine_chained_matmul(%ctx: !hip.context,
 
 // -----
 
-// --- Outs producer is NOT a tensor.empty (here it's a function arg) -> the
-//     pass refuses to refine that result and leaves the IR untouched. ---
 // CHECK-LABEL: func.func @skip_non_empty_producer
 // CHECK:         hip.matmul
 // CHECK-SAME:    outs(%{{.*}} : tensor<?x?xf16>) : tensor<?x?xf16>
@@ -97,8 +66,6 @@ func.func @skip_non_empty_producer(%ctx: !hip.context,
 
 // -----
 
-// --- Idempotence: if the result type is already maximally static, the pass
-//     leaves the IR unchanged (no spurious tensor.cast). ---
 // CHECK-LABEL: func.func @noop_on_static
 // CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x8xf16>
 // CHECK:         %[[Y:.*]] = hip.matmul
@@ -117,19 +84,9 @@ func.func @noop_on_static(%ctx: !hip.context,
 
 // -----
 
-// --- The pass restricts itself to HIP-dialect ops. Upstream ops like
-//     `tensor.pad` (which also carry `ReifyRankedShapedTypeOpInterface`)
-//     are intentionally left alone: their per-op invariants between
-//     operands and result shape — e.g. `tensor.empty(%dyn)`'s "operand
-//     count == #dynamic dims" — would desync if this pass narrowed the
-//     result in place without mirror-rewriting the operand list, and we
-//     deliberately do not duplicate every upstream op's folder/canonicalizer
-//     surface here.
-//
-//     This case pins that contract: a `tensor.pad` whose
-//     reify-implementing impl could narrow `tensor<?x?xf16>` to
-//     `tensor<6x10xf16>` is left as-is.  Refining non-HIP ops is the
-//     canonicalizer's job, not this pass's.
+// Pin that the pass restricts itself to HIP-dialect ops: refining a non-HIP
+// op like `tensor.pad` (which also implements ReifyRankedShapedTypeOpInterface)
+// is the canonicalizer's job, not this pass's.
 // CHECK-LABEL: func.func @skip_non_hip_op
 // CHECK:         %[[P:.*]] = tensor.pad
 // CHECK:         tensor<4x8xf16> to tensor<?x?xf16>

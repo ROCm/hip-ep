@@ -1,26 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
-//
-//===----------------------------------------------------------------------===//
-// FileCheck tests for the static shape verifier on `hip.matmul`.
-//
-// `hip.matmul` is a destination-passing-style op whose contract is:
-//   A: [..., M, K]
-//   B: [..., K, N]
-//   output: [broadcast(A.batch, B.batch), M, N]
-//
-// The verifier (HipShapeUtils::verifyHipOpShape backed by
-// HipShapeUtils::inferContractionShape) accepts kDynamic on either side as
-// a wildcard and rejects any pair of statically-known dims that disagrees.
-//
-// The verifier ALSO inherits the cross-cutting all-tensor-or-all-memref
-// check from verifyDpsComputeOp; that path is exercised by other LIT
-// suites, so this file focuses on the contraction-specific checks.
-//===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
-// --- Positive: 2D matmul with all-static shapes accepts. ---
 // CHECK-LABEL: func.func @matmul_2d_static
 // CHECK:         hip.matmul
 func.func @matmul_2d_static(%ctx: !hip.context,
@@ -35,7 +17,6 @@ func.func @matmul_2d_static(%ctx: !hip.context,
 
 // -----
 
-// --- Positive: 3D batched matmul with broadcast batch ([2] x [] -> [2]). ---
 // CHECK-LABEL: func.func @matmul_3d_broadcast
 // CHECK:         hip.matmul
 func.func @matmul_3d_broadcast(%ctx: !hip.context,
@@ -50,7 +31,6 @@ func.func @matmul_3d_broadcast(%ctx: !hip.context,
 
 // -----
 
-// --- Positive: kDynamic on every batch dim — wildcard, no error. ---
 // CHECK-LABEL: func.func @matmul_dynamic_batch
 // CHECK:         hip.matmul
 func.func @matmul_dynamic_batch(%ctx: !hip.context,
@@ -65,7 +45,6 @@ func.func @matmul_dynamic_batch(%ctx: !hip.context,
 
 // -----
 
-// --- Positive: kDynamic on contraction K — wildcard, no error. ---
 // CHECK-LABEL: func.func @matmul_dynamic_k
 // CHECK:         hip.matmul
 func.func @matmul_dynamic_k(%ctx: !hip.context,
@@ -80,7 +59,6 @@ func.func @matmul_dynamic_k(%ctx: !hip.context,
 
 // -----
 
-// --- Negative: contraction K mismatch is rejected. ---
 func.func @matmul_k_mismatch(%ctx: !hip.context,
                              %a: memref<2x4xf16, 1>,
                              %b: memref<8x16xf16, 1>,
@@ -94,7 +72,6 @@ func.func @matmul_k_mismatch(%ctx: !hip.context,
 
 // -----
 
-// --- Negative: M (output dim 0 in 2D case) mismatches outs. ---
 func.func @matmul_m_mismatch(%ctx: !hip.context,
                              %a: memref<2x4xf16, 1>,
                              %b: memref<4x8xf16, 1>,
@@ -108,7 +85,6 @@ func.func @matmul_m_mismatch(%ctx: !hip.context,
 
 // -----
 
-// --- Negative: N (output dim 1 in 2D case) mismatches outs. ---
 func.func @matmul_n_mismatch(%ctx: !hip.context,
                              %a: memref<2x4xf16, 1>,
                              %b: memref<4x8xf16, 1>,
@@ -122,7 +98,6 @@ func.func @matmul_n_mismatch(%ctx: !hip.context,
 
 // -----
 
-// --- Negative: batch dim broadcast failure ([2] vs [3], neither is 1). ---
 func.func @matmul_batch_broadcast_fail(%ctx: !hip.context,
                                        %a: memref<2x4x8xf16, 1>,
                                        %b: memref<3x8x16xf16, 1>,
@@ -136,8 +111,6 @@ func.func @matmul_batch_broadcast_fail(%ctx: !hip.context,
 
 // -----
 
-// --- Negative: rank of outs disagrees with the expected output rank
-//     (broadcast(A.batch=[2], B.batch=[]) gives rank 3, but outs is rank 2). ---
 func.func @matmul_rank_mismatch(%ctx: !hip.context,
                                 %a: memref<2x4x8xf16, 1>,
                                 %b: memref<8x16xf16, 1>,
@@ -151,7 +124,6 @@ func.func @matmul_rank_mismatch(%ctx: !hip.context,
 
 // -----
 
-// --- Positive: tensor mode (pre-bufferization) with all-static shapes. ---
 // CHECK-LABEL: func.func @matmul_tensor_mode_static
 // CHECK:         hip.matmul
 func.func @matmul_tensor_mode_static(%ctx: !hip.context,
