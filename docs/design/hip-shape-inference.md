@@ -31,7 +31,7 @@ op into the same machinery.
    [Pipeline placement](#pipeline-placement)).
 
 These three layers share **one** static shape function per op
-(`inferContractionShape`, future `broadcastShapes`, ...). The verifier
+(`inferMatmulShape`, future `inferBroadcastShape`, ...). The verifier
 checks the result against the helper; reify lifts the helper's output
 into `OpFoldResult`s; the pass aggregates reify across the module.
 
@@ -162,7 +162,7 @@ substituting it into `Pipelines.cpp` and re-running the LIT suite.
 
 ```text
 include/hip/Dialect/IR/
-  HipShapeUtils.h          -- public API: inferContractionShape,
+  HipShapeUtils.h          -- public API: inferMatmulShape,
                               verifyHipOpShape, reifyDimOrConstant
   HipOps.td                -- per-op declares
                               `DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface>`
@@ -264,13 +264,13 @@ supplied `emitError` callable on shape mismatch.
 
 ```cpp
 // HipShapeUtils.h
-SmallVector<int64_t> broadcastShapes(
+SmallVector<int64_t> inferBroadcastShape(
     ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
     function_ref<InFlightDiagnostic()> emitError);
 ```
 
-If your op fits an existing helper (e.g. another contraction shape),
-just reuse it.
+If your op fits an existing helper (e.g. another matmul-shaped op, or
+another op with the same broadcast rules), just reuse it.
 
 ### 2. Declare the interface in TableGen
 
