@@ -84,6 +84,32 @@ func.func @noop_on_static(%ctx: !hip.context,
 
 // -----
 
+// Pin per-edge producer refinement: when a `tensor.empty` is shared between
+// the matmul's outs operand AND a non-DPS-init use (here, a func.return),
+// only the DPS-init edge is rewired to the more-static empty. The original
+// %e keeps `tensor<?x?xf16>` for the func.return — leaking the static type
+// past the per-op refinement boundary would invalidate the function
+// signature.
+// CHECK-LABEL: func.func @per_edge_refine_with_extra_empty_user
+// CHECK:         %[[E_NEW:.*]] = tensor.empty() : tensor<2x8xf16>
+// CHECK:         %[[E_OLD:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf16>
+// CHECK:         %[[Y:.*]] = hip.matmul
+// CHECK-SAME:      outs(%[[E_NEW]] : tensor<2x8xf16>) : tensor<2x8xf16>
+// CHECK:         %[[CAST:.*]] = tensor.cast %[[Y]] : tensor<2x8xf16> to tensor<?x?xf16>
+// CHECK:         return %[[CAST]], %[[E_OLD]] : tensor<?x?xf16>, tensor<?x?xf16>
+func.func @per_edge_refine_with_extra_empty_user(
+    %ctx: !hip.context, %a: tensor<2x4xf16>, %b: tensor<4x8xf16>,
+    %dM: index, %dN: index)
+    -> (tensor<?x?xf16>, tensor<?x?xf16>) {
+  %e = tensor.empty(%dM, %dN) : tensor<?x?xf16>
+  %y = hip.matmul(%ctx)
+    ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+    outs(%e : tensor<?x?xf16>) : tensor<?x?xf16>
+  return %y, %e : tensor<?x?xf16>, tensor<?x?xf16>
+}
+
+// -----
+
 // Pin that the pass restricts itself to HIP-dialect ops: refining a non-HIP
 // op like `tensor.pad` (which also implements ReifyRankedShapedTypeOpInterface)
 // is the canonicalizer's job, not this pass's.

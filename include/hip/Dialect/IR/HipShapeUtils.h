@@ -16,27 +16,32 @@
 namespace mlir {
 namespace hip {
 
-/// Compute the shape of `A @ B` for a matmul / contraction with NumPy-style
-/// batch broadcast over the leading dims. Last two dims of `aShape` are
-/// `[M, K]`; last two dims of `bShape` are `[K, N]`. Leading dims are
-/// broadcast (right-aligned, missing dims treated as 1).
+/// Compute the shape of `A @ B` for a matmul / contraction. Last two dims
+/// of `aShape` are `[M, K]`; last two dims of `bShape` are `[K, N]`.
 ///
-/// Returns the inferred shape on success. Returns an empty `SmallVector` and
-/// emits a diagnostic via `emitError` on rank-, contraction-K-, or
-/// batch-broadcast mismatch.
+/// Accepts only the subset of MatMul shape contracts that
+/// `MatMulConversion.cpp` + `MatmulLowering.cpp` execute correctly today:
+///   - 2D x 2D
+///   - ND x ND with same-rank batch dims (kDynamic-as-wildcard equality)
+///   - ND x 2D (rank-2 `B` re-used across all batches)
+///
+/// Rejected (would be miscompiled by codegen):
+///   - `B`'s rank > `A`'s rank  (codegen derives result rank from A)
+///   - mixed ranks where `B` is not exactly 2 (e.g. `[2,3,M,K] @ [3,K,N]`)
+///   - per-dim batch broadcasting (`1` vs `>1`); codegen takes A's batch
+///     value verbatim, so a static `1` against a static `>1` is wrong.
 ///
 /// `ShapedType::kDynamic` is treated as a wildcard:
-///   - K_a or K_b dynamic -> contraction match passes (result K is dropped
-///     anyway).
-///   - Batch dim broadcast follows NumPy / TF / ONNX MatMul semantics
-///     (delegated to `mlir::OpTrait::util::getBroadcastedShape`):
-///       * 1 broadcasts against any dim.
-///       * dynamic + static>1 -> static (the dynamic side must be 1 or
-///         match the static side at runtime per the broadcast contract;
-///         taking the static side is the strictly-correct tightening).
-///       * dynamic + dynamic -> dynamic.
-///       * static + static, equal -> static; unequal and neither is 1
-///         -> error.
+///   - K_a or K_b dynamic -> contraction match passes.
+///   - Batch dim equality: dynamic + static -> static; dynamic + dynamic
+///     -> dynamic; static + static must be equal.
+///
+/// Returns the inferred shape on success. Returns an empty `SmallVector`
+/// and emits a diagnostic via `emitError` on any contract violation.
+///
+/// Widening this contract requires matching widening in
+/// `MatMulConversion`, `MatmulLowering`, and the runtime's
+/// `STRIDED_BATCH_OFFSET` layout (zero stride for the broadcast side).
 SmallVector<int64_t>
 inferContractionShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                       function_ref<InFlightDiagnostic()> emitError);

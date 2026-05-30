@@ -15,7 +15,6 @@
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Traits.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "llvm/ADT/STLExtras.h"
@@ -48,18 +47,44 @@ SmallVector<int64_t>
 mlir::hip::inferContractionShape(ArrayRef<int64_t> aShape,
                                  ArrayRef<int64_t> bShape,
                                  function_ref<InFlightDiagnostic()> emitError) {
-  if (aShape.size() < 2) {
-    emitError() << "matmul A must have rank >= 2, got rank " << aShape.size();
+  size_t aRank = aShape.size();
+  size_t bRank = bShape.size();
+  if (aRank < 2) {
+    emitError() << "matmul A must have rank >= 2, got rank " << aRank;
     return {};
   }
-  if (bShape.size() < 2) {
-    emitError() << "matmul B must have rank >= 2, got rank " << bShape.size();
+  if (bRank < 2) {
+    emitError() << "matmul B must have rank >= 2, got rank " << bRank;
     return {};
   }
 
-  int64_t M = aShape[aShape.size() - 2];
+  // Tightened contract: matches what `MatMulConversion.cpp` +
+  // `MatmulLowering.cpp` actually compute correctly today. Codegen
+  // derives result rank and batchCount from `A`, with optional `B`
+  // rank-2 broadcast (one matrix re-used across all batches). Anything
+  // wider — `B`'s rank > `A`'s rank, mixed ranks where `B` is not
+  // exactly rank-2, or per-dim batch broadcasting (`1` vs `>1`) —
+  // would be miscompiled by codegen + runtime, so the verifier rejects
+  // it here. Widening this contract requires matching widening in
+  // codegen and the runtime's strided-batch layout (zero stride for
+  // the broadcast side). Tracked under "Codegen contract" in
+  // `docs/design/hip-shape-inference.md`.
+  if (bRank > aRank) {
+    emitError() << "matmul B's rank (" << bRank << ") exceeds A's rank ("
+                << aRank
+                << "); B-side batch broadcasting is not supported by codegen";
+    return {};
+  }
+  if (aRank > bRank && bRank != 2) {
+    emitError() << "matmul mixed-rank operands require B to be rank-2 (got A "
+                   "rank "
+                << aRank << ", B rank " << bRank << ")";
+    return {};
+  }
+
+  int64_t M = aShape[aRank - 2];
   int64_t Ka = aShape.back();
-  int64_t Kb = bShape[bShape.size() - 2];
+  int64_t Kb = bShape[bRank - 2];
   int64_t N = bShape.back();
 
   // Contraction K must agree (kDynamic on either side is a wildcard).
@@ -69,15 +94,34 @@ mlir::hip::inferContractionShape(ArrayRef<int64_t> aShape,
     return {};
   }
 
-  // Batch broadcast (NumPy / ONNX MatMul) on the leading dims; see header
-  // for the full case table.
   ArrayRef<int64_t> aBatch = aShape.drop_back(2);
   ArrayRef<int64_t> bBatch = bShape.drop_back(2);
   SmallVector<int64_t> result;
-  if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, result)) {
-    emitError() << "matmul batch broadcast failure: A.batch="
-                << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
-    return {};
+  if (bBatch.empty()) {
+    // ND x 2D: result batch = A's batch (one matrix B re-used across all
+    // batches). Codegen path: MatmulLowering computes batchCount from A's
+    // leading dims and runtime treats B as zero-stride for the batch loop.
+    result.assign(aBatch.begin(), aBatch.end());
+  } else {
+    // Same-rank batched matmul: per-position batch dim equality.
+    // kDynamic on either side is a wildcard; if one side is static and
+    // the other dynamic, the static side is the strictly-correct
+    // tightening (the dynamic side must equal it at runtime).
+    assert(aBatch.size() == bBatch.size());
+    for (size_t i : llvm::seq<size_t>(0, aBatch.size())) {
+      int64_t ad = aBatch[i];
+      int64_t bd = bBatch[i];
+      bool aDyn = ShapedType::isDynamic(ad);
+      bool bDyn = ShapedType::isDynamic(bd);
+      if (!aDyn && !bDyn && ad != bd) {
+        emitError() << "matmul batch dim mismatch at position " << i
+                    << ": A=" << ad << " B=" << bd
+                    << "; per-dim batch broadcasting (1 vs >1) is not "
+                       "supported by codegen";
+        return {};
+      }
+      result.push_back(aDyn ? bd : ad);
+    }
   }
   result.reserve(result.size() + 2);
   result.push_back(M);

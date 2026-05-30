@@ -12,7 +12,9 @@ op into the same machinery.
 
 1. **Static verification.** Every HIP DPS op verifies that its `outs`
    operand types are compatible with the shapes that fall out of the op
-   contract (matmul: `[..., M, K] @ [..., K, N] -> [..., M, N]`;
+   contract (matmul: `[..., M, K] @ [..., K, N] -> [..., M, N]` over the
+   subset of shapes our codegen actually executes correctly — see
+   [`hip.matmul` codegen contract](#hipmatmul-codegen-contract);
    elementwise: NumPy broadcast over the inputs; etc).
 2. **Reify dynamic dims.** When a result dim is `?` (`kDynamic`) at the
    type level but is computable in terms of operand dims, the op exposes
@@ -377,3 +379,39 @@ then `tensor.collapse_shape` the result. Lowering (`MatmulLowering.cpp`)
 and runtime assume rank >= 2 today (indexing `aShape[rank-2]` and
 `bShape[rank-1]`); the verifier turns what would have been a
 silently-wrong hipBLASLt call into an explicit diagnostic.
+
+### `hip.matmul` codegen contract
+
+The verifier accepts only the subset of MatMul shape contracts that
+`MatMulConversion.cpp` + `MatmulLowering.cpp` execute correctly today:
+
+* 2D x 2D
+* ND x ND with same-rank batch dims (kDynamic-as-wildcard equality)
+* ND x 2D (rank-2 `B` re-used across all batches; codegen derives
+  `batchCount` from A's leading dims)
+
+Rejected at the verifier:
+
+* `B`'s rank > `A`'s rank — codegen derives result rank and `batchCount`
+  from A; a higher-rank `B` would be miscompiled.
+* Mixed ranks where `B` is not exactly rank-2 (e.g.
+  `[2,3,M,K] @ [3,K,N]`).
+* Per-dim batch broadcasting (`1` vs `>1`) — codegen reads A's batch
+  value verbatim, so a static `1` against a static `>1` would silently
+  produce the wrong result.
+
+Even the accepted ND x 2D path has a known runtime gap: hipBLASLt's
+`STRIDED_BATCH_OFFSET` for `B` is set to a non-zero value
+(`lib/Runtime/real/matmul.cpp`), which works for same-rank batched
+matmul but reads past `B`'s buffer when `B` is rank-2. None of the
+currently supported transformer models hit this path (every matmul is
+either 2D x 2D or same-rank batched), so the gap is latent. Fixing it
+requires a zero-stride layout for the broadcast side and a small
+runtime API extension; tracked as a follow-up alongside the verifier
+contract widening above.
+
+The strict subset is intentional: it gives the verifier a contract that
+codegen actually honors, so a future model that hits an unsupported
+shape gets a clean diagnostic instead of a silent miscompile. Widening
+this contract requires matching widening in `MatMulConversion`,
+`MatmulLowering`, and the runtime in lockstep.
