@@ -84,32 +84,14 @@ static bool composeRefinedShape(ArrayRef<int64_t> cur,
   return refined;
 }
 
-/// Build a refined `tensor.empty` for `emptyOp` and attach it to the
-/// `outs` operand of `dpsOp` at `resultIdx`. Per-edge mutation: only the
-/// DPS-init operand is rewired; other users of `emptyOp` (if any) keep
-/// their original less-static type. The old `emptyOp` is left in place;
-/// canonicalization DCEs it if no live uses remain.
+/// Rebuild `emptyOp` with the refined shape. Dynamic-dim operands whose
+/// corresponding dim became static are dropped.
 ///
-/// `replaceOp` would rewire every user of `emptyOp` to the more-static
-/// new value, leaking the static type past the per-op refinement
-/// boundary that `refineOneResult` enforces with `tensor.cast` on the
-/// result side. The cast barrier is for non-DPS-init uses of the OP
-/// RESULT; producer-side leaks need a symmetric per-edge primitive.
-///
-/// Before:
-///   %e = tensor.empty(%d) : tensor<?xf16>
-///   %y = hip.foo outs(%e : tensor<?xf16>) : tensor<?xf16>
-///   <other_use>(%e)
-/// After (newShape narrows to tensor<8xf16> for hip.foo's outs):
-///   %e = tensor.empty(%d) : tensor<?xf16>          // unchanged
-///   <other_use>(%e)                                // unchanged
-///   %e2 = tensor.empty() : tensor<8xf16>
-///   %y = hip.foo outs(%e2 : tensor<8xf16>) : tensor<8xf16>
-static LogicalResult
-refineTensorEmptyProducer(RewriterBase &rewriter,
-                          DestinationStyleOpInterface dpsOp, unsigned resultIdx,
-                          tensor::EmptyOp emptyOp,
-                          ArrayRef<int64_t> newShape) {
+/// Before: %init = tensor.empty(%d0, %d1) : tensor<?x4x?xf16>; newShape=[2,4,8]
+/// After : %init = tensor.empty() : tensor<2x4x8xf16>
+static LogicalResult refineTensorEmptyProducer(RewriterBase &rewriter,
+                                               tensor::EmptyOp emptyOp,
+                                               ArrayRef<int64_t> newShape) {
   auto curType = emptyOp.getType();
   if (curType.getShape().size() != newShape.size())
     return failure();
@@ -133,8 +115,7 @@ refineTensorEmptyProducer(RewriterBase &rewriter,
   rewriter.setInsertionPoint(emptyOp);
   auto newEmpty =
       tensor::EmptyOp::create(rewriter, emptyOp.getLoc(), newType, newDyn);
-  // Per-edge rewire: only this DPS-init operand sees the new value.
-  dpsOp.getDpsInitsMutable()[resultIdx].set(newEmpty.getResult());
+  rewriter.replaceOp(emptyOp, newEmpty.getResult());
   ++NumProducersRefined;
   return success();
 }
@@ -166,8 +147,7 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
                         << ": outs producer is not tensor.empty\n");
       return failure();
     }
-    if (failed(refineTensorEmptyProducer(rewriter, dpsOp, resultIdx,
-                                         emptyProducer, newShape)))
+    if (failed(refineTensorEmptyProducer(rewriter, emptyProducer, newShape)))
       return failure();
   }
 
