@@ -69,12 +69,8 @@ mlir::hip::inferContractionShape(ArrayRef<int64_t> aShape,
     return {};
   }
 
-  // NumPy / ONNX MatMul batch broadcast: right-align, pad with 1, then
-  // per-dim equal-or-1 rule. Delegated to upstream MLIR's helper, which
-  // also implements the TF/ONNX-style "dynamic + static>1 -> static"
-  // tightening: a dynamic side that meets a static side > 1 must be
-  // either 1 (broadcast) or matching the static side at runtime, so the
-  // static side is the inferred result.
+  // Batch broadcast (NumPy / ONNX MatMul) on the leading dims; see header
+  // for the full case table.
   ArrayRef<int64_t> aBatch = aShape.drop_back(2);
   ArrayRef<int64_t> bBatch = bShape.drop_back(2);
   SmallVector<int64_t> result;
@@ -92,23 +88,17 @@ mlir::hip::inferContractionShape(ArrayRef<int64_t> aShape,
 LogicalResult mlir::hip::verifyHipOpShape(
     Operation *op,
     function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected) {
-  // Required-by-construction: every op that wires up `verifyHipOpShape`
-  // also implements `DestinationStyleOpInterface` via TableGen. Use
-  // asserting `cast<>` to express that contract — a missing interface is
-  // a programmer error in the op's TableGen def, not a user-facing
-  // diagnostic.
+  // Asserting cast: every op wired to verifyHipOpShape also implements DPS
+  // via TableGen; a missing interface is a programmer error in the op def.
   auto dpsOp = cast<DestinationStyleOpInterface>(op);
 
+  // Empty outer vector means the shape helper already emitted a diagnostic.
   SmallVector<SmallVector<int64_t>> expected = computeExpected();
-  // Empty outer vector: the shape helper failed and already issued a
-  // diagnostic. Don't double-emit.
   if (expected.empty())
     return failure();
 
-  // Programmer-error invariant: each shape helper returns one expected shape
-  // per DPS init operand by construction. Assert in debug builds; the
-  // `return failure()` keeps release builds safe by avoiding the
-  // out-of-bounds `expected[i]` in the loop below.
+  // Each helper returns one shape per DPS init by construction; assert in
+  // debug, fail-safe in release to avoid OOB on `expected[i]` below.
   auto inits = dpsOp.getDpsInits();
   assert(expected.size() == inits.size() &&
          "shape helper must produce one expected shape per DPS init operand");
@@ -148,9 +138,7 @@ OpFoldResult mlir::hip::reifyDimOrConstant(OpBuilder &b, Location loc,
                                            int64_t sourceDim) {
   if (!ShapedType::isDynamic(staticDim))
     return b.getIndexAttr(staticDim);
-  // `ReifyRankedShapedTypeOpInterface` restricts reify callers to ops with
-  // tensor results, so `source` is always a `RankedTensorType` here. If a
-  // future op exposes reify on a memref result, add the `memref.dim`
-  // branch back together with an LIT case that exercises it.
+  // Reify interface restricts callers to tensor results; if a memref
+  // reify path is added later, also add a memref.dim branch + LIT case.
   return tensor::getMixedSize(b, loc, source, sourceDim);
 }
