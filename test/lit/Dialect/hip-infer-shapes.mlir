@@ -306,3 +306,51 @@ func.func @refine_gemm_2d_from_inputs(%ctx: !hip.context,
     : tensor<?x?xf32>
   return %y : tensor<?x?xf32>
 }
+
+// -----
+
+// Same-shape unary ops (silu, sigmoid, softplus, gelu, reciprocal, sqrt,
+// not, cos, sin, neg, cast, sign, cumsum, scatter_nd) all reify their
+// result shape from the primary input tensor's shape — covered here by
+// `hip.cos` as a representative. The pass refines the dynamic-result
+// `tensor.empty` to the input's static rank/extents.
+// CHECK-LABEL: func.func @refine_cos_static_last_dim
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x4096xf32>
+// CHECK:         %[[Y:.*]] = hip.cos
+// CHECK-SAME:                  outs(%[[E]] : tensor<?x?x4096xf32>) : tensor<?x?x4096xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<?x?x4096xf32> to tensor<?x?x?xf32>
+func.func @refine_cos_static_last_dim(%ctx: !hip.context,
+                                      %x: tensor<?x?x4096xf32>,
+                                      %d0: index, %d1: index, %d2: index)
+    -> tensor<?x?x?xf32> {
+  %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
+  %y = hip.cos(%ctx)
+    ins(%x : tensor<?x?x4096xf32>)
+    outs(%e : tensor<?x?x?xf32>)
+    : tensor<?x?x?xf32>
+  return %y : tensor<?x?x?xf32>
+}
+
+// -----
+
+// `hip.size` produces a rank-0 `tensor<i64>` — its reify returns a
+// shape entry with an empty inner dim list. The pass has nothing to
+// refine (rank-0 is already maximally static), but must not crash on
+// the empty inner list. CHECK that the op survives the pass unchanged
+// and no `tensor.cast` barrier is inserted (the result type is already
+// the same as the function's return type).
+// CHECK-LABEL: func.func @noop_on_size_rank_zero
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<i64>
+// CHECK:         %[[Y:.*]] = hip.size
+// CHECK-SAME:                  outs(%[[E]] : tensor<i64>) : tensor<i64>
+// CHECK-NOT:     tensor.cast
+// CHECK:         return %[[Y]] : tensor<i64>
+func.func @noop_on_size_rank_zero(%ctx: !hip.context,
+                                  %x: tensor<?x?xf16>) -> tensor<i64> {
+  %e = tensor.empty() : tensor<i64>
+  %y = hip.size(%ctx)
+    ins(%x : tensor<?x?xf16>)
+    outs(%e : tensor<i64>)
+    : tensor<i64>
+  return %y : tensor<i64>
+}
