@@ -157,12 +157,9 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 }
 
 // Result types are mechanically the `v_init` operand types — matches the
-// `LoopOp::verify` contract. Builders that omit explicit result types
-// pick this up automatically, so any new caller is verifier-clean by
-// construction. Existing callers that still pass explicit result types
-// (notably the onnx-loop outlining pass) are unaffected; migrating them
-// requires shape refinement on the outlined body func so body arg /
-// yield / op types agree with v_init, which is follow-up work.
+// `LoopOp::verify` contract, so any caller that uses an InferType-aware
+// builder (operand types only, no explicit result types) is verifier-clean
+// by construction.
 //
 // Memref-mode v_init produces 0 result types (DPS post-bufferization
 // convention; the verifier rejects mixed mode anyway).
