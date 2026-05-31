@@ -159,9 +159,9 @@ mlir::hip::reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source) {
   return dims;
 }
 
-SmallVector<OpFoldResult>
-mlir::hip::reifyBroadcastShape(OpBuilder &b, Location loc,
-                               ValueRange operands) {
+SmallVector<OpFoldResult> mlir::hip::reifyBroadcastShape(OpBuilder &b,
+                                                         Location loc,
+                                                         ValueRange operands) {
   if (operands.empty())
     return {};
 
@@ -234,7 +234,8 @@ mlir::hip::reifyBroadcastShape(OpBuilder &b, Location loc,
       bestSrc = operands[0];
       bestSrcDim = 0;
     }
-    dims.push_back(reifyDimOrConstant(b, loc, outShape[i], bestSrc, bestSrcDim));
+    dims.push_back(
+        reifyDimOrConstant(b, loc, outShape[i], bestSrc, bestSrcDim));
   }
   return dims;
 }
@@ -290,9 +291,9 @@ mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
   return dims;
 }
 
-SmallVector<OpFoldResult>
-mlir::hip::reifyGatherND(OpBuilder &b, Location loc, Value data, Value indices,
-                         int64_t batchDims) {
+SmallVector<OpFoldResult> mlir::hip::reifyGatherND(OpBuilder &b, Location loc,
+                                                   Value data, Value indices,
+                                                   int64_t batchDims) {
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
   if (!dataType || !indicesType)

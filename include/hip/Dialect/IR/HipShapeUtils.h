@@ -105,8 +105,8 @@ SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
 /// contract for `reifyResultShapes` callers). Returns an empty vector
 /// if broadcast fails — verifiers should already have caught this, but
 /// reify bails defensively to avoid materializing nonsense IR.
-SmallVector<OpFoldResult>
-reifyBroadcastShape(OpBuilder &b, Location loc, ValueRange operands);
+SmallVector<OpFoldResult> reifyBroadcastShape(OpBuilder &b, Location loc,
+                                              ValueRange operands);
 
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
 /// `perm` must be a permutation of `[0, rank-1)` and have the same length
@@ -118,9 +118,9 @@ reifyBroadcastShape(OpBuilder &b, Location loc, ValueRange operands);
 ///   - emits `tensor.dim %input, perm[i]` otherwise.
 ///
 /// `input` must be a `RankedTensorType`-typed Value.
-SmallVector<OpFoldResult>
-reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
-                     ArrayRef<int64_t> perm);
+SmallVector<OpFoldResult> reifyTransposeByPerm(OpBuilder &b, Location loc,
+                                               Value input,
+                                               ArrayRef<int64_t> perm);
 
 /// Reify the result shape of a gather op as
 /// `output = data.shape[:axis] ++ indices.shape ++ data.shape[axis+1:]`.
@@ -128,9 +128,9 @@ reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
 /// convention). The helper bails (returns empty) on a malformed axis.
 ///
 /// `data` and `indices` must be `RankedTensorType`-typed Values.
-SmallVector<OpFoldResult>
-reifyGatherWithAxis(OpBuilder &b, Location loc, Value data, Value indices,
-                    int64_t axis);
+SmallVector<OpFoldResult> reifyGatherWithAxis(OpBuilder &b, Location loc,
+                                              Value data, Value indices,
+                                              int64_t axis);
 
 /// Reify the result shape of a `gather_nd` op as
 /// `batch_dims_from_data ++ indices.shape[batch_dims:-1] ++
@@ -142,9 +142,8 @@ reifyGatherWithAxis(OpBuilder &b, Location loc, Value data, Value indices,
 /// output rank itself is then unknown and reify cannot run.
 ///
 /// `data` and `indices` must be `RankedTensorType`-typed Values.
-SmallVector<OpFoldResult>
-reifyGatherND(OpBuilder &b, Location loc, Value data, Value indices,
-              int64_t batchDims);
+SmallVector<OpFoldResult> reifyGatherND(OpBuilder &b, Location loc, Value data,
+                                        Value indices, int64_t batchDims);
 
 /// Reify the result shape of a reduction op (reduce_sum / reduce_max /
 /// reduce_prod) given `data`, the `axes` operand (rank-1 i64 tensor),
@@ -172,10 +171,10 @@ reifyGatherND(OpBuilder &b, Location loc, Value data, Value indices,
 /// the other helpers in this header) because a valid rank-0 reduction
 /// result has an empty dim list, which would otherwise be
 /// indistinguishable from the bail path.
-LogicalResult
-reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data, Value axes,
-                           int64_t keepdims, int64_t noopWithEmptyAxes,
-                           SmallVectorImpl<OpFoldResult> &out);
+LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
+                                         Value axes, int64_t keepdims,
+                                         int64_t noopWithEmptyAxes,
+                                         SmallVectorImpl<OpFoldResult> &out);
 
 } // namespace hip
 } // namespace mlir

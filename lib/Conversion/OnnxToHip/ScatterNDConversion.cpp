@@ -81,9 +81,8 @@ struct ScatterNDToHip : public mlir::RewritePattern {
     else
       reductionAttr = rewriter.getStringAttr("none");
 
-    auto hipOp = mlir::hip::ScatterNDOp::create(rewriter, loc, context, data,
-                                                indices, updates, init,
-                                                reductionAttr);
+    auto hipOp = mlir::hip::ScatterNDOp::create(
+        rewriter, loc, context, data, indices, updates, init, reductionAttr);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

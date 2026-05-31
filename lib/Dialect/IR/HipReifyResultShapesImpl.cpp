@@ -457,8 +457,9 @@ SignOp::reifyResultShapes(OpBuilder &b,
   return success();
 }
 
-LogicalResult CumSumOp::reifyResultShapes(
-    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+LogicalResult
+CumSumOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
   if (!isa<RankedTensorType>(getX().getType()))
@@ -528,7 +529,8 @@ SizeOp::reifyResultShapes(OpBuilder & /*b*/,
 // Before (typical canonical case):
 //   %add = hip.add(%ctx) ins(%lhs, %rhs : tensor<1x?x4096xf16>,
 //                                          tensor<?x1x4096xf16>)
-//                        outs(%out : tensor<?x?x4096xf16>) : tensor<?x?x4096xf16>
+//                        outs(%out : tensor<?x?x4096xf16>) :
+//                        tensor<?x?x4096xf16>
 //   %d0 = tensor.dim %add, %c0
 //   %d1 = tensor.dim %add, %c1
 // After (reified, then folded by tensor.dim folder):
@@ -629,9 +631,8 @@ SubOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 WhereOp::reifyResultShapes(OpBuilder &b,
                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return reifyBroadcastShapeFor(b, getLoc(),
-                                {getCondition(), getX(), getY()}, *this,
-                                reifiedReturnShapes);
+  return reifyBroadcastShapeFor(b, getLoc(), {getCondition(), getX(), getY()},
+                                *this, reifiedReturnShapes);
 }
 
 LogicalResult
@@ -744,8 +745,9 @@ LogicalResult TransposeOp::reifyResultShapes(
   return success();
 }
 
-LogicalResult GatherOp::reifyResultShapes(
-    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+LogicalResult
+GatherOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
   if (!isa<RankedTensorType>(getData().getType()) ||
@@ -859,8 +861,9 @@ TileOp::reifyResultShapes(OpBuilder &b,
   return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
 }
 
-LogicalResult ExpandOp::reifyResultShapes(
-    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+LogicalResult
+ExpandOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
 }
 
