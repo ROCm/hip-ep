@@ -4,9 +4,10 @@ Licensed under the MIT License.
 -->
 # HIP dialect shape inference
 
-This document explains how the HIP dialect represents and refines the
-shapes of its DPS (destination-passing-style) ops, and how to wire a new
-op into the same machinery.
+How HIP DPS (destination-passing-style) ops express their shape
+contract — verifier, `ReifyRankedShapedTypeOpInterface` impl,
+`--hip-infer-shapes` pass — and how to wire a new op into the same
+machinery.
 
 ## Goals
 
@@ -61,17 +62,12 @@ both the interface and the LLVM-project test pass that drives it
 (`--resolve-shaped-type-result-dims`) so our infrastructure does not
 fork.
 
-We considered a custom `HipShapeInferenceOpInterface` early on. The
-draft would have added a `inferOutputShape(...)` static method returning
-`SmallVector<int64_t>`. That would have given us a clean separator
-between "static helper used by the verifier" and "dynamic helper used by
-the canonicaliser". We dropped it because:
-
-* Both jobs are already covered by upstream interfaces — the static
-  helper is a free function in `HipShapeUtils`, and the dynamic helper
-  is the upstream interface method.
-* Doubling up the surface adds a maintenance gradient with no payoff.
-* The upstream test-pass machinery is the test surface for free.
+An earlier draft added a custom `HipShapeInferenceOpInterface` with an
+`inferOutputShape(...) -> SmallVector<int64_t>` static method. Dropped:
+the upstream interface and the static helper already cover both jobs
+(static check, dynamic reify), doubling up adds maintenance with no
+payoff, and the upstream test-pass machinery is the test surface for
+free.
 
 ### Why a dedicated `--hip-infer-shapes` pass?
 
@@ -235,14 +231,14 @@ Wired in `lib/Dialect/Transforms/Pipelines.cpp` at the top of
 by both `buildOnnxToHipPipeline` overloads), so every production
 compile path gets it.
 
-Why this placement: refining tensor result types BEFORE bufferize
-propagates static dims through the alloc / pool sizing computations
-and removes spurious `memref.dim` ops at the top of the function. The
-pass is idempotent — a second invocation that finds no further
-refinements is a no-op — and it is also a no-op on functions whose ops
-either don't carry the interface or expose no further refinable dims,
-so it's safe to run unconditionally regardless of how much HIP-op
-coverage `ReifyRankedShapedTypeOpInterface` currently has. As more
+Refining tensor result types BEFORE bufferize is what makes the pass
+pay rent: static dims then propagate through the alloc / pool sizing
+computations, and bufferize stops emitting `memref.dim` ops at the top
+of the function. The pass is idempotent (a second invocation that
+finds no further refinements is a no-op) and a no-op on functions
+whose ops either don't carry the interface or expose no further
+refinable dims — safe to run unconditionally regardless of how much
+HIP-op coverage the interface currently has. As more
 HIP DPS ops (GQA, RmsNorm, SkipRmsNorm, Attention, RotaryEmbedding,
 …) gain reify impls, the wiring lets each new op participate without
 any change to `Pipelines.cpp`.

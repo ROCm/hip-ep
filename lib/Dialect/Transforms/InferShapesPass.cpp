@@ -7,11 +7,11 @@
 // Module-level pass: drive `ReifyRankedShapedTypeOpInterface` on every
 // HIP-dialect op that implements it, narrow `?` dims in the op's result
 // type, rebuild the `tensor.empty` producer of any refined DPS init, and
-// emit a `tensor.cast` barrier on every non-DPS-init use to preserve the
-// consumer's signature. Refinement is per-op, not whole-chain (the cast
-// is the barrier, not a propagation channel). Upstream interface ops
-// (e.g. `tensor::EmptyOp`) are intentionally skipped — they have their
-// own folders.
+// emit a `tensor.cast` on every non-DPS-init use to preserve the
+// consumer's signature. The cast is a per-op propagation barrier:
+// downstream consumers refine locally against the OLD operand type,
+// no whole-chain narrowing. Upstream interface ops (e.g. `tensor::EmptyOp`)
+// are intentionally skipped — they have their own folders.
 //
 // See `docs/design/hip-shape-inference.md` for rationale, layout, and the
 // recipe for wiring a new op.

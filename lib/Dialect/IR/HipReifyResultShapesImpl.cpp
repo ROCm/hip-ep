@@ -40,10 +40,11 @@ ArrayRef<int64_t> getShapeOf(Value v) {
 //===----------------------------------------------------------------------===//
 // MatmulOp
 //
-// Reify uses `inferMatmulShape` to recompute the result shape, then
-// lifts each dim to an OpFoldResult: static -> IndexAttr, dynamic ->
-// tensor.dim of the operand that contributes the runtime size.
-// Source: M = A[-2], N = B[-1], batch dim = the broadcast-canonical side.
+// Reify recomputes the result shape via `inferMatmulShape`, then lifts
+// each dim to an OpFoldResult: static dims become `IndexAttr`; dynamic
+// dims become `tensor.dim` of whichever operand contributes the runtime
+// size — M from A[-2], N from B[-1], batch from the broadcast-canonical
+// side.
 //
 // Before:
 //   %m = hip.matmul ins(%a, %b : tensor<?x4096xf16>, tensor<4096x4096xf16>)
