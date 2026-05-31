@@ -432,11 +432,12 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   //
   // For dynamic-shape exports the original onnx.Loop result types may
   // disagree with v_init operand types — the hip.loop verifier rejects
-  // in that case (canonical trigger: vision-encoder ONNX exports that
-  // leave loop result types under-refined relative to v_init). The fix
-  // is recursive shape refinement on the outlined body func, which is
-  // follow-up work; once body arg / yield / op types agree with v_init,
-  // migrate this construction to the InferTypeOpInterface-aware
+  // in that case (canonical trigger: the importer leaves result / body
+  // block-arg types as rank-0 placeholders while upstream shape
+  // inference has already refined v_init to a richer dynamic shape).
+  // The fix is recursive shape refinement on the outlined body func,
+  // which is follow-up work; once body arg / yield / op types agree
+  // with v_init, migrate this construction to the InferTypeOpInterface-aware
   // LoopOp::create overload (drops the explicit result-types argument;
   // LoopOp::inferReturnTypes sources them from v_init). Premature
   // migration without body refinement leaves the body func signature
