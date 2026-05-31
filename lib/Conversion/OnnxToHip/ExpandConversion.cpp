@@ -74,8 +74,8 @@ struct ExpandToHip : public mlir::RewritePattern {
         mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                       resultType.getElementType(), dynSizes);
 
-    auto hipOp = mlir::hip::ExpandOp::create(rewriter, loc, resultType, context,
-                                             input, shape, init);
+    auto hipOp = mlir::hip::ExpandOp::create(rewriter, loc, context, input,
+                                             shape, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

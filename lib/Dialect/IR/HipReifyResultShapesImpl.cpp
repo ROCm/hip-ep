@@ -647,3 +647,227 @@ ModOp::reifyResultShapes(OpBuilder &b,
   return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
                                 reifiedReturnShapes);
 }
+
+//===----------------------------------------------------------------------===//
+// Shape-changing ops (PR #263 commit 3):
+// transpose, gather, gather_nd, reduce_sum, reduce_max, reduce_prod,
+// pad, tile, expand, slice, range
+//
+// Two-tier strategy:
+//
+//  Tier 1 — real per-input-dim mapping. Helpers in `HipShapeUtils`
+//  walk the input's static shape and emit an `OpFoldResult` per output
+//  dim that points back at the contributing input dim (or a static
+//  `IndexAttr`). This is the chained-refinement case where a
+//  preceding op's reify already tightened the input type.
+//    transpose, gather, gather_nd: shape pieces come directly from
+//    static input shapes + structural attrs (perm / axis / batch_dims).
+//    reduce_sum/max/prod: same idea, but the axes-list arrives via a
+//    `Value` operand rather than an attr; the helper introspects it as
+//    an `arith.constant` (which is what the OnnxToHip converter
+//    materialises). On non-constant axes the op falls through to the
+//    Tier-2 fallback so the reify interface still succeeds.
+//
+//  Tier 2 — no-op fallback. For ops whose output dims are arithmetic
+//  functions of operand values (pad: data+pads_begin+pads_end; tile:
+//  input*repeats; expand: max(input, target_shape); slice:
+//  per-axis slice arithmetic; range: ceil((limit-start)/delta)),
+//  reify lifts the DPS `outs` operand's own shape via
+//  `reifyElementwiseSameShape(getOutput())`. Static dims become
+//  `IndexAttr` (the common case after ONNX shape inference); dynamic
+//  dims emit `tensor.dim %output, %i` — a no-op tightening that
+//  doesn't add signal beyond what's already on the result type, but
+//  keeps every Hip_DpsOp wired with a non-failing reify implementation
+//  (the contract a future backward dim-origin composer relies on).
+//  Proper per-op shape arithmetic for these five is deferred to a
+//  follow-up PR.
+//
+// Before (transpose, perm-driven mapping, Tier 1):
+//   %t = hip.transpose(%ctx) ins(%x : tensor<2x?x4096xf16>)
+//                            outs(%out : tensor<?x?x?xf16>)
+//                            {perm = [2, 0, 1]} : tensor<?x?x?xf16>
+// After (reified result shape):
+//   dim 0 -> 4096 : index            (static, from %x.shape[2])
+//   dim 1 -> 2 : index               (static, from %x.shape[0])
+//   dim 2 -> tensor.dim %x, %c1      (dynamic, from %x.shape[1])
+//
+// Before (reduce_sum with constant axes, keepdims=1, Tier 1):
+//   %a = arith.constant dense<[1]> : tensor<1xi64>
+//   %r = hip.reduce_sum(%ctx) ins(%x, %a : tensor<?x4096xf16>,
+//                                            tensor<1xi64>)
+//                              outs(%out : tensor<?x?xf16>)
+//                              {keepdims = 1, noop_with_empty_axes = 0}
+//                            : tensor<?x?xf16>
+// After (reified result shape):
+//   dim 0 -> tensor.dim %x, %c0     (passes through from input)
+//   dim 1 -> 1 : index              (axes-listed dim → keepdims=1 → 1)
+//===----------------------------------------------------------------------===//
+
+LogicalResult TransposeOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(getInput().getType()))
+    return failure();
+
+  // Decode the I64ArrayAttr `perm`. Verifier already rejects non-int
+  // entries; we still bail defensively if any entry is not an IntegerAttr.
+  SmallVector<int64_t> perm;
+  perm.reserve(getPerm().size());
+  for (Attribute a : getPerm()) {
+    auto ia = dyn_cast<IntegerAttr>(a);
+    if (!ia)
+      return failure();
+    perm.push_back(ia.getInt());
+  }
+
+  SmallVector<OpFoldResult> dims =
+      mlir::hip::reifyTransposeByPerm(b, getLoc(), getInput(), perm);
+  if (dims.empty())
+    return failure();
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+LogicalResult GatherOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(getData().getType()) ||
+      !isa<RankedTensorType>(getIndices().getType()))
+    return failure();
+
+  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherWithAxis(
+      b, getLoc(), getData(), getIndices(), getAxis());
+  if (dims.empty())
+    return failure();
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+LogicalResult GatherNDOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(getData().getType()) ||
+      !isa<RankedTensorType>(getIndices().getType()))
+    return failure();
+
+  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherND(
+      b, getLoc(), getData(), getIndices(), getBatchDims());
+  if (dims.empty())
+    return failure();
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+namespace {
+
+// Shared reduction reify body. Tries `reifyReductionWithKeepdims`; if
+// that fails (axes is not a recognised constant), falls back to
+// `reifyElementwiseSameShape` against the DPS `outs` operand so the
+// reify interface still succeeds.
+LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
+                                  Value axes, int64_t keepdims,
+                                  int64_t noopWithEmptyAxes, Value output,
+                                  Operation *op,
+                                  ReifiedRankedShapedTypeDims &out) {
+  if (op->getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(data.getType()) ||
+      !isa<RankedTensorType>(output.getType()))
+    return failure();
+
+  SmallVector<OpFoldResult> dims;
+  if (succeeded(mlir::hip::reifyReductionWithKeepdims(
+          b, loc, data, axes, keepdims, noopWithEmptyAxes, dims))) {
+    out.assign({std::move(dims)});
+    return success();
+  }
+
+  // Fallback: lift the DPS `outs` operand's own shape (no extra signal
+  // beyond what `outs` already carries, but the reify call always
+  // succeeds — see Tier-2 fallback comment above).
+  SmallVector<OpFoldResult> fallback =
+      mlir::hip::reifyElementwiseSameShape(b, loc, output);
+  if (fallback.empty() &&
+      cast<RankedTensorType>(output.getType()).getRank() != 0)
+    return failure();
+  out.assign({std::move(fallback)});
+  return success();
+}
+
+// Shared Tier-2 fallback for shape-changing ops without per-op
+// arithmetic helpers: just lift the DPS `outs` operand's own shape.
+// Static dims fall out as `IndexAttr`; dynamic dims emit
+// `tensor.dim %output, %i` — a no-op tightening that nonetheless
+// keeps the reify interface non-failing for downstream consumers.
+LogicalResult reifyDpsOutShape(OpBuilder &b, Location loc, Value output,
+                               Operation *op,
+                               ReifiedRankedShapedTypeDims &out) {
+  if (op->getNumResults() == 0)
+    return failure();
+  auto outputType = dyn_cast<RankedTensorType>(output.getType());
+  if (!outputType)
+    return failure();
+  SmallVector<OpFoldResult> dims =
+      mlir::hip::reifyElementwiseSameShape(b, loc, output);
+  // `reifyElementwiseSameShape` returns empty for rank-0 too; rank-0 is
+  // a valid result so don't conflate it with bail.
+  if (dims.empty() && outputType.getRank() != 0)
+    return failure();
+  out.assign({std::move(dims)});
+  return success();
+}
+
+} // namespace
+
+LogicalResult ReduceSumOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyReductionShape(b, getLoc(), getData(), getAxes(), getKeepdims(),
+                             getNoopWithEmptyAxes(), getOutput(), *this,
+                             reifiedReturnShapes);
+}
+
+LogicalResult ReduceMaxOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyReductionShape(b, getLoc(), getData(), getAxes(), getKeepdims(),
+                             getNoopWithEmptyAxes(), getOutput(), *this,
+                             reifiedReturnShapes);
+}
+
+LogicalResult ReduceProdOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyReductionShape(b, getLoc(), getData(), getAxes(), getKeepdims(),
+                             getNoopWithEmptyAxes(), getOutput(), *this,
+                             reifiedReturnShapes);
+}
+
+LogicalResult
+PadOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
+}
+
+LogicalResult
+TileOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
+}
+
+LogicalResult ExpandOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
+}
+
+LogicalResult
+SliceOp::reifyResultShapes(OpBuilder &b,
+                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
+}
+
+LogicalResult
+RangeOp::reifyResultShapes(OpBuilder &b,
+                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
+}

@@ -1050,7 +1050,11 @@ def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
 
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
-def Hip_TransposeOp : Hip_DpsOp<"transpose"> {
+def Hip_TransposeOp : Hip_DpsOp<"transpose", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/0,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
   let summary = "N-D transpose with arbitrary permutation (ONNX Transpose)";
   let description = [{
     Permutes the dimensions of the input tensor according to the `perm`
@@ -1086,7 +1090,11 @@ def Hip_TransposeOp : Hip_DpsOp<"transpose"> {
   let hasVerifier = 1;
 }
 
-def Hip_GatherOp : Hip_DpsOp<"gather"> {
+def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/0,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
   let summary = "Gather elements along an axis";
   let description = [{
     Gathers elements from data tensor along the given axis using indices.
@@ -1115,7 +1123,11 @@ def Hip_GatherOp : Hip_DpsOp<"gather"> {
   }];
 }
 
-def Hip_RangeOp : Hip_DpsOp<"range"> {
+def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/0,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
   let summary = "Generate 1-D range tensor";
   let description = [{
     Implements ONNX Range semantics:
@@ -1688,7 +1700,11 @@ def Hip_CastOp : Hip_DpsOp<"cast", /*traits=*/[],
   }];
 }
 
-def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
+def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/0,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
   let summary = "Reduce tensor by summing along axes";
   let description = [{
     Computes the sum of input tensor elements along the specified axes.
@@ -1723,7 +1739,11 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
   }];
 }
 
-def Hip_ReduceMaxOp : Hip_DpsOp<"reduce_max"> {
+def Hip_ReduceMaxOp : Hip_DpsOp<"reduce_max", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/0,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
   let summary = "Reduce tensor by taking maximum along axes";
   let description = [{
     Computes the max of input tensor elements along the specified axes.
@@ -2411,7 +2431,12 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
   }];
 }
 
-def Hip_PadOp : Hip_DpsOp<"pad", [AttrSizedOperandSegments]> {
+def Hip_PadOp : Hip_DpsOp<"pad",
+                          /*traits=*/[AttrSizedOperandSegments],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Pad a tensor with constant / reflect / edge / wrap";
   let description = [{
     Pads input tensor along the axes selected by `axes` (or all axes if
@@ -2457,7 +2482,11 @@ def Hip_PadOp : Hip_DpsOp<"pad", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Hip_TileOp : Hip_DpsOp<"tile"> {
+def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Tile a tensor by repeating along each dimension";
   let description = [{
     Constructs a new tensor by repeating `input` along each dimension by the
@@ -2489,7 +2518,11 @@ def Hip_TileOp : Hip_DpsOp<"tile"> {
   }];
 }
 
-def Hip_ExpandOp : Hip_DpsOp<"expand"> {
+def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/0,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
   let summary = "Broadcast a tensor to a target shape";
   let description = [{
     Broadcasts `input` to the target `shape` following NumPy broadcast rules.
@@ -2522,7 +2555,11 @@ def Hip_ExpandOp : Hip_DpsOp<"expand"> {
   }];
 }
 
-def Hip_ReduceProdOp : Hip_DpsOp<"reduce_prod"> {
+def Hip_ReduceProdOp : Hip_DpsOp<"reduce_prod", /*traits=*/[],
+                                 /*outsAccessor=*/"Output",
+                                 /*autoReify=*/0,
+                                 /*autoInfer=*/1,
+                                 /*declareInfer=*/1> {
   let summary = "Reduce tensor by multiplying elements along axes";
   let description = [{
     Computes the product of input tensor elements along the specified axes.
@@ -2592,7 +2629,12 @@ def Hip_LessOp : Hip_DpsOp<"less", /*traits=*/[],
   }];
 }
 
-def Hip_SliceOp : Hip_DpsOp<"slice", [AttrSizedOperandSegments]> {
+def Hip_SliceOp : Hip_DpsOp<"slice",
+                            /*traits=*/[AttrSizedOperandSegments],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/0,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
   let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";
   let description = [{
     Native fallback for ONNX Slice when the OnnxToHip pass cannot decompose
@@ -2646,7 +2688,11 @@ def Hip_SliceOp : Hip_DpsOp<"slice", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Hip_GatherNDOp : Hip_DpsOp<"gather_nd"> {
+def Hip_GatherNDOp : Hip_DpsOp<"gather_nd", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/0,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
   let summary = "GatherND: gather slices using N-D index tuples";
   let description = [{
     Gathers slices of `data` indexed by the trailing dimension of `indices`.
