@@ -61,8 +61,8 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
 
   auto toAttr = rewriter.getI64IntegerAttr(onnxDataType);
 
-  auto hipOp = mlir::hip::CastOp::create(rewriter, loc, resultType, context,
-                                         input, init, toAttr);
+  auto hipOp =
+      mlir::hip::CastOp::create(rewriter, loc, context, input, init, toAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

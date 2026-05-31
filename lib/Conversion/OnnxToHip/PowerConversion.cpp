@@ -52,8 +52,8 @@ ReciprocalToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-  auto hipOp = mlir::hip::ReciprocalOp::create(rewriter, loc, resultType,
-                                               context, input, init);
+  auto hipOp =
+      mlir::hip::ReciprocalOp::create(rewriter, loc, context, input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -77,8 +77,8 @@ SqrtToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-  auto hipOp = mlir::hip::SqrtOp::create(rewriter, loc, resultType, context,
-                                         input, init);
+  auto hipOp =
+      mlir::hip::SqrtOp::create(rewriter, loc, context, input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -105,8 +105,8 @@ struct NegToHip : public mlir::RewritePattern {
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
     mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-    auto hipOp = mlir::hip::NegOp::create(rewriter, loc, resultType, context,
-                                          input, init);
+    auto hipOp =
+        mlir::hip::NegOp::create(rewriter, loc, context, input, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }
