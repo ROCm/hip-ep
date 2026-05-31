@@ -156,20 +156,16 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
-// Result types are mechanically `v_init` operand types (verifier contract,
-// see verify() above and HipOps.td:126-127). Builders without explicit
-// result types pick this up automatically; ensures any new caller is
-// verifier-clean by construction.
-//
-// Status quo callers (notably LoopOutline.cpp's outlining) still pass
-// explicit result types and are unaffected. Migrating those to the
-// InferType-friendly builder requires upstream shape refinement on the
-// outlined body func (so body arg / yield / op types agree with v_init);
-// that work lives in Phase 2.5 / PR #265, which then flips LoopOutline
-// over to this path. Until then, this method only services NEW callers.
+// Result types are mechanically the `v_init` operand types — matches the
+// `LoopOp::verify` contract. Builders that omit explicit result types
+// pick this up automatically, so any new caller is verifier-clean by
+// construction. Existing callers that still pass explicit result types
+// (notably the onnx-loop outlining pass) are unaffected; migrating them
+// requires shape refinement on the outlined body func so body arg /
+// yield / op types agree with v_init, which is follow-up work.
 //
 // Memref-mode v_init produces 0 result types (DPS post-bufferization
-// convention -- verifier rejects mixed mode anyway).
+// convention; the verifier rejects mixed mode anyway).
 LogicalResult LoopOp::inferReturnTypes(
     MLIRContext *context, std::optional<Location> location,
     ValueRange operands, DictionaryAttr attributes,
