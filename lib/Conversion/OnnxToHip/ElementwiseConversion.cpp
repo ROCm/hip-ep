@@ -57,8 +57,7 @@ AddToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
-  auto hipOp =
-      mlir::hip::AddOp::create(rewriter, loc, resultType, context, a, b, init);
+  auto hipOp = mlir::hip::AddOp::create(rewriter, loc, context, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -83,8 +82,7 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
-  auto hipOp =
-      mlir::hip::MulOp::create(rewriter, loc, resultType, context, a, b, init);
+  auto hipOp = mlir::hip::MulOp::create(rewriter, loc, context, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -107,8 +105,8 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   auto lhsType = mlir::cast<mlir::RankedTensorType>(lhs.getType());
   mlir::Value source = (lhsType.getRank() == resultType.getRank()) ? lhs : rhs;
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
-  auto hipOp = mlir::hip::SubOp::create(rewriter, loc, resultType, context, lhs,
-                                        rhs, init);
+  auto hipOp =
+      mlir::hip::SubOp::create(rewriter, loc, context, lhs, rhs, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

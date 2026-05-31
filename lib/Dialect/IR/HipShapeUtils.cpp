@@ -154,3 +154,83 @@ mlir::hip::reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source) {
     dims.push_back(reifyDimOrConstant(b, loc, shape[i], source, i));
   return dims;
 }
+
+SmallVector<OpFoldResult>
+mlir::hip::reifyBroadcastShape(OpBuilder &b, Location loc,
+                               ValueRange operands) {
+  if (operands.empty())
+    return {};
+
+  // Collect operand shapes; bail if any is non-ranked (verifier should
+  // already have caught this on the op).
+  SmallVector<ArrayRef<int64_t>> shapes;
+  shapes.reserve(operands.size());
+  for (Value v : operands) {
+    auto t = dyn_cast<RankedTensorType>(v.getType());
+    if (!t)
+      return {};
+    shapes.push_back(t.getShape());
+  }
+
+  // Compute the broadcast result shape via sequential pairwise reduction.
+  // `getBroadcastedShape` follows NumPy/ONNX semantics:
+  //   - 1 broadcasts against any other dim
+  //   - dynamic + static>1 -> static (the strictly-correct tightening,
+  //     since the dynamic side must equal the static side at runtime)
+  //   - dynamic + dynamic -> dynamic
+  //   - equal static -> static; unequal non-1 static -> failure
+  SmallVector<int64_t> outShape(shapes[0].begin(), shapes[0].end());
+  for (size_t k : llvm::seq<size_t>(1, shapes.size())) {
+    SmallVector<int64_t> tmp;
+    if (!OpTrait::util::getBroadcastedShape(outShape, shapes[k], tmp))
+      return {};
+    outShape = std::move(tmp);
+  }
+
+  size_t outRank = outShape.size();
+  // Right-alignment padding per operand (operand `k` doesn't reach output
+  // dims in `[0, pads[k])`; those positions are an implicit 1 contribution).
+  SmallVector<size_t> pads(operands.size());
+  for (size_t k : llvm::seq<size_t>(0, operands.size()))
+    pads[k] = outRank - shapes[k].size();
+
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(outRank);
+  for (size_t i : llvm::seq<size_t>(0, outRank)) {
+    // Pick the operand to reify this dim against:
+    //   1. earliest operand that is in-range AND has a non-1 dim
+    //      (that operand actually determines the runtime extent;
+    //      `tensor.dim %that, i` folds to the constant when that
+    //      operand's dim is static)
+    //   2. else earliest operand that is in-range (all in-range
+    //      operands have a 1 here, so reifying against any of them
+    //      is correct; first wins for stability)
+    //   3. else operand 0 dim 0 — defensive fallback that should be
+    //      unreachable when the broadcast result rank == max input rank.
+    Value bestSrc;
+    size_t bestSrcDim = 0;
+    bool foundCanonical = false;
+    for (size_t k : llvm::seq<size_t>(0, operands.size())) {
+      if (i < pads[k])
+        continue;
+      size_t kDim = i - pads[k];
+      if (!bestSrc) {
+        bestSrc = operands[k];
+        bestSrcDim = kDim;
+      }
+      if (shapes[k][kDim] != 1) {
+        bestSrc = operands[k];
+        bestSrcDim = kDim;
+        foundCanonical = true;
+        break;
+      }
+    }
+    (void)foundCanonical;
+    if (!bestSrc) {
+      bestSrc = operands[0];
+      bestSrcDim = 0;
+    }
+    dims.push_back(reifyDimOrConstant(b, loc, outShape[i], bestSrc, bestSrcDim));
+  }
+  return dims;
+}
