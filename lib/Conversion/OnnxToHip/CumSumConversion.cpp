@@ -38,10 +38,10 @@ struct CumSumToHip : public mlir::RewritePattern {
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("reverse"))
       reverse = attr.getValue().getSExtValue();
 
-    auto hipOp = mlir::hip::CumSumOp::create(
-        rewriter, loc, context, x, axis, init,
-        rewriter.getI64IntegerAttr(exclusive),
-        rewriter.getI64IntegerAttr(reverse));
+    auto hipOp =
+        mlir::hip::CumSumOp::create(rewriter, loc, context, x, axis, init,
+                                    rewriter.getI64IntegerAttr(exclusive),
+                                    rewriter.getI64IntegerAttr(reverse));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

@@ -233,10 +233,9 @@ struct RangeToHip : public RewritePattern {
                                      elemTy, ValueRange{});
     }
 
-    auto rangeOp = mlir::hip::RangeOp::create(rewriter, loc, ctx,
-                                              op->getOperand(0),
-                                              op->getOperand(1),
-                                              op->getOperand(2), init);
+    auto rangeOp =
+        mlir::hip::RangeOp::create(rewriter, loc, ctx, op->getOperand(0),
+                                   op->getOperand(1), op->getOperand(2), init);
     rewriter.replaceOp(op, rangeOp->getResult(0));
     return success();
   }
