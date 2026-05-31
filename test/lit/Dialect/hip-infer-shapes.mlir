@@ -354,3 +354,62 @@ func.func @noop_on_size_rank_zero(%ctx: !hip.context,
     : tensor<i64>
   return %y : tensor<i64>
 }
+
+// -----
+
+// 2-operand broadcast ops (miopen.add, mul, add, min, div, equal, and,
+// sub, less, mod) all reify their result shape via NumPy broadcast over
+// both inputs — covered here by `hip.add` as a representative. The
+// canonical-side pick is exercised: lhs=<?x4> contributes the static `4`
+// at dim 1, rhs=<2x?> contributes the static `2` at dim 0, so the
+// fully-dynamic result type tightens to `tensor<2x4xf16>`.
+//
+// Note: `hip.add` uses a custom assembly format (alongside `hip.mul`
+// and `hip.miopen.add`) that emits the result type with `-> type`, not
+// `: type` — the latter is the TableGen `assemblyFormat` convention
+// used by the other commit-2 broadcast ops (min, div, equal, and, sub,
+// where, less, mod) and by `hip.matmul`.
+// CHECK-LABEL: func.func @refine_add_broadcast_canonical_pick
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x4xf16>
+// CHECK:         %[[Y:.*]] = hip.add
+// CHECK-SAME:                  outs(%[[E]] : tensor<2x4xf16>) -> tensor<2x4xf16>
+// CHECK:         tensor.cast %[[Y]] : tensor<2x4xf16> to tensor<?x?xf16>
+func.func @refine_add_broadcast_canonical_pick(%ctx: !hip.context,
+                                                %lhs: tensor<?x4xf16>,
+                                                %rhs: tensor<2x?xf16>,
+                                                %d0: index, %d1: index)
+    -> tensor<?x?xf16> {
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf16>
+  %y = hip.add(%ctx)
+    ins(%lhs, %rhs : tensor<?x4xf16>, tensor<2x?xf16>)
+    outs(%e : tensor<?x?xf16>)
+    -> tensor<?x?xf16>
+  return %y : tensor<?x?xf16>
+}
+
+// -----
+
+// 3-operand `hip.where` reifies its result shape via NumPy broadcast over
+// `condition`, `x`, `y`. With cond=<1x4xi1>, x=<2x1xf32>, y=<2x4xf32>,
+// the broadcast result is `tensor<2x4xf32>` — `where` is the only
+// commit-2 op with a non-binary input list, so it gets its own LIT case
+// to guard the variadic helper path. `hip.where` uses TableGen
+// `assemblyFormat` so the trailing result type is printed with `:`.
+// CHECK-LABEL: func.func @refine_where_3operand_broadcast
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x4xf32>
+// CHECK:         %[[Y:.*]] = hip.where
+// CHECK-SAME:                  outs(%[[E]] : tensor<2x4xf32>) : tensor<2x4xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<2x4xf32> to tensor<?x?xf32>
+func.func @refine_where_3operand_broadcast(%ctx: !hip.context,
+                                            %cond: tensor<1x4xi1>,
+                                            %x: tensor<2x1xf32>,
+                                            %y: tensor<2x4xf32>,
+                                            %d0: index, %d1: index)
+    -> tensor<?x?xf32> {
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+  %out = hip.where(%ctx)
+    ins(%cond, %x, %y : tensor<1x4xi1>, tensor<2x1xf32>, tensor<2x4xf32>)
+    outs(%e : tensor<?x?xf32>)
+    : tensor<?x?xf32>
+  return %out : tensor<?x?xf32>
+}
