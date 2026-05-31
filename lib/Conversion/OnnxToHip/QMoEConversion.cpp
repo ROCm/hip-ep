@@ -163,14 +163,15 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, input);
 
+  // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
+  // result type == outs operand type.
   auto hipOp = mlir::hip::QMoEOp::create(
-      rewriter, loc, mlir::TypeRange{rt}, context, input, routerProbs,
-      fc1Weights, fc1Scales, fc2Weights, fc2Scales, fc1Bias, fc2Bias,
-      fc3Weights, fc3Scales, fc3Bias, fc1ZeroPoints, fc2ZeroPoints,
-      fc3ZeroPoints, routerWeights, init, expertWeightBitsAttr, kAttr,
-      blockSizeAttr, normalizeAttr, swigluFusionAttr, useSparseAttr,
-      activationAlphaAttr, activationBetaAttr, swigluLimitAttr,
-      activationTypeAttr);
+      rewriter, loc, context, input, routerProbs, fc1Weights, fc1Scales,
+      fc2Weights, fc2Scales, fc1Bias, fc2Bias, fc3Weights, fc3Scales, fc3Bias,
+      fc1ZeroPoints, fc2ZeroPoints, fc3ZeroPoints, routerWeights, init,
+      expertWeightBitsAttr, kAttr, blockSizeAttr, normalizeAttr,
+      swigluFusionAttr, useSparseAttr, activationAlphaAttr, activationBetaAttr,
+      swigluLimitAttr, activationTypeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }

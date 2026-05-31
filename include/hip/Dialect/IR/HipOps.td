@@ -475,7 +475,11 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
 // Quantized Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits", [AttrSizedOperandSegments]> {
+def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
+       ["reifyResultShapes"]>]> {
   let summary = "Quantized N-bit matrix multiplication (com.microsoft MatMulNBits)";
   let description = [{
     Performs matrix multiplication with N-bit quantized weights.
@@ -536,7 +540,11 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
+def Hip_QMoEOp : Hip_DpsOp<"qmoe",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
+       ["reifyResultShapes"]>]> {
   let summary = "Quantized Mixture-of-Experts (com.microsoft QMoE)";
   let description = [{
     Implements the com.microsoft QMoE operator (ONNX v1.25+ compatible): quantized
@@ -632,7 +640,10 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
+def Hip_RmsNormOp : Hip_DpsOp<"rms_norm",
+    [DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
+       ["reifyResultShapes"]>]> {
   let summary = "RMS normalization via miopenT5LayerNormForward";
   let description = [{
     Applies simplified (RMS) layer normalization.
@@ -847,7 +858,10 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
   let hasVerifier = 1;
 }
 
-def Hip_RopeOp : Hip_DpsOp<"rope"> {
+def Hip_RopeOp : Hip_DpsOp<"rope",
+    [DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
+       ["reifyResultShapes"]>]> {
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
@@ -2215,7 +2229,10 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   }];
 }
 
-def Hip_GemmOp : Hip_DpsOp<"gemm">{
+def Hip_GemmOp : Hip_DpsOp<"gemm",
+    [DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
+       ["reifyResultShapes"]>]> {
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:

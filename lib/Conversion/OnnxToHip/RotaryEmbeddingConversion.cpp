@@ -142,10 +142,11 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   // Create init tensor
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
-  // Create hip.rope operation
+  // Create hip.rope operation. Result type inferred from `init` via
+  // InferTypeOpInterface — DPS contract: result type == outs operand type.
   auto hipOp = mlir::hip::RopeOp::create(
-      rewriter, loc, resultType, context, input, positionIds, cosCache,
-      sinCache, init, interleavedI64Attr, numHeadsI64Attr, rotaryDimI64Attr);
+      rewriter, loc, context, input, positionIds, cosCache, sinCache, init,
+      interleavedI64Attr, numHeadsI64Attr, rotaryDimI64Attr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
