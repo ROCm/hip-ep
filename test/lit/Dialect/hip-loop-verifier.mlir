@@ -36,8 +36,8 @@ func.func @loop_dynamic_v_init_ok(%ctx: !hip.context,
 // Negative case: result type is rank-0 (under-refined), v_init is rank-3
 // dynamic (refined). `LoopOp::inferReturnTypes` would have produced
 // rank-3 here; manually supplying rank-0 is the historical bug pattern
-// (canonical trigger: dynamic-shape vision-encoder exports that leave
-// loop result types under-refined relative to v_init operands).
+// (the importer leaves loop result types as rank-0 placeholders while
+// upstream shape inference has already refined v_init).
 func.func private @loop_body_mismatch(%ctx: !hip.context,
                                       %iter: index,
                                       %cond_in: i1,
