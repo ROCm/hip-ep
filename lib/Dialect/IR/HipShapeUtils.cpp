@@ -390,11 +390,7 @@ LogicalResult mlir::hip::reifyReductionWithKeepdims(
     }
     // Reduce all axes: every dim is reduced.
     if (keepdims) {
-      out.reserve(dataRank);
-      for (int64_t i : llvm::seq<int64_t>(0, dataRank)) {
-        (void)i;
-        out.push_back(b.getIndexAttr(1));
-      }
+      out.append(dataRank, b.getIndexAttr(1));
       return success();
     }
     // keepdims=0: output is rank-0 — `out` stays empty (a valid result).

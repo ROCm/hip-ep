@@ -679,8 +679,12 @@ ModOp::reifyResultShapes(OpBuilder &b,
 //  doesn't add signal beyond what's already on the result type, but
 //  keeps every Hip_DpsOp wired with a non-failing reify implementation
 //  (the contract a future backward dim-origin composer relies on).
-//  Proper per-op shape arithmetic for these five is deferred to a
-//  follow-up PR.
+//  This mirrors the upstream IREE convention: `LinalgExtOp`'s default
+//  `reifyResultShapes` walks `getDpsInits()` and lifts each output's
+//  shape — the same fallback we use here for ops without a specialized
+//  arithmetic helper. Proper per-op arithmetic for these five (e.g.
+//  `tensor::PadOp`'s `affine.apply (d0 + d1 + d2)` recipe) is deferred
+//  to a follow-up PR.
 //
 // Before (transpose, perm-driven mapping, Tier 1):
 //   %t = hip.transpose(%ctx) ins(%x : tensor<2x?x4096xf16>)
@@ -701,6 +705,17 @@ ModOp::reifyResultShapes(OpBuilder &b,
 // After (reified result shape):
 //   dim 0 -> tensor.dim %x, %c0     (passes through from input)
 //   dim 1 -> 1 : index              (axes-listed dim → keepdims=1 → 1)
+//
+// Before (pad, Tier-2 no-op fallback — pad arithmetic deferred):
+//   %p = hip.pad(%ctx) ins(%x, %pads : tensor<?x4096xf16>,
+//                                       tensor<4xi64>)
+//                      outs(%out : tensor<?x4100xf16>)
+//                      {mode = "constant"} : tensor<?x4100xf16>
+// After (reified result shape — lifted from `%out`, not computed):
+//   dim 0 -> tensor.dim %out, %c0   (dynamic dim of `outs`; folds away
+//                                    if a downstream consumer already
+//                                    knows the result type)
+//   dim 1 -> 4100 : index           (static dim of `outs`)
 //===----------------------------------------------------------------------===//
 
 LogicalResult TransposeOp::reifyResultShapes(
@@ -763,40 +778,6 @@ LogicalResult GatherNDOp::reifyResultShapes(
 
 namespace {
 
-// Shared reduction reify body. Tries `reifyReductionWithKeepdims`; if
-// that fails (axes is not a recognised constant), falls back to
-// `reifyElementwiseSameShape` against the DPS `outs` operand so the
-// reify interface still succeeds.
-LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
-                                  Value axes, int64_t keepdims,
-                                  int64_t noopWithEmptyAxes, Value output,
-                                  Operation *op,
-                                  ReifiedRankedShapedTypeDims &out) {
-  if (op->getNumResults() == 0)
-    return failure();
-  if (!isa<RankedTensorType>(data.getType()) ||
-      !isa<RankedTensorType>(output.getType()))
-    return failure();
-
-  SmallVector<OpFoldResult> dims;
-  if (succeeded(mlir::hip::reifyReductionWithKeepdims(
-          b, loc, data, axes, keepdims, noopWithEmptyAxes, dims))) {
-    out.assign({std::move(dims)});
-    return success();
-  }
-
-  // Fallback: lift the DPS `outs` operand's own shape (no extra signal
-  // beyond what `outs` already carries, but the reify call always
-  // succeeds — see Tier-2 fallback comment above).
-  SmallVector<OpFoldResult> fallback =
-      mlir::hip::reifyElementwiseSameShape(b, loc, output);
-  if (fallback.empty() &&
-      cast<RankedTensorType>(output.getType()).getRank() != 0)
-    return failure();
-  out.assign({std::move(fallback)});
-  return success();
-}
-
 // Shared Tier-2 fallback for shape-changing ops without per-op
 // arithmetic helpers: just lift the DPS `outs` operand's own shape.
 // Static dims fall out as `IndexAttr`; dynamic dims emit
@@ -818,6 +799,29 @@ LogicalResult reifyDpsOutShape(OpBuilder &b, Location loc, Value output,
     return failure();
   out.assign({std::move(dims)});
   return success();
+}
+
+// Shared reduction reify body. Tries `reifyReductionWithKeepdims`; if
+// that fails (axes is not a recognised constant), falls back to the
+// Tier-2 `reifyDpsOutShape` so the reify interface still succeeds.
+LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
+                                  Value axes, int64_t keepdims,
+                                  int64_t noopWithEmptyAxes, Value output,
+                                  Operation *op,
+                                  ReifiedRankedShapedTypeDims &out) {
+  if (op->getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(data.getType()) ||
+      !isa<RankedTensorType>(output.getType()))
+    return failure();
+
+  SmallVector<OpFoldResult> dims;
+  if (succeeded(mlir::hip::reifyReductionWithKeepdims(
+          b, loc, data, axes, keepdims, noopWithEmptyAxes, dims))) {
+    out.assign({std::move(dims)});
+    return success();
+  }
+  return reifyDpsOutShape(b, loc, output, op, out);
 }
 
 } // namespace
