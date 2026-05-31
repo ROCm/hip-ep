@@ -507,3 +507,143 @@ SizeOp::reifyResultShapes(OpBuilder & /*b*/,
   reifiedReturnShapes.assign({SmallVector<OpFoldResult>{}});
   return success();
 }
+
+//===----------------------------------------------------------------------===//
+// Broadcast elementwise ops: miopen.add, mul, add, min, div, equal, and,
+// sub, where, less, mod
+//
+// All these ops take 2-3 broadcast-compatible input operands and write
+// their NumPy-broadcast result into `outs`. The output rank equals the
+// max input rank and each output dim is determined by whichever operand
+// contributes a non-1 value at that position (right-aligned).
+// `reifyBroadcastShape` lifts each output dim to an `OpFoldResult`:
+// static dims become `IndexAttr`; dynamic dims become `tensor.dim`
+// against whichever operand actually contributes the runtime extent.
+//
+// Output element type is independent of this reify path — comparisons
+// (equal, less) emit i1 outs while their operands are typically f32/f16,
+// and `where` mixes an i1 condition with f32/f16 x/y. Reify only walks
+// shapes; the dtype lives on `outs` and is set by the converter.
+//
+// Before (typical canonical case):
+//   %add = hip.add(%ctx) ins(%lhs, %rhs : tensor<1x?x4096xf16>,
+//                                          tensor<?x1x4096xf16>)
+//                        outs(%out : tensor<?x?x4096xf16>) : tensor<?x?x4096xf16>
+//   %d0 = tensor.dim %add, %c0
+//   %d1 = tensor.dim %add, %c1
+// After (reified, then folded by tensor.dim folder):
+//   dim 0 dynamic -> tensor.dim %rhs, %c0  (rhs.shape[0]=? != 1, canonical)
+//   dim 1 dynamic -> tensor.dim %lhs, %c1  (lhs.shape[1]=? != 1, canonical)
+//   dim 2 static  -> arith.constant 4096
+//
+// Before (3-operand `where`):
+//   %sel = hip.where(%ctx) ins(%cond, %x, %y : tensor<1x4xi1>,
+//                                              tensor<2x1xf32>,
+//                                              tensor<2x4xf32>)
+//                          outs(%out : tensor<2x4xf32>) : tensor<2x4xf32>
+// After (reified result shape):
+//   dim 0 static -> 2 (canonical: from %x or %y)
+//   dim 1 static -> 4 (canonical: from %cond or %y)
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+// Common shape: every broadcast op below differs only in (a) the input
+// operand list and (b) which getter names that list. Centralizing the
+// guard + `reifyBroadcastShape` call keeps each op's reify thunk a
+// one-liner against a `ValueRange` slice.
+LogicalResult
+reifyBroadcastShapeFor(OpBuilder &b, Location loc, ValueRange operands,
+                       Operation *op,
+                       ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (op->getNumResults() == 0)
+    return failure();
+  for (Value v : operands)
+    if (!isa<RankedTensorType>(v.getType()))
+      return failure();
+  SmallVector<OpFoldResult> dims =
+      mlir::hip::reifyBroadcastShape(b, loc, operands);
+  if (dims.empty())
+    return failure();
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+} // namespace
+
+LogicalResult MiopenAddOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getA(), getB()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+MulOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+AddOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+MinOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+DivOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+EqualOp::reifyResultShapes(OpBuilder &b,
+                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+AndOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+SubOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+WhereOp::reifyResultShapes(OpBuilder &b,
+                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(),
+                                {getCondition(), getX(), getY()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+LessOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}
+
+LogicalResult
+ModOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  return reifyBroadcastShapeFor(b, getLoc(), {getLhs(), getRhs()}, *this,
+                                reifiedReturnShapes);
+}

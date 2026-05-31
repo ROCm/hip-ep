@@ -921,7 +921,11 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   }];
 }
 
-def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
+def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add", /*traits=*/[],
+                                /*outsAccessor=*/"C",
+                                /*autoReify=*/0,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
   let summary = "Element-wise add via miopenOpTensor(miopenTensorOpAdd)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -934,7 +938,11 @@ def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
   let hasVerifier = 1;
 }
 
-def Hip_MulOp : Hip_DpsOp<"mul"> {
+def Hip_MulOp : Hip_DpsOp<"mul", /*traits=*/[],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Elementwise multiplication";
   let description = [{
     Performs elementwise multiplication: output = lhs * rhs
@@ -961,7 +969,11 @@ def Hip_MulOp : Hip_DpsOp<"mul"> {
   let hasVerifier = 1;
 }
 
-def Hip_AddOp : Hip_DpsOp<"add"> {
+def Hip_AddOp : Hip_DpsOp<"add", /*traits=*/[],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Elementwise addition";
   let description = [{
     Performs elementwise addition: output = lhs + rhs
@@ -988,7 +1000,11 @@ def Hip_AddOp : Hip_DpsOp<"add"> {
   let hasVerifier = 1;
 }
 
-def Hip_MinOp : Hip_DpsOp<"min"> {
+def Hip_MinOp : Hip_DpsOp<"min", /*traits=*/[],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Elementwise minimum";
   let description = [{
     Performs elementwise minimum: output = min(lhs, rhs)
@@ -1314,7 +1330,11 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
   }];
 }
 
-def Hip_DivOp : Hip_DpsOp<"div"> {
+def Hip_DivOp : Hip_DpsOp<"div", /*traits=*/[],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Elementwise division";
   let description = [{
     Performs elementwise division: output = lhs / rhs
@@ -1345,7 +1365,11 @@ def Hip_DivOp : Hip_DpsOp<"div"> {
   }];
 }
 
-def Hip_EqualOp : Hip_DpsOp<"equal"> {
+def Hip_EqualOp : Hip_DpsOp<"equal", /*traits=*/[],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/0,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
   let summary = "Element-wise equality comparison: c = (a == b)";
   let description = [{
     Compares two input tensors element-wise for equality.
@@ -1377,7 +1401,11 @@ def Hip_EqualOp : Hip_DpsOp<"equal"> {
   }];
 }
 
-def Hip_AndOp : Hip_DpsOp<"and"> {
+def Hip_AndOp : Hip_DpsOp<"and", /*traits=*/[],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise logical AND: c = a && b";
   let description = [{
     Computes element-wise logical AND of two boolean tensors (i1).
@@ -1547,7 +1575,11 @@ def Hip_NegOp : Hip_DpsOp<"neg", /*traits=*/[],
   }];
 }
 
-def Hip_SubOp : Hip_DpsOp<"sub"> {
+def Hip_SubOp : Hip_DpsOp<"sub", /*traits=*/[],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Elementwise subtraction";
   let description = [{
     Performs elementwise subtraction: output = lhs - rhs
@@ -1578,7 +1610,11 @@ def Hip_SubOp : Hip_DpsOp<"sub"> {
   }];
 }
 
-def Hip_WhereOp : Hip_DpsOp<"where"> {
+def Hip_WhereOp : Hip_DpsOp<"where", /*traits=*/[],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/0,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
   let summary = "Elementwise selection: output = condition ? x : y";
   let description = [{
     Implements ONNX Where: output[i] = condition[i] ? x[i] : y[i].
@@ -2521,7 +2557,11 @@ def Hip_ReduceProdOp : Hip_DpsOp<"reduce_prod"> {
   }];
 }
 
-def Hip_LessOp : Hip_DpsOp<"less"> {
+def Hip_LessOp : Hip_DpsOp<"less", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Element-wise less-than comparison: c = (a < b)";
   let description = [{
     Compares two input tensors element-wise. Output is a boolean tensor (i1)
@@ -2736,7 +2776,11 @@ def Hip_SignOp : Hip_DpsOp<"sign", /*traits=*/[],
   }];
 }
 
-def Hip_ModOp : Hip_DpsOp<"mod"> {
+def Hip_ModOp : Hip_DpsOp<"mod", /*traits=*/[],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise modulo / fmod operation";
   let description = [{
     Performs element-wise binary modulo. Implements the standard ONNX Mod

@@ -83,6 +83,31 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
                                                     Value source);
 
+/// Compute the NumPy-broadcast result shape over `operands` and lift each
+/// output dim to an `OpFoldResult`. Static result dims become `IndexAttr`
+/// (no IR emitted); dynamic result dims become `tensor.dim` against
+/// whichever operand contributes the runtime extent — right-aligned, and
+/// preferring the canonical side (in-range and != 1) when multiple
+/// operands could contribute. The canonical-side preference matches the
+/// batch-dim contract in `MatmulOp::reifyResultShapes` and ensures that
+/// a future `tensor.dim` of the result folds back to the operand that
+/// actually determines the size at runtime.
+///
+/// Used by elementwise ops that take broadcast-shape operands and write
+/// the broadcast result into their `outs` (add, mul, sub, div, min, mod,
+/// equal, less, and, where, ...). The output dtype is taken from the
+/// op's `outs` operand and is independent of this helper — comparisons
+/// (equal, less) emit i1 outs while the operands are typically f32/f16,
+/// and the helper handles both cases identically (it only looks at
+/// shapes).
+///
+/// All operands must be `RankedTensorType`-typed Values (the interface
+/// contract for `reifyResultShapes` callers). Returns an empty vector
+/// if broadcast fails — verifiers should already have caught this, but
+/// reify bails defensively to avoid materializing nonsense IR.
+SmallVector<OpFoldResult>
+reifyBroadcastShape(OpBuilder &b, Location loc, ValueRange operands);
+
 } // namespace hip
 } // namespace mlir
 
