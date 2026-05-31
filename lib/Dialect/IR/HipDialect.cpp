@@ -166,11 +166,11 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 //
 // Memref-mode v_init produces 0 result types (DPS post-bufferization
 // convention; the verifier rejects mixed mode anyway).
-LogicalResult LoopOp::inferReturnTypes(
-    MLIRContext *context, std::optional<Location> location,
-    ValueRange operands, DictionaryAttr attributes,
-    OpaqueProperties properties, RegionRange regions,
-    SmallVectorImpl<Type> &inferredReturnTypes) {
+LogicalResult
+LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                         ValueRange operands, DictionaryAttr attributes,
+                         OpaqueProperties properties, RegionRange regions,
+                         SmallVectorImpl<Type> &inferredReturnTypes) {
   LoopOpAdaptor adaptor(operands, attributes, properties, regions);
   auto vInit = adaptor.getVInit();
   inferredReturnTypes.reserve(vInit.size());
