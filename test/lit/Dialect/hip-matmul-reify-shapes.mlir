@@ -3,6 +3,35 @@
 
 // RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
 
+// What this file tests
+// --------------------
+// `MatmulOp::reifyResultShapes` (in lib/Dialect/IR/HipReifyResultShapesImpl.cpp)
+// — i.e. the PRODUCER side of `ReifyRankedShapedTypeOpInterface` for
+// `hip.matmul`. Validates that for any operand-shape combination (static,
+// dynamic batch, dynamic M, dynamic N, broadcast) it returns a correct
+// per-dim `OpFoldResult`: an `IntegerAttr` for static dims, and a
+// `tensor.dim` of the right operand at the right local index for dynamic dims.
+//
+// What this file does NOT test
+// ----------------------------
+// `--hip-infer-shapes` — the production pass that consumes these
+// `OpFoldResult`s to refine result types and rebuild `tensor.empty`
+// producers. Pass-level behavior (composeRefinedShape, cast barriers,
+// DPS-init exemption) is covered by `hip-infer-shapes.mlir`.
+//
+// Why this test exists in addition to the pass test
+// -------------------------------------------------
+// `--hip-infer-shapes` only consumes the *constant* branch of each
+// `OpFoldResult` (via `getConstantIntValue`); it silently discards
+// dynamic ones. A bug in reify's dynamic-dim source-picking (wrong
+// operand chosen, wrong local dim index, or a malformed `tensor.dim`
+// emitted) is therefore invisible to the pass test. Upstream's
+// `--resolve-shaped-type-result-dims` materializes every `OpFoldResult`
+// — static and dynamic — into IR that FileCheck can inspect, exposing
+// those bugs. The upstream pass is used here purely as a generic
+// producer-contract validator; it is not part of the production
+// pipeline.
+
 // CHECK-LABEL: func.func @reify_2d_static
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index

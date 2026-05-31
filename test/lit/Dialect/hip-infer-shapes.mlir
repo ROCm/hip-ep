@@ -3,6 +3,40 @@
 
 // RUN: hip-mlir-opt --hip-infer-shapes %s | FileCheck %s
 
+// What this file tests
+// --------------------
+// The `--hip-infer-shapes` production pass (lib/Dialect/Transforms/
+// InferShapesPass.cpp) — i.e. the CONSUMER side of
+// `ReifyRankedShapedTypeOpInterface` for HIP ops. Specifically:
+//
+//   - composing a refined result type by combining the current type
+//     with the constant branches of each reified `OpFoldResult`
+//     (`refine_single_matmul`, `refine_chained_matmul`),
+//   - in-place SSA value-type narrowing and `tensor.empty` producer
+//     rebuild when the producer is a single-use `tensor.empty`
+//     (`refine_single_matmul`, `refine_chained_matmul`),
+//   - leaving the producer alone when it is something else
+//     (`skip_non_empty_producer`),
+//   - early-out on already-static results (`noop_on_static`),
+//   - filtering to ops in the `hip` dialect (`skip_non_hip_op`),
+//   - inserting `tensor.cast` barriers on non-DPS uses while exempting
+//     DPS-init uses so chains like
+//     `matmul -> tensor.empty -> matmul` propagate refinement through
+//     all links.
+//
+// What this file does NOT test
+// ----------------------------
+// The correctness of the `OpFoldResult`s produced by individual reify
+// implementations — in particular, the dynamic-dim branch of
+// `MatmulOp::reifyResultShapes` (which operand a dynamic dim is taken
+// from, and at which local dim index). This pass only consumes the
+// *constant* branch of each `OpFoldResult`; dynamic ones are silently
+// discarded. That branch is covered by `hip-matmul-reify-shapes.mlir`,
+// which uses upstream's `--resolve-shaped-type-result-dims` as a
+// generic producer-contract validator (the upstream pass materializes
+// every reified `OpFoldResult` — static and dynamic — into IR and is
+// not itself part of our production pipeline).
+
 // CHECK-LABEL: func.func @refine_single_matmul
 // CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x8xf16>
 // CHECK:         %[[Y:.*]] = hip.matmul
