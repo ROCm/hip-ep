@@ -14,12 +14,16 @@
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Traits.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
@@ -233,4 +237,189 @@ mlir::hip::reifyBroadcastShape(OpBuilder &b, Location loc,
     dims.push_back(reifyDimOrConstant(b, loc, outShape[i], bestSrc, bestSrcDim));
   }
   return dims;
+}
+
+SmallVector<OpFoldResult>
+mlir::hip::reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
+                                ArrayRef<int64_t> perm) {
+  auto inputType = dyn_cast<RankedTensorType>(input.getType());
+  if (!inputType)
+    return {};
+  ArrayRef<int64_t> inputShape = inputType.getShape();
+  int64_t rank = inputType.getRank();
+  if (static_cast<int64_t>(perm.size()) != rank)
+    return {};
+
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(perm.size());
+  for (int64_t pi : perm) {
+    if (pi < 0 || pi >= rank)
+      return {};
+    dims.push_back(reifyDimOrConstant(b, loc, inputShape[pi], input, pi));
+  }
+  return dims;
+}
+
+SmallVector<OpFoldResult>
+mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
+                               Value indices, int64_t axis) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
+  if (!dataType || !indicesType)
+    return {};
+  int64_t dataRank = dataType.getRank();
+  int64_t indicesRank = indicesType.getRank();
+  // Negative-axis normalization (ONNX convention).
+  if (axis < 0)
+    axis += dataRank;
+  if (axis < 0 || axis >= dataRank)
+    return {};
+
+  ArrayRef<int64_t> dataShape = dataType.getShape();
+  ArrayRef<int64_t> indicesShape = indicesType.getShape();
+
+  // Output = data.shape[:axis] ++ indices.shape ++ data.shape[axis+1:].
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(dataRank - 1 + indicesRank);
+  for (int64_t i : llvm::seq<int64_t>(0, axis))
+    dims.push_back(reifyDimOrConstant(b, loc, dataShape[i], data, i));
+  for (int64_t i : llvm::seq<int64_t>(0, indicesRank))
+    dims.push_back(reifyDimOrConstant(b, loc, indicesShape[i], indices, i));
+  for (int64_t i : llvm::seq<int64_t>(axis + 1, dataRank))
+    dims.push_back(reifyDimOrConstant(b, loc, dataShape[i], data, i));
+  return dims;
+}
+
+SmallVector<OpFoldResult>
+mlir::hip::reifyGatherND(OpBuilder &b, Location loc, Value data, Value indices,
+                         int64_t batchDims) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
+  if (!dataType || !indicesType)
+    return {};
+  int64_t dataRank = dataType.getRank();
+  int64_t indicesRank = indicesType.getRank();
+  if (indicesRank < 1)
+    return {};
+  ArrayRef<int64_t> dataShape = dataType.getShape();
+  ArrayRef<int64_t> indicesShape = indicesType.getShape();
+
+  // Trailing-tuple width must be statically known — it determines the
+  // output rank (`q + r - tupleWidth - 1 - batch_dims`) and we can't
+  // synthesise a rank with a dynamic count of dim entries.
+  int64_t tupleWidth = indicesShape[indicesRank - 1];
+  if (ShapedType::isDynamic(tupleWidth))
+    return {};
+  if (batchDims < 0 || batchDims > indicesRank - 1 ||
+      batchDims + tupleWidth > dataRank)
+    return {};
+
+  // Output = data.shape[:batch_dims] (the shared batch prefix) ++
+  //          indices.shape[batch_dims:-1] (the gathered tuple count) ++
+  //          data.shape[batch_dims + tupleWidth:] (the per-element slice).
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(batchDims + (indicesRank - 1 - batchDims) +
+               (dataRank - batchDims - tupleWidth));
+  for (int64_t i : llvm::seq<int64_t>(0, batchDims))
+    dims.push_back(reifyDimOrConstant(b, loc, dataShape[i], data, i));
+  for (int64_t i : llvm::seq<int64_t>(batchDims, indicesRank - 1))
+    dims.push_back(reifyDimOrConstant(b, loc, indicesShape[i], indices, i));
+  for (int64_t i : llvm::seq<int64_t>(batchDims + tupleWidth, dataRank))
+    dims.push_back(reifyDimOrConstant(b, loc, dataShape[i], data, i));
+  return dims;
+}
+
+namespace {
+
+/// Try to extract the integer values from a rank-0 / rank-1 i64 / i32
+/// tensor that came in via `arith.constant` with a `DenseIntElementsAttr`.
+/// Returns true on success and writes the values into `out`. Returns false
+/// for any pattern we don't recognise — caller falls back gracefully.
+///
+/// The reduce / pad / tile / expand converters in `lib/Conversion/OnnxToHip/`
+/// materialize axes / pads / repeats / shape operands as `arith.constant`
+/// with `DenseIntElementsAttr` when the ONNX node carries a constant
+/// attribute or a folded constant initializer — that is the case this
+/// helper recognises. Anything else (a runtime input, an unfolded chain
+/// of arith ops) is intentionally left alone so reify falls through to
+/// the no-op fallback.
+bool extractConstantInts(Value v, SmallVectorImpl<int64_t> &out) {
+  out.clear();
+  IntegerAttr intAttr;
+  DenseIntElementsAttr denseAttr;
+  if (matchPattern(v, m_Constant(&intAttr))) {
+    out.push_back(intAttr.getInt());
+    return true;
+  }
+  if (matchPattern(v, m_Constant(&denseAttr))) {
+    for (APInt e : denseAttr.getValues<APInt>())
+      out.push_back(e.getSExtValue());
+    return true;
+  }
+  return false;
+}
+
+} // namespace
+
+LogicalResult mlir::hip::reifyReductionWithKeepdims(
+    OpBuilder &b, Location loc, Value data, Value axes, int64_t keepdims,
+    int64_t noopWithEmptyAxes, SmallVectorImpl<OpFoldResult> &out) {
+  out.clear();
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType)
+    return failure();
+  ArrayRef<int64_t> dataShape = dataType.getShape();
+  int64_t dataRank = dataType.getRank();
+
+  // Axes operand: try to fold to a constant int vector. ONNX semantics
+  // allow a size-0 vector to mean "no axes specified" — combined with the
+  // `noop_with_empty_axes` attribute that selects between "no-op" and
+  // "reduce all axes".
+  SmallVector<int64_t> axesList;
+  if (!extractConstantInts(axes, axesList))
+    return failure();
+
+  // Empty axes branch: "no axes specified" semantics.
+  if (axesList.empty()) {
+    if (noopWithEmptyAxes != 0) {
+      // No-op: output == data shape.
+      out.reserve(dataRank);
+      for (int64_t i : llvm::seq<int64_t>(0, dataRank))
+        out.push_back(reifyDimOrConstant(b, loc, dataShape[i], data, i));
+      return success();
+    }
+    // Reduce all axes: every dim is reduced.
+    if (keepdims) {
+      out.reserve(dataRank);
+      for (int64_t i : llvm::seq<int64_t>(0, dataRank)) {
+        (void)i;
+        out.push_back(b.getIndexAttr(1));
+      }
+      return success();
+    }
+    // keepdims=0: output is rank-0 — `out` stays empty (a valid result).
+    return success();
+  }
+
+  // Normalize negative axes (ONNX convention).
+  llvm::SmallSet<int64_t, 8> reducedSet;
+  for (int64_t a : axesList) {
+    if (a < 0)
+      a += dataRank;
+    if (a < 0 || a >= dataRank)
+      return failure();
+    reducedSet.insert(a);
+  }
+
+  out.reserve(dataRank);
+  for (int64_t i : llvm::seq<int64_t>(0, dataRank)) {
+    if (reducedSet.contains(i)) {
+      if (keepdims)
+        out.push_back(b.getIndexAttr(1));
+      // else: drop the dim from the output.
+    } else {
+      out.push_back(reifyDimOrConstant(b, loc, dataShape[i], data, i));
+    }
+  }
+  return success();
 }

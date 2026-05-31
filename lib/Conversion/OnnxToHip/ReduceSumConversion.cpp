@@ -84,7 +84,7 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
   auto hipOp = mlir::hip::ReduceSumOp::create(
-      rewriter, loc, resultType, context, data, axesOperand, init, keepdimsAttr,
+      rewriter, loc, context, data, axesOperand, init, keepdimsAttr,
       noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));

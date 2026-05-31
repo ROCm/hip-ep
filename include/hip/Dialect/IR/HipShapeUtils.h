@@ -108,6 +108,75 @@ SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
 SmallVector<OpFoldResult>
 reifyBroadcastShape(OpBuilder &b, Location loc, ValueRange operands);
 
+/// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
+/// `perm` must be a permutation of `[0, rank-1)` and have the same length
+/// as `input`'s rank — the verifier should already guarantee this; the
+/// helper bails (returns empty) on mismatch.
+///
+/// Each output dim `i`:
+///   - emits `IndexAttr(input.shape[perm[i]])` when that dim is static,
+///   - emits `tensor.dim %input, perm[i]` otherwise.
+///
+/// `input` must be a `RankedTensorType`-typed Value.
+SmallVector<OpFoldResult>
+reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
+                     ArrayRef<int64_t> perm);
+
+/// Reify the result shape of a gather op as
+/// `output = data.shape[:axis] ++ indices.shape ++ data.shape[axis+1:]`.
+/// `axis` is normalized into `[0, data.rank)` (negative axis follows ONNX
+/// convention). The helper bails (returns empty) on a malformed axis.
+///
+/// `data` and `indices` must be `RankedTensorType`-typed Values.
+SmallVector<OpFoldResult>
+reifyGatherWithAxis(OpBuilder &b, Location loc, Value data, Value indices,
+                    int64_t axis);
+
+/// Reify the result shape of a `gather_nd` op as
+/// `batch_dims_from_data ++ indices.shape[batch_dims:-1] ++
+///  data.shape[batch_dims + indices.shape[-1]:]`.
+/// Per ONNX GatherND semantics, output rank =
+/// `q + r - indices.shape[-1] - 1 - batch_dims`, where `q = rank(indices)`
+/// and `r = rank(data)`. The helper bails (returns empty) when the
+/// trailing index-tuple width (`indices.shape[-1]`) is dynamic — the
+/// output rank itself is then unknown and reify cannot run.
+///
+/// `data` and `indices` must be `RankedTensorType`-typed Values.
+SmallVector<OpFoldResult>
+reifyGatherND(OpBuilder &b, Location loc, Value data, Value indices,
+              int64_t batchDims);
+
+/// Reify the result shape of a reduction op (reduce_sum / reduce_max /
+/// reduce_prod) given `data`, the `axes` operand (rank-1 i64 tensor),
+/// and the `keepdims` / `noop_with_empty_axes` attributes.
+///
+/// Tries to introspect `axes` as an `arith.constant` (the typical case
+/// after the OnnxToHip converter materializes it from the ONNX
+/// attribute). When successful:
+///   - keepdims=1: axes-listed dims become `IndexAttr(1)`; non-axes
+///     dims pass through from `data`.
+///   - keepdims=0: axes-listed dims are dropped from the output rank;
+///     non-axes dims pass through.
+///   - Empty axes + noop_with_empty_axes=0: ALL dims become 1
+///     (keepdims=1) or output is rank-0 (keepdims=0).
+///   - Empty axes + noop_with_empty_axes=1: output equals input
+///     (no reduction).
+///
+/// Returns `success()` and writes the reified dim list into `out` when
+/// `axes` can be introspected. Returns `failure()` when `axes` is not a
+/// recognised constant — the caller should then fall back to
+/// `reifyElementwiseSameShape(output)` to keep the reify interface
+/// non-failing.
+///
+/// Uses `LogicalResult` (rather than the empty-vector sentinel used by
+/// the other helpers in this header) because a valid rank-0 reduction
+/// result has an empty dim list, which would otherwise be
+/// indistinguishable from the bail path.
+LogicalResult
+reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data, Value axes,
+                           int64_t keepdims, int64_t noopWithEmptyAxes,
+                           SmallVectorImpl<OpFoldResult> &out);
+
 } // namespace hip
 } // namespace mlir
 
