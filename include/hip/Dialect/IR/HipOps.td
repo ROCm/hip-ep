@@ -1125,7 +1125,11 @@ def Hip_RangeOp : Hip_DpsOp<"range"> {
   }];
 }
 
-def Hip_SiluOp : Hip_DpsOp<"silu"> {
+def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -1137,7 +1141,11 @@ def Hip_SiluOp : Hip_DpsOp<"silu"> {
   let hasVerifier = 1;
 }
 
-def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
+                              /*outsAccessor=*/"Y",
+                              /*autoReify=*/0,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
   let summary = "Sigmoid activation";
   let description = [{
     Applies sigmoid activation: y = 1 / (1 + exp(-x))
@@ -1164,7 +1172,11 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
   }];
 }
 
-def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
+def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
+                               /*outsAccessor=*/"Y",
+                               /*autoReify=*/0,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
   let summary = "Softplus activation: y = ln(exp(x) + 1)";
   let description = [{
     Applies the softplus activation function element-wise.
@@ -1194,7 +1206,11 @@ def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
   }];
 }
 
-def Hip_GeluOp : Hip_DpsOp<"gelu"> {
+def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "GELU activation (Gaussian Error Linear Unit)";
   let description = [{
     Applies the GELU activation function element-wise.
@@ -1230,7 +1246,11 @@ def Hip_GeluOp : Hip_DpsOp<"gelu"> {
   }];
 }
 
-def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal"> {
+def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
+                                 /*outsAccessor=*/"Y",
+                                 /*autoReify=*/0,
+                                 /*autoInfer=*/1,
+                                 /*declareInfer=*/1> {
   let summary = "Element-wise reciprocal: y = 1/x";
   let description = [{
     Computes the reciprocal of each element.
@@ -1260,7 +1280,11 @@ def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal"> {
   }];
 }
 
-def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
+def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Element-wise square root: y = sqrt(x)";
   let description = [{
     Computes the square root of each element.
@@ -1385,7 +1409,11 @@ def Hip_AndOp : Hip_DpsOp<"and"> {
   }];
 }
 
-def Hip_NotOp : Hip_DpsOp<"not"> {
+def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise logical NOT: y = !x";
   let description = [{
     Computes the logical NOT of each element (boolean/i1).
@@ -1415,7 +1443,11 @@ def Hip_NotOp : Hip_DpsOp<"not"> {
   }];
 }
 
-def Hip_CosOp : Hip_DpsOp<"cos"> {
+def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise cosine: y = cos(x)";
   let description = [{
     Computes the cosine of each element.
@@ -1445,7 +1477,11 @@ def Hip_CosOp : Hip_DpsOp<"cos"> {
   }];
 }
 
-def Hip_SinOp : Hip_DpsOp<"sin"> {
+def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise sine: y = sin(x)";
   let description = [{
     Computes the sine of each element.
@@ -1475,7 +1511,11 @@ def Hip_SinOp : Hip_DpsOp<"sin"> {
   }];
 }
 
-def Hip_NegOp : Hip_DpsOp<"neg"> {
+def Hip_NegOp : Hip_DpsOp<"neg", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/0,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise negation: y = -x";
   let description = [{
     Negates each element of the input tensor.
@@ -1578,7 +1618,11 @@ def Hip_WhereOp : Hip_DpsOp<"where"> {
   }];
 }
 
-def Hip_CastOp : Hip_DpsOp<"cast"> {
+def Hip_CastOp : Hip_DpsOp<"cast", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Type conversion operation";
   let description = [{
     Converts input tensor from one data type to another.
@@ -2291,7 +2335,11 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[],
   }];
 }
 
-def Hip_CumSumOp : Hip_DpsOp<"cumsum"> {
+def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
+                             /*outsAccessor=*/"Y",
+                             /*autoReify=*/0,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
   let summary = "Cumulative sum along an axis";
   let description = [{
     Computes the cumulative sum of input tensor elements along the given axis.
@@ -2594,7 +2642,11 @@ def Hip_GatherNDOp : Hip_DpsOp<"gather_nd"> {
   }];
 }
 
-def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd"> {
+def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/0,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
   let summary = "ScatterND: scatter updates into a data tensor using N-D index tuples";
   let description = [{
     Implements the standard ONNX ScatterND operator: produce an `output`
@@ -2649,7 +2701,11 @@ def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd"> {
   }];
 }
 
-def Hip_SignOp : Hip_DpsOp<"sign"> {
+def Hip_SignOp : Hip_DpsOp<"sign", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Element-wise sign: y = sign(x)";
   let description = [{
     Computes the element-wise sign of the input. Returns +1 / 0 / -1 for
@@ -2715,7 +2771,11 @@ def Hip_ModOp : Hip_DpsOp<"mod"> {
   }];
 }
 
-def Hip_SizeOp : Hip_DpsOp<"size"> {
+def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Total element count of a tensor (ONNX Size, dynamic-shape path)";
   let description = [{
     Implements the runtime path of the standard ONNX Size operator
