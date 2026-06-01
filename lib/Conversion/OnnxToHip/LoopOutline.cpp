@@ -36,6 +36,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Conversion/OnnxToHip/OnnxResultTypeInference.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
@@ -101,6 +102,68 @@ static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
   Value indexVal =
       arith::IndexCastOp::create(builder, loc, builder.getIndexType(), i64Val);
   return indexVal;
+}
+
+/// Refine cloned `onnx.*` op result types from operand types via
+/// `OnnxResultTypeInferenceInterface`. ONNX shape inference does not
+/// recurse into `onnx.Loop` body regions, so HF Loop-body exports ship
+/// cloned body op result types as rank-0 placeholders even when the
+/// v_carry entry args carry real ranks. Without this catch-up,
+/// `--convert-onnx-to-hip`'s rank-aware patterns silently bail on the
+/// operand-vs-result rank mismatch and the pipeline aborts at
+/// one-shot-bufferize. Done here, before conversion, because
+/// `--hip-infer-shapes` Phase 2 runs AFTER `--convert-onnx-to-hip`
+/// and cannot rescue patterns that already bailed out.
+///
+/// Before:
+///   func.func @body(%arg3: tensor<?x?x?xf16>, %x: tensor<?x?x?xf16>) {
+///     %step = "onnx.Concat"(%arg3, %x) {axis = 1 : si64}
+///             : (tensor<?x?x?xf16>, tensor<?x?x?xf16>) -> tensor<f16>
+///     ...
+///   }
+/// After:
+///   func.func @body(%arg3: tensor<?x?x?xf16>, %x: tensor<?x?x?xf16>) {
+///     %step = "onnx.Concat"(%arg3, %x) {axis = 1 : si64}
+///             : (tensor<?x?x?xf16>, tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
+///     ...
+///   }
+///
+/// Dispatch is via `OnnxResultTypeInferenceInterface` -- one rule per
+/// ONNX op kind, registered as a FallbackModel on `OnnxStubDialect`
+/// (see `lib/Conversion/OnnxToHip/OnnxResultTypeInference.cpp`). Ops
+/// outside the rules library return null Type and are left alone --
+/// the safety belt against false promotion of rank-changing ops we
+/// have not yet reasoned about (e.g. `onnx.ReduceSum` with
+/// `keepdims=0` is intentionally absent from the rules library, so
+/// its rank-0 result is preserved).
+///
+/// Refinement is rank-promotion only: we update the result type only
+/// when the inferred rank is strictly greater than the current rank.
+/// Same-rank per-dim refinement (e.g. dynamic -> concrete) would be
+/// useful but risks regressing concrete dims to dynamic if a future
+/// rule has a partial view of an operand; rank-promotion is the
+/// minimum needed to fix the canonical Loop-body regression. Source-
+/// order walk catches chains in one pass: refinement at op N is
+/// visible to op N+1 via SSA.
+static void refineClonedBodyOpTypes(Block *entry) {
+  for (Operation &op : *entry) {
+    if (isa<func::ReturnOp>(op))
+      continue;
+    auto iface = dyn_cast<OnnxResultTypeInferenceInterface>(&op);
+    if (!iface)
+      continue;
+    for (unsigned i : llvm::seq<unsigned>(0, op.getNumResults())) {
+      auto curRanked = dyn_cast<RankedTensorType>(op.getResult(i).getType());
+      if (!curRanked)
+        continue;
+      Type inferred = iface.computeResultType(i);
+      auto infRanked = dyn_cast_or_null<RankedTensorType>(inferred);
+      if (!infRanked)
+        continue;
+      if (infRanked.getRank() > curRanked.getRank())
+        op.getResult(i).setType(infRanked);
+    }
+  }
 }
 
 /// Materialize an `i1` scalar from a 0-D BOOL-like tensor operand.
@@ -426,6 +489,13 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     }
   }
 
+  // Catch up cloned body op result types via the
+  // `OnnxResultTypeInferenceInterface` rules library: ONNX shape
+  // inference does not recurse into Loop bodies, so HF exports ship
+  // rank-0 placeholders that mismatch the now-refined v_carry entry
+  // args. See the helper's docstring for the full rationale.
+  refineClonedBodyOpTypes(entry);
+
   // Build the func.return from the (mapped) yield operands.  Cond is
   // skipped when cond_is_passthrough (see resultTypes computation above).
   SmallVector<Value> returnVals;
@@ -433,6 +503,18 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   for (unsigned i = yieldStartIdx; i < yieldOp->getNumOperands(); ++i)
     returnVals.push_back(mapping.lookupOrDefault(yieldOp->getOperand(i)));
   func::ReturnOp::create(bodyBuilder, loc, returnVals);
+
+  // Sync the outlined func's declared return types with the (now-
+  // refined) `func.return` operand types -- the func verifier requires
+  // they agree, and the provisional `resultTypes` computed from the
+  // source `onnx.Yield` operand types is stale once
+  // `refineClonedBodyOpTypes` has promoted any yield-chain SSA value's
+  // rank. Idempotent when nothing changed.
+  SmallVector<Type> refinedResultTypes;
+  refinedResultTypes.reserve(returnVals.size());
+  for (Value v : returnVals)
+    refinedResultTypes.push_back(v.getType());
+  newFn.setType(FunctionType::get(ctx, argTypes, refinedResultTypes));
 
   // Now build the hip.loop op at the original onnx.Loop location.
   OpBuilder outerBuilder(loopOp);
@@ -498,6 +580,13 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
 
 void OnnxLoopOutlinePass::runOnOperation() {
   ModuleOp module = getOperation();
+
+  // Install the OnnxResultTypeInferenceInterface FallbackModel on
+  // `OnnxStubDialect` so that `refineClonedBodyOpTypes` can dyn_cast
+  // every cloned `onnx.*` op to the interface and dispatch to the
+  // rules library. Idempotent across pass runs (function-local-static
+  // singleton).
+  registerOnnxResultTypeInferenceFallback();
 
   // Pre-scan: reject nested onnx.Loop before any outlining happens. The
   // HIP runtime drivers share a single iter/cond buffer pair per
