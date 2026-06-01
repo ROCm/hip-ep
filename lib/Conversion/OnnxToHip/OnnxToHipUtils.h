@@ -205,6 +205,15 @@ void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 
+/// Pre-lowering pattern set: decompose `onnx.LpNormalization` into a small
+/// chain of already-supported ONNX primitives (Mul / Sqrt / ReduceSum /
+/// Div). Lives in the pre-lowering loop next to FastGeluFusion /
+/// ProjectorOpsRewrites so the freshly-emitted onnx.* primitives become
+/// "existing" ops by the next round and reach `convertComputeOps`'s
+/// converters as ordinary onnx.* ops. See LpNormalizationConversion.cpp.
+void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
 /// BEFORE lowerOnnxConstants so the index value is still inline in the
