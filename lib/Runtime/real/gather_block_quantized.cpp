@@ -3,25 +3,57 @@
  * Licensed under the MIT License.
  */
 
-// Runtime stub for `com.microsoft.GatherBlockQuantized`.
+// Runtime wrapper for `com.microsoft.GatherBlockQuantized`.
 //
-// The full implementation needs:
-//   * sub-byte unpack (int4 / uint4: 2 elements per byte, low nibble first)
-//   * block-wise dequantize: out_scaled = (q - zp) * scale, where the
-//     scale/zp index maps quantize_axis position p -> (p / block_size)
-//   * gather along gather_axis using `indices`
-//   * default zp = 0 for int4/uint4, 2^(bits-1) for uint8 when zero_points
-//     is absent
+// Glue between the lowering ABI (`wrap_gather_block_quantized`, all i64
+// scalars + raw shape pointers) and the GPU kernel
+// (`hip_gather_block_quantized` in 3rd-party/custom_kernels) which only
+// wants normalised axes, a packed enum dtype, and a few derived flags.
 //
-// None of that exists yet — the function body deliberately prints its
-// arguments and then throws so any model that exercises the op fails loudly
-// (instead of silently passing because of CPU EP fallback or a bit-pattern
-// match of zero-init garbage).
+// Responsibilities of this wrapper:
+//   * stream extraction from the opaque RuntimeState
+//   * axis normalisation (the lowering forwards the raw ONNX attribute,
+//     which may be negative)
+//   * dtype mapping HIPDNN_EP_DATATYPE_* -> HIP_DTYPE_* and signedness
+//     derivation from the data tensor element type
+//   * default zp computation per the ONNX spec:
+//       - bits == 4 (int4 / uint4) ........ default 0
+//       - bits == 8, uint8 storage ........ default 128 (= 2^(bits-1))
+//       - bits == 8, int8  storage ........ default 0
+//   * spec compliance: for uint8 data, gather_axis must be 0
+//   * size-zero output fast-path (no kernel launch)
 
+#include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "../op_profile.h"
+#include "hip_custom_kernels.h"
+#include "runtime_types.h"
 
 #include <cstdio>
-#include <stdexcept>
+
+namespace {
+
+// Map the runtime's HIPDNN_EP_DATATYPE_* enum to the kernel-side
+// hip_dtype_t. Returns -1 for unsupported types so callers can produce
+// a clear error before launch.
+int map_to_hip_dtype(int64_t hipdnn_dtype) {
+  switch (hipdnn_dtype) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return HIP_DTYPE_BFLOAT16;
+  case HIPDNN_EP_DATATYPE_INT32:
+    return HIP_DTYPE_INT32;
+  case HIPDNN_EP_DATATYPE_INT64:
+    return HIP_DTYPE_INT64;
+  default:
+    return -1;
+  }
+}
+
+} // namespace
 
 extern "C" int wrap_gather_block_quantized(
     RuntimeState *state,
@@ -34,35 +66,121 @@ extern "C" int wrap_gather_block_quantized(
     int64_t bits, int64_t block_size, int64_t gather_axis,
     int64_t quantize_axis,
     int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
-  (void)state;
-  (void)data;
-  (void)indices;
-  (void)scales;
-  (void)zero_points;
-  (void)output;
-  (void)data_shape;
-  (void)indices_shape;
-  (void)scales_shape;
-  (void)output_shape;
+  OP_PROFILE(
+      "gather_block_quantized",
+      [&] {
+        char b[128];
+        snprintf(b, sizeof(b),
+                 "bits=%lld bs=%lld dr=%lld qr=%lld",
+                 (long long)bits, (long long)block_size,
+                 (long long)data_rank, (long long)indices_rank);
+        return std::string(b);
+      },
+      state);
 
-  fprintf(stderr,
-          "[gather_block_quantized] STUB CALLED — not yet implemented.\n"
-          "  data_rank=%lld indices_rank=%lld scales_rank=%lld "
-          "output_rank=%lld\n"
-          "  bits=%lld block_size=%lld gather_axis=%lld quantize_axis=%lld\n"
-          "  data_dtype=%s(%lld) indices_dtype=%s(%lld) scales_dtype=%s(%lld)\n"
-          "  zero_points=%s\n",
-          (long long)data_rank, (long long)indices_rank,
-          (long long)scales_rank, (long long)output_rank, (long long)bits,
-          (long long)block_size, (long long)gather_axis,
-          (long long)quantize_axis, hipdnn_ep_datatype_name(data_dtype),
-          (long long)data_dtype, hipdnn_ep_datatype_name(indices_dtype),
-          (long long)indices_dtype, hipdnn_ep_datatype_name(scales_dtype),
-          (long long)scales_dtype, zero_points ? "yes" : "null");
-  fflush(stderr);
+  if (!state || !data || !indices || !scales || !output ||
+      !data_shape || !indices_shape || !scales_shape || !output_shape) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized: null required argument\n");
+    return -1;
+  }
 
-  throw std::runtime_error(
-      "wrap_gather_block_quantized: runtime not implemented "
-      "(com.microsoft.GatherBlockQuantized stub). See lib/Runtime/real/"
-      "gather_block_quantized.cpp.");
+  // Normalise potentially-negative axes against `data_rank`. The conversion
+  // (lib/Conversion/OnnxToHip/GatherBlockQuantizedConversion.cpp) forwards
+  // the raw ONNX attribute, which the spec lets be negative.
+  int gather_axis_n = static_cast<int>(gather_axis);
+  if (gather_axis_n < 0)
+    gather_axis_n += static_cast<int>(data_rank);
+  int quantize_axis_n = static_cast<int>(quantize_axis);
+  if (quantize_axis_n < 0)
+    quantize_axis_n += static_cast<int>(data_rank);
+  if (gather_axis_n < 0 || gather_axis_n >= data_rank ||
+      quantize_axis_n < 0 || quantize_axis_n >= data_rank) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized: axis out of range "
+            "(data_rank=%lld gather_axis=%lld quantize_axis=%lld)\n",
+            (long long)data_rank, (long long)gather_axis,
+            (long long)quantize_axis);
+    return -1;
+  }
+
+  // Spec: for uint8 data the gather_axis must be 0. Catch this here
+  // (cheap) instead of producing silently-wrong output.
+  bool is_signed_data =
+      (data_dtype == HIPDNN_EP_DATATYPE_INT8); // i8 storage -> int4 / int8
+  if (bits == 8 && !is_signed_data && gather_axis_n != 0) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized: ONNX spec requires "
+            "gather_axis == 0 for uint8 data, got %d\n",
+            gather_axis_n);
+    return -1;
+  }
+
+  // Default zero point when zero_points is omitted (ONNX spec):
+  //   bits == 4 .................. 0    (int4 / uint4)
+  //   bits == 8 + uint8 storage .. 128  (= 2^(bits-1))
+  //   bits == 8 + int8  storage .. 0
+  int default_zp;
+  if (bits == 4) {
+    default_zp = 0;
+  } else if (is_signed_data) {
+    default_zp = 0;
+  } else {
+    default_zp = 128;
+  }
+
+  int hip_out_dtype = map_to_hip_dtype(scales_dtype);
+  if (hip_out_dtype != HIP_DTYPE_FLOAT32 &&
+      hip_out_dtype != HIP_DTYPE_FLOAT16 &&
+      hip_out_dtype != HIP_DTYPE_BFLOAT16) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized: unsupported scales/output "
+            "dtype %s (%lld); kernel supports fp32/fp16/bf16\n",
+            hipdnn_ep_datatype_name(scales_dtype), (long long)scales_dtype);
+    return -1;
+  }
+
+  if (indices_dtype != HIPDNN_EP_DATATYPE_INT32 &&
+      indices_dtype != HIPDNN_EP_DATATYPE_INT64) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized: indices dtype must be "
+            "i32 or i64, got %s (%lld)\n",
+            hipdnn_ep_datatype_name(indices_dtype), (long long)indices_dtype);
+    return -1;
+  }
+  int indices_is_int64 = (indices_dtype == HIPDNN_EP_DATATYPE_INT64) ? 1 : 0;
+
+  // Empty-output fast-path. Skip the launch entirely; matches ORT semantics
+  // (no work, no error).
+  int64_t total = 1;
+  for (int64_t i = 0; i < output_rank; ++i)
+    total *= output_shape[i];
+  if (total <= 0)
+    return 0;
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_gather_block_quantized: data_dtype=%s indices_dtype=%s "
+      "scales_dtype=%s bits=%lld block_size=%lld gather_axis=%d "
+      "quantize_axis=%d signed=%d default_zp=%d has_zp=%d "
+      "data_rank=%lld indices_rank=%lld out_rank=%lld total=%lld\n",
+      hipdnn_ep_datatype_name(data_dtype),
+      hipdnn_ep_datatype_name(indices_dtype),
+      hipdnn_ep_datatype_name(scales_dtype), (long long)bits,
+      (long long)block_size, gather_axis_n, quantize_axis_n,
+      (int)is_signed_data, default_zp, zero_points ? 1 : 0,
+      (long long)data_rank, (long long)indices_rank, (long long)output_rank,
+      (long long)total);
+
+  return hip_gather_block_quantized(
+      stream, data, indices, scales, zero_points, output,
+      data_shape, static_cast<int>(data_rank),
+      indices_shape, static_cast<int>(indices_rank),
+      scales_shape, static_cast<int>(scales_rank),
+      output_shape, static_cast<int>(output_rank),
+      static_cast<int>(bits), static_cast<int>(block_size),
+      gather_axis_n, quantize_axis_n,
+      default_zp, is_signed_data ? 1 : 0, indices_is_int64,
+      hip_out_dtype);
 }
