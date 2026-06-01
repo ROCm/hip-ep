@@ -252,6 +252,9 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
     compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
     compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
+    # ck_dsl single-pass GQA decode shim — opt-in via HIPDNN_EP_CK_DSL_FMHA_DECODE.
+    # Embeds the gfx1151 wmma_fmha_fwd HSACO inline (see docs/design/ck-dsl-fmha-decode.md).
+    compile_to_bitcode(real/ck_dsl_fmha_decode.cpp runtime_ck_dsl_fmha_decode.bc)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
     compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)

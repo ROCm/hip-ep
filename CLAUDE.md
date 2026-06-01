@@ -500,7 +500,7 @@ Best observed `model_benchmark.exe` numbers (`-g 32 -ml 16384 -r 5`, `-w 1` for 
 
 ### Future improvements (ranked by expected impact)
 
-1. **Fused single-pass attention decode** that eliminates the reduce kernel — would unblock the L=256+ cliff and remove the K_SPLITS guesswork entirely. High effort, high impact.
+1. **Fused single-pass attention decode** that eliminates the reduce kernel — would unblock the L=256+ cliff and remove the K_SPLITS guesswork entirely. High effort, high impact. **In flight (short-skv half):** [`docs/design/ck-dsl-fmha-decode.md`](docs/design/ck-dsl-fmha-decode.md) ships an opt-in ck_dsl-generated WMMA single-pass kernel that beats `hip_gqa_fused_decode` 2.3-2.8× at skv ∈ {64,128,192} on Mistral 7B GQA shape (est. +9.5% Mistral L=128 decode TPS). Long-context (skv ≥ 256) still uses `hip_gqa_flash_decode` unchanged; closing that needs a ck_dsl split-K follow-on. Opt in with `HIPDNN_EP_CK_DSL_FMHA_DECODE=1`.
 2. **Add `<128, K, 5>` flash_decode instantiations** for Qwen2.5-14B / Coder-14B. Medium effort (HPG=5 is unusual — verify thread/LDS budget).
 3. **Per-shape K_SPLITS autotune** keyed on `(D, HPG, B*G, skv_bucket)` — lower-risk than (1).
 4. **Profile-OFF investigation of flash_decode at L=256–1024 on Llama-8B** — the cliff is launch/scheduling overhead, not per-op cost.

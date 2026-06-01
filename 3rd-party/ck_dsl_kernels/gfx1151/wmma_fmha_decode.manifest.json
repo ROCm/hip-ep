@@ -1,0 +1,47 @@
+{
+  "schema": "ck.dsl.example.manifest/v1",
+  "kind": "attention_unified",
+  "kernel_name": "ck_dsl_wmma_fmha_fwd_wmma16x16x16_H128_HQ32_HK8_fp16_none_vgather",
+  "hsaco": "wmma_fmha_decode.hsaco",
+  "hsaco_bytes": 13136,
+  "threads_per_block": 32,
+  "ck_dependency": false,
+  "ir_authored": true,
+  "atoms": ["wmma_f32_16x16x16_f16"],
+  "notes": "Single-pass FA-2 forward repurposed as a sq=1 GQA decode kernel by driving stride_q_token=stride_o_token=0 (broadcast Q across the 16-row WMMA M-tile). Compiled from ck_dsl WmmaFmhaFwdSpec(head_size=128, num_query_heads=32, num_kv_heads=8, mask_mode='none'). See docs/design/ck-dsl-fmha-decode.md.",
+  "attention_path": "2d",
+  "attention_config": {
+    "head_size": 128,
+    "num_query_heads": 32,
+    "num_kv_heads": 8,
+    "wave_size": 32,
+    "block_m": 16,
+    "block_k": 16,
+    "mask_mode": "none",
+    "sliding_window": 0,
+    "v_lds_stage": false
+  },
+  "ck_dsl_source": {
+    "repo": "https://github.com/ROCm/rocm-libraries",
+    "branch": "users/vanantha/ck-dsl-prototype",
+    "path": "projects/composablekernel/python/ck_dsl/instances/gfx1151/wmma_fmha_fwd.py",
+    "spec": "WmmaFmhaFwdSpec(head_size=128, num_query_heads=32, num_kv_heads=8, dtype='fp16', mask_mode='none', sliding_window=0, v_lds_stage=False)"
+  },
+  "args_signature": [
+    {"name": "Q",              "type": "ptr<f16, global>", "size_bytes": 8},
+    {"name": "K",              "type": "ptr<f16, global>", "size_bytes": 8},
+    {"name": "V",              "type": "ptr<f16, global>", "size_bytes": 8},
+    {"name": "O",              "type": "ptr<f16, global>", "size_bytes": 8},
+    {"name": "scale_log2",     "type": "f32",              "size_bytes": 4},
+    {"name": "seqlen_q",       "type": "i32",              "size_bytes": 4},
+    {"name": "seqlen_k",       "type": "i32",              "size_bytes": 4},
+    {"name": "stride_q_token", "type": "i32",              "size_bytes": 4},
+    {"name": "stride_q_head",  "type": "i32",              "size_bytes": 4},
+    {"name": "stride_k_token", "type": "i32",              "size_bytes": 4},
+    {"name": "stride_k_head",  "type": "i32",              "size_bytes": 4},
+    {"name": "stride_v_token", "type": "i32",              "size_bytes": 4},
+    {"name": "stride_v_head",  "type": "i32",              "size_bytes": 4},
+    {"name": "stride_o_token", "type": "i32",              "size_bytes": 4},
+    {"name": "stride_o_head",  "type": "i32",              "size_bytes": 4}
+  ]
+}
