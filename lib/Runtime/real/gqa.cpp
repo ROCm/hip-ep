@@ -145,10 +145,11 @@ static bool gqa_ck_dsl_fmha_decode_enabled() {
   return enabled;
 }
 
-extern "C" int ck_dsl_gqa_fmha_decode(
-    void *stream, const void *Q, const void *Kcache, const void *Vcache,
-    void *O, int B, int H, int G, int d, int skv, int max_seq, float scale,
-    const void *seqlens_k);
+extern "C" int ck_dsl_gqa_fmha_decode(void *stream, const void *Q,
+                                      const void *Kcache, const void *Vcache,
+                                      void *O, int B, int H, int G, int d,
+                                      int skv, int max_seq, float scale,
+                                      const void *seqlens_k);
 
 // Smart-dispatch threshold for GQA decode (sq == 1). When total_seq exceeds
 // this value, dispatch routes through the decomposed hipBLASLt pipeline
