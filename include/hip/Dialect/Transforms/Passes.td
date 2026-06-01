@@ -335,6 +335,35 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   ];
 }
 
+def OnnxResultTypeInferenceTestPass
+    : Pass<"hip-test-onnx-result-type-inference", "mlir::ModuleOp"> {
+  let summary = "Walk onnx.* ops, dispatch OnnxResultTypeInferenceInterface, "
+                "emit remarks (LIT-only test harness)";
+  let description = [{
+    Test-only pass that regression-tests the dialect-level fallback
+    dispatch of `OnnxResultTypeInferenceInterface` for unregistered
+    `onnx.*` ops, and the per-op rules library it dispatches into.
+
+    For every `onnx.*` op in the module, the pass attempts
+    `dyn_cast<OnnxResultTypeInferenceInterface>(op)`. The cast must
+    succeed for every op (the dialect-level fallback returns the rules
+    library's FallbackModel for any interface ID it has registered).
+    The pass then calls `iface.computeResultType(0)` and emits an
+    `op->emitRemark()` recording either the returned type or the
+    sentinel `<unhandled>` when the rules library returned null Type.
+
+    Not wired into any production pipeline -- exists only so individual
+    rules can be unit-tested in isolation as they land in the rules
+    library at `lib/Conversion/OnnxToHip/OnnxResultTypeInference.cpp`.
+
+    LIT fixture: `test/lit/Conversion/onnx-to-hip/onnx-result-type-inference.mlir`.
+  }];
+  // No dependentDialects -- the pass walks IR and emits remarks, it does
+  // not construct any new ops. The `OnnxStubDialect` that owns the
+  // fallback registry is loaded by the global `loadAllDialects()` in
+  // hip-mlir-opt's startup, before any pass runs.
+}
+
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
   let summary = "Replace extern memref.global constants with "
