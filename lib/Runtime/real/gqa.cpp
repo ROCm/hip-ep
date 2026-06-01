@@ -836,7 +836,8 @@ static int gqa_forward_hipblaslt(
         // rc_decode == -2: drop through to hip_gqa_fused_decode.
       }
       if (!used_ck_dsl) {
-        // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when available
+        // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when
+        // available
         if (hip_gqa_fused_decode(
                 stream, qSrc, present_key, present_value, output,
                 static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+#
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 """Embed a binary HSACO file into a C header as a static byte array.
 
 Usage:
@@ -14,6 +16,7 @@ DRAFT-PR shape: rerun manually after rebuilding the HSACO via ck_dsl. A
 follow-up can promote this to a CMake `add_custom_command` so the generation
 runs at build time.
 """
+
 from __future__ import annotations
 
 import sys
@@ -38,7 +41,7 @@ def main() -> int:
     ]
     # 16 bytes per line.
     for i in range(0, len(blob), 16):
-        chunk = blob[i:i + 16]
+        chunk = blob[i : i + 16]
         hex_bytes = ", ".join(f"0x{b:02x}" for b in chunk)
         lines.append(f"    {hex_bytes},")
     lines.append("};")
