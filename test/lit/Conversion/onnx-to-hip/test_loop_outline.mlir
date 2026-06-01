@@ -271,11 +271,11 @@ module {
 
 // -----
 
-// PR #265 commit 2 — Qwen3.5-9B vision encoder regression closure.
+// PR #265 commits 2 + 5 — Qwen3.5-9B vision encoder regression closure.
 //
-// Lifted shape from /scratch/fhanuman/RCOmEP/ir_dump/qwen_vision_new.ir.0
-// (search for `onnx.Loop`). The HF Qwen3.5-9B vision-encoder ONNX export
-// ships an `onnx.Loop` whose body terminal `Concat(rank-0-block-arg,
+// Lifted shape from a real HF Qwen3.5-9B vision-encoder ONNX export
+// (search the production IR dump for `onnx.Loop`). The export ships an
+// `onnx.Loop` whose body terminal `Concat(rank-0-block-arg,
 // rank-3-mha-output) -> rank-0` declares a rank-0 v_carry-out type
 // because shape inference does not recurse into Loop body regions;
 // the `onnx.Loop`'s declared result follows that rank-0 yield. The v_init
@@ -290,14 +290,24 @@ module {
 //          v_init type #0 ('tensor<?x?x?xf16>')
 //
 // 10+ instances per compile, 3 compiles per session — the EP silently
-// fell back to CPU and the encoder did not actually offload to MorphiZenEP.
+// fell back to CPU and the encoder did not actually offload to the
+// MorphiZen EP.
 //
-// Post-PR-265 (this commit), hip.loop's result types come from
+// Post-PR-265 commit 2: hip.loop's result types come from
 // `LoopOp::inferReturnTypes` (reads v_init); the outlined body func's
 // arg slot 3 comes from v_init too. Both are `tensor<?x?x?xf16>` here.
-// The body's cloned `onnx.Concat` retains its rank-0 declared result —
-// downstream type catch-up is `--hip-infer-shapes` Phase 2's job once
-// `--convert-onnx-to-hip` has converted the body ops.
+// But the cloned `onnx.Concat` still declared rank-0 -- ConvertOnnxToHip's
+// rank-aware pattern bailed -> one-shot-bufferize aborted -> still silent
+// CPU fallback (just relocated the failure point).
+//
+// Post-PR-265 commit 5 (this CHECK shape): `refineClonedBodyOpTypes`
+// dispatches `OnnxResultTypeInferenceInterface` on each cloned body op.
+// The Concat rule sees operand[0] is rank-0 (rank-mismatched relative
+// to operand[1]'s rank-3) and returns `tensor<?x?x?xf16>` -- rank
+// correct, axis dim conservatively dynamic. The body Concat result
+// gets rewritten in place; the declared body func return type catches
+// up via `newFn.setType`. The pipeline now actually converts and
+// bufferizes the body.
 module {
   func.func @qwen_vision_loop(%attn_in: tensor<?x?x?xf16>,
                               %M: tensor<i64>,
@@ -328,11 +338,133 @@ module {
   //
   // Body func arg slot 3 (v_carry) is the REFINED rank-3 v_init type,
   // NOT the rank-0 type the original onnx.Loop body block declared
-  // for %arg4.
+  // for %arg4. Declared return type is also rank-3 dynamic (commit 5:
+  // `refineClonedBodyOpTypes` propagated the rank from operands via
+  // the Concat rule; the `newFn.setType` post-refine call synced the
+  // function signature).
   // CHECK-LABEL: func.func private @qwen_vision_loop_loop_body_n0
   // CHECK-SAME: (%{{.*}}: !hip.context,
   // CHECK-SAME:  %{{.*}}: tensor<i64>,
   // CHECK-SAME:  %{{.*}}: tensor<ui8>,
   // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>,
-  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>) -> tensor<f16>
+  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
+  //
+  // Cloned Concat result type was tensor<f16> (rank-0 placeholder) in
+  // the source onnx.Loop body; commit 5 promotes it to all-dynamic at
+  // rank-3 via the interface's Concat rule. Without this the next
+  // pipeline pass `--convert-onnx-to-hip` bails on the rank mismatch
+  // and the pipeline aborts at one-shot-bufferize -> silent CPU
+  // fallback.
+  // CHECK: %[[CONCAT:.*]] = "onnx.Concat"
+  // CHECK-SAME: -> tensor<?x?x?xf16>
+  // CHECK: return %[[CONCAT]] : tensor<?x?x?xf16>
+}
+
+// -----
+
+// PR #265 commit 5 — `refineClonedBodyOpTypes` interface dispatch.
+//
+// Minimal repro of the canonical Qwen pattern: a single
+// `onnx.Add(rank-0-block-arg, rank-3-capture) -> rank-0` in the body.
+// The block-arg is rank-0 in the source onnx.Loop because shape
+// inference did not recurse; commit 2 flips it to rank-3 (sourcing
+// from the v_init operand type). Commit 5's interface dispatch then
+// promotes the Add result via the broadcast rule: max(rank-0,
+// rank-3) = rank-3, all-dim broadcast yields the rank-3 shape from
+// the higher-rank operand verbatim.
+//
+// What this case PINS beyond `qwen_vision_loop` above is the body op
+// refinement HELPER's contract in isolation: a body op whose result
+// has a stale rank-0 placeholder + at least one higher-rank operand
+// gets its result type rewritten by the interface, and the outlined
+// func's declared return type catches up via `newFn.setType`. The
+// `onnx.Add` choice (instead of Concat) exercises the broadcast rule
+// rather than the concat-axis-sum path.
+//
+// `func.func @... -> ()` (void): the source `onnx.Loop`'s rank-0
+// declared result is unused at parse time, sidestepping the verifier
+// constraint that `return %r : T` must agree with the function's
+// declared return type at parse time -- which would clash with this
+// test's whole point of asserting the loop result gets refined to
+// rank-3 mid-pass. Letting `%r` go dead post-outlining is fine for a
+// LIT-only fixture.
+module {
+  func.func @refine_add_rank0_to_rank3(
+      %attn: tensor<?x?x?xf16>, %M: tensor<i64>) {
+    %cond = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Loop"(%M, %cond, %attn) ({
+    ^bb0(%it: tensor<i64>, %ci: tensor<ui8>, %acc: tensor<f16>):
+      %step = "onnx.Add"(%acc, %attn)
+              : (tensor<f16>, tensor<?x?x?xf16>) -> tensor<f16>
+      %co = "onnx.Identity"(%ci) : (tensor<ui8>) -> tensor<ui8>
+      "onnx.Yield"(%co, %step) : (tensor<ui8>, tensor<f16>) -> ()
+    }) : (tensor<i64>, none, tensor<?x?x?xf16>) -> tensor<f16>
+    return
+  }
+
+  // CHECK-LABEL: func.func @refine_add_rank0_to_rank3
+  //
+  // Outlined body func: declared return rank-3 (post-`newFn.setType`).
+  // CHECK-LABEL: func.func private @refine_add_rank0_to_rank3_loop_body_n0
+  // CHECK-SAME: -> tensor<?x?x?xf16>
+  //
+  // Cloned Add result type promoted from rank-0 to rank-3 by the
+  // interface's broadcast rule.
+  // CHECK: %[[ADD:.*]] = "onnx.Add"
+  // CHECK-SAME: -> tensor<?x?x?xf16>
+  // CHECK: return %[[ADD]] : tensor<?x?x?xf16>
+}
+
+// -----
+
+// PR #265 commit 5 — interface safety belt.
+//
+// Verifies that the `OnnxResultTypeInferenceInterface` rules library
+// correctly returns null Type (caller leaves the op alone) for ops
+// outside the library's coverage. `onnx.ReduceSum` with `keepdims=0`
+// over all axes IS a real rank-3 -> rank-0 op (the source IR is
+// correct). The interface MUST NOT promote its result back to rank-3,
+// or downstream passes would receive an op claiming rank-3 output
+// where the actual computation produces a scalar.
+//
+// The mechanism: the rules library has no rule for `onnx.ReduceSum`,
+// so `iface.computeResultType(0)` returns null. The helper's
+// `if (!infRanked) continue;` then skips the op entirely. This is the
+// safety belt against new export shapes adding rank-changing ops we
+// have not yet reasoned about: silently-correct, never miscompiled.
+module {
+  func.func @reduce_sum_stays_rank0(
+      %x: tensor<?x?x?xf32>, %M: tensor<i64>) -> tensor<f32> {
+    %cond = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Loop"(%M, %cond, %x) ({
+    ^bb0(%it: tensor<i64>, %ci: tensor<ui8>, %acc: tensor<?x?x?xf32>):
+      // ReduceSum with keepdims=0 over all axes: rank-3 -> rank-0.
+      // This is a TRUE rank-changing op -- the helper must leave it
+      // alone or the IR would lie about the result rank.
+      %sum = "onnx.ReduceSum"(%acc) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64}
+             : (tensor<?x?x?xf32>) -> tensor<f32>
+      // Identity of the rank-3 acc -- result is also rank-3, but its
+      // operand is rank-3 too, so the helper's rank-promotion guard
+      // (infRanked.getRank() > curRanked.getRank()) doesn't fire.
+      %step = "onnx.Identity"(%acc) : (tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
+      %co = "onnx.Identity"(%ci) : (tensor<ui8>) -> tensor<ui8>
+      "onnx.Yield"(%co, %step) : (tensor<ui8>, tensor<?x?x?xf32>) -> ()
+    }) : (tensor<i64>, none, tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
+    %sum = "onnx.ReduceSum"(%r) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64}
+           : (tensor<?x?x?xf32>) -> tensor<f32>
+    return %sum : tensor<f32>
+  }
+
+  // CHECK-LABEL: func.func @reduce_sum_stays_rank0
+  //
+  // Outlined body func: declared return is rank-3 (the `onnx.Identity`
+  // step value, which the helper leaves at its existing rank-3 type).
+  // The `onnx.ReduceSum` inside the body retains its rank-0 result.
+  // CHECK-LABEL: func.func private @reduce_sum_stays_rank0_loop_body_n0
+  // CHECK-SAME: -> tensor<?x?x?xf32>
+  //
+  // ReduceSum result stays rank-0 -- the rules library has no rule
+  // for it, so the helper skips it (safety belt).
+  // CHECK: "onnx.ReduceSum"
+  // CHECK-SAME: -> tensor<f32>
 }
