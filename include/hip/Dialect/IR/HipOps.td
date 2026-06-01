@@ -500,8 +500,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Hip_GatherBlockQuantizedOp
-    : Hip_DpsOp<"gather_block_quantized", [AttrSizedOperandSegments]> {
+def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
   let summary = "Gather + block-wise dequantize "
                 "(com.microsoft GatherBlockQuantized)";
   let description = [{
