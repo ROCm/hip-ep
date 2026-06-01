@@ -24,6 +24,19 @@
 //     `matmul -> tensor.empty -> matmul` propagate refinement through
 //     all links.
 //
+// PR #265 commit 1 added Phase 2 (`refineLoopSignatures`):
+//
+//   - idempotence on already-tight `hip.loop` signatures
+//     (`loop_signatures_no_op`),
+//   - depth-agnostic refinement across nested `hip.loop` ops via
+//     bounded fixed-point iteration (`nested_loop_signatures`).
+//
+// Production-pipeline coverage of `hip.loop` signature refinement
+// driven by an upstream `hip.matmul` narrowing — the case the helper
+// was actually written to fix — lands together with PR #265 commit 2
+// once `OnnxLoopOutlinePass` flips its body-arg + result-type
+// producers to read v_init / inferReturnTypes.
+//
 // What this file does NOT test
 // ----------------------------
 // The correctness of the `OpFoldResult`s produced by individual reify
@@ -857,4 +870,108 @@ func.func @refine_nonzero_data_dependent_dim1(
                           {input_data_type = 1 : i64}
                           : tensor<?x?xi64>
   return %y : tensor<?x?xi64>
+}
+
+// -----
+
+// PR #265 commit 1 — Phase 2 (`refineLoopSignatures`) idempotence guard.
+//
+// `hip.loop` v_init type already matches the body func's declared arg
+// type at slot [3..3+N) and the loop's own result type. Phase 2 must
+// be a no-op: no signature mutation, no body re-walk, no extra
+// `tensor.cast` insertion. The body func's `func.return` SSA wiring
+// is also already type-consistent.
+//
+// CHECK-LABEL: func.func private @body_already_tight
+// CHECK-SAME:    (%{{.*}}: !hip.context, %{{.*}}: index, %{{.*}}: i1, %[[V:.*]]: tensor<128xf32>)
+// CHECK-SAME:    -> tensor<128xf32>
+// CHECK:         return %[[V]] : tensor<128xf32>
+func.func private @body_already_tight(%ctx: !hip.context, %iter: index,
+                                      %cond_in: i1,
+                                      %v: tensor<128xf32>) -> tensor<128xf32> {
+  return %v : tensor<128xf32>
+}
+
+// CHECK-LABEL: func.func @loop_signatures_no_op
+// CHECK-NOT:     tensor.cast
+// CHECK:         %[[R:.*]] = hip.loop
+// CHECK-SAME:      iter_args(%{{.*}} : tensor<128xf32>)
+// CHECK-SAME:      -> (tensor<128xf32>)
+// CHECK-SAME:      body @body_already_tight
+// CHECK:         return %[[R]] : tensor<128xf32>
+func.func @loop_signatures_no_op(%ctx: !hip.context,
+                                 %M: index, %cond: i1,
+                                 %v_static: tensor<128xf32>) -> tensor<128xf32> {
+  %r = hip.loop(%ctx, %M, %cond)
+                 iter_args(%v_static : tensor<128xf32>)
+                 -> (tensor<128xf32>)
+                 body @body_already_tight
+                 {num_loop_carried = 1 : i32, cond_is_passthrough}
+  return %r : tensor<128xf32>
+}
+
+// -----
+
+// PR #265 commit 1 — Phase 2 depth-agnosticism guard.
+//
+// Outer hip.loop's body func contains an inner hip.loop. Outer v_init
+// is statically refined (the function arg is `tensor<256xf32>`) but
+// outer body func arg slot 3 is declared `tensor<?xf32>`; inner
+// hip.loop's v_init feeds from that block arg, so the inner's
+// signature is also under-refined transitively. Phase 2 fixed-point
+// iteration handles both levels: outer pass refines outer body arg ?xf32
+// -> 256xf32, then inner pass (in the next iteration) sees its v_init
+// type tighten to 256xf32 and refines inner_body's signature to match.
+//
+// `OnnxLoopOutlinePass` rejects nested `onnx.Loop` upstream so this
+// shape is unreachable from production graphs, but pinning the
+// contract here keeps the helper safe against future relaxations
+// of that rejection.
+//
+// CHECK-LABEL: func.func private @inner_body
+// CHECK-SAME:    (%{{.*}}: !hip.context, %{{.*}}: index, %{{.*}}: i1, %[[V:.*]]: tensor<256xf32>)
+// CHECK-SAME:    -> tensor<256xf32>
+// CHECK:         return %[[V]] : tensor<256xf32>
+func.func private @inner_body(%ctx: !hip.context, %iter: index,
+                              %cond_in: i1,
+                              %v: tensor<?xf32>) -> tensor<?xf32> {
+  return %v : tensor<?xf32>
+}
+
+// CHECK-LABEL: func.func private @outer_body_with_inner_loop
+// CHECK-SAME:    (%{{.*}}: !hip.context, %{{.*}}: index, %{{.*}}: i1, %[[V:.*]]: tensor<256xf32>)
+// CHECK-SAME:    -> tensor<256xf32>
+// CHECK:         %[[R:.*]] = hip.loop
+// CHECK-SAME:      iter_args(%[[V]] : tensor<256xf32>)
+// CHECK-SAME:      -> (tensor<256xf32>)
+// CHECK-SAME:      body @inner_body
+// CHECK:         return %[[R]] : tensor<256xf32>
+func.func private @outer_body_with_inner_loop(%ctx: !hip.context,
+                                              %iter: index, %cond_in: i1,
+                                              %v: tensor<?xf32>) -> tensor<?xf32> {
+  %M_inner = arith.constant 1 : index
+  %cond_init_inner = arith.constant true
+  %r = hip.loop(%ctx, %M_inner, %cond_init_inner)
+                 iter_args(%v : tensor<?xf32>)
+                 -> (tensor<?xf32>)
+                 body @inner_body
+                 {num_loop_carried = 1 : i32, cond_is_passthrough}
+  return %r : tensor<?xf32>
+}
+
+// CHECK-LABEL: func.func @nested_loop_signatures
+// CHECK:         %[[R:.*]] = hip.loop
+// CHECK-SAME:      iter_args(%{{.*}} : tensor<256xf32>)
+// CHECK-SAME:      -> (tensor<256xf32>)
+// CHECK-SAME:      body @outer_body_with_inner_loop
+// CHECK:         return %[[R]] : tensor<256xf32>
+func.func @nested_loop_signatures(%ctx: !hip.context,
+                                  %M: index, %cond: i1,
+                                  %v_static: tensor<256xf32>) -> tensor<256xf32> {
+  %r = hip.loop(%ctx, %M, %cond)
+                 iter_args(%v_static : tensor<256xf32>)
+                 -> (tensor<256xf32>)
+                 body @outer_body_with_inner_loop
+                 {num_loop_carried = 1 : i32, cond_is_passthrough}
+  return %r : tensor<256xf32>
 }
