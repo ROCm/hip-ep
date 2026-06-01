@@ -194,10 +194,14 @@ Type computeConcatResult(Operation *op, unsigned resultIdx) {
   if (rank == 0)
     return {};
 
-  // axis attribute, with negative-index wrap.
+  // axis attribute, with negative-index wrap. ONNX `axis` is a signed
+  // integer attribute (`si64`); `IntegerAttr::getInt` asserts the
+  // underlying type is signless/index. Use `getSInt` to extract the
+  // value with the correct sign-extension for ONNX's signed encoding
+  // (matches the idiom used in `ConcatConversion.cpp`).
   int64_t axis = 0;
   if (auto a = op->getAttrOfType<IntegerAttr>("axis"))
-    axis = a.getInt();
+    axis = a.getSInt();
   if (axis < 0)
     axis += rank;
   if (axis < 0 || axis >= rank)
