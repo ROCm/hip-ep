@@ -21,6 +21,41 @@
 // we fail the match so the pipeline surfaces a clear error rather than
 // emitting extract/load IR that breaks pool-allocs.
 //
+// ONNX Expand broadcast semantics (v8/v13 spec):
+//   output[k] = numpy.array(input) * numpy.ones(shape) -- right-aligned,
+//   per-axis output_dim[k] = max(input_dim[k'], shape_value[s']).
+// Critically: ONNX Expand is NOT numpy.broadcast_to.  When shape[s] == 1 but
+// input has input_dim > 1 at the corresponding axis, the spec says the output
+// dim is input_dim (identity broadcast), NOT 1.  This is rare in LLM-style
+// exports (which build shape from `Shape(x)` so SSA-traced values already
+// equal input_dim), but HF vision encoders (Qwen3.5-VL, ViT patch flows)
+// emit literal `Expand(x, [1, 1, ...])` with x rank > 0 -- a pure no-op at
+// runtime, but only if we honour max(input_dim, shape_value).  When the shape
+// operand is an opaque constant we cannot peek into (case (C) below), we now
+// emit `arith.maxsi(tensor.dim(input, k), index_cast(extract(shape, k)))`
+// instead of just `index_cast(extract(shape, k))`.
+//
+// Before (broken on `Expand([3136,1152]xf16, dense<[1,1]>) -> [?, 1152]`):
+//   %v = tensor.extract %shape[%c0] : tensor<2xi64>     // = 1
+//   %d = arith.index_cast %v : i64 to index             // = 1
+//   %t = tensor.empty(%d) : tensor<?x1152xf16>          // = tensor<1x1152>
+//
+// After:
+//   %sv = tensor.extract %shape[%c0] : tensor<2xi64>    // = 1
+//   %sd = arith.index_cast %sv : i64 to index           // = 1
+//   %id = tensor.dim %input, %c0 : tensor<3136x1152xf16> // = 3136
+//   %d  = arith.maxsi %id, %sd : index                  // = 3136
+//   %t  = tensor.empty(%d) : tensor<?x1152xf16>         // = tensor<3136x1152>
+//
+// Compile-time fast paths (skip the `tensor.dim` + `maxsi` op pair):
+//   - input_idx < 0  (shape rank > input rank, leading output axis with no
+//                     input counterpart): output_dim = shape_value.
+//   - input_dim is statically 1: max(1, shape) == shape, so output_dim =
+//                                shape_value.
+// Both compile-time-static-equivalent to the pre-fix path, so they preserve
+// IR shape for the canonical attention-mask Expand idiom (Llama-style:
+// input `[1, 1, S]`, shape via `from_elements(Shape(x))`).
+//
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
@@ -157,6 +192,10 @@ struct ExpandToHip : public mlir::RewritePattern {
       if (!resultType.isDynamicDim(i))
         continue;
       int64_t shapeIdx = i - (resultRank - shapeLen);
+      // Right-aligned input axis matching this output axis (-1 if the output
+      // axis has no input counterpart -- leading dims when shape rank is
+      // larger than input rank).
+      int64_t inputIdx = i - (resultRank - inputRank);
       mlir::Value dim;
       if (shapeIdx >= 0) {
         std::optional<mlir::Value> traced =
@@ -172,15 +211,39 @@ struct ExpandToHip : public mlir::RewritePattern {
                   "tensor.dim or constant; cannot size empty() without "
                   "tensor.extract (breaks hip-pool-allocs dominance)");
         } else {
+          // Opaque shape operand (initializer constant tensor or function
+          // argument). Honour the ONNX Expand spec rule that
+          //   output_dim[i] = max(input_dim[input_idx], shape_value[shape_idx])
+          // not just `shape_value`. The pre-fix code used shape_value
+          // directly, which silently shrank inputs when shape carries 1 at an
+          // axis where input has > 1 (HF Qwen3.5-VL `Expand(x, [1,1])`
+          // identity-broadcast pattern). See file header for the IR diff.
           mlir::Value idx =
               arith::ConstantIndexOp::create(rewriter, loc, shapeIdx);
           mlir::Value extracted = tensor::ExtractOp::create(
               rewriter, loc, shape, mlir::ValueRange{idx});
-          dim = arith::IndexCastOp::create(rewriter, loc,
-                                           rewriter.getIndexType(), extracted);
+          mlir::Value shapeDim = arith::IndexCastOp::create(
+              rewriter, loc, rewriter.getIndexType(), extracted);
+          if (inputIdx < 0) {
+            // Leading output axis with no input dim: output = shape_value.
+            dim = shapeDim;
+          } else if (!inputType.isDynamicDim(inputIdx) &&
+                     inputType.getDimSize(inputIdx) == 1) {
+            // Static input dim is 1: max(1, x) == x, so output = shape_value.
+            // Preserves IR shape for the canonical attention-mask idiom
+            // (input `[1,1,S]` Expand to `[B,H,S]`).
+            dim = shapeDim;
+          } else {
+            // input_dim could be > 1 -- emit the runtime max so an
+            // identity-broadcast shape operand does not collapse the output.
+            mlir::Value inputDim =
+                tensor::DimOp::create(rewriter, loc, input, inputIdx);
+            dim = arith::MaxSIOp::create(rewriter, loc, inputDim, shapeDim);
+          }
         }
       } else {
-        int64_t inputIdx = i - (resultRank - inputRank);
+        // Output axis with no shape entry (shape rank < output rank): the
+        // missing leading dims come straight from the input.
         if (inputIdx < 0)
           return rewriter.notifyMatchFailure(
               op, "cannot resolve dynamic dim from input or shape");

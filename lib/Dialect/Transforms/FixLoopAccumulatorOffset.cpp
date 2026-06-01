@@ -60,6 +60,61 @@
 // (uncommon), this pass would need extension to compute the prefix sum from
 // a captured seqlens tensor instead.
 //
+// THE `iter * chunk_size` ASSUMPTION SILENTLY BREAKS WHEN `chunk_size` IS
+// NOT THE PER-ITER WINDOW SIZE. Canonical break (Qwen 3.5 vision encoder,
+// Flickr30k sample 1, ~50% of vision-loop trip counts > 1):
+//
+//   1. SliceConversion's upper-bound guard (lib/Conversion/OnnxToHip/
+//      SliceConversion.cpp -- the gotcha "Slice with runtime extent 0
+//      produces a TRUE dim-0 buffer" is the OPPOSITE direction; the
+//      upper-bound guard fires for the typical hip.slice the body uses
+//      to grab its per-iter chunk from a captured Q/K/V tensor) sizes
+//      the slice OUTPUT to `data.dim(slice_axis)` rows -- the FULL
+//      sequence length of the captured tensor, not the actual per-iter
+//      chunk extent (`cu_seqlens_k[iter+1] - cu_seqlens_k[iter]`).
+//      This over-allocation is needed elsewhere to keep v_init big
+//      enough to hold max_trip chunks; it is "by design" but has the
+//      side effect we hit here.
+//   2. OneShotBufferize's Concat-grow lowering takes the chunk's own
+//      dim 1 as the subview's `sizes[i]`. Because of (1) that value is
+//      now `full_seq`, not `window_size`.
+//   3. This pass's fallback computes `newOff = iter * sizes[i]`. With
+//      `sizes[i] = full_seq`, iter=1's offset becomes `full_seq * stride`
+//      -- past the v_out buffer's end. The OOB write corrupts adjacent
+//      pool slots; downstream layers' K/V load from the corrupted slots
+//      and produce NaN / garbage; vision encoder output `image_features`
+//      degrades from numeric (cos > 0.99 vs CPU) to NaN.
+//
+// THE FIX (below). Before falling back to `iter * sizes[i]`, we look for
+// a host-side `arith.index_cast(memref.load(<gather_out>))` chain whose
+// gather reads a captured seqlens-style table indexed by iter. That gives
+// the TRUE start position `cu_seqlens_k[iter]` -- the canonical chunk
+// origin in v_out coordinates -- regardless of whether `sizes[i]` was
+// over-allocated. If the body has no such chain (typical: gather output
+// is consumed directly by hip.slice as a device buffer, never host-loaded),
+// we SYNTHESISE the load + cast just before the subview rewrite. The fix
+// activates whenever the body has a hip.gather of a captured arg with
+// memref<1xi32> output -- which is the canonical IR shape for any ONNX
+// Loop windowed-attention export driven by a cu_seqlens table (Qwen-VL,
+// SigLIP windowed variants, Swin-style window indexing, etc.). It does
+// NOT match -- and is therefore a no-op on -- fixed-stride loops where
+// chunk_start is computed as `iter * static_stride` without going through
+// a gather of a runtime table; those genuine equal-chunk loops are still
+// served correctly by the original `iter * sizes[i]` fallback.
+//
+// CAVEAT. The SIZE operand of the chunk-append subview is still
+// `full_seq` (not `window_size`), so each iter's memref.copy writes
+// more bytes than are semantically valid for that window. Today this is
+// "harmless" because (a) hip.slice writes the per-iter valid prefix and
+// leaves the over-allocated tail as the SliceConversion zero-fill, and
+// (b) downstream MHA / Reshape / view chains read only the first
+// `valid_chunk` rows. Strictly fixing this requires either tightening
+// SliceConversion to emit `cu_seqlens_k[iter+1] - cu_seqlens_k[iter]`
+// as the slice extent (and resizing the v_init buffer accordingly --
+// the CLAUDE.md SAFETY REQUIREMENT note above is the constraint that
+// must hold), or adopting one of Alts 1/2/4 below to remove the in-place
+// writer pattern entirely.
+//
 // SAFETY REQUIREMENT. The v_init buffer MUST be sized large enough to hold
 // max_trip chunks. With SliceConversion's upper-bound guard, the buffer is
 // `data.dim(slice_axis)` rows = `max_trip * chunk_size` for the canonical
@@ -359,6 +414,59 @@ struct FixLoopAccumulatorOffsetPass
             }
             return WalkResult::advance();
           });
+          // Fallback synthesis: if the body has no host-side
+          // index_cast(memref.load(...)) chain (typical for Qwen-style
+          // vision loops where the gather output `alloc_0` is consumed
+          // directly by hip.slice as a device buffer), find the FIRST
+          // hip.gather whose data is a captured function arg (a
+          // seqlens_k/q-style table) and whose output is memref<1xi32>,
+          // then synthesise a host load + index_cast right before the
+          // subview. Result is the start position cu_seqlens_k[iter] —
+          // the canonical chunk start in v_out coordinates for windowed
+          // attention. The synthesised load reads pinned/UMA memory
+          // (alloc was placed on the GPU pool but is host-readable on
+          // UMA targets); on non-UMA arches the MaterializeHostScalars
+          // pass would route this through host scratch.
+          if (!existingStart) {
+            Operation *firstGather = nullptr;
+            funcOp.walk([&](Operation *op) -> WalkResult {
+              if (firstGather)
+                return WalkResult::interrupt();
+              if (op->getName().getStringRef() != "hip.gather")
+                return WalkResult::advance();
+              if (op->getNumOperands() < 3)
+                return WalkResult::advance();
+              // Output (last operand for DPS) must be memref<1xi32>.
+              Value out = op->getOperand(op->getNumOperands() - 1);
+              auto outTy = dyn_cast<MemRefType>(out.getType());
+              if (!outTy || outTy.getRank() != 1 ||
+                  !outTy.getElementType().isInteger(32))
+                return WalkResult::advance();
+              if (outTy.getDimSize(0) != 1)
+                return WalkResult::advance();
+              // Must have a function-arg-as-data operand (capture).
+              for (Value opnd : op->getOperands()) {
+                if (auto ba = dyn_cast<BlockArgument>(opnd)) {
+                  if (ba.getOwner() == &entry && ba.getArgNumber() >= 3) {
+                    firstGather = op;
+                    return WalkResult::interrupt();
+                  }
+                }
+              }
+              return WalkResult::advance();
+            });
+            if (firstGather) {
+              OpBuilder b2(sv);
+              Value gatherOut =
+                  firstGather->getOperand(firstGather->getNumOperands() - 1);
+              Value zeroIdx = arith::ConstantIndexOp::create(b2, loc, 0);
+              Value loaded = memref::LoadOp::create(b2, loc, gatherOut,
+                                                    ValueRange{zeroIdx});
+              Value idx = arith::IndexCastOp::create(b2, loc, b2.getIndexType(),
+                                                     loaded);
+              existingStart = idx;
+            }
+          }
           Value newOff;
           if (existingStart) {
             // Use the actual seqlens_k[iter] start. The subview offset
