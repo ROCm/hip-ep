@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # ck_dsl single-pass GQA attention decode
 
 ## Why this exists
@@ -28,7 +32,7 @@ Estimated end-to-end gain on the verified Mistral 7B AWQ b128 baseline
 
 ```
                     sq=1 GQA decode (current path)                                            sq=1 GQA decode (this PR, opt-in)
-                                                                
+
    ┌─────────────────────────────────────┐         ┌────────────────────────────────────────────────┐
    │ skv < 256  : hip_gqa_fused_decode    │         │ skv < 256  : ck_dsl wmma_fmha_fwd              │
    │   - cooperative dot product          │         │   - WMMA 16x16x16 single-pass                  │

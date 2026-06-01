@@ -1,0 +1,17 @@
+style: apply pre-commit auto-fixes (clang-format + licenseheaders + trailing-ws)
+
+Run pre-commit locally on the files this branch touches; let it apply the
+auto-fixes it would have applied in CI:
+
+  - lib/Runtime/real/ck_dsl_fmha_decode.cpp        : clang-format reflow
+  - lib/Runtime/real/ck_dsl_fmha_decode_gfx1151_hsaco.h
+                                                   : licenseheaders + clang-format
+                                                     reflow of the byte-array literal
+  - lib/Runtime/real/gqa.cpp                       : clang-format reflow of
+                                                     the added dispatch block
+  - docs/design/ck-dsl-fmha-decode.md              : trailing whitespace trim
+
+No semantic changes; pure formatting / license header. The embed_hsaco.py
+script's existing output formatting now matches the post-clang-format shape
+of the generated header so a future regeneration won't trip the hook again
+(see TODO in embed_hsaco.py for the CMake-time embed follow-up).
