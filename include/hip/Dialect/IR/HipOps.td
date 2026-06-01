@@ -500,6 +500,68 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
   }];
 }
 
+def Hip_GatherBlockQuantizedOp
+    : Hip_DpsOp<"gather_block_quantized", [AttrSizedOperandSegments]> {
+  let summary = "Gather + block-wise dequantize "
+                "(com.microsoft GatherBlockQuantized)";
+  let description = [{
+    Implements the com.microsoft GatherBlockQuantized operator: gather rows
+    from a block-wise quantized constant `data` along `gather_axis` using
+    integer `indices`, and dequantize the gathered rows using per-block
+    `scales` and optional `zero_points`.
+
+    `data` is a constant tensor of rank `r >= 1` quantized along
+    `quantize_axis` with the given `block_size`. For 4-bit, two values are
+    packed per byte (low nibble first, high nibble second); for 8-bit one
+    value per byte. `scales` (and `zero_points`, when present) share the
+    layout of `data` except along `quantize_axis`, where their extent is
+    `data.shape[quantize_axis] / block_size`. When `zero_points` is absent,
+    the default is `0` for int4/uint4 and `2^(bits-1)` for uint8.
+
+    Output rank is `q + (r - 1)` where `q = rank(indices)`. Element type of
+    `output` matches `scales` (T2: f32 / f16 / bf16). For uint8 `data`,
+    `gather_axis` must be 0.
+
+    Uses destination-passing style: the `output` buffer is provided as an
+    argument. The runtime is responsible for fetching the per-element
+    quantized value (handling sub-byte unpacking when `bits == 4`),
+    dequantizing it via `(q - zp) * scale`, and writing the result.
+
+    Example:
+    ```mlir
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<2048x96xui8, 1>,
+            memref<8xi64, 1>,
+            memref<2048x12xf16, 1>)
+        zero_points(%zp : memref<2048x12xui8, 1>)
+        outs(%out : memref<8x96xf16, 1>)
+        {bits = 4, block_size = 16, gather_axis = 0, quantize_axis = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,                   // packed quantized weights
+    Hip_TensorOrMemRef:$indices,                // i32/i64 indices
+    Hip_TensorOrMemRef:$scales,                 // dequant scales (T2)
+    Optional<Hip_TensorOrMemRef>:$zero_points,  // dequant zero points
+    Hip_TensorOrMemRef:$output,                 // DPS init / dequantized output
+    I64Attr:$bits,
+    I64Attr:$block_size,
+    I64Attr:$gather_axis,
+    I64Attr:$quantize_axis
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `,` $scales `:`
+        type($data) `,` type($indices) `,` type($scales) `)`
+    (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // ===== MIOpen ops ============================================================
 
 def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {

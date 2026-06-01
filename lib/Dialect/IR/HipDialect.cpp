@@ -847,6 +847,21 @@ void QMoEOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// GatherBlockQuantizedOp: ins(data, indices, scales, [zero_points])
+//                          outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatherBlockQuantizedOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatherBlockQuantizedOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CausalConvWithStateOp: ins(input, weight, [bias], [past_state])
 //                        outs(output, present_state)
 //===----------------------------------------------------------------------===//
