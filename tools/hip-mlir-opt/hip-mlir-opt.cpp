@@ -139,6 +139,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::MatMulNBitsOp>>(*ctx);
     mlir::hip::QMoEOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::QMoEOp>>(*ctx);
+    mlir::hip::GatherBlockQuantizedOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GatherBlockQuantizedOp>>(*ctx);
     mlir::hip::LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::LinearAttentionOp>>(*ctx);
     mlir::hip::CausalConvWithStateOp::attachInterface<

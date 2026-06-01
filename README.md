@@ -68,6 +68,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | MultiHeadAttention (com.microsoft) | Runtime stub (not yet GPU-accelerated) |
 | MatMulNBits (com.microsoft) | Custom HIP Kernel |
 | QMoE (com.microsoft) | Custom HIP Kernel |
+| GatherBlockQuantized (com.microsoft) | Runtime stub (not yet GPU-accelerated) |
 | LinearAttention (com.microsoft) | Custom HIP Kernel |
 | CausalConvWithState (com.microsoft) | MIOpen |
 
