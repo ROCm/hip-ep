@@ -11,14 +11,17 @@ machinery.
 
 ## Goals
 
-1. **Static verification.** Every HIP DPS op verifies that its `outs`
-   operand types are compatible with the shapes that fall out of the op
-   contract (matmul: `[..., M, K] @ [..., K, N] -> [..., M, N]`;
-   elementwise: NumPy broadcast over the inputs; etc).
+1. **Result types tracked through the converter.** Every HIP DPS op
+   declares `InferTypeOpInterface` so the converter can construct ops
+   without restating the result type at every callsite — the
+   auto-generated `Op::create` overload reads the result type(s) from
+   the `outs` operand types via `appendDpsResultIfTensor`. This keeps
+   the DPS contract `result_type == outs_operand_type` closed by
+   construction.
 2. **Reify dynamic dims.** When a result dim is `?` (`kDynamic`) at the
    type level but is computable in terms of operand dims, the op exposes
    that knowledge through upstream
-   `ReifyRankedShapedTypeOpInterface::reifyResultShapes`.  Downstream
+   `ReifyRankedShapedTypeOpInterface::reifyResultShapes`. Downstream
    `--resolve-shaped-type-result-dims` then folds `tensor.dim` of the
    result into either an `arith.constant` (static dims) or a
    `tensor.dim` of the relevant input (dynamic dims).
@@ -26,46 +29,75 @@ machinery.
    module, calls `reifyResultShapes` on every HIP-dialect op carrying
    the interface, and refines `?` dims in result types in place —
    including the DPS `outs` operand's `tensor.empty` producer, which is
-   necessary to keep the IR well-formed (DPS contract:
-   `result_type == outs_operand_type`). Wired into the production
+   necessary to keep the IR well-formed. Wired into the production
    pipeline immediately after `convert-onnx-to-hip` (see
    [Pipeline placement](#pipeline-placement)).
+4. **Static verification where it pays rent.** Ops with a non-trivial
+   static shape contract (canonical: `hip.matmul`'s
+   `[..., M, K] @ [..., K, N] -> [..., M, N]`) carry `let hasVerifier = 1`
+   and a per-op `verify()` driving the same shape helper used by Reify.
+   The default for new DPS ops is no verifier — the InferType-driven
+   `outs` typing already closes the DPS contract, and a Reify impl that
+   returns the wrong shape is caught by LIT cases under
+   `--hip-infer-shapes`.
 
-These three layers share **one** static shape function per op
-(`inferMatmulShape`, future `inferBroadcastShape`, ...). The verifier
-checks the result against the helper; reify lifts the helper's output
-into `OpFoldResult`s; the pass aggregates reify across the module.
+`hip.matmul` is the worked example that exercises all four layers.
+Other ops compose the layers from a small helper menu chosen by shape
+contract — `reifyElementwiseSameShape` (default), `reifyBroadcastShape`
+(NumPy broadcast), dedicated helpers for permutation / reduction /
+gather, fold-or-bail Tier-1 helpers for shape-arithmetic ops
+(`reifyPadShape` etc.), and the generic `reifyResultsFromDpsInits` for
+multi-result outs-lifting. See [How to add a new op](#how-to-add-a-new-op)
+for the table.
 
 ## Design rationale
 
-### Why `ReifyRankedShapedTypeOpInterface` and not a custom interface?
+### Why `InferTypeOpInterface` + `ReifyRankedShapedTypeOpInterface`?
 
 Upstream MLIR has three relevant interfaces:
 
-| Interface | Static shape | Dynamic shape | Used by |
+| Interface | Static shape | Dynamic shape | We use? |
 |---|---|---|---|
-| `InferTypeOpInterface` | yes (`inferReturnTypes`) | no | Type inference at op build time |
-| `InferShapedTypeOpInterface` | yes (`inferReturnTypeComponents`) | partial | Some ops (e.g. mhlo) |
-| `ReifyRankedShapedTypeOpInterface` | implicit (IntegerAttr) | yes (Value) | linalg, tensor::Pad, tensor::Concat |
+| `InferTypeOpInterface` | yes (`inferReturnTypes`) | no | **YES** |
+| `InferShapedTypeOpInterface` | yes (`inferReturnTypeComponents`) | partial | no |
+| `ReifyRankedShapedTypeOpInterface` | implicit (IntegerAttr) | yes (Value) | **YES** |
 
 For DPS ops the result type is **tautologically tied** to the `outs`
-operand type — you can't "infer" the result type from the inputs because
-the result type IS the outs type. `InferTypeOpInterface` is therefore
-not a fit: there's nothing for it to infer.
+operand type — the result type IS the outs type, so an interface has
+nothing to "infer" from the inputs in the classical sense. The job
+`InferTypeOpInterface` does for us is different and concrete: the
+**converter** still has to construct each op, and on the legacy
+`Op::create` builder path every callsite has to spell out the result
+type list explicitly even though it is just the (already typed)
+`outs` operand type echoed back. `inferReturnTypes` moves that
+boilerplate into the op once — the auto-generated `Op::create`
+overload reads the outs operand types from the operation state and
+produces the result types via `appendDpsResultIfTensor`. Every
+`OnnxToHip*Conversion.cpp` callsite then drops its explicit type
+list and relies on the inference. Memref-mode ops produce zero result
+types — the destination operand carries the writes via its memref
+descriptor and the SSA result list is empty.
 
-`ReifyRankedShapedTypeOpInterface` neatly steps around this: it lets the
-op describe its result *shape* (per-dim `OpFoldResult`) without trying to
-synthesise a result *type*. Static dims fall out as `IntegerAttr`,
-dynamic dims fall out as `tensor.dim` (or `memref.dim`) of the operand
-they depend on. Linalg's named ops use exactly this pattern; we reuse
-both the interface and the LLVM-project test pass that drives it
-(`--resolve-shaped-type-result-dims`) so our infrastructure does not
-fork.
+`ReifyRankedShapedTypeOpInterface` covers the orthogonal *dynamic-shape*
+job: per-dim `OpFoldResult`s for `--hip-infer-shapes` and the upstream
+test pass `--resolve-shaped-type-result-dims`. Static dims fall out as
+`IntegerAttr`, dynamic dims fall out as `tensor.dim` (or `memref.dim`)
+of the operand they depend on. Linalg's named ops use exactly this
+pattern; we reuse both the interface and the LLVM-project test pass so
+our infrastructure does not fork.
+
+The two interfaces compose cleanly with no overlap: InferType makes
+converters terse at op-construction time, Reify makes refinement work
+at module-walk time (`--hip-infer-shapes` calls reify, narrows result
+types in place, rebuilds outs producers). Verifier checks slot in on
+top — for ops with a non-trivial shape contract — sharing the same
+static shape helper (`inferMatmulShape`) that Reify lifts into
+`OpFoldResult`s.
 
 An earlier draft added a custom `HipShapeInferenceOpInterface` with an
 `inferOutputShape(...) -> SmallVector<int64_t>` static method. Dropped:
-the upstream interface and the static helper already cover both jobs
-(static check, dynamic reify), doubling up adds maintenance with no
+the two upstream interfaces above already cover both jobs (static type
+inference, dynamic dim reify), doubling up adds maintenance with no
 payoff, and the upstream test-pass machinery is the test surface for
 free.
 
@@ -159,16 +191,31 @@ substituting it into `Pipelines.cpp` and re-running the LIT suite.
 ```text
 include/hip/Dialect/IR/
   HipShapeUtils.h          -- public API: inferMatmulShape,
-                              verifyHipOpShape, reifyDimOrConstant
+                              verifyHipOpShape, appendDpsResultIfTensor,
+                              reifyDimOrConstant, reifyElementwiseSameShape,
+                              reifyBroadcastShape, reifyResultsFromDpsInits,
+                              and per-shape Tier-1 helpers (reifyPadShape,
+                              reifyTileShape, reifySliceShape,
+                              reifyExpandShape, reifyRangeShape,
+                              reifyTransposeByPerm, reifyGatherWithAxis,
+                              reifyGatherND, reifyReductionWithKeepdims)
   HipOps.td                -- per-op declares
-                              `DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface>`
-                              and `let hasVerifier = 1`
+                              `DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>`
+                              and `DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface>`;
+                              `let hasVerifier = 1` only when the op has a
+                              non-trivial shape contract (matmul today)
 
 lib/Dialect/IR/
   HipShapeUtils.cpp                -- implementations + diagnostics
-  HipDialect.cpp                   -- per-op `verify()`, `getEffects()`,
-                                      `getDpsInitsMutable()`, custom
-                                      builders / printers / parsers
+  HipDialect.cpp                   -- per-op `verify()` (matmul only as of
+                                      #264, plus `LoopOp::verify()`),
+                                      `getEffects()`, `getDpsInitsMutable()`,
+                                      custom builders / printers / parsers;
+                                      `LoopOp::inferReturnTypes` lives here
+                                      next to its peers (control-flow op,
+                                      not a DPS compute op)
+  HipResultTypeInferenceImpl.cpp   -- per-op `inferReturnTypes()`,
+                                      one `// <OpName>` section per op
   HipReifyResultShapesImpl.cpp     -- per-op `reifyResultShapes()`,
                                       one `// <OpName>` section per op
 
@@ -179,24 +226,32 @@ lib/Dialect/Transforms/
   InferShapesPass.cpp      -- module-level walk; DPS-aware refinement
 
 test/lit/Dialect/
-  hip-matmul-shape-verifier.mlir   -- verifier positive + negative
+  hip-matmul-shape-verifier.mlir   -- matmul shape-contract verifier
+                                       positive + negative cases
   hip-matmul-reify-shapes.mlir     -- driven by upstream
                                        `--resolve-shaped-type-result-dims`
-  hip-infer-shapes.mlir            -- propagation pass behaviour
+  hip-loop-verifier.mlir           -- `hip.loop` v_init / result type
+                                       contract (added by #261)
+  hip-infer-shapes.mlir            -- consolidated `--hip-infer-shapes`
+                                       LIT, one section per op rolled out
+                                       across #260 - #264
 ```
 
 ### Why the per-interface split
 
-`reifyResultShapes` lives in its own translation unit because it grows
-on a different schedule from the rest of an op's machinery. Verifiers,
-`getEffects`, `getDpsInitsMutable`, and op-local builders touch the op
-once and rarely need maintenance after that. Reify implementations are
+`reifyResultShapes` and `inferReturnTypes` each live in their own
+translation unit because they grow on a different schedule from the
+rest of an op's machinery. Verifiers, `getEffects`,
+`getDpsInitsMutable`, and op-local builders touch the op once and
+rarely need maintenance after that. Reify implementations are
 non-trivial shape arithmetic that benefits from being read alongside
 each other (every dynamic-shape op solves a small variant of the same
-"lift static dims to `IntegerAttr`, dynamic dims to `tensor.dim` of the
-right operand" problem). Keeping them together — and out of the
-already-large `HipDialect.cpp` — makes both files easier to navigate as
-the dialect picks up shape-inference support for more ops.
+"lift static dims to `IntegerAttr`, dynamic dims to `tensor.dim` of
+the right operand" problem). InferType implementations are typically
+mechanical (`appendDpsResultIfTensor` chained over outs operands) but
+multiply across every DPS op — keeping them together makes the "every
+op uniformly delegates to the same helper" pattern obvious. Both files
+follow the same one-`// <OpName>`-section-per-op convention.
 
 This mirrors IREE's LinalgExt convention (`LinalgExtOps.cpp` keeps
 verifiers / builders; `TilingInterfaceImpl.cpp` and
@@ -245,48 +300,115 @@ any change to `Pipelines.cpp`.
 
 ## How to add a new op
 
-A new HIP op participates in shape inference in **five** small edits,
-spread across the three files identified in the layout above. The
-matmul wiring is the canonical reference; the same pattern applies to
-every DPS compute op.
+A new HIP DPS op participates in shape inference in **four** small
+edits (TableGen + InferType + Reify + LIT), plus an **optional**
+verifier when the op has a non-trivial static shape contract. The
+matmul wiring is the canonical full-stack reference; for the rest of
+the dialect the InferType + Reify path (no verifier) is the realized
+pattern across #262 - #264.
 
-### 1. Add a shape helper (or reuse one)
+**Stack rollout context.** Infrastructure lands in #260 with `hip.matmul`
+as the worked example. #261 adds `InferTypeOpInterface` to `hip.loop`.
+#262 - #264 roll out the InferType + Reify pattern across 51 more DPS
+ops, picking from a small menu of reify helpers chosen by op shape
+contract — see step 3.
 
-In [HipShapeUtils.h](../../include/hip/Dialect/IR/HipShapeUtils.h), add a free
-function that takes the operand shapes (and any op-specific attrs) and
-returns the expected output shape vector. Use `ShapedType::kDynamic` for
-dims that the helper cannot compute, and emit a diagnostic via the
-supplied `emitError` callable on shape mismatch.
-
-```cpp
-// HipShapeUtils.h
-SmallVector<int64_t> inferBroadcastShape(
-    ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
-    function_ref<InFlightDiagnostic()> emitError);
-```
-
-If your op fits an existing helper (e.g. another matmul-shaped op, or
-another op with the same broadcast rules), just reuse it.
-
-### 2. Declare the interface in TableGen
+### 1. Declare the two interfaces in TableGen
 
 In [HipOps.td](../../include/hip/Dialect/IR/HipOps.td):
 
 ```tablegen
 def Hip_MyOp : Hip_DpsOp<"my_op", [
+    DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>,
     DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface>
   ]> {
   // ... arguments, assemblyFormat ...
-  let hasVerifier = 1;
 }
 ```
 
 `Hip_DpsOp` already declares `DestinationStyleOpInterface` and emits the
-`Variadic<AnyRankedTensor>:$result_tensors` result for tensor mode.
+`Variadic<AnyRankedTensor>:$result_tensors` result for tensor mode. Add
+`let hasVerifier = 1;` only if the op has a non-trivial static shape
+contract worth verifying (matmul-style; default for new ops is no
+verifier — see step 5).
 
-### 3. Implement `verify()` in `HipDialect.cpp`
+### 2. Implement `inferReturnTypes()` in `HipResultTypeInferenceImpl.cpp`
 
-In [HipDialect.cpp](../../lib/Dialect/IR/HipDialect.cpp), under the
+Add a `// MyOp` section banner at the bottom of
+[HipResultTypeInferenceImpl.cpp](../../lib/Dialect/IR/HipResultTypeInferenceImpl.cpp).
+Single-result ops are typically a one-liner over the outs operand:
+
+```cpp
+LogicalResult MyOp::inferReturnTypes(
+    MLIRContext *ctx, std::optional<Location> loc, MyOp::Adaptor adaptor,
+    SmallVectorImpl<Type> &inferredReturnTypes) {
+  appendDpsResultIfTensor(adaptor.getOutput(), inferredReturnTypes);
+  return success();
+}
+```
+
+For multi-result ops, chain `appendDpsResultIfTensor` per outs operand;
+when the op carries `AttrSizedOperandSegments` and you would otherwise
+duplicate the chain, delegate to the generic helper used by
+`hip.gqa` / `hip.layer_norm` / `hip.multi_head_attention`:
+
+```cpp
+return reifyResultsFromDpsInits(*this, b, reifiedReturnShapes);
+```
+
+Memref-mode ops produce zero result types — `appendDpsResultIfTensor`
+is a no-op when the operand is a memref, so the same impl works for
+both modes.
+
+### 3. Implement `reifyResultShapes()` in `HipReifyResultShapesImpl.cpp`
+
+Add a `// MyOp` section banner at the bottom of
+[HipReifyResultShapesImpl.cpp](../../lib/Dialect/IR/HipReifyResultShapesImpl.cpp).
+Pick the reify helper that matches the op's shape contract:
+
+| Op shape contract | Helper |
+|---|---|
+| Result shape == operand shape (silu, sigmoid, cast, ...) | `reifyElementwiseSameShape` |
+| NumPy broadcast (add, mul, where, ...) | `reifyBroadcastShape` |
+| Permutation (`hip.transpose`) | `reifyTransposeByPerm` |
+| Reduction with `keepdims` (reduce_sum, reduce_max, ...) | `reifyReductionWithKeepdims` |
+| Gather along an axis (`hip.gather`, `hip.gather_nd`) | `reifyGatherWithAxis` / `reifyGatherND` |
+| Multi-result outs-lifting (gqa, attention, layer_norm, ...) | `reifyResultsFromDpsInits` (mirrors IREE's `LinalgExtOp::reifyResultShapes` default) |
+| Fold-or-bail shape arithmetic (pad, tile, slice, expand, range) | one of `reifyPadShape` / `reifyTileShape` / `reifySliceShape` / `reifyExpandShape` / `reifyRangeShape` (return `failure()` on non-foldable; the thunk falls through to outs-lifting) |
+| Matmul-shaped (`[..., M, K] @ [..., K, N] -> [..., M, N]`) | call `inferMatmulShape` to compute output extents, then `reifyDimOrConstant` per dim |
+
+If your op's contract is not in the table, write a new helper in
+`HipShapeUtils.{h,cpp}` and add a row.
+
+`reifyDimOrConstant` (used by the matmul-shaped row) returns
+`IntegerAttr` when the dim is static and a `tensor.dim` / `memref.dim`
+otherwise, mirroring upstream `linalg::createFoldedDimOp`.
+
+The interface declarations are already in TableGen (step 1), so no
+header / `attachInterface` changes are needed — the linker resolves
+each member function to whichever `.cpp` file defines it.
+
+### 4. Migrate converter callsites
+
+Drop the explicit `resultType` argument from the `Op::create` callsite
+in `lib/Conversion/OnnxToHip/<MyOp>Conversion.cpp`:
+
+```cpp
+// Before:
+hip::MyOp::create(b, loc, /*resultType=*/outsType, ctx, lhs, rhs, outs);
+// After:
+hip::MyOp::create(b, loc, ctx, lhs, rhs, outs);
+```
+
+The InferType-aware `Op::create` overload is auto-generated by ODS
+once `InferTypeOpInterface` is declared in step 1. Existing callers
+that still pass an explicit type list keep working — the migration is
+mechanical and per-op.
+
+### 5. (Optional) Verifier in `HipDialect.cpp`
+
+Only for ops with a non-trivial static shape contract — `hip.matmul`
+is the only such op as of #264. Implement `verify()` under the
 `// MyOp` section banner alongside the existing
 `getDpsInitsMutable()` / `getEffects()`:
 
@@ -301,7 +423,7 @@ LogicalResult MyOp::verify() {
   // the helper already issued a diagnostic.
   return mlir::hip::verifyHipOpShape(
       *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        SmallVector<int64_t> outShape = mlir::hip::broadcastShapes(
+        SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
             getShapeOf(getA()), getShapeOf(getB()),
             [&]() { return this->emitOpError(); });
         if (outShape.empty())
@@ -311,48 +433,23 @@ LogicalResult MyOp::verify() {
 }
 ```
 
-### 4. Implement `reifyResultShapes()` in `HipReifyResultShapesImpl.cpp`
+Most new ops do **not** need this. The InferType-driven outs typing
+already closes the DPS contract by construction, and a Reify impl
+that returns the wrong shape is caught by LIT cases under
+`--hip-infer-shapes` (step 6).
 
-In [HipReifyResultShapesImpl.cpp](../../lib/Dialect/IR/HipReifyResultShapesImpl.cpp),
-add a new `// MyOp` section banner at the bottom of the file and place
-the impl underneath it:
+### 6. LIT coverage
 
-```cpp
-//===----------------------------------------------------------------------===//
-// MyOp
-//===----------------------------------------------------------------------===//
-
-LogicalResult MyOp::reifyResultShapes(
-    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  if (getNumResults() == 0)
-    return failure(); // memref mode -- no tensor result
-  // ... compute outShape via the same helper used in verify(), then for
-  //     each dim: reifyDimOrConstant(b, loc, outShape[d], operand,
-  //                                  operandDimIdx)
-  // ... reifiedReturnShapes.assign({std::move(dims)});
-  return success();
-}
-```
-
-`reifyDimOrConstant` returns `IntegerAttr` when the dim is static and a
-`tensor.dim` / `memref.dim` otherwise, mirroring upstream
-`linalg::createFoldedDimOp`.
-
-The interface declaration is already in TableGen (step 2), so no
-header / `attachInterface` changes are needed — the linker resolves the
-member function to whichever `.cpp` file defines it.
-
-### 5. (Optional) LIT coverage
-
-Add three small LIT tests under `test/lit/Dialect/`, modelled on the
-matmul ones:
-
-* `hip-<op>-shape-verifier.mlir`: positive + negative shape checks via
-  `--verify-diagnostics`.
-* `hip-<op>-reify-shapes.mlir`: drive `--resolve-shaped-type-result-dims`
-  and FileCheck that `tensor.dim` of the op result folds correctly.
-* (Optional) extend `test/lit/Dialect/hip-infer-shapes.mlir` with a case
-  that exercises `--hip-infer-shapes` on a chain involving the new op.
+Append cases to
+[test/lit/Dialect/hip-infer-shapes.mlir](../../test/lit/Dialect/hip-infer-shapes.mlir),
+one per shape pattern your op exercises (typically one static, one
+dynamic; for fold-or-bail Tier-1 ops also one non-foldable case with
+`CHECK-NOT: arith.subi` / `CHECK-NOT: arith.divsi` to guard the
+no-IR-bloat fallback contract). Per-op verifier / reify files
+(`hip-<op>-shape-verifier.mlir`, `hip-<op>-reify-shapes.mlir`) are
+reserved for ops complex enough to deserve their own file (matmul has
+both today; `hip.loop` has its own `hip-loop-verifier.mlir` for the
+v_init / result-type contract added by #261).
 
 ## Open extensions
 
