@@ -789,6 +789,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       mlir::RewritePatternSet patterns(ctx);
       populateFastGeluFusionPatterns(patterns, ctx);
       populateProjectorOpsRewritePatterns(patterns, ctx);
+      populateLpNormalizationConversionPatterns(patterns, ctx);
       ChangeFlagListener listener;
       mlir::GreedyRewriteConfig cfg;
       cfg.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
