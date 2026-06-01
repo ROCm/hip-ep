@@ -61,6 +61,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | NonZero | Runtime stub (not yet GPU-accelerated) |
 | Gather | Custom HIP Kernel |
 | LayerNormalization | MIOpen |
+| LpNormalization | Decomposed → Mul + ReduceSum + Sqrt + Div |
 | SimplifiedLayerNormalization | MIOpen |
 | SkipSimplifiedLayerNormalization (com.microsoft) | MIOpen |
 | RotaryEmbedding (com.microsoft) | Custom HIP Kernel |
