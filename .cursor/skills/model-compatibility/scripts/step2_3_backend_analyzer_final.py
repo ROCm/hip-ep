@@ -60,11 +60,14 @@ class BackendAnalyzer:
     def _load_backend_mappings(self, config_json: str = None) -> Dict[str, str]:
         """Load the runtime -> backend mapping table.
 
-        Priority:
-        1. External config file (if provided).
-        2. Built-in predefined mapping table.
+        Source of truth is the runtime source itself: `_analyze_backend`
+        scans each wrapper's implementation for ROCm library API calls
+        (miopen*, hipblasLt*, hipblas*, rocblas*) and custom-kernel
+        markers (__global__, hipLaunchKernel, file under custom_kernels/).
+        This dict is therefore empty by default -- override only via an
+        external config when source-scan misclassifies (no compiled-in
+        list to drift out of date as new wrappers land).
         """
-        
         if config_json and Path(config_json).exists():
             try:
                 with open(config_json, 'r', encoding='utf-8') as f:
@@ -72,69 +75,56 @@ class BackendAnalyzer:
                     return data.get('mappings', {})
             except Exception as e:
                 print(f"Warning: Could not load backend config {config_json}: {e}")
-        
-        # Built-in predefined mapping table.
-        return {
-            # MIOpen functions
-            'wrap_miopenActivationForward': 'MIOpen',
-            'wrap_miopenConvolutionForward': 'MIOpen',
-            'wrap_miopenOpTensor': 'MIOpen',
-            'wrap_miopenT5LayerNormForward': 'MIOpen',
-            'wrap_reduce_sum': 'MIOpen',
-            'hip_miopen_softmax': 'MIOpen',
-            
-            # hipBLASLt functions
-            'wrap_hipblasLtMatmul': 'hipBLASLt',
-            
-            # Custom Hip Kernel functions
-            'wrap_cast': 'Custom Hip Kernel',
-            'wrap_gather': 'Custom Hip Kernel',
-            'wrap_gemm': 'Custom Hip Kernel',
-            'wrap_group_query_attention': 'Custom Hip Kernel',
-            'wrap_matmul_nbits': 'Custom Hip Kernel',
-            'wrap_qmoe': 'Custom Hip Kernel',
-            'wrap_rotary_embedding': 'Custom Hip Kernel',
-            'wrap_skip_simplified_layer_norm': 'Custom Hip Kernel',
-            'wrap_elementwise_sub': 'MIOpen',
-            'hip_transpose': 'Custom Hip Kernel',
-        }
+        return {}
     
     def _load_runtime_implementations(self) -> Dict[str, Dict]:
-        """Load the content of all runtime implementation files."""
-        implementations = {}
-        
-        # Search both the runtime dir and its parent (broader search).
+        """Index every runtime function definition to its source file.
+
+        Walks `lib/Runtime/real/` plus immediate `lib/Runtime/` siblings,
+        but **excludes `lib/Runtime/mock/`** because mock_gpu.cpp redefines
+        many wrappers as stubs whose bodies do not reflect the real backend.
+        Without this filter mock stubs overwrite real implementations
+        (last-write-wins) and `_analyze_backend` ends up reading the mock
+        body for backend classification.
+
+        For real-vs-real collisions (rare), the first definition wins.
+        """
+        implementations: Dict[str, Dict] = {}
+
+        # `runtime_dir` is typically `<repo>/lib/Runtime/real`. Also scan
+        # the parent so any wrappers placed at `lib/Runtime/*.cpp` are
+        # caught, but always skip the `mock/` subtree.
         search_dirs = [self.runtime_dir]
         parent_dir = self.runtime_dir.parent
-        if parent_dir.exists():
+        if parent_dir.exists() and parent_dir != self.runtime_dir:
             search_dirs.append(parent_dir)
-        
-        runtime_files = []
+
+        runtime_files = set()
         for search_dir in search_dirs:
-            runtime_files.extend(list(search_dir.glob('**/*.cpp')))
-        
-        runtime_files = list(set(runtime_files))
-        
+            for cpp in search_dir.glob('**/*.cpp'):
+                norm = str(cpp).replace('\\', '/').lower()
+                if '/mock/' in norm or norm.endswith('/mock_gpu.cpp'):
+                    continue
+                runtime_files.add(cpp)
+
+        func_pat = re.compile(
+            r'(?:int|void|bool|float|double|hipError_t)\s+(\w+)\s*\([^)]*\)\s*\{'
+        )
+
         for file_path in runtime_files:
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                
-                func_patterns = [
-                    r'(?:int|void|bool|float|double|hipError_t)\s+(\w+)\s*\([^)]*\)\s*\{',
-                ]
-                
-                for pattern in func_patterns:
-                    matches = re.findall(pattern, content)
-                    for func_name in matches:
-                        if func_name not in implementations:
-                            implementations[func_name] = {
-                                'file': str(file_path),
-                                'content': content
-                            }
-            except Exception as e:
+                for func_name in func_pat.findall(content):
+                    # First real definition wins; skip duplicates.
+                    if func_name not in implementations:
+                        implementations[func_name] = {
+                            'file': str(file_path),
+                            'content': content,
+                        }
+            except Exception:
                 pass
-        
+
         return implementations
     
     def analyze(self) -> Dict:
@@ -207,48 +197,101 @@ class BackendAnalyzer:
     def _analyze_backend(self, runtime_func: str) -> str:
         """Identify the backend a runtime function relies on.
 
-        Priority:
-        1. Look up in the predefined mapping table.
-        2. Inspect implementation file path (e.g. 3rd-party/custom_kernels).
-        3. Dynamic detection by scanning the implementation source.
+        Detection rules (source-driven, no hardcoded wrapper table):
+        1. Override via external config (self.backend_mappings, empty by default).
+        2. Implementation file path under custom_kernels/ -> Custom Hip Kernel
+           (file lives in the custom-kernel area of the tree).
+        3. The WRAPPER FUNCTION BODY (scoped, not whole file) is examined
+           for direct calls to library APIs:
+              - hipblasLt* / hipblaslt_*  -> hipBLASLt
+              - miopen* / miopenCreate    -> MIOpen
+              - hipblas* / hipblas[A-Z]   -> hipBLAS
+              - rocblas* / rocblas[A-Z]   -> rocBLAS
+           Body-scope avoids cross-wrapper pollution from neighbouring
+           helpers in the same .cpp.
+        4. Body has `__global__` / `hipLaunchKernel`, OR delegates to a
+           `hip_<name>(` function while the file `#include`s the custom-
+           kernels gateway header -> Custom Hip Kernel.
+        5. Fallback to whole-file library scan (rescue tiny wrappers whose
+           body is purely a delegation call without the library token).
+        6. Else Unknown.
         """
-        
-        # 1. Check the predefined mapping table.
+
         if runtime_func in self.backend_mappings:
             return self.backend_mappings[runtime_func]
-        
-        # 2. Dynamic detection (requires the implementation source).
+
         if runtime_func not in self.runtime_implementations:
             return "Unknown"
-        
+
         impl = self.runtime_implementations[runtime_func]
         content = impl['content']
         file_path = impl['file']
-        
-        # 2.1 Path heuristic: files under 3rd-party/custom_kernels are Custom Hip Kernels.
-        if '3rd-party/custom_kernels' in file_path or '3rd-party\\custom_kernels' in file_path:
+
+        if 'custom_kernels' in file_path.replace('\\', '/'):
             return "Custom Hip Kernel"
-        if 'custom_kernels' in file_path:
-            return "Custom Hip Kernel"
-        
-        # 2.2 Library-API detection in source.
+
         rocm_libraries = [
-            ('MIOpen', [r'miopen_\w+', r'miopenCreate', r'miopenDestroy']),
             ('hipBLASLt', [r'hipblaslt_\w+', r'hipblasLt\w+']),
+            ('MIOpen', [r'miopen_\w+', r'miopenCreate', r'miopenDestroy']),
             ('hipBLAS', [r'hipblas_\w+', r'hipblas[A-Z]']),
             ('rocBLAS', [r'rocblas_\w+', r'rocblas[A-Z]']),
         ]
-        
+
+        custom_kernel_header = bool(
+            re.search(r'#\s*include\s*[<"]hip_custom_kernels\.h[>"]', content)
+        )
+
+        body = self._extract_function_body(content, runtime_func)
+        if body:
+            for lib_name, patterns in rocm_libraries:
+                for pattern in patterns:
+                    if re.search(pattern, body):
+                        return lib_name
+            if re.search(r'__global__\s+void|__kernel\s+void|hipLaunchKernel', body):
+                return "Custom Hip Kernel"
+            # Body delegates to a hip_<name>(...) call AND the file pulls
+            # in the custom-kernel gateway: this is the canonical
+            # "wrap_X -> hip_X" delegation pattern used across runtime/real/.
+            if custom_kernel_header and re.search(r'\bhip_\w+\s*\(', body):
+                return "Custom Hip Kernel"
+
         for lib_name, patterns in rocm_libraries:
             for pattern in patterns:
                 if re.search(pattern, content):
                     return lib_name
-        
-        # 2.3 Custom kernel detection.
         if re.search(r'__global__\s+void|__kernel\s+void|hipLaunchKernel', content):
             return "Custom Hip Kernel"
-        
+
         return "Unknown"
+
+    @staticmethod
+    def _extract_function_body(content: str, func_name: str) -> str:
+        """Extract the body `{ ... }` of a top-level function definition
+        `... func_name(...) {`. Returns '' when not found. Uses balanced
+        brace traversal so nested blocks and string-with-brace edge cases
+        are handled."""
+        # Find the function signature opening: `func_name(`.
+        sig_pat = re.compile(
+            r'\b' + re.escape(func_name) + r'\s*\([^)]*\)\s*(?:const\s*)?\{'
+        )
+        m = sig_pat.search(content)
+        if not m:
+            return ''
+        # The `{` is the last char of the match. Walk balanced braces.
+        brace_pos = m.end() - 1
+        depth = 0
+        i = brace_pos
+        n = len(content)
+        while i < n:
+            ch = content[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return content[brace_pos + 1:i]
+            i += 1
+        return ''
 
 
 def main():
