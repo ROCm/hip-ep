@@ -36,7 +36,7 @@ env:
   # pinned ONNXRUNTIME_VERSION release.
   ONNXRUNTIME_PR_PATCHES: "28608"
   # THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
-  THEROCK_VERSION: therock-dist-linux-gfx120X-all-7.11.0.tar.gz
+  THEROCK_VERSION: therock-dist-linux-gfx120X-all-7.11.0
   # OGA fork+pin matches windows-build.yml so both platforms produce
   # ABI-compatible OGA binaries against the same ORT and tokenizer surface.
   OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
