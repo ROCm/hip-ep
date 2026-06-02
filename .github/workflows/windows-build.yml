@@ -9,8 +9,13 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
+  # TEMPORARY -- REVERT BEFORE MERGE: restore `branches: [main, "release_*"]`.
+  # Triggering on push to every branch lets CI build the PR head even while it
+  # still has merge conflicts with the base branch (GitHub skips pull_request
+  # events until the conflict is resolved). This duplicates runs for
+  # conflict-free PRs (push + pull_request) and must not land on main.
   push:
-    branches: [main, "release_*"]
+    branches: ["**"]
 
 permissions:
   contents: read
