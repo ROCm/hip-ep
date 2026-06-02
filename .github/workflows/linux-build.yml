@@ -37,6 +37,27 @@ env:
   ONNXRUNTIME_PR_PATCHES: "28608"
   # THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
   THEROCK_VERSION: therock-dist-linux-gfx120X-all-7.11.0
+  # HIP_ARCHITECTURES MUST match the GPU family inside THEROCK_VERSION.
+  # gfx120X TheRock SDK pairs with RDNA 4 SKUs (gfx1200/gfx1201); gfx1151
+  # TheRock pairs with Strix Halo. Always update both env values in
+  # lockstep — a mismatch lets MIOpen / hipBLASLt (kernels shipped inside
+  # TheRock) keep working, but anything in 3rd-party/custom_kernels/ fails
+  # at first hipLaunchKernel with "device kernel image is invalid"
+  # (hipErrorInvalidImage), because hipcc bakes a fat binary with only
+  # the listed --offload-arch targets. Use a semicolon list
+  # ("gfx1200;gfx1201") for a multi-arch artifact; build time and library
+  # size both scale linearly with the list length.
+  HIP_ARCHITECTURES: "gfx1201"
+  # Single integer used for BOTH the renumbered UID and GID of Ubuntu
+  # 24.04's default `ubuntu:ubuntu` user inside the image (see the long
+  # block comment around the `RUN if id ubuntu` line in docker/Dockerfile
+  # for why we renumber rather than delete). Forwarded into the image via
+  # `--build-arg UBUNTU_USER_ID=...` by docker/run.sh::cmd_image and
+  # consumed by the matching `ARG` in docker/Dockerfile. Override only
+  # when 60001 is already occupied (rare); pinning it here keeps every
+  # CI image bit-identical at this layer so the Dockerfile cache stays
+  # warm across runs.
+  UBUNTU_USER_ID: "60001"
   # OGA fork+pin matches windows-build.yml so both platforms produce
   # ABI-compatible OGA binaries against the same ORT and tokenizer surface.
   OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
@@ -160,6 +181,21 @@ jobs:
           # each PR's `.patch` from GitHub and applies it on the freshly
           # cloned ORT source.
           ONNXRUNTIME_PR_PATCHES: ${{ env.ONNXRUNTIME_PR_PATCHES }}
+          # HIP_ARCHITECTURES forwards the workflow env into docker/run.sh,
+          # which re-exports it via `-e` into the container, where
+          # docker/build.sh passes it to cmake as -DHIP_ARCHITECTURES=...
+          # for the 3rd-party/custom_kernels HIP sub-build. Without this
+          # forward, the container falls back to docker/build.sh's local
+          # default (gfx1151), silently producing custom_kernels for the
+          # wrong GPU family even when THEROCK_VERSION is gfx120X.
+          HIP_ARCHITECTURES: ${{ env.HIP_ARCHITECTURES }}
+          # UBUNTU_USER_ID is read by docker/run.sh::cmd_image and passed
+          # as `--build-arg UBUNTU_USER_ID=...` to `docker build`. It's
+          # consumed by the matching `ARG` in docker/Dockerfile, where it
+          # becomes the new UID/GID for the squatter `ubuntu` user. Pinned
+          # here so the Dockerfile cache layer that runs `groupmod /
+          # usermod / find -gid 1000` is bit-identical across CI runs.
+          UBUNTU_USER_ID: ${{ env.UBUNTU_USER_ID }}
         run: |
           set -euo pipefail
           ./docker/run.sh image

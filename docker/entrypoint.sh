@@ -38,11 +38,18 @@ fi
 # device's actual GID so HIP can open it. usermod takes either name or
 # numeric, but some shadow-utils silently no-op on numeric — resolve a
 # name (existing or synthetic) and pass that.
+#
+# `|| true` on the substitution is load-bearing: under `set -euo pipefail`,
+# `getent group <missing_gid>` exits 2 and pipefail propagates that through
+# `cut`. Without the suppressor, a `var=$(failing-pipe)` in this strict mode
+# kills the whole script before the fallback `if [ -z "$grp_name" ]` below
+# ever runs — which is exactly when we need it (host /dev/kfd's render-group
+# GID is rarely present in the base image's /etc/group).
 for dev in /dev/kfd /dev/dri/renderD*; do
     if [ -e "$dev" ]; then
         dev_gid=$(stat -c '%g' "$dev")
         if [ "$dev_gid" != "0" ] && ! id -G "$HOST_USER" | tr ' ' '\n' | grep -qx "$dev_gid"; then
-            grp_name=$(getent group "$dev_gid" | cut -d: -f1)
+            grp_name=$(getent group "$dev_gid" | cut -d: -f1 || true)
             if [ -z "$grp_name" ]; then
                 grp_name="hostgid_${dev_gid}"
                 groupadd -g "$dev_gid" "$grp_name"

@@ -9,6 +9,38 @@ FROM ubuntu:24.04
 
 ARG LLVM_MAJOR=22
 ARG DEBIAN_FRONTEND=noninteractive
+# Parking slot for the squatter `ubuntu` user/group (see block comment below).
+# Override at build time with `--build-arg UBUNTU_USER_ID=<n>`. docker/run.sh
+# forwards this from its own `UBUNTU_USER_ID` env (default 60001) and CI
+# pins the value in .github/workflows/linux-build.yml so it can't silently
+# drift. Single integer is used for both the renumbered UID and GID.
+ARG UBUNTU_USER_ID=60001
+
+# Ubuntu 24.04+ ships a default `ubuntu:ubuntu` user/group at UID/GID 1000,
+# which collides with the most common Linux host user IDs (the entrypoint
+# needs to claim HOST_UID:HOST_GID — typically 1000:1000 — so bind-mounted
+# host files keep the right owner without chown). Park the squatter at a
+# high UID/GID at build time rather than tearing it down at runtime: the
+# `ubuntu` user and its home directory are preserved intact, just renumbered
+# out of the way. Three steps because shadow-utils command behavior is
+# asymmetric:
+#   1. groupmod -g — updates /etc/group; does NOT chgrp files on disk.
+#   2. usermod -u -g — updates /etc/passwd AND auto-chowns files in the
+#      user's home dir whose user owner matched the old UID (the new
+#      primary-GID pointer is corrected in the same call so no /etc/passwd
+#      entry dangles at the freed GID).
+#   3. find -gid + chgrp — group ownership of files is NOT touched by
+#      either of the first two; sweep the rootfs (xdev to skip pseudo-fs)
+#      and re-stamp anything still group-owned by the freed GID, otherwise
+#      whatever group later claims GID 1000 silently inherits those files.
+# The `1000` in `find -gid 1000` is the SOURCE id (Ubuntu 24.04's fixed
+# default for the `ubuntu` user) — it stays a literal. UBUNTU_USER_ID is
+# the DESTINATION id.
+RUN if id ubuntu >/dev/null 2>&1; then \
+        groupmod -g ${UBUNTU_USER_ID} ubuntu && \
+        usermod -u ${UBUNTU_USER_ID} -g ${UBUNTU_USER_ID} ubuntu && \
+        find / -xdev -gid 1000 -exec chgrp -h ${UBUNTU_USER_ID} {} +; \
+    fi
 
 # Layer 1: base toolchain for ORT / protobuf / flatbuffers / OGA sub-builds.
 RUN apt-get update && apt-get install -y --no-install-recommends \
