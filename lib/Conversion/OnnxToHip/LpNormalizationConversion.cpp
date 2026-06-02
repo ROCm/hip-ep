@@ -165,8 +165,8 @@ struct LpNormalizationDecompose : public mlir::RewritePattern {
     // operand form so the reduction axis is visible to InferOnnxShapes.
     auto i64Type = rewriter.getI64Type();
     auto axesType = mlir::RankedTensorType::get({1}, i64Type);
-    auto axesValueAttr =
-        mlir::DenseElementsAttr::get(axesType, llvm::ArrayRef<int64_t>{normAxis});
+    auto axesValueAttr = mlir::DenseElementsAttr::get(
+        axesType, llvm::ArrayRef<int64_t>{normAxis});
     mlir::OperationState axesState(loc, "onnx.Constant");
     axesState.addTypes(axesType);
     axesState.addAttribute("value", axesValueAttr);
@@ -180,8 +180,7 @@ struct LpNormalizationDecompose : public mlir::RewritePattern {
     mlir::OperationState reduceState(loc, "onnx.ReduceSum");
     reduceState.addOperands({reduceInput, axes});
     reduceState.addTypes(reducedType);
-    reduceState.addAttribute("keepdims",
-                             mlir::IntegerAttr::get(sintType, 1));
+    reduceState.addAttribute("keepdims", mlir::IntegerAttr::get(sintType, 1));
     reduceState.addAttribute("noop_with_empty_axes",
                              mlir::IntegerAttr::get(sintType, 0));
     mlir::Value reduced = rewriter.create(reduceState)->getResult(0);
@@ -208,9 +207,9 @@ struct LpNormalizationDecompose : public mlir::RewritePattern {
 
     rewriter.replaceOp(op, result);
     ++NumLpNormalizationRewrites;
-    LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] decomposed LpNormalization "
-                            << inputType << " axis=" << normAxis << " p=" << p
-                            << "\n");
+    LLVM_DEBUG(llvm::dbgs()
+               << "[" DEBUG_TYPE "] decomposed LpNormalization " << inputType
+               << " axis=" << normAxis << " p=" << p << "\n");
     return mlir::success();
   }
 };
