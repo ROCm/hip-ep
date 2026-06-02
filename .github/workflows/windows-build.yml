@@ -129,7 +129,7 @@ jobs:
       - name: Fix DIA SDK path from prebuilt LLVM
         shell: cmd
         run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS_PATH=%%i"
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -version "[17.0,18.0)" -property installationPath`) do set "VS_PATH=%%i"
           mklink /J C:\msvsn2022 "%VS_PATH%"
 
       # -----------------------------------------------------------------------
@@ -144,9 +144,14 @@ jobs:
       - name: Install pip dependencies
         run: pip install lit requests
 
-      # Put cl.exe and ninja.exe (bundled with VS) into PATH
+      # Put cl.exe and ninja.exe (bundled with VS) into PATH. Pin to VS 2022:
+      # the runner's VS 18 (2026) toolchain breaks the pinned onnxruntime-genai
+      # / onnxruntime_extensions build (GSL [[gsl::suppress]] C4875, /EHsc
+      # C4530, and the experimental/coroutine STL1011 hard error).
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          vsversion: "2022"
 
       # Cache compilation results across runs via GitHub Actions Cache backend
       - name: Setup sccache
