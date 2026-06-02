@@ -98,13 +98,7 @@ if ([string]::IsNullOrWhiteSpace($VaipConfigPath)) {
 
 if (-not (Test-Path -LiteralPath $VaipConfigPath)) {
 
-    $fallbackConfig = "D:\Users\mingyue\cp_dev\source\test_onnx_runner\win_scripts\vaip_config.json"
-
-    if (Test-Path -LiteralPath $fallbackConfig) {
-
-        $VaipConfigPath = $fallbackConfig
-
-    }
+    throw "VAIP config not found: $VaipConfigPath (default ships at scripts/only_init_config.json; pass -VaipConfigPath <file> to override)"
 
 }
 
