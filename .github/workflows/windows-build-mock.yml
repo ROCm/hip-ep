@@ -21,7 +21,10 @@ permissions:
 
 jobs:
   build-windows-mock:
-    runs-on: windows-latest
+    # Pin to VS 2022: windows-latest now serves the VS 2026 image
+    # (actions/runner-images#14017), which the pinned LLVM/ORT/OGA deps were
+    # not validated against.
+    runs-on: windows-2022
 
     env:
       LLVM_TAG: llvm-22.1.0-release
