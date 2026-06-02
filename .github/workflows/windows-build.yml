@@ -417,18 +417,12 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          # examples/c builds model_qa/chat/mm/whisper in parallel, all sharing
-          # common.cpp; without /FS the concurrent cl.exe runs collide on the
-          # compiler PDB (C1041). -FS (dash form to avoid MSYS path mangling)
-          # forces synchronous PDB writes; CMake picks up CXXFLAGS for both the
-          # OGA core and the examples configure.
-          export CXXFLAGS=-FS
           python "${{ github.workspace }}/source-oga/build.py" \
             --config Release \
             --cmake_generator Ninja \
             --use_dml \
             --ort_home "$ORT_HOME" \
-            --skip_tests \
+            --skip_tests --skip_examples \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
@@ -450,13 +444,22 @@ jobs:
           cp "$OGA_WHEEL" "${{ runner.workspace }}/oga-artifacts/"
           echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
 
-          MODEL_MM=$(find "${{ github.workspace }}/source-oga/examples/c/build" \
-            -name model_mm.exe -type f | head -1)
-          if [ -z "$MODEL_MM" ]; then
-            echo "ERROR: model_mm.exe not found in examples build tree"
-            exit 1
-          fi
-          cp "$MODEL_MM" "${{ runner.workspace }}/oga-artifacts/"
+          # build.py --skip_examples leaves examples/c unbuilt. Configure it as
+          # a standalone project against the just-built OGA lib + ORT_HOME and
+          # build only model_mm. build.py's own build_examples ignores CXXFLAGS,
+          # so set -DCMAKE_CXX_FLAGS=-FS here directly to force synchronous
+          # compiler-PDB writes (the parallel model_mm.cpp / common.cpp compiles
+          # otherwise clash on vc140.pdb -> C1041).
+          cmake -S "${{ github.workspace }}/source-oga/examples/c" \
+            -B "${{ runner.workspace }}/build-oga-examples" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DMODEL_MM=ON -DCMAKE_CXX_FLAGS=-FS \
+            -DORT_INCLUDE_DIR="$ORT_HOME/include" \
+            -DORT_LIB_DIR="$ORT_HOME/lib" \
+            -DOGA_INCLUDE_DIR="${{ github.workspace }}/source-oga/src" \
+            -DOGA_LIB_DIR="$OGA_OUT"
+          cmake --build "${{ runner.workspace }}/build-oga-examples" --target model_mm
+          cp "${{ runner.workspace }}/build-oga-examples/model_mm.exe" \
+            "${{ runner.workspace }}/oga-artifacts/"
 
           cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_multimodal.py" \
             "${{ runner.workspace }}/oga-artifacts/"
