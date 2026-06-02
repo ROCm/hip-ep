@@ -121,6 +121,17 @@ jobs:
           tar -xzf therock.tar.gz -C "$THEROCK_DIST" --strip-components=1
           rm therock.tar.gz
 
+      # TEMP DEBUG: enumerate installed Visual Studio toolchains on the runner.
+      - name: List installed Visual Studio (debug)
+        shell: cmd
+        run: |
+          echo === vswhere -all -prerelease (path + version) ===
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -all -prerelease -property installationPath
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -all -prerelease -property installationVersion
+          echo === dir of VS roots ===
+          dir "C:\Program Files\Microsoft Visual Studio" 2>nul
+          dir "C:\Program Files (x86)\Microsoft Visual Studio" 2>nul
+
       # -----------------------------------------------------------------------
       # The prebuilt LLVM package has C:\msvsn2022 hardcoded in LLVMExports.cmake
       # for the DIA SDK path (known LLVM issue: llvm/llvm-project#111829).
