@@ -15,8 +15,8 @@
 #   stop    Stop + rm the long-lived shell container.
 #
 # Env knobs (override on the command line, e.g. `BUILD_OGA=1 ./run.sh build`):
-#   IMAGE, CONTAINER_NAME, HIP_ARCHITECTURES, BUILD_OGA, SKIP_LIT,
-#   FORCE_RECONFIGURE.
+#   IMAGE, CONTAINER_NAME, HIP_ARCHITECTURES, UBUNTU_USER_ID, BUILD_OGA,
+#   SKIP_LIT, FORCE_RECONFIGURE.
 
 set -euo pipefail
 
@@ -29,6 +29,13 @@ WORKSPACE="$(cd "$SOURCE_DIR/.." && pwd -P)"
 : "${IMAGE:=hipdnn-ep-build:llvm22-noble}"
 : "${CONTAINER_NAME:=${USER}.hipdnn-ep.shell}"
 : "${HIP_ARCHITECTURES:=gfx1151}"
+# Single integer used for both the renumbered UID and GID of the default
+# `ubuntu` user inside the image (parks the squatter so the entrypoint can
+# claim HOST_UID/HOST_GID, typically 1000/1000). Default matches CI; only
+# change if 60001 is already taken on your system. Forwarded as a Docker
+# `--build-arg` in cmd_image; consumed by the ARG of the same name in
+# docker/Dockerfile.
+: "${UBUNTU_USER_ID:=60001}"
 : "${BUILD_OGA:=0}"
 # OGA_REF intentionally not defaulted; build.sh owns the pin. Unset on the
 # host means "use build.sh default"; setting it overrides.
@@ -83,8 +90,8 @@ populate_gpu_args() {
 }
 
 cmd_image() {
-    echo "[host] docker build -t $IMAGE $DOCKER_DIR"
-    docker build -t "$IMAGE" "$DOCKER_DIR"
+    echo "[host] docker build -t $IMAGE --build-arg UBUNTU_USER_ID=$UBUNTU_USER_ID $DOCKER_DIR"
+    docker build -t "$IMAGE" --build-arg "UBUNTU_USER_ID=$UBUNTU_USER_ID" "$DOCKER_DIR"
 }
 
 cmd_build() {
