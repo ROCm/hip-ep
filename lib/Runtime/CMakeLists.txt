@@ -399,6 +399,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/mm_activation.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_kv_manager.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_core.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
     )
 else()
     # Mock runtime for testing without GPU
