@@ -70,7 +70,13 @@ Thumbs.db
 # Cline/AI assistant storage
 .cline_storage/
 .cline/
-.cursor/
+# Ignore .cursor/ contents (IDE/agent state) but track project-level skills.
+# Use .cursor/* (not .cursor/) so we can un-ignore .cursor/skills/ below;
+# a fully-ignored parent dir cannot have children re-included by git.
+.cursor/*
+!.cursor/skills/
+.cursor/skills/**/__pycache__/
+.cursor/skills/**/*.pyc
 
 # Claude Code workspace (worktrees, local settings, sdd ledger — never committed)
 .claude/
