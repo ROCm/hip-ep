@@ -23,13 +23,15 @@ def norm_domain(domain: str) -> str:
 
 
 def unsupported_rec(op: str):
+    # Fallback table for ops that have NO Conversion.cpp at all but are known
+    # to be eliminated by MLIR's standard passes (constant folding /
+    # canonicalization / dead-code elimination). Ops whose conversion EXISTS
+    # but lowers to tensor.* / arith.* / memref.* are auto-detected by step2_1
+    # (which emits a synthetic `tensor.<X>` mapping) and never reach this
+    # branch -- they show up as supported / compile-time in the report.
     compile_time = {
-        "Shape": "Shape inference operation - handled at compile time.",
-        "Concat": "Shape manipulation operation - handled at compile time.",
-        "Range": "Range generation - handled at compile time.",
         "Constant": "Constant folding / constant propagation - handled at compile time.",
-        "Size": "Shape/size query - typically handled by compile-time shape propagation.",
-        "CastLike": "Type-canonicalization pattern - often resolved at compile time.",
+        "CastLike": "Type canonicalization pattern - resolved at compile time.",
     }
     if op in compile_time:
         return "Compile Time Optimization", compile_time[op]
@@ -194,12 +196,34 @@ def main():
     step23 = json.loads((analysis_dir / "step2_3_backend_analysis.json").read_text(encoding="utf-8"))
     step2hip = json.loads((analysis_dir / "step2_hip_ops.json").read_text(encoding="utf-8"))
 
+    # Consolidate step2_1 mappings keyed on (op, domain). An ONNX op may
+    # have MULTIPLE mappings -- e.g. Gather has hip.gather (the runtime path
+    # in GatherConversion.cpp) AND tensor.from_elements (the shape-fold
+    # variant in GatherShapeFold.cpp); ConstantOfShape has tensor.splat (the
+    # MLIR-std fold) and no hip.* op. Prefer real hip.* mappings over
+    # tensor.*/arith.*/memref.* compile-time fold variants when both exist
+    # so the report column reflects the executed runtime path, not the
+    # shape-fold fallback.
+    def _mapping_priority(mapping):
+        hop = mapping.get("hip_op", "") or ""
+        if hop.startswith("hip."):
+            return 0  # real runtime path -- highest priority
+        if hop.startswith("tensor.") or hop.startswith("arith.") or hop.startswith("memref."):
+            return 1  # compile-time fold variant
+        return 2
+
     support = {}
     for m in step21.get("mappings", []):
-        support[(m.get("onnx_op", ""), norm_domain(m.get("onnx_domain", "onnx")))] = m
+        key = (m.get("onnx_op", ""), norm_domain(m.get("onnx_domain", "onnx")))
+        existing = support.get(key)
+        if existing is None or _mapping_priority(m) < _mapping_priority(existing):
+            support[key] = m
     backend_by_key = {}
     for m in step23.get("mappings", []):
-        backend_by_key[(m.get("onnx_op", ""), norm_domain(m.get("onnx_domain", "onnx")))] = m
+        key = (m.get("onnx_op", ""), norm_domain(m.get("onnx_domain", "onnx")))
+        existing = backend_by_key.get(key)
+        if existing is None or _mapping_priority(m) < _mapping_priority(existing):
+            backend_by_key[key] = m
 
     model = onnx.load(str(model_path), load_external_data=False)
     counts = Counter(

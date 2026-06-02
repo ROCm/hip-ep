@@ -28,26 +28,30 @@ import sys
 from onnx_graph_walk import iter_graph_nodes, iter_model_nodes
 
 class ONNXModelAnalyzer:
-    # Baseline operator description dictionary (extensible).
+    # Fallback descriptions, used ONLY when `onnx.defs.get_schema(...)` does
+    # not return a schema. In practice this covers Microsoft custom ops
+    # (com.microsoft domain) and any opset/domain combination the installed
+    # `onnx` library does not know about. For standard ai.onnx ops the
+    # description comes from the ONNX schema directly (single source of
+    # truth: the ONNX specification, not this dict).
     OP_DESCRIPTIONS = {
         'MatMulNBits': 'Quantized N-bit matrix multiplication (com.microsoft)',
         'RotaryEmbedding': 'Rotary position embedding (RoPE)',
         'SkipSimplifiedLayerNormalization': 'Skip connection + RMS normalization',
         'GroupQueryAttention': 'Group Query Attention mechanism',
-        'Mul': 'Element-wise multiplication',
-        'Sigmoid': 'Sigmoid activation function',
-        'Constant': 'Constant tensor',
-        'Gather': 'Gather elements along axis',
-        'Shape': 'Get tensor shape',
-        'Cast': 'Type casting',
-        'Unsqueeze': 'Add dimension',
-        'Concat': 'Concatenate tensors',
-        'Reshape': 'Reshape tensor',
-        'ReduceSum': 'Reduce sum along axes',
-        'Sub': 'Element-wise subtraction',
         'SimplifiedLayerNormalization': 'RMS layer normalization',
         'MultiHeadAttention': 'Multi-head attention (often inside Loop subgraph)',
-        'Loop': 'Loop control flow; body subgraph contains nested ops',
+        'CausalConvWithState': 'Causal convolution with persistent state (com.microsoft)',
+        'LinearAttention': 'Linear attention (com.microsoft)',
+        'QMoE': 'Quantized Mixture-of-Experts (com.microsoft)',
+    }
+
+    # Domain -> canonical name accepted by onnx.defs.get_schema.
+    _SCHEMA_DOMAIN_ALIASES = {
+        '': '',
+        'ai.onnx': '',
+        'onnx': '',
+        'com.microsoft': 'com.microsoft',
     }
     
     def __init__(
@@ -105,23 +109,58 @@ class ONNXModelAnalyzer:
     
     def _build_op_descriptions(self) -> Dict[str, str]:
         """
-        Build the operator description dictionary dynamically from the model.
-        Prefer the predefined description; otherwise synthesize one from
-        op_type and domain.
+        Build the operator description dictionary, sourced (in order) from:
+          1. ONNX official op schema doc (`onnx.defs.get_schema(...).doc`)
+             -- single source of truth for standard `ai.onnx` ops.
+          2. The OP_DESCRIPTIONS fallback (mostly `com.microsoft` ops the
+             installed `onnx` library may not carry, plus a few hand-curated
+             one-liners).
+          3. A synthesized `<OpType> (<domain>)` placeholder.
         """
         descriptions = {}
-        
-        # Seed with predefined descriptions.
-        descriptions.update(self.OP_DESCRIPTIONS)
-        
-        # Infer descriptions for ops actually used (including those in subgraphs).
+
         for node, _scope in self._iter_nodes():
             op_type = node.op_type
-            if op_type not in descriptions:
-                domain = node.domain if node.domain else 'ai.onnx'
+            if op_type in descriptions:
+                continue
+            domain = node.domain if node.domain else 'ai.onnx'
+            doc = self._lookup_onnx_schema_doc(op_type, domain)
+            if doc:
+                descriptions[op_type] = doc
+            elif op_type in self.OP_DESCRIPTIONS:
+                descriptions[op_type] = self.OP_DESCRIPTIONS[op_type]
+            else:
                 descriptions[op_type] = f'{op_type} ({domain})'
 
         return descriptions
+
+    def _lookup_onnx_schema_doc(self, op_type: str, domain: str) -> Optional[str]:
+        """Return a short single-line description from the ONNX op schema.
+
+        Trims the schema's `.doc` string to the first non-empty paragraph
+        (or first sentence) to match the inline-friendly format used by
+        the report's "Op Description" column.
+        """
+        schema_domain = self._SCHEMA_DOMAIN_ALIASES.get(domain.lower(), domain)
+        try:
+            schema = onnx.defs.get_schema(op_type, domain=schema_domain)
+        except Exception:
+            return None
+        if schema is None or not getattr(schema, 'doc', None):
+            return None
+        doc = schema.doc.strip()
+        if not doc:
+            return None
+        # First non-empty paragraph (paragraphs separated by blank lines).
+        para = doc.split('\n\n', 1)[0].strip()
+        # Collapse internal whitespace / newlines for table-cell display.
+        para = ' '.join(para.split())
+        # Prefer first sentence to keep the cell short; fall back to first
+        # 200 chars if no sentence boundary is found.
+        sentence_end = para.find('. ')
+        if 0 < sentence_end <= 240:
+            return para[:sentence_end + 1]
+        return para[:240]
 
     def _iter_nodes(self):
         if self.include_subgraphs:
