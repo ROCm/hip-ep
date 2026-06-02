@@ -424,7 +424,8 @@ jobs:
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              CMAKE_CXX_FLAGS=/wd4875
 
           mkdir -p "${{ runner.workspace }}/oga-artifacts"
           OGA_OUT="${{ runner.workspace }}/build-oga/Release"
