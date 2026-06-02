@@ -748,68 +748,42 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   mlir::OpBuilder builder(context_for(*entry_block_));
   CHECK(terminator_ != nullptr);
 
-  // Set insertion point - default to before terminator
-  builder.setInsertionPoint(terminator_);
-
-  mlir::Operation* latestInputOp = nullptr;
-
-  if (input_args.empty()) {
-    // Insert at the beginning of the entry block when no input arguments
-    builder.setInsertionPointToStart(entry_block_);
-  } else {
+  // Anchor the insertion point after every entry_block_-defined value this op
+  // depends on: explicit operands, the none_ placeholder used for missing
+  // optional inputs, and the last onnx.Constant. Operands from an enclosing
+  // block or block args already dominate, so they don't constrain placement;
+  // restricting the comparison to entry_block_ keeps isBeforeInBlock
+  // well-defined (it is UB across blocks). Keeping the op after the last
+  // constant holds the constants contiguous at the block top -- interleaving
+  // other ops among them changes the constant-streaming backend's results.
+  // Loop/If/Scan body captures are folded in after transplant (below).
+  {
+    mlir::Operation* anchor = nullptr;
     for (const auto& arg : input_args) {
-      if (auto* input_node_arg = get_node_arg(arg)) {
-        if (auto& value = input_node_arg->getValue()) {
-          if (auto* definingOp = value.getDefiningOp()) {
-            // Captured outer value: isBeforeInBlock is UB across blocks, and
-            // a defining op in an enclosing block cannot anchor entry_block_'s
-            // insertion point. Treat as graph-input-equivalent.
-            if (definingOp->getBlock() != entry_block_) {
-              if (!latestInputOp) {
-                builder.setInsertionPointToStart(entry_block_);
-              }
-              continue;
-            }
-
-            if (!latestInputOp || latestInputOp->isBeforeInBlock(definingOp)) {
-              latestInputOp = definingOp;
-              builder.setInsertionPointAfter(latestInputOp);
-            }
-          } else {
-            // means graph input
-            if (!latestInputOp) {
-              // Only handle cases where InsertionPoint is not set
-              builder.setInsertionPointToStart(entry_block_);
-            }
-          }
-        }
-      }
+      auto* input_node_arg = get_node_arg(arg);
+      if (!input_node_arg)
+        continue;
+      mlir::Value value = input_node_arg->getValue();
+      mlir::Operation* def = value ? value.getDefiningOp() : nullptr;
+      if (!def || def->getBlock() != entry_block_)
+        continue;
+      if (!anchor || anchor->isBeforeInBlock(def))
+        anchor = def;
     }
-
-    // Always insert after the last onnx.Constant. Region-bearing ops
-    // (If/Loop/Scan) may implicitly capture initializers from inside their
-    // regions; placing the parent op before those constants breaks dominance.
-    {
-      mlir::Operation* lastConstantOp = nullptr;
-      for (auto& op : entry_block_->getOperations()) {
-        if (op.getName().getStringRef() == "onnx.Constant") {
-          lastConstantOp = &op;
-        }
-      }
-      if (lastConstantOp &&
-          (!latestInputOp || latestInputOp->isBeforeInBlock(lastConstantOp))) {
-        latestInputOp = lastConstantOp;
-        builder.setInsertionPointAfter(latestInputOp);
-      }
+    if (none_ && none_->getBlock() == entry_block_ &&
+        (!anchor || anchor->isBeforeInBlock(none_)))
+      anchor = none_;
+    mlir::Operation* lastConstantOp = nullptr;
+    for (auto& blockOp : entry_block_->getOperations()) {
+      if (blockOp.getName().getStringRef() == "onnx.Constant")
+        lastConstantOp = &blockOp;
     }
-
-    // Ensure insertion point is after the none_ operation to maintain SSA
-    // dominance. When all inputs are function arguments (graph inputs) and some
-    // operands use none_->getResult(0), the node must be placed after none_.
-    if (none_ && (!latestInputOp || latestInputOp == none_ ||
-                  latestInputOp->isBeforeInBlock(none_))) {
-      builder.setInsertionPointAfter(none_);
-    }
+    if (lastConstantOp && (!anchor || anchor->isBeforeInBlock(lastConstantOp)))
+      anchor = lastConstantOp;
+    if (anchor)
+      builder.setInsertionPointAfter(anchor);
+    else
+      builder.setInsertionPointToStart(entry_block_);
   }
 
   // Convert MLIRNodeArgIndex to mlir::Value for input arguments
@@ -1004,6 +978,28 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     mlir::Block* orphan = sub->take_orphan_block();
     region.push_back(orphan);
     sub->resolve(/*force=*/true);
+  }
+
+  // Region captures: a Loop/If/Scan body may use outer-scope values that are
+  // not operands of the op, so the anchoring above cannot see them. With the
+  // body attached, enumerate them via getUsedValuesDefinedAbove; the producer
+  // of a captured value can appear later in graph order than the region-bearing
+  // op, so if a capture is defined after the op in entry_block_, sink the op
+  // past it to keep the body's use dominated.
+  if (op->getNumRegions() > 0) {
+    llvm::SetVector<mlir::Value> captured;
+    for (mlir::Region& region : op->getRegions())
+      mlir::getUsedValuesDefinedAbove(region, captured);
+    mlir::Operation* anchor = nullptr;
+    for (mlir::Value value : captured) {
+      mlir::Operation* def = value.getDefiningOp();
+      if (!def || def->getBlock() != entry_block_)
+        continue;
+      if (!anchor || anchor->isBeforeInBlock(def))
+        anchor = def;
+    }
+    if (anchor && op->isBeforeInBlock(anchor))
+      op->moveAfter(anchor);
   }
 
   // For now, return a placeholder - in a real implementation this would
