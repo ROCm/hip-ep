@@ -4,17 +4,31 @@ Licensed under the MIT License.
 -->
 # HIPDNN EP Profiling Report Formatter
 
-`format_perf_report.py` parses a `HIPDNN_EP_PERF=1` log produced by
-`model_benchmark` driving the MorphiZen EP and renders a locked-down,
-section-stable profiling report.
+This directory holds three cooperating tools that turn a single
+`HIPDNN_EP_PERF=1` bench run into a structured, section-stable profiling
+report:
 
-> **Scope: Linux Docker build.** The example invocations below use the
+| File | Purpose | Portability |
+|---|---|---|
+| [`format_perf_report.py`](format_perf_report.py) | Parses a captured log and renders the four-section report. The value-add tool. | Pure Python 3, stdlib only — any platform with Python ≥ 3.10. |
+| [`run_bench.sh`](run_bench.sh) | Bench driver. Runs `onnxruntime_perf_test` (default) or `model_benchmark` (`--oga`) against a model under `$WORKSPACE/oga_models/<dir>` and captures the log under `tools/perf-report/_perf_logs/`. The `--oga` path additionally pipes the log through `format_perf_report.py`; the perftest path prints its own grep-based summary inline. | Linux + AMD GPU + the in-container build artefacts at `$WORKSPACE/install/{bin,lib}`. |
+| [`docker_run_bench.sh`](docker_run_bench.sh) | Thin host-side wrapper that runs `run_bench.sh` (or any other repo-relative bench script via `REL_BENCH=...`) inside the `hipdnn-ep-build` Docker image as a `docker run --rm` one-shot — no interactive shell needed. | Linux + Docker + an AMD GPU exposed via `/dev/kfd` and `/dev/dri/renderD*`. |
+
+> **Scope: Linux Docker build.** The bench-side examples below use the
 > Linux paths (`$ROOT/bin/`, `$ROOT/lib/libonnxruntime_morphizen_ep.so`)
 > from the Docker build layout documented in
 > [`docs/quick_start_linux.md`](../../docs/quick_start_linux.md).
-> The script itself is pure Python 3 (stdlib only) and will run on any
-> platform with Python ≥ 3.10, but the bench-side command shown under
-> [Usage](#usage) is specific to the Linux build.
+> `format_perf_report.py` itself has no Linux assumptions and can be run
+> against a log captured from any platform; `run_bench.sh` and
+> `docker_run_bench.sh` are Linux / Docker specific.
+
+> **Models are not downloaded.** `run_bench.sh` expects a model directory
+> to already exist at `$WORKSPACE/oga_models/<dir>/` with `model.onnx`,
+> `model.onnx.data`, `tokenizer.json`, `tokenizer_config.json`, and
+> `genai_config_MorphiZenEP.json`. Stage one with e.g.
+> `huggingface-cli download <repo> --local-dir $WORKSPACE/oga_models/<dir>`
+> before invoking. `$WORKSPACE` defaults to the parent of the repo root,
+> matching the `docker/run.sh` convention.
 
 ## Why
 
@@ -46,35 +60,87 @@ for the underlying instrumentation design.
 
 ## Usage
 
-The full `model_benchmark` invocation (including the `-ml` rules for
-fixed-shape pipelines, how `$ROOT` is set up by the Docker build, and
-the canonical bench env vars) is documented in
-[`docs/quick_start_linux.md`](../../docs/quick_start_linux.md). The
-bare-minimum two-step is:
+The three tools compose into three layers of increasing automation.
+Pick the entry point that matches your situation.
+
+### Layer 1: format only (any host with a captured log)
+
+If you already have a `HIPDNN_EP_PERF=1` log produced anywhere, just
+render it:
 
 ```bash
-# 1) Run model_benchmark with HIPDNN_EP_PERF=1, capturing stderr+stdout
-#    into a single log file (all three [PERF*] streams go to stderr).
-#    $ROOT and $WORKSPACE are set up by docs/quick_start_linux.md when
-#    you `source` the in-container shell helpers; don't hardcode them.
-HIPDNN_EP_PERF=1 $ROOT/bin/model_benchmark \
-    -i /path/to/oga-model-dir \
-    --ep_library MorphiZenEP $ROOT/lib/libonnxruntime_morphizen_ep.so \
-    -l 128 -g 128 -ml -1 -r 3 -w 1 \
-    > run.log 2>&1
-
-# 2) Format the report:
 python3 tools/perf-report/format_perf_report.py run.log
 ```
 
-The script file is marked executable (`100755` in git), so the shebang
-form also works:
+`format_perf_report.py` is marked executable (`100755` in git), so the
+shebang form also works:
 
 ```bash
 ./tools/perf-report/format_perf_report.py run.log
 ```
 
-Flags:
+### Layer 2: run the bench inside the container shell
+
+From inside the build container (`./docker/run.sh shell`), the bench
+driver wires up env (`LD_LIBRARY_PATH`, `THEROCK_DIST`, optional
+`HIPDNN_EP_PERF=1`) and captures the log under
+`tools/perf-report/_perf_logs/`. On the `--oga` path it additionally
+pipes the log through `format_perf_report.py` before exiting:
+
+```bash
+# OGA path -- model_benchmark, prompt=128 gen=128, three reps, one warmup,
+# in --mode perf (sets HIPDNN_EP_PERF=1 so all four report sections render):
+tools/perf-report/run_bench.sh --oga --prompt 128 --gen 128 --reps 3 --warmup 1 --mode perf
+
+# perftest path -- onnxruntime_perf_test, decode-only dynamic, 30s window:
+# (prints its own P50 / [PERF SUMMARY] / last-per-op-table grep summary;
+#  does NOT auto-invoke format_perf_report.py because perftest output has
+#  no model_benchmark stats block.)
+tools/perf-report/run_bench.sh --time 30 --mode perf
+
+# Different model (must already be staged at $WORKSPACE/oga_models/<dir>/):
+tools/perf-report/run_bench.sh --oga --model Mistral-7B-Instruct-v0.3-dml-int4-awq-block-128 --mode perf
+```
+
+`run_bench.sh --help` prints the full flag list. Logs land at
+`tools/perf-report/_perf_logs/<model>_<tool>_<...>_<ts>.log` — keep them
+for postmortem, re-render any of them later with
+`format_perf_report.py <log>`.
+
+The raw `model_benchmark` invocation (which `run_bench.sh --oga` builds
+internally — `-l`/`-g`/`-r`/`-w`/`-b`/`-v`, optional `-ml`, EP loaded
+via CWD discovery from `$ROOT/lib`) is fully documented in the
+[`docs/quick_start_linux.md`](../../docs/quick_start_linux.md) "Open a
+container shell" section if you need to invoke it directly.
+
+### Layer 3: run the bench from the host (no shell needed)
+
+For a clean one-shot from any host terminal (including Cursor's embedded
+terminal, where `docker exec -it` is unreliable), the wrapper spins a
+`docker run --rm` container, exec's the bench inside it as your host
+UID/GID with the GPU and bind mounts attached, and exits when it's done.
+See the script header for the failure modes it works around (Cursor TTY
+behaviour, the `docker/entrypoint.sh` `getent` crash, zombie-container
+reaping).
+
+```bash
+# Equivalent to Layer 2's first example, but runs from the host:
+tools/perf-report/docker_run_bench.sh --oga --prompt 128 --gen 128 --reps 3 --warmup 1 --mode perf
+```
+
+The wrapper is an unopinionated relay — it forwards all CLI args
+verbatim to `$REL_BENCH` (default `tools/perf-report/run_bench.sh`).
+Override `REL_BENCH` to invoke a different in-container bench:
+
+```bash
+REL_BENCH=oga/my_local_harness.sh \
+    tools/perf-report/docker_run_bench.sh --foo --bar
+```
+
+Other env knobs (`WORKSPACE`, `IMAGE`) are documented in the script
+header.
+
+### Flags (`format_perf_report.py`)
 
 | Flag | Effect |
 |---|---|
@@ -82,7 +148,7 @@ Flags:
 | `--no-banner` | Suppress the top/bottom banner lines (useful when embedding the report inside another report) |
 | `--indent N` | Indent every output line by N spaces |
 
-Exit codes:
+### Exit codes (`format_perf_report.py`)
 
 | Code | Meaning |
 |---|---|
@@ -153,4 +219,11 @@ intended for CI / regression-bot consumption.
 
 ## Dependencies
 
-Python ≥ 3.10, standard library only. No third-party packages.
+| Tool | Required by | Notes |
+|---|---|---|
+| Python ≥ 3.10 | `format_perf_report.py` | Standard library only; no third-party packages. |
+| Bash + `git` + `python3` | `run_bench.sh` | All present in the `hipdnn-ep-build` image. `git` is used only for the PR #212 reachability check, which silently no-ops if `git` is unavailable. |
+| `$WORKSPACE/install/{bin,lib}` populated | `run_bench.sh` | `libonnxruntime_morphizen_ep.so` + `model_benchmark` (for `--oga`) + `onnxruntime_perf_test` (for the default path). Produced by `./docker/run.sh build` ([`docs/quick_start_linux.md`](../../docs/quick_start_linux.md)). |
+| `$WORKSPACE/oga_models/<dir>/` staged | `run_bench.sh` | Model directory with `model.onnx`, `model.onnx.data`, `tokenizer.*`, `genai_config_MorphiZenEP.json`. `run_bench.sh` does NOT download — see the "Models are not downloaded" callout above. |
+| Bash + `docker` CLI | `docker_run_bench.sh` | Tested with Docker Engine on Linux. Rootless Docker works as long as the engine can mount `/dev/kfd` and `/dev/dri/renderD*`. |
+| AMDGPU driver + `hipdnn-ep-build` image | `docker_run_bench.sh` | The image is the one built by `./docker/run.sh image` ([`docs/quick_start_linux.md`](../../docs/quick_start_linux.md)); image tag is overridable via `IMAGE`. |
