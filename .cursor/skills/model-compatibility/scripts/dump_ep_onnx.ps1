@@ -24,7 +24,9 @@ param(
 
 
 
-    [string]$VoePackageRoot = "D:\Users\mingyue\cp_dev\AIESW-34732\onnx-rt",
+    # Default empty so no dev-machine-specific path lives in source.
+    # Resolution order: -VoePackageRoot arg > $env:VOE_PACKAGE_ROOT > error.
+    [string]$VoePackageRoot = "",
 
     [string]$DumpDirectory = "",
 
@@ -48,6 +50,27 @@ $ModelPath = (Resolve-Path -LiteralPath $ModelPath).ProviderPath
 if ([string]::IsNullOrWhiteSpace($DumpDirectory)) {
 
     $DumpDirectory = [System.IO.Path]::GetDirectoryName($ModelPath)
+
+}
+
+
+
+# Resolve VoePackageRoot: -arg first, then $env:VOE_PACKAGE_ROOT.
+# Bail out with a machine-readable marker if still empty so callers
+# (orchestrator or human) get an actionable message instead of a
+# confusing "test_onnx_runner.exe not found: bin\test_onnx_runner.exe".
+
+if ([string]::IsNullOrWhiteSpace($VoePackageRoot) -and $env:VOE_PACKAGE_ROOT) {
+
+    $VoePackageRoot = $env:VOE_PACKAGE_ROOT
+
+}
+
+if ([string]::IsNullOrWhiteSpace($VoePackageRoot)) {
+
+    Write-Output '[VOE_NOT_CONFIGURED] dump_ep_onnx.ps1: no VoePackageRoot. Pass -VoePackageRoot <path> or set env var VOE_PACKAGE_ROOT to the onnx-rt install (the dir containing bin\test_onnx_runner.exe).'
+
+    exit 10
 
 }
 
