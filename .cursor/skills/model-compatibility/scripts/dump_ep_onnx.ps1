@@ -24,7 +24,7 @@ param(
 
 
 
-    [string]$VoePackageRoot = "D:\Users\mingyue\cp_dev\AIESW-31511\onnx-rt-1250\onnx-rt",
+    [string]$VoePackageRoot = "D:\Users\mingyue\cp_dev\AIESW-34732\onnx-rt",
 
     [string]$DumpDirectory = "",
 
@@ -135,6 +135,10 @@ Write-Host "VITISAI_EP_JSON_CONFIG=only_init_config.json"
 
 Write-Host "XLNX_CONFIG_TARGET_NAME=$VaipTarget"
 
+Write-Host "DEBUG_LOG_LEVEL=info"
+
+Write-Host "DEBUG_VAIP_PASS=1"
+
 Write-Host "provider target=$VaipTarget (init pass dump only)"
 
 Write-Host ""
@@ -146,6 +150,12 @@ $prevVaipConfig = $env:VITISAI_EP_JSON_CONFIG
 $prevProviderOpt = $env:XLNX_EXTERNAL_PROVIDER_OPTION
 
 $prevVaipTarget = $env:XLNX_CONFIG_TARGET_NAME
+
+# Debug env vars for VAIP pass tracing (so we can see why partitioner accepts /
+# rejects subgraphs; output goes to stderr from inside test_onnx_runner.exe).
+$prevDebugLogLevel = $env:DEBUG_LOG_LEVEL
+
+$prevDebugVaipPass = $env:DEBUG_VAIP_PASS
 
 
 
@@ -159,9 +169,35 @@ try {
 
     $env:XLNX_EXTERNAL_PROVIDER_OPTION = $providerOption
 
-    & ".\test_onnx_runner.exe" $ModelPath
+    $env:DEBUG_LOG_LEVEL = "info"
 
-    $exitCode = $LASTEXITCODE
+    $env:DEBUG_VAIP_PASS = "1"
+
+    # When the parent invokes this script under 2>&1 stream merging
+    # (the orchestrator and any caller that captures output does this),
+    # PowerShell converts the first native-stderr line of test_onnx_runner.exe
+    # ("WARNING: Logging before InitGoogleLogging() is written to STDERR",
+    # always emitted by glog at startup) into a terminating NativeCommandError
+    # because $ErrorActionPreference is "Stop" above. That kills the runner
+    # before pass.init can dump onnx.onnx. Localize the relaxation so a real
+    # failure (non-zero $LASTEXITCODE OR missing dump file) still surfaces
+    # via the post-run checks below.
+
+    $savedErrPref = $ErrorActionPreference
+
+    $ErrorActionPreference = 'Continue'
+
+    try {
+
+        & ".\test_onnx_runner.exe" $ModelPath
+
+        $exitCode = $LASTEXITCODE
+
+    } finally {
+
+        $ErrorActionPreference = $savedErrPref
+
+    }
 
 }
 
@@ -196,6 +232,26 @@ finally {
     } else {
 
         $env:XLNX_CONFIG_TARGET_NAME = $prevVaipTarget
+
+    }
+
+    if ($null -eq $prevDebugLogLevel) {
+
+        Remove-Item Env:DEBUG_LOG_LEVEL -ErrorAction SilentlyContinue
+
+    } else {
+
+        $env:DEBUG_LOG_LEVEL = $prevDebugLogLevel
+
+    }
+
+    if ($null -eq $prevDebugVaipPass) {
+
+        Remove-Item Env:DEBUG_VAIP_PASS -ErrorAction SilentlyContinue
+
+    } else {
+
+        $env:DEBUG_VAIP_PASS = $prevDebugVaipPass
 
     }
 
