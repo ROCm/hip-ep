@@ -139,22 +139,23 @@ class OnnxToHipParser:
                         mappings.append(mapping)
             
             # Mode 2: mappings discovered via RewritePattern("onnx.<Op>", ...).
-            pattern_matches = re.findall(r'RewritePattern\("onnx\.(\w+)"', content)
-            for onnx_op in pattern_matches:
+            # Each occurrence is scoped to its OWN struct (a single onnx_op
+            # may legitimately have multiple registrations in one file, e.g.
+            # ConstantOfShapeFold + ConstantOfShapeDynamic both register
+            # "onnx.ConstantOfShape" -- one folds at compile time and emits
+            # no hip op, the other lowers to hip.where). End-of-parse dedup
+            # by (onnx_op, domain, hip_op) collapses duplicates safely; the
+            # fold variant simply yields no hip_op and gets skipped.
+            for rp_match in re.finditer(r'RewritePattern\("onnx\.(\w+)"', content):
+                onnx_op = rp_match.group(1)
                 if onnx_op == 'Custom':
                     continue
-                
-                if any(m['onnx_op'] == onnx_op for m in mappings):
-                    continue
 
-                # Restrict to the matchAndRewrite body of the struct that registers
-                # this RewritePattern, to avoid pollution from sibling structs in the
-                # same file (e.g. NormConversion.cpp holds SimplifiedLayerNormToHip,
-                # SkipSimplifiedLayerNormToHip, and LayerNormToHip together):
-                #   - the first *Op::create in the file may belong to a different struct
-                #   - the substring "com.microsoft" anywhere in the file does not imply
-                #     this struct targets that domain
-                scoped = self._scope_to_rewrite_pattern_body(content, onnx_op) or content
+                # Restrict to the struct body containing THIS specific
+                # RewritePattern position, not the file's first one.
+                scoped = self._scope_to_rewrite_pattern_body(
+                    content, onnx_op, start_pos=rp_match.start()
+                ) or content
 
                 hip_op = self._extract_hip_op_from_code(scoped)
                 class_name = self._extract_hip_class_name(scoped, onnx_op)
@@ -163,6 +164,27 @@ class OnnxToHipParser:
                     mapping = self._create_mapping(onnx_op, hip_op, file_path, 'standard', class_name, domain)
                     if mapping:
                         mappings.append(mapping)
+                else:
+                    # No hip.* op produced; check whether the struct lowers
+                    # to standard MLIR dialect ops (tensor.* / arith.* /
+                    # memref.*). Such conversions are handled by MLIR's
+                    # standard bufferization + lowering passes and need no
+                    # HIP runtime wrapper, so we emit a synthetic
+                    # `tensor.<X>` mapping. Downstream classification
+                    # already treats any `tensor.*` hip_op as
+                    # `COMPILE_TIME_TENSOR_OP`.
+                    td_op = self._extract_std_dialect_op(scoped)
+                    if td_op:
+                        mapping = self._create_mapping(
+                            onnx_op,
+                            f"tensor.{td_op}",
+                            file_path,
+                            'compile_time',
+                            'StdMlirLowering',
+                            domain,
+                        )
+                        if mapping:
+                            mappings.append(mapping)
             
             # Mode 3: onnx.Custom ops dispatched via function_name == "<Op>".
             custom_patterns = re.findall(
@@ -276,16 +298,25 @@ class OnnxToHipParser:
 
         return "onnx"
 
-    def _scope_to_rewrite_pattern_body(self, content: str, onnx_op: str) -> Optional[str]:
+    def _scope_to_rewrite_pattern_body(self, content: str, onnx_op: str,
+                                       start_pos: int = 0) -> Optional[str]:
         """Scope to the matchAndRewrite body of the struct that registers
         `RewritePattern("onnx.<onnx_op>", ...)`. Returns None when not found;
         the caller then falls back to the whole-file content.
 
+        `start_pos` is a hint: locate the struct whose RewritePattern occurs
+        at or AFTER this offset. Defaults to 0 (find the first one). The
+        caller passes the actual RewritePattern match start when multiple
+        structs register the same onnx_op in one file (e.g.
+        ConstantOfShapeFold + ConstantOfShapeDynamic) so each gets scoped to
+        its own body.
+
         Steps:
-        1) Locate the struct that contains the RewritePattern("onnx.<op>", ...) ctor.
-        2) With the same boundary rule used by _extract_hip_class_name_for_op
-           (the next XxxX::matchAndRewrite / populate* / EOF), slice out that
-           struct's matchAndRewrite body (possibly including the struct decl).
+        1) Locate the struct that contains the RewritePattern("onnx.<op>", ...)
+           ctor at or after start_pos.
+        2) Slice out that struct's body. Prefer the out-of-class
+           `StructName::matchAndRewrite { ... }` form; otherwise extract the
+           inline struct body via balanced-brace traversal.
         """
         ctor_pat = re.compile(
             r'struct\s+(\w+)\b[^{}]*?\{[^{}]*?RewritePattern\s*\(\s*"onnx\.'
@@ -293,7 +324,14 @@ class OnnxToHipParser:
             + r'"',
             re.DOTALL,
         )
-        m = ctor_pat.search(content)
+        # Iterate matches and pick the one whose ctor RewritePattern position
+        # is >= start_pos. This lets the caller disambiguate multiple structs
+        # registering the same onnx_op (Fold + Dynamic, etc.).
+        m = None
+        for cand in ctor_pat.finditer(content):
+            if cand.end() >= start_pos:
+                m = cand
+                break
         if not m:
             return None
         struct_name = m.group(1)
@@ -429,6 +467,35 @@ class OnnxToHipParser:
         # Fall back to the generic extractor when scoped lookups fail.
         return self._extract_hip_class_name(content, onnx_op)
     
+    def _extract_std_dialect_op(self, content: str) -> Optional[str]:
+        """Return a representative standard-MLIR-dialect op name produced by
+        a conversion that does NOT call any hip.* op. Used to classify
+        compile-time-foldable conversions (e.g. ConstantOfShape -> tensor.splat,
+        Reshape -> tensor.collapse_shape, Shape -> tensor.from_elements).
+
+        Picks the LAST `[mlir::](tensor|arith|memref)::<X>Op::create` call in
+        the scoped struct body -- typically the one closest to
+        `rewriter.replaceOp(...)`, i.e. the "output" op of the lowering.
+
+        The `mlir::` qualifier is optional because conversion files often
+        write bare `arith::ConstantOp::create` etc. when `using namespace
+        mlir;` or `namespace mlir::hip { ... }` is in scope (ShapeConversion.cpp).
+
+        Returns the op name in snake_case (SplatOp -> splat,
+        FromElementsOp -> from_elements); caller prefixes with `tensor.`
+        to trigger COMPILE_TIME_TENSOR_OP downstream.
+        """
+        matches = re.findall(
+            r'(?:mlir::)?(?:tensor|arith|memref)::(\w+)Op::create',
+            content,
+        )
+        if not matches:
+            return None
+        cls = matches[-1]
+        # CamelCase -> snake_case (handles ConstantIndexOp, SplatOp, etc.)
+        snake = re.sub(r'(?<!^)([A-Z])', r'_\1', cls).lower()
+        return snake
+
     def _extract_hip_op_from_code(self, content: str) -> str:
         """Extract the HIP op mnemonic from source code."""
         # Prefer derivation from the HIP class name (more accurate).
