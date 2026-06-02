@@ -117,17 +117,51 @@ extern "C" int wrap_gather_block_quantized(
   }
 
   // Default zero point when zero_points is omitted (ONNX spec):
-  //   bits == 4 .................. 0    (int4 / uint4)
-  //   bits == 8 + uint8 storage .. 128  (= 2^(bits-1))
-  //   bits == 8 + int8  storage .. 0
+  // "If zero_points is not provided, the default value is 0 for signed
+  //  types and 2^(bits-1) for unsigned types." That gives the four-way
+  // table:
+  //   bits == 4 + int8  storage (int4)  .. 0
+  //   bits == 4 + uint8 storage (uint4)  .. 8   (= 2^(bits-1))
+  //   bits == 8 + int8  storage (int8)   .. 0
+  //   bits == 8 + uint8 storage (uint8)  .. 128 (= 2^(bits-1))
+  // The previous version hard-coded 0 for bits == 4, which silently
+  // produces values shifted by +(8 * scale) on every uint4-packed weight
+  // (canonical site: Qwen3.5 vision encoder's pos_embed.weight_Q4 — the
+  // model dequantises to roughly +0.65/+0.73 in place of the correct
+  // values, which cluster around 0).
   int default_zp;
-  if (bits == 4) {
-    default_zp = 0;
-  } else if (is_signed_data) {
+  if (is_signed_data) {
     default_zp = 0;
   } else {
-    default_zp = 128;
+    default_zp = 1 << (static_cast<int>(bits) - 1);
   }
+
+  // Sub-byte storage: when bits == 4 and the data tensor element type is
+  // uint8 / int8 (no native int4/uint4 in the EP type system), ONNX stores
+  // two logical 4-bit values per byte, packed along the LAST axis with the
+  // low nibble being the lower logical index. The memref-derived shape we
+  // get from the lowering is therefore the BYTE shape (e.g. [2304, 576] for
+  // a 2304x1152 logical tensor). The kernel's coord arithmetic assumes
+  // `data_shape` is the LOGICAL shape — read_quant does the sub-byte unpack
+  // from a logical element index — so we materialise a local shape array
+  // with the last dim doubled and pass that to the kernel. The scales /
+  // zero_points tensors are not packed and keep their original shape (the
+  // per-block scale axis already divides the logical element count).
+  int64_t logical_data_shape_buf[8];
+  if (data_rank > static_cast<int64_t>(sizeof(logical_data_shape_buf) /
+                                       sizeof(int64_t))) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized: data_rank=%lld exceeds "
+            "max supported rank %zu\n",
+            (long long)data_rank,
+            sizeof(logical_data_shape_buf) / sizeof(int64_t));
+    return -1;
+  }
+  for (int64_t i = 0; i < data_rank; ++i)
+    logical_data_shape_buf[i] = data_shape[i];
+  if (bits == 4 && data_rank > 0)
+    logical_data_shape_buf[data_rank - 1] *= 2;
+  const int64_t *logical_data_shape = logical_data_shape_buf;
 
   int hip_out_dtype = map_to_hip_dtype(scales_dtype);
   if (hip_out_dtype != HIP_DTYPE_FLOAT32 &&
@@ -175,7 +209,7 @@ extern "C" int wrap_gather_block_quantized(
 
   return hip_gather_block_quantized(
       stream, data, indices, scales, zero_points, output,
-      data_shape, static_cast<int>(data_rank),
+      logical_data_shape, static_cast<int>(data_rank),
       indices_shape, static_cast<int>(indices_rank),
       scales_shape, static_cast<int>(scales_rank),
       output_shape, static_cast<int>(output_rank),
