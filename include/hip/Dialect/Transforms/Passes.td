@@ -51,6 +51,36 @@ def SimplifyOnnxPass : Pass<"simplify-onnx", "mlir::ModuleOp"> {
           frees up any function argument that was wired up only to feed
           that type-donor slot.
 
+      * PrecisionFreeCast: <fp16-saturating producer> -> onnx.Cast(fp32)
+        -> <fp32-pure consumer>  ==>  <fp32 producer> -> <fp32 consumer>
+          Mirrors ORT CPU's `InsertCastTransformer` / "PrecisionFreeCast"
+          optimization. Eliminates the fp16 saturation that occurs when a
+          fp16 op's output is then up-cast to fp32 for downstream fp32
+          compute -- e.g. residual `Add` saturating to -Inf at one row
+          position, which then poisons `LayerNormalization` via
+          `var = E[x^2] - E[x]^2 = Inf - Inf = NaN`.
+
+          Promotable producers (must have fp16 result):
+            onnx.Add, onnx.Sum, onnx.Gemm, onnx.MatMul.
+          Fp32-pure consumers of the anchor Cast:
+            onnx.LayerNormalization, OR any op whose results are all fp32
+            (so the value is never folded back to fp16).
+
+          For each promotion: insert a fp16->fp32 Cast on each fp16 input,
+          rebuild the producer with fp32 result type (preserving all
+          attributes -- `Gemm`'s alpha/beta/transA/transB etc.), replace
+          the anchor Cast's uses with the new fp32 result, and emit a
+          fp32->fp16 bridge Cast for any remaining fp16 consumers of the
+          original producer. The input scan peeks through incoming
+          Cast(fp32->fp16) bridges and uses the upstream fp32 source
+          directly, so chained promotions across a multi-block residual
+          chain converge in a single walk. The pass loops the rewrite
+          until no new anchors appear (capped to 64 iterations) so that
+          producers exposed by an earlier pass (e.g. a Gemm whose Cast
+          anchor is created by a downstream Add promotion) get caught.
+
+          See SimplifyOnnx.cpp for the full Before/After IR snippet.
+
     Future-friendly: additional simplifiers (e.g. onnx.EyeLike /
     onnx.RandomNormalLike, which are similar shape/type-donor patterns)
     can be added by writing one `static void simplify<Op>(func::FuncOp)`
