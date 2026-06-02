@@ -129,7 +129,7 @@ jobs:
       - name: Fix DIA SDK path from prebuilt LLVM
         shell: cmd
         run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -version "[17.0,18.0)" -property installationPath`) do set "VS_PATH=%%i"
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS_PATH=%%i"
           mklink /J C:\msvsn2022 "%VS_PATH%"
 
       # -----------------------------------------------------------------------
@@ -144,14 +144,9 @@ jobs:
       - name: Install pip dependencies
         run: pip install lit requests
 
-      # Put cl.exe and ninja.exe (bundled with VS) into PATH. Pin to VS 2022:
-      # the runner's VS 18 (2026) toolchain breaks the pinned onnxruntime-genai
-      # / onnxruntime_extensions build (GSL [[gsl::suppress]] C4875, /EHsc
-      # C4530, and the experimental/coroutine STL1011 hard error).
+      # Put cl.exe and ninja.exe (bundled with VS) into PATH
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-        with:
-          vsversion: "2022"
 
       # Cache compilation results across runs via GitHub Actions Cache backend
       - name: Setup sccache
@@ -384,12 +379,11 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          # Keyed on PREBUILT_CACHE_VERSION (shared with the ORT cache) plus an
-          # OGA-local token. Bump the OGA token when only the OGA artifact set
-          # changes shape (e.g. model_mm / benchmark_multimodal.py added) so the
-          # OGA build reruns without forcing an ORT source rebuild; bump
-          # PREBUILT_CACHE_VERSION when the ORT side changes.
-          key: oga-dml-v${{ env.PREBUILT_CACHE_VERSION }}-mm1-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # Reuse PREBUILT_CACHE_VERSION as the OGA cache version too: when
+          # the OGA build outputs change shape (e.g. wheel added), bumping
+          # PREBUILT_CACHE_VERSION invalidates both ORT and OGA caches in
+          # one step instead of needing two separate version knobs.
+          key: oga-dml-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -406,7 +400,7 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          ORT_HOME="${{ github.workspace }}/source-oga/ort"
+          ORT_HOME="${{ runner.workspace }}/oga-ort-home"
           mkdir -p "$ORT_HOME/include" "$ORT_HOME/lib"
           PREBUILT="${{ runner.workspace }}/prebuilt-local"
           cp -r "$PREBUILT/include/onnxruntime/"* "$ORT_HOME/include/"
@@ -424,13 +418,12 @@ jobs:
             --cmake_generator Ninja \
             --use_dml \
             --ort_home "$ORT_HOME" \
-            --skip_tests \
+            --skip_tests --skip_examples \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-              "CMAKE_CXX_FLAGS=-wd4875 -wd4530"
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache
 
           mkdir -p "${{ runner.workspace }}/oga-artifacts"
           OGA_OUT="${{ runner.workspace }}/build-oga/Release"
@@ -446,17 +439,6 @@ jobs:
           fi
           cp "$OGA_WHEEL" "${{ runner.workspace }}/oga-artifacts/"
           echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
-
-          MODEL_MM=$(find "${{ github.workspace }}/source-oga/examples/c/build" \
-            -name model_mm.exe -type f | head -1)
-          if [ -z "$MODEL_MM" ]; then
-            echo "ERROR: model_mm.exe not found in examples build tree"
-            exit 1
-          fi
-          cp "$MODEL_MM" "${{ runner.workspace }}/oga-artifacts/"
-
-          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_multimodal.py" \
-            "${{ runner.workspace }}/oga-artifacts/"
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -529,8 +511,6 @@ jobs:
           # ---------------------------------------------------------------
           cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
-          cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
-          cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
 
           # ---------------------------------------------------------------
           # Python wheels (ORT + OGA cp314) — bundled into the same artifact
