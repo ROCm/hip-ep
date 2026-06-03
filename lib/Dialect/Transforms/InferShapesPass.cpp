@@ -62,6 +62,10 @@ namespace {
 /// `OpFoldResult` is a constant integer, the constant replaces it.
 /// Returns true iff at least one dim moved from `kDynamic` to static.
 ///
+/// In debug builds, asserts that a constant reified dim agrees with an
+/// existing static dim — a contradiction signals a buggy
+/// `reifyResultShapes` impl on the op being refined.
+///
 /// Precondition: `cur.size() == reif.size()`. The
 /// `ReifyRankedShapedTypeOpInterface` contract guarantees one
 /// `OpFoldResult` per dim of the reified result; a mismatch signals a
@@ -157,8 +161,8 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
     // Refining a shared `tensor.empty` would retype every sibling
     // consumer's outs operand without retyping their result, breaking
     // the DPS contract (outs.type == result.type) on the unrefined
-    // sibling. No converter aliases empties today; the guard makes the
-    // single-use invariant local to this pass.
+    // sibling. No converter aliases empties today; the guard removes
+    // that as a correctness precondition for this pass.
     if (!emptyProducer->hasOneUse()) {
       LLVM_DEBUG(DBGS() << "skip " << op->getName() << " result #" << resultIdx
                         << ": outs producer is a shared tensor.empty\n");
