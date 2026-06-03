@@ -33,10 +33,6 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
-      # Global bump knob: changing this invalidates every dependency cache at
-      # once (and the OGA cache). Per-dep caches below additionally key on
-      # their own version so bumping one dep does not rebuild the others.
-      PREBUILT_CACHE_VERSION: "4"  # bump to invalidate all dep caches (source-built deps)
       # LLVM/MLIR/LLD are built from source at this upstream commit. This is
       # the llvm/llvm-project revision that the 22.1.0 release corresponds to
       # (verified via LLVM_REVISION in the prior prebuilt). Bumping it only
@@ -107,35 +103,35 @@ jobs:
           path: ${{ runner.workspace }}/ort-install
           # `ortpr-<list>` embeds ONNXRUNTIME_PR_PATCHES verbatim so editing
           # the patched-PR set auto-invalidates the cached ORT prefix.
-          key: dep-ort-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Cache llvm-install
         id: cache-llvm
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/llvm-install
-          key: dep-llvm-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.LLVM_COMMIT }}
+          key: dep-llvm-${{ env.LLVM_COMMIT }}
 
       - name: Cache protobuf-install
         id: cache-protobuf
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/protobuf-install
-          key: dep-protobuf-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.PROTO_TAG }}
+          key: dep-protobuf-${{ env.PROTO_TAG }}
 
       - name: Cache flatbuffers-install
         id: cache-flatbuffers
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/flatbuffers-install
-          key: dep-flatbuffers-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.FLATBUFFERS_TAG }}
+          key: dep-flatbuffers-${{ env.FLATBUFFERS_TAG }}
 
       - name: Cache gtest-install
         id: cache-gtest
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/gtest-install
-          key: dep-gtest-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.GTEST_VERSION }}
+          key: dep-gtest-${{ env.GTEST_VERSION }}
 
       # -----------------------------------------------------------------------
       # TheRock HIP SDK: downloaded fresh every run (not cached). The tarball
@@ -437,11 +433,9 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          # Reuse PREBUILT_CACHE_VERSION as the OGA cache version too: when
-          # the OGA build outputs change shape (e.g. wheel added), bumping
-          # PREBUILT_CACHE_VERSION invalidates both ORT and OGA caches in
-          # one step instead of needing two separate version knobs.
-          key: oga-dml-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # Bump the v<N> token to invalidate the OGA cache when its output
+          # set changes shape (e.g. a new artifact) without an OGA_REF/ORT bump.
+          key: oga-dml-v1-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
