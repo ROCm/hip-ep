@@ -784,6 +784,15 @@ int hip_reduce_prod(
     int64_t num_output_elements,
     int hip_dtype);
 
+/* Mean reduction (ONNX ReduceMean): sum then divide by reduce_size. */
+int hip_reduce_mean(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int hip_dtype);
+
 /* =========================================================================
  * Tile / Expand (shape replication)
  * =========================================================================

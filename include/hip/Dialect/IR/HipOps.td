@@ -2848,6 +2848,37 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   }];
 }
 
+def Hip_ReduceMeanOp : Hip_DpsOp<"reduce_mean"> {
+  let summary = "Reduce tensor by taking arithmetic mean along axes";
+  let description = [{
+    Computes the arithmetic mean of input tensor elements along the
+    specified axes. Implements the ONNX ReduceMean operator (opset 18+).
+    Same operand / attribute shape as ReduceMax / ReduceSum.
+
+    Example:
+    ```mlir
+    hip.reduce_mean(%ctx) ins(%data, %axes : memref<3x4x5xf32, 1>, memref<1xi64, 1>)
+                          outs(%output : memref<3x1x5xf32, 1>)
+                          {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ClipOp : Hip_DpsOp<"clip"> {
   let summary = "Elementwise clip (ONNX Clip)";
   let description = [{

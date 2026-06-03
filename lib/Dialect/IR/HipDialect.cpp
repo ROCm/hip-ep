@@ -823,6 +823,20 @@ void ClipOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ReduceMeanOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMeanOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMeanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // WhereOp: ins(condition, x, y), outs(output)
 //===----------------------------------------------------------------------===//
 

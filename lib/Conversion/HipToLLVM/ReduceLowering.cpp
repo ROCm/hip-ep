@@ -108,6 +108,8 @@ void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
                                                  "reduce_max");
   patterns.insert<ReduceOpLowering<ReduceProdOp>>(converter, kWrapReduceProd,
                                                   "reduce_prod");
+  patterns.insert<ReduceOpLowering<ReduceMeanOp>>(converter, kWrapReduceMean,
+                                                  "reduce_mean");
 }
 
 } // namespace hip

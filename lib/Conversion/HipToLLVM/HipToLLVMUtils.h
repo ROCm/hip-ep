@@ -108,6 +108,7 @@ inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
 inline constexpr const char *kWrapSize = "wrap_size";
 inline constexpr const char *kWrapClip = "wrap_clip";
+inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }

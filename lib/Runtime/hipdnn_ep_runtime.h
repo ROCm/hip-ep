@@ -1081,6 +1081,12 @@ int wrap_less(RuntimeState *state, void *a, void *b, void *output,
 int wrap_clip(RuntimeState *state, void *input, void *lo, void *hi,
               void *output, int64_t num_elements, int64_t data_type);
 
+// ReduceMean operation wrapper. Mirrors the reduce_sum/reduce_max signature.
+int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
+                     int64_t data_num_elements, int64_t output_num_elements,
+                     int64_t axes_num_elements, int64_t data_type,
+                     int64_t keepdims, int64_t noop_with_empty_axes);
+
 // GatherND operation wrapper. data_shape has rank `data_rank`; indices has
 // rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
 int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
