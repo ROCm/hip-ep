@@ -18,6 +18,12 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    # Source-building ORT + LLVM/MLIR/LLD on a cold cache is long; raise the
+    # job timeout to the GitHub-hosted maximum (6 h is a hard runner cap that
+    # timeout-minutes cannot exceed). Warm-cache runs are minutes -- prime the
+    # dep caches first via a manual workflow_dispatch on main so PR runs never
+    # approach this ceiling.
+    timeout-minutes: 360
     # Cancel the build job when a newer commit lands on the same PR ref to
     # save runner minutes. gpu-test deliberately does NOT inherit this rule
     # (see its own concurrency block below) so an in-progress GPU run keeps
@@ -27,16 +33,25 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
-      PREBUILT_CACHE_VERSION: "3"  # bump to invalidate prebuilt cache (added cp314 wheels)
-      LLVM_TAG: llvm-22.1.0-release
-      FLATBUFFERS_TAG: flatbuffers-25.12.19-release
-      PROTO_TAG: protobuf-34.0-release
+      # Global bump knob: changing this invalidates every dependency cache at
+      # once (and the OGA cache). Per-dep caches below additionally key on
+      # their own version so bumping one dep does not rebuild the others.
+      PREBUILT_CACHE_VERSION: "4"  # bump to invalidate all dep caches (source-built deps)
+      # LLVM/MLIR/LLD are built from source at this upstream commit. This is
+      # the llvm/llvm-project revision that the 22.1.0 release corresponds to
+      # (verified via LLVM_REVISION in the prior prebuilt). Bumping it only
+      # invalidates the llvm-install cache. NOTE: this is NOT the morphizen
+      # FetchContent fallback pin (cmake/deps.txt) -- the project resolves
+      # LLVM via find_package against this prebuilt, so that fallback is unused.
+      LLVM_COMMIT: "4434dabb69916856b824f68a64b029c67175e532"
+      FLATBUFFERS_TAG: v25.12.19
+      PROTO_TAG: v34.0
       ONNXRUNTIME_VERSION: "1.25.1"
       # Space-separated list of microsoft/onnxruntime PR numbers to fetch
       # from github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply`
       # on top of the pinned ONNXRUNTIME_VERSION tag during the source-build
-      # step. The PR list is also part of the prebuilt-local cache key, so
-      # editing this list auto-invalidates the cached install prefix.
+      # step. The PR list is also part of the ort-install cache key, so
+      # editing this list auto-invalidates the cached ORT install prefix.
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: "28608"
       GTEST_VERSION: "1.15.0"
@@ -74,38 +89,60 @@ jobs:
           git submodule update --init --recursive --depth 1
 
       # -----------------------------------------------------------------------
-      # Cache: ORT + LLVM prebuilt + flatbuffers + protobuf + gtest
-      # All are installed into the same prebuilt-local prefix so one cache
-      # entry covers all of them.
-      # Note: protobuf is excluded from prebuilt downloads – cmake/deps.cmake
-      # fetches v21.12 via FetchContent (same version pinned by morphizen) to
-      # avoid C4267 errors from mismatched protobuf versions.
-      # ORT is built from source and installed here (same pattern as GTest).
+      # Per-dependency caches. Each dep is built from source into its own
+      # ${{ runner.workspace }}/<dep>-install prefix and cached separately so a
+      # version bump of one dep does not invalidate the others. The configure
+      # step lists all of them on CMAKE_PREFIX_PATH (no merge/copy).
+      #
+      # The llvm/protobuf/flatbuffers/gtest caches are byte-identical to the
+      # ones produced by windows-build-mock.yml, so their keys are shared
+      # across both workflows -- whichever job builds a dep first populates
+      # the cache for both, and the expensive LLVM cold build runs once.
+      # Only the ORT cache differs per-PR via the patched-PR list.
       # -----------------------------------------------------------------------
-      - name: Cache prebuilt-local
-        id: cache-prebuilt
+      - name: Cache ort-install
+        id: cache-ort
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
-          path: ${{ runner.workspace }}/prebuilt-local
-          # The `ortpr-<list>` segment embeds the ONNXRUNTIME_PR_PATCHES env
-          # value verbatim, so editing the PR list auto-invalidates the
-          # cached install prefix. Without this, bumping the patched PR set
-          # but leaving ONNXRUNTIME_VERSION fixed would silently keep the
-          # previous-patch ORT artifacts in the cache.
-          key: prebuilt-v${{ env.PREBUILT_CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
+          path: ${{ runner.workspace }}/ort-install
+          # `ortpr-<list>` embeds ONNXRUNTIME_PR_PATCHES verbatim so editing
+          # the patched-PR set auto-invalidates the cached ORT prefix.
+          key: dep-ort-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
 
-      # -----------------------------------------------------------------------
-      # Cache: TheRock HIP SDK for Windows (separate cache – large tarball)
-      # -----------------------------------------------------------------------
-      - name: Cache TheRock
-        id: cache-therock
+      - name: Cache llvm-install
+        id: cache-llvm
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
-          path: ${{ runner.workspace }}/therock-dist
-          key: ${{ env.THEROCK_VERSION }}
+          path: ${{ runner.workspace }}/llvm-install
+          key: dep-llvm-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.LLVM_COMMIT }}
 
+      - name: Cache protobuf-install
+        id: cache-protobuf
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/protobuf-install
+          key: dep-protobuf-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.PROTO_TAG }}
+
+      - name: Cache flatbuffers-install
+        id: cache-flatbuffers
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/flatbuffers-install
+          key: dep-flatbuffers-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.FLATBUFFERS_TAG }}
+
+      - name: Cache gtest-install
+        id: cache-gtest
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/gtest-install
+          key: dep-gtest-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.GTEST_VERSION }}
+
+      # -----------------------------------------------------------------------
+      # TheRock HIP SDK: downloaded fresh every run (not cached). The tarball
+      # is large and would eat into the 10 GB repo cache budget needed by the
+      # source-built dep caches above; the AMD CDN download is fast enough.
+      # -----------------------------------------------------------------------
       - name: Download & extract TheRock
-        if: steps.cache-therock.outputs.cache-hit != 'true'
         shell: bash
         run: |
           THEROCK_DIST="$(cygpath -u '${{ runner.workspace }}/therock-dist')"
@@ -115,17 +152,6 @@ jobs:
             -o therock.tar.gz
           tar -xzf therock.tar.gz -C "$THEROCK_DIST" --strip-components=1
           rm therock.tar.gz
-
-      # -----------------------------------------------------------------------
-      # The prebuilt LLVM package has C:\msvsn2022 hardcoded in LLVMExports.cmake
-      # for the DIA SDK path (known LLVM issue: llvm/llvm-project#111829).
-      # Create a junction from C:\msvsn2022 to the actual VS installation.
-      # -----------------------------------------------------------------------
-      - name: Fix DIA SDK path from prebuilt LLVM
-        shell: cmd
-        run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS_PATH=%%i"
-          mklink /J C:\msvsn2022 "%VS_PATH%"
 
       # -----------------------------------------------------------------------
       # llvm-lit.py (from prebuilt) requires the lit pip package at runtime.
@@ -148,14 +174,14 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
 
       # -----------------------------------------------------------------------
-      # Build ONNX Runtime from source and install into prebuilt-local.
+      # Build ONNX Runtime from source and install into ort-install.
       # Produces both the ORT shared library (build-time dep for onnx-hipdnn-ep)
       # and onnxruntime_perf_test.exe (GPU test tool).
       # Requires MSVC env; placed after Setup MSVC (same pattern as GTest).
       # Clone and build are skipped when the ORT build cache hits.
       # -----------------------------------------------------------------------
       - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: Microsoft/onnxruntime
@@ -169,12 +195,12 @@ jobs:
       # ONNXRUNTIME_PR_PATCHES (env). Each PR's `.patch` endpoint returns the
       # git format-patch mailbox for the PR's current head, which we apply on
       # top of the pinned ONNXRUNTIME_VERSION tag. The cache key on
-      # `prebuilt-local` includes the PR list, so adding/removing a PR
+      # `ort-install` includes the PR list, so adding/removing a PR
       # number forces a rebuild. The source-onnxruntime tree itself is not
       # cached, so a fresh checkout always lands here clean and patches
       # apply directly. No idempotency needed.
       - name: Apply ONNX Runtime PR patches
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        if: steps.cache-ort.outputs.cache-hit != 'true'
         shell: pwsh
         working-directory: ${{ github.workspace }}\source-onnxruntime
         env:
@@ -199,7 +225,7 @@ jobs:
           }
 
       - name: Build ONNX Runtime
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        if: steps.cache-ort.outputs.cache-hit != 'true'
         shell: cmd
         run: |
           cd /d "${{ github.workspace }}\source-onnxruntime"
@@ -216,21 +242,21 @@ jobs:
             --cmake_generator Ninja ^
             --build_wheel
 
-      - name: Install ORT into prebuilt-local
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+      - name: Install ORT into ort-install
+        if: steps.cache-ort.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cmake --install "${{ runner.workspace }}/build-onnxruntime/Release" \
-            --prefix "${{ runner.workspace }}/prebuilt-local"
+            --prefix "${{ runner.workspace }}/ort-install"
           # perf_test is not a cmake install target; copy manually so it lands
-          # in prebuilt-local (cached) rather than the ephemeral build directory.
+          # in ort-install (cached) rather than the ephemeral build directory.
           PERF_TEST=$(find "${{ runner.workspace }}/build-onnxruntime" \
             -name "onnxruntime_perf_test.exe" -type f | head -1)
           if [ -z "$PERF_TEST" ]; then
             echo "ERROR: onnxruntime_perf_test.exe not found in build tree"
             exit 1
           fi
-          cp "$PERF_TEST" "${{ runner.workspace }}/prebuilt-local/bin/"
+          cp "$PERF_TEST" "${{ runner.workspace }}/ort-install/bin/"
           # DirectML.dll is not installed by cmake --install; copy manually.
           DML_DLL=$(find "${{ runner.workspace }}/build-onnxruntime" \
             -path "*/x64-win/DirectML.dll" -type f | head -1)
@@ -238,8 +264,8 @@ jobs:
             echo "ERROR: DirectML.dll not found in build tree"
             exit 1
           fi
-          cp "$DML_DLL" "${{ runner.workspace }}/prebuilt-local/bin/"
-          # Cache the cp314 ORT Python wheel inside prebuilt-local so it
+          cp "$DML_DLL" "${{ runner.workspace }}/ort-install/bin/"
+          # Cache the cp314 ORT Python wheel inside ort-install so it
           # rides the same cache key as the rest of the ORT artifacts.
           # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
           ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
@@ -248,78 +274,115 @@ jobs:
             echo "ERROR: onnxruntime_directml wheel not found in build tree"
             exit 1
           fi
-          mkdir -p "${{ runner.workspace }}/prebuilt-local/wheels"
-          cp "$ORT_WHEEL" "${{ runner.workspace }}/prebuilt-local/wheels/"
+          mkdir -p "${{ runner.workspace }}/ort-install/wheels"
+          cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
       # -----------------------------------------------------------------------
-      # Download LLVM prebuilt (from wcy123/llvm-mlir-prebuilt releases)
+      # Build LLVM/MLIR/LLD from source into llvm-install.
+      # Only mlir;lld are enabled and only the X86 backend is built: the project
+      # find_package()s LLVM/MLIR/LLD (no Clang) and lib/Target/LLVM links the
+      # X86 codegen + lldCOFF/lldCommon for the in-process COFF DLL linker.
+      # /MT matches the rest of the toolchain; RTTI/zlib/zstd are off to match
+      # the morphizen build options. Cold build is multi-hour; sccache + the
+      # shared llvm-install cache key amortize it across runs and workflows.
       # -----------------------------------------------------------------------
-      - name: Download LLVM prebuilt
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+      - name: Build LLVM/MLIR/LLD from source
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          PREBUILT_DIR="${{ runner.workspace }}/prebuilt-local"
-          mkdir -p "$PREBUILT_DIR"
-          gh release download "${{ env.LLVM_TAG }}" \
-            --repo wcy123/llvm-mlir-prebuilt \
-            --pattern "llvm-22.1.0-release-windows-x64.zip" \
-            --dir "$PREBUILT_DIR"
-          unzip -q -o "$PREBUILT_DIR/llvm-22.1.0-release-windows-x64.zip" -d "$PREBUILT_DIR"
-          rm "$PREBUILT_DIR/llvm-22.1.0-release-windows-x64.zip"
+          SRC="${{ runner.workspace }}/llvm-project"
+          git init "$SRC"
+          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
+          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_COMMIT }}"
+          git -C "$SRC" checkout FETCH_HEAD
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS="mlir;lld" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
+            -DLLVM_ENABLE_RTTI=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DLLVM_INSTALL_UTILS=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
       # -----------------------------------------------------------------------
-      # Download flatbuffers prebuilt
+      # Build protobuf (+ bundled abseil) from source into protobuf-install.
+      # CMAKE_CXX_STANDARD=17 is REQUIRED: abseil pins its installed options.h
+      # ABI from a configure-time `_MSVC_LANG >= 201703` probe. Without it MSVC
+      # defaults to C++14, abseil pins ABSL_OPTION_USE_STD_STRING_VIEW=0 (own
+      # string_view) while the libs compile under C++17 (std::string_view) ->
+      # unresolved `absl::...::CopyToEncodedBuffer` at EP DLL link time.
+      # Recipe otherwise mirrors docker/build.sh; /MT matches the toolchain.
       # -----------------------------------------------------------------------
-      - name: Download flatbuffers prebuilt
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+      - name: Build protobuf from source
+        if: steps.cache-protobuf.outputs.cache-hit != 'true'
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          PREBUILT_DIR="${{ runner.workspace }}/prebuilt-local"
-          gh release download "${{ env.FLATBUFFERS_TAG }}" \
-            --repo wcy123/llvm-mlir-prebuilt \
-            --pattern "flatbuffers-25.12.19-release-windows-x64.zip" \
-            --dir "$PREBUILT_DIR"
-          unzip -q -o "$PREBUILT_DIR/flatbuffers-25.12.19-release-windows-x64.zip" -d "$PREBUILT_DIR"
-          rm "$PREBUILT_DIR/flatbuffers-25.12.19-release-windows-x64.zip"
+          SRC="${{ runner.workspace }}/src-protobuf"
+          git clone --depth 1 --branch "${{ env.PROTO_TAG }}" --recursive \
+            https://github.com/protocolbuffers/protobuf.git "$SRC"
+          cmake -G Ninja -S "$SRC" -B "${{ runner.workspace }}/build-protobuf" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/protobuf-install" \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -Dprotobuf_BUILD_TESTS=OFF \
+            -Dprotobuf_BUILD_EXAMPLES=OFF \
+            -Dprotobuf_WITH_ZLIB=OFF \
+            -Dprotobuf_BUILD_SHARED_LIBS=OFF \
+            -Dprotobuf_INSTALL=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ runner.workspace }}/build-protobuf" --target install
 
       # -----------------------------------------------------------------------
-      # Download protobuf prebuilt
+      # Build flatbuffers from source into flatbuffers-install (docker/build.sh
+      # recipe + /MT).
       # -----------------------------------------------------------------------
-      - name: Download protobuf prebuilt
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+      - name: Build flatbuffers from source
+        if: steps.cache-flatbuffers.outputs.cache-hit != 'true'
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          PREBUILT_DIR="${{ runner.workspace }}/prebuilt-local"
-          mkdir -p "$PREBUILT_DIR"
-          gh release download "${{ env.PROTO_TAG }}" \
-            --repo wcy123/llvm-mlir-prebuilt \
-            --pattern "protobuf-34.0-release-windows-x64.zip" \
-            --dir "$PREBUILT_DIR"
-          unzip -q -o "$PREBUILT_DIR/protobuf-34.0-release-windows-x64.zip" -d "$PREBUILT_DIR"
-          rm "$PREBUILT_DIR/protobuf-34.0-release-windows-x64.zip"
+          SRC="${{ runner.workspace }}/src-flatbuffers"
+          git clone --depth 1 --branch "${{ env.FLATBUFFERS_TAG }}" \
+            https://github.com/google/flatbuffers.git "$SRC"
+          cmake -G Ninja -S "$SRC" -B "${{ runner.workspace }}/build-flatbuffers" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/flatbuffers-install" \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DFLATBUFFERS_BUILD_TESTS=OFF \
+            -DFLATBUFFERS_BUILD_FLATC=ON \
+            -DFLATBUFFERS_BUILD_FLATLIB=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ runner.workspace }}/build-flatbuffers" --target install
 
       # -----------------------------------------------------------------------
-      # Build GTest from source and install into prebuilt-local.
+      # Build GTest from source and install into gtest-install.
       # cmake/deps.cmake does find_package(GTest CONFIG QUIET) first; if found
       # via CMAKE_PREFIX_PATH it skips FetchContent entirely.
       # Requires MSVC env (cl.exe + ninja) hence placed after Setup MSVC.
       # -----------------------------------------------------------------------
       - name: Build GTest
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        if: steps.cache-gtest.outputs.cache-hit != 'true'
         shell: cmd
         run: |
           curl -fsSL "https://github.com/google/googletest/archive/refs/tags/v${{ env.GTEST_VERSION }}.zip" -o gtest.zip
           unzip -q gtest.zip
           cmake -G Ninja -B gtest-build -S "googletest-${{ env.GTEST_VERSION }}" ^
             -DCMAKE_BUILD_TYPE=Release ^
-            "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/prebuilt-local" ^
+            "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/gtest-install" ^
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" ^
             -DBUILD_GMOCK=ON
           ninja -C gtest-build install
@@ -337,7 +400,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" \
             -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/prebuilt-local" \
+            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/protobuf-install;${{ runner.workspace }}/flatbuffers-install;${{ runner.workspace }}/gtest-install" \
             "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/install" \
             -DBUILD_EP=ON \
             -DBUILD_HIP_TOOLS=ON \
@@ -397,7 +460,7 @@ jobs:
         run: |
           ORT_HOME="${{ runner.workspace }}/oga-ort-home"
           mkdir -p "$ORT_HOME/include" "$ORT_HOME/lib"
-          PREBUILT="${{ runner.workspace }}/prebuilt-local"
+          PREBUILT="${{ runner.workspace }}/ort-install"
           cp -r "$PREBUILT/include/onnxruntime/"* "$ORT_HOME/include/"
           cp "$PREBUILT/lib/"onnxruntime*.lib "$ORT_HOME/lib/"
           cp "$PREBUILT/bin/onnxruntime.dll" "$ORT_HOME/lib/"
@@ -446,8 +509,8 @@ jobs:
         run: |
           mkdir -p staging/bin staging/lib
 
-          # onnxruntime_perf_test.exe + onnxruntime.dll – from prebuilt-local
-          PREBUILT="${{ runner.workspace }}/prebuilt-local"
+          # onnxruntime_perf_test.exe + onnxruntime.dll – from ort-install
+          PREBUILT="${{ runner.workspace }}/ort-install"
           PERF_TEST=$(find "$PREBUILT" -name "onnxruntime_perf_test.exe" -type f | head -1)
           if [ -z "$PERF_TEST" ]; then
             echo "ERROR: onnxruntime_perf_test.exe not found in $PREBUILT"
@@ -510,12 +573,12 @@ jobs:
           # ---------------------------------------------------------------
           # Python wheels (ORT + OGA cp314) — bundled into the same artifact
           # under staging/wheels/ so downstream consumers download a single
-          # zip. Both wheels are cached inside prebuilt-local / oga-artifacts
+          # zip. Both wheels are cached inside ort-install / oga-artifacts
           # respectively, so cache hits restore them without re-running ORT
           # or OGA from source.
           # ---------------------------------------------------------------
           mkdir -p staging/wheels
-          ORT_WHEEL=$(find "${{ runner.workspace }}/prebuilt-local/wheels" \
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
             -name "onnxruntime_directml-*.whl" -type f | head -1)
           OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
             -name "onnxruntime_genai_directml-*.whl" -type f | head -1)

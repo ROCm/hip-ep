@@ -47,8 +47,8 @@ winget install Mozilla.sccache
 winget install GitHub.cli
 winget install Git.Git
 
-# 3. Authenticate gh (needed to download pre-built LLVM/MLIR/Protobuf/FlatBuffers
-#    archives from wcy123/llvm-mlir-prebuilt releases)
+# 3. Authenticate gh / set up an SSH key with access to the private
+#    ROCm/MorphiZen submodule (cloned by `git submodule update`).
 gh auth login
 ```
 
@@ -143,31 +143,33 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
 ```
 
-### 2. Download Pre-built Dependencies
+### 2. Build the C++ Dependencies from Source
 
 Step 1 leaves you inside `<workspace>/onnxruntime/`. Switch back to the
-project root and run the bundled setup script (uses Git Bash / MSYS2):
+project root and run the bundled setup script from a Visual Studio Developer
+shell (it needs `cl.exe` / `ninja` / `git` on PATH; uses Git Bash / MSYS2):
 
 ```bash
 cd ../onnx-hipdnn-ep
 bash scripts/setup-prebuilt.sh
 ```
 
-This downloads the following assets from
-`https://github.com/wcy123/llvm-mlir-prebuilt/releases` and extracts them into
-`../prebuilt-local/`:
+This builds the following from source and installs them into `../prebuilt-local/`:
 
-| Release tag | Asset |
-|---|---|
-| `llvm-22.1.0-release` | `llvm-22.1.0-release-windows-x64.zip` |
-| `protobuf-34.0-release` | `protobuf-34.0-release-windows-x64.zip` |
-| `flatbuffers-25.12.19-release` | `flatbuffers-25.12.19-release-windows-x64.zip` |
+| Component | Source | Version |
+|---|---|---|
+| LLVM / MLIR / LLD | `github.com/llvm/llvm-project` | commit `4434dabb…` (22.1.0), `mlir;lld`, X86 only, `/MT` |
+| Protobuf (+ abseil) | `github.com/protocolbuffers/protobuf` | `v34.0` (built with `CMAKE_CXX_STANDARD=17`) |
+| FlatBuffers | `github.com/google/flatbuffers` | `v25.12.19` |
 
-Already-downloaded zip files are skipped on subsequent runs.
+The LLVM build is the long pole (multi-hour cold; `ccache` is used when
+present). Each component is skipped on re-run when its install marker
+(`lib/cmake/<name>/...`) is already present — delete `../prebuilt-local/` to
+force a clean rebuild.
 
 ### 3. Build onnx-hipdnn-ep
 
-**Prerequisites**: Complete steps 1-2 (build ONNX Runtime, download prebuilt dependencies) and install [TheRock SDK](https://repo.amd.com/rocm/tarball/). Recommended version: **TheRock 7.11.0**.
+**Prerequisites**: Complete steps 1-2 (build ONNX Runtime, build the C++ dependencies from source) and install [TheRock SDK](https://repo.amd.com/rocm/tarball/). Recommended version: **TheRock 7.11.0**.
 
 Run from the project root:
 
@@ -501,11 +503,14 @@ The pre-built binaries are compiled with the **Release `/MT`** runtime
 `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug` will produce runtime library
 mismatch linker errors.
 
-## Updating Pre-built Binaries
+## Updating the C++ Dependencies
 
-When new releases are published to `wcy123/llvm-mlir-prebuilt`, update the tag
-variables at the top of `scripts/setup-prebuilt.sh` and re-run it. Delete the
-old zip files in `../prebuilt-local/` if you want a clean re-download.
+To move to a newer LLVM/protobuf/flatbuffers, update the `LLVM_COMMIT` /
+`PROTO_TAG` / `FLATBUFFERS_TAG` variables at the top of
+`scripts/setup-prebuilt.sh` (keep them in lockstep with
+`.github/workflows/windows-build.yml`) and re-run it. Delete the corresponding
+`../prebuilt-local/lib/cmake/<name>/` install marker (or the whole
+`../prebuilt-local/`) to force a rebuild.
 
 ## Troubleshooting
 
@@ -516,12 +521,14 @@ old zip files in `../prebuilt-local/` if you want a clean re-download.
 **Solution:** Verify `../prebuilt-local/lib/cmake/llvm/` exists. Re-run
 `bash scripts/setup-prebuilt.sh` if the directory is missing.
 
-### `gh` authentication error during setup
+### Dependency build cannot find a compiler
 
-**Symptom:** `gh release download` fails with `HTTP 401`.
+**Symptom:** `scripts/setup-prebuilt.sh` fails with `cl.exe`/`ninja` not found
+or a CMake compiler-detection error.
 
-**Solution:** Run `gh auth login` and authenticate with a GitHub account that
-has access to `wcy123/llvm-mlir-prebuilt`.
+**Solution:** Run the script from a Visual Studio Developer shell (so `cl.exe`,
+`ninja` and `git` are on PATH). The LLVM build also needs several GB of free
+disk and is long on a cold `ccache`.
 
 ### sccache not found
 
@@ -546,16 +553,3 @@ configure command.
 **Solution:** Ensure `lit` is installed via pip (`pip install lit`) and that
 CMake found the correct `lit.exe` during configure. Re-run configure with
 `--fresh` after installing lit.
-
-### Missing DIA SDK library (diaguids.lib)
-
-**Symptom:** `ninja: error: 'C:/msvsn2022/DIA SDK/lib/amd64/diaguids.lib' missing`
-
-**Cause:** The prebuilt LLVM package has `C:\msvsn2022` hardcoded in LLVMExports.cmake for the DIA SDK path. This is a known LLVM issue: https://github.com/llvm/llvm-project/issues/111829
-
-**Solution:** Create a junction from `C:\msvsn2022` to your Visual Studio installation:
-
-```bash
-# Auto-detect VS installation path and create junction
-for /f "usebackq delims=" %i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do mklink /J C:\msvsn2022 "%i"
-```
