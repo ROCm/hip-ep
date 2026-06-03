@@ -491,14 +491,24 @@ static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
 ///      row-major dyn-shape alloc): wrap_hipMemcpyAsync (rank ≤ 1) or
 ///      wrap_hipMemcpy2DAsync with runtime-computed sizes / src-pitch.
 ///
-/// Regimes 2 and 3 assume the source's outer dims collapse uniformly into a
-/// single height pitch (true for any subview-of-contiguous-parent).
+/// Regimes 2 and 3 require the source's outer dims to collapse uniformly into
+/// a single height pitch (stride[i] == stride[i+1] * shape[i+1]).  This holds
+/// for a subview of a contiguous parent that keeps all parent dims, but NOT
+/// for a subview that drops an outer dim (e.g. selecting one component of an
+/// unbind / Split on a packed [N, C, H, W] tensor): there stride[0] stays at
+/// the parent row stride while stride[1]*shape[1] is the smaller post-collapse
+/// extent.  Both regimes therefore verify the collapse where it is statically
+/// provable and bail (notifyMatchFailure) when it provably fails.
 ///
-/// Cases outside these three (e.g. arbitrary non-row-major source, transposed
-/// view) intentionally fall through with notifyMatchFailure rather than into
-/// the upstream MemRefToLLVM `memrefCopy` libcall, since that libcall is not
-/// linked into the EP runtime — failing here surfaces unsupported patterns
-/// at compile time instead of as a downstream undefined-symbol link error.
+/// Cases that bail here -- including the dropped-outer-dim copy above and
+/// arbitrary non-row-major / strided destinations -- fall through to the
+/// standard MemRefToLLVM `CopyOpLowering` (registered at lower benefit by
+/// populateFinalizeMemRefToLLVMConversionPatterns), which emits the runtime
+/// `memrefCopy` libcall.  That helper (lib/Runtime/real/hip.cpp) walks the
+/// outer index space one contiguous row at a time and honours arbitrary
+/// rank-N strides, so it is the correct general fallback.  (The 2D fast paths
+/// here exist only to avoid a per-row launch when the copy IS a single pitched
+/// blit.)
 struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
   MemRefCopyOpLowering(const LLVMTypeConverter &converter)
       : ConvertOpToLLVMPattern(converter, PatternBenefit(10)) {}
@@ -669,6 +679,43 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
         if (typeStrides[i] != typeStrides[i + 1] * shape[i + 1])
           break;
         splitDim = i;
+      }
+
+      // hipMemcpy2DAsync exposes only ONE source pitch, so the height-group
+      // prefix dims [0..splitDim) must collapse UNIFORMLY into that single
+      // pitch, i.e. stride[i] == stride[i+1] * shape[i+1] for every
+      // i in [0..splitDim-1).  For a subview of a contiguous parent this holds
+      // (sometimes only at runtime, when prefix shapes are dynamic -- the QKV
+      // [B,S,H,D]-from-packed-[B,S,3HD] producer relies on that runtime
+      // equality, which we cannot disprove statically and therefore allow).
+      // But a subview that DROPS an outer dim -- e.g. selecting one component
+      // of an unbind / Split on a packed [N, C, H, W] tensor -- leaves
+      // stride[0] = parent_row_stride while stride[1]*shape[1] is the smaller
+      // post-collapse inner extent; the two differ by the dropped dim's factor.
+      // A single 2D copy with pitch = stride[splitDim-1] would then walk every
+      // height row at that one (too-small) pitch and silently read the wrong
+      // source rows.  When we can STATICALLY PROVE the prefix does not collapse,
+      // bail so the generic strided @memrefCopy libcall (registered by the
+      // standard memref-to-llvm lowering at lower benefit) handles it correctly
+      // by walking the outer index space one row at a time.
+      //
+      // Before:  memref.copy %sv, %tmp
+      //   : memref<?x16x36xf16, strided<[3456, 72, 1], offset: ?>>
+      //     to memref<?x16x36xf16>
+      //   ; sv = Squeeze(Split(view_16=[N,3,16,72], axis=1)[0])[.,:,36:72].
+      //   ; stride[0]=3456 (view_16 row stride) but stride[1]*shape[1]=72*16
+      //   ; =1152 -> the prefix dim 0 does NOT collapse onto dim 1.
+      // After:   (this pattern bails on the provable mismatch) the standard
+      //          lowering emits @memrefCopy, which copies each 36-elem row at
+      //          the correct outer stride 3456.
+      for (int64_t i = 0; i + 1 < splitDim; ++i) {
+        if (ShapedType::isDynamic(typeStrides[i]) ||
+            ShapedType::isDynamic(typeStrides[i + 1]) ||
+            ShapedType::isDynamic(shape[i + 1]))
+          continue; // cannot disprove collapse; keep the runtime-correct 2D path
+        if (typeStrides[i] != typeStrides[i + 1] * shape[i + 1])
+          return rewriter.notifyMatchFailure(
+              op, "non-collapsible outer strides; defer to generic memrefCopy");
       }
 
       // Width = product of sizes [splitDim..rank-1] * elem_bytes.  Each size
