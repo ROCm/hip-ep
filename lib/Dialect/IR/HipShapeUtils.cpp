@@ -424,6 +424,22 @@ LogicalResult mlir::hip::reifyReductionWithKeepdims(
 }
 
 LogicalResult
+mlir::hip::reifyBroadcastShapeFor(OpBuilder &b, Location loc,
+                                  ValueRange operands, Operation *op,
+                                  ReifiedRankedShapedTypeDims &reified) {
+  if (op->getNumResults() == 0)
+    return failure();
+  for (Value v : operands)
+    if (!isa<RankedTensorType>(v.getType()))
+      return failure();
+  SmallVector<OpFoldResult> dims = reifyBroadcastShape(b, loc, operands);
+  if (dims.empty())
+    return failure();
+  reified.assign({std::move(dims)});
+  return success();
+}
+
+LogicalResult
 mlir::hip::reifyReductionShape(OpBuilder &b, Location loc, Value data,
                                Value axes, int64_t keepdims,
                                int64_t noopWithEmptyAxes, Operation *op,

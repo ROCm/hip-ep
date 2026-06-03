@@ -198,6 +198,24 @@ LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
                                   int64_t noopWithEmptyAxes, Operation *op,
                                   ReifiedRankedShapedTypeDims &reified);
 
+/// One-shot reify body for elementwise NumPy-broadcast ops (add, mul,
+/// sub, div, min, mod, equal, less, and, where, ...). Wraps
+/// `reifyBroadcastShape` with the per-op guards (no-results bail,
+/// every operand must be `RankedTensorType`) and writes the lifted
+/// dim list into `reified`.
+///
+/// `operands` is the list of broadcast input operands in the order
+/// they should be aligned (right-aligned for NumPy broadcast).
+/// Returns `failure()` on any defensive bail or when broadcast itself
+/// fails (verifier should already have caught the latter; reify bails
+/// to avoid materializing nonsense IR).
+///
+/// Used as the body of `Hip_DpsOp_Broadcast`'s auto-emitted reify
+/// dispatcher; see `Hip_DpsOp_Broadcast` in `HipOps.td`.
+LogicalResult reifyBroadcastShapeFor(OpBuilder &b, Location loc,
+                                     ValueRange operands, Operation *op,
+                                     ReifiedRankedShapedTypeDims &reified);
+
 } // namespace hip
 } // namespace mlir
 

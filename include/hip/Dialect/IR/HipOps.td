@@ -186,6 +186,40 @@ class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
                     getOperation(), reified);
               }]>;
 
+// Parameterized sub-base for elementwise NumPy-broadcast ops (add,
+// mul, sub, div, min, mod, equal, less, and, where, miopen.add).
+// Auto-emits a `reifyResultShapes` body that calls
+// `mlir::hip::reifyBroadcastShapeFor` with the broadcast input
+// operands — output element type is independent of this reify path
+// and is taken from the `outs` operand by the converter.
+//
+// `operandGetters` is the list of ODS-generated accessor stems for
+// the broadcast inputs, in right-alignment order. The auto-emitted
+// body builds a `{getXX(), getYY(), ...}` initialiser list from
+// these names. Most ops pass `["Lhs", "Rhs"]`; ops with non-default
+// operand naming pass that naming (`["A", "B"]` for `miopen.add`,
+// `["Condition", "X", "Y"]` for `where`).
+//
+// `outsAccessor` defaults to `"Output"`; pass the leaf op's actual
+// outs accessor stem (e.g. `"C"` for `miopen.add`) so the inherited
+// auto-emitted `inferReturnTypes` reads the correct outs type.
+class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
+                          string outsAccessor = "Output",
+                          list<Trait> traits = []> :
+    Hip_DpsOp<mnemonic, traits,
+              outsAccessor,
+              /*autoReify=*/0,
+              /*autoInfer=*/1,
+              /*declareInfer=*/1,
+              /*customReifyBody=*/!strconcat(
+                "return ::mlir::hip::reifyBroadcastShapeFor("
+                "b, getLoc(), {",
+                !interleave(
+                  !foreach(g, operandGetters, "get" # g # "()"),
+                  ", "),
+                "}, getOperation(), reified);"
+              )>;
+
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
                                     "ranked tensor or memref">;
@@ -969,11 +1003,9 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   }];
 }
 
-def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add", /*traits=*/[],
-                                /*outsAccessor=*/"C",
-                                /*autoReify=*/0,
-                                /*autoInfer=*/1,
-                                /*declareInfer=*/1> {
+def Hip_MiopenAddOp : Hip_DpsOp_Broadcast<"miopen.add",
+                                          /*operandGetters=*/["A", "B"],
+                                          /*outsAccessor=*/"C"> {
   let summary = "Element-wise add via miopenOpTensor(miopenTensorOpAdd)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -986,11 +1018,7 @@ def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_MulOp : Hip_DpsOp<"mul", /*traits=*/[],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise multiplication";
   let description = [{
     Performs elementwise multiplication: output = lhs * rhs
@@ -1017,11 +1045,7 @@ def Hip_MulOp : Hip_DpsOp<"mul", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_AddOp : Hip_DpsOp<"add", /*traits=*/[],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise addition";
   let description = [{
     Performs elementwise addition: output = lhs + rhs
@@ -1048,11 +1072,7 @@ def Hip_AddOp : Hip_DpsOp<"add", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_MinOp : Hip_DpsOp<"min", /*traits=*/[],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise minimum";
   let description = [{
     Performs elementwise minimum: output = min(lhs, rhs)
@@ -1390,11 +1410,7 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
   }];
 }
 
-def Hip_DivOp : Hip_DpsOp<"div", /*traits=*/[],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_DivOp : Hip_DpsOp_Broadcast<"div", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise division";
   let description = [{
     Performs elementwise division: output = lhs / rhs
@@ -1425,11 +1441,7 @@ def Hip_DivOp : Hip_DpsOp<"div", /*traits=*/[],
   }];
 }
 
-def Hip_EqualOp : Hip_DpsOp<"equal", /*traits=*/[],
-                            /*outsAccessor=*/"Output",
-                            /*autoReify=*/0,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_EqualOp : Hip_DpsOp_Broadcast<"equal", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Element-wise equality comparison: c = (a == b)";
   let description = [{
     Compares two input tensors element-wise for equality.
@@ -1461,11 +1473,7 @@ def Hip_EqualOp : Hip_DpsOp<"equal", /*traits=*/[],
   }];
 }
 
-def Hip_AndOp : Hip_DpsOp<"and", /*traits=*/[],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_AndOp : Hip_DpsOp_Broadcast<"and", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Element-wise logical AND: c = a && b";
   let description = [{
     Computes element-wise logical AND of two boolean tensors (i1).
@@ -1635,11 +1643,7 @@ def Hip_NegOp : Hip_DpsOp<"neg", /*traits=*/[],
   }];
 }
 
-def Hip_SubOp : Hip_DpsOp<"sub", /*traits=*/[],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_SubOp : Hip_DpsOp_Broadcast<"sub", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise subtraction";
   let description = [{
     Performs elementwise subtraction: output = lhs - rhs
@@ -1670,11 +1674,8 @@ def Hip_SubOp : Hip_DpsOp<"sub", /*traits=*/[],
   }];
 }
 
-def Hip_WhereOp : Hip_DpsOp<"where", /*traits=*/[],
-                            /*outsAccessor=*/"Output",
-                            /*autoReify=*/0,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_WhereOp : Hip_DpsOp_Broadcast<"where",
+                                      /*operandGetters=*/["Condition", "X", "Y"]> {
   let summary = "Elementwise selection: output = condition ? x : y";
   let description = [{
     Implements ONNX Where: output[i] = condition[i] ? x[i] : y[i].
@@ -2630,11 +2631,7 @@ def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
   }];
 }
 
-def Hip_LessOp : Hip_DpsOp<"less", /*traits=*/[],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_LessOp : Hip_DpsOp_Broadcast<"less", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Element-wise less-than comparison: c = (a < b)";
   let description = [{
     Compares two input tensors element-wise. Output is a boolean tensor (i1)
@@ -2858,11 +2855,7 @@ def Hip_SignOp : Hip_DpsOp<"sign", /*traits=*/[],
   }];
 }
 
-def Hip_ModOp : Hip_DpsOp<"mod", /*traits=*/[],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_ModOp : Hip_DpsOp_Broadcast<"mod", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Element-wise modulo / fmod operation";
   let description = [{
     Performs element-wise binary modulo. Implements the standard ONNX Mod
