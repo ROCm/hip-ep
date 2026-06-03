@@ -825,6 +825,12 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
 
+// LeakyRelu activation wrapper (uses custom HIP kernel).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, DOUBLE)
+// alpha: slope for negative values (default 0.01 per ONNX spec)
+int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type, double alpha);
+
 // Rotary embedding operation wrapper.
 //
 // Supports M-RoPE / partial rotary embedding (rotary_dim < head_dim) and the
@@ -1110,6 +1116,7 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
 // Less operation wrapper (element-wise C = A < B). Output is bool (1 byte).
 int wrap_less(RuntimeState *state, void *a, void *b, void *output,
               int64_t num_elements, int64_t data_type);
+
 
 // GatherND operation wrapper. data_shape has rank `data_rank`; indices has
 // rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
