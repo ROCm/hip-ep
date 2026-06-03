@@ -161,11 +161,12 @@ Two related MLIR passes already exist:
   producer to keep the type chain well-formed).
 
 `--hip-infer-shapes` extends the same module-walk pattern with the
-DPS-aware producer refinement: when the outs operand is a `tensor.empty`,
-the pass rebuilds it with the new static shape and drops any dyn-dim
-operands that became static. Producers we don't know how to refine
-today (function args, other DPS ops higher in the chain) are skipped —
-the pass then leaves that result index at `?`.
+DPS-aware producer refinement: when the outs operand is a single-use
+`tensor.empty`, the pass rebuilds it with the new static shape and
+drops any dyn-dim operands that became static. Shared empties (more
+than one use) and producers we don't know how to refine today
+(function args, other DPS ops higher in the chain) are skipped — the
+pass then leaves that result index at `?`.
 
 The pass restricts itself to **HIP-dialect ops**. Non-HIP-dialect ops
 that also implement the reify interface (`tensor::EmptyOp`,
