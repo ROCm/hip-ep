@@ -14,6 +14,8 @@
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
+#include "hip/Dialect/IR/HipDialect.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Traits.h"
@@ -419,4 +421,33 @@ LogicalResult mlir::hip::reifyReductionWithKeepdims(
     }
   }
   return success();
+}
+
+LogicalResult
+mlir::hip::reifyReductionShape(OpBuilder &b, Location loc, Value data,
+                               Value axes, int64_t keepdims,
+                               int64_t noopWithEmptyAxes, Operation *op,
+                               ReifiedRankedShapedTypeDims &reified) {
+  if (op->getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(data.getType()))
+    return failure();
+
+  // Tier-1: introspect `axes` as an `arith.constant` and reify per-dim
+  // from the input shape with keepdims awareness.
+  SmallVector<OpFoldResult> dims;
+  if (succeeded(reifyReductionWithKeepdims(b, loc, data, axes, keepdims,
+                                           noopWithEmptyAxes, dims))) {
+    reified.assign({std::move(dims)});
+    return success();
+  }
+
+  // Fallback: lift the DPS `outs` operand's own shape via the shared
+  // `HipDpsOp` default. `cast<HipDpsOp>(op).reifyResultShapes` is the
+  // interface-default body in `HipDpsOpInterface.cpp` — it walks
+  // `getDpsInits()` and lifts each via `tensor::getMixedSizes` /
+  // `memref::getMixedSizes`. This is NOT the per-op virtual dispatch
+  // (which would recurse back into THIS function for reduction ops);
+  // it is a static call to the interface's shared default body.
+  return cast<HipDpsOp>(op).reifyResultShapes(b, reified);
 }
