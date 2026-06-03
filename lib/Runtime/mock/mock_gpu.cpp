@@ -903,6 +903,28 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
   return 0;
 }
 
+int wrap_resize(RuntimeState *state, void *input, void *output,
+                int64_t data_type, int64_t spatial_rank, int64_t N, int64_t C,
+                int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+                int64_t out1, int64_t out2, int64_t mode,
+                int64_t coord_transform, int64_t nearest_mode) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_resize\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_resize(dtype=%s(%lld), rank=%lld, N=%lld, C=%lld, "
+             "in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], mode=%lld, "
+             "coord_transform=%lld, nearest_mode=%lld, in=%s, out=%s)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)spatial_rank, (long long)N, (long long)C,
+             (long long)in0, (long long)in1, (long long)in2,
+             (long long)out0, (long long)out1, (long long)out2,
+             (long long)mode, (long long)coord_transform,
+             (long long)nearest_mode,
+             input ? "yes" : "null", output ? "yes" : "null");
+  return 0;
+}
+
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {

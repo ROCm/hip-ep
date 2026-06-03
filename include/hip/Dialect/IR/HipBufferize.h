@@ -86,6 +86,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GeluOp::attachInterface<HipDstBufferizableModel<GeluOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
     PoolOp::attachInterface<HipDstBufferizableModel<PoolOp>>(*ctx);
+    ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     ReciprocalOp::attachInterface<HipDstBufferizableModel<ReciprocalOp>>(*ctx);
     SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);
     SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);

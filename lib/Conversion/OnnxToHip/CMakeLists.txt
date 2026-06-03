@@ -59,6 +59,7 @@ add_library(OnnxToHip STATIC
   FlattenConversion.cpp
   GlobalPoolConversion.cpp
   PoolConversion.cpp
+  ResizeConversion.cpp
   LoopOutline.cpp
 )
 
