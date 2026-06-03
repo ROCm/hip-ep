@@ -1125,7 +1125,7 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
 
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
-                            /*autoReify=*/0,
+                            /*autoReify=*/1,
                             /*autoInfer=*/1,
                             /*declareInfer=*/1> {
   let summary = "Generate 1-D range tensor";
@@ -2434,7 +2434,7 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
 def Hip_PadOp : Hip_DpsOp<"pad",
                           /*traits=*/[AttrSizedOperandSegments],
                           /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
+                          /*autoReify=*/1,
                           /*autoInfer=*/1,
                           /*declareInfer=*/1> {
   let summary = "Pad a tensor with constant / reflect / edge / wrap";
@@ -2484,7 +2484,7 @@ def Hip_PadOp : Hip_DpsOp<"pad",
 
 def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
                            /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
+                           /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Tile a tensor by repeating along each dimension";
@@ -2520,7 +2520,7 @@ def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
 
 def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
                              /*outsAccessor=*/"Output",
-                             /*autoReify=*/0,
+                             /*autoReify=*/1,
                              /*autoInfer=*/1,
                              /*declareInfer=*/1> {
   let summary = "Broadcast a tensor to a target shape";
@@ -2632,7 +2632,7 @@ def Hip_LessOp : Hip_DpsOp<"less", /*traits=*/[],
 def Hip_SliceOp : Hip_DpsOp<"slice",
                             /*traits=*/[AttrSizedOperandSegments],
                             /*outsAccessor=*/"Output",
-                            /*autoReify=*/0,
+                            /*autoReify=*/1,
                             /*autoInfer=*/1,
                             /*declareInfer=*/1> {
   let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";

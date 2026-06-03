@@ -509,8 +509,8 @@ func.func @refine_gather_nd_structural(%ctx: !hip.context,
 // reduced axis with keepdims=1 → static 1. The pass tightens dim 1
 // only; dim 0 stays dynamic. Same path covers `hip.reduce_max` and
 // `hip.reduce_prod` (one helper, three thunks). When `axes` is not a
-// constant the helper bails and the op falls through to the Tier-2
-// `outs`-shape fallback — verified by `noop_on_static` upstream of
+// constant the helper bails and the op falls through to a no-op
+// outs-shape fallback — verified by `noop_on_static` upstream of
 // here, since the fallback only emits dim ops that the pass discards.
 // CHECK-LABEL: func.func @refine_reduce_sum_keepdims_constant_axes
 // CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<?x1xf16>
@@ -533,27 +533,29 @@ func.func @refine_reduce_sum_keepdims_constant_axes(%ctx: !hip.context,
 
 // -----
 
-// `hip.pad` (PR #263 commit 3) uses the Tier-2 fallback reify — its
-// shape arithmetic (data + pads_begin + pads_end) is deferred to a
-// follow-up PR. The fallback lifts the `outs` operand's own shape via
-// `reifyElementwiseSameShape(getOutput())`: static dims become
-// `IndexAttr` (which the pass can use to tighten), dynamic dims emit
-// `tensor.dim %output, %i` (a no-op tightening that the pass discards).
+// `hip.pad` (along with tile, expand, slice, range) uses the shared
+// `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
+// `getDpsInits()` and lifts each output dim from the DPS `outs`
+// operand's runtime shape via `tensor::getMixedSizes`. Static dims
+// become `IndexAttr` (which the pass can use to tighten); dynamic
+// dims emit `tensor.dim %output, %i` (a no-op tightening that the
+// pass discards). Per-op arithmetic for these ops (e.g.
+// `tensor::PadOp`'s `affine.apply (d0 + d1 + d2)` recipe) is deferred.
 //
-// This LIT case is the contract guard for the fallback:
+// This LIT case is the contract guard for the default outs-lift path:
 //   1. The op's reify ALWAYS returns success() — no crash, no failure
 //      propagation up to the pass.
 //   2. Fully-dynamic `outs` survives the pass intact: the pass walks
-//      the fallback's `tensor.dim` outputs, finds nothing it can use to
+//      the lifted `tensor.dim` outputs, finds nothing it can use to
 //      tighten, and leaves the op unchanged.
 //
 // We also exercise the optional `cval` branch of pad's assembly format
 // here (the most common ONNX Pad shape) — the reify path doesn't read
-// `cval` but we want to make sure the fallback works on the variant
+// `cval` but we want to make sure the auto-emit works on the variant
 // with a non-empty optional segment, not just the bare-minimum shape.
 //
-// (Tier-2 fallback also covers tile, expand, slice, range — same
-// pattern, one LIT case is enough to guard the contract.)
+// (Same default path also covers tile, expand, slice, range — one LIT
+// case is enough to guard the contract.)
 // CHECK-LABEL: func.func @refine_pad_dps_out_fallback
 // CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
 // CHECK:         %[[Y:.*]] = hip.pad
