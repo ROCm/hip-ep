@@ -945,6 +945,46 @@ fused_gqa_decode_kernel(
     O[(batch * H + head_q) * d + tid] = __float2half(O_acc);
 }
 
+// Fused decode launcher -- dispatches to the template matching d.
+// IMPORTANT: this launcher lives OUTSIDE the HIPCK_NO_RDNA3_WMMA guard
+// below, because `fused_gqa_decode_kernel` is a per-thread shfl-reduction
+// kernel that does NOT use any WMMA intrinsic. Moving it inside the guard
+// (as an earlier revision accidentally did) drops the symbol on non-RDNA-3
+// builds and causes lld to fail every compiled model.dll with
+// `undefined symbol: hip_gqa_fused_decode`, since lib/Runtime/real/gqa.cpp
+// dispatches to this launcher on the decode (sq==1) hot path.
+extern "C" int hip_gqa_fused_decode(
+    void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int d, int skv, int max_seq,
+    float scale, const void* seqlens_k) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  dim3 grid(B * H, 1);
+  const __half* hQ = static_cast<const __half*>(Q);
+  const __half* hK = static_cast<const __half*>(Kcache);
+  const __half* hV = static_cast<const __half*>(Vcache);
+  __half* hO = static_cast<__half*>(O);
+  const int* iSeqlensK = static_cast<const int*>(seqlens_k);
+  switch (d) {
+    case 64:
+      fused_gqa_decode_kernel<64><<<grid, 64, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
+      break;
+    case 128:
+      fused_gqa_decode_kernel<128><<<grid, 128, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
+      break;
+    case 256:
+      fused_gqa_decode_kernel<256><<<grid, 256, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
+      break;
+    default:
+      fprintf(stderr, "hip_gqa_fused_decode: unsupported d=%d "
+              "(must be 64, 128, or 256)\n", d);
+      return -1;
+  }
+  return hipSuccess;
+}
+
 //===----------------------------------------------------------------------===//
 // Fused GQA Prefill Kernel (sq > 1, Flash Attention 2 with WMMA)
 //===----------------------------------------------------------------------===//
@@ -1192,39 +1232,6 @@ fused_gqa_prefill_kernel(
             }
         }
     }
-}
-
-// Fused decode launcher -- dispatches to the template matching d
-extern "C" int hip_gqa_fused_decode(
-    void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int H, int G, int d, int skv, int max_seq,
-    float scale, const void* seqlens_k) {
-  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  dim3 grid(B * H, 1);
-  const __half* hQ = static_cast<const __half*>(Q);
-  const __half* hK = static_cast<const __half*>(Kcache);
-  const __half* hV = static_cast<const __half*>(Vcache);
-  __half* hO = static_cast<__half*>(O);
-  const int* iSeqlensK = static_cast<const int*>(seqlens_k);
-  switch (d) {
-    case 64:
-      fused_gqa_decode_kernel<64><<<grid, 64, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
-      break;
-    case 128:
-      fused_gqa_decode_kernel<128><<<grid, 128, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
-      break;
-    case 256:
-      fused_gqa_decode_kernel<256><<<grid, 256, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
-      break;
-    default:
-      fprintf(stderr, "hip_gqa_fused_decode: unsupported d=%d "
-              "(must be 64, 128, or 256)\n", d);
-      return -1;
-  }
-  return hipSuccess;
 }
 
 // Fused prefill launcher
