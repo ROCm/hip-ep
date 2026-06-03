@@ -616,6 +616,58 @@ int hip_reduce_sum(
     int hip_dtype);
 
 /* =========================================================================
+ * Pool — MaxPool / AveragePool / LpPool (1D / 2D / 3D)
+ * =========================================================================
+ *
+ * Generic ONNX window pooling over an `(N, C, D_1[, D_2[, D_3]])` input.
+ * Lays the output `(N, C, O_1[, O_2[, O_3]])` out in row-major order matching
+ * the input layout.
+ *
+ * `mode` selects the per-window reduction (must match HIPDNN_EP_POOL_* in
+ * lib/Runtime/hipdnn_ep_runtime.h):
+ *   0 (AVERAGE): Y = sum(window) / divisor
+ *   1 (MAX)    : Y = max(window)
+ *   2 (LP)     : Y = pow(sum(pow(|window|, p)), 1/p)
+ *
+ * Pad positions are never read (they fall outside the input bounds). For
+ * AVERAGE, `count_include_pad` picks the divisor: 0 = number of in-bounds
+ * window elements, 1 = full kernel volume (pad cells contribute 0 to the
+ * sum). `p` is the LP norm exponent (>= 1); both are ignored for the modes
+ * that don't use them.
+ *
+ * Optional `indices` (i64 buffer the same shape as the output) records the
+ * row-major flat index in the *unpadded* input that each max came from —
+ * MAX mode only; matches ONNX MaxPool spec for storage_order = 0. Pass NULL
+ * for AVERAGE / LP.
+ *
+ * `spatial_rank` selects how many of the per-axis arrays are read; for
+ * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `kernel`,
+ * `strides`, `pads_begin`, `dilations` must be set to 1 / 0 by the caller
+ * (the lowering does this).
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+int hip_pool(
+    void* stream,
+    const void* input,
+    void* output,
+    void* indices,            /* int64_t* — nullable, MAX only */
+    int hip_dtype,
+    int mode,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int count_include_pad,
+    int p);
+
+/* =========================================================================
  * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
  * =========================================================================
  *

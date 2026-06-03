@@ -816,6 +816,20 @@ void GeluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// PoolOp: ins(input), outs([output] or [output, indices])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PoolOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void PoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ReciprocalOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
