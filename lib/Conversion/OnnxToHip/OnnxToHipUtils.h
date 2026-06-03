@@ -206,6 +206,8 @@ void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
