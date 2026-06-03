@@ -13,7 +13,8 @@ namespace {
 /// Unary element-wise exponential: Y = exp(X). Float types.
 //
 // Before:
-//   %y = "onnx.Exp"(%x) : (tensor<1024x1x64x64xf16>) -> tensor<1024x1x64x64xf16>
+//   %y = "onnx.Exp"(%x) : (tensor<1024x1x64x64xf16>) ->
+//   tensor<1024x1x64x64xf16>
 //
 // After:
 //   %init = tensor.empty() : tensor<1024x1x64x64xf16>

@@ -72,12 +72,10 @@ struct ClipToOnnxMinMax : public mlir::RewritePattern {
     mlir::Location loc = op->getLoc();
     mlir::Value x = op->getOperand(0);
 
-    mlir::Value loV = (n >= 2 && !isNoValue(op->getOperand(1)))
-                          ? op->getOperand(1)
-                          : nullptr;
-    mlir::Value hiV = (n >= 3 && !isNoValue(op->getOperand(2)))
-                          ? op->getOperand(2)
-                          : nullptr;
+    mlir::Value loV =
+        (n >= 2 && !isNoValue(op->getOperand(1))) ? op->getOperand(1) : nullptr;
+    mlir::Value hiV =
+        (n >= 3 && !isNoValue(op->getOperand(2))) ? op->getOperand(2) : nullptr;
 
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());

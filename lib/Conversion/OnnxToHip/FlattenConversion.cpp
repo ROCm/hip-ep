@@ -123,10 +123,9 @@ struct FlattenDecompose : public mlir::RewritePattern {
         }
         flatDim *= inputType.getDimSize(i);
       }
-      int64_t flatExtent =
-          anyDyn ? mlir::ShapedType::kDynamic : flatDim;
-      auto flatType = mlir::RankedTensorType::get({flatExtent},
-                                                  inputType.getElementType());
+      int64_t flatExtent = anyDyn ? mlir::ShapedType::kDynamic : flatDim;
+      auto flatType =
+          mlir::RankedTensorType::get({flatExtent}, inputType.getElementType());
       auto reassoc = buildFullCollapseReassoc(r);
       auto collapseOp = mlir::tensor::CollapseShapeOp::create(
           rewriter, loc, flatType, input, reassoc);
@@ -177,8 +176,7 @@ struct FlattenDecompose : public mlir::RewritePattern {
         outputShape.push_back(rewriter.getIndexAttr(outputType.getDimSize(i)));
       } else {
         // Dynamic side mirrors the rank-1 source's single dim.
-        mlir::Value dim =
-            mlir::tensor::DimOp::create(rewriter, loc, src, 0);
+        mlir::Value dim = mlir::tensor::DimOp::create(rewriter, loc, src, 0);
         outputShape.push_back(dim);
       }
     }

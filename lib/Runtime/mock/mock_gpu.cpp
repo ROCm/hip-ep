@@ -938,10 +938,9 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
              "coord_transform=%lld, nearest_mode=%lld, in=%s, out=%s)\n",
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
              (long long)spatial_rank, (long long)N, (long long)C,
-             (long long)in0, (long long)in1, (long long)in2,
-             (long long)out0, (long long)out1, (long long)out2,
-             (long long)mode, (long long)coord_transform,
-             (long long)nearest_mode,
+             (long long)in0, (long long)in1, (long long)in2, (long long)out0,
+             (long long)out1, (long long)out2, (long long)mode,
+             (long long)coord_transform, (long long)nearest_mode,
              input ? "yes" : "null", output ? "yes" : "null");
   return 0;
 }
