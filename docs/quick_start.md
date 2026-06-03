@@ -145,27 +145,15 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 
 ### 2. Build the C++ Dependencies from Source
 
-Step 1 leaves you inside `<workspace>/onnxruntime/`. Switch back to the
-project root and run the bundled setup script from a Visual Studio Developer
-shell (it needs `cl.exe` / `ninja` / `git` on PATH; uses Git Bash / MSYS2):
-
-```bash
-cd ../onnx-hipdnn-ep
-bash scripts/setup-prebuilt.sh
-```
-
-This builds the following from source and installs them into `../prebuilt-local/`:
+You must build LLVM/MLIR/LLD, protobuf and flatbuffers from source yourself (from a Visual Studio Developer shell) and install them into `../prebuilt-local/` — there is no prebuilt download. Use the following pinned versions; the exact cmake invocations are the `Build LLVM/MLIR/LLD from source`, `Build protobuf from source` and `Build flatbuffers from source` steps in [`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml), which is the canonical recipe (point each `-DCMAKE_INSTALL_PREFIX` at the shared `../prebuilt-local/`).
 
 | Component | Source | Version |
 |---|---|---|
-| LLVM / MLIR / LLD | `github.com/llvm/llvm-project` | tag `llvmorg-22.1.0`, `mlir;lld`, X86 only, `/MT` |
-| Protobuf (+ abseil) | `github.com/protocolbuffers/protobuf` | `v34.0` (built with `CMAKE_CXX_STANDARD=17`) |
+| LLVM / MLIR / LLD | `github.com/llvm/llvm-project` | tag `llvmorg-22.1.0` (`mlir;lld`, X86 only, `/MT`, `LLVM_INSTALL_UTILS=ON` for FileCheck) |
+| Protobuf (+ abseil) | `github.com/protocolbuffers/protobuf` | `v34.0` (build with `CMAKE_CXX_STANDARD=17`) |
 | FlatBuffers | `github.com/google/flatbuffers` | `v25.12.19` |
 
-The LLVM build is the long pole (multi-hour cold; `ccache` is used when
-present). Each component is skipped on re-run when its install marker
-(`lib/cmake/<name>/...`) is already present — delete `../prebuilt-local/` to
-force a clean rebuild.
+The LLVM build is the long pole (multi-hour cold build).
 
 ### 3. Build onnx-hipdnn-ep
 
@@ -506,11 +494,9 @@ mismatch linker errors.
 ## Updating the C++ Dependencies
 
 To move to a newer LLVM/protobuf/flatbuffers, update the `LLVM_TAG` /
-`PROTO_TAG` / `FLATBUFFERS_TAG` variables at the top of
-`scripts/setup-prebuilt.sh` (keep them in lockstep with
-`.github/workflows/windows-build.yml`) and re-run it. Delete the corresponding
-`../prebuilt-local/lib/cmake/<name>/` install marker (or the whole
-`../prebuilt-local/`) to force a rebuild.
+`PROTO_TAG` / `FLATBUFFERS_TAG` values in
+[`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml)
+and rebuild the affected dependency into `../prebuilt-local/`.
 
 ## Troubleshooting
 
@@ -518,12 +504,12 @@ To move to a newer LLVM/protobuf/flatbuffers, update the `LLVM_TAG` /
 
 **Symptom:** `Could not find package LLVM` or similar.
 
-**Solution:** Verify `../prebuilt-local/lib/cmake/llvm/` exists. Re-run
-`bash scripts/setup-prebuilt.sh` if the directory is missing.
+**Solution:** Verify `../prebuilt-local/lib/cmake/llvm/` exists. Rebuild the
+dependencies from source (step 2) if the directory is missing.
 
 ### Dependency build cannot find a compiler
 
-**Symptom:** `scripts/setup-prebuilt.sh` fails with `cl.exe`/`ninja` not found
+**Symptom:** the dependency builds fail with `cl.exe`/`ninja` not found
 or a CMake compiler-detection error.
 
 **Solution:** Run the script from a Visual Studio Developer shell (so `cl.exe`,
