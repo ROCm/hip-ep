@@ -11,8 +11,8 @@ PREBUILT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)/../prebuilt-local
 SCRATCH_DIR="${PREBUILT_DIR}/.src"
 
 # Pins kept in lockstep with .github/workflows/windows-build.yml.
-# LLVM is built from this upstream llvm/llvm-project commit (== 22.1.0).
-LLVM_COMMIT="4434dabb69916856b824f68a64b029c67175e532"
+# LLVM is built from this upstream llvm/llvm-project release tag.
+LLVM_TAG="llvmorg-22.1.0"
 PROTO_TAG="v34.0"
 FLATBUFFERS_TAG="v25.12.19"
 
@@ -35,13 +35,13 @@ fi
 if [ -f "$PREBUILT_DIR/lib/cmake/mlir/MLIRConfig.cmake" ]; then
     echo "Already built: LLVM/MLIR/LLD"
 else
-    echo "Building LLVM/MLIR/LLD from source (commit $LLVM_COMMIT) ..."
+    echo "Building LLVM/MLIR/LLD from source ($LLVM_TAG) ..."
     LLVM_SRC="$SCRATCH_DIR/llvm-project"
     if [ ! -d "$LLVM_SRC/.git" ]; then
         git init "$LLVM_SRC"
         git -C "$LLVM_SRC" remote add origin https://github.com/llvm/llvm-project.git
     fi
-    git -C "$LLVM_SRC" fetch --depth 1 origin "$LLVM_COMMIT"
+    git -C "$LLVM_SRC" fetch --depth 1 origin "$LLVM_TAG"
     git -C "$LLVM_SRC" checkout FETCH_HEAD
     cmake -G Ninja -S "$LLVM_SRC/llvm" -B "$SCRATCH_DIR/llvm-build" \
         -DCMAKE_BUILD_TYPE=Release \
