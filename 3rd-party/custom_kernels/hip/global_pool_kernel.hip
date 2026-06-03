@@ -11,8 +11,7 @@
 #include <hip/hip_bfloat16.h>
 #include <cstdint>
 #include <cstdio>
-#include <cmath>
-#include <limits>
+#include <math.h>
 
 // =============================================================================
 // Global Pool (average / max / lp)
@@ -71,7 +70,7 @@ template <> __device__ inline double from_float<double>(float v) {
 
 template <int MODE> __device__ inline float pool_init() {
   if constexpr (MODE == kModeMax)
-    return -std::numeric_limits<float>::infinity();
+    return -INFINITY;
   return 0.0f;
 }
 

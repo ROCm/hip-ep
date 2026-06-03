@@ -168,6 +168,28 @@ static inline const char *hipdnn_ep_global_pool_mode_name(int64_t mode) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// Window-pool reduction modes (must match kPool* in HipToLLVMUtils.h and the
+// pool_mode constants used in OnnxToHip/PoolConversion.cpp).
+//===----------------------------------------------------------------------===//
+
+#define HIPDNN_EP_POOL_AVERAGE 0
+#define HIPDNN_EP_POOL_MAX 1
+#define HIPDNN_EP_POOL_LP 2
+
+static inline const char *hipdnn_ep_pool_mode_name(int64_t mode) {
+  switch (mode) {
+  case HIPDNN_EP_POOL_AVERAGE:
+    return "avg_pool";
+  case HIPDNN_EP_POOL_MAX:
+    return "max_pool";
+  case HIPDNN_EP_POOL_LP:
+    return "lp_pool";
+  default:
+    return "pool_unknown";
+  }
+}
+
 // Opaque handle for runtime state
 typedef struct RuntimeState RuntimeState;
 
@@ -744,6 +766,27 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
 int wrap_global_pool(RuntimeState *state, void *input, void *output,
                      int64_t outer, int64_t reduce_size, int64_t data_type,
                      int64_t mode, int64_t p);
+
+// Window-pool wrapper (uses custom HIP kernel).
+// Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
+// input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
+// the per-window reduction: AVERAGE / MAX / LP.  When `has_indices=1` (MAX
+// only), also writes per-output flat int64 indices into the unpadded input.
+// `spatial_rank` selects how many of the three trailing axes
+// (in_*, out_*, k*, s*, p*, dil*) are read; unused slots must be 1
+// (kernel/dim) or 0 (pad).  `storage_order` and `ceil_mode` are pre-resolved
+// at compile time and accepted only for ABI completeness.  `count_include_pad`
+// is the AveragePool divisor selector; `p` is the LpPool norm exponent — both
+// are ignored for the modes that don't use them.
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
+              int64_t data_type, int64_t pool_mode, int64_t spatial_rank,
+              int64_t N, int64_t C, int64_t in0, int64_t in1, int64_t in2,
+              int64_t out0, int64_t out1, int64_t out2, int64_t k0, int64_t k1,
+              int64_t k2, int64_t s0, int64_t s1, int64_t s2, int64_t p0,
+              int64_t p1, int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+              int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
+              int64_t count_include_pad, int64_t p);
 
 // Rotary embedding operation wrapper.
 //
