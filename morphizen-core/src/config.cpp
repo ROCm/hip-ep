@@ -91,8 +91,6 @@ const ConfigProto& Config::config_proto() const { return config_proto_; }
 
 // Removed: update_target_attr - depended on removed target_opts field
 
-// Removed: update_xclbin - NPU-specific xclbin firmware handling
-
 // Removed: update_hw_context_share - depended on removed share_hw_context field
 
 // Removed: update_graph_engine_qos_priority - depended on removed

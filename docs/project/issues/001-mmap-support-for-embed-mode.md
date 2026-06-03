@@ -212,6 +212,5 @@ Currently, mmap is only available in non-embed mode where tar files are persiste
 
 ### References
 
-- Windows Memory-Mapped Files: https://docs.microsoft.com/en-us/windows/win32/memory/file-mapping
 - tmpfile() specification: https://en.cppreference.com/w/cpp/io/c/tmpfile
 - POSIX delete on Windows: See technical/tmpfile-posix-delete.md

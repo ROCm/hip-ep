@@ -54,9 +54,6 @@ option(morphizen_ENABLE_UNIT_TEST "enable morphizen unit test or not" ${morphize
 #     * test_const_data.cpp (unit-test/morphizen/test_const_data.cpp)
 option(morphizen_ENABLE_BOOST "enable Boost dependency for executables and unit tests" OFF)
 #
-# it is possible to emebed xclbin files in the binary, assume the xclbin files are in the directory
-#
-# the repo now is downloaded by default, do not use it unless set explicitly
 set(MORPHIZEN_EMBEDDED_RESOURCE_PATH "" CACHE PATH "Path to the meta info of embedded resource files")
 
 

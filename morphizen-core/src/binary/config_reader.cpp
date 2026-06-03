@@ -35,7 +35,7 @@ namespace config_default {
 static const char* get_default_config() {
   // `with_default_morphizen_config` and `config` are generated
   // automatically by
-  // ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
+  // ${CMAKE_CURRENT_SOURCE_DIR}/src/binary/config_json_binary.hpp.py
   if (config_default::with_default_morphizen_config) {
     return (const char*)&config_default::config[0];
   }
