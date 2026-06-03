@@ -256,8 +256,12 @@ include/hip/Dialect/IR/
                               Per-shape helpers reifyBroadcastShape /
                               reifyTransposeByPerm / reifyGatherWithAxis /
                               reifyGatherND / reifyReductionWithKeepdims
-                              land with the broadcast-op cleanup in #263
-                              and the bespoke-op cleanup in #264. Ops with
+                              land with the broadcast-op cleanup in #263.
+                              The one-shot wrappers reifyBroadcastShapeFor
+                              and reifyReductionShape (used as the bodies
+                              of `Hip_DpsOp_Broadcast` and
+                              `Hip_DpsOp_Reduction`'s auto-emitted reify
+                              dispatchers) live alongside them. Ops with
                               value-dependent output dims (range, pad,
                               tile, expand, slice, nonzero) defer to the
                               shared `Hip_DpsOp` outs-lift default and do
@@ -295,29 +299,43 @@ lib/Dialect/IR/
                                       lives here next to its peers (control-flow op,
                                       not a DPS compute op)
   HipReifyResultShapesImpl.cpp     -- per-op `reifyResultShapes()` for ops
-                                      that opt out (`autoReify=0`), one
-                                      `// <OpName>` section per op. Matmul
-                                      is the only op in this file on #260;
-                                      `hip.rope` / `hip.rms_norm` / `hip.qmoe`
-                                      / `hip.matmul_nbits` / `hip.gemm` join
-                                      on #262; the broadcast-op cluster
-                                      (`hip.miopen.add` / `hip.add` /
-                                      `hip.mul` / `hip.min` / `hip.div` /
-                                      `hip.equal` / `hip.and` / `hip.sub` /
-                                      `hip.where` / `hip.less` / `hip.mod`)
-                                      and the bespoke shape-changing ops
-                                      (`hip.transpose` / `hip.gather` /
-                                      `hip.gather_nd` / `hip.reduce_*`)
-                                      join on #263. Ops whose output dims
-                                      are arithmetic functions of operand
-                                      values (range, pad, tile, expand,
-                                      slice, nonzero), the same-shape unary
-                                      ops (silu, sigmoid, softplus, gelu,
-                                      reciprocal, sqrt, not, cos, sin, neg,
-                                      cast, sign, cumsum, scatter_nd, size),
+                                      that opt out (`autoReify=0`) AND do
+                                      not match a parameterized sub-base,
+                                      one `// <OpName>` section per op.
+                                      Matmul is the only op in this file
+                                      on #260; `hip.rope` / `hip.rms_norm`
+                                      / `hip.qmoe` / `hip.matmul_nbits` /
+                                      `hip.gemm` join on #262; the bespoke
+                                      shape-changing ops `hip.transpose` /
+                                      `hip.gather` / `hip.gather_nd` join
+                                      on #263. Ops covered by a
+                                      parameterized sub-base contribute
+                                      ZERO per-op `.cpp` boilerplate: the
+                                      broadcast-op cluster (`hip.miopen.add`
+                                      / `hip.add` / `hip.mul` / `hip.min` /
+                                      `hip.div` / `hip.equal` / `hip.and`
+                                      / `hip.sub` / `hip.where` /
+                                      `hip.less` / `hip.mod`) is wired via
+                                      `Hip_DpsOp_Broadcast` in `HipOps.td`,
+                                      and the reductions (`hip.reduce_sum`
+                                      / `hip.reduce_max` /
+                                      `hip.reduce_prod`) via
+                                      `Hip_DpsOp_Reduction`. Both
+                                      sub-bases auto-emit the reify
+                                      dispatcher in `extraClassDefinition`
+                                      and call free helpers in
+                                      `HipShapeUtils.{h,cpp}`. Ops whose
+                                      output dims are arithmetic
+                                      functions of operand values (range,
+                                      pad, tile, expand, slice, nonzero),
+                                      the same-shape unary ops (silu,
+                                      sigmoid, softplus, gelu, reciprocal,
+                                      sqrt, not, cos, sin, neg, cast,
+                                      sign, cumsum, scatter_nd, size),
                                       and the multi-init outs-lift ops
-                                      (gqa, mha, layer_norm, skip_rms_norm,
-                                      hipdnn_graph, linear_attention,
+                                      (gqa, mha, layer_norm,
+                                      skip_rms_norm, hipdnn_graph,
+                                      linear_attention,
                                       causal_conv_with_state, conv,
                                       miopen.softmax) all stay on the
                                       shared `Hip_DpsOp` default
