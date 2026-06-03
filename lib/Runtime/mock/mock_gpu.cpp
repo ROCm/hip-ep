@@ -851,6 +851,38 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
+              int64_t data_type, int64_t pool_mode, int64_t spatial_rank,
+              int64_t N, int64_t C, int64_t in0, int64_t in1, int64_t in2,
+              int64_t out0, int64_t out1, int64_t out2, int64_t k0, int64_t k1,
+              int64_t k2, int64_t s0, int64_t s1, int64_t s2, int64_t p0,
+              int64_t p1, int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+              int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
+              int64_t count_include_pad, int64_t p) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pool\n");
+    return -1;
+  }
+  (void)k0; (void)k1; (void)k2;
+  (void)s0; (void)s1; (void)s2;
+  (void)p0; (void)p1; (void)p2;
+  (void)dil0; (void)dil1; (void)dil2;
+  MOCK_PRINT("[MOCK] wrap_pool(mode=%s, dtype=%s(%lld), rank=%lld, N=%lld, "
+             "C=%lld, in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], "
+             "storage_order=%lld, ceil_mode=%lld, has_indices=%lld, "
+             "count_include_pad=%lld, p=%lld, in=%s, out=%s, idx=%s)\n",
+             hipdnn_ep_pool_mode_name(pool_mode),
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)spatial_rank, (long long)N, (long long)C,
+             (long long)in0, (long long)in1, (long long)in2,
+             (long long)out0, (long long)out1, (long long)out2,
+             (long long)storage_order, (long long)ceil_mode,
+             (long long)has_indices, (long long)count_include_pad,
+             (long long)p, input ? "yes" : "null", output ? "yes" : "null",
+             indices ? "yes" : "null");
+  return 0;
+}
+
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
