@@ -2,23 +2,19 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- ReluConversion.cpp - Decompose onnx.Relu into Less + Where --------===//
+//===- ReluConversion.cpp - Decompose onnx.Relu into onnx.Max ------------===//
 //
-// Relu(x) = max(0, x). MorphiZen does not have an elementwise-max ONNX
-// converter, but Less + Where together express the same selection without
-// a new kernel:
+// Relu(x) = max(0, x). We emit `onnx.Max(x, 0)` so that the same MaxToHip
+// conversion (which delegates to MIOpen's miopenOpTensor) handles it. The
+// scalar zero broadcasts against `x`; the Max pattern supports broadcast.
 //
 //   Before:
 //     %y = "onnx.Relu"(%x) : (tensor<...xT>) -> tensor<...xT>
 //
 //   After:
 //     %zero = "onnx.Constant"() {value = dense<0> : tensor<T>} : () -> tensor<T>
-//     %cond = "onnx.Less"(%x, %zero) : (tensor<...xT>, tensor<T>) -> tensor<...xi1>
-//     %y    = "onnx.Where"(%cond, %zero, %x)
-//             : (tensor<...xi1>, tensor<T>, tensor<...xT>) -> tensor<...xT>
-//
-// The scalar zero broadcasts against x; Less and Where converters already
-// support the broadcast pattern.
+//     %y    = "onnx.Max"(%x, %zero) : (tensor<...xT>, tensor<T>)
+//                                         -> tensor<...xT>
 //
 //===----------------------------------------------------------------------===//
 
@@ -70,22 +66,13 @@ struct ReluDecompose : public mlir::RewritePattern {
     if (!xType)
       return rewriter.notifyMatchFailure(op, "onnx.Relu expects ranked tensor");
 
-    mlir::Type elemType = xType.getElementType();
-    mlir::Value zero = buildZeroScalar(rewriter, loc, elemType);
+    mlir::Value zero = buildZeroScalar(rewriter, loc, xType.getElementType());
 
-    auto i1Type = rewriter.getI1Type();
-    auto condType = mlir::RankedTensorType::get(xType.getShape(), i1Type);
-
-    mlir::OperationState lessState(loc, "onnx.Less");
-    lessState.addOperands({x, zero});
-    lessState.addTypes(condType);
-    mlir::Value cond = rewriter.create(lessState)->getResult(0);
-
-    mlir::OperationState whereState(loc, "onnx.Where");
-    whereState.addOperands({cond, zero, x});
-    whereState.addTypes(op->getResult(0).getType());
-    mlir::Operation *whereOp = rewriter.create(whereState);
-    rewriter.replaceOp(op, whereOp->getResult(0));
+    mlir::OperationState maxState(loc, "onnx.Max");
+    maxState.addOperands({x, zero});
+    maxState.addTypes(op->getResult(0).getType());
+    mlir::Operation *maxOp = rewriter.create(maxState);
+    rewriter.replaceOp(op, maxOp->getResult(0));
     return mlir::success();
   }
 };

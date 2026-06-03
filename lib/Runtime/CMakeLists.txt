@@ -290,7 +290,6 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
-    compile_to_bitcode(real/clip.cpp runtime_clip.bc)
     compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
 
     # Compile MemoryManager sources to bitcode so model DLLs need no separate mm.lib.

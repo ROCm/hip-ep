@@ -16,8 +16,7 @@ module {
   // CHECK-LABEL: func.func @relu_static_f32
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<3x4xf32>)
   // CHECK-NOT: onnx.Relu
-  // CHECK: hip.less(%[[CTX]]) ins(%[[X]]
-  // CHECK: hip.where(%[[CTX]])
+  // CHECK: hip.max(%[[CTX]]) ins(%[[X]]
 
   func.func @relu_static_f16(%x: tensor<2x3xf16>) -> tensor<2x3xf16> {
     %y = "onnx.Relu"(%x) : (tensor<2x3xf16>) -> tensor<2x3xf16>
@@ -26,8 +25,7 @@ module {
 
   // CHECK-LABEL: func.func @relu_static_f16
   // CHECK-NOT: onnx.Relu
-  // CHECK: hip.less
-  // CHECK: hip.where
+  // CHECK: hip.max
 
   func.func @relu_dynamic(%x: tensor<?x?xf32>) -> tensor<?x?xf32> {
     %y = "onnx.Relu"(%x) : (tensor<?x?xf32>) -> tensor<?x?xf32>
@@ -37,8 +35,5 @@ module {
   // CHECK-LABEL: func.func @relu_dynamic
   // CHECK-SAME: (%[[CTX3:.*]]: !hip.context, %[[X3:.*]]: tensor<?x?xf32>)
   // CHECK-NOT: onnx.Relu
-  // CHECK: tensor.dim
-  // CHECK: tensor.empty({{.*}}) : tensor<?x?xi1>
-  // CHECK: hip.less(%[[CTX3]])
-  // CHECK: hip.where(%[[CTX3]])
+  // CHECK: hip.max(%[[CTX3]])
 }

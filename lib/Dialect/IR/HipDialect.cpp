@@ -811,16 +811,21 @@ void MinOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// ClipOp: ins(input, min, max), outs(output)
+// MaxOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange ClipOp::getDpsInitsMutable() { return getOutputMutable(); }
+MutableOperandRange MaxOp::getDpsInitsMutable() { return getOutputMutable(); }
 
-void ClipOp::getEffects(
+void MaxOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
+
+//===----------------------------------------------------------------------===//
+// (ClipOp removed: onnx.Clip is now decomposed into onnx.Max + onnx.Min in
+//  OnnxToHip and lowered via the elementwise hip.max / hip.min path.)
+//===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
 // ReduceMeanOp: ins(data, axes), outs(output)

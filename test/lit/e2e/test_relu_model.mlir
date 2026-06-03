@@ -6,8 +6,7 @@
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK-DAG: llvm.func @wrap_less
-// CHECK-DAG: llvm.func @wrap_where
+// CHECK-DAG: llvm.func @wrap_miopenOpTensor
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

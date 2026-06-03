@@ -862,6 +862,38 @@ def Hip_MinOp : Hip_DpsOp<"min"> {
   }];
 }
 
+def Hip_MaxOp : Hip_DpsOp<"max"> {
+  let summary = "Elementwise maximum";
+  let description = [{
+    Performs elementwise maximum: output = max(lhs, rhs)
+
+    Supports multidirectional (NumPy-style) broadcasting via MIOpen's
+    miopenOpTensor with miopenTensorOpMax.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.max(%ctx) ins(%lhs, %rhs : memref<3xf32, 1>,
+                                   memref<3xf32, 1>)
+                  outs(%output : memref<3xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
   let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
   let arguments = (ins
@@ -2874,44 +2906,6 @@ def Hip_ReduceMeanOp : Hip_DpsOp<"reduce_mean"> {
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
-    `outs` `(` $output `:` type($output) `)`
-    attr-dict (`:` type($result_tensors)^)?
-  }];
-}
-
-def Hip_ClipOp : Hip_DpsOp<"clip"> {
-  let summary = "Elementwise clip (ONNX Clip)";
-  let description = [{
-    Clip the input tensor elementwise into the interval `[min, max]`:
-    `output[i] = min(max(input[i], min_val), max_val)`.
-
-    `min` and `max` are 0-rank scalar tensors with the same element type as
-    `input`. The OnnxToHip converter materializes the default
-    `numeric_limits::lowest()` / `numeric_limits::max()` for omitted ONNX
-    operands so the HIP op always carries both bounds.
-
-    Uses destination-passing style.
-
-    Example:
-    ```mlir
-    hip.clip(%ctx) ins(%x, %lo, %hi : memref<3x4xf32, 1>,
-                                       memref<f32, 1>,
-                                       memref<f32, 1>)
-                   outs(%y : memref<3x4xf32, 1>)
-    ```
-  }];
-
-  let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$min,
-    Hip_TensorOrMemRef:$max,
-    Hip_TensorOrMemRef:$output
-  );
-
-  let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `,` $min `,` $max `:` type($input) `,`
-    type($min) `,` type($max) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

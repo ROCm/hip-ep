@@ -36,6 +36,7 @@ add_library(OnnxToHip STATIC
   DivConversion.cpp
   ReduceMaxConversion.cpp
   MinConversion.cpp
+  MaxConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   SinConversion.cpp
