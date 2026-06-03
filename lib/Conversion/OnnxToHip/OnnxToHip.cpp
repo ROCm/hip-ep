@@ -716,6 +716,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       mlir::RewritePatternSet preLoweringPatterns(ctx);
       populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
       populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
+      populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
       mlir::GreedyRewriteConfig preLoweringConfig;
       preLoweringConfig.setStrictness(
           mlir::GreedyRewriteStrictness::ExistingOps);
