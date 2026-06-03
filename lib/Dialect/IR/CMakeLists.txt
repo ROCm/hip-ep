@@ -5,6 +5,7 @@
 
 add_library(HipDialectIR STATIC
   HipDialect.cpp
+  HipDpsOpInterface.cpp
   HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp
 )
@@ -12,6 +13,7 @@ add_library(HipDialectIR STATIC
 add_dependencies(HipDialectIR
   HipDialectIncGen
   HipTypesIncGen
+  HipDpsOpInterfaceIncGen
   HipOpsIncGen
 )
 

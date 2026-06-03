@@ -7,6 +7,7 @@
 #define HIP_OPS
 
 include "hip/Dialect/IR/HipDialect.td"
+include "hip/Dialect/IR/HipDpsOpInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -18,16 +19,113 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
     Op<Hip_Dialect, mnemonic, traits>;
 
 // Base class for all HIP destination-passing-style (DPS) compute ops.
-// Provides MemoryEffectsOpInterface, DestinationStyleOpInterface, and the
-// Variadic<AnyRankedTensor>:$result_tensors result (non-empty only at the
-// tensor level; empty after bufferization).
-class Hip_DpsOp<string mnemonic, list<Trait> traits = []> :
+//
+// Provides:
+//   - MemoryEffectsOpInterface
+//   - DestinationStyleOpInterface (`getDpsInitsMutable` is op-defined)
+//   - HipDpsOpInterface (carries the shared default `reifyResultShapes`)
+//   - ReifyRankedShapedTypeOpInterface (decl; body auto-emitted below)
+//   - Variadic<AnyRankedTensor>:$result_tensors (empty in memref mode)
+//
+// `extraClassDefinition` auto-emits per-op dispatchers via TableGen so
+// the bulk of HIP DPS ops contribute zero per-op `.cpp` boilerplate for
+// shape inference. The dispatchers are gated by `autoReify` /
+// `autoInfer` bits so bespoke ops (matmul, gemm, ...) opt out and
+// provide their own per-op bodies. See
+// `docs/design/hip-shape-inference.md` for the rationale.
+//
+// Parameters:
+//   `outsAccessor`  : ODS-generated accessor name for the DPS init
+//                     operand, used by the auto-emitted `inferReturnTypes`
+//                     body to read the result type from the outs operand.
+//                     Default `"Output"` matches the 37 ops whose outs is
+//                     named `$output`. Ops with `$y` pass `"Y"`, etc.
+//   `autoReify`     : when 1, emit a per-op `reifyResultShapes` that
+//                     forwards to the `HipDpsOpInterface` default. When 0,
+//                     the op author writes their own body in
+//                     `HipReifyResultShapesImpl.cpp`.
+//   `autoInfer`     : when 1, emit a per-op `inferReturnTypes` that
+//                     pushes the outs operand's tensor type into
+//                     `results` (or pushes nothing for memref mode, so
+//                     memref-mode ops correctly produce zero SSA
+//                     results). Default 0 on #260 -- only matmul opts
+//                     in as the worked example -- and flipped to 1 in
+//                     #262 so every single-result Hip_DpsOp inherits
+//                     it. `autoReify` and `autoInfer` are independent:
+//                     ops with bespoke runtime reify (matmul, gemm,
+//                     qmoe, matmul_nbits) still benefit from
+//                     auto-emitted `inferReturnTypes` because at
+//                     construction time the converter passes a typed
+//                     outs whose tensor type already encodes the result
+//                     shape.
+//   `declareInfer`  : when 1, declare `InferTypeOpInterface` on the op
+//                     so ODS emits the inferred-type `Op::create`
+//                     overload (lets converter callsites drop the
+//                     explicit `resultType` argument). Default 0 on
+//                     #260 -- matmul opts in -- and flipped to 1 in
+//                     #262 in lockstep with `autoInfer`.
+//
+// Generated dispatcher example (matmul, after Phase 1):
+//   - `extraClassDefinition` produces:
+//       LogicalResult MatmulOp::reifyResultShapes(...) {  // omitted: autoReify=0
+//       LogicalResult MatmulOp::inferReturnTypes(...) {   // emitted: autoInfer=1
+//         MatmulOp::Adaptor adaptor(operands, attrs, props, regions);
+//         Value outs = adaptor.getOutput();
+//         if (auto t = dyn_cast<RankedTensorType>(outs.getType()))
+//           results.push_back(t);
+//         return success();
+//       }
+//   - The reify body for matmul is hand-written in
+//     `HipReifyResultShapesImpl.cpp` (recovers M/K/N from operand
+//     shapes via `inferMatmulShape`, then `reifyDimOrConstant` per
+//     dim).
+class Hip_DpsOp<string mnemonic,
+                list<Trait> traits = [],
+                string outsAccessor = "Output",
+                bit autoReify = 1,
+                bit autoInfer = 0,
+                bit declareInfer = 0> :
     Hip_Op<mnemonic, !listconcat([
-      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-      DeclareOpInterfaceMethods<DestinationStyleOpInterface,
-                                ["getDpsInitsMutable"]>
-    ], traits)> {
+        DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+        DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                                  ["getDpsInitsMutable"]>,
+        HipDpsOpInterface,
+        DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
+                                  ["reifyResultShapes"]>
+      ],
+      !if(declareInfer,
+          [DeclareOpInterfaceMethods<InferTypeOpInterface,
+                                     ["inferReturnTypes"]>],
+          []),
+      traits)> {
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
+  let extraClassDefinition = !strconcat(
+    !if(autoReify, [{
+      ::mlir::LogicalResult $cppClass::reifyResultShapes(
+          ::mlir::OpBuilder &b,
+          ::mlir::ReifiedRankedShapedTypeDims &reified) {
+        return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+            .reifyResultShapes(b, reified);
+      }
+    }], ""),
+    !if(autoInfer, !strconcat([{
+      ::llvm::LogicalResult $cppClass::inferReturnTypes(
+          ::mlir::MLIRContext *,
+          ::std::optional<::mlir::Location>,
+          ::mlir::ValueRange operands,
+          ::mlir::DictionaryAttr attrs,
+          ::mlir::OpaqueProperties props,
+          ::mlir::RegionRange regions,
+          ::llvm::SmallVectorImpl<::mlir::Type> &results) {
+        $cppClass::Adaptor adaptor(operands, attrs, props, regions);
+        ::mlir::Value outs = adaptor.get}], outsAccessor, [{();
+        if (auto t = ::llvm::dyn_cast<::mlir::RankedTensorType>(
+                outs.getType()))
+          results.push_back(t);
+        return ::mlir::success();
+      }
+    }]), "")
+  );
 }
 
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
@@ -302,10 +400,22 @@ def Hip_ConvOp : Hip_DpsOp<"conv"> {
 
 // ===== hipBLASLt ops =========================================================
 
-def Hip_MatmulOp : Hip_DpsOp<"matmul", [
-    DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface,
-      ["reifyResultShapes"]>
-  ]> {
+// `autoReify=0` opts out of the shared default reify body: matmul
+// recovers its result dims from operand shapes (M, K from A; K, N from
+// B) rather than echoing the outs shape, so the body is hand-written
+// in `HipReifyResultShapesImpl.cpp`. `autoInfer=1, declareInfer=1`
+// keep the op on the parameterized auto-emit path for
+// `inferReturnTypes` because at construction time the converter passes
+// a typed outs operand whose tensor type already encodes the result
+// shape -- the auto-emitted body just reads it back, so there is no
+// reason to write that boilerplate by hand. Matmul is the worked
+// example for the orthogonality of these two layers on #260; #262
+// extends the same split to gemm / qmoe / matmul_nbits.
+def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/0,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B

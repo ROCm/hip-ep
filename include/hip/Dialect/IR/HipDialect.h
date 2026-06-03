@@ -20,6 +20,10 @@
 #define GET_TYPEDEF_CLASSES
 #include "hip/Dialect/IR/HipTypes.h.inc"
 
+// HipDpsOpInterface declares the `HipDpsOp` interface class. Must be
+// included before HipOps.h.inc so per-op definitions can reference it.
+#include "hip/Dialect/IR/HipDpsOpInterface.h.inc"
+
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.h.inc"
 
