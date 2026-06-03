@@ -20,8 +20,9 @@
 #define GET_TYPEDEF_CLASSES
 #include "hip/Dialect/IR/HipTypes.h.inc"
 
-// HipDpsOpInterface declares the `HipDpsOp` interface class. Must be
-// included before HipOps.h.inc so per-op definitions can reference it.
+// Generated header for the `HipDpsOp` C++ interface class (TableGen def
+// `HipDpsOpInterface`). Must precede HipOps.h.inc — every Hip_DpsOp's
+// generated declaration references `HipDpsOp::Trait`.
 #include "hip/Dialect/IR/HipDpsOpInterface.h.inc"
 
 #define GET_OP_CLASSES

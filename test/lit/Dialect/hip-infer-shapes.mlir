@@ -118,6 +118,36 @@ func.func @noop_on_static(%ctx: !hip.context,
 
 // -----
 
+// Pin the safety guard against refining a `tensor.empty` whose result is
+// used as the outs operand of more than one HIP op. Refinement of one
+// consumer's result would silently retype the shared empty (and thus
+// every other consumer's outs operand) without retyping the others'
+// results — breaking the DPS contract. No converter aliases empties
+// today, so the guard is purely defensive against a future regression.
+// CHECK-LABEL: func.func @skip_shared_empty_producer
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf16>
+// CHECK:         %[[Y1:.*]] = hip.matmul
+// CHECK-SAME:      outs(%[[E]] : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK:         %[[Y2:.*]] = hip.matmul
+// CHECK-SAME:      outs(%[[E]] : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK-NOT:     tensor.empty()
+func.func @skip_shared_empty_producer(%ctx: !hip.context,
+                                      %a: tensor<2x4xf16>,
+                                      %b: tensor<4x8xf16>,
+                                      %d1: index, %d2: index)
+    -> (tensor<?x?xf16>, tensor<?x?xf16>) {
+  %shared = tensor.empty(%d1, %d2) : tensor<?x?xf16>
+  %y1 = hip.matmul(%ctx)
+    ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+    outs(%shared : tensor<?x?xf16>) : tensor<?x?xf16>
+  %y2 = hip.matmul(%ctx)
+    ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+    outs(%shared : tensor<?x?xf16>) : tensor<?x?xf16>
+  return %y1, %y2 : tensor<?x?xf16>, tensor<?x?xf16>
+}
+
+// -----
+
 // Pin that the pass restricts itself to HIP-dialect ops: refining a non-HIP
 // op like `tensor.pad` (which also implements ReifyRankedShapedTypeOpInterface)
 // is the canonicalizer's job, not this pass's.
