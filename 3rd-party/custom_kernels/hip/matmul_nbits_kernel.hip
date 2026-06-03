@@ -1418,9 +1418,21 @@ void GemmFp16U4Impl(
                     dst[i] = src[i];
 
 #pragma unroll
-                for(int wn = 0; wn < WT_N; wn++)
+                for(int wn = 0; wn < WT_N; wn++) {
+#if defined(HIPCK_NO_RDNA3_WMMA)
+                    // Belt-and-suspenders trap: the host-side dispatcher
+                    // in hip_matmul_nbits never launches this kernel when
+                    // HIPCK_NO_RDNA3_WMMA is defined, so a regression in
+                    // that dispatcher (re-enabling the WMMA branch on a
+                    // non-RDNA-3 build) lands here at runtime instead of
+                    // silently producing garbage.
+                    __builtin_trap();
+                    (void)a_frag; (void)b_frag[wn]; (void)acc[wm][wn];
+#else
                     acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
                         a_frag, b_frag[wn], acc[wm][wn]);
+#endif
+                }
             }
         }
     };
@@ -2313,9 +2325,18 @@ void GemmFp16I8Impl(
                     dst[i] = src[i];
 
 #pragma unroll
-                for (int wn = 0; wn < WT_N; wn++)
+                for (int wn = 0; wn < WT_N; wn++) {
+#if defined(HIPCK_NO_RDNA3_WMMA)
+                    // See the matching guard in the int4 GemmFp16U4Impl
+                    // above for rationale — host dispatcher must never
+                    // launch this on a non-RDNA-3 build.
+                    __builtin_trap();
+                    (void)a_frag; (void)b_frag[wn]; (void)acc[wm][wn];
+#else
                     acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
                         a_frag, b_frag[wn], acc[wm][wn]);
+#endif
+                }
             }
         }
     };
@@ -2751,9 +2772,17 @@ extern "C" int hip_matmul_nbits(
     // the kernel. Common quantization (gs in {32, 64, 128}) satisfies it.
     constexpr int kI8GemvMinBs = 16;
     const bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
+#if defined(HIPCK_NO_RDNA3_WMMA)
+    // GEMV-i8 (`block_size >= 16`) covers the same shape envelope; bs < 16
+    // falls through to the naive int8 kernel further below. Force-false
+    // here keeps `use_gemv_i8` evaluable without the WMMA path eligibility
+    // table.
+    const bool use_wmma_i8 = false;
+#else
     const bool use_wmma_i8 =
         wmma_data_format && (M >= kBlockDim) &&
         (block_size >= 32) && (block_size % 32 == 0);
+#endif
     const bool use_gemv_i8 = !use_wmma_i8 && (block_size >= kI8GemvMinBs);
 
     if (use_wmma_i8) {
@@ -2884,6 +2913,7 @@ extern "C" int hip_matmul_nbits(
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
 
+#if !defined(HIPCK_NO_RDNA3_WMMA)
   if (wmma_data_format && M >= kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "
@@ -2946,6 +2976,7 @@ extern "C" int hip_matmul_nbits(
 
     return static_cast<int>(hipGetLastError());
   }
+#endif  // !HIPCK_NO_RDNA3_WMMA
 
   /* -------------------------------------------------------------------
    * GEMV path with col-major data — small M (>1), WMMA data format
@@ -2956,8 +2987,20 @@ extern "C" int hip_matmul_nbits(
    *
    * M=1 skips this path entirely — row/col layouts are identical for a
    * single row, and the row-major GEMV avoids the ZP conversion kernel.
+   *
+   * On a build with HIPCK_NO_RDNA3_WMMA defined (no RDNA 3 in
+   * HIP_ARCHITECTURES) the upper bound `M < kBlockDim` is dropped — GEMV
+   * col-major then handles every M > 1 with wmma_data_format. Correctness
+   * is unaffected (the kernel is M-agnostic; it tiles N x K with M output
+   * rows, and there's no compile-time M cap). Performance is significantly
+   * lower than WMMA at M >= ~16 — this is the temporary cost of running
+   * without RDNA 3 WMMA until the kernels are ported to the new ISA.
    * ------------------------------------------------------------------- */
+#if defined(HIPCK_NO_RDNA3_WMMA)
+  if (wmma_data_format && M > 1) {
+#else
   if (wmma_data_format && M > 1 && M < kBlockDim) {
+#endif
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
