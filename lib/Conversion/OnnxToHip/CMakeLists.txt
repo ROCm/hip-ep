@@ -61,6 +61,7 @@ add_library(OnnxToHip STATIC
   GlobalPoolConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
+  ReluConversion.cpp
   LoopOutline.cpp
 )
 
