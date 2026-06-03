@@ -78,11 +78,19 @@ __device__ inline float coord_to_input(int o, int out_dim, int in_dim,
   }
 }
 
-__device__ inline int round_prefer_floor(float x) {
-  // ONNX "round_prefer_floor" = round half down: ties go DOWN.
-  // floorf(x + 0.5) rounds half up; subtract a tiny epsilon-equivalent
-  // by using `ceilf(x - 0.5)` -> rounds half down.
-  return static_cast<int>(ceilf(x - 0.5f));
+__device__ inline int nearest_round(float x, int nearest_mode) {
+  // ONNX nearest_mode:
+  //   0 = round_prefer_floor: ties go DOWN
+  //   1 = round_prefer_ceil:  ties go UP
+  //   2 = floor
+  //   3 = ceil
+  switch (nearest_mode) {
+    case 1: return static_cast<int>(floorf(x + 0.5f));
+    case 2: return static_cast<int>(floorf(x));
+    case 3: return static_cast<int>(ceilf(x));
+    case 0:
+    default: return static_cast<int>(ceilf(x - 0.5f));
+  }
 }
 
 template <typename T>
@@ -93,7 +101,7 @@ __global__ void resize_nearest_kernel(const T* __restrict__ input,
                                       int64_t in0, int64_t in1, int64_t in2,
                                       int64_t out0, int64_t out1, int64_t out2,
                                       int coord_transform,
-                                      int /*nearest_mode*/,
+                                      int nearest_mode,
                                       int64_t total_outputs) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= total_outputs) return;
@@ -119,9 +127,9 @@ __global__ void resize_nearest_kernel(const T* __restrict__ input,
   float x2 = coord_to_input(static_cast<int>(o2), static_cast<int>(out2),
                             static_cast<int>(in2), coord_transform);
 
-  int i0 = round_prefer_floor(x0);
-  int i1 = round_prefer_floor(x1);
-  int i2 = round_prefer_floor(x2);
+  int i0 = nearest_round(x0, nearest_mode);
+  int i1 = nearest_round(x1, nearest_mode);
+  int i2 = nearest_round(x2, nearest_mode);
   if (i0 < 0) i0 = 0;
   if (i0 >= in0) i0 = static_cast<int>(in0 - 1);
   if (i1 < 0) i1 = 0;

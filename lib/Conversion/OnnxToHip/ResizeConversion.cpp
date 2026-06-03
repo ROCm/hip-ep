@@ -150,10 +150,19 @@ struct ResizeToHip : public mlir::RewritePattern {
               "{half_pixel, asymmetric, align_corners}");
 
     std::string nm = getStrAttr("nearest_mode", "round_prefer_floor");
-    if (nm != "round_prefer_floor")
+    int64_t nearestId;
+    if (nm == "round_prefer_floor")
+      nearestId = 0;
+    else if (nm == "round_prefer_ceil")
+      nearestId = 1;
+    else if (nm == "floor")
+      nearestId = 2;
+    else if (nm == "ceil")
+      nearestId = 3;
+    else
       return rewriter.notifyMatchFailure(
-          op, "Resize nearest_mode must be round_prefer_floor");
-    int64_t nearestId = 0;
+          op, "Resize nearest_mode must be one of "
+              "{round_prefer_floor, round_prefer_ceil, floor, ceil}");
 
     // Reject features outside the supported subset.
     auto getI64 = [&](mlir::StringRef name, int64_t defaultVal) -> int64_t {

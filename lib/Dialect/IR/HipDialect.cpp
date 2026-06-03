@@ -1239,6 +1239,18 @@ void SinOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ExpOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ExpOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ExpOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CumSumOp: ins(x, axis), outs(y)
 //===----------------------------------------------------------------------===//
 
