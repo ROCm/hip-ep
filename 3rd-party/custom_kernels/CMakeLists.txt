@@ -62,11 +62,10 @@ set(_hipck_kernel_compile_opts "")
 if(NOT _hipck_has_rdna3_wmma)
     message(STATUS
         "[custom_kernels] no RDNA 3 arch in HIP_ARCHITECTURES "
-        "(${HIP_ARCHITECTURES}) — disabling WMMA F16 path "
-        "(HIPCK_NO_RDNA3_WMMA=1). gemm_wmma_fp16 and the GQA fused "
-        "prefill WMMA kernel become trap-stubs; matmul_nbits routes "
-        "every shape through GEMV. Expect lower prefill TPS until the "
-        "gfx12 WMMA port lands.")
+        "(${HIP_ARCHITECTURES}) — switching matmul_nbits WMMA to the "
+        "RDNA 4 `_gfx12` builtin variant (HIPCK_NO_RDNA3_WMMA=1). "
+        "gemm_wmma_fp16 and the GQA fused prefill WMMA kernel remain "
+        "trap-stubs (no caller in lib/Runtime/).")
     list(APPEND _hipck_kernel_compile_opts -DHIPCK_NO_RDNA3_WMMA=1)
 endif()
 

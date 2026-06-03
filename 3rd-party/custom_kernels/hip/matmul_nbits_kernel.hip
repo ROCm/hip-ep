@@ -1173,6 +1173,12 @@ __global__ void dequant_u4_to_fp16(
  * ======================================================================= */
 
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
+// half8 is the per-lane A/B fragment for the RDNA 4 WMMA builtin
+// `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12` (V8fV8hV8hV8f). RDNA 3's
+// builtin took half16 because lanes 0..15 / 16..31 had to hold duplicate data;
+// RDNA 4 dropped that requirement, halving per-lane VGPR pressure on A and B.
+// `float8` is unchanged across both architectures (C/D fragments).
+typedef _Float16 half8  __attribute__((ext_vector_type(8)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
 
 #define WMMA_TILE 16
@@ -1388,11 +1394,59 @@ void GemmFp16U4Impl(
         }
     };
 
+    // Dual-path WMMA inner loop:
+    //   - RDNA 4: half8 per-lane fragments, builtin has _gfx12 suffix, each
+    //     lane holds a half-K-strip of its row (sub=0 → K=0..7, sub=1 → K=8..15
+    //     within the 16-wide WMMA tile).
+    //   - RDNA 3: half16 per-lane fragments, original builtin, each lane holds
+    //     the full 16-wide K-strip with lanes 0..15 / 16..31 duplicated.
+    // The shared-memory layout (smA[buf][M][K], smB[buf][N][K]) is identical
+    // for both architectures — only the per-lane slicing of the K dimension
+    // changes. The acc[] accumulator type (float8) is unchanged.
     auto computeWMMA = [&](int buf) __attribute__((always_inline))
     {
 #pragma unroll
         for(int ks = 0; ks < K_STEPS; ks++)
         {
+#if defined(HIPCK_NO_RDNA3_WMMA)
+            // RDNA 4 path. Per-lane load is 4 uint32 (= 8 fp16 = half8) starting
+            // at K offset `ks*16 + sub*8`. The two halves of a wave32 (lanes
+            // 0..15 and 16..31) cooperate to cover the full 16 K-elements that
+            // one WMMA tile needs; the hardware does the cross-lane gather.
+            half8 b_frag[WT_N];
+#pragma unroll
+            for(int wn = 0; wn < WT_N; wn++)
+            {
+                int noff              = (wcol * WT_N + wn) * WMMA_TILE;
+                uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
+                const uint32_t* src   = reinterpret_cast<const uint32_t*>(
+                    &smB[buf][noff + lane][ks * WMMA_TILE + sub * 8]);
+#pragma unroll
+                for(int i = 0; i < 4; i++)
+                    dst[i] = src[i];
+            }
+#pragma unroll
+            for(int wm = 0; wm < WT_M; wm++)
+            {
+                int moff              = (wrow * WT_M + wm) * WMMA_TILE;
+                half8 a_frag;
+                uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
+                const uint32_t* src   = reinterpret_cast<const uint32_t*>(
+                    &smA[buf][moff + lane][ks * WMMA_TILE + sub * 8]);
+#pragma unroll
+                for(int i = 0; i < 4; i++)
+                    dst[i] = src[i];
+
+#pragma unroll
+                for(int wn = 0; wn < WT_N; wn++)
+                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                        a_frag, b_frag[wn], acc[wm][wn]);
+            }
+#else
+            // RDNA 3 path (original). Per-lane load is 8 uint32 (= 16 fp16 =
+            // half16). Lanes 0..15 and 16..31 within a wave end up with
+            // bit-identical fragment data — that duplication is what the RDNA 3
+            // WMMA hardware expects.
             half16 b_frag[WT_N];
 #pragma unroll
             for(int wn = 0; wn < WT_N; wn++)
@@ -1418,22 +1472,11 @@ void GemmFp16U4Impl(
                     dst[i] = src[i];
 
 #pragma unroll
-                for(int wn = 0; wn < WT_N; wn++) {
-#if defined(HIPCK_NO_RDNA3_WMMA)
-                    // Belt-and-suspenders trap: the host-side dispatcher
-                    // in hip_matmul_nbits never launches this kernel when
-                    // HIPCK_NO_RDNA3_WMMA is defined, so a regression in
-                    // that dispatcher (re-enabling the WMMA branch on a
-                    // non-RDNA-3 build) lands here at runtime instead of
-                    // silently producing garbage.
-                    __builtin_trap();
-                    (void)a_frag; (void)b_frag[wn]; (void)acc[wm][wn];
-#else
+                for(int wn = 0; wn < WT_N; wn++)
                     acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
                         a_frag, b_frag[wn], acc[wm][wn]);
-#endif
-                }
             }
+#endif
         }
     };
 
@@ -1464,7 +1507,25 @@ void GemmFp16U4Impl(
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
+                // C/D fragment-to-output mapping. Column is always `lane`
+                // (= lid % 16) for both architectures. The ROW mapping
+                // is the part that changed:
+                //
+                //   RDNA 3 — row-interleaved across the wave32 sub-halves:
+                //     sub=0 → even rows (e=0..7 → row 0,2,4,6,8,10,12,14)
+                //     sub=1 → odd  rows (e=0..7 → row 1,3,5,7,9,11,13,15)
+                //   RDNA 4 — row-block across the wave32 sub-halves:
+                //     sub=0 → rows 0..7  (contiguous)
+                //     sub=1 → rows 8..15 (contiguous)
+                //
+                // Getting this wrong corrupts every row pair in the output
+                // tile and produces a silent failure (build passes, model
+                // output goes wrong by a deterministic permutation).
+#if defined(HIPCK_NO_RDNA3_WMMA)
+                int r = e + sub * 8;
+#else
                 int r = e * 2 + sub;
+#endif
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -2299,9 +2360,44 @@ void GemmFp16I8Impl(
         }
     };
 
+    // Dual-path WMMA inner loop — semantics identical to the int4
+    // GemmFp16U4Impl version above (only the B-side dequant in storeToShared
+    // differs between int4 and int8). See that function for the layout
+    // rationale.
     auto computeWMMA = [&](int buf) __attribute__((always_inline)) {
 #pragma unroll
         for (int ks = 0; ks < K_STEPS; ks++) {
+#if defined(HIPCK_NO_RDNA3_WMMA)
+            // RDNA 4 path: half8 fragments, half-K-strip per lane.
+            half8 b_frag[WT_N];
+#pragma unroll
+            for (int wn = 0; wn < WT_N; wn++) {
+                int noff              = (wcol * WT_N + wn) * WMMA_TILE;
+                uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
+                const uint32_t* src   = reinterpret_cast<const uint32_t*>(
+                    &smB[buf][noff + lane][ks * WMMA_TILE + sub * 8]);
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+                    dst[i] = src[i];
+            }
+#pragma unroll
+            for (int wm = 0; wm < WT_M; wm++) {
+                int moff              = (wrow * WT_M + wm) * WMMA_TILE;
+                half8 a_frag;
+                uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
+                const uint32_t* src   = reinterpret_cast<const uint32_t*>(
+                    &smA[buf][moff + lane][ks * WMMA_TILE + sub * 8]);
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+                    dst[i] = src[i];
+
+#pragma unroll
+                for (int wn = 0; wn < WT_N; wn++)
+                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                        a_frag, b_frag[wn], acc[wm][wn]);
+            }
+#else
+            // RDNA 3 path (original): half16 fragments, full duplicated K-strip.
             half16 b_frag[WT_N];
 #pragma unroll
             for (int wn = 0; wn < WT_N; wn++) {
@@ -2325,19 +2421,11 @@ void GemmFp16I8Impl(
                     dst[i] = src[i];
 
 #pragma unroll
-                for (int wn = 0; wn < WT_N; wn++) {
-#if defined(HIPCK_NO_RDNA3_WMMA)
-                    // See the matching guard in the int4 GemmFp16U4Impl
-                    // above for rationale — host dispatcher must never
-                    // launch this on a non-RDNA-3 build.
-                    __builtin_trap();
-                    (void)a_frag; (void)b_frag[wn]; (void)acc[wm][wn];
-#else
+                for (int wn = 0; wn < WT_N; wn++)
                     acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
                         a_frag, b_frag[wn], acc[wm][wn]);
-#endif
-                }
             }
+#endif
         }
     };
 
@@ -2364,7 +2452,14 @@ void GemmFp16I8Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
+                // C/D row mapping: see GemmFp16U4Impl above for the full
+                // RDNA 3 (e*2 + sub, interleaved) vs RDNA 4 (e + sub*8, block)
+                // explanation. Column mapping `lane` is unchanged.
+#if defined(HIPCK_NO_RDNA3_WMMA)
+                int r = e + sub * 8;
+#else
                 int r = e * 2 + sub;
+#endif
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -2772,17 +2867,15 @@ extern "C" int hip_matmul_nbits(
     // the kernel. Common quantization (gs in {32, 64, 128}) satisfies it.
     constexpr int kI8GemvMinBs = 16;
     const bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
-#if defined(HIPCK_NO_RDNA3_WMMA)
-    // GEMV-i8 (`block_size >= 16`) covers the same shape envelope; bs < 16
-    // falls through to the naive int8 kernel further below. Force-false
-    // here keeps `use_gemv_i8` evaluable without the WMMA path eligibility
-    // table.
-    const bool use_wmma_i8 = false;
-#else
+    // Both RDNA 3 and RDNA 4 builds re-enable the WMMA-i8 fast path because
+    // GemmFp16I8Impl's WMMA inner loop is now dual-architecture (selects the
+    // half16+gfx11 vs half8+gfx12 variant at compile time via
+    // HIPCK_NO_RDNA3_WMMA inside the kernel). Earlier this flag also gated the
+    // dispatcher to force GEMV — that gate is gone now that the kernel itself
+    // is portable.
     const bool use_wmma_i8 =
         wmma_data_format && (M >= kBlockDim) &&
         (block_size >= 32) && (block_size % 32 == 0);
-#endif
     const bool use_gemv_i8 = !use_wmma_i8 && (block_size >= kI8GemvMinBs);
 
     if (use_wmma_i8) {
@@ -2913,7 +3006,10 @@ extern "C" int hip_matmul_nbits(
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
 
-#if !defined(HIPCK_NO_RDNA3_WMMA)
+  // WMMA fast path is enabled on every architecture the kernel TU was built
+  // for. The kernel's inner loop and writeback now dual-path on
+  // HIPCK_NO_RDNA3_WMMA at compile time, so the host dispatcher no longer
+  // needs to special-case non-RDNA-3 builds here.
   if (wmma_data_format && M >= kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "
@@ -2976,7 +3072,6 @@ extern "C" int hip_matmul_nbits(
 
     return static_cast<int>(hipGetLastError());
   }
-#endif  // !HIPCK_NO_RDNA3_WMMA
 
   /* -------------------------------------------------------------------
    * GEMV path with col-major data — small M (>1), WMMA data format
@@ -2987,20 +3082,8 @@ extern "C" int hip_matmul_nbits(
    *
    * M=1 skips this path entirely — row/col layouts are identical for a
    * single row, and the row-major GEMV avoids the ZP conversion kernel.
-   *
-   * On a build with HIPCK_NO_RDNA3_WMMA defined (no RDNA 3 in
-   * HIP_ARCHITECTURES) the upper bound `M < kBlockDim` is dropped — GEMV
-   * col-major then handles every M > 1 with wmma_data_format. Correctness
-   * is unaffected (the kernel is M-agnostic; it tiles N x K with M output
-   * rows, and there's no compile-time M cap). Performance is significantly
-   * lower than WMMA at M >= ~16 — this is the temporary cost of running
-   * without RDNA 3 WMMA until the kernels are ported to the new ISA.
    * ------------------------------------------------------------------- */
-#if defined(HIPCK_NO_RDNA3_WMMA)
-  if (wmma_data_format && M > 1) {
-#else
   if (wmma_data_format && M > 1 && M < kBlockDim) {
-#endif
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
