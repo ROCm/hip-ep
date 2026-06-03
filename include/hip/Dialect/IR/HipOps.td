@@ -2848,4 +2848,42 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   }];
 }
 
+def Hip_ClipOp : Hip_DpsOp<"clip"> {
+  let summary = "Elementwise clip (ONNX Clip)";
+  let description = [{
+    Clip the input tensor elementwise into the interval `[min, max]`:
+    `output[i] = min(max(input[i], min_val), max_val)`.
+
+    `min` and `max` are 0-rank scalar tensors with the same element type as
+    `input`. The OnnxToHip converter materializes the default
+    `numeric_limits::lowest()` / `numeric_limits::max()` for omitted ONNX
+    operands so the HIP op always carries both bounds.
+
+    Uses destination-passing style.
+
+    Example:
+    ```mlir
+    hip.clip(%ctx) ins(%x, %lo, %hi : memref<3x4xf32, 1>,
+                                       memref<f32, 1>,
+                                       memref<f32, 1>)
+                   outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$min,
+    Hip_TensorOrMemRef:$max,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $min `,` $max `:` type($input) `,`
+    type($min) `,` type($max) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 #endif // HIP_OPS

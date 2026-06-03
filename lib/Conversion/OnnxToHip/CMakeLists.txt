@@ -63,6 +63,7 @@ add_library(OnnxToHip STATIC
   ResizeConversion.cpp
   ReluConversion.cpp
   LeakyReluConversion.cpp
+  ClipConversion.cpp
   LoopOutline.cpp
 )
 

@@ -811,6 +811,18 @@ void MinOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ClipOp: ins(input, min, max), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ClipOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void ClipOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // WhereOp: ins(condition, x, y), outs(output)
 //===----------------------------------------------------------------------===//
 

@@ -1076,6 +1076,11 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
 int wrap_less(RuntimeState *state, void *a, void *b, void *output,
               int64_t num_elements, int64_t data_type);
 
+// Clip operation wrapper: y[i] = min(max(x[i], lo), hi).
+// `lo` and `hi` are rank-0 scalar device pointers of the same dtype as input.
+int wrap_clip(RuntimeState *state, void *input, void *lo, void *hi,
+              void *output, int64_t num_elements, int64_t data_type);
+
 // GatherND operation wrapper. data_shape has rank `data_rank`; indices has
 // rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
 int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
