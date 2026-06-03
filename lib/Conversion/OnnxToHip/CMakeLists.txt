@@ -38,6 +38,7 @@ add_library(OnnxToHip STATIC
   NotConversion.cpp
   CosConversion.cpp
   SinConversion.cpp
+  ExpConversion.cpp
   CumSumConversion.cpp
   PadConversion.cpp
   TileConversion.cpp
