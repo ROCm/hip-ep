@@ -158,7 +158,7 @@ This builds the following from source and installs them into `../prebuilt-local/
 
 | Component | Source | Version |
 |---|---|---|
-| LLVM / MLIR / LLD | `github.com/llvm/llvm-project` | commit `4434dabb…` (22.1.0), `mlir;lld`, X86 only, `/MT` |
+| LLVM / MLIR / LLD | `github.com/llvm/llvm-project` | tag `llvmorg-22.1.0`, `mlir;lld`, X86 only, `/MT` |
 | Protobuf (+ abseil) | `github.com/protocolbuffers/protobuf` | `v34.0` (built with `CMAKE_CXX_STANDARD=17`) |
 | FlatBuffers | `github.com/google/flatbuffers` | `v25.12.19` |
 
@@ -505,7 +505,7 @@ mismatch linker errors.
 
 ## Updating the C++ Dependencies
 
-To move to a newer LLVM/protobuf/flatbuffers, update the `LLVM_COMMIT` /
+To move to a newer LLVM/protobuf/flatbuffers, update the `LLVM_TAG` /
 `PROTO_TAG` / `FLATBUFFERS_TAG` variables at the top of
 `scripts/setup-prebuilt.sh` (keep them in lockstep with
 `.github/workflows/windows-build.yml`) and re-run it. Delete the corresponding

@@ -36,7 +36,7 @@ jobs:
       # across both workflows. The build recipes below are byte-identical to
       # windows-build.yml's, so identical cache keys resolve to identical
       # artifacts and each dep's expensive cold build runs once globally.
-      LLVM_COMMIT: "4434dabb69916856b824f68a64b029c67175e532"
+      LLVM_TAG: llvmorg-22.1.0
       FLATBUFFERS_TAG: v25.12.19
       PROTO_TAG: v34.0
       ONNXRUNTIME_VERSION: "1.25.1"
@@ -84,7 +84,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/llvm-install
-          key: dep-llvm-${{ env.LLVM_COMMIT }}
+          key: dep-llvm-${{ env.LLVM_TAG }}
 
       - name: Cache protobuf-install
         id: cache-protobuf
@@ -227,7 +227,7 @@ jobs:
           SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
-          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_COMMIT }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
           git -C "$SRC" checkout FETCH_HEAD
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \

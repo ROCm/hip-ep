@@ -69,8 +69,8 @@ VULKAN_INSTALLER_URL = (
 
 # Build-time deps built from source — keep in sync with
 # scripts/setup-prebuilt.sh and .github/workflows/windows-build.yml.
-# LLVM is built from this upstream llvm/llvm-project commit (== 22.1.0).
-_LLVM_COMMIT = "4434dabb69916856b824f68a64b029c67175e532"
+# LLVM is built from this upstream llvm/llvm-project release tag.
+_LLVM_TAG = "llvmorg-22.1.0"
 _PROTO_TAG = "v34.0"
 _FLATBUFFERS_TAG = "v25.12.19"
 
@@ -230,9 +230,7 @@ def fetch_prebuilt_deps():
     if (DEPS / "lib" / "cmake" / "mlir" / "MLIRConfig.cmake").exists():
         log("  LLVM/MLIR/LLD: already installed.")
     else:
-        log(
-            f"  Building LLVM/MLIR/LLD (commit {_LLVM_COMMIT}) — multi-hour cold build ..."
-        )
+        log(f"  Building LLVM/MLIR/LLD ({_LLVM_TAG}) — multi-hour cold build ...")
         llvm_src = src_root / "llvm-project"
         if not (llvm_src / ".git").exists():
             subprocess.run(["git", "init", str(llvm_src)], check=True)
@@ -257,7 +255,7 @@ def fetch_prebuilt_deps():
                 "--depth",
                 "1",
                 "origin",
-                _LLVM_COMMIT,
+                _LLVM_TAG,
             ],
             check=True,
         )
