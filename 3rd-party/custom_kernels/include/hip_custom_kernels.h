@@ -219,18 +219,6 @@ int hip_elementwise_less(
     int64_t num_elements,
     int hip_dtype);
 
-/* Elementwise clip: y[i] = min(max(x[i], lo[0]), hi[0]).
- * lo and hi are 0-rank scalar device pointers of the same dtype as input.
- */
-int hip_elementwise_clip(
-    void* stream,
-    const void* input,
-    const void* lo,
-    const void* hi,
-    void* output,
-    int64_t num_elements,
-    int hip_dtype);
-
 /* And over bool (1-byte) tensors. No hip_dtype: bool is the only supported
  * input/output type (mirrors ORT v1.22.2 SPECIALIZED_BINARY_ELEMENTWISE_IMPL(And, bool)).
  */

@@ -228,7 +228,8 @@ void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns) {
   patterns.add<ElementwiseOpLowering<MulOp, kTensorOpMul>,
                ElementwiseOpLowering<AddOp, kTensorOpAdd>,
-               ElementwiseOpLowering<MinOp, kTensorOpMin>, SubOpLowering>(
+               ElementwiseOpLowering<MinOp, kTensorOpMin>,
+               ElementwiseOpLowering<MaxOp, kTensorOpMax>, SubOpLowering>(
       converter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(converter, kMiopenAdd);
 }

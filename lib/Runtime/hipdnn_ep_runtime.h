@@ -1076,11 +1076,6 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
 int wrap_less(RuntimeState *state, void *a, void *b, void *output,
               int64_t num_elements, int64_t data_type);
 
-// Clip operation wrapper: y[i] = min(max(x[i], lo), hi).
-// `lo` and `hi` are rank-0 scalar device pointers of the same dtype as input.
-int wrap_clip(RuntimeState *state, void *input, void *lo, void *hi,
-              void *output, int64_t num_elements, int64_t data_type);
-
 // ReduceMean operation wrapper. Mirrors the reduce_sum/reduce_max signature.
 int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,

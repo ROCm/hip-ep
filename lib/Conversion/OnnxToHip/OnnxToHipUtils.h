@@ -162,6 +162,8 @@ void populateDivConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateMaxConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
