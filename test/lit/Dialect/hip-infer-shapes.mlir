@@ -310,18 +310,24 @@ func.func @refine_gemm_2d_from_inputs(%ctx: !hip.context,
 // -----
 
 // Same-shape unary ops (silu, sigmoid, softplus, gelu, reciprocal, sqrt,
-// not, cos, sin, neg, cast, sign, cumsum, scatter_nd) all reify their
-// result shape from the primary input tensor's shape — covered here by
-// `hip.cos` as a representative. The pass refines the dynamic-result
-// `tensor.empty` to the input's static rank/extents.
-// CHECK-LABEL: func.func @refine_cos_static_last_dim
-// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x4096xf32>
+// not, cos, sin, neg, cast, sign, cumsum, scatter_nd) opt INTO the
+// shared `HipDpsOp` default reify (`autoReify=1`), which lifts each
+// output dim from the DPS `outs` operand's runtime shape. The DPS
+// contract pins `result.type == outs.type`, so the consumer-side pass
+// has signal to refine only when `outs` carries static dims that the
+// result type doesn't (rare in practice; the in-tree converters keep
+// `outs.type` aligned with the inferred ONNX result type from the
+// start). When `outs` is fully dynamic, the pass becomes a no-op for
+// these ops — `hip.cos` is the canonical example pinned here.
+// CHECK-LABEL: func.func @noop_on_cos_dynamic_outs
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
 // CHECK:         %[[Y:.*]] = hip.cos
-// CHECK-SAME:                  outs(%[[E]] : tensor<?x?x4096xf32>) : tensor<?x?x4096xf32>
-// CHECK:         tensor.cast %[[Y]] : tensor<?x?x4096xf32> to tensor<?x?x?xf32>
-func.func @refine_cos_static_last_dim(%ctx: !hip.context,
-                                      %x: tensor<?x?x4096xf32>,
-                                      %d0: index, %d1: index, %d2: index)
+// CHECK-SAME:                  outs(%[[E]] : tensor<?x?x?xf32>) : tensor<?x?x?xf32>
+// CHECK-NOT:     tensor.cast
+// CHECK:         return %[[Y]] : tensor<?x?x?xf32>
+func.func @noop_on_cos_dynamic_outs(%ctx: !hip.context,
+                                    %x: tensor<?x?x4096xf32>,
+                                    %d0: index, %d1: index, %d2: index)
     -> tensor<?x?x?xf32> {
   %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
   %y = hip.cos(%ctx)

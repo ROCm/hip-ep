@@ -1155,7 +1155,7 @@ def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
 
 def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
                            /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
+                           /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
@@ -1171,7 +1171,7 @@ def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
 
 def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
                               /*outsAccessor=*/"Y",
-                              /*autoReify=*/0,
+                              /*autoReify=*/1,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
   let summary = "Sigmoid activation";
@@ -1202,7 +1202,7 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
 
 def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
                                /*outsAccessor=*/"Y",
-                               /*autoReify=*/0,
+                               /*autoReify=*/1,
                                /*autoInfer=*/1,
                                /*declareInfer=*/1> {
   let summary = "Softplus activation: y = ln(exp(x) + 1)";
@@ -1236,7 +1236,7 @@ def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
 
 def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
                            /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
+                           /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "GELU activation (Gaussian Error Linear Unit)";
@@ -1276,7 +1276,7 @@ def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
 
 def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
                                  /*outsAccessor=*/"Y",
-                                 /*autoReify=*/0,
+                                 /*autoReify=*/1,
                                  /*autoInfer=*/1,
                                  /*declareInfer=*/1> {
   let summary = "Element-wise reciprocal: y = 1/x";
@@ -1310,7 +1310,7 @@ def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
 
 def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
                            /*outsAccessor=*/"Y",
-                           /*autoReify=*/0,
+                           /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Element-wise square root: y = sqrt(x)";
@@ -1451,7 +1451,7 @@ def Hip_AndOp : Hip_DpsOp<"and", /*traits=*/[],
 
 def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
                           /*outsAccessor=*/"Y",
-                          /*autoReify=*/0,
+                          /*autoReify=*/1,
                           /*autoInfer=*/1,
                           /*declareInfer=*/1> {
   let summary = "Element-wise logical NOT: y = !x";
@@ -1485,7 +1485,7 @@ def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
 
 def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
                           /*outsAccessor=*/"Y",
-                          /*autoReify=*/0,
+                          /*autoReify=*/1,
                           /*autoInfer=*/1,
                           /*declareInfer=*/1> {
   let summary = "Element-wise cosine: y = cos(x)";
@@ -1519,7 +1519,7 @@ def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
 
 def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
                           /*outsAccessor=*/"Y",
-                          /*autoReify=*/0,
+                          /*autoReify=*/1,
                           /*autoInfer=*/1,
                           /*declareInfer=*/1> {
   let summary = "Element-wise sine: y = sin(x)";
@@ -1553,7 +1553,7 @@ def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
 
 def Hip_NegOp : Hip_DpsOp<"neg", /*traits=*/[],
                           /*outsAccessor=*/"Y",
-                          /*autoReify=*/0,
+                          /*autoReify=*/1,
                           /*autoInfer=*/1,
                           /*declareInfer=*/1> {
   let summary = "Element-wise negation: y = -x";
@@ -1668,7 +1668,7 @@ def Hip_WhereOp : Hip_DpsOp<"where", /*traits=*/[],
 
 def Hip_CastOp : Hip_DpsOp<"cast", /*traits=*/[],
                            /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
+                           /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Type conversion operation";
@@ -2393,7 +2393,7 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[],
 
 def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
                              /*outsAccessor=*/"Y",
-                             /*autoReify=*/0,
+                             /*autoReify=*/1,
                              /*autoInfer=*/1,
                              /*declareInfer=*/1> {
   let summary = "Cumulative sum along an axis";
@@ -2730,7 +2730,7 @@ def Hip_GatherNDOp : Hip_DpsOp<"gather_nd", /*traits=*/[],
 
 def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd", /*traits=*/[],
                                 /*outsAccessor=*/"Output",
-                                /*autoReify=*/0,
+                                /*autoReify=*/1,
                                 /*autoInfer=*/1,
                                 /*declareInfer=*/1> {
   let summary = "ScatterND: scatter updates into a data tensor using N-D index tuples";
@@ -2789,7 +2789,7 @@ def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd", /*traits=*/[],
 
 def Hip_SignOp : Hip_DpsOp<"sign", /*traits=*/[],
                            /*outsAccessor=*/"Y",
-                           /*autoReify=*/0,
+                           /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Element-wise sign: y = sign(x)";
@@ -2863,7 +2863,7 @@ def Hip_ModOp : Hip_DpsOp<"mod", /*traits=*/[],
 
 def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
                            /*outsAccessor=*/"Y",
-                           /*autoReify=*/0,
+                           /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Total element count of a tensor (ONNX Size, dynamic-shape path)";
