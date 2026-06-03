@@ -59,6 +59,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
     hip/elementwise_clip_kernel.hip
+    hip/reduce_mean_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

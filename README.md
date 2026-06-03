@@ -80,6 +80,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Relu | Decomposed → Less + Where |
 | LeakyRelu | Decomposed → Mul + Less + Where |
 | Clip | Custom HIP Kernel |
+| ReduceMean | Custom HIP Kernel |
 
 ### Compiler-Optimized Operations
 

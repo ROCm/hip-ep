@@ -291,6 +291,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/clip.cpp runtime_clip.bc)
+    compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
 
     # Compile MemoryManager sources to bitcode so model DLLs need no separate mm.lib.
     # These files include private mm headers from lib/MemoryManager/ and public mm
@@ -402,6 +403,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_clip.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_config.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_hal.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_handle_table.bc
