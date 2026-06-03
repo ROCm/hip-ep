@@ -24,9 +24,12 @@ using namespace mlir::hip;
 
 namespace {
 
-/// Read the shape of `v` if shaped, else return empty (treated as a graceful
-/// bail-out by callers below). Duplicated in `HipDialect.cpp`; the two
-/// callers may diverge later (verify rejects non-shaped, reify bails).
+/// Read the shape of `v` if shaped, else return empty. Callers below treat
+/// empty as a graceful bail-out (return failure() and let the caller of
+/// reifyResultShapes fall back to using the existing result type's shape).
+/// `HipDialect.cpp` carries a near-twin used in `verify()`; keeping the
+/// two distinct lets verify reject non-shaped values while reify bails
+/// silently if the contract ever loosens.
 ArrayRef<int64_t> getShapeOf(Value v) {
   if (auto t = dyn_cast<RankedTensorType>(v.getType()))
     return t.getShape();

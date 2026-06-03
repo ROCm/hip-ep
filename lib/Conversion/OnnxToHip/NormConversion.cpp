@@ -106,8 +106,8 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
   // Create init tensor
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
-  // Create hip.rms_norm operation. Result type inferred from `init` via
-  // InferTypeOpInterface — DPS contract: result type == outs operand type.
+  // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
+  // result type == outs operand type.
   auto hipOp =
       mlir::hip::RmsNormOp::create(rewriter, loc, context, input, scale, init,
                                    axisI64Attr, epsilonAttr, stashTypeI64Attr);
