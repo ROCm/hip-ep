@@ -75,8 +75,7 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 /// Reify the result shape of a shape-preserving DPS op as the runtime
 /// shape of `source`: each static dim becomes `IndexAttr`, each dynamic
 /// dim becomes `tensor.dim %source, %i`. Used by ops whose result has
-/// the same shape as one designated input (e.g. rope, rms_norm
-/// single-output, qmoe).
+/// the same shape as one designated input (e.g. rope, rms_norm, qmoe).
 ///
 /// `source` must be a `RankedTensorType`-typed Value -- this helper is
 /// called from `reifyResultShapes` impls, which are invoked only in
