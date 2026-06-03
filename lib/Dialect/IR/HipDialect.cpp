@@ -816,6 +816,20 @@ void GeluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// LeakyReluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LeakyReluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void LeakyReluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ReciprocalOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
@@ -858,6 +872,18 @@ void SubOp::getEffects(
 MutableOperandRange MinOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void MinOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MaxOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MaxOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void MaxOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

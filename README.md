@@ -70,6 +70,9 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | QMoE (com.microsoft) | Custom HIP Kernel |
 | LinearAttention (com.microsoft) | Custom HIP Kernel |
 | CausalConvWithState (com.microsoft) | MIOpen |
+| Relu | Decomposed → Less + Where |
+| LeakyRelu | Custom HIP Kernel |
+| Clip | Custom HIP Kernel |
 
 ### Compiler-Optimized Operations
 

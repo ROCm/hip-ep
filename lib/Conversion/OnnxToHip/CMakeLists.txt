@@ -35,6 +35,7 @@ add_library(OnnxToHip STATIC
   DivConversion.cpp
   ReduceMaxConversion.cpp
   MinConversion.cpp
+  MaxConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   SinConversion.cpp
@@ -56,6 +57,9 @@ add_library(OnnxToHip STATIC
   NonZeroConversion.cpp
   ConcatConversion.cpp
   LoopOutline.cpp
+  ReluConversion.cpp
+  LeakyReluConversion.cpp
+  ClipConversion.cpp
 )
 
 add_dependencies(OnnxToHip
