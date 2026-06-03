@@ -77,6 +77,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | AveragePool | Custom HIP Kernel |
 | LpPool | Custom HIP Kernel |
 | Resize | Custom HIP Kernel |
+| Relu | Decomposed → Less + Where |
 
 ### Compiler-Optimized Operations
 
