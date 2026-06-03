@@ -950,6 +950,16 @@ fused_gqa_decode_kernel(
 //===----------------------------------------------------------------------===//
 // Grid: (num_q_tiles * B, H). Block: 128 threads = 4 waves of 32.
 // WMMA 16x16x16 tile GEMMs, online softmax with exp2f, double-buffered KV.
+//
+// HIPCK_NO_RDNA3_WMMA gate: nothing in lib/Runtime/real/gqa.cpp dispatches
+// to `hip_gqa_fused_prefill` today (the prefill path is decomposed
+// hipBLASLt + softmax, see the note around gqa.cpp:520). The fused
+// prefill kernel here is preserved only for an eventual port to GPU
+// families where the legacy 16x16x16 F16 WMMA builtin does not lower.
+// On builds without RDNA 3 WMMA support, the kernel + launcher are
+// dropped and a trap-stub launcher is provided so undefined references
+// don't break linking.
+#if !defined(HIPCK_NO_RDNA3_WMMA)
 
 static constexpr int PREFILL_BQ   = 32;
 static constexpr int PREFILL_D    = 128;
@@ -1238,6 +1248,28 @@ extern "C" int hip_gqa_fused_prefill(
       B, H, G, sq, skv, max_seq, past_len, scale);
   return hipGetLastError();
 }
+
+#else  // HIPCK_NO_RDNA3_WMMA
+
+// Trap-stub: keeps the extern "C" symbol so the EP / model.dll link
+// closure stays satisfied. No caller in lib/Runtime/real/gqa.cpp
+// reaches this today — if somebody adds a fused-prefill dispatch in
+// the future without porting the kernel to gfx12 first, the early
+// return signals "not implemented on this build" to the caller.
+extern "C" int hip_gqa_fused_prefill(
+    void* /*stream_ptr*/, const void* /*Q*/, const void* /*Kcache*/,
+    const void* /*Vcache*/, void* /*O*/, int /*B*/, int /*H*/, int /*G*/,
+    int /*sq*/, int /*skv*/, int /*max_seq*/, int /*past_len*/,
+    float /*scale*/) {
+  fprintf(stderr,
+          "[custom_kernels] hip_gqa_fused_prefill: built without RDNA 3 "
+          "WMMA support (HIPCK_NO_RDNA3_WMMA=1). lib/Runtime/real/gqa.cpp "
+          "uses the decomposed hipBLASLt path for prefill — if you hit "
+          "this, that dispatcher regressed.\n");
+  return -1;
+}
+
+#endif  // HIPCK_NO_RDNA3_WMMA
 
 //===----------------------------------------------------------------------===//
 // FA-2 Split-K GQA Decode Kernel (Phase 1)
