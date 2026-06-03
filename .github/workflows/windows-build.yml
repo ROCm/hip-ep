@@ -22,7 +22,10 @@ permissions:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # windows-latest now serves the VS 2026 (VS 18) image, which the pinned
+    # onnxruntime-genai / onnxruntime_extensions does not build under. Pin to
+    # the VS 2022 image per actions/runner-images#14017.
+    runs-on: windows-2022
     # Cancel the build job when a newer commit lands on the same PR ref to
     # save runner minutes. gpu-test deliberately does NOT inherit this rule
     # (see its own concurrency block below) so an in-progress GPU run keeps
@@ -379,11 +382,12 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          # Reuse PREBUILT_CACHE_VERSION as the OGA cache version too: when
-          # the OGA build outputs change shape (e.g. wheel added), bumping
-          # PREBUILT_CACHE_VERSION invalidates both ORT and OGA caches in
-          # one step instead of needing two separate version knobs.
-          key: oga-dml-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # Keyed on PREBUILT_CACHE_VERSION (shared with the ORT cache) plus an
+          # OGA-local token. Bump the OGA token when only the OGA artifact set
+          # changes shape (e.g. model_mm / benchmark_multimodal.py added) so the
+          # OGA build reruns without forcing an ORT source rebuild; bump
+          # PREBUILT_CACHE_VERSION when the ORT side changes.
+          key: oga-dml-v${{ env.PREBUILT_CACHE_VERSION }}-mm1-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -400,7 +404,7 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          ORT_HOME="${{ runner.workspace }}/oga-ort-home"
+          ORT_HOME="${{ github.workspace }}/source-oga/ort"
           mkdir -p "$ORT_HOME/include" "$ORT_HOME/lib"
           PREBUILT="${{ runner.workspace }}/prebuilt-local"
           cp -r "$PREBUILT/include/onnxruntime/"* "$ORT_HOME/include/"
@@ -439,6 +443,26 @@ jobs:
           fi
           cp "$OGA_WHEEL" "${{ runner.workspace }}/oga-artifacts/"
           echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
+
+          # build.py --skip_examples leaves examples/c unbuilt. Configure it as
+          # a standalone project against the just-built OGA lib + ORT_HOME and
+          # build only model_mm. build.py's own build_examples ignores CXXFLAGS,
+          # so set -DCMAKE_CXX_FLAGS=-FS here directly to force synchronous
+          # compiler-PDB writes (the parallel model_mm.cpp / common.cpp compiles
+          # otherwise clash on vc140.pdb -> C1041).
+          cmake -S "${{ github.workspace }}/source-oga/examples/c" \
+            -B "${{ runner.workspace }}/build-oga-examples" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DMODEL_MM=ON -DCMAKE_CXX_FLAGS=-FS \
+            -DORT_INCLUDE_DIR="$ORT_HOME/include" \
+            -DORT_LIB_DIR="$ORT_HOME/lib" \
+            -DOGA_INCLUDE_DIR="${{ github.workspace }}/source-oga/src" \
+            -DOGA_LIB_DIR="$OGA_OUT"
+          cmake --build "${{ runner.workspace }}/build-oga-examples" --target model_mm
+          cp "${{ runner.workspace }}/build-oga-examples/model_mm.exe" \
+            "${{ runner.workspace }}/oga-artifacts/"
+
+          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_multimodal.py" \
+            "${{ runner.workspace }}/oga-artifacts/"
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -511,6 +535,8 @@ jobs:
           # ---------------------------------------------------------------
           cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
 
           # ---------------------------------------------------------------
           # Python wheels (ORT + OGA cp314) — bundled into the same artifact
