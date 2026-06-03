@@ -45,14 +45,15 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 //                     (walks `getDpsInits()`, reads each init's runtime
 //                     shape — covers the typical same-shape DPS case).
 //                     Default 1. Ops with a tighter shape source opt
-//                     out with `autoReify=0` and write their own body
-//                     in `HipReifyResultShapesImpl.cpp`. Examples:
-//                     matmul (recomputes M/N from input operands);
-//                     rope, rms_norm, qmoe (source dims from `$input`
-//                     so refinement propagates from upstream rather
-//                     than freezing at the destination buffer's
-//                     allocation-time shape); matmul_nbits, gemm
-//                     (mixed input + attribute dims).
+//                     out with `autoReify=0` and either pass a
+//                     `customReifyBody` (sub-bases) or write a
+//                     hand-written body in `HipReifyResultShapesImpl.cpp`.
+//                     Examples: matmul (recomputes M/N from input
+//                     operands); rope, rms_norm, qmoe (source dims
+//                     from `$input` so refinement propagates from
+//                     upstream rather than freezing at the destination
+//                     buffer's allocation-time shape); matmul_nbits,
+//                     gemm (mixed input + attribute dims).
 //   `autoInfer`     : when 1, emit a per-op `inferReturnTypes` that
 //                     pushes the outs operand's tensor type into
 //                     `results` (or pushes nothing for memref mode, so
@@ -74,6 +75,17 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 //                     overload (lets converter callsites drop the
 //                     explicit `resultType` argument). Default 0; ops
 //                     opt in in lockstep with `autoInfer`.
+//   `customReifyBody` : optional string; when non-empty, replaces the
+//                     `autoReify` body with a custom one. The string
+//                     is the function BODY (between `{` and `}`) of
+//                     `<Op>::reifyResultShapes(OpBuilder &b,
+//                     ReifiedRankedShapedTypeDims &reified)`. Used by
+//                     parameterized sub-bases (`Hip_DpsOp_Reduction`,
+//                     `Hip_DpsOp_Broadcast`) to inject per-shape-class
+//                     boilerplate without each leaf op duplicating it.
+//                     Mutually exclusive with `autoReify=1` (sub-bases
+//                     pass `autoReify=0` and a non-empty
+//                     `customReifyBody`). Default `""`.
 //
 // Generated dispatcher example for matmul:
 //   - `extraClassDefinition` produces:
@@ -94,7 +106,8 @@ class Hip_DpsOp<string mnemonic,
                 string outsAccessor = "Output",
                 bit autoReify = 1,
                 bit autoInfer = 0,
-                bit declareInfer = 0> :
+                bit declareInfer = 0,
+                string customReifyBody = ""> :
     Hip_Op<mnemonic, !listconcat([
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
@@ -110,14 +123,24 @@ class Hip_DpsOp<string mnemonic,
       traits)> {
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
   let extraClassDefinition = !strconcat(
-    !if(autoReify, [{
-      ::mlir::LogicalResult $cppClass::reifyResultShapes(
-          ::mlir::OpBuilder &b,
-          ::mlir::ReifiedRankedShapedTypeDims &reified) {
-        return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
-            .reifyResultShapes(b, reified);
-      }
-    }], ""),
+    !if(!ne(customReifyBody, ""),
+        !strconcat([{
+          ::mlir::LogicalResult $cppClass::reifyResultShapes(
+              ::mlir::OpBuilder &b,
+              ::mlir::ReifiedRankedShapedTypeDims &reified) {
+        }],
+        customReifyBody,
+        [{
+          }
+        }]),
+        !if(autoReify, [{
+          ::mlir::LogicalResult $cppClass::reifyResultShapes(
+              ::mlir::OpBuilder &b,
+              ::mlir::ReifiedRankedShapedTypeDims &reified) {
+            return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+                .reifyResultShapes(b, reified);
+          }
+        }], "")),
     !if(autoInfer, !strconcat([{
       ::llvm::LogicalResult $cppClass::inferReturnTypes(
           ::mlir::MLIRContext *,
@@ -137,6 +160,31 @@ class Hip_DpsOp<string mnemonic,
     }]), "")
   );
 }
+
+// Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
+// reduce_max, reduce_prod). Auto-emits a `reifyResultShapes` body
+// that calls `mlir::hip::reifyReductionShape` — which tries
+// `reifyReductionWithKeepdims` first to recover per-input-dim
+// mappings from a constant `axes` operand and falls back to the
+// shared `HipDpsOp` outs-lift default when `axes` is not a
+// recognised constant. Each leaf op contributes only its TableGen
+// declaration; no per-op `.cpp` thunk is needed.
+//
+// Contract on the leaf op: must declare operands `$data` (input
+// tensor), `$axes` (rank-1 i64 tensor), `$output` (DPS init),
+// integer attributes `$keepdims` and `$noop_with_empty_axes`.
+class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
+    Hip_DpsOp<mnemonic, traits,
+              /*outsAccessor=*/"Output",
+              /*autoReify=*/0,
+              /*autoInfer=*/1,
+              /*declareInfer=*/1,
+              /*customReifyBody=*/[{
+                return ::mlir::hip::reifyReductionShape(
+                    b, getLoc(), getData(), getAxes(),
+                    getKeepdims(), getNoopWithEmptyAxes(),
+                    getOperation(), reified);
+              }]>;
 
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
@@ -1700,11 +1748,7 @@ def Hip_CastOp : Hip_DpsOp<"cast", /*traits=*/[],
   }];
 }
 
-def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum", /*traits=*/[],
-                                /*outsAccessor=*/"Output",
-                                /*autoReify=*/0,
-                                /*autoInfer=*/1,
-                                /*declareInfer=*/1> {
+def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
   let summary = "Reduce tensor by summing along axes";
   let description = [{
     Computes the sum of input tensor elements along the specified axes.
@@ -1739,11 +1783,7 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum", /*traits=*/[],
   }];
 }
 
-def Hip_ReduceMaxOp : Hip_DpsOp<"reduce_max", /*traits=*/[],
-                                /*outsAccessor=*/"Output",
-                                /*autoReify=*/0,
-                                /*autoInfer=*/1,
-                                /*declareInfer=*/1> {
+def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
   let summary = "Reduce tensor by taking maximum along axes";
   let description = [{
     Computes the max of input tensor elements along the specified axes.
@@ -2555,11 +2595,7 @@ def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
   }];
 }
 
-def Hip_ReduceProdOp : Hip_DpsOp<"reduce_prod", /*traits=*/[],
-                                 /*outsAccessor=*/"Output",
-                                 /*autoReify=*/0,
-                                 /*autoInfer=*/1,
-                                 /*declareInfer=*/1> {
+def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
   let summary = "Reduce tensor by multiplying elements along axes";
   let description = [{
     Computes the product of input tensor elements along the specified axes.

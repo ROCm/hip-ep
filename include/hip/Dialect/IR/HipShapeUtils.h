@@ -8,6 +8,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -175,6 +176,27 @@ LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
                                          Value axes, int64_t keepdims,
                                          int64_t noopWithEmptyAxes,
                                          SmallVectorImpl<OpFoldResult> &out);
+
+/// One-shot reify body for ONNX-style reduction ops (reduce_sum,
+/// reduce_max, reduce_prod). Tries `reifyReductionWithKeepdims` first
+/// to recover per-input-dim mappings from a constant `axes` operand.
+/// When `axes` is not a recognised constant, falls back to the shared
+/// `HipDpsOp` outs-lift default so the reify interface always
+/// succeeds (the only honest answer when we cannot decide which dims
+/// were reduced is the type of the `outs` operand the converter
+/// already picked).
+///
+/// `op` must implement both `HipDpsOp` (so the fallback can walk
+/// `getDpsInits()`) and have a `RankedTensorType` `data` operand.
+/// Returns `failure()` only on the no-tensor-results / non-tensor
+/// `data` defensive paths; otherwise always returns `success()`.
+///
+/// Used as the body of `Hip_DpsOp_Reduction`'s auto-emitted reify
+/// dispatcher; see `Hip_DpsOp_Reduction` in `HipOps.td`.
+LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
+                                  Value axes, int64_t keepdims,
+                                  int64_t noopWithEmptyAxes, Operation *op,
+                                  ReifiedRankedShapedTypeDims &reified);
 
 } // namespace hip
 } // namespace mlir
