@@ -437,44 +437,32 @@ ModOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
-// Shape-changing ops (PR #263 commit 3):
-// transpose, gather, gather_nd, reduce_sum, reduce_max, reduce_prod,
-// pad, tile, expand, slice, range
+// Shape-changing ops with bespoke per-input-dim reify:
+//   transpose, gather, gather_nd, reduce_sum, reduce_max, reduce_prod
 //
-// Two-tier strategy:
+// These ops own per-input-dim mapping. Helpers in `HipShapeUtils` walk
+// the input's static shape and emit an `OpFoldResult` per output dim
+// that points back at the contributing input dim (or a static
+// `IndexAttr`). This is the chained-refinement case where a preceding
+// op's reify already tightened the input type.
+//   transpose, gather, gather_nd: shape pieces come directly from
+//   static input shapes + structural attrs (perm / axis / batch_dims).
+//   reduce_sum/max/prod: same idea, but the axes-list arrives via a
+//   `Value` operand rather than an attr; the helper introspects it as
+//   an `arith.constant` (which is what the OnnxToHip converter
+//   materialises). On non-constant axes the op falls through to a
+//   no-op fallback that lifts the DPS `outs` operand's own shape, so
+//   the reify interface always succeeds.
 //
-//  Tier 1 — real per-input-dim mapping. Helpers in `HipShapeUtils`
-//  walk the input's static shape and emit an `OpFoldResult` per output
-//  dim that points back at the contributing input dim (or a static
-//  `IndexAttr`). This is the chained-refinement case where a
-//  preceding op's reify already tightened the input type.
-//    transpose, gather, gather_nd: shape pieces come directly from
-//    static input shapes + structural attrs (perm / axis / batch_dims).
-//    reduce_sum/max/prod: same idea, but the axes-list arrives via a
-//    `Value` operand rather than an attr; the helper introspects it as
-//    an `arith.constant` (which is what the OnnxToHip converter
-//    materialises). On non-constant axes the op falls through to the
-//    Tier-2 fallback so the reify interface still succeeds.
+// Sibling ops whose output dims are arithmetic functions of operand
+// values (pad, tile, expand, slice, range) keep their default
+// `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
+// `getDpsInits()` and lifts each output's shape, which is identical
+// to the no-op fallback used here as the reduction tail. Proper
+// per-op arithmetic for those (e.g. `tensor::PadOp`'s
+// `affine.apply (d0 + d1 + d2)` recipe) is deferred.
 //
-//  Tier 2 — no-op fallback. For ops whose output dims are arithmetic
-//  functions of operand values (pad: data+pads_begin+pads_end; tile:
-//  input*repeats; expand: max(input, target_shape); slice:
-//  per-axis slice arithmetic; range: ceil((limit-start)/delta)),
-//  reify lifts the DPS `outs` operand's own shape via
-//  `reifyElementwiseSameShape(getOutput())`. Static dims become
-//  `IndexAttr` (the common case after ONNX shape inference); dynamic
-//  dims emit `tensor.dim %output, %i` — a no-op tightening that
-//  doesn't add signal beyond what's already on the result type, but
-//  keeps every Hip_DpsOp wired with a non-failing reify implementation
-//  (the contract a future backward dim-origin composer relies on).
-//  This mirrors the upstream IREE convention: `LinalgExtOp`'s default
-//  `reifyResultShapes` walks `getDpsInits()` and lifts each output's
-//  shape — the same fallback we use here for ops without a specialized
-//  arithmetic helper. Proper per-op arithmetic for these five (e.g.
-//  `tensor::PadOp`'s `affine.apply (d0 + d1 + d2)` recipe) is deferred
-//  to a follow-up PR.
-//
-// Before (transpose, perm-driven mapping, Tier 1):
+// Before (transpose, perm-driven mapping):
 //   %t = hip.transpose(%ctx) ins(%x : tensor<2x?x4096xf16>)
 //                            outs(%out : tensor<?x?x?xf16>)
 //                            {perm = [2, 0, 1]} : tensor<?x?x?xf16>
@@ -483,7 +471,7 @@ ModOp::reifyResultShapes(OpBuilder &b,
 //   dim 1 -> 2 : index               (static, from %x.shape[0])
 //   dim 2 -> tensor.dim %x, %c1      (dynamic, from %x.shape[1])
 //
-// Before (reduce_sum with constant axes, keepdims=1, Tier 1):
+// Before (reduce_sum with constant axes, keepdims=1):
 //   %a = arith.constant dense<[1]> : tensor<1xi64>
 //   %r = hip.reduce_sum(%ctx) ins(%x, %a : tensor<?x4096xf16>,
 //                                            tensor<1xi64>)
@@ -493,17 +481,6 @@ ModOp::reifyResultShapes(OpBuilder &b,
 // After (reified result shape):
 //   dim 0 -> tensor.dim %x, %c0     (passes through from input)
 //   dim 1 -> 1 : index              (axes-listed dim → keepdims=1 → 1)
-//
-// Before (pad, Tier-2 no-op fallback — pad arithmetic deferred):
-//   %p = hip.pad(%ctx) ins(%x, %pads : tensor<?x4096xf16>,
-//                                       tensor<4xi64>)
-//                      outs(%out : tensor<?x4100xf16>)
-//                      {mode = "constant"} : tensor<?x4100xf16>
-// After (reified result shape — lifted from `%out`, not computed):
-//   dim 0 -> tensor.dim %out, %c0   (dynamic dim of `outs`; folds away
-//                                    if a downstream consumer already
-//                                    knows the result type)
-//   dim 1 -> 4100 : index           (static dim of `outs`)
 //===----------------------------------------------------------------------===//
 
 LogicalResult TransposeOp::reifyResultShapes(
@@ -567,11 +544,15 @@ LogicalResult GatherNDOp::reifyResultShapes(
 
 namespace {
 
-// Shared Tier-2 fallback for shape-changing ops without per-op
-// arithmetic helpers: just lift the DPS `outs` operand's own shape.
-// Static dims fall out as `IndexAttr`; dynamic dims emit
+// Shared no-op fallback that lifts the DPS `outs` operand's own
+// shape. Static dims fall out as `IndexAttr`; dynamic dims emit
 // `tensor.dim %output, %i` — a no-op tightening that nonetheless
 // keeps the reify interface non-failing for downstream consumers.
+// Used as the tail for reductions when `axes` is not a recognised
+// constant (the only case where a per-input-dim reify is impossible
+// for those ops). Sibling outs-lift ops (pad / tile / expand / slice
+// / range) are wired through the shared `Hip_DpsOp` auto-emit path
+// in `HipDpsOpInterface.cpp` and do not call this helper.
 LogicalResult reifyDpsOutShape(OpBuilder &b, Location loc, Value output,
                                Operation *op,
                                ReifiedRankedShapedTypeDims &out) {
@@ -591,8 +572,8 @@ LogicalResult reifyDpsOutShape(OpBuilder &b, Location loc, Value output,
 }
 
 // Shared reduction reify body. Tries `reifyReductionWithKeepdims`; if
-// that fails (axes is not a recognised constant), falls back to the
-// Tier-2 `reifyDpsOutShape` so the reify interface still succeeds.
+// that fails (axes is not a recognised constant), falls back to
+// `reifyDpsOutShape` so the reify interface still succeeds.
 LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
                                   Value axes, int64_t keepdims,
                                   int64_t noopWithEmptyAxes, Value output,
@@ -634,34 +615,4 @@ LogicalResult ReduceProdOp::reifyResultShapes(
   return reifyReductionShape(b, getLoc(), getData(), getAxes(), getKeepdims(),
                              getNoopWithEmptyAxes(), getOutput(), *this,
                              reifiedReturnShapes);
-}
-
-LogicalResult
-PadOp::reifyResultShapes(OpBuilder &b,
-                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
-}
-
-LogicalResult
-TileOp::reifyResultShapes(OpBuilder &b,
-                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
-}
-
-LogicalResult
-ExpandOp::reifyResultShapes(OpBuilder &b,
-                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
-}
-
-LogicalResult
-SliceOp::reifyResultShapes(OpBuilder &b,
-                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
-}
-
-LogicalResult
-RangeOp::reifyResultShapes(OpBuilder &b,
-                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return reifyDpsOutShape(b, getLoc(), getOutput(), *this, reifiedReturnShapes);
 }
