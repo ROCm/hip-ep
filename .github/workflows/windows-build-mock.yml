@@ -36,7 +36,6 @@ jobs:
       # across both workflows. The build recipes below are byte-identical to
       # windows-build.yml's, so identical cache keys resolve to identical
       # artifacts and each dep's expensive cold build runs once globally.
-      PREBUILT_CACHE_VERSION: "4"
       LLVM_COMMIT: "4434dabb69916856b824f68a64b029c67175e532"
       FLATBUFFERS_TAG: v25.12.19
       PROTO_TAG: v34.0
@@ -78,35 +77,35 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/ort-install
-          key: dep-ort-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Cache llvm-install
         id: cache-llvm
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/llvm-install
-          key: dep-llvm-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.LLVM_COMMIT }}
+          key: dep-llvm-${{ env.LLVM_COMMIT }}
 
       - name: Cache protobuf-install
         id: cache-protobuf
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/protobuf-install
-          key: dep-protobuf-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.PROTO_TAG }}
+          key: dep-protobuf-${{ env.PROTO_TAG }}
 
       - name: Cache flatbuffers-install
         id: cache-flatbuffers
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/flatbuffers-install
-          key: dep-flatbuffers-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.FLATBUFFERS_TAG }}
+          key: dep-flatbuffers-${{ env.FLATBUFFERS_TAG }}
 
       - name: Cache gtest-install
         id: cache-gtest
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/gtest-install
-          key: dep-gtest-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.GTEST_VERSION }}
+          key: dep-gtest-${{ env.GTEST_VERSION }}
 
       # -----------------------------------------------------------------------
       # llvm-lit.py requires the lit pip package at runtime. Pin Python to
