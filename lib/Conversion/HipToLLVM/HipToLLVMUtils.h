@@ -96,6 +96,7 @@ inline constexpr const char *kWrapTile = "wrap_tile";
 inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
 inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
+inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapLess = "wrap_less";
 inline constexpr const char *kWrapGatherND = "wrap_gather_nd";
 inline constexpr const char *kWrapSign = "wrap_sign";
@@ -126,6 +127,13 @@ inline constexpr int64_t kActivationSoftplus = 3;
 inline constexpr int64_t kGlobalPoolAverage = 0;
 inline constexpr int64_t kGlobalPoolMax = 1;
 inline constexpr int64_t kGlobalPoolLp = 2;
+
+// Window-pool reduction mode constants (hip.pool / wrap_pool).
+// Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
+// and the `pool_mode` constants used in OnnxToHip/PoolConversion.cpp.
+inline constexpr int64_t kPoolAverage = 0;
+inline constexpr int64_t kPoolMax = 1;
+inline constexpr int64_t kPoolLp = 2;
 
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
 // Values must match the #defines in hipdnn_ep_runtime.h.
@@ -407,6 +415,8 @@ void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
+void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir
