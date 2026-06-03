@@ -213,9 +213,9 @@ struct ResizeToHip : public mlir::RewritePattern {
     auto coordAttr = rewriter.getI64IntegerAttr(coordId);
     auto nearestAttr = rewriter.getI64IntegerAttr(nearestId);
 
-    auto hipOp = mlir::hip::ResizeOp::create(rewriter, loc, outputType, context,
-                                             input, init, modeAttr, coordAttr,
-                                             nearestAttr);
+    auto hipOp =
+        mlir::hip::ResizeOp::create(rewriter, loc, outputType, context, input,
+                                    init, modeAttr, coordAttr, nearestAttr);
     rewriter.replaceOp(op, hipOp.getResult(0));
     return mlir::success();
   }

@@ -2,7 +2,8 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- ErfGeluFusion.cpp - Fold erf-form GELU primitive chain ---------------===//
+//===- ErfGeluFusion.cpp - Fold erf-form GELU primitive chain
+//---------------===//
 //
 // Some ONNX exports inline the function body of `Gelu(approximate="none")`
 // (the exact erf-based definition) into primitive ops:

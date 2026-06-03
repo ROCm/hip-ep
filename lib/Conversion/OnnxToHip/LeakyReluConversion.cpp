@@ -80,8 +80,8 @@ struct LeakyReluDecompose : public mlir::RewritePattern {
     mulState.addTypes(xType);
     mlir::Value alphaX = rewriter.create(mulState)->getResult(0);
 
-    auto condType = mlir::RankedTensorType::get(xType.getShape(),
-                                                rewriter.getI1Type());
+    auto condType =
+        mlir::RankedTensorType::get(xType.getShape(), rewriter.getI1Type());
     mlir::OperationState lessState(loc, "onnx.Less");
     lessState.addOperands({x, zero});
     lessState.addTypes(condType);

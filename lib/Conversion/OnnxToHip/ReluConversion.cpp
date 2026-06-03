@@ -12,8 +12,8 @@
 //     %y = "onnx.Relu"(%x) : (tensor<...xT>) -> tensor<...xT>
 //
 //   After:
-//     %zero = "onnx.Constant"() {value = dense<0> : tensor<T>} : () -> tensor<T>
-//     %y    = "onnx.Max"(%x, %zero) : (tensor<...xT>, tensor<T>)
+//     %zero = "onnx.Constant"() {value = dense<0> : tensor<T>} : () ->
+//     tensor<T> %y    = "onnx.Max"(%x, %zero) : (tensor<...xT>, tensor<T>)
 //                                         -> tensor<...xT>
 //
 //===----------------------------------------------------------------------===//
