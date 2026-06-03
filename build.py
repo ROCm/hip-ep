@@ -7,7 +7,7 @@
 
 Downloads dependencies and builds the project:
   1. Downloads and extracts TheRock ROCm SDK
-  2. Downloads and extracts prebuilt LLVM/MLIR/FlatBuffers/Protobuf
+  2. Builds LLVM/MLIR/LLD, FlatBuffers and Protobuf from source
   3. Downloads and extracts ONNX Runtime pre-built binaries
   4. Configures, builds, and installs via CMake
 
@@ -67,13 +67,12 @@ VULKAN_INSTALLER_URL = (
     f"{VULKAN_INSTALLER_NAME}?Human=true"
 )
 
-# Prebuilt deps — keep in sync with scripts/setup-prebuilt.sh
-_PREBUILT_BASE = "https://github.com/wcy123/llvm-mlir-prebuilt/releases/download"
-_PREBUILTS = [
-    ("llvm-22.1.0-release", "llvm-22.1.0-release-windows-x64.zip"),
-    ("protobuf-34.0-release", "protobuf-34.0-release-windows-x64.zip"),
-    ("flatbuffers-25.12.19-release", "flatbuffers-25.12.19-release-windows-x64.zip"),
-]
+# Build-time deps built from source — keep in sync with
+# scripts/setup-prebuilt.sh and .github/workflows/windows-build.yml.
+# LLVM is built from this upstream llvm/llvm-project commit (== 22.1.0).
+_LLVM_COMMIT = "4434dabb69916856b824f68a64b029c67175e532"
+_PROTO_TAG = "v34.0"
+_FLATBUFFERS_TAG = "v25.12.19"
 
 
 # ---------------------------------------------------------------------------
@@ -192,24 +191,193 @@ def fetch_therock():
 
 
 # ---------------------------------------------------------------------------
-# Prebuilt LLVM / MLIR / Protobuf / FlatBuffers
-# Tags and assets mirror scripts/setup-prebuilt.sh — keep in sync.
+# LLVM / MLIR / LLD + Protobuf + FlatBuffers, built from source into DEPS.
+# Recipes mirror scripts/setup-prebuilt.sh and the CI workflow — keep in sync.
 # ---------------------------------------------------------------------------
 
 
+def _build_dep_install(name, configure_args):
+    """cmake configure (args include -S/-B/-DCMAKE_INSTALL_PREFIX) then install."""
+    build_dir = configure_args[configure_args.index("-B") + 1]
+    subprocess.run(["cmake", *configure_args], check=True)
+    subprocess.run(["cmake", "--build", build_dir, "--target", "install"], check=True)
+    log(f"  {name}: done.")
+
+
 def fetch_prebuilt_deps():
-    log("Setting up prebuilt dependencies (LLVM, Protobuf, FlatBuffers) ...")
-    for tag, asset in _PREBUILTS:
-        sentinel = DEPS / f".{tag}.ok"
-        if sentinel.exists():
-            log(f"  {tag}: already installed.")
-            continue
-        url = f"{_PREBUILT_BASE}/{tag}/{asset}"
-        archive = CACHE / asset
-        download(url, archive)
-        _zip_extract(archive, DEPS)
-        sentinel.touch()
-        log(f"  {tag}: done.")
+    """Build LLVM/MLIR/LLD, protobuf and flatbuffers from source into DEPS."""
+    log(
+        "Building build-time dependencies (LLVM, Protobuf, FlatBuffers) from source ..."
+    )
+    _ensure_msvc_env()
+    for tool in ("git", "cmake", "ninja"):
+        if not shutil.which(tool):
+            log(f"  ERROR: {tool} not found on PATH.")
+            sys.exit(1)
+    DEPS.mkdir(parents=True, exist_ok=True)
+    src_root = CACHE / "dep-src"
+    src_root.mkdir(parents=True, exist_ok=True)
+
+    common = []
+    if shutil.which("ccache"):
+        common = [
+            "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+            "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+        ]
+
+    # LLVM / MLIR / LLD — only mlir;lld + the X86 backend are needed (the
+    # project find_package()s LLVM/MLIR/LLD, no Clang). /MT matches the EP.
+    if (DEPS / "lib" / "cmake" / "mlir" / "MLIRConfig.cmake").exists():
+        log("  LLVM/MLIR/LLD: already installed.")
+    else:
+        log(
+            f"  Building LLVM/MLIR/LLD (commit {_LLVM_COMMIT}) — multi-hour cold build ..."
+        )
+        llvm_src = src_root / "llvm-project"
+        if not (llvm_src / ".git").exists():
+            subprocess.run(["git", "init", str(llvm_src)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(llvm_src),
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/llvm/llvm-project.git",
+                ],
+                check=True,
+            )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(llvm_src),
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                _LLVM_COMMIT,
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(llvm_src), "checkout", "FETCH_HEAD"], check=True
+        )
+        _build_dep_install(
+            "LLVM/MLIR/LLD",
+            [
+                "-G",
+                "Ninja",
+                "-S",
+                str(llvm_src / "llvm"),
+                "-B",
+                str(src_root / "llvm-build"),
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DLLVM_ENABLE_PROJECTS=mlir;lld",
+                "-DLLVM_TARGETS_TO_BUILD=X86",
+                "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                f"-DCMAKE_INSTALL_PREFIX={DEPS}",
+                "-DLLVM_ENABLE_RTTI=OFF",
+                "-DLLVM_ENABLE_ZLIB=OFF",
+                "-DLLVM_ENABLE_ZSTD=OFF",
+                "-DLLVM_INCLUDE_TESTS=OFF",
+                "-DLLVM_INCLUDE_EXAMPLES=OFF",
+                "-DLLVM_INCLUDE_BENCHMARKS=OFF",
+                "-DLLVM_BUILD_TOOLS=ON",
+                "-DLLVM_INSTALL_UTILS=OFF",
+                *common,
+            ],
+        )
+
+    # protobuf (+ bundled abseil). CMAKE_CXX_STANDARD=17 is REQUIRED on MSVC:
+    # abseil pins its installed options.h ABI from a configure-time C++ probe;
+    # without it the libs (C++17, std::string_view) and the installed header
+    # (own string_view) disagree -> unresolved symbols at EP link time.
+    if (DEPS / "lib" / "cmake" / "protobuf" / "protobuf-config.cmake").exists():
+        log("  protobuf: already installed.")
+    else:
+        log(f"  Building protobuf {_PROTO_TAG} ...")
+        pb_src = src_root / "protobuf"
+        if pb_src.exists():
+            shutil.rmtree(pb_src)
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                _PROTO_TAG,
+                "--recursive",
+                "https://github.com/protocolbuffers/protobuf.git",
+                str(pb_src),
+            ],
+            check=True,
+        )
+        _build_dep_install(
+            "protobuf",
+            [
+                "-G",
+                "Ninja",
+                "-S",
+                str(pb_src),
+                "-B",
+                str(src_root / "protobuf-build"),
+                "-DCMAKE_BUILD_TYPE=Release",
+                f"-DCMAKE_INSTALL_PREFIX={DEPS}",
+                "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                "-DCMAKE_CXX_STANDARD=17",
+                "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+                "-Dprotobuf_BUILD_TESTS=OFF",
+                "-Dprotobuf_BUILD_EXAMPLES=OFF",
+                "-Dprotobuf_WITH_ZLIB=OFF",
+                "-Dprotobuf_BUILD_SHARED_LIBS=OFF",
+                "-Dprotobuf_INSTALL=ON",
+                *common,
+            ],
+        )
+
+    # flatbuffers.
+    if (DEPS / "lib" / "cmake" / "flatbuffers" / "flatbuffers-config.cmake").exists():
+        log("  flatbuffers: already installed.")
+    else:
+        log(f"  Building flatbuffers {_FLATBUFFERS_TAG} ...")
+        fb_src = src_root / "flatbuffers"
+        if fb_src.exists():
+            shutil.rmtree(fb_src)
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                _FLATBUFFERS_TAG,
+                "https://github.com/google/flatbuffers.git",
+                str(fb_src),
+            ],
+            check=True,
+        )
+        _build_dep_install(
+            "flatbuffers",
+            [
+                "-G",
+                "Ninja",
+                "-S",
+                str(fb_src),
+                "-B",
+                str(src_root / "flatbuffers-build"),
+                "-DCMAKE_BUILD_TYPE=Release",
+                f"-DCMAKE_INSTALL_PREFIX={DEPS}",
+                "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+                "-DFLATBUFFERS_BUILD_TESTS=OFF",
+                "-DFLATBUFFERS_BUILD_FLATC=ON",
+                "-DFLATBUFFERS_BUILD_FLATLIB=ON",
+                *common,
+            ],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -293,40 +461,6 @@ def _ensure_submodules():
         )
     else:
         log("  Submodules OK.")
-
-
-def _ensure_dia_sdk_junction():
-    """Create C:\\msvsn2022 junction if needed (LLVM prebuilt hardcoded path)."""
-    junction = Path("C:/msvsn2022")
-    if junction.exists():
-        return
-    vswhere = (
-        Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
-        / "Microsoft Visual Studio"
-        / "Installer"
-        / "vswhere.exe"
-    )
-    if not vswhere.exists():
-        log("  WARNING: vswhere not found — cannot create DIA SDK junction.")
-        return
-    r = subprocess.run(
-        [str(vswhere), "-latest", "-property", "installationPath"],
-        capture_output=True,
-        text=True,
-    )
-    vs_path = r.stdout.strip()
-    if not vs_path:
-        log("  WARNING: No Visual Studio installation found.")
-        return
-    log(f"  Creating DIA SDK junction: C:\\msvsn2022 -> {vs_path}")
-    try:
-        subprocess.run(
-            ["cmd", "/c", "mklink", "/J", "C:\\msvsn2022", vs_path],
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError:
-        log("  WARNING: mklink failed (may need admin). See docs/quick_start.md.")
 
 
 def _detect_gpu_arch():
@@ -415,7 +549,6 @@ def configure_and_build():
             sys.exit(1)
 
     _ensure_submodules()
-    _ensure_dia_sdk_junction()
 
     BUILD.mkdir(parents=True, exist_ok=True)
 
