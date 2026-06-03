@@ -70,6 +70,9 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | QMoE (com.microsoft) | Custom HIP Kernel |
 | LinearAttention (com.microsoft) | Custom HIP Kernel |
 | CausalConvWithState (com.microsoft) | MIOpen |
+| GlobalAveragePool | Custom HIP Kernel |
+| GlobalMaxPool | Custom HIP Kernel |
+| GlobalLpPool | Custom HIP Kernel |
 
 ### Compiler-Optimized Operations
 

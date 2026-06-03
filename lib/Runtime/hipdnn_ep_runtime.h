@@ -147,6 +147,27 @@ static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// Global pool reduction modes (must match kGlobalPool* in HipToLLVMUtils.h).
+//===----------------------------------------------------------------------===//
+
+#define HIPDNN_EP_GLOBAL_POOL_AVERAGE 0
+#define HIPDNN_EP_GLOBAL_POOL_MAX 1
+#define HIPDNN_EP_GLOBAL_POOL_LP 2
+
+static inline const char *hipdnn_ep_global_pool_mode_name(int64_t mode) {
+  switch (mode) {
+  case HIPDNN_EP_GLOBAL_POOL_AVERAGE:
+    return "global_avg_pool";
+  case HIPDNN_EP_GLOBAL_POOL_MAX:
+    return "global_max_pool";
+  case HIPDNN_EP_GLOBAL_POOL_LP:
+    return "global_lp_pool";
+  default:
+    return "global_pool_unknown";
+  }
+}
+
 // Opaque handle for runtime state
 typedef struct RuntimeState RuntimeState;
 
@@ -794,6 +815,21 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 // approximate: 0 = exact (erf), 1 = tanh approximation
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
+
+// Global pool wrapper (uses custom HIP kernel).
+// Treats the data as a flat [outer, reduce_size] matrix and writes one
+// reduced value per row into output. Covers ONNX GlobalAveragePool /
+// GlobalMaxPool / GlobalLpPool of any input rank >= 3:
+//   outer       = N * C                       (leading two input dims)
+//   reduce_size = D_1 * D_2 * ... * D_k       (product of spatial dims)
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
+// mode      : HIPDNN_EP_GLOBAL_POOL_* (AVERAGE / MAX / LP)
+// p         : LP-norm exponent; only consumed when mode == LP, otherwise
+//             ignored. ONNX spec requires `p >= 1`; values below that are
+//             rejected upstream during ONNX→HIP conversion.
+int wrap_global_pool(RuntimeState *state, void *input, void *output,
+                     int64_t outer, int64_t reduce_size, int64_t data_type,
+                     int64_t mode, int64_t p);
 
 // Rotary embedding operation wrapper.
 //
