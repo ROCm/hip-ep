@@ -18,12 +18,6 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    # Source-building ORT + LLVM/MLIR/LLD on a cold cache is long; raise the
-    # job timeout to the GitHub-hosted maximum (6 h is a hard runner cap that
-    # timeout-minutes cannot exceed). Warm-cache runs are minutes -- prime the
-    # dep caches first via a manual workflow_dispatch on main so PR runs never
-    # approach this ceiling.
-    timeout-minutes: 360
     # Cancel the build job when a newer commit lands on the same PR ref to
     # save runner minutes. gpu-test deliberately does NOT inherit this rule
     # (see its own concurrency block below) so an in-progress GPU run keeps
@@ -279,8 +273,9 @@ jobs:
       # find_package()s LLVM/MLIR/LLD (no Clang) and lib/Target/LLVM links the
       # X86 codegen + lldCOFF/lldCommon for the in-process COFF DLL linker.
       # /MT matches the rest of the toolchain; RTTI/zlib/zstd are off to match
-      # the morphizen build options. Cold build is multi-hour; sccache + the
-      # shared llvm-install cache key amortize it across runs and workflows.
+      # the morphizen build options. LLVM_INSTALL_UTILS=ON ships FileCheck (+
+      # not/count) into bin/, which the LIT suite needs. Cold build is
+      # multi-hour; sccache + the shared llvm-install cache amortize it.
       # -----------------------------------------------------------------------
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -304,7 +299,7 @@ jobs:
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
-            -DLLVM_INSTALL_UTILS=OFF \
+            -DLLVM_INSTALL_UTILS=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install

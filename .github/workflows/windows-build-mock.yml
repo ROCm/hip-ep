@@ -25,10 +25,6 @@ jobs:
     # (actions/runner-images#14017), which the pinned LLVM/ORT deps were
     # not validated against.
     runs-on: windows-2022
-    # Cold-cache source builds (ORT + LLVM) are long; raise to the
-    # GitHub-hosted maximum (6 h hard runner cap). Shared dep caches with
-    # windows-build.yml keep warm runs to minutes -- prime via workflow_dispatch.
-    timeout-minutes: 360
 
     env:
       # Dependency pins — kept in lockstep with windows-build.yml so the
@@ -242,7 +238,7 @@ jobs:
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
-            -DLLVM_INSTALL_UTILS=OFF \
+            -DLLVM_INSTALL_UTILS=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
