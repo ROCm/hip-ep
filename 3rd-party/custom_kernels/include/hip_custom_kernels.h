@@ -616,6 +616,36 @@ int hip_reduce_sum(
     int hip_dtype);
 
 /* =========================================================================
+ * Resize (1D / 2D / 3D spatial)
+ * =========================================================================
+ *
+ * Resamples the trailing spatial axes of an `(N, C, D_1, ..., D_k)` input
+ * onto an `(N, C, O_1, ..., O_k)` output grid.  Per-axis scale is computed
+ * inside the kernel as `scale = in_dim / out_dim`.  The (N, C) prefix is
+ * pass-through.
+ *
+ *  mode:               0 = nearest, 1 = linear (N-linear)
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+int hip_resize(
+    void* stream,
+    const void* input,
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int mode,
+    int coord_transform,
+    int nearest_mode);
+
+/* =========================================================================
  * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
  * =========================================================================
  *
