@@ -214,4 +214,3 @@ private:
 
 - [std::make_unique - cppreference](https://en.cppreference.com/w/cpp/memory/unique_ptr/make_unique)
 - [Factory Method Pattern](https://refactoring.guru/design-patterns/factory-method)
-- [Passkey Idiom - Stack Overflow](https://stackoverflow.com/questions/3217390/clean-c-granular-friend-equivalent-answer-attorney-client-idiom/3218920#3218920)

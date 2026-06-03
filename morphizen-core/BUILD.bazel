@@ -180,17 +180,6 @@ genrule(
 )
 
 
-## xclbin.h (vendored)
-genrule(
-    name = "test_xclbin.h",
-    srcs = [
-        "//3rd-party/xclbin:xclbin.h",
-    ],
-    outs = ["xclbin.h"],
-    cmd = "cp $(SRCS)  $@",
-    visibility = ["//visibility:public"],
-)
-
 # Generate config JSON binary (Python script equivalent)
 # Note: This would normally run src/binary/config_json_binary.hpp.py with various parameters
 py_binary(
@@ -273,7 +262,6 @@ cc_library(
         ":mem_binary_file.hpp.inc",
         "include/morphizen/tar.h",
         ":morphizen_version_info.hpp.inc",
-        ":xclbin.h",
     ],
     copts = select({
         "@bazel_tools//src/conditions:windows": [
