@@ -1135,6 +1135,10 @@ static int getOrTuneGemvConfigI8(
  * Each thread processes 8 nibbles (= 4 bytes) from one N row.
  * ======================================================================= */
 
+// N goes on blockIdx.x (NOT blockIdx.y) for the same reason as the ZP
+// unpack kernels below — large N (e.g. lm_head vocab > 100k) would otherwise
+// exceed the effective grid_y cap on some HIP runtimes and produce
+// `hipErrorInvalidConfiguration` at launch. K is split across blockIdx.y.
 __global__ void dequant_u4_to_fp16(
     const unsigned char* __restrict__ B_packed,
     const _Float16* __restrict__ scales,
@@ -1142,8 +1146,8 @@ __global__ void dequant_u4_to_fp16(
     _Float16* __restrict__ B_fp16,
     int N, int K, int group_size, int num_groups_k)
 {
-    int n   = static_cast<int>(blockIdx.y);
-    int k8  = (static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x) * 8;
+    int n   = static_cast<int>(blockIdx.x);
+    int k8  = (static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x) * 8;
     if (n >= N || k8 >= K) return;
 
     int grp = k8 / group_size;
@@ -1669,7 +1673,9 @@ static void launchDequant(
 {
     constexpr int DQ_THR = 256;
     int k_groups = (K + DQ_THR * 8 - 1) / (DQ_THR * 8);
-    dim3 dq_grid(static_cast<unsigned>(k_groups), static_cast<unsigned>(N));
+    // grid_x = N (large for lm_head), grid_y = k_groups (small). See the
+    // comment on dequant_u4_to_fp16's kernel definition for the rationale.
+    dim3 dq_grid(static_cast<unsigned>(N), static_cast<unsigned>(k_groups));
     dim3 dq_block(DQ_THR);
     hipLaunchKernelGGL(dequant_u4_to_fp16, dq_grid, dq_block, 0, stream,
                        B_packed, scales, zeros, B_fp16, N, K, gs, ngk);
@@ -2723,13 +2729,23 @@ __global__ void matmul_nbits_add_bias_rowmajor(
  * Output FP16 format: [N, groups_k]
  * ======================================================================= */
 
+// IMPORTANT: N (the output-channel count, e.g. vocab_size in an lm_head)
+// is mapped to blockIdx.x — NOT blockIdx.y. On some HIP runtimes / GPU
+// architectures the effective maximum for grid_y/grid_z is tighter than
+// the documented 2^31-1 (some drivers still inherit a legacy 65535 cap),
+// while grid_x is uniformly 2^31-1. Putting an N up to ~200k (typical for
+// modern LLM vocabs) on grid_y causes `hipErrorInvalidConfiguration` at
+// launch — and because this unpack runs before the GEMV launch with no
+// intermediate error check, the sticky error gets blamed on the next
+// `hipGetLastError()`, i.e. the GEMV launch. The packed_cols dimension
+// (small: groups_k/2, e.g. 16) goes on grid_y instead.
 __global__ void unpack_zp_u8_to_fp16_kernel(
     const unsigned char* __restrict__ zp_packed,
     _Float16* __restrict__ zp_fp16,
     int N, int groups_k, int packed_cols)
 {
-    int n  = static_cast<int>(blockIdx.y);
-    int g2 = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int n  = static_cast<int>(blockIdx.x);
+    int g2 = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
     if (n >= N || g2 >= packed_cols) return;
 
     unsigned char packed = zp_packed[n * packed_cols + g2];
@@ -2743,14 +2759,16 @@ __global__ void unpack_zp_u8_to_fp16_kernel(
 
 /* Unpack packed nibble ZPs [N, ceil(k_blocks/2)] → [N, k_blocks] uint8,
  * one byte per zero_point (0-15). Needed because the GEMV row-major and
- * naive kernels index zp[n * k_blocks + grp], expecting one value per byte. */
+ * naive kernels index zp[n * k_blocks + grp], expecting one value per byte.
+ * See the grid-mapping comment on unpack_zp_u8_to_fp16_kernel above for
+ * why N goes on blockIdx.x rather than blockIdx.y. */
 __global__ void unpack_zp_nibbles_to_u8_kernel(
     const uint8_t* __restrict__ packed,
     uint8_t* __restrict__ out,
     int N, int k_blocks, int packed_cols)
 {
-    int n  = static_cast<int>(blockIdx.y);
-    int g2 = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int n  = static_cast<int>(blockIdx.x);
+    int g2 = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
     if (n >= N || g2 >= packed_cols) return;
 
     uint8_t p = packed[n * packed_cols + g2];
@@ -2770,8 +2788,10 @@ extern "C" void hip_matmul_nbits_unpack_zp_u8(
 {
     int packed_cols = (groups_k + 1) / 2;
     constexpr int THR = 256;
-    dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
-              static_cast<unsigned>(N));
+    // grid_x = N (can be very large for an lm_head — vocab_size > 100k is
+    // common); grid_y = ceil(packed_cols/THR) is small. See kernel comment.
+    dim3 grid(static_cast<unsigned>(N),
+              static_cast<unsigned>((packed_cols + THR - 1) / THR));
     dim3 block(THR);
     hipLaunchKernelGGL(unpack_zp_nibbles_to_u8_kernel,
                        grid, block, 0, static_cast<hipStream_t>(stream),
@@ -2785,8 +2805,9 @@ extern "C" void hip_matmul_nbits_convert_zp_fp16(
 {
     int packed_cols = (groups_k + 1) / 2;
     constexpr int THR = 256;
-    dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
-              static_cast<unsigned>(N));
+    // Same grid-mapping rationale as hip_matmul_nbits_unpack_zp_u8 above.
+    dim3 grid(static_cast<unsigned>(N),
+              static_cast<unsigned>((packed_cols + THR - 1) / THR));
     dim3 block(THR);
     hipLaunchKernelGGL(unpack_zp_u8_to_fp16_kernel,
                        grid, block, 0, static_cast<hipStream_t>(stream),
