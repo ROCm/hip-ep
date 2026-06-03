@@ -74,10 +74,17 @@ static bool composeRefinedShape(ArrayRef<int64_t> cur,
   bool refined = false;
   out.assign(cur.begin(), cur.end());
   for (size_t d : llvm::seq<size_t>(0, cur.size())) {
-    if (!ShapedType::isDynamic(cur[d]))
+    std::optional<int64_t> reifCst = getConstantIntValue(reif[d]);
+    if (!ShapedType::isDynamic(cur[d])) {
+      // Static dim must agree with reify if reify gave a constant. A
+      // mismatch is an op-author bug in `reifyResultShapes` and would
+      // otherwise be silently swallowed by the pass.
+      assert((!reifCst || *reifCst == cur[d]) &&
+             "reifyResultShapes contradicts existing static dim");
       continue;
-    if (std::optional<int64_t> s = getConstantIntValue(reif[d])) {
-      out[d] = *s;
+    }
+    if (reifCst) {
+      out[d] = *reifCst;
       refined = true;
     }
   }
@@ -145,6 +152,16 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
     if (!emptyProducer) {
       LLVM_DEBUG(DBGS() << "skip " << op->getName() << " result #" << resultIdx
                         << ": outs producer is not tensor.empty\n");
+      return failure();
+    }
+    // Refining a shared `tensor.empty` would retype every sibling
+    // consumer's outs operand without retyping their result, breaking
+    // the DPS contract (outs.type == result.type) on the unrefined
+    // sibling. No converter aliases empties today; the guard makes the
+    // single-use invariant local to this pass.
+    if (!emptyProducer->hasOneUse()) {
+      LLVM_DEBUG(DBGS() << "skip " << op->getName() << " result #" << resultIdx
+                        << ": outs producer is a shared tensor.empty\n");
       return failure();
     }
     if (failed(refineTensorEmptyProducer(rewriter, emptyProducer, newShape)))
