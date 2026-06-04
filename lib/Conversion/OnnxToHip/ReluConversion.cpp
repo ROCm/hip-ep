@@ -28,6 +28,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -38,7 +39,12 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// Build a 0-D `onnx.Constant` carrying a zero value of `elemType`.
+/// Build a 0-D `arith.constant` carrying a zero value of `elemType`.
+///
+/// We emit `arith.constant` (not `onnx.Constant`) because `convert-onnx-to-hip`
+/// runs `lowerOnnxConstants` BEFORE `convertComputeOps`. Any `onnx.Constant` we
+/// synthesize from a compute-op pattern is therefore never lowered and trips
+/// "op was not bufferized" downstream.
 static mlir::Value buildZeroScalar(mlir::PatternRewriter &rewriter,
                                    mlir::Location loc, mlir::Type elemType) {
   auto scalarType = mlir::RankedTensorType::get({}, elemType);
@@ -51,10 +57,7 @@ static mlir::Value buildZeroScalar(mlir::PatternRewriter &rewriter,
     llvm::APInt zero(intType.getWidth(), 0, /*isSigned=*/true);
     valueAttr = mlir::DenseElementsAttr::get(scalarType, zero);
   }
-  mlir::OperationState state(loc, "onnx.Constant");
-  state.addTypes(scalarType);
-  state.addAttribute("value", valueAttr);
-  return rewriter.create(state)->getResult(0);
+  return mlir::arith::ConstantOp::create(rewriter, loc, valueAttr).getResult();
 }
 
 struct ReluToHipMax : public mlir::RewritePattern {
