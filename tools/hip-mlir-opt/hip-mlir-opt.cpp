@@ -93,6 +93,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
   registry.addExtension(+[](mlir::MLIRContext *ctx, mlir::hip::HipDialect *) {
     mlir::hip::ConvOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ConvOp>>(*ctx);
+    mlir::hip::ConvTransposeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ConvTransposeOp>>(*ctx);
     mlir::hip::MatmulOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::MatmulOp>>(*ctx);
     mlir::hip::RmsNormOp::attachInterface<
