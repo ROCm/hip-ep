@@ -36,7 +36,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Conversion/OnnxToHip/OnnxResultTypeInference.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
@@ -102,68 +101,6 @@ static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
   Value indexVal =
       arith::IndexCastOp::create(builder, loc, builder.getIndexType(), i64Val);
   return indexVal;
-}
-
-/// Refine cloned `onnx.*` op result types from operand types via
-/// `OnnxResultTypeInferenceInterface`. ONNX shape inference does not
-/// recurse into `onnx.Loop` body regions, so importer output frequently
-/// ships cloned body op result types as rank-0 placeholders even when
-/// the v_carry entry args carry real ranks. Without this catch-up,
-/// `--convert-onnx-to-hip`'s rank-aware patterns silently bail on the
-/// operand-vs-result rank mismatch and the pipeline aborts at
-/// one-shot-bufferize. Done here, before conversion, because
-/// `--hip-infer-shapes` Phase 2 runs AFTER `--convert-onnx-to-hip` and
-/// cannot rescue patterns that already bailed out.
-///
-/// Before:
-///   func.func @body(%arg3: tensor<?x?x?xf16>, %x: tensor<?x?x?xf16>) {
-///     %step = "onnx.Concat"(%arg3, %x) {axis = 1 : si64}
-///             : (tensor<?x?x?xf16>, tensor<?x?x?xf16>) -> tensor<f16>
-///     ...
-///   }
-/// After:
-///   func.func @body(%arg3: tensor<?x?x?xf16>, %x: tensor<?x?x?xf16>) {
-///     %step = "onnx.Concat"(%arg3, %x) {axis = 1 : si64}
-///             : (tensor<?x?x?xf16>, tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
-///     ...
-///   }
-///
-/// Dispatch is via `OnnxResultTypeInferenceInterface` -- one rule per
-/// ONNX op kind, registered as a FallbackModel on `OnnxStubDialect`
-/// (see `lib/Conversion/OnnxToHip/OnnxResultTypeInference.cpp`). Ops
-/// outside the rules library return null Type and are left alone --
-/// the safety belt against false promotion of rank-changing ops we
-/// have not yet reasoned about (e.g. `onnx.ReduceSum` with
-/// `keepdims=0` is intentionally absent from the rules library, so
-/// its rank-0 result is preserved).
-///
-/// Refinement is rank-promotion only: we update the result type only
-/// when the inferred rank is strictly greater than the current rank.
-/// Same-rank per-dim refinement (e.g. dynamic -> concrete) would be
-/// useful but risks regressing concrete dims to dynamic if a future
-/// rule has a partial view of an operand; rank-promotion is the
-/// minimum needed to fix the canonical Loop-body regression. Source-
-/// order walk catches chains in one pass: refinement at op N is
-/// visible to op N+1 via SSA.
-static void refineClonedBodyOpTypes(Block *entry) {
-  for (Operation &op : *entry) {
-    if (isa<func::ReturnOp>(op))
-      continue;
-    auto iface = dyn_cast<OnnxResultTypeInferenceInterface>(&op);
-    if (!iface)
-      continue;
-    for (unsigned i : llvm::seq<unsigned>(0, op.getNumResults())) {
-      auto curRanked = dyn_cast<RankedTensorType>(op.getResult(i).getType());
-      if (!curRanked)
-        continue;
-      Type inferred = iface.computeResultType(i);
-      auto infRanked = dyn_cast_or_null<RankedTensorType>(inferred);
-      if (!infRanked)
-        continue;
-      if (infRanked.getRank() > curRanked.getRank())
-        op.getResult(i).setType(infRanked);
-    }
-  }
 }
 
 /// Materialize an `i1` scalar from a 0-D BOOL-like tensor operand.
@@ -349,38 +286,28 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   getUsedValuesDefinedAbove(bodyRegion, capturedSet);
   SmallVector<Value> captureVals(capturedSet.begin(), capturedSet.end());
 
-  // Build the outlined function signature:
-  //   arg0       : !hip.context  (threaded by us since AddHipContextArg
-  //                                has already run on the parent function)
-  //   arg1       : iter_t        (from bodyBlock arg 0, original onnx
-  //                                body iter type — typically tensor<i64>)
-  //   arg2       : cond_in_t     (from bodyBlock arg 1, original onnx
-  //                                body cond type — typically tensor<i1>)
-  //   args[3..3+N) : v_carry_1..N  (types sourced from `vInitTensors`,
-  //                                  the `onnx.Loop`'s loop-carried
-  //                                  operands — i.e. the refined,
-  //                                  post-shape-inference types feeding
-  //                                  the loop from the outside).
-  //                                  Sourcing from v_init (rather than
-  //                                  bodyBlock's v_in args) is the key
-  //                                  invariant that lets `hip.loop`'s
-  //                                  `LoopOp::inferReturnTypes` derive
-  //                                  result types from operand types
-  //                                  without disagreement: hip.loop's
-  //                                  verifier requires
-  //                                  `result_type[i] == v_init[i].type`,
-  //                                  and result types == declared body
-  //                                  func return types at the v_carry
-  //                                  slots (modulo the cond_out slot,
-  //                                  see below). The cloned-from-onnx
-  //                                  body block args still use the
-  //                                  original (potentially under-
-  //                                  refined) onnx.Loop block-arg types
-  //                                  — `--hip-infer-shapes` Phase 2
-  //                                  catches the body op result types
-  //                                  up via `refineFuncBody` after this
-  //                                  pass runs.
-  //   args[3+N..) : captures (in iteration order of the SetVector)
+  // Outlined function signature:
+  //   arg0           : !hip.context (threaded by us; AddHipContextArg
+  //                                  has already run on the parent func)
+  //   arg1           : iter_t       (bodyBlock arg 0 type;
+  //                                  typically tensor<i64>)
+  //   arg2           : cond_in_t    (bodyBlock arg 1 type;
+  //                                  typically tensor<i1>)
+  //   args[3..3+N)   : v_carry_1..N (types from `vInitTensors`, i.e.
+  //                                  the onnx.Loop's loop-carried
+  //                                  operands feeding the loop from
+  //                                  outside)
+  //   args[3+N..)    : captures     (in iteration order of the SetVector)
+  //
+  // Sourcing v_carry types from v_init (rather than bodyBlock's v_in
+  // args) is the key invariant that lets hip.loop's
+  // `LoopOp::inferReturnTypes` derive result types without
+  // disagreement: hip.loop's verifier requires
+  // `result_type[i] == v_init[i].type`. Cloned body ops below still
+  // carry their pre-refinement onnx result types -- this is reconciled
+  // by `--onnx-infer-shapes` (the next pass in the pipeline) and then
+  // by `--hip-infer-shapes` Phase 2 (`refineLoopSignatures`) after
+  // HIP-dialect conversion.
   Type ctxType = ContextType::get(ctx);
   SmallVector<Type> argTypes;
   argTypes.push_back(ctxType);
@@ -392,27 +319,25 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     argTypes.push_back(c.getType());
 
   // Skip the cond return value if the body trivially passes cond_in
-  // through (the runtime trampoline aliases cond_in and cond_out on the
+  // through. The runtime trampoline aliases cond_in and cond_out on the
   // same device buffer, so the body's cond_out doesn't need to be
-  // returned; BufferResultsToOutParams would otherwise materialize an
-  // unnecessary memref<i1> out-param + a memref.copy that lowers to a
-  // host-side llvm.intr.memcpy on a device pointer (crash) since the
-  // MemRefCopyOpLowering pattern bails out on i1 element type as a
-  // non-byte-aligned width).
+  // returned -- and BufferResultsToOutParams would otherwise materialize
+  // an unnecessary memref<i1> out-param + a memref.copy that lowers to
+  // a host-side llvm.intr.memcpy on a device pointer (crash, since
+  // MemRefCopyOpLowering bails on i1 as non-byte-aligned).
   //
-  // The declared return types here track the cloned-from-onnx body op
-  // result types (= yield operand types) — NOT v_init types. Reasoning:
-  // at outline-pass exit the cloned body ops still have their original
-  // ONNX result types, so `func.return` operands match the declared
-  // return types. After `ConvertOnnxToHip` re-types the body ops via
-  // `InferTypeOpInterface` (driven by the now-v_init-refined entry
-  // block args), `--hip-infer-shapes` Phase 2 (`refineLoopSignatures`)
-  // syncs the declared return types in lockstep with the loop's v_init
-  // types — by which point the body op result types and func.return
-  // operand types have caught up too, so no `tensor.cast` insertion is
-  // needed on the func.return edge (`snapshotNonDpsInitUses` skips
-  // func.return when the parent func's declared return type already
-  // matches `newType`).
+  // Declared return types here are the cloned body op result types
+  // (= yield operand types), NOT v_init types. The cloned body ops
+  // still carry their pre-refinement ONNX result types at outline-pass
+  // exit, so `func.return` operands match the declared return types
+  // and the func is verifier-clean. Three downstream passes catch up:
+  //   * `--onnx-infer-shapes` refines the body op result types from
+  //     operand types and rewrites the declared func return types.
+  //   * `--convert-onnx-to-hip` re-types body ops via
+  //     `InferTypeOpInterface` driven by the refined entry-block args.
+  //   * `--hip-infer-shapes` Phase 2 (`refineLoopSignatures`) syncs
+  //     the declared return types with the loop's v_init types after
+  //     HIP-dialect refinements.
   SmallVector<Type> resultTypes;
   resultTypes.reserve(yieldOp->getNumOperands());
   unsigned yieldStartIdx = condIsPassthrough ? 1 : 0;
@@ -489,32 +414,17 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     }
   }
 
-  // Catch up cloned body op result types via the
-  // `OnnxResultTypeInferenceInterface` rules library: ONNX shape
-  // inference does not recurse into Loop bodies, so importer output
-  // ships rank-0 placeholders that mismatch the now-refined v_carry
-  // entry args. See the helper's docstring for the full rationale.
-  refineClonedBodyOpTypes(entry);
-
-  // Build the func.return from the (mapped) yield operands.  Cond is
-  // skipped when cond_is_passthrough (see resultTypes computation above).
+  // Build the func.return from the (mapped) yield operands. Cond is
+  // skipped when cond_is_passthrough (see resultTypes above). The
+  // cloned body ops still carry their source ONNX result types --
+  // typically rank-0 placeholders, since ONNX protobuf shape inference
+  // does not recurse into Loop body regions -- and the mismatch with
+  // the v_carry entry args is caught up by `--onnx-infer-shapes` next.
   SmallVector<Value> returnVals;
   returnVals.reserve(yieldOp->getNumOperands());
   for (unsigned i = yieldStartIdx; i < yieldOp->getNumOperands(); ++i)
     returnVals.push_back(mapping.lookupOrDefault(yieldOp->getOperand(i)));
   func::ReturnOp::create(bodyBuilder, loc, returnVals);
-
-  // Sync the outlined func's declared return types with the (now-
-  // refined) `func.return` operand types -- the func verifier requires
-  // they agree, and the provisional `resultTypes` computed from the
-  // source `onnx.Yield` operand types is stale once
-  // `refineClonedBodyOpTypes` has promoted any yield-chain SSA value's
-  // rank. Idempotent when nothing changed.
-  SmallVector<Type> refinedResultTypes;
-  refinedResultTypes.reserve(returnVals.size());
-  for (Value v : returnVals)
-    refinedResultTypes.push_back(v.getType());
-  newFn.setType(FunctionType::get(ctx, argTypes, refinedResultTypes));
 
   // Now build the hip.loop op at the original onnx.Loop location.
   OpBuilder outerBuilder(loopOp);
@@ -580,13 +490,6 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
 
 void OnnxLoopOutlinePass::runOnOperation() {
   ModuleOp module = getOperation();
-
-  // Install the OnnxResultTypeInferenceInterface FallbackModel on
-  // `OnnxStubDialect` so that `refineClonedBodyOpTypes` can dyn_cast
-  // every cloned `onnx.*` op to the interface and dispatch to the
-  // rules library. Idempotent across pass runs (function-local-static
-  // singleton).
-  registerOnnxResultTypeInferenceFallback();
 
   // Pre-scan: reject nested onnx.Loop before any outlining happens. The
   // HIP runtime drivers share a single iter/cond buffer pair per
