@@ -372,6 +372,15 @@ void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
 void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 
+/// Pre-lowering pattern set: stamp `onnx.Pad`'s compile-time `pads` (and
+/// optional `axes`) constant onto the op as `hipdnn.pad_amounts` /
+/// `hipdnn.pad_axes` attributes so PadConversion can compute the dynamic
+/// output shape from them without reading the (by-then externalized) operand.
+/// Sibling of GatherShapeFold; must run BEFORE lowerOnnxConstants. See
+/// PadShapeFold.cpp.
+void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
+                                  MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body

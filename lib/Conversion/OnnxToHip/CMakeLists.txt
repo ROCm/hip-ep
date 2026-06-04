@@ -27,6 +27,7 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   GatherShapeFold.cpp
   ReshapeShapeFold.cpp
+  PadShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp

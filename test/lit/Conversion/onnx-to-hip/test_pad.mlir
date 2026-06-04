@@ -84,6 +84,29 @@ module {
   // CHECK: tensor.empty(%[[OUT0]]) : tensor<?x6xf32>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
 
+  // Dynamic output with `pads` supplied as an onnx.Constant -- the form that
+  // lowerOnnxConstants may externalize (replacing the inline value with a NULL
+  // memref.global). The pre-lowering PadShapeFold stamps the constant onto the
+  // op BEFORE externalization, so the output shape folds to arith.constants
+  // here: no hip.readback_scalar, no device read of the pads buffer. This is
+  // the path-1 fix for the externalized-pads host-read SEGV.
+  func.func @pad_dyn_output_onnx_const_pads(%data: tensor<?x4xf32>) -> tensor<?x6xf32> {
+    %pads = "onnx.Constant"() {value = dense<[1, 1, 2, 1]> : tensor<4xi64>} : () -> tensor<4xi64>
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %none, %none) {mode = "constant"} : (tensor<?x4xf32>, tensor<4xi64>, none, none) -> tensor<?x6xf32>
+    return %r : tensor<?x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_dyn_output_onnx_const_pads
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x4xf32>)
+  // No readback / extract_slice anywhere in the body: the pad amounts were
+  // folded at compile time, so the only operand feeding tensor.empty is the
+  // tensor.dim of the data plus arith.constant pad amounts.
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK-NOT: tensor.extract_slice
+  // CHECK: tensor.empty({{.*}}) : tensor<?x6xf32>
+  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
+
   // Dynamic output dims with a non-constant `pads` (function arg): the
   // per-axis padding amounts are read on the HOST through a synchronized
   // hip.readback_scalar (extract_slice -> collapse_shape -> readback_scalar ->
