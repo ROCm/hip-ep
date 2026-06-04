@@ -398,4 +398,3 @@ LogicalResult GatherNDOp::reifyResultShapes(
   reifiedReturnShapes.assign({std::move(dims)});
   return success();
 }
-
