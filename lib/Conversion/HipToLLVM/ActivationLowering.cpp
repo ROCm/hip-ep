@@ -249,8 +249,10 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 };
 
 // hip.miopen.softmax(%handle) ins(%input) outs(%output)
-//   -> hip_miopen_softmax(handle, input, output, rows, cols)
+//   -> hip_miopen_softmax(state, input, output, rows, cols, data_type)
 // Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D.
+// data_type is a HIPDNN_EP_DATATYPE_* enum so the runtime can set the MIOpen
+// tensor descriptor dtype for f32/f16/bf16.
 struct MiopenSoftmaxOpLowering
     : public ConvertOpToLLVMPattern<MiopenSoftmaxOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -262,30 +264,49 @@ struct MiopenSoftmaxOpLowering
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
     Type ptrType = getPtrType();
-    Type indexType = getIndexType();
+    Type i64Type = rewriter.getI64Type();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, indexType,
-                                    indexType};
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0 || dataType > 2)
+      return rewriter.notifyMatchFailure(
+          op, "miopen.softmax only supports f32/f16/bf16");
+
+    SmallVector<Type> paramTypes = {ptrType,  ptrType, ptrType,
+                                    i64Type, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenSoftmax, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
-    int rank = cast<MemRefType>(op.getInput().getType()).getRank();
+    int rank = inputType.getRank();
     MemRefDescriptor inputDesc(adaptor.getInput());
 
+    auto createI64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    // Helper to read a memref dim either as static (constant) or via descriptor
+    // (dynamic). MemRefDescriptor::size returns an index-typed Value; we want
+    // i64 everywhere for the call.
+    auto dimAsI64 = [&](int idx) -> Value {
+      if (inputType.isDynamicDim(idx))
+        return inputDesc.size(rewriter, loc, idx);
+      return createI64Const(inputType.getDimSize(idx));
+    };
+
     // cols = last dim; rows = product of all other dims
-    Value cols = inputDesc.size(rewriter, loc, rank - 1);
-    Value rows = inputDesc.size(rewriter, loc, 0);
-    for (int i = 1; i < rank - 1; i++)
-      rows = LLVM::MulOp::create(rewriter, loc, rows,
-                                 inputDesc.size(rewriter, loc, i));
+    Value cols = dimAsI64(rank - 1);
+    Value rows = (rank == 1) ? createI64Const(1) : dimAsI64(0);
+    for (int i = 1; i < rank - 1; ++i)
+      rows = LLVM::MulOp::create(rewriter, loc, rows, dimAsI64(i));
 
     SmallVector<Value> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc), rows,
-        cols};
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        rows, cols, createI64Const(dataType)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
