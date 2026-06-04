@@ -60,14 +60,14 @@ import sys
 # ---------------------------------------------------------------------------
 # Paths -- edit if you move any of these
 # ---------------------------------------------------------------------------
-ORT_126_DIR = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep-qwen35\install\onnxruntime\lib"
-PREBUILT_BIN = r"C:\Users\Administrator\workspace\prebuilt-local\bin"
-PREBUILT_LIB = r"C:\Users\Administrator\workspace\prebuilt-local\lib"
-THEROCK_DIST = r"C:\Users\Administrator\workspace\therock-dist"
+ORT_126_DIR = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\onnxruntime\lib"
+PREBUILT_BIN = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\dist\bin"
+PREBUILT_LIB = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\dist\lib"
+THEROCK_DIST = r"C:\Users\Administrator\workspace\therock"
 THEROCK_BIN = os.path.join(THEROCK_DIST, "bin")
 OGA_DIR = r"C:\Python3\Python310\lib\site-packages\onnxruntime_genai"
-DML_DLL = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep-qwen35\install\oga-build\RelWithDebInfo\_deps\dmllib-src\bin\x64-win\DirectML.dll"
-BENCHMARK = r"C:\Users\Administrator\workspace\onnxruntime-genai\benchmark\python\benchmark_multimodal.py"
+DML_DLL = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\oga-build\RelWithDebInfo\_deps\dmllib-src\bin\x64-win\DirectML.dll"
+BENCHMARK = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\oga-source\benchmark\python\benchmark_multimodal.py"
 
 # ---------------------------------------------------------------------------
 # Default benchmark args -- overridden by anything passed on the CLI
@@ -79,7 +79,6 @@ DEFAULT_ARGV = [
     "-m", "512",
     "-r", "1",
     "-w", "1",
-    "-o", r"C:\Users\Administrator\workspace\build\tower_mm_smoketest.csv",
     "-v",
 ]
 
@@ -116,7 +115,31 @@ print(f"[wrap] cwd -> {os.getcwd()}", flush=True)
 # (argparse takes the LAST occurrence of each flag, so user args win)
 # ---------------------------------------------------------------------------
 user_args = sys.argv[1:]
-sys.argv = [BENCHMARK] + DEFAULT_ARGV + user_args
+argv = DEFAULT_ARGV + user_args
+
+
+def _last_value(args, *flags):
+    """Last value for any of *flags* in *args* (argparse 'last wins' semantics)."""
+    found = None
+    for i, tok in enumerate(args):
+        if tok in flags and i + 1 < len(args):
+            found = args[i + 1]
+    return found
+
+
+# Derive a per-run CSV name from the effective image so runs with different
+# images (or back-to-back runs) don't clobber a single shared CSV -- otherwise
+# format_perf_report.py can pair this run's log with a *different* run's CSV
+# row. An explicit -o/--output on the CLI still wins.
+if not any(a in ("-o", "--output") for a in user_args):
+    img = _last_value(argv, "--image_path", "-im") or "run"
+    stem = os.path.splitext(os.path.basename(img))[0]
+    csv_out = os.path.join(
+        r"C:\Users\Administrator\workspace\build", f"{stem}_mm.csv")
+    argv += ["-o", csv_out]
+    print(f"[wrap] CSV output -> {csv_out}", flush=True)
+
+sys.argv = [BENCHMARK] + argv
 print(f"[wrap] argv: {sys.argv[1:]}", flush=True)
 
 with open(BENCHMARK) as f:
