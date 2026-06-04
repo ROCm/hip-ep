@@ -395,7 +395,11 @@ class DecodeBreakdown:
             compute_cpu_ms=cpu,
             gpu_ms=gpu,
             fence_ms=med("fence_residual_ms") or 0.0,
-            perop_gpu_median_ms=perop.total_gpu_median_ms,
+            # Use the SAME (last decode token) block that § 7 prints, so the
+            # § 2 row "GPU: OP_PROFILE kernels ◀ § 7 TOTAL" reconciles exactly
+            # with § 7's TOTAL instead of being a median across all decode
+            # Computes (which differed slightly from the displayed last token).
+            perop_gpu_median_ms=_block_total_gpu(perop.last_block_lines),
         )
 
     # ── derived rows (clamp to >= 0 since these are between-distribution diffs)
@@ -578,7 +582,7 @@ def render_section_2_breakdown(bd: DecodeBreakdown, charset: str, indent: str) -
     tc = TREE_CHARS[charset]
     arrow = "<-" if charset == "ascii" else "◀"
     lines = render_section_header(
-        2, "STEADY-STATE DECODE BREAKDOWN",
+        3, "STEADY-STATE DECODE BREAKDOWN",
         "1 decode token, median across run",
         indent,
     )
@@ -631,26 +635,26 @@ def render_section_2_breakdown(bd: DecodeBreakdown, charset: str, indent: str) -
                      bd.other_oga_ms, pct(bd.other_oga_ms)))
     lines.append(row(LAST, "EP MlirCustomOp::Compute()",
                      bd.wall_ms, pct(bd.wall_ms),
-                     f"{arrow} § 4 wall_ms"))
+                     f"{arrow} § 6 wall_ms"))
     lines.append(row(BLANK + BRANCH, "Marshal in (input descriptors)",
                      bd.marshal_in_ms, pct(bd.marshal_in_ms),
-                     f"{arrow} § 4 marshal_in_ms"))
+                     f"{arrow} § 6 marshal_in_ms"))
     lines.append(row(BLANK + BRANCH, "Marshal out (output desc.)",
                      bd.marshal_out_ms, pct(bd.marshal_out_ms),
-                     f"{arrow} § 4 marshal_out_ms"))
+                     f"{arrow} § 6 marshal_out_ms"))
     lines.append(row(BLANK + BRANCH, "model.dll inference_compute()",
                      bd.compute_cpu_ms, pct(bd.compute_cpu_ms),
-                     f"{arrow} § 4 compute_cpu_ms"))
+                     f"{arrow} § 6 compute_cpu_ms"))
     lines.append(row(BLANK + PIPE + BRANCH, "GPU: OP_PROFILE kernels (sum)",
                      bd.perop_gpu_median_ms, pct(bd.perop_gpu_median_ms),
-                     f"{arrow} § 3 TOTAL"))
-    lines.append(row(BLANK + PIPE + BRANCH, "GPU: outside § 3 scopes",
+                     f"{arrow} § 7 TOTAL"))
+    lines.append(row(BLANK + PIPE + BRANCH, "GPU: outside § 7 scopes",
                      bd.unprofiled_gpu_ms, pct(bd.unprofiled_gpu_ms)))
     lines.append(row(BLANK + PIPE + LAST, "CPU: host dispatch + sync poll",
                      bd.cpu_overhead_ms, pct(bd.cpu_overhead_ms)))
     lines.append(row(BLANK + LAST, "Trailing fence (hipStreamSync)",
                      bd.fence_ms, pct(bd.fence_ms),
-                     f"{arrow} § 4 fence_residual_ms"))
+                     f"{arrow} § 6 fence_residual_ms"))
 
     # Notes for the two "residual" rows that don't have a direct § N cross-ref
     # (they are subtractive — what's left after the named rows are accounted
@@ -659,7 +663,7 @@ def render_section_2_breakdown(bd: DecodeBreakdown, charset: str, indent: str) -
     # speak for themselves once you've followed their § N arrow.
     lines.append("")
     lines.append(indent + "    notes:")
-    lines.append(indent + "      - \"GPU: outside § 3 scopes\" = § 4 gpu_ms − § 3 "
+    lines.append(indent + "      - \"GPU: outside § 7 scopes\" = § 6 gpu_ms − § 7 "
                           "TOTAL: GPU work not bracketed by any")
     lines.append(indent + "        OP_PROFILE wrapper. Typical sources: MIOpen / "
                           "hipBLASLt internal helper")
@@ -735,14 +739,33 @@ def _prefill_substage(block: list[str]) -> str:
 
 def parse_compute_samples(lines: list[str]) -> list[ComputeSample]:
     """Pair each ``[PERF] #N`` metric line with its following ``[PERF] ===``
-    block (same Compute, printed in order) and classify the stage."""
-    metric_ms = [m for m in (_PERCALL_RE.search(ln) for ln in lines) if m]
+    block (same Compute, printed in order) and classify the stage.
+
+    Pairing is by LINE POSITION -- each metric takes the next op-block that
+    *opens after* it -- NOT by sequential index. This matters when a metric
+    line is dropped: e.g. a console-wrapped ``[PERF] #1 wall=...`` line whose
+    ``fence_residual=`` spilled onto the next physical line no longer matches
+    ``_PERCALL_RE``, so it's missing from the metric list. With index pairing
+    that single drop shifts EVERY subsequent metric onto the previous Compute's
+    block, misclassifying a cold multi-second prefill Compute as a "decode"
+    token (and blowing up the § 2 decode share to thousands of percent).
+    Positional pairing instead just skips the one orphaned Compute.
+    """
+    metric_pos = [(i, m) for i, ln in enumerate(lines)
+                  if (m := _PERCALL_RE.search(ln))]
     border_idx = [i for i, ln in enumerate(lines) if ln.startswith("[PERF] ===")]
-    blocks = [lines[border_idx[i]: border_idx[i + 1] + 1]
-              for i in range(0, len(border_idx) - 1, 2)]
+    pairs = [(border_idx[j], border_idx[j + 1])
+             for j in range(0, len(border_idx) - 1, 2)]
     out: list[ComputeSample] = []
-    for k, m in enumerate(metric_ms):
-        blk = blocks[k] if k < len(blocks) else []
+    pi = 0
+    for pos, m in metric_pos:
+        # Advance past any op-block that opened before this metric line (e.g.
+        # the very first Compute's block, when its own metric line was dropped).
+        while pi < len(pairs) and pairs[pi][0] < pos:
+            pi += 1
+        blk = lines[pairs[pi][0]: pairs[pi][1] + 1] if pi < len(pairs) else []
+        if pi < len(pairs):
+            pi += 1
         s = ComputeSample(
             wall_ms=float(m.group(2)), marshal_in_ms=float(m.group(3)),
             marshal_out_ms=float(m.group(4)), compute_cpu_ms=float(m.group(5)),
@@ -792,8 +815,57 @@ def _accum(slot: list, gpu_tok: str, cpu_tok: str) -> None:
                 pass
 
 
+_PREFILL_SUBS = ("vision", "embedding", "text_prefill", "glue")
+_PREFILL_METRICS = ("wall", "mi", "mo", "cpu", "gpu", "fence", "optot")
+
+
+def _segment_prefill_generations(samples: list[ComputeSample]) -> list[dict]:
+    """Segment prefill Computes into generations -- a new generation begins at
+    each vision-substage Compute (the ViT runs once per rep) -- summing each
+    sub-stage's metrics per generation.
+
+    Shared by the § 3 waterfall and the § 5 per-generation normalization so
+    their generation counts can NEVER disagree. (They previously could: when a
+    first metric line is dropped/wrapped, the first parsed prefill Compute may
+    be non-vision, which opens a leading generation that a naive vision-count
+    would miss -- off-by-one against § 3.)
+    """
+    def blank() -> dict:
+        return {sub: {m: 0.0 for m in _PREFILL_METRICS}
+                for sub in _PREFILL_SUBS}
+
+    gens: list[dict] = []
+    cur: Optional[dict] = None
+    for s in samples:
+        sub = _prefill_substage(s.block) if s.stage == "prefill" else None
+        if sub == "vision":
+            if cur is not None:
+                gens.append(cur)
+            cur = blank()
+        if s.stage == "prefill":
+            if cur is None:
+                cur = blank()
+            d = cur[sub]
+            d["wall"] += s.wall_ms
+            d["mi"] += s.marshal_in_ms
+            d["mo"] += s.marshal_out_ms
+            d["cpu"] += s.compute_cpu_ms
+            d["gpu"] += s.gpu_ms
+            d["fence"] += s.fence_residual_ms
+            d["optot"] += _block_total_gpu(s.block)
+    if cur is not None and any(d["wall"] for d in cur.values()):
+        gens.append(cur)
+    return gens
+
+
+def _count_prefill_generations(samples: list[ComputeSample]) -> int:
+    """Generation count from the shared segmentation (>= 1)."""
+    return len(_segment_prefill_generations(samples)) or 1
+
+
 def render_perop_aggregate(blocks: list[list[str]], indent: str, *,
-                           num: int, subtitle: str) -> list[str]:
+                           num: int, subtitle: str,
+                           generations: int = 1) -> list[str]:
     """Sum each op's gpu/cpu/calls across every block in a stage, keeping the
     op -> shape hierarchy so the discriminating shapes stay visible.
 
@@ -822,8 +894,14 @@ def render_perop_aggregate(blocks: list[list[str]], indent: str, *,
                 _accum(e, ms.group(3), ms.group(4))
     if not agg:
         return []
-    lines = render_section_header(num, "PER-OP GPU BREAKDOWN (stage total)",
-                                  subtitle, indent)
+    # Normalize GPU/CPU ms to PER GENERATION so this table's TOTAL reconciles
+    # with the per-generation § 3 waterfall that references it (§ 3 is one
+    # generation; the raw sum here spans every rep). `calls` stays a run total
+    # (the exact launch count); only the time columns are divided.
+    div = generations if generations and generations > 0 else 1
+    title = ("PER-OP GPU BREAKDOWN (per generation)" if div > 1
+             else "PER-OP GPU BREAKDOWN (stage total)")
+    lines = render_section_header(num, title, subtitle, indent)
     tot_gpu = sum(v[1] for v in agg.values())
     tot_cpu = sum(v[2] for v in agg.values())
     lines.append(indent + f"    {'op / shape':<40}{'calls':>7}{'gpu (ms)':>10}"
@@ -831,14 +909,15 @@ def render_perop_aggregate(blocks: list[list[str]], indent: str, *,
     for name, (calls, gpu, cpu, shapes) in sorted(
             agg.items(), key=lambda kv: kv[1][1], reverse=True):
         pct = (100.0 * gpu / tot_gpu) if tot_gpu else 0.0
-        lines.append(indent + f"    {name:<40}{calls:>7}{gpu:>10.1f}"
-                              f"{cpu:>10.1f}{pct:>6.1f}%")
+        lines.append(indent + f"    {name:<40}{calls:>7}{gpu / div:>10.1f}"
+                              f"{cpu / div:>10.1f}{pct:>6.1f}%")
         for shp, (scalls, sgpu, scpu) in sorted(
                 shapes.items(), key=lambda kv: kv[1][1], reverse=True):
             spct = (100.0 * sgpu / tot_gpu) if tot_gpu else 0.0
-            lines.append(indent + f"      {shp:<38}{scalls:>7}{sgpu:>10.1f}"
-                                  f"{scpu:>10.1f}{spct:>6.1f}%")
-    lines.append(indent + f"    {'TOTAL':<40}{'':>7}{tot_gpu:>10.1f}{tot_cpu:>10.1f}")
+            lines.append(indent + f"      {shp:<38}{scalls:>7}{sgpu / div:>10.1f}"
+                                  f"{scpu / div:>10.1f}{spct:>6.1f}%")
+    lines.append(indent + f"    {'TOTAL':<40}{'':>7}"
+                          f"{tot_gpu / div:>10.1f}{tot_cpu / div:>10.1f}")
     return lines
 
 
@@ -889,33 +968,9 @@ def render_prefill_breakdown(samples: list[ComputeSample], head: OgaHeadline,
     if not prefill:
         return []
 
-    subs = ("vision", "embedding", "text_prefill", "glue")
-    metrics = ("wall", "mi", "mo", "cpu", "gpu", "fence", "optot")
-
-    def blank() -> dict[str, float]:
-        return {sub: {m: 0.0 for m in metrics} for sub in subs}
-
-    gens: list[dict] = []
-    cur: Optional[dict] = None
-    for s in samples:
-        sub = _prefill_substage(s.block) if s.stage == "prefill" else None
-        if sub == "vision":
-            if cur is not None:
-                gens.append(cur)
-            cur = blank()
-        if s.stage == "prefill":
-            if cur is None:
-                cur = blank()
-            d = cur[sub]
-            d["wall"] += s.wall_ms
-            d["mi"] += s.marshal_in_ms
-            d["mo"] += s.marshal_out_ms
-            d["cpu"] += s.compute_cpu_ms
-            d["gpu"] += s.gpu_ms
-            d["fence"] += s.fence_residual_ms
-            d["optot"] += _block_total_gpu(s.block)
-    if cur is not None and any(d["wall"] for d in cur.values()):
-        gens.append(cur)
+    subs = _PREFILL_SUBS
+    metrics = _PREFILL_METRICS
+    gens = _segment_prefill_generations(samples)
     if not gens:
         return []
 
@@ -1160,26 +1215,34 @@ def render_report(log_path: Path, *, charset: str = "unicode",
         out += render_section_1_headline(head, indent)
         out.append("")
 
+    # § 2 PREFILL breakdown -- chronologically first (prefill precedes decode).
+    if prefill:
+        wf = render_prefill_breakdown(samples, head, charset, indent, num=2)
+        if wf:
+            out += wf
+            out.append("")
+
+    # § 3 DECODE breakdown.
     if breakdown is not None:
         out += render_section_2_breakdown(breakdown, charset, indent)
         out.append("")
 
-    # § 3 PREFILL WATERFALL (sub-model split), § 4/5 PREFILL dist + per-op,
-    # § 6/7 DECODE dist + per-op -- each stage from its own Computes only.
+    # § 4/5 PREFILL dist + per-op, § 6/7 DECODE dist + per-op -- each stage
+    # from its own Computes only.
     if prefill:
-        wf = render_prefill_breakdown(samples, head, charset, indent, num=3)
-        if wf:
-            out += wf
-            out.append("")
         out += render_section_4_distribution(
             stage_perf(prefill), indent, num=4,
             subtitle=f"PREFILL stage -- {len(prefill)} Compute(s) "
                      "(vision + embedding + text prefill), all ms")
         out.append("")
-        # Prefill spans multiple Computes -> sum per-op across all of them.
+        # Prefill spans multiple Computes per generation -> sum per-op across
+        # them, then normalize to per-generation so the TOTAL matches § 2.
+        n_gen = _count_prefill_generations(samples)
         out += render_perop_aggregate(
             [s.block for s in prefill if s.block], indent, num=5,
-            subtitle=f"summed across all {len(prefill)} prefill Compute(s)")
+            generations=n_gen,
+            subtitle=f"gpu/cpu per generation (avg over {n_gen} gen(s)); "
+                     f"calls = run total over {len(prefill)} prefill Compute(s)")
         out.append("")
     if decode:
         out += render_section_4_distribution(
