@@ -110,8 +110,8 @@ via `extraClassDefinition`, forwarding to that interface default. A
 | Parameter | Default | Effect |
 |---|---|---|
 | `autoReify` | `1` | Auto-emit a per-op `reifyResultShapes` that delegates to `HipDpsOp::reifyResultShapes`. Set `0` for ops with a tighter contract (matmul) that provide a hand-written body in `HipReifyResultShapesImpl.cpp`. |
-| `autoInfer` | `0` (#260 default; #260 sets `1` on `hip.matmul` as the worked example, #262 flips the default) | Auto-emit a per-op `inferReturnTypes` that reads the result type from the outs operand. |
-| `declareInfer` | `0` (#260 default; #260 sets `1` on `hip.matmul`, #262 flips the default) | Declare `InferTypeOpInterface` on the op (so converters can use the inferred-type `Op::create` overload). |
+| `autoInfer` | `0` | Auto-emit a per-op `inferReturnTypes` that reads the result type from the outs operand. Set `1` per-op when the op wants the InferType-aware `Op::create` builder. Opted in: `hip.matmul` on #260; `hip.rope`, `hip.rms_norm`, `hip.qmoe`, `hip.matmul_nbits`, `hip.gemm` on #262. Multi-result Hip_DpsOps (`hip.gqa`, `hip.layer_norm`, `hip.skip_rms_norm`) keep `0` because the auto-emit body pushes a single result type. |
+| `declareInfer` | `0` | Declare `InferTypeOpInterface` on the op (so converters can use the inferred-type `Op::create` overload). Set `1` in lockstep with `autoInfer`. |
 | `outsAccessor` | `"Output"` (37 ops) | ODS accessor name read by the auto-emitted `inferReturnTypes` body. Pass `"Y"` for ops with `$y` outs (12 ops), `"C"` for `hip.miopen.add` (`$C`), etc. |
 
 The shape: the interface owns the default body in a sibling `.cpp`
@@ -123,9 +123,10 @@ ops with a tighter shape contract — `[..., M, K] @ [..., K, N] ->
 `autoReify` and `autoInfer` are orthogonal: `hip.matmul` keeps
 `autoReify=0` (runtime dim recovery from operand shapes) while taking
 `autoInfer=1, declareInfer=1` (construction-time result type comes
-verbatim from the typed outs operand). Most other ops with bespoke
-reify (`hip.range`, `hip.gemm`, `hip.qmoe`, `hip.matmul_nbits`) follow
-the same split on #262 onward.
+verbatim from the typed outs operand). The same split applies to other
+ops with bespoke reify (`hip.gemm`, `hip.qmoe`, `hip.matmul_nbits`)
+plus the shape-preserving `hip.rope` / `hip.rms_norm` on #262;
+`hip.range` joins later.
 
 `ReifyRankedShapedTypeOpInterface` covers the orthogonal *dynamic-shape*
 job: per-dim `OpFoldResult`s for `--hip-infer-shapes` and the test
@@ -241,18 +242,17 @@ re-running the LIT suite.
 ```text
 include/hip/Dialect/IR/
   HipShapeUtils.h          -- public API: inferMatmulShape, verifyHipOpShape,
-                              reifyDimOrConstant. Helpers added by
-                              later phases of the cascade are listed in their
-                              respective PR plans (reifyElementwiseSameShape
-                              and reifyBroadcastShape land with the
-                              Hip_DpsOp_SameShape / Hip_DpsOp_Broadcast
-                              sub-bases in #262 / #263; per-shape Tier-1
-                              helpers reifyPadShape / reifyTileShape /
+                              reifyDimOrConstant, reifyElementwiseSameShape
+                              (added on #262 for ops whose result has the
+                              same shape as one designated input).
+                              Per-shape Tier-1 helpers reifyBroadcastShape /
+                              reifyPadShape / reifyTileShape /
                               reifySliceShape / reifyExpandShape /
                               reifyRangeShape / reifyTransposeByPerm /
                               reifyGatherWithAxis / reifyGatherND /
                               reifyReductionWithKeepdims land with the
-                              bespoke-op cleanup in #264).
+                              broadcast-op cleanup in #263 and the
+                              bespoke-op cleanup in #264.
   HipDpsOpInterface.td     -- in-dialect `HipDpsOp` interface declaration;
                               carries the shared default `reifyResultShapes`
                               that all `Hip_DpsOp`s inherit unless they opt
@@ -263,13 +263,14 @@ include/hip/Dialect/IR/
                               onward also auto-emits per-op
                               `InferTypeOpInterface::inferReturnTypes` for
                               ops that pass `autoInfer=1, declareInfer=1`
-                              (matmul today; the rest migrate in #262).
-                              Per-op defs only carry `autoReify=0` /
-                              `autoInfer=0` / `declareInfer=0` opt-outs and
-                              `outsAccessor` when the outs SSA name is not
-                              `$output`. `let hasVerifier = 1` only when the
-                              op has a non-trivial shape contract (matmul
-                              today).
+                              (matmul on #260; rope, rms_norm, qmoe,
+                              matmul_nbits, gemm on #262). Per-op defs
+                              only carry the `autoReify` / `autoInfer` /
+                              `declareInfer` flags they need to override
+                              and `outsAccessor` when the outs SSA name
+                              is not `$output`. `let hasVerifier = 1`
+                              only when the op has a non-trivial shape
+                              contract (matmul today).
 
 lib/Dialect/IR/
   HipShapeUtils.cpp                -- implementations + diagnostics
@@ -288,28 +289,28 @@ lib/Dialect/IR/
                                       that opt out (`autoReify=0`), one
                                       `// <OpName>` section per op. Matmul
                                       is the only op in this file on #260;
-                                      `hip.range` / `hip.nonzero` / `hip.pad`
-                                      / `hip.tile` / `hip.expand` / `hip.slice`
-                                      / `hip.gather*` / `hip.reduce_*` /
-                                      `hip.transpose` / `hip.layer_norm` /
-                                      `hip.skip_rms_norm` / `hip.gqa` /
-                                      `hip.mha` / `hip.causal_conv_with_state`
-                                      / `hip.linear_attention` / `hip.hipdnn_graph`
-                                      join across #262-#264.
+                                      `hip.rope` / `hip.rms_norm` / `hip.qmoe`
+                                      / `hip.matmul_nbits` / `hip.gemm` join
+                                      on #262; `hip.range` / `hip.nonzero` /
+                                      `hip.pad` / `hip.tile` / `hip.expand` /
+                                      `hip.slice` / `hip.gather*` /
+                                      `hip.reduce_*` / `hip.transpose` /
+                                      `hip.layer_norm` / `hip.skip_rms_norm` /
+                                      `hip.gqa` / `hip.mha` /
+                                      `hip.causal_conv_with_state` /
+                                      `hip.linear_attention` /
+                                      `hip.hipdnn_graph` join across
+                                      #263-#264.
 
-  HipResultTypeInferenceImpl.cpp   -- (added in #262) per-op
-                                      `inferReturnTypes()` for ops that opt
-                                      out of the auto-emitted body
-                                      (`autoInfer=0`), one `// <OpName>`
-                                      section per op. Used by the variadic-out
-                                      ops (`layer_norm`, `skip_rms_norm`,
-                                      `hipdnn_graph`) and the multi-init ops
-                                      (`gqa`, `mha`, `linear_attention`,
-                                      `causal_conv_with_state`). Single-result
-                                      ops with bespoke reify (matmul, gemm,
-                                      qmoe, matmul_nbits) take the
-                                      auto-emitted `inferReturnTypes` body
-                                      and do NOT appear in this file.
+  (No HipResultTypeInferenceImpl.cpp today: every op that declares
+   `InferTypeOpInterface` so far is single-result, and the auto-emitted
+   body — push the outs operand's tensor type — is correct for them.
+   When a future op needs a hand-written body — most likely a
+   variadic-out op like `layer_norm` / `skip_rms_norm` / `hipdnn_graph`
+   that wants to declare `InferTypeOpInterface` — add a new
+   `HipResultTypeInferenceImpl.cpp` next to `HipReifyResultShapesImpl.cpp`,
+   wire it into `lib/Dialect/IR/CMakeLists.txt`, and follow the same
+   one-`// <OpName>`-section-per-op layout.)
 
 include/hip/Dialect/Transforms/
   Passes.td                -- `def InferShapesPass` registration
@@ -332,26 +333,30 @@ test/lit/Dialect/
 
 ### Why the per-interface split
 
-`reifyResultShapes` and `inferReturnTypes` each live in their own
-translation unit because they grow on a different schedule from the
-rest of an op's machinery. Verifiers, `getEffects`,
-`getDpsInitsMutable`, and op-local builders touch the op once and
-rarely need maintenance after that. Reify implementations are
+`reifyResultShapes` lives in its own translation unit because it grows
+on a different schedule from the rest of an op's machinery. Verifiers,
+`getEffects`, `getDpsInitsMutable`, and op-local builders touch the op
+once and rarely need maintenance after that. Reify implementations are
 non-trivial shape arithmetic that benefits from being read alongside
 each other (every dynamic-shape op solves a small variant of the same
 "lift static dims to `IntegerAttr`, dynamic dims to `tensor.dim` of
-the right operand" problem). InferType implementations are typically
-mechanical reads of the outs operand's type but multiply across every
-DPS op — keeping them together makes the "every op uniformly delegates
-to the same helper" pattern obvious. Both files follow the same
-one-`// <OpName>`-section-per-op convention.
+the right operand" problem). The file follows a one-`// <OpName>`-
+section-per-op convention.
+
+`inferReturnTypes` does NOT have its own translation unit today: the
+auto-emitted body in `Hip_DpsOp::extraClassDefinition` covers every op
+that opts in (single-result, result type == outs operand type). When a
+future op (most likely a variadic-out one) needs a hand-written body,
+add `HipResultTypeInferenceImpl.cpp` next to `HipReifyResultShapesImpl.cpp`
+following the same per-op-section layout.
 
 The interface impls are **member functions, not external models** —
 `attachInterface` / `ExternalModel<>` is only needed when implementing
 an interface from *outside* the op's owning dialect. Inside the HIP
 dialect we own both the op and the interface impl, so a normal
-class-member definition in `HipReifyResultShapesImpl.cpp` /
-`HipResultTypeInferenceImpl.cpp` is the right shape.
+class-member definition in `HipReifyResultShapesImpl.cpp` is the right
+shape (and the same shape applies to a future
+`HipResultTypeInferenceImpl.cpp` when it lands).
 
 When a future interface accumulates enough impls to deserve the same
 treatment (e.g. a dialect-defined op interface, a tiling interface, or
@@ -395,7 +400,8 @@ The `Hip_DpsOp` base auto-emits a working `reifyResultShapes` so the op
 participates in dynamic-shape refinement without per-op `.cpp`
 boilerplate. Construction-time `inferReturnTypes` is also auto-emitted
 when the op opts in via `autoInfer=1, declareInfer=1` (matmul on #260;
-all single-result ops by default from #262). Verifier and per-op
+five transformer-block ops on #262: `hip.rope`, `hip.rms_norm`,
+`hip.qmoe`, `hip.matmul_nbits`, `hip.gemm`). Verifier and per-op
 overrides remain optional escape hatches when the op has a shape
 contract tighter than "result_type == outs_operand_type".
 
@@ -407,9 +413,12 @@ recovers M/K/N from operand shapes) AND opt in to auto-emitted
 inferReturnTypes (`autoInfer=1, declareInfer=1`, with the converter
 callsite dropped to the inferred-type `Op::create` overload). #261
 adds `InferTypeOpInterface` to `hip.loop` (region op, not DPS). #262
-flips `autoInfer=1` / `declareInfer=1` defaults and introduces the
-`Hip_DpsOp_SameShape` sub-base. #263 introduces `Hip_DpsOp_Broadcast`
-and migrates 23 ops. #264 cleans up the remaining bespoke ops.
+opts five transformer-block ops in to auto-emitted `inferReturnTypes`
+(`hip.rope`, `hip.rms_norm`, `hip.qmoe`, `hip.matmul_nbits`,
+`hip.gemm`) and gives them hand-written `reifyResultShapes`, so
+`--hip-infer-shapes` refines through a typical decoder block end-to-end.
+#263 introduces `Hip_DpsOp_Broadcast` and migrates 23 ops. #264 cleans
+up the remaining bespoke ops.
 
 ### 1. Declare the op in TableGen
 
@@ -460,12 +469,12 @@ Pick the reify helper that matches the op's shape contract:
 | Op shape contract | Helper | Lands in |
 |---|---|---|
 | Result shape == outs operand shape (default) | (no helper — interface default in `HipDpsOpInterface.cpp`) | #260 |
-| Result shape == named INPUT operand shape (e.g. silu, rope, rms_norm) | `Hip_DpsOp_SameShape<input>` sub-base + `reifyElementwiseSameShape` | #262 |
+| Result shape == named INPUT operand shape (e.g. rope, rms_norm, qmoe) | hand-written body calling `reifyElementwiseSameShape(b, loc, getInput())` | #262 |
 | NumPy broadcast (add, mul, where, ...) | `Hip_DpsOp_Broadcast<[...]>` sub-base + `reifyBroadcastShape` | #263 |
 | Permutation (`hip.transpose`) | `reifyTransposeByPerm` | #264 |
 | Reduction with `keepdims` (reduce_sum, reduce_max) | `reifyReductionWithKeepdims` | #264 |
 | Gather along an axis (`hip.gather`, `hip.gather_nd`) | `reifyGatherWithAxis` / `reifyGatherND` | #264 |
-| Multi-init outs-lifting (gqa, mha, layer_norm, ...) | hand-written body in `HipReifyResultShapesImpl.cpp` walking `getDpsInits()` | #262-#264 |
+| Multi-init outs-lifting (gqa, mha, layer_norm, ...) | hand-written body in `HipReifyResultShapesImpl.cpp` walking `getDpsInits()` | #263-#264 |
 | Fold-or-bail shape arithmetic (pad, tile, slice, expand, range) | one of `reifyPadShape` / `reifyTileShape` / `reifySliceShape` / `reifyExpandShape` / `reifyRangeShape` (return `failure()` on non-foldable; falls through to outs-lifting) | #264 |
 | Matmul-shaped (`[..., M, K] @ [..., K, N] -> [..., M, N]`) | call `inferMatmulShape` to compute output extents, then `reifyDimOrConstant` per dim | #260 (matmul) |
 
@@ -507,9 +516,10 @@ kernel) leave the dim as `?` — the only honest answer.
 
 ### 4. Converter callsites (inferred-type `Op::create`)
 
-For ops with `declareInfer=1, autoInfer=1` (matmul on #260; all
-single-result `Hip_DpsOp`s by default from #262), drop the explicit
-`resultType` argument from the `Op::create` callsite in
+For ops with `declareInfer=1, autoInfer=1` (matmul on #260; five
+transformer-block ops on #262: `hip.rope`, `hip.rms_norm`, `hip.qmoe`,
+`hip.matmul_nbits`, `hip.gemm`), drop the explicit `resultType`
+argument from the `Op::create` callsite in
 `lib/Conversion/OnnxToHip/<MyOp>Conversion.cpp`:
 
 ```cpp
