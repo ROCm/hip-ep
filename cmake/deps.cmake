@@ -18,6 +18,19 @@ foreach(_dep IN LISTS _HIPDNN_DEPS_LIST)
   set(DEP_HASH_${_dep_name} "${_dep}")  # remaining column = hash (may be empty)
 endforeach()
 
+# The shared toolchain (LLVM/MLIR/LLD, flatbuffers, cpptrace, TheRock) is needed
+# by both the EP and the standalone HIP tools, so it is resolved whenever either
+# is on. The EP-only deps (morphizen, ONNX Runtime, protobuf) stay gated on
+# BUILD_EP. Both options are declared in the top-level CMakeLists.txt before this
+# file is included.
+if(BUILD_EP OR BUILD_HIP_TOOLS)
+  set(_HIPDNN_NEED_TOOLCHAIN ON)
+else()
+  set(_HIPDNN_NEED_TOOLCHAIN OFF)
+endif()
+
+if(BUILD_EP)
+
 # Function to get git version info for a component
 function(morphizen_add_version_info)
   set(options)
@@ -92,6 +105,8 @@ set(morphizen_OUTPUT_NAME "onnxruntime_morphizen_ep" CACHE STRING "Set output na
 set(MORPHIZEN_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
 
+endif()  # BUILD_EP (morphizen build setup)
+
 # Cross-wire BUILD_MOCK_RUNTIME (this project) <-> morphizen's HIP GPU
 # allocator option so the same build invocation does the right thing on
 # both sides:
@@ -136,7 +151,7 @@ endif()
 # cmake/deps.txt (therock;<base-url>;<rocm-version>); the full tarball basename
 # is derived from the host OS + the first HIP_ARCHITECTURES entry. Skipped for
 # BUILD_MOCK_RUNTIME=ON (no GPU/HIP), so mock never triggers a download.
-if(NOT BUILD_MOCK_RUNTIME AND (NOT THEROCK_DIST OR NOT EXISTS "${THEROCK_DIST}/bin"))
+if(_HIPDNN_NEED_TOOLCHAIN AND NOT BUILD_MOCK_RUNTIME AND (NOT THEROCK_DIST OR NOT EXISTS "${THEROCK_DIST}/bin"))
   set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
   if(NOT EXISTS "${_therock_root}/bin")
     if(WIN32)
@@ -186,21 +201,24 @@ if(NOT BUILD_MOCK_RUNTIME AND (NOT THEROCK_DIST OR NOT EXISTS "${THEROCK_DIST}/b
   list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
 endif()
 
-# cpptrace for crash backtraces
-set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
-set(BUILD_SHARED_LIBS OFF)
-if(WIN32)
-  set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
-  set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
+# cpptrace for crash backtraces (EP morphizen + standalone hip-compiler)
+if(_HIPDNN_NEED_TOOLCHAIN)
+  set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+  if(WIN32)
+    set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
+    set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
+  endif()
+  FetchContent_Declare(
+    cpptrace
+    GIT_REPOSITORY ${DEP_URL_cpptrace}
+    GIT_TAG ${DEP_HASH_cpptrace}
+  )
+  FetchContent_MakeAvailable(cpptrace)
+  set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 endif()
-FetchContent_Declare(
-  cpptrace
-  GIT_REPOSITORY ${DEP_URL_cpptrace}
-  GIT_TAG ${DEP_HASH_cpptrace}
-)
-FetchContent_MakeAvailable(cpptrace)
-set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
+if(BUILD_EP)
 # ONNX Runtime resolution (find_package first, official release zip fallback).
 #
 # The EP links onnxruntime::onnxruntime (headers + import lib). We resolve it
@@ -253,6 +271,7 @@ if(NOT onnxruntime_FOUND AND NOT TARGET onnxruntime::onnxruntime)
   set(onnxruntime_VERSION "${ORT_VERSION}")
   message(STATUS "onnxruntime::onnxruntime synthesized from release zip (v${ORT_VERSION})")
 endif()
+endif()  # BUILD_EP (ONNX Runtime)
 
 # ---------------------------------------------------------------------------
 # Source-built C++ deps: find_package first, from-source FetchContent fallback.
@@ -270,6 +289,7 @@ endif()
 # which require flatc >= the pinned version. An older flatbuffers that happens
 # to sit on CMAKE_PREFIX_PATH (e.g. TheRock bundles an older one) is rejected
 # here so the from-source build provides a new-enough flatc.
+if(_HIPDNN_NEED_TOOLCHAIN)
 string(REGEX REPLACE "^v" "" _fb_version "${DEP_HASH_flatbuffers}")
 find_package(flatbuffers ${_fb_version} CONFIG QUIET)
 if(NOT flatbuffers_FOUND AND NOT TARGET flatbuffers::flatbuffers)
@@ -295,12 +315,14 @@ if(NOT flatbuffers_FOUND AND NOT TARGET flatbuffers::flatbuffers)
     add_executable(flatbuffers::flatc ALIAS flatc)
   endif()
 endif()
+endif()  # _HIPDNN_NEED_TOOLCHAIN (flatbuffers)
 
 # protobuf (+ bundled abseil). Name "Protobuf" matches morphizen's
 # FetchContent_Declare so the first-populated wins and morphizen reuses it.
 # CMAKE_CXX_STANDARD=17 is required (abseil pins its installed options.h ABI
 # from a configure-time _MSVC_LANG probe; C++14 default -> CopyToEncodedBuffer
 # link error). See windows-build.yml "Build protobuf from source".
+if(BUILD_EP)
 find_package(Protobuf CONFIG QUIET)
 if(NOT Protobuf_FOUND AND NOT TARGET protobuf::libprotobuf)
   message(STATUS "protobuf not found; building from source (${DEP_HASH_protobuf})")
@@ -323,6 +345,7 @@ if(NOT Protobuf_FOUND AND NOT TARGET protobuf::libprotobuf)
     EXCLUDE_FROM_ALL)
   FetchContent_MakeAvailable(Protobuf)
 endif()
+endif()  # BUILD_EP (protobuf)
 
 # LLVM/MLIR/LLD resolution.
 #
@@ -341,6 +364,7 @@ endif()
 # tree, and a plain find_package(MLIR) on the next configure would then fail in
 # the build-tree LLVMConfig includes -- so once embedded we skip find_package
 # entirely and clear those stale cache entries.
+if(_HIPDNN_NEED_TOOLCHAIN)
 if(HIPDNN_LLVM_EMBEDDED)
   unset(MLIR_DIR CACHE)
   unset(LLVM_DIR CACHE)
@@ -409,6 +433,7 @@ else()
     "${llvm-project_SOURCE_DIR}/lld/include"
     "${llvm-project_BINARY_DIR}/tools/lld/include")
 endif()
+endif()  # _HIPDNN_NEED_TOOLCHAIN (LLVM/MLIR/LLD)
 
 # Add morphizen subdirectory.
 #
@@ -420,4 +445,6 @@ endif()
 # its .pb.h surface comes from external `onnx_proto` whose
 # INTERFACE_INCLUDE_DIRECTORIES we don't control (upstream onnx fix is a
 # follow-up).
-add_subdirectory(3rd-party/morphizen)
+if(BUILD_EP)
+  add_subdirectory(3rd-party/morphizen)
+endif()

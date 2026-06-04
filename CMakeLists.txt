@@ -67,9 +67,15 @@ if(THEROCK_DIST)
 endif()
 
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
+option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
+
+# Centralized dependency resolution. Always included; internally partitions by
+# BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the
+# shared toolchain (LLVM/MLIR/LLD, flatbuffers, cpptrace, TheRock) without the
+# EP-only bits (morphizen, ORT, protobuf).
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 
 if(BUILD_EP)
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
   # MLIR backend compiler
   add_subdirectory(backend-mlir-compiler)
   add_subdirectory(tools/hip-onnx-runner)
@@ -85,12 +91,10 @@ endif()
 #   cmake -B build -S . -DBUILD_HIP_TOOLS=ON \
 #     [-DONNX_MLIR_SRC=/path/to/onnx-mlir -DONNX_MLIR_BUILD=/path/to/build]
 # ==============================================================================
-option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
-
 if(BUILD_HIP_TOOLS)
-  # When BUILD_EP=ON these are already resolved by cmake/deps.cmake (find_package
-  # against a prefix, or a from-source fallback) and reused here. When building
-  # the tools standalone (BUILD_EP=OFF) deps.cmake did not run, so resolve them.
+  # LLVM/MLIR, flatbuffers and cpptrace are resolved by cmake/deps.cmake (which
+  # runs for any BUILD_EP or BUILD_HIP_TOOLS tree). The guards below only reuse
+  # what deps.cmake already populated; they never resolve a dependency twice.
   #
   # HIPDNN_LLVM_EMBEDDED means LLVM/MLIR came from a FetchContent subdirectory
   # build: the targets, helper functions and LLVM_*/MLIR_* consumer variables
@@ -106,27 +110,6 @@ if(BUILD_HIP_TOOLS)
   endif()
   if(NOT flatbuffers_FOUND AND NOT TARGET flatbuffers::flatbuffers)
     find_package(flatbuffers REQUIRED CONFIG)
-  endif()
-
-  # cpptrace for crash backtraces. When BUILD_EP=ON, cmake/deps.cmake already
-  # declared it (pinned from cmake/deps.txt) -- skip here to avoid a redundant
-  # declaration. Only the standalone tools build (BUILD_EP=OFF) falls through;
-  # deps.txt is not parsed in that path, so the version is pinned inline.
-  if(NOT TARGET cpptrace::cpptrace)
-    include(FetchContent)
-    set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
-    set(BUILD_SHARED_LIBS OFF)
-    if(WIN32)
-      set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
-      set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
-    endif()
-    FetchContent_Declare(
-      cpptrace
-      GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
-      GIT_TAG v0.8.3
-    )
-    FetchContent_MakeAvailable(cpptrace)
-    set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
   endif()
 
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
