@@ -270,6 +270,71 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
+  let summary = "Refine dynamic dims in HIP DPS op result types via "
+                "`ReifyRankedShapedTypeOpInterface`";
+  let description = [{
+    Walks every op that implements `ReifyRankedShapedTypeOpInterface` and
+    has at least one `RankedTensorType` result (memref-mode DPS ops are
+    skipped). For each such op, calls `reifyResultShapes` to discover
+    static dim values that the op contract knows but the IR types still
+    spell as `?`, and refines:
+
+      1. The DPS `outs` operand's producer result type, when the producer
+         is a `tensor.empty` -- the only zero-cost refinement we can do
+         today. The tensor.empty is rebuilt with the refined shape; any
+         dynamic dim operands that became static are dropped.
+      2. The op's own result type, in place.
+      3. Each consumer whose operand type no longer matches: a
+         `tensor.cast` is inserted on the use-edge to bridge the new
+         (more-static) type back to the original type. DPS consumers
+         that take the refined value as their `outs` operand are
+         deliberately NOT cast back -- they will be refined in turn on
+         the same module walk (topo-ordered by IR position).
+
+    Why DPS-aware
+    -------------
+    HIP DPS ops require `result_type == outs_operand_type`, so refining
+    the op's result without matching the outs operand's producer would
+    produce a verifier error. This pass handles the DPS contract by
+    rewriting the producer at the same time as the result type. See
+    [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
+    for the full design discussion.
+
+    Pipeline placement
+    ------------------
+    Wired into `buildOnnxToHipPipelineTail` (the shared post-conversion
+    segment of `buildOnnxToHipPipeline`) immediately after
+    `convert-onnx-to-hip` and before `one-shot-bufferize`. Refining
+    tensor result types BEFORE bufferize propagates static dims through
+    the alloc / pool sizing computations and removes spurious
+    `memref.dim` ops that the legalisation chain would otherwise leave
+    at the top of the function. The pass is also a no-op when no op in
+    the function carries the interface (or when no further refinement
+    is possible), so it is safe to run unconditionally on every model.
+
+    Idempotent: a second invocation that finds no further refinements is
+    a no-op.
+
+    Example:
+    ```mlir
+    // before
+    %empty = tensor.empty(%dynM, %dynN) : tensor<?x?xf16>
+    %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+                          outs(%empty : tensor<?x?xf16>) -> tensor<?x?xf16>
+
+    // after
+    %empty = tensor.empty() : tensor<2x8xf16>
+    %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+                          outs(%empty : tensor<2x8xf16>) -> tensor<2x8xf16>
+    ```
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
   let summary = "Replace extern memref.global constants with "
