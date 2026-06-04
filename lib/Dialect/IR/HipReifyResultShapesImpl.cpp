@@ -324,11 +324,17 @@ GemmOp::reifyResultShapes(OpBuilder &b,
 // per-op `.cpp` thunk is needed.
 //
 // Other ops whose output dims are arithmetic functions of operand
-// values (pad, tile, expand, slice, range) keep their default
-// `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
-// `getDpsInits()` and lifts each output's shape. Proper per-op
-// arithmetic for those (e.g. `tensor::PadOp`'s
-// `affine.apply (d0 + d1 + d2)` recipe) is deferred.
+// values (pad, tile, expand, slice, range) have per-op Tier-1 reify
+// thunks below: each calls a dedicated `reifyPadShape` /
+// `reifyTileShape` / `reifyExpandShape` / `reifySliceShape` /
+// `reifyRangeShape` helper (`HipShapeUtils.cpp`) that computes the
+// output shape from the INPUT operands using a fold-or-bail strategy.
+// On bail (non-constant operands, dynamic input dims) the thunk falls
+// back to `cast<HipDpsOp>(getOperation()).reifyResultShapes` — i.e. the
+// shared `HipDpsOp` outs-lift default. This avoids emitting per-dim
+// `arith.addi(tensor.dim, const)` / `arith.divsi(...)` chains that
+// don't fold and would clutter the IR (particularly important for
+// slice's per-axis chain and range's count-only output).
 //
 // Before (transpose, perm-driven mapping):
 //   %t = hip.transpose(%ctx) ins(%x : tensor<2x?x4096xf16>)
@@ -338,6 +344,33 @@ GemmOp::reifyResultShapes(OpBuilder &b,
 //   dim 0 -> 4096 : index            (static, from %x.shape[2])
 //   dim 1 -> 2 : index               (static, from %x.shape[0])
 //   dim 2 -> tensor.dim %x, %c1      (dynamic, from %x.shape[1])
+//
+// Before (reduce_sum with constant axes, keepdims=1, Tier 1):
+//   %a = arith.constant dense<[1]> : tensor<1xi64>
+//   %r = hip.reduce_sum(%ctx) ins(%x, %a : tensor<?x4096xf16>,
+//                                            tensor<1xi64>)
+//                              outs(%out : tensor<?x?xf16>)
+//                              {keepdims = 1, noop_with_empty_axes = 0}
+//                            : tensor<?x?xf16>
+// After (reified result shape):
+//   dim 0 -> tensor.dim %x, %c0     (passes through from input)
+//   dim 1 -> 1 : index              (axes-listed dim → keepdims=1 → 1)
+//
+// Before (pad, Tier-1 with constant pads, full fold):
+//   %pads = arith.constant dense<[1, 2, 1, 2]> : tensor<4xi64>
+//   %p = hip.pad(%ctx) ins(%x, %pads : tensor<3x4xf16>, tensor<4xi64>)
+//                      outs(%out : tensor<?x?xf16>)
+//                      {mode = "constant"} : tensor<?x?xf16>
+// After (reified result shape — computed from data.shape + pads):
+//   dim 0 -> 6 : index    (3 + pads[0]=1 + pads[2]=1)
+//   dim 1 -> 8 : index    (4 + pads[1]=2 + pads[3]=2)
+//
+// Before (slice, non-foldable starts -> outs-lift fallback):
+//   %p = hip.slice(%ctx) ins(%data, %starts, %ends : ...)
+//        outs(%out : tensor<?x4xf32>) : tensor<?x4xf32>
+// After (reified result shape — outs-lift via HipDpsOp default, no IR bloat):
+//   dim 0 -> tensor.dim %out, %c0   (passes through from outs)
+//   dim 1 -> 4 : index              (static dim of `outs`)
 //===----------------------------------------------------------------------===//
 
 LogicalResult TransposeOp::reifyResultShapes(
@@ -397,4 +430,80 @@ LogicalResult GatherNDOp::reifyResultShapes(
     return failure();
   reifiedReturnShapes.assign({std::move(dims)});
   return success();
+}
+
+// Per-op Tier-1 thunks for pad / tile / expand / slice / range. Each
+// calls its dedicated `reify*Shape` helper (HipShapeUtils.cpp); on
+// failure it falls back to the shared `HipDpsOp::reifyResultShapes`
+// default body in `HipDpsOpInterface.cpp`, which walks `getDpsInits()`
+// and lifts each init's runtime shape via `tensor::getMixedSizes` /
+// `memref::getMixedSizes`. The fallback dispatches through the
+// `HipDpsOp` interface concept and resolves to the default body (these
+// ops override only `ReifyRankedShapedTypeOpInterface::reifyResultShapes`
+// — the body of THIS function — and do not override the `HipDpsOp`
+// interface method, so the call below does not recurse).
+LogicalResult
+PadOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  SmallVector<OpFoldResult> dims;
+  if (succeeded(mlir::hip::reifyPadShape(b, getLoc(), getData(), getPads(),
+                                         getAxes(), dims))) {
+    reifiedReturnShapes.assign({std::move(dims)});
+    return success();
+  }
+  return cast<HipDpsOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
+LogicalResult
+TileOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  SmallVector<OpFoldResult> dims;
+  if (succeeded(mlir::hip::reifyTileShape(b, getLoc(), getInput(), getRepeats(),
+                                          dims))) {
+    reifiedReturnShapes.assign({std::move(dims)});
+    return success();
+  }
+  return cast<HipDpsOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
+LogicalResult
+ExpandOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  SmallVector<OpFoldResult> dims;
+  if (succeeded(mlir::hip::reifyExpandShape(b, getLoc(), getInput(), getShape(),
+                                            dims))) {
+    reifiedReturnShapes.assign({std::move(dims)});
+    return success();
+  }
+  return cast<HipDpsOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
+LogicalResult
+SliceOp::reifyResultShapes(OpBuilder &b,
+                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  SmallVector<OpFoldResult> dims;
+  if (succeeded(mlir::hip::reifySliceShape(b, getLoc(), getData(), getStarts(),
+                                           getEnds(), getAxes(), getSteps(),
+                                           dims))) {
+    reifiedReturnShapes.assign({std::move(dims)});
+    return success();
+  }
+  return cast<HipDpsOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
+LogicalResult
+RangeOp::reifyResultShapes(OpBuilder &b,
+                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  SmallVector<OpFoldResult> dims;
+  if (succeeded(mlir::hip::reifyRangeShape(b, getLoc(), getStart(), getLimit(),
+                                           getDelta(), dims))) {
+    reifiedReturnShapes.assign({std::move(dims)});
+    return success();
+  }
+  return cast<HipDpsOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
 }

@@ -216,6 +216,83 @@ LogicalResult reifyBroadcastShapeFor(OpBuilder &b, Location loc,
                                      ValueRange operands, Operation *op,
                                      ReifiedRankedShapedTypeDims &reified);
 
+/// Reify the result shape of an ONNX-style `pad` op:
+///   `output[d] = data.shape[d] + pre_pad[d] + post_pad[d]`
+/// where `pre_pad[d]` / `post_pad[d]` come from `pads[axes.find(d)]` /
+/// `pads[axes.find(d) + N]` (default `axes = [0, rank)`, `N = num_axes`).
+///
+/// Fold-or-bail strategy: tries to introspect `pads` and (if non-null)
+/// `axes` as constant int vectors, then per-dim computes static output
+/// extents from `data.shape`. Returns `success()` and writes the per-dim
+/// `OpFoldResult`s into `out` ONLY when EVERY output dim is statically
+/// known; returns `failure()` otherwise (the per-op reify thunk falls
+/// back to `HipDpsOp::reifyResultShapes`'s outs-lift default so reify
+/// still succeeds end-to-end). This avoids emitting per-dim
+/// `arith.addi(tensor.dim, const)` chains that don't fold and would
+/// clutter the IR; the typical Tier-1 case is `pads` from an ONNX
+/// attribute (constant) + a fully-static `data.shape`, which folds
+/// entirely to `IndexAttr` results.
+///
+/// `axes` may be null (ONNX "pad all axes" default).
+LogicalResult reifyPadShape(OpBuilder &b, Location loc, Value data, Value pads,
+                            Value axes, SmallVectorImpl<OpFoldResult> &out);
+
+/// Reify the result shape of an ONNX-style `tile` op:
+///   `output[d] = input.shape[d] * repeats[d]`
+/// where `repeats` is a rank-1 i64 tensor of length `input.rank`.
+///
+/// Same fold-or-bail strategy as `reifyPadShape`: tries to introspect
+/// `repeats` as a constant int vector, computes static output extents
+/// from `input.shape`, and returns `success()` only when EVERY dim is
+/// statically known.
+LogicalResult reifyTileShape(OpBuilder &b, Location loc, Value input,
+                             Value repeats, SmallVectorImpl<OpFoldResult> &out);
+
+/// Reify the result shape of an ONNX-style `expand` op:
+///   broadcast `input.shape` against `shape`'s constant values
+///   (right-aligned, leading-1 padded on whichever side is shorter).
+///
+/// Same fold-or-bail strategy. `shape` is the target-shape operand
+/// (rank-1 i64 tensor); when it is an `arith.constant` with a
+/// `DenseIntElementsAttr`, the helper runs MLIR's
+/// `OpTrait::util::getBroadcastedShape` and lifts the result shape.
+/// Returns `failure()` when the broadcast result has any dynamic dim
+/// (so the caller falls back to outs-lifting).
+LogicalResult reifyExpandShape(OpBuilder &b, Location loc, Value input,
+                               Value shape, SmallVectorImpl<OpFoldResult> &out);
+
+/// Reify the result shape of an ONNX-style `slice` op. `output[axis]`
+/// for each `axis` in `axes` is `ceil_div(end - start, step)` (negative
+/// indices and steps clamp per ONNX rules); for axes not in `axes`,
+/// `output[d] = data.shape[d]`.
+///
+/// Pure fold-or-bail (no fallback for partial constants). The dim-arith
+/// chain `arith.divsi(arith.subi(end, start), step)` per axis would
+/// clutter the IR persistently when any of starts / ends / axes / steps
+/// is non-constant; returning `failure()` early lets the per-op reify
+/// thunk fall back to the `HipDpsOp` outs-lift default for a single
+/// `tensor.dim` per dim instead.
+///
+/// `axes` and `steps` may be null (ONNX defaults: `[0, rank)` and
+/// all-ones respectively).
+LogicalResult reifySliceShape(OpBuilder &b, Location loc, Value data,
+                              Value starts, Value ends, Value axes, Value steps,
+                              SmallVectorImpl<OpFoldResult> &out);
+
+/// Reify the result shape of an ONNX-style `range` op:
+///   `output.shape[0] = ceil_div(max(0, limit - start), delta)` (limit
+///   exclusive; clamp to 0 when `limit < start && delta > 0`, etc.).
+///
+/// `start`, `limit`, `delta` are scalar (rank-0) tensors. Pure
+/// fold-or-bail: when ALL three are `arith.constant` with a single int
+/// value, computes the static output count and returns a one-element
+/// `IndexAttr` vector. Else `failure()` -- the dim-arith chain to
+/// compute the count at runtime is rarely useful for refinement and
+/// would persist in IR.
+LogicalResult reifyRangeShape(OpBuilder &b, Location loc, Value start,
+                              Value limit, Value delta,
+                              SmallVectorImpl<OpFoldResult> &out);
+
 } // namespace hip
 } // namespace mlir
 

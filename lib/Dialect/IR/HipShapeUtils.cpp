@@ -28,6 +28,8 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
+
 using namespace mlir;
 using namespace mlir::hip;
 
@@ -469,4 +471,246 @@ mlir::hip::reifyReductionShape(OpBuilder &b, Location loc, Value data,
   // override the `HipDpsOp` interface method, so the call below resolves
   // to the default body and does not recurse.
   return cast<HipDpsOp>(op).reifyResultShapes(b, reified);
+}
+
+LogicalResult mlir::hip::reifyPadShape(OpBuilder &b, Location loc, Value data,
+                                       Value pads, Value axes,
+                                       SmallVectorImpl<OpFoldResult> &out) {
+  out.clear();
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType)
+    return failure();
+  ArrayRef<int64_t> dataShape = dataType.getShape();
+  int64_t dataRank = dataType.getRank();
+
+  // pads is the primary semantic info; without it nothing can be tightened
+  // beyond outs (and the caller's Tier-2 fallback already handles that).
+  SmallVector<int64_t> padsList;
+  if (!extractConstantInts(pads, padsList))
+    return failure();
+
+  // axes default: full range. ONNX requires len(pads) == 2 * len(axes).
+  SmallVector<int64_t> axesList;
+  if (axes) {
+    if (!extractConstantInts(axes, axesList))
+      return failure();
+    for (int64_t &a : axesList) {
+      if (a < 0)
+        a += dataRank;
+      if (a < 0 || a >= dataRank)
+        return failure();
+    }
+  } else {
+    axesList.reserve(dataRank);
+    for (int64_t i : llvm::seq<int64_t>(0, dataRank))
+      axesList.push_back(i);
+  }
+  if (static_cast<int64_t>(padsList.size()) !=
+      2 * static_cast<int64_t>(axesList.size()))
+    return failure();
+
+  // Index axes -> [pre, post]. Default 0 for non-listed axes.
+  SmallVector<std::pair<int64_t, int64_t>> perAxis(dataRank, {0, 0});
+  int64_t numAxes = axesList.size();
+  for (int64_t i : llvm::seq<int64_t>(0, numAxes)) {
+    int64_t a = axesList[i];
+    perAxis[a] = {padsList[i], padsList[i + numAxes]};
+  }
+
+  // Fold-or-bail: each output dim must be statically computable. A
+  // dynamic data dim under a non-zero pad gives a dynamic output dim
+  // (would need arith.addi(tensor.dim, const)) -- we'd rather fall back
+  // to Tier-2 outs-lifting than emit a non-foldable arith chain.
+  SmallVector<int64_t> outShape;
+  outShape.reserve(dataRank);
+  for (int64_t d : llvm::seq<int64_t>(0, dataRank)) {
+    if (ShapedType::isDynamic(dataShape[d]))
+      return failure();
+    outShape.push_back(dataShape[d] + perAxis[d].first + perAxis[d].second);
+  }
+
+  out.reserve(dataRank);
+  for (int64_t v : outShape)
+    out.push_back(b.getIndexAttr(v));
+  return success();
+}
+
+LogicalResult mlir::hip::reifyTileShape(OpBuilder &b, Location loc, Value input,
+                                        Value repeats,
+                                        SmallVectorImpl<OpFoldResult> &out) {
+  out.clear();
+  auto inputType = dyn_cast<RankedTensorType>(input.getType());
+  if (!inputType)
+    return failure();
+  ArrayRef<int64_t> inputShape = inputType.getShape();
+  int64_t inputRank = inputType.getRank();
+
+  SmallVector<int64_t> repeatsList;
+  if (!extractConstantInts(repeats, repeatsList))
+    return failure();
+  if (static_cast<int64_t>(repeatsList.size()) != inputRank)
+    return failure();
+
+  // Same fold-or-bail logic as pad: skip dynamic input dims.
+  out.reserve(inputRank);
+  for (int64_t d : llvm::seq<int64_t>(0, inputRank)) {
+    if (ShapedType::isDynamic(inputShape[d]))
+      return failure();
+    int64_t r = repeatsList[d];
+    if (r < 0)
+      return failure();
+    out.push_back(b.getIndexAttr(inputShape[d] * r));
+  }
+  return success();
+}
+
+LogicalResult mlir::hip::reifyExpandShape(OpBuilder &b, Location loc,
+                                          Value input, Value shape,
+                                          SmallVectorImpl<OpFoldResult> &out) {
+  out.clear();
+  auto inputType = dyn_cast<RankedTensorType>(input.getType());
+  if (!inputType)
+    return failure();
+
+  SmallVector<int64_t> shapeVals;
+  if (!extractConstantInts(shape, shapeVals))
+    return failure();
+
+  // ONNX broadcast: right-aligned, leading-1 padded. Defer the actual
+  // broadcast math to MLIR's `OpTrait::util::getBroadcastedShape` for
+  // consistency with matmul / reifyBroadcastShape.
+  SmallVector<int64_t> outShape;
+  if (!OpTrait::util::getBroadcastedShape(inputType.getShape(), shapeVals,
+                                          outShape))
+    return failure();
+
+  // Fold-or-bail: any dynamic in the broadcast result means we can't
+  // produce a tight shape; let the Tier-2 fallback lift from outs.
+  for (int64_t d : outShape)
+    if (ShapedType::isDynamic(d))
+      return failure();
+
+  out.reserve(outShape.size());
+  for (int64_t v : outShape)
+    out.push_back(b.getIndexAttr(v));
+  return success();
+}
+
+LogicalResult mlir::hip::reifySliceShape(OpBuilder &b, Location loc, Value data,
+                                         Value starts, Value ends, Value axes,
+                                         Value steps,
+                                         SmallVectorImpl<OpFoldResult> &out) {
+  out.clear();
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType)
+    return failure();
+  ArrayRef<int64_t> dataShape = dataType.getShape();
+  int64_t dataRank = dataType.getRank();
+
+  // ALL operands must be foldable -- partial constants on slice would
+  // emit `arith.divsi(arith.subi(end, start), step)` chains per axis
+  // that don't fold, persisting as dead IR. Tier-2 outs-lifting is the
+  // safer fallback.
+  SmallVector<int64_t> startsList, endsList, axesList, stepsList;
+  if (!extractConstantInts(starts, startsList) ||
+      !extractConstantInts(ends, endsList))
+    return failure();
+  if (axes) {
+    if (!extractConstantInts(axes, axesList))
+      return failure();
+  } else {
+    axesList.reserve(dataRank);
+    for (int64_t i : llvm::seq<int64_t>(0, dataRank))
+      axesList.push_back(i);
+  }
+  if (steps) {
+    if (!extractConstantInts(steps, stepsList))
+      return failure();
+  } else {
+    stepsList.assign(axesList.size(), 1);
+  }
+
+  if (startsList.size() != axesList.size() ||
+      endsList.size() != axesList.size() || stepsList.size() != axesList.size())
+    return failure();
+
+  // Per-axis sliced extent; non-axis dims pass through.
+  SmallVector<int64_t> outShape(dataShape.begin(), dataShape.end());
+  for (size_t i : llvm::seq<size_t>(0, axesList.size())) {
+    int64_t a = axesList[i];
+    if (a < 0)
+      a += dataRank;
+    if (a < 0 || a >= dataRank)
+      return failure();
+    int64_t dim = dataShape[a];
+    if (ShapedType::isDynamic(dim))
+      return failure();
+    int64_t step = stepsList[i];
+    if (step == 0)
+      return failure();
+    int64_t s = startsList[i];
+    int64_t e = endsList[i];
+    // ONNX clamping: negative values offset by `dim`; out-of-range clamps.
+    if (s < 0)
+      s += dim;
+    if (e < 0)
+      e += dim;
+    if (step > 0) {
+      s = std::clamp<int64_t>(s, 0, dim);
+      e = std::clamp<int64_t>(e, 0, dim);
+      outShape[a] = (e > s) ? ((e - s + step - 1) / step) : 0;
+    } else { // step < 0
+      s = std::clamp<int64_t>(s, 0, dim - 1);
+      // Negative-step end clamps to [-1, dim-1] (treat <-1 as -1).
+      e = std::clamp<int64_t>(e, -1, dim - 1);
+      int64_t span = s - e;
+      int64_t k = -step;
+      outShape[a] = (s > e) ? ((span + k - 1) / k) : 0;
+    }
+  }
+
+  // All dims must be static (fold-or-bail).
+  for (int64_t v : outShape)
+    if (ShapedType::isDynamic(v))
+      return failure();
+
+  out.reserve(dataRank);
+  for (int64_t v : outShape)
+    out.push_back(b.getIndexAttr(v));
+  return success();
+}
+
+LogicalResult mlir::hip::reifyRangeShape(OpBuilder &b, Location loc,
+                                         Value start, Value limit, Value delta,
+                                         SmallVectorImpl<OpFoldResult> &out) {
+  out.clear();
+
+  // Each operand is a rank-0 (scalar) integer tensor. extractConstantInts
+  // returns a 1-element vector for the rank-0 / IntegerAttr case.
+  SmallVector<int64_t> sList, lList, dList;
+  if (!extractConstantInts(start, sList) ||
+      !extractConstantInts(limit, lList) || !extractConstantInts(delta, dList))
+    return failure();
+  if (sList.size() != 1 || lList.size() != 1 || dList.size() != 1)
+    return failure();
+  int64_t s = sList[0], l = lList[0], d = dList[0];
+  if (d == 0)
+    return failure();
+
+  // ONNX Range: count = max(0, ceil((limit - start) / delta)) for the
+  // direction implied by sign(delta). Negative direction (delta < 0)
+  // counts down from start to limit.
+  int64_t count = 0;
+  if ((d > 0 && l > s) || (d < 0 && l < s)) {
+    int64_t diff = l - s;
+    int64_t step = d;
+    if (step < 0) {
+      diff = -diff;
+      step = -step;
+    }
+    count = (diff + step - 1) / step;
+  }
+
+  out.push_back(b.getIndexAttr(count));
+  return success();
 }
