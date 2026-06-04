@@ -576,3 +576,285 @@ func.func @refine_pad_dps_out_fallback(%ctx: !hip.context,
     : tensor<?x?xf32>
   return %y : tensor<?x?xf32>
 }
+
+// -----
+
+// `hip.pad` Tier-1 promotion. With static `data` and constant `pads`,
+// the helper computes
+// `output[d] = data.shape[d] + pads[d] + pads[d + N]`. Pads = [1, 2, 1, 2]
+// over axes [0, 1] yields output [3+1+1=5, 4+2+2=8]. The pass refines
+// the result type from `tensor<?x?xf32>` to `tensor<5x8xf32>` and the
+// outs `tensor.empty` producer is rebuilt without dynamic operands.
+// CHECK-LABEL: func.func @refine_pad_tier1_constant_pads
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<5x8xf32>
+// CHECK:         %[[Y:.*]] = hip.pad
+// CHECK-SAME:                  outs(%[[E]] : tensor<5x8xf32>){{.*}}: tensor<5x8xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<5x8xf32> to tensor<?x?xf32>
+func.func @refine_pad_tier1_constant_pads(%ctx: !hip.context,
+                                          %data: tensor<3x4xf32>,
+                                          %cval: tensor<f32>,
+                                          %d0: index, %d1: index)
+    -> tensor<?x?xf32> {
+  %pads = arith.constant dense<[1, 2, 1, 2]> : tensor<4xi64>
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+  %y = hip.pad(%ctx)
+    ins(%data, %pads : tensor<3x4xf32>, tensor<4xi64>)
+    cval(%cval : tensor<f32>)
+    outs(%e : tensor<?x?xf32>)
+    {mode = "constant"}
+    : tensor<?x?xf32>
+  return %y : tensor<?x?xf32>
+}
+
+// -----
+
+// `hip.tile` Tier-1 promotion. With static `input` and constant
+// `repeats`, the helper computes
+// `output[d] = input.shape[d] * repeats[d]`. Repeats = [2, 3] over a
+// `tensor<3x4xf32>` yields output [6, 12].
+// CHECK-LABEL: func.func @refine_tile_tier1_constant_repeats
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<6x12xf32>
+// CHECK:         %[[Y:.*]] = hip.tile
+// CHECK-SAME:                  outs(%[[E]] : tensor<6x12xf32>){{.*}}: tensor<6x12xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<6x12xf32> to tensor<?x?xf32>
+func.func @refine_tile_tier1_constant_repeats(%ctx: !hip.context,
+                                               %input: tensor<3x4xf32>,
+                                               %d0: index, %d1: index)
+    -> tensor<?x?xf32> {
+  %repeats = arith.constant dense<[2, 3]> : tensor<2xi64>
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+  %y = hip.tile(%ctx)
+    ins(%input, %repeats : tensor<3x4xf32>, tensor<2xi64>)
+    outs(%e : tensor<?x?xf32>)
+    : tensor<?x?xf32>
+  return %y : tensor<?x?xf32>
+}
+
+// -----
+
+// `hip.expand` Tier-1 promotion. With static `input` and constant
+// `shape`, the helper runs the standard NumPy broadcast (right-
+// aligned, leading-1 padded). Input `tensor<3x1xf32>` broadcast
+// against shape [2, 3, 6] yields output [2, 3, 6].
+// CHECK-LABEL: func.func @refine_expand_tier1_constant_shape
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x3x6xf32>
+// CHECK:         %[[Y:.*]] = hip.expand
+// CHECK-SAME:                  outs(%[[E]] : tensor<2x3x6xf32>){{.*}}: tensor<2x3x6xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<2x3x6xf32> to tensor<?x?x?xf32>
+func.func @refine_expand_tier1_constant_shape(%ctx: !hip.context,
+                                                %input: tensor<3x1xf32>,
+                                                %d0: index, %d1: index,
+                                                %d2: index)
+    -> tensor<?x?x?xf32> {
+  %shape = arith.constant dense<[2, 3, 6]> : tensor<3xi64>
+  %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
+  %y = hip.expand(%ctx)
+    ins(%input, %shape : tensor<3x1xf32>, tensor<3xi64>)
+    outs(%e : tensor<?x?x?xf32>)
+    : tensor<?x?x?xf32>
+  return %y : tensor<?x?x?xf32>
+}
+
+// -----
+
+// `hip.slice` Tier-1 promotion. With static `data` and constant
+// `starts` / `ends` (axes default to [0..rank), steps default to
+// all-ones), the helper computes
+// `output[axis] = ceil_div(end - start, step)`. Slicing `tensor<10x4xf32>`
+// with starts=[1, 0], ends=[6, 4] yields output [5, 4].
+// CHECK-LABEL: func.func @refine_slice_tier1_constant_indices
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<5x4xf32>
+// CHECK:         %[[Y:.*]] = hip.slice
+// CHECK-SAME:                  outs(%[[E]] : tensor<5x4xf32>){{.*}}: tensor<5x4xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<5x4xf32> to tensor<?x?xf32>
+func.func @refine_slice_tier1_constant_indices(%ctx: !hip.context,
+                                                 %data: tensor<10x4xf32>,
+                                                 %d0: index, %d1: index)
+    -> tensor<?x?xf32> {
+  %starts = arith.constant dense<[1, 0]> : tensor<2xi64>
+  %ends = arith.constant dense<[6, 4]> : tensor<2xi64>
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+  %y = hip.slice(%ctx)
+    ins(%data, %starts, %ends : tensor<10x4xf32>, tensor<2xi64>, tensor<2xi64>)
+    outs(%e : tensor<?x?xf32>)
+    : tensor<?x?xf32>
+  return %y : tensor<?x?xf32>
+}
+
+// -----
+
+// `hip.slice` non-foldable case: `starts` is a function arg, not a
+// constant. The Tier-1 helper bails and the per-op thunk falls back
+// to `HipDpsOp::reifyResultShapes`'s outs-lift default. Static dims
+// of the outs (`tensor<10x?xf32>`) still tighten dim 0; the dynamic
+// dim 1 stays dynamic. This guards "no IR bloat on non-foldable slice"
+// (the dim-arith chain would have been
+// `arith.divsi(arith.subi(end, start), step)` per axis -- never emitted).
+// CHECK-LABEL: func.func @refine_slice_non_foldable_falls_back_to_outs
+// CHECK-NOT:     arith.subi
+// CHECK-NOT:     arith.divsi
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<10x?xf32>
+// CHECK:         %[[Y:.*]] = hip.slice
+// CHECK-SAME:                  outs(%[[E]] : tensor<10x?xf32>){{.*}}: tensor<10x?xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<10x?xf32> to tensor<?x?xf32>
+func.func @refine_slice_non_foldable_falls_back_to_outs(
+    %ctx: !hip.context,
+    %data: tensor<10x4xf32>,
+    %starts: tensor<2xi64>,
+    %ends: tensor<2xi64>,
+    %d0: index)
+    -> tensor<?x?xf32> {
+  %e = tensor.empty(%d0) : tensor<10x?xf32>
+  %y = hip.slice(%ctx)
+    ins(%data, %starts, %ends : tensor<10x4xf32>, tensor<2xi64>, tensor<2xi64>)
+    outs(%e : tensor<10x?xf32>)
+    : tensor<10x?xf32>
+  %c = tensor.cast %y : tensor<10x?xf32> to tensor<?x?xf32>
+  return %c : tensor<?x?xf32>
+}
+
+// -----
+
+// `hip.range` Tier-1 promotion. With constant rank-0 start / limit /
+// delta, the helper computes
+// `count = ceil_div(max(0, limit - start), delta)`. start=2, limit=10,
+// delta=3 yields count=3.
+// CHECK-LABEL: func.func @refine_range_tier1_constant_args
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<3xi64>
+// CHECK:         %[[Y:.*]] = hip.range
+// CHECK-SAME:                  outs(%[[E]] : tensor<3xi64>){{.*}}: tensor<3xi64>
+// CHECK:         tensor.cast %[[Y]] : tensor<3xi64> to tensor<?xi64>
+func.func @refine_range_tier1_constant_args(%ctx: !hip.context,
+                                              %d0: index)
+    -> tensor<?xi64> {
+  %start = arith.constant dense<2> : tensor<i64>
+  %limit = arith.constant dense<10> : tensor<i64>
+  %delta = arith.constant dense<3> : tensor<i64>
+  %e = tensor.empty(%d0) : tensor<?xi64>
+  %y = hip.range(%ctx)
+    ins(%start, %limit, %delta : tensor<i64>, tensor<i64>, tensor<i64>)
+    outs(%e : tensor<?xi64>)
+    : tensor<?xi64>
+  return %y : tensor<?xi64>
+}
+
+// -----
+
+// `hip.gqa` is multi-result (3 required outs: output, present_key,
+// present_value, plus one optional debug out `output_qk` -- omitted
+// here). Reify routes through `Hip_DpsOp`'s default `reifyResultShapes`
+// body in `lib/Dialect/IR/HipDpsOpInterface.cpp`, which walks
+// `getDpsInits()` and lifts each init's runtime shape via
+// `tensor::getMixedSizes` -- one entry of `reified` per result. The
+// LIT case uses matching dynamic outs/result triples and guards the
+// no-crash + multi-result-walk contract; for static-dim refinement
+// see the per-op-arithmetic cases like `refine_transpose_perm_driven`.
+//
+// Pass behavior: walks all 3 results, calls reify which lifts each
+// outs's `tensor<?x?x?xf16>` / `tensor<?x?x?x?xf16>` shape as
+// `tensor.dim` ops, finds nothing static-er to narrow to, and exits
+// without mutating the op. The CHECK guards that the op stays intact
+// across all three outs and the dim-walk doesn't bail mid-result.
+// CHECK-LABEL: func.func @refine_gqa_multi_result_dps_out_fallback
+// CHECK:         %[[E0:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf16>
+// CHECK:         %[[E1:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?x?xf16>
+// CHECK:         %[[E2:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?x?xf16>
+// CHECK:         %[[R:.*]]:3 = hip.gqa
+// CHECK-SAME:      outs(%[[E0]], %[[E1]], %[[E2]] :
+// CHECK-SAME:           tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
+// CHECK:         return %[[R]]#0, %[[R]]#1, %[[R]]#2
+func.func @refine_gqa_multi_result_dps_out_fallback(
+    %ctx: !hip.context,
+    %query: tensor<1x?x4096xf16>,
+    %key: tensor<1x?x1024xf16>,
+    %value: tensor<1x?x1024xf16>,
+    %past_key: tensor<1x8x?x128xf16>,
+    %past_value: tensor<1x8x?x128xf16>,
+    %seqlens_k: tensor<1xi32>,
+    %total_seq_len: tensor<i32>,
+    %d0: index, %d1: index, %d2: index, %d3: index)
+    -> (tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>) {
+  %e0 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf16>
+  %e1 = tensor.empty(%d0, %d1, %d2, %d3) : tensor<?x?x?x?xf16>
+  %e2 = tensor.empty(%d0, %d1, %d2, %d3) : tensor<?x?x?x?xf16>
+  %r:3 = hip.gqa(%ctx)
+    ins(%query, %key, %value, %past_key, %past_value,
+        %seqlens_k, %total_seq_len :
+        tensor<1x?x4096xf16>, tensor<1x?x1024xf16>, tensor<1x?x1024xf16>,
+        tensor<1x8x?x128xf16>, tensor<1x8x?x128xf16>,
+        tensor<1xi32>, tensor<i32>)
+    outs(%e0, %e1, %e2 :
+         tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
+    {num_heads = 32 : i64, kv_num_heads = 8 : i64,
+     scale = 0.0883883461 : f32, softcap = 0.000000e+00 : f32,
+     do_rotary = 0 : i64, rotary_interleaved = 0 : i64,
+     local_window_size = -1 : i64}
+    : tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
+  return %r#0, %r#1, %r#2 : tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
+}
+
+// -----
+
+// `hip.layer_norm` is variadic-multi-result: 1, 2, or 3 outs (output
+// required; mean and inv_std optional, training-only). The default
+// `Hip_DpsOp::reifyResultShapes` body walks `getDpsInits()` regardless
+// of arity; this case exercises the full 3-out form so the variadic
+// iteration is covered (1-out covered implicitly by every Tier-2
+// fallback test).
+//
+// Same matching-dynamic-outs pattern as the gqa case above: pass walks
+// all 3 results, reify lifts dynamic outs, no narrowing happens, op
+// stays intact -- guards "Variadic outputs interpreted correctly".
+// CHECK-LABEL: func.func @refine_layer_norm_variadic_three_outs
+// CHECK:         %[[E0:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf16>
+// CHECK:         %[[E1:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
+// CHECK:         %[[E2:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
+// CHECK:         %[[R:.*]]:3 = hip.layer_norm
+// CHECK-SAME:      outs(%[[E0]], %[[E1]], %[[E2]] :
+// CHECK-SAME:           tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+// CHECK:         return %[[R]]#0, %[[R]]#1, %[[R]]#2
+func.func @refine_layer_norm_variadic_three_outs(
+    %ctx: !hip.context,
+    %input: tensor<?x?x?xf16>,
+    %scale: tensor<?xf16>,
+    %d0: index, %d1: index, %d2: index)
+    -> (tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>) {
+  %e0 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf16>
+  %e1 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
+  %e2 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
+  %r:3 = hip.layer_norm(%ctx)
+    ins(%input, %scale : tensor<?x?x?xf16>, tensor<?xf16>)
+    outs(%e0, %e1, %e2 :
+         tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+    {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
+    : tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>
+  return %r#0, %r#1, %r#2 : tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>
+}
+
+// -----
+
+// `hip.nonzero` has a data-dependent output dim 1 (number of non-zero
+// elements -- only knowable at runtime). The default DPS Tier-2 reify
+// lifts the outs's shape directly: dim 0 is the static input rank,
+// dim 1 lifts as `tensor.dim %outs, %c1` and stays dynamic because
+// outs itself was constructed dynamic. This is the "outs IS the only
+// authority on the output shape" case the Tier-2 contract is designed
+// for -- the LIT case guards that reify doesn't crash on data-
+// dependent shapes.
+// CHECK-LABEL: func.func @refine_nonzero_data_dependent_dim1
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xi64>
+// CHECK:         %[[Y:.*]] = hip.nonzero
+// CHECK-SAME:      outs(%[[E]] : tensor<?x?xi64>){{.*}}: tensor<?x?xi64>
+// CHECK:         return %[[Y]] : tensor<?x?xi64>
+func.func @refine_nonzero_data_dependent_dim1(
+    %ctx: !hip.context,
+    %x: tensor<3x4xf16>,
+    %d0: index, %d1: index)
+    -> tensor<?x?xi64> {
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xi64>
+  %y = hip.nonzero(%ctx) ins(%x : tensor<3x4xf16>)
+                          outs(%e : tensor<?x?xi64>)
+                          {input_data_type = 1 : i64}
+                          : tensor<?x?xi64>
+  return %y : tensor<?x?xi64>
+}

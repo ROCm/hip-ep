@@ -32,8 +32,10 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-  auto hipOp = mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, resultType,
-                                                  context, input, init);
+  // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
+  // result type == outs operand type.
+  auto hipOp =
+      mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, context, input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
