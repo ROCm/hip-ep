@@ -169,9 +169,10 @@ if(NOT BUILD_MOCK_RUNTIME AND (NOT THEROCK_DIST OR NOT EXISTS "${THEROCK_DIST}/b
     file(MAKE_DIRECTORY "${_therock_root}")
     message(STATUS "Extracting TheRock SDK into ${_therock_root} ...")
     # tar (ships with Windows 10+/Linux) flattens the single top-level dir;
-    # file(ARCHIVE_EXTRACT) has no --strip-components.
+    # file(ARCHIVE_EXTRACT) has no --strip-components. --force-local stops GNU
+    # tar from treating the Windows "D:\..." archive path as a remote host.
     execute_process(
-      COMMAND ${CMAKE_COMMAND} -E env tar -xzf "${_therock_tgz}"
+      COMMAND ${CMAKE_COMMAND} -E env tar --force-local -xzf "${_therock_tgz}"
               -C "${_therock_root}" --strip-components=1
       RESULT_VARIABLE _therock_tar_rc)
     if(NOT _therock_tar_rc EQUAL 0)
