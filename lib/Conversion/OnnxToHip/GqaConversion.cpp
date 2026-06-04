@@ -9,6 +9,65 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// Trace a scalar shape value (e.g. GQA's `total_sequence_length` operand)
+/// back to a host-known input dimension, returning that `index` value — or
+/// null if the chain does not resolve to a host dim (caller falls back to a
+/// GPU readback).
+///
+/// Why this exists
+/// ---------------
+/// Every GQA exporter we ship (LLM + VLM) computes
+///   total_sequence_length = Cast(Gather(Shape(attention_mask), k))
+/// on the host. By the time this pattern fires, GatherShapeFold (which runs
+/// to quiescence in the pre-lowering rounds, BEFORE the main conversion) has
+/// already lowered that idiom to:
+///   %d   = tensor.dim %attention_mask, %k : index
+///   %d64 = arith.index_cast %d : index to i64
+///   %fe  = tensor.from_elements %d64 : tensor<1xi64>
+///   %tsl = <cast %fe to the i32 scalar GQA operand[6]>
+/// Walking back through the value-preserving scalar ops lands on the
+/// `tensor.dim`, whose `index` result already equals total_sequence_length
+/// and dominates this op (it is in operand[6]'s producer chain). Reusing it
+/// sizes the present-KV buffer with NO `hipStreamSynchronize` readback — and
+/// sidesteps the host-scratch slot-reuse race that corrupts a readback of
+/// total_sequence_length on the decode path.
+///
+/// Before (value `v` = GQA operand[6]):
+///   %d = tensor.dim %am, %c1 ; ... ; %v = cast(from_elements(index_cast %d))
+/// After (returned):
+///   %d   (the index result of tensor.dim — reused as-is)
+static mlir::Value traceScalarToHostIndex(mlir::Value v) {
+  // The canonical chain is <= 5 ops; the cap defends against an unexpected
+  // cycle or pathologically long chain.
+  for (int step = 0; step < 16; ++step) {
+    mlir::Operation *def = v.getDefiningOp();
+    if (!def)
+      return nullptr; // block argument: not a traceable host dim
+    llvm::StringRef name = def->getName().getStringRef();
+
+    // Found the host dim — its `index` result IS total_sequence_length.
+    if (name == "tensor.dim")
+      return def->getResult(0);
+
+    // Value-preserving single-source scalar ops: peek through operand 0.
+    // (the i64<->i32<->index casts, the from_elements wrapper, and the
+    // onnx.Cast adapting Shape's i64 to GQA's i32 all preserve the scalar
+    // value for sizing purposes.)
+    if (name == "tensor.from_elements" || name == "tensor.extract" ||
+        name == "arith.index_cast" || name == "arith.extsi" ||
+        name == "arith.extui" || name == "arith.trunci" ||
+        name == "onnx.Cast" || name == "hip.cast" || name == "onnx.Squeeze" ||
+        name == "onnx.Unsqueeze") {
+      if (def->getNumOperands() == 0)
+        return nullptr;
+      v = def->getOperand(0);
+      continue;
+    }
+    return nullptr; // unrecognized producer: bail to readback
+  }
+  return nullptr;
+}
+
 /// onnx.Custom(GroupQueryAttention) -> hip.gqa
 struct GroupQueryAttentionToHip : public mlir::RewritePattern {
   GroupQueryAttentionToHip(mlir::MLIRContext *ctx)
@@ -184,11 +243,86 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   // === Create DPS init tensors ===
 
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentKeyInit = createEmptyTensor(
-      rewriter, loc, presentKeyType, pastKey ? pastKey : (key ? key : query));
+
+  // present_key/value DPS-init shaping. The present KV-cache sequence extent is
+  // total_sequence_length = past_sequence_length + new_sequence_length. The
+  // plain createEmptyTensor donor (past_*) copies past_*'s seq extent into
+  // present, which is only correct for past_present_share_buffer=true: there
+  // past and present alias one buffer pre-sized to max_length, so
+  // past_*.dim(seqAxis) == max_length >= total. For the separate-buffer case
+  // past_*.dim(seqAxis) == past_sequence_length, so the present buffer comes
+  // out sized to the *past* length and the newly appended tokens are dropped
+  // (decode past=1 -> present=1 instead of 2; prefill past=0 -> present=0
+  // instead of new_seq). Use max(past_*.dim(seqAxis), total_seq_len), which is
+  // correct for BOTH runtime modes from one compiled DLL: shared-buffer ->
+  // max == max_length (past wins); separate-buffer -> max == total (the scalar
+  // total_seq_len operand wins). total_seq_len is GQA operand[6]; its host
+  // value is obtained by tracing its producer chain back to a host-known input
+  // dim (attention_mask.shape[1]) via traceScalarToHostIndex, falling back to
+  // a synchronized GPU readback only if the trace fails (folds to a const when
+  // static).
+  //
+  // Before (separate-buffer decode, past_sequence_length=1, new=1):
+  //   %present = tensor.empty(%batch, tensor.dim %past_key[2] = 1)  // too
+  //   small
+  // After:
+  //   %tsl = <traced attention_mask dim> ; %s = arith.maxsi(dim %past_key[2],
+  //   %tsl) %present = tensor.empty(%batch, %s)                            //
+  //   == total
+  constexpr int64_t kPresentSeqAxis = 2; // BNSH: [batch, kv_heads, seq, head]
+
+  mlir::Value totalSeqIdx; // index-typed total_seq_len, built lazily/once
+  auto getTotalSeqIdx = [&]() -> mlir::Value {
+    if (totalSeqIdx)
+      return totalSeqIdx;
+    // Primary: trace total_seq_len back to a host-known input dim (e.g.
+    // attention_mask.shape[1]) and reuse that index directly — no GPU sync,
+    // no host-scratch readback race.
+    if (mlir::Value hostIdx = traceScalarToHostIndex(totalSeqLen)) {
+      totalSeqIdx = hostIdx; // already index-typed and dominates this op
+      return totalSeqIdx;
+    }
+    // Fallback: synchronized GPU readback of the scalar operand (used when
+    // the exporter computes total_sequence_length in a form this trace does
+    // not recognize).
+    auto tslTy = mlir::cast<mlir::RankedTensorType>(totalSeqLen.getType());
+    mlir::Value host =
+        tslTy.getRank() == 0
+            ? readbackScalarToHost(rewriter, loc, context, totalSeqLen)
+            : readbackShapeEntryToHost(rewriter, loc, context, totalSeqLen, 0);
+    totalSeqIdx = mlir::arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), host);
+    return totalSeqIdx;
+  };
+
+  auto buildPresentInit = [&](mlir::RankedTensorType ptype,
+                              mlir::Value pastVal) -> mlir::Value {
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t d : llvm::seq<int64_t>(ptype.getRank())) {
+      if (!ptype.isDynamicDim(d))
+        continue;
+      if (d == kPresentSeqAxis) {
+        mlir::Value pastSeq =
+            mlir::tensor::DimOp::create(rewriter, loc, pastVal, d);
+        dynSizes.push_back(mlir::arith::MaxSIOp::create(rewriter, loc, pastSeq,
+                                                        getTotalSeqIdx()));
+      } else {
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, pastVal, d));
+      }
+    }
+    return mlir::tensor::EmptyOp::create(rewriter, loc, ptype.getShape(),
+                                         ptype.getElementType(), dynSizes);
+  };
+
+  mlir::Value presentKeyInit =
+      pastKey
+          ? buildPresentInit(presentKeyType, pastKey)
+          : createEmptyTensor(rewriter, loc, presentKeyType, key ? key : query);
   mlir::Value presentValueInit =
-      createEmptyTensor(rewriter, loc, presentValueType,
-                        pastValue ? pastValue : (value ? value : query));
+      pastValue ? buildPresentInit(presentValueType, pastValue)
+                : createEmptyTensor(rewriter, loc, presentValueType,
+                                    value ? value : query);
 
   mlir::Value outputQkInit = nullptr;
   if (outputQkType)

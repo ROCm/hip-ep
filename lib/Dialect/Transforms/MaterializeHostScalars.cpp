@@ -111,8 +111,12 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
+
+#include <iterator>
 
 #define DEBUG_TYPE "hip-materialize-host-scalars"
 
@@ -162,6 +166,45 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO) {
     return false;
   }
   return true;
+}
+
+/// Direct `memref.store` ops whose memref operand is exactly \p allocResult,
+/// in program order. Used to detect (and split) the scalar-reuse hazard.
+static SmallVector<memref::StoreOp> directStores(Value allocResult) {
+  SmallVector<memref::StoreOp> stores;
+  for (Operation *user : allocResult.getUsers())
+    if (auto st = dyn_cast<memref::StoreOp>(user))
+      if (st.getMemref() == allocResult)
+        stores.push_back(st);
+  llvm::sort(stores, [](memref::StoreOp a, memref::StoreOp b) {
+    return a->isBeforeInBlock(b);
+  });
+  return stores;
+}
+
+/// Number of distinct host-scratch slots a candidate needs.
+///
+/// The default is 1 (the canonical single-store seqlens_k pattern). A
+/// single-element scalar that is written by MORE THAN ONE store is a buffer
+/// reused across logically-independent scalars (an upstream pass coalesced two
+/// `tensor.from_elements` buffers into one). If an earlier store's value is
+/// consumed by an ASYNC `hip.*` op and a later store overwrites the same slot
+/// before that op executes on the stream, the GPU reads the wrong value. To
+/// make every store collision-free we hand each store its own slot. Restricted
+/// to single-element buffers whose users all live in the alloc's own block, so
+/// the program-order epoch walk in the rewrite is well-defined (multi-element
+/// array-fill buffers — e.g. a 3xi64 shape vector filled element by element —
+/// are NOT reuse and keep one slot).
+static int64_t numScratchSlotsFor(memref::AllocOp allocOp) {
+  if (allocOp.getType().getNumElements() != 1)
+    return 1;
+  Value res = allocOp.getResult();
+  Block *block = allocOp->getBlock();
+  for (Operation *user : res.getUsers())
+    if (user->getBlock() != block)
+      return 1; // cross-block use: program-order epochs ill-defined → 1 slot
+  int64_t numStores = static_cast<int64_t>(directStores(res).size());
+  return numStores > 1 ? numStores : 1;
 }
 
 /// True if \p allocOp is a tiny host-fed scalar staging buffer: a static,
@@ -217,12 +260,18 @@ void MaterializeHostScalarsPass::runOnOperation() {
   if (candidates.empty())
     return;
 
-  // Compute byte size per candidate and aligned offsets. 64-byte alignment
-  // matches the runtime pool and is comfortably above the largest scalar
-  // alignment; gives every candidate its own cache line.
+  // Compute byte size per candidate and aligned base offsets. 64-byte
+  // alignment matches the runtime pool and is comfortably above the largest
+  // scalar alignment; gives every candidate (and every per-store slot) its own
+  // cache line. A candidate may need MORE THAN ONE slot — see
+  // numScratchSlotsFor for the scalar-reuse-hazard split.
   constexpr int64_t kAlign = 64;
-  SmallVector<int64_t> offsets;
-  offsets.reserve(candidates.size());
+  SmallVector<int64_t> baseOffsets; // first slot offset per candidate
+  SmallVector<int64_t> slotStrides; // bytes between consecutive slots
+  SmallVector<int64_t> slotCounts;  // number of slots per candidate
+  baseOffsets.reserve(candidates.size());
+  slotStrides.reserve(candidates.size());
+  slotCounts.reserve(candidates.size());
   int64_t total = 0;
   for (memref::AllocOp allocOp : candidates) {
     MemRefType ty = allocOp.getType();
@@ -232,9 +281,13 @@ void MaterializeHostScalarsPass::runOnOperation() {
     int64_t bytes = ty.getNumElements() * elemBytes;
     if (bytes == 0)
       bytes = 1; // rank-0 with i1 etc. — never zero-sized
-    int64_t off = roundUp(total, kAlign);
-    offsets.push_back(off);
-    total = off + bytes;
+    int64_t nSlots = numScratchSlotsFor(allocOp);
+    int64_t stride = roundUp(bytes, kAlign); // each slot on its own cache line
+    int64_t base = roundUp(total, kAlign);
+    baseOffsets.push_back(base);
+    slotStrides.push_back(stride);
+    slotCounts.push_back(nSlots);
+    total = base + nSlots * stride;
   }
   total = roundUp(total, kAlign);
 
@@ -249,16 +302,26 @@ void MaterializeHostScalarsPass::runOnOperation() {
   Value scratch =
       GetHostScratchOp::create(builder, loc, scratchType, ctx, totalSize);
 
-  // Replace each candidate with a memref.view over the scratch buffer.
+  // Replace each candidate with memref.view(s) over the scratch buffer.
   // Deallocs of the candidate are erased — the scratch buffer is owned by
   // the runtime (released in hipdnn_ep_state_cleanup), like the pool.
-  for (auto [allocOp, offset] : llvm::zip(candidates, offsets)) {
+  for (auto [allocOp, base, stride, nSlots] :
+       llvm::zip(candidates, baseOffsets, slotStrides, slotCounts)) {
     builder.setInsertionPoint(allocOp);
-    Value offsetVal =
-        arith::ConstantIndexOp::create(builder, allocOp.getLoc(), offset);
-    auto view = memref::ViewOp::create(builder, allocOp.getLoc(),
-                                       allocOp.getType(), scratch, offsetVal,
-                                       /*sizes=*/ValueRange{});
+
+    // Materialize one view per slot at the alloc site (so each view dominates
+    // every use that follows the alloc in the block).
+    SmallVector<Value> views;
+    views.reserve(nSlots);
+    for (int64_t s : llvm::seq<int64_t>(nSlots)) {
+      Value offsetVal = arith::ConstantIndexOp::create(
+          builder, allocOp.getLoc(), base + s * stride);
+      views.push_back(memref::ViewOp::create(builder, allocOp.getLoc(),
+                                             allocOp.getType(), scratch,
+                                             offsetVal,
+                                             /*sizes=*/ValueRange{})
+                          .getResult());
+    }
 
     // Erase deallocs first (they reference the alloc's result).
     SmallVector<memref::DeallocOp> deallocs;
@@ -268,11 +331,43 @@ void MaterializeHostScalarsPass::runOnOperation() {
     for (auto d : deallocs)
       d.erase();
 
-    allocOp.replaceAllUsesWith(view.getResult());
+    Value allocResult = allocOp.getResult();
+    if (nSlots == 1) {
+      // Common case: one slot, byte-identical to the original behaviour.
+      allocResult.replaceAllUsesWith(views[0]);
+    } else {
+      // Scalar-reuse split: each `memref.store` opens a new epoch bound to its
+      // own slot; every other use binds to the most recent epoch's slot. The
+      // alloc's block is straight-line (cross-block users were excluded by
+      // numScratchSlotsFor), so program order == epoch order and a later host
+      // store can no longer clobber a slot still pending an async hip read.
+      //
+      // Before (one slot, %s reused — async hip.cast clobbered by 2nd store):
+      //   %v  = view %scr[0]
+      //   store %a, %v ; hip.cast %v -> ... ; store %b, %v ; readback %v
+      // After (one slot per store):
+      //   %v0 = view %scr[0] ; %v1 = view %scr[64]
+      //   store %a, %v0 ; hip.cast %v0 -> ... ; store %b, %v1 ; readback %v1
+      int64_t epoch = -1;
+      for (Operation &op : llvm::make_early_inc_range(
+               llvm::make_range(std::next(allocOp->getIterator()),
+                                allocOp->getBlock()->end()))) {
+        if (auto st = dyn_cast<memref::StoreOp>(&op);
+            st && st.getMemref() == allocResult) {
+          ++epoch;
+          st.getMemrefMutable().assign(views[epoch]);
+          continue;
+        }
+        if (llvm::is_contained(op.getOperands(), allocResult))
+          op.replaceUsesOfWith(allocResult, views[std::max<int64_t>(epoch, 0)]);
+      }
+      assert(allocResult.use_empty() && "alloc still used after slot split");
+    }
     allocOp.erase();
-    ++NumAllocsMaterialized;
+    NumAllocsMaterialized += nSlots;
     LLVM_DEBUG(llvm::dbgs()
-               << "  Materialized " << view << " at offset " << offset << "\n");
+               << "  Materialized " << nSlots << " slot(s) at base " << base
+               << " (stride " << stride << ")\n");
   }
 }
 

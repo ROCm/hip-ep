@@ -983,8 +983,10 @@ int main(int argc, char *argv[]) {
       std::cerr << "Error: --free-dim value is not an integer: " << ov << "\n";
       return 1;
     }
-    if (dim_value <= 0) {
-      std::cerr << "Error: --free-dim value must be > 0, got: " << ov << "\n";
+    // Allow 0 to express an empty dim (e.g. past_sequence_length:0 for a true
+    // prefill step where the KV cache is empty -> past tensors are [.,.,0,.]).
+    if (dim_value < 0) {
+      std::cerr << "Error: --free-dim value must be >= 0, got: " << ov << "\n";
       return 1;
     }
     free_dim_values[dim_name] = dim_value;
