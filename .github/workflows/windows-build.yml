@@ -233,10 +233,7 @@ jobs:
             --disable_memleak_checker ^
             --use_dml ^
             --cmake_generator Ninja ^
-            --build_wheel ^
-            --cmake_extra_defines ^
-              CMAKE_C_COMPILER_LAUNCHER=sccache ^
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+            --build_wheel
 
       - name: Install ORT into ort-install
         if: steps.cache-ort.outputs.cache-hit != 'true'
