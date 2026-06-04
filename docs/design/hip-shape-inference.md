@@ -49,12 +49,15 @@ machinery.
 
 `hip.matmul` is the worked example that exercises all four layers.
 Other ops compose the layers from a small helper menu chosen by shape
-contract — `reifyElementwiseSameShape` (default), `reifyBroadcastShape`
-(NumPy broadcast), dedicated helpers for permutation / reduction /
-gather, fold-or-bail Tier-1 helpers for shape-arithmetic ops
-(`reifyPadShape` etc.). The "result shape == outs shape" case is the
-shared default on `HipDpsOpInterface`; no per-op helper is needed for
-it. See [How to add a new op](#how-to-add-a-new-op) for the table.
+contract — `reifyElementwiseSameShape` (input-shape passthrough),
+`reifyBroadcastShape` (NumPy broadcast), and dedicated helpers for
+permutation / reduction / gather. The "result shape == outs shape"
+case is the shared default on `HipDpsOpInterface` and covers most ops
+(every same-shape unary op, every multi-init outs-lift op, and every
+op whose output dims are arithmetic functions of operand values
+where the converter already encodes the runtime extent in `outs`);
+no per-op helper is needed. See [How to add a new op](#how-to-add-a-new-op)
+for the full table.
 
 ## Design rationale
 
@@ -118,15 +121,20 @@ The shape: the interface owns the default body in a sibling `.cpp`
 file; per-op dispatchers are auto-emitted by TableGen from the
 dialect's DPS base class. The opt-out lever (`autoReify=0`) gives
 ops with a tighter shape contract — `[..., M, K] @ [..., K, N] ->
-[..., M, N]` for matmul, or value-dependent contracts like
-`hip.range` — a clean escape hatch with no boilerplate. Note that
-`autoReify` and `autoInfer` are orthogonal: `hip.matmul` keeps
-`autoReify=0` (runtime dim recovery from operand shapes) while taking
-`autoInfer=1, declareInfer=1` (construction-time result type comes
-verbatim from the typed outs operand). The same split applies to other
-ops with bespoke reify (`hip.gemm`, `hip.qmoe`, `hip.matmul_nbits`)
-plus the shape-preserving `hip.rope` / `hip.rms_norm` on #262;
-`hip.range` joins later.
+[..., M, N]` for matmul, or per-input-dim mappings (transpose,
+gather, reductions) — a clean escape hatch with no boilerplate.
+Note that `autoReify` and `autoInfer` are orthogonal: `hip.matmul`
+keeps `autoReify=0` (runtime dim recovery from operand shapes) while
+taking `autoInfer=1, declareInfer=1` (construction-time result type
+comes verbatim from the typed outs operand). The same split applies
+to other ops with bespoke reify (`hip.gemm`, `hip.qmoe`,
+`hip.matmul_nbits`) plus the shape-preserving `hip.rope` /
+`hip.rms_norm`. Ops whose output dims are arithmetic functions of
+operand values (`hip.range`, `hip.pad`, `hip.tile`, `hip.expand`,
+`hip.slice`, `hip.nonzero`) keep the default `autoReify=1` and lift
+their shape from the typed `outs` operand — the converter sets
+`outs` to `tensor.empty(<runtime extent>)` so a downstream
+`tensor.dim` on the result folds back to the SSA extent.
 
 `ReifyRankedShapedTypeOpInterface` covers the orthogonal *dynamic-shape*
 job: per-dim `OpFoldResult`s for `--hip-infer-shapes` and the test
@@ -245,14 +253,19 @@ include/hip/Dialect/IR/
                               reifyDimOrConstant, reifyElementwiseSameShape
                               (added on #262 for ops whose result has the
                               same shape as one designated input).
-                              Per-shape Tier-1 helpers reifyBroadcastShape /
-                              reifyPadShape / reifyTileShape /
-                              reifySliceShape / reifyExpandShape /
-                              reifyRangeShape / reifyTransposeByPerm /
-                              reifyGatherWithAxis / reifyGatherND /
-                              reifyReductionWithKeepdims land with the
-                              broadcast-op cleanup in #263 and the
-                              bespoke-op cleanup in #264.
+                              Per-shape helpers reifyBroadcastShape /
+                              reifyTransposeByPerm / reifyGatherWithAxis /
+                              reifyGatherND / reifyReductionWithKeepdims
+                              land with the broadcast-op cleanup in #263.
+                              The one-shot wrappers reifyBroadcastShapeFor
+                              and reifyReductionShape (used as the bodies
+                              of `Hip_DpsOp_Broadcast` and
+                              `Hip_DpsOp_Reduction`'s auto-emitted reify
+                              dispatchers) live alongside them. Ops with
+                              value-dependent output dims (range, pad,
+                              tile, expand, slice, nonzero) defer to the
+                              shared `Hip_DpsOp` outs-lift default and do
+                              not need their own helper.
   HipDpsOpInterface.td     -- in-dialect `HipDpsOp` interface declaration;
                               carries the shared default `reifyResultShapes`
                               that all `Hip_DpsOp`s inherit unless they opt
@@ -286,21 +299,48 @@ lib/Dialect/IR/
                                       lives here next to its peers (control-flow op,
                                       not a DPS compute op)
   HipReifyResultShapesImpl.cpp     -- per-op `reifyResultShapes()` for ops
-                                      that opt out (`autoReify=0`), one
-                                      `// <OpName>` section per op. Matmul
-                                      is the only op in this file on #260;
-                                      `hip.rope` / `hip.rms_norm` / `hip.qmoe`
-                                      / `hip.matmul_nbits` / `hip.gemm` join
-                                      on #262; `hip.range` / `hip.nonzero` /
-                                      `hip.pad` / `hip.tile` / `hip.expand` /
-                                      `hip.slice` / `hip.gather*` /
-                                      `hip.reduce_*` / `hip.transpose` /
-                                      `hip.layer_norm` / `hip.skip_rms_norm` /
-                                      `hip.gqa` / `hip.mha` /
-                                      `hip.causal_conv_with_state` /
-                                      `hip.linear_attention` /
-                                      `hip.hipdnn_graph` join across
-                                      #263-#264.
+                                      that opt out (`autoReify=0`) AND do
+                                      not match a parameterized sub-base,
+                                      one `// <OpName>` section per op.
+                                      Matmul is the only op in this file
+                                      on #260; `hip.rope` / `hip.rms_norm`
+                                      / `hip.qmoe` / `hip.matmul_nbits` /
+                                      `hip.gemm` join on #262; the bespoke
+                                      shape-changing ops `hip.transpose` /
+                                      `hip.gather` / `hip.gather_nd` join
+                                      on #263. Ops covered by a
+                                      parameterized sub-base contribute
+                                      ZERO per-op `.cpp` boilerplate: the
+                                      broadcast-op cluster (`hip.miopen.add`
+                                      / `hip.add` / `hip.mul` / `hip.min` /
+                                      `hip.div` / `hip.equal` / `hip.and`
+                                      / `hip.sub` / `hip.where` /
+                                      `hip.less` / `hip.mod`) is wired via
+                                      `Hip_DpsOp_Broadcast` in `HipOps.td`,
+                                      and the reductions (`hip.reduce_sum`
+                                      / `hip.reduce_max` /
+                                      `hip.reduce_prod`) via
+                                      `Hip_DpsOp_Reduction`. Both
+                                      sub-bases auto-emit the reify
+                                      dispatcher in `extraClassDefinition`
+                                      and call free helpers in
+                                      `HipShapeUtils.{h,cpp}`. Ops whose
+                                      output dims are arithmetic
+                                      functions of operand values (range,
+                                      pad, tile, expand, slice, nonzero),
+                                      the same-shape unary ops (silu,
+                                      sigmoid, softplus, gelu, reciprocal,
+                                      sqrt, not, cos, sin, neg, cast,
+                                      sign, cumsum, scatter_nd, size),
+                                      and the multi-init outs-lift ops
+                                      (gqa, mha, layer_norm,
+                                      skip_rms_norm, hipdnn_graph,
+                                      linear_attention,
+                                      causal_conv_with_state, conv,
+                                      miopen.softmax) all stay on the
+                                      shared `Hip_DpsOp` default
+                                      (`autoReify=1`) and contribute zero
+                                      `.cpp` boilerplate.
 
   (No HipResultTypeInferenceImpl.cpp today: every op that declares
    `InferTypeOpInterface` so far is single-result, and the auto-emitted
@@ -471,11 +511,11 @@ Pick the reify helper that matches the op's shape contract:
 | Result shape == outs operand shape (default) | (no helper — interface default in `HipDpsOpInterface.cpp`) | #260 |
 | Result shape == named INPUT operand shape (e.g. rope, rms_norm, qmoe) | hand-written body calling `reifyElementwiseSameShape(b, loc, getInput())` | #262 |
 | NumPy broadcast (add, mul, where, ...) | `Hip_DpsOp_Broadcast<[...]>` sub-base + `reifyBroadcastShape` | #263 |
-| Permutation (`hip.transpose`) | `reifyTransposeByPerm` | #264 |
-| Reduction with `keepdims` (reduce_sum, reduce_max) | `reifyReductionWithKeepdims` | #264 |
-| Gather along an axis (`hip.gather`, `hip.gather_nd`) | `reifyGatherWithAxis` / `reifyGatherND` | #264 |
-| Multi-init outs-lifting (gqa, mha, layer_norm, ...) | hand-written body in `HipReifyResultShapesImpl.cpp` walking `getDpsInits()` | #263-#264 |
-| Fold-or-bail shape arithmetic (pad, tile, slice, expand, range) | one of `reifyPadShape` / `reifyTileShape` / `reifySliceShape` / `reifyExpandShape` / `reifyRangeShape` (return `failure()` on non-foldable; falls through to outs-lifting) | #264 |
+| Permutation (`hip.transpose`) | `reifyTransposeByPerm` | #263 |
+| Reduction with `keepdims` (reduce_sum, reduce_max, reduce_prod) | `Hip_DpsOp_Reduction` sub-base + `reifyReductionWithKeepdims` | #263 |
+| Gather along an axis (`hip.gather`, `hip.gather_nd`) | `reifyGatherWithAxis` / `reifyGatherND` | #263 |
+| Multi-init outs-lifting (gqa, mha, layer_norm, ...) | shared `Hip_DpsOp` default (walks every DPS init via `getDpsInits()`) | #260 |
+| Value-dependent output dims (pad, tile, slice, expand, range, nonzero) | shared `Hip_DpsOp` default; the converter sets `outs` to `tensor.empty(<runtime extent>)` so a downstream `tensor.dim` on the result folds to the SSA extent. Per-op fold-on-constant helpers (`reifyPadShape` / `reifyTileShape` / `reifySliceShape` / `reifyExpandShape` / `reifyRangeShape`) deferred to a follow-up | #263 (default), #264 (helpers) |
 | Matmul-shaped (`[..., M, K] @ [..., K, N] -> [..., M, N]`) | call `inferMatmulShape` to compute output extents, then `reifyDimOrConstant` per dim | #260 (matmul) |
 
 If your op's contract is not in the table, write a new helper in
@@ -497,22 +537,31 @@ whose extent is `(end - start) / step`; `hip.nonzero(input)` produces
 a 2D result whose first dim is the runtime count of nonzero entries
 in the input.
 
-The "fold-or-bail" Tier-1 helpers
-(`reifyRangeShape` etc.) handle this in two cases:
+These ops keep the default `Hip_DpsOp` reify (`autoReify=1`), which
+walks `getDpsInits()` and lifts each output dim from the typed `outs`
+operand:
 
-1. **Constant value operands** — the helper folds `(end - start)` /
-   `step` into an `IntegerAttr` and refines the result dim
-   statically.
-2. **Non-foldable** — the helper returns `failure()`. The dispatcher
-   thunk then falls through to outs-lifting (the default), which
-   reads the dim from the outs operand. If the outs operand was
-   constructed via `tensor.empty(%dyn)` with the runtime extent as
-   a dynamic-size operand, downstream consumers see a `tensor.dim`
-   on the result that folds back to that operand.
+1. **Constant value operands at converter time** — the OnnxToHip
+   converter folds `(end - start) / step` (or the equivalent
+   per-axis arithmetic for pad / tile / slice / expand) and
+   constructs `outs` as `tensor.empty()` with the static extent
+   baked into the type. The default reify lifts that static dim
+   straight off `outs.getType()` as an `IndexAttr`.
+2. **Non-foldable** — the converter constructs `outs` as
+   `tensor.empty(%dyn)` with the runtime extent as a dynamic-size
+   operand. The default reify emits `tensor.dim %outs, i` for the
+   `?` dim; downstream `tensor.dim` consumers fold through to the
+   original `%dyn` SSA value.
 
 Ops where the runtime extent has no SSA representation at all (e.g.
 `hip.nonzero` whose count cannot be expressed before running the
 kernel) leave the dim as `?` — the only honest answer.
+
+A future per-op fold-on-constant helper layer (`reifyRangeShape`,
+`reifyPadShape`, ...) would let reify recover a static extent from
+constant SSA operands even when the converter emitted a dynamic
+`tensor.empty` — a refinement on top of the outs-lift baseline,
+deferred to a follow-up PR.
 
 ### 4. Converter callsites (inferred-type `Op::create`)
 
@@ -573,9 +622,10 @@ that returns the wrong shape is caught by LIT cases under
 Append cases to
 [test/lit/Dialect/hip-infer-shapes.mlir](../../test/lit/Dialect/hip-infer-shapes.mlir),
 one per shape pattern your op exercises (typically one static, one
-dynamic; for fold-or-bail Tier-1 ops also one non-foldable case with
-`CHECK-NOT: arith.subi` / `CHECK-NOT: arith.divsi` to guard the
-no-IR-bloat fallback contract). Per-op verifier / reify files
+dynamic; for ops whose output dims are arithmetic functions of operand
+values also one fully-dynamic outs case to pin that the default
+outs-lift survives the pass intact — see `refine_pad_dps_out_fallback`
+for the canonical example). Per-op verifier / reify files
 (`hip-<op>-shape-verifier.mlir`, `hip-<op>-reify-shapes.mlir`) are
 reserved for ops complex enough to deserve their own file (matmul has
 both today; `hip.loop` has its own `hip-loop-verifier.mlir` for the

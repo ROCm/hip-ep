@@ -295,3 +295,106 @@ GemmOp::reifyResultShapes(OpBuilder &b,
   reifiedReturnShapes.assign({std::move(dims)});
   return success();
 }
+
+//===----------------------------------------------------------------------===//
+// Shape-changing ops with bespoke per-input-dim reify:
+//   transpose, gather, gather_nd
+//
+// These ops own per-input-dim mapping. Helpers in `HipShapeUtils` walk
+// the input's static shape and emit an `OpFoldResult` per output dim
+// that points back at the contributing input dim (or a static
+// `IndexAttr`). This is the chained-refinement case where a preceding
+// op's reify already tightened the input type. Shape pieces come
+// directly from static input shapes + structural attrs (perm / axis
+// / batch_dims).
+//
+// Sibling reduction ops (reduce_sum, reduce_max, reduce_prod) follow
+// the same per-input-dim pattern, but the axes-list arrives via a
+// `Value` operand rather than an attr — these are wired via the
+// `Hip_DpsOp_Reduction` sub-base in `HipOps.td`, which auto-emits a
+// reify body that calls `mlir::hip::reifyReductionShape`. On
+// non-constant axes that helper falls back to the shared `HipDpsOp`
+// outs-lift default, so the reify interface always succeeds.
+//
+// Sibling broadcast ops (miopen.add, mul, add, min, div, equal, and,
+// sub, where, less, mod) use NumPy-broadcast over their inputs and
+// are wired via the `Hip_DpsOp_Broadcast` sub-base, which auto-emits
+// a reify body calling `mlir::hip::reifyBroadcastShapeFor`. Each
+// leaf op contributes only the list of operand getter names; no
+// per-op `.cpp` thunk is needed.
+//
+// Other ops whose output dims are arithmetic functions of operand
+// values (pad, tile, expand, slice, range) keep their default
+// `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
+// `getDpsInits()` and lifts each output's shape. Proper per-op
+// arithmetic for those (e.g. `tensor::PadOp`'s
+// `affine.apply (d0 + d1 + d2)` recipe) is deferred.
+//
+// Before (transpose, perm-driven mapping):
+//   %t = hip.transpose(%ctx) ins(%x : tensor<2x?x4096xf16>)
+//                            outs(%out : tensor<?x?x?xf16>)
+//                            {perm = [2, 0, 1]} : tensor<?x?x?xf16>
+// After (reified result shape):
+//   dim 0 -> 4096 : index            (static, from %x.shape[2])
+//   dim 1 -> 2 : index               (static, from %x.shape[0])
+//   dim 2 -> tensor.dim %x, %c1      (dynamic, from %x.shape[1])
+//===----------------------------------------------------------------------===//
+
+LogicalResult TransposeOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(getInput().getType()))
+    return failure();
+
+  // Decode the I64ArrayAttr `perm`. Verifier already rejects non-int
+  // entries; we still bail defensively if any entry is not an IntegerAttr.
+  SmallVector<int64_t> perm;
+  perm.reserve(getPerm().size());
+  for (Attribute a : getPerm()) {
+    auto ia = dyn_cast<IntegerAttr>(a);
+    if (!ia)
+      return failure();
+    perm.push_back(ia.getInt());
+  }
+
+  SmallVector<OpFoldResult> dims =
+      mlir::hip::reifyTransposeByPerm(b, getLoc(), getInput(), perm);
+  if (dims.empty())
+    return failure();
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+LogicalResult
+GatherOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(getData().getType()) ||
+      !isa<RankedTensorType>(getIndices().getType()))
+    return failure();
+
+  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherWithAxis(
+      b, getLoc(), getData(), getIndices(), getAxis());
+  if (dims.empty())
+    return failure();
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+LogicalResult GatherNDOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  if (!isa<RankedTensorType>(getData().getType()) ||
+      !isa<RankedTensorType>(getIndices().getType()))
+    return failure();
+
+  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherND(
+      b, getLoc(), getData(), getIndices(), getBatchDims());
+  if (dims.empty())
+    return failure();
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
