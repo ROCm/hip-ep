@@ -111,10 +111,11 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
 
+  // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
+  // result type == outs operand type.
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
-      rewriter, loc, mlir::TypeRange{rt}, context, A, B, scales, zeroPoints,
-      gIdx, bias, init, KAttr, NAttr, bitsAttr, blockSizeAttr,
-      accuracyLevelAttr, zpElemSizeAttr);
+      rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, init, KAttr,
+      NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }

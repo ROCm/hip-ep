@@ -41,31 +41,41 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 //                     Default `"Output"` matches the 37 ops whose outs is
 //                     named `$output`. Ops with `$y` pass `"Y"`, etc.
 //   `autoReify`     : when 1, emit a per-op `reifyResultShapes` that
-//                     forwards to the `HipDpsOpInterface` default. When 0,
-//                     the op author writes their own body in
-//                     `HipReifyResultShapesImpl.cpp`.
+//                     forwards to the `HipDpsOpInterface` default body
+//                     (walks `getDpsInits()`, reads each init's runtime
+//                     shape — covers the typical same-shape DPS case).
+//                     Default 1. Ops with a tighter shape source opt
+//                     out with `autoReify=0` and write their own body
+//                     in `HipReifyResultShapesImpl.cpp`. Examples:
+//                     matmul (recomputes M/N from input operands);
+//                     rope, rms_norm, qmoe (source dims from `$input`
+//                     so refinement propagates from upstream rather
+//                     than freezing at the destination buffer's
+//                     allocation-time shape); matmul_nbits, gemm
+//                     (mixed input + attribute dims).
 //   `autoInfer`     : when 1, emit a per-op `inferReturnTypes` that
 //                     pushes the outs operand's tensor type into
 //                     `results` (or pushes nothing for memref mode, so
 //                     memref-mode ops correctly produce zero SSA
-//                     results). Default 0 on #260 -- only matmul opts
-//                     in as the worked example -- and flipped to 1 in
-//                     #262 so every single-result Hip_DpsOp inherits
-//                     it. `autoReify` and `autoInfer` are independent:
-//                     ops with bespoke runtime reify (matmul, gemm,
-//                     qmoe, matmul_nbits) still benefit from
-//                     auto-emitted `inferReturnTypes` because at
-//                     construction time the converter passes a typed
-//                     outs whose tensor type already encodes the result
-//                     shape.
+//                     results). Default 0; ops opt in explicitly. The
+//                     auto-emit body is correct for any single-result
+//                     Hip_DpsOp (DPS post-bufferize convention: result
+//                     type == outs operand type) and is independent of
+//                     `autoReify` — ops with bespoke runtime reify
+//                     still benefit from auto-emitted `inferReturnTypes`
+//                     because at converter callsites the typed outs
+//                     already encodes the result shape. Multi-result
+//                     Hip_DpsOps (gqa, layer_norm, skip_rms_norm) keep
+//                     `autoInfer=0` because the auto-emit body pushes a
+//                     single result type and would need a hand-written
+//                     replacement that walks every `outs` operand.
 //   `declareInfer`  : when 1, declare `InferTypeOpInterface` on the op
 //                     so ODS emits the inferred-type `Op::create`
 //                     overload (lets converter callsites drop the
-//                     explicit `resultType` argument). Default 0 on
-//                     #260 -- matmul opts in -- and flipped to 1 in
-//                     #262 in lockstep with `autoInfer`.
+//                     explicit `resultType` argument). Default 0; ops
+//                     opt in in lockstep with `autoInfer`.
 //
-// Generated dispatcher example (matmul, after Phase 1):
+// Generated dispatcher example for matmul:
 //   - `extraClassDefinition` produces:
 //       LogicalResult MatmulOp::reifyResultShapes(...) {  // omitted: autoReify=0
 //       LogicalResult MatmulOp::inferReturnTypes(...) {   // emitted: autoInfer=1
@@ -475,7 +485,12 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
 // Quantized Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits", [AttrSizedOperandSegments]> {
+def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
+                                  /*traits=*/[AttrSizedOperandSegments],
+                                  /*outsAccessor=*/"Output",
+                                  /*autoReify=*/0,
+                                  /*autoInfer=*/1,
+                                  /*declareInfer=*/1> {
   let summary = "Quantized N-bit matrix multiplication (com.microsoft MatMulNBits)";
   let description = [{
     Performs matrix multiplication with N-bit quantized weights.
@@ -536,7 +551,12 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
+def Hip_QMoEOp : Hip_DpsOp<"qmoe",
+                           /*traits=*/[AttrSizedOperandSegments],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Quantized Mixture-of-Experts (com.microsoft QMoE)";
   let description = [{
     Implements the com.microsoft QMoE operator (ONNX v1.25+ compatible): quantized
@@ -632,7 +652,11 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
+def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[],
+                              /*outsAccessor=*/"Output",
+                              /*autoReify=*/0,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
   let summary = "RMS normalization via miopenT5LayerNormForward";
   let description = [{
     Applies simplified (RMS) layer normalization.
@@ -847,7 +871,11 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
   let hasVerifier = 1;
 }
 
-def Hip_RopeOp : Hip_DpsOp<"rope"> {
+def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
@@ -2215,7 +2243,11 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   }];
 }
 
-def Hip_GemmOp : Hip_DpsOp<"gemm">{
+def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/0,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:

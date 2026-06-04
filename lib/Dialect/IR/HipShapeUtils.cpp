@@ -141,3 +141,16 @@ OpFoldResult mlir::hip::reifyDimOrConstant(OpBuilder &b, Location loc,
   // reify path is added later, also add a memref.dim branch + LIT case.
   return tensor::getMixedSize(b, loc, source, sourceDim);
 }
+
+SmallVector<OpFoldResult>
+mlir::hip::reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source) {
+  // Caller must hand a ranked tensor; reify is only invoked in tensor mode
+  // per the ReifyRankedShapedTypeOpInterface contract.
+  auto sourceType = cast<RankedTensorType>(source.getType());
+  ArrayRef<int64_t> shape = sourceType.getShape();
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(shape.size());
+  for (size_t i : llvm::seq<size_t>(0, shape.size()))
+    dims.push_back(reifyDimOrConstant(b, loc, shape[i], source, i));
+  return dims;
+}
