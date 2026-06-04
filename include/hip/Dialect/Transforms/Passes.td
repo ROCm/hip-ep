@@ -335,33 +335,26 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   ];
 }
 
-def OnnxResultTypeInferenceTestPass
-    : Pass<"hip-test-onnx-result-type-inference", "mlir::ModuleOp"> {
-  let summary = "Walk onnx.* ops, dispatch OnnxResultTypeInferenceInterface, "
-                "emit remarks (LIT-only test harness)";
+def OnnxInferShapesPass : Pass<"onnx-infer-shapes", "mlir::ModuleOp"> {
+  let summary = "Refine `onnx.*` op result types from operand types";
   let description = [{
-    Test-only pass that regression-tests the dialect-level fallback
-    dispatch of `OnnxResultTypeInferenceInterface` for unregistered
-    `onnx.*` ops, and the per-op rules library it dispatches into.
+    Walks every `func.func` in the module, refines each `onnx.*` op's
+    rank-0 / under-refined result types using a per-op-name rules
+    library, and syncs each function's declared return types from its
+    terminator's operand types. Idempotent and a no-op when no
+    refinement is possible -- safe to run unconditionally.
 
-    For every `onnx.*` op in the module, the pass attempts
-    `dyn_cast<OnnxResultTypeInferenceInterface>(op)`. The cast must
-    succeed for every op (the dialect-level fallback returns the rules
-    library's FallbackModel for any interface ID it has registered).
-    The pass then calls `iface.computeResultType(0)` and emits an
-    `op->emitRemark()` recording either the returned type or the
-    sentinel `<unhandled>` when the rules library returned null Type.
+    Pipeline placement (set in `Pipelines.cpp::buildOnnxToHipPipeline`):
+      simplify-onnx -> hip-add-context-arg -> onnx-loop-outline ->
+      *onnx-infer-shapes* -> convert-onnx-to-hip -> hip-infer-shapes
 
-    Not wired into any production pipeline -- exists only so individual
-    rules can be unit-tested in isolation as they land in the rules
-    library at `lib/Conversion/OnnxToHip/OnnxResultTypeInference.cpp`.
-
-    LIT fixture: `test/lit/Conversion/onnx-to-hip/onnx-result-type-inference.mlir`.
+    See `lib/Conversion/OnnxToHip/OnnxInferShapesPass.cpp` for the full
+    rationale and an IR example, and `RefineOnnxResultType.h` for the
+    rules-library contract.
   }];
-  // No dependentDialects -- the pass walks IR and emits remarks, it does
-  // not construct any new ops. The `OnnxStubDialect` that owns the
-  // fallback registry is loaded by the global `loadAllDialects()` in
-  // hip-mlir-opt's startup, before any pass runs.
+  let dependentDialects = [
+    "mlir::func::FuncDialect"
+  ];
 }
 
 def ResolveExternConstantsPass

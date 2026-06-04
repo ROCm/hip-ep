@@ -139,6 +139,11 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // ops in the module.
   pm.addPass(createOnnxLoopOutlinePass());
 
+  // Refine rank-0 placeholder result types on outlined-body `onnx.*` ops
+  // before the convert pass walks them.  See OnnxInferShapesPass.cpp for
+  // why ONNX protobuf shape inference cannot do this on its own.
+  pm.addPass(createOnnxInferShapesPass());
+
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
         fs, options.externalizeMinNumElements, options.skipConstantData));
@@ -161,6 +166,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createOnnxInferShapesPass());
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());
