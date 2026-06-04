@@ -106,14 +106,14 @@ static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
 
 /// Refine cloned `onnx.*` op result types from operand types via
 /// `OnnxResultTypeInferenceInterface`. ONNX shape inference does not
-/// recurse into `onnx.Loop` body regions, so HF Loop-body exports ship
-/// cloned body op result types as rank-0 placeholders even when the
-/// v_carry entry args carry real ranks. Without this catch-up,
+/// recurse into `onnx.Loop` body regions, so importer output frequently
+/// ships cloned body op result types as rank-0 placeholders even when
+/// the v_carry entry args carry real ranks. Without this catch-up,
 /// `--convert-onnx-to-hip`'s rank-aware patterns silently bail on the
 /// operand-vs-result rank mismatch and the pipeline aborts at
 /// one-shot-bufferize. Done here, before conversion, because
-/// `--hip-infer-shapes` Phase 2 runs AFTER `--convert-onnx-to-hip`
-/// and cannot rescue patterns that already bailed out.
+/// `--hip-infer-shapes` Phase 2 runs AFTER `--convert-onnx-to-hip` and
+/// cannot rescue patterns that already bailed out.
 ///
 /// Before:
 ///   func.func @body(%arg3: tensor<?x?x?xf16>, %x: tensor<?x?x?xf16>) {
@@ -491,9 +491,9 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
 
   // Catch up cloned body op result types via the
   // `OnnxResultTypeInferenceInterface` rules library: ONNX shape
-  // inference does not recurse into Loop bodies, so HF exports ship
-  // rank-0 placeholders that mismatch the now-refined v_carry entry
-  // args. See the helper's docstring for the full rationale.
+  // inference does not recurse into Loop bodies, so importer output
+  // ships rank-0 placeholders that mismatch the now-refined v_carry
+  // entry args. See the helper's docstring for the full rationale.
   refineClonedBodyOpTypes(entry);
 
   // Build the func.return from the (mapped) yield operands.  Cond is

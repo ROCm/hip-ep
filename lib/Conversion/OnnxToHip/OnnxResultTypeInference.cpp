@@ -5,51 +5,41 @@
 //===- OnnxResultTypeInference.cpp - rules library + dialect fallback -===//
 //
 // FallbackModel implementation of `OnnxResultTypeInferenceInterface`.
-//
-// `OnnxResultTypeInferenceFallback::computeResultType` is the dispatch
-// point: it switches on `op->getName()` and delegates to per-op rule
-// helpers for each ONNX op the rules library knows about. Returns null
-// Type for every op outside the rules library; callers (e.g.
+// `OnnxResultTypeInferenceFallback::computeResultType` switches on
+// `op->getName()` and delegates to per-op rule helpers. Returns null
+// Type for any op outside the rules library; callers (e.g.
 // `OnnxLoopOutlinePass`'s body op refinement) MUST treat null as "leave
-// the op alone" -- this is the safety belt against false promotion of
+// the op alone" -- the safety belt against false promotion of
 // rank-changing ops we have not yet reasoned about.
 //
-// Rules currently in the library (group + ops):
+// Rule groups currently in the library:
 //
-//   1. Pointwise unary (1 operand; result shape == operand[0] shape;
-//      element type taken from the EXISTING result type so element-type-
-//      changing ops like Cast / CastLike are handled without inspecting
-//      attributes -- the cloned IR's result element type is correct;
-//      only the rank/shape may be stale):
-//        Identity, Cast, CastLike, Tanh, Sigmoid, Relu, Gelu, Erf,
-//        Softmax
+//   1. Pointwise unary -- result shape from operand[0]; element type
+//      preserved from the existing result type so element-type-changing
+//      ops (Cast, CastLike) are handled without inspecting attributes.
+//      Ops: Identity, Cast, CastLike, Tanh, Sigmoid, Relu, Gelu, Erf,
+//           Softmax.
 //
-//   2. Pointwise broadcast (N >= 2 operands; result rank == max operand
-//      rank; per-dim numpy-style broadcast: align right, take max of
-//      operand dims (or 1 if missing), kDynamic when ANY operand has
-//      dynamic dim at that position; element type taken from the
-//      existing result type so comparison ops like Equal / Greater /
-//      Less keep their i1 result element type):
-//        Add, Sub, Mul, Div, Min, Max, Where, Equal, Greater, Less
+//   2. Pointwise broadcast (N >= 2 operands) -- numpy-style align-right
+//      broadcast over operand shapes, output rank = max operand rank,
+//      per-dim take the max (kDynamic if any operand is dynamic). The
+//      element type is preserved from the existing result type so
+//      comparison ops (Equal, Greater, Less) keep their i1 result.
+//      Ops: Add, Sub, Mul, Div, Min, Max, Where, Equal, Greater, Less.
 //
-//   3. Concat (axis dim is sum of operand axis dims, kDynamic if any
-//      operand axis dim is dynamic; non-axis dims agreement-or-dynamic):
-//        Concat
+//   3. Concat -- axis dim is the sum of per-operand axis dims
+//      (kDynamic if any is dynamic); non-axis dims agree-or-dynamic.
 //
-//   4. Slice (rank-preserving, all dims kDynamic -- a precise rule
-//      would parse starts/ends/axes/steps inputs but Slice is rare in
-//      Loop bodies and the rank is the load-bearing fact for the
-//      conversion patterns):
-//        Slice
+//   4. Slice -- rank-preserving, all dims kDynamic. A precise rule
+//      would constant-fold starts/ends/axes/steps, but Slice is rare
+//      in the contexts where this rules library is consulted today.
 //
-//   5. LayerNormalization (result 0 has operand[0] shape; results 1
-//      and 2 -- mean and inv-std -- are not handled, the rule returns
-//      null for resultIdx > 0 so the caller leaves the op alone):
-//        LayerNormalization
+//   5. LayerNormalization -- result 0 has operand[0]'s shape; results
+//      1 / 2 (mean, inv-std) are not handled.
 //
 // Adding a new op:
-//   * If it fits "pointwise unary" or "pointwise broadcast", add the
-//     name to the corresponding `is*` predicate -- nothing else needed.
+//   * "Pointwise unary" or "pointwise broadcast" group: add the name
+//     to the corresponding `is*` predicate; nothing else needed.
 //   * Otherwise add a `compute<Op>Result` helper alongside
 //     `computeConcatResult` and dispatch to it from the switch.
 //
@@ -60,7 +50,7 @@
 //   %r = "onnx.Concat"(%a, %b) {axis = 1 : si64}
 //        : (tensor<2x3xf16>, tensor<2x4xf16>) -> tensor<f16>
 //
-//   // After (the Concat rule sums the axis dim; non-axis dims agree):
+//   // After (Concat rule sums the axis dim; non-axis dims agree):
 //   %r = "onnx.Concat"(%a, %b) {axis = 1 : si64}
 //        : (tensor<2x3xf16>, tensor<2x4xf16>) -> tensor<2x7xf16>
 //
@@ -88,19 +78,19 @@ namespace {
 // Op-name predicates for the two "uniform rule" groups.
 //===----------------------------------------------------------------------===//
 
-bool isPointwiseUnary(::llvm::StringRef name) {
+bool isPointwiseUnary(StringRef name) {
   return llvm::is_contained(
-      ::llvm::ArrayRef<::llvm::StringLiteral>{
-          "onnx.Identity", "onnx.Cast", "onnx.CastLike", "onnx.Tanh",
-          "onnx.Sigmoid", "onnx.Relu", "onnx.Gelu", "onnx.Erf", "onnx.Softmax"},
+      ArrayRef<StringLiteral>{"onnx.Identity", "onnx.Cast", "onnx.CastLike",
+                              "onnx.Tanh", "onnx.Sigmoid", "onnx.Relu",
+                              "onnx.Gelu", "onnx.Erf", "onnx.Softmax"},
       name);
 }
 
-bool isPointwiseBroadcast(::llvm::StringRef name) {
+bool isPointwiseBroadcast(StringRef name) {
   return llvm::is_contained(
-      ::llvm::ArrayRef<::llvm::StringLiteral>{
-          "onnx.Add", "onnx.Sub", "onnx.Mul", "onnx.Div", "onnx.Min",
-          "onnx.Max", "onnx.Where", "onnx.Equal", "onnx.Greater", "onnx.Less"},
+      ArrayRef<StringLiteral>{"onnx.Add", "onnx.Sub", "onnx.Mul", "onnx.Div",
+                              "onnx.Min", "onnx.Max", "onnx.Where",
+                              "onnx.Equal", "onnx.Greater", "onnx.Less"},
       name);
 }
 
@@ -113,15 +103,14 @@ bool isPointwiseBroadcast(::llvm::StringRef name) {
 ///
 /// Before:  %r = "onnx.Tanh"(%x) : (tensor<2x3xf16>) -> tensor<f16>
 /// After:   %r = "onnx.Tanh"(%x) : (tensor<2x3xf16>) -> tensor<2x3xf16>
-::mlir::Type computeUnaryResult(::mlir::Operation *op, unsigned resultIdx) {
-  auto inputType =
-      ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getOperand(0).getType());
-  auto resultType = ::mlir::dyn_cast<::mlir::RankedTensorType>(
-      op->getResult(resultIdx).getType());
+Type computeUnaryResult(Operation *op, unsigned resultIdx) {
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  auto resultType =
+      dyn_cast<RankedTensorType>(op->getResult(resultIdx).getType());
   if (!inputType || !resultType)
     return {};
-  return ::mlir::RankedTensorType::get(inputType.getShape(),
-                                       resultType.getElementType());
+  return RankedTensorType::get(inputType.getShape(),
+                               resultType.getElementType());
 }
 
 /// Rule 2: pointwise broadcast (N >= 2 operands). Numpy-style: align
@@ -133,20 +122,19 @@ bool isPointwiseBroadcast(::llvm::StringRef name) {
 ///              : (tensor<2x3xf16>, tensor<f16>) -> tensor<f16>
 /// After:   %r = "onnx.Add"(%a, %b)
 ///              : (tensor<2x3xf16>, tensor<f16>) -> tensor<2x3xf16>
-::mlir::Type computeBroadcastResult(::mlir::Operation *op, unsigned resultIdx) {
-  auto resultType = ::mlir::dyn_cast<::mlir::RankedTensorType>(
-      op->getResult(resultIdx).getType());
+Type computeBroadcastResult(Operation *op, unsigned resultIdx) {
+  auto resultType =
+      dyn_cast<RankedTensorType>(op->getResult(resultIdx).getType());
   if (!resultType)
     return {};
 
-  // First pass: determine the output rank as the max of operand ranks.
-  // None-typed and non-ranked operands are skipped (they contribute no
-  // shape information; common for `Where`'s condition when it is a
-  // splat / for ops in the middle of conversion where one operand is
-  // still an opaque value).
+  // First pass: output rank = max of operand ranks. None-typed and
+  // non-ranked operands contribute no shape information (typical for
+  // `Where`'s splat condition or operands still in flight through
+  // conversion); skip them.
   int64_t maxRank = 0;
-  for (::mlir::Value v : op->getOperands()) {
-    if (auto t = ::mlir::dyn_cast<::mlir::RankedTensorType>(v.getType()))
+  for (Value v : op->getOperands()) {
+    if (auto t = dyn_cast<RankedTensorType>(v.getType()))
       maxRank = std::max(maxRank, t.getRank());
   }
   if (maxRank == 0)
@@ -155,53 +143,52 @@ bool isPointwiseBroadcast(::llvm::StringRef name) {
   // Second pass: per-dim broadcast. shape[outIdx] starts at 1 (the
   // implicit broadcast neutral). For each operand, align right and
   // merge.
-  ::llvm::SmallVector<int64_t> shape(maxRank, 1);
-  for (::mlir::Value v : op->getOperands()) {
-    auto t = ::mlir::dyn_cast<::mlir::RankedTensorType>(v.getType());
+  SmallVector<int64_t> shape(maxRank, 1);
+  for (Value v : op->getOperands()) {
+    auto t = dyn_cast<RankedTensorType>(v.getType());
     if (!t)
       continue;
     int64_t r = t.getRank();
     int64_t off = maxRank - r;
-    for (int64_t i = 0; i < r; ++i) {
+    for (int64_t i : llvm::seq<int64_t>(0, r)) {
       int64_t outIdx = off + i;
       int64_t d = t.getDimSize(i);
-      if (d == ::mlir::ShapedType::kDynamic) {
-        shape[outIdx] = ::mlir::ShapedType::kDynamic;
+      if (d == ShapedType::kDynamic) {
+        shape[outIdx] = ShapedType::kDynamic;
       } else if (shape[outIdx] == 1) {
         // First non-1 contribution at this position wins.
         shape[outIdx] = d;
       } else if (shape[outIdx] != d && d != 1 &&
-                 shape[outIdx] != ::mlir::ShapedType::kDynamic) {
-        // Conflicting concrete dims at the same position: invalid IR
-        // for broadcast, but be conservative rather than abort.
-        shape[outIdx] = ::mlir::ShapedType::kDynamic;
+                 shape[outIdx] != ShapedType::kDynamic) {
+        // Conflicting concrete dims at the same position is invalid
+        // broadcast IR; fall back to dynamic rather than abort.
+        shape[outIdx] = ShapedType::kDynamic;
       }
     }
   }
-  return ::mlir::RankedTensorType::get(shape, resultType.getElementType());
+  return RankedTensorType::get(shape, resultType.getElementType());
 }
 
 /// Rule 3: Concat. Result rank == operand rank; axis dim is the sum of
 /// per-operand axis dims (kDynamic if any is dynamic); non-axis dims
-/// take the agreement value across operands (kDynamic when operands
-/// disagree or any is dynamic).
+/// take the agreement value across operands (kDynamic on disagreement
+/// or any-operand-dynamic).
 ///
 /// Before:  %r = "onnx.Concat"(%a, %b) {axis = 1 : si64}
 ///              : (tensor<2x3xf16>, tensor<2x4xf16>) -> tensor<f16>
 /// After:   %r = "onnx.Concat"(%a, %b) {axis = 1 : si64}
 ///              : (tensor<2x3xf16>, tensor<2x4xf16>) -> tensor<2x7xf16>
-::mlir::Type computeConcatResult(::mlir::Operation *op, unsigned resultIdx) {
-  auto resultType = ::mlir::dyn_cast<::mlir::RankedTensorType>(
-      op->getResult(resultIdx).getType());
+Type computeConcatResult(Operation *op, unsigned resultIdx) {
+  auto resultType =
+      dyn_cast<RankedTensorType>(op->getResult(resultIdx).getType());
   if (!resultType)
     return {};
 
-  // Determine rank from the first ranked operand. ONNX requires all
-  // Concat inputs to have identical rank, so taking the max would be
-  // equivalent for valid IR.
+  // Rank from the first ranked operand. ONNX requires identical rank
+  // across Concat inputs, so taking the max is equivalent for valid IR.
   int64_t rank = 0;
-  for (::mlir::Value v : op->getOperands()) {
-    if (auto t = ::mlir::dyn_cast<::mlir::RankedTensorType>(v.getType()))
+  for (Value v : op->getOperands()) {
+    if (auto t = dyn_cast<RankedTensorType>(v.getType()))
       rank = std::max(rank, t.getRank());
   }
   if (rank == 0)
@@ -209,105 +196,94 @@ bool isPointwiseBroadcast(::llvm::StringRef name) {
 
   // axis attribute, with negative-index wrap.
   int64_t axis = 0;
-  if (auto a = op->getAttrOfType<::mlir::IntegerAttr>("axis"))
+  if (auto a = op->getAttrOfType<IntegerAttr>("axis"))
     axis = a.getInt();
   if (axis < 0)
     axis += rank;
   if (axis < 0 || axis >= rank)
     return {};
 
-  // We use 0 as a "not yet seeded" sentinel (a real ONNX dim is always
-  // > 0 or kDynamic; never 0 except for the empty-tensor edge case
-  // which Concat cannot produce). After the merge loop any dim still
-  // at 0 means no operand contributed to it -- impossible for valid
-  // Concat IR but defensively rewritten to kDynamic.
-  ::llvm::SmallVector<int64_t> shape(rank, 0);
+  // 0 is the "unseeded" sentinel: a real ONNX dim is always > 0 or
+  // kDynamic. Any dim left at 0 after the merge means no operand
+  // contributed to it (impossible for valid Concat IR but defensively
+  // rewritten to kDynamic below).
+  SmallVector<int64_t> shape(rank, 0);
 
-  // If ANY operand is unranked or has a rank that doesn't match the
-  // max (e.g. operand[0] is a rank-0 placeholder while operand[1]
-  // carries the true rank-N type), we cannot reason about that
-  // operand's contribution to the axis dim -- force the axis dim
-  // dynamic up front.
+  // If any operand is unranked or rank-mismatched (e.g. operand[0] is
+  // a rank-0 placeholder while operand[1] carries the true rank), we
+  // cannot reason about its contribution to the axis dim -- force the
+  // axis dim dynamic up front.
   bool axisIsUnknown = false;
-  for (::mlir::Value v : op->getOperands()) {
-    auto t = ::mlir::dyn_cast<::mlir::RankedTensorType>(v.getType());
+  for (Value v : op->getOperands()) {
+    auto t = dyn_cast<RankedTensorType>(v.getType());
     if (!t || t.getRank() != rank) {
       axisIsUnknown = true;
       break;
     }
   }
   if (axisIsUnknown)
-    shape[axis] = ::mlir::ShapedType::kDynamic;
+    shape[axis] = ShapedType::kDynamic;
 
-  for (::mlir::Value v : op->getOperands()) {
-    auto t = ::mlir::dyn_cast<::mlir::RankedTensorType>(v.getType());
+  for (Value v : op->getOperands()) {
+    auto t = dyn_cast<RankedTensorType>(v.getType());
     if (!t || t.getRank() != rank)
       continue;
-    for (int64_t i = 0; i < rank; ++i) {
+    for (int64_t i : llvm::seq<int64_t>(0, rank)) {
       int64_t di = t.getDimSize(i);
-      if (shape[i] == ::mlir::ShapedType::kDynamic) {
-        // Already absorbed kDynamic earlier this loop; nothing further
-        // to merge -- kDynamic is the absorbing element on both axes.
+      if (shape[i] == ShapedType::kDynamic) {
+        // kDynamic is absorbing on both axes; nothing further to merge.
         continue;
       }
-      if (di == ::mlir::ShapedType::kDynamic) {
-        shape[i] = ::mlir::ShapedType::kDynamic;
+      if (di == ShapedType::kDynamic) {
+        shape[i] = ShapedType::kDynamic;
         continue;
       }
       if (i == axis) {
-        // Sum along the concat axis; 0 means we haven't seeded yet.
+        // Sum along the concat axis; 0 means unseeded.
         shape[i] = (shape[i] == 0) ? di : shape[i] + di;
       } else {
-        // Non-axis dim: agreement, otherwise dynamic.
+        // Non-axis: require agreement, else kDynamic.
         if (shape[i] == 0)
           shape[i] = di;
         else if (shape[i] != di)
-          shape[i] = ::mlir::ShapedType::kDynamic;
+          shape[i] = ShapedType::kDynamic;
       }
     }
   }
 
   // Any dim still at the unseeded sentinel: no ranked operand
-  // contributed. Treat as dynamic to keep the helper defensive against
-  // pathologically-typed Concat IR (e.g. all operands rank-mismatched
-  // or non-tensor).
-  for (int64_t i = 0; i < rank; ++i) {
+  // contributed. Defensively rewrite to dynamic.
+  for (int64_t i : llvm::seq<int64_t>(0, rank)) {
     if (shape[i] == 0)
-      shape[i] = ::mlir::ShapedType::kDynamic;
+      shape[i] = ShapedType::kDynamic;
   }
 
-  return ::mlir::RankedTensorType::get(shape, resultType.getElementType());
+  return RankedTensorType::get(shape, resultType.getElementType());
 }
 
-/// Rule 4: Slice. Rank-preserving; all dims kDynamic. A precise rule
-/// would constant-fold starts/ends/axes/steps, but Slice is rare in
-/// Loop bodies and the rank is the load-bearing fact for downstream
-/// rank-aware patterns.
+/// Rule 4: Slice. Rank-preserving; all dims kDynamic.
 ///
 /// Before:  %r = "onnx.Slice"(%x, ...) : (tensor<2x3xf16>, ...) -> tensor<f16>
-/// After:   %r = "onnx.Slice"(%x, ...) : (tensor<2x3xf16>, ...) ->
-/// tensor<?x?xf16>
-::mlir::Type computeSliceResult(::mlir::Operation *op, unsigned resultIdx) {
-  auto t0 =
-      ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getOperand(0).getType());
-  auto resultType = ::mlir::dyn_cast<::mlir::RankedTensorType>(
-      op->getResult(resultIdx).getType());
+/// After:   %r = "onnx.Slice"(%x, ...)
+///              : (tensor<2x3xf16>, ...) -> tensor<?x?xf16>
+Type computeSliceResult(Operation *op, unsigned resultIdx) {
+  auto t0 = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  auto resultType =
+      dyn_cast<RankedTensorType>(op->getResult(resultIdx).getType());
   if (!t0 || !resultType)
     return {};
-  ::llvm::SmallVector<int64_t> shape(t0.getRank(),
-                                     ::mlir::ShapedType::kDynamic);
-  return ::mlir::RankedTensorType::get(shape, resultType.getElementType());
+  SmallVector<int64_t> shape(t0.getRank(), ShapedType::kDynamic);
+  return RankedTensorType::get(shape, resultType.getElementType());
 }
 
-/// Rule 5: LayerNormalization, result 0 only. Result 0 has operand[0]'s
-/// shape; results 1 (mean) and 2 (inv-std) are not handled (the rule
-/// returns null for resultIdx > 0 so the caller leaves the op alone).
+/// Rule 5: LayerNormalization, result 0 only. Returns null for
+/// resultIdx > 0 (mean / inv-std) so the caller leaves them alone.
 ///
 /// Before:  %r = "onnx.LayerNormalization"(%x, %scale, %bias)
 ///              : (tensor<2x3xf16>, ...) -> tensor<f16>
 /// After:   %r = "onnx.LayerNormalization"(%x, %scale, %bias)
 ///              : (tensor<2x3xf16>, ...) -> tensor<2x3xf16>
-::mlir::Type computeLayerNormResult(::mlir::Operation *op, unsigned resultIdx) {
+Type computeLayerNormResult(Operation *op, unsigned resultIdx) {
   if (resultIdx != 0)
     return {};
   return computeUnaryResult(op, resultIdx);
@@ -320,11 +296,10 @@ bool isPointwiseBroadcast(::llvm::StringRef name) {
 struct OnnxResultTypeInferenceFallback
     : public OnnxResultTypeInferenceInterface::FallbackModel<
           OnnxResultTypeInferenceFallback> {
-  ::mlir::Type computeResultType(::mlir::Operation *op,
-                                 unsigned resultIdx) const {
+  Type computeResultType(Operation *op, unsigned resultIdx) const {
     if (resultIdx >= op->getNumResults() || op->getNumOperands() == 0)
       return {};
-    ::llvm::StringRef name = op->getName().getStringRef();
+    StringRef name = op->getName().getStringRef();
 
     if (isPointwiseUnary(name))
       return computeUnaryResult(op, resultIdx);
@@ -347,13 +322,12 @@ struct OnnxResultTypeInferenceFallback
 
 void registerOnnxResultTypeInferenceFallback() {
   // Function-local static keeps the FallbackModel alive for the lifetime
-  // of the process; OnnxStubDialect just stores a non-owning void*.
-  // `registerInterfaceFallback` is idempotent: re-registering the same
-  // (interface TypeID, fallback ptr) pair is a no-op since the registry
-  // is a DenseMap that overwrites on insert.
-  static OnnxResultTypeInferenceFallback s_fallback;
+  // of the process; OnnxStubDialect stores a non-owning void*. The
+  // registry is a DenseMap that overwrites on insert, so re-registering
+  // the same (interface TypeID, fallback ptr) pair is a no-op.
+  static OnnxResultTypeInferenceFallback fallback;
   ::hip::compiler::detail::OnnxStubDialect::registerInterfaceFallback(
-      ::mlir::TypeID::get<OnnxResultTypeInferenceInterface>(), &s_fallback);
+      TypeID::get<OnnxResultTypeInferenceInterface>(), &fallback);
 }
 
 } // namespace hip

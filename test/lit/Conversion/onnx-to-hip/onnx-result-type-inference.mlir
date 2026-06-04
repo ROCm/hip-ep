@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
 // RUN: hip-mlir-opt %s --hip-test-onnx-result-type-inference --verify-diagnostics
 
 // Per-rule unit tests for the `OnnxResultTypeInferenceInterface` rules
