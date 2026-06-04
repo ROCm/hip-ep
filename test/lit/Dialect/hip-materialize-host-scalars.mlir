@@ -123,6 +123,56 @@ func.func @host_store_then_hip_consumer(%ctx: !hip.context,
   return
 }
 
+// --- Scalar-reuse hazard: a SINGLE-element buffer written by TWO stores, with
+//     an async hip consumer of the first value between the stores. An upstream
+//     pass coalesced two logically-independent scalars (e.g. total_seq_len and
+//     an unrelated shape value) into one alloc. Mapping both to ONE slot lets
+//     the second (host, synchronous) store clobber the slot before the first
+//     store's async hip read executes on the stream — the GPU then reads the
+//     wrong value. The pass MUST give each store its own slot so the async read
+//     sees an un-clobbered slot. Two distinct views over the scratch buffer;
+//     store/consumer #1 bind to view #0, store/consumer #2 bind to view #1. ---
+// CHECK-LABEL: func.func @scalar_reuse_split
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context
+// CHECK:         hip.get_host_scratch(%[[CTX]],
+// CHECK:         %[[V0:.*]] = memref.view %{{.*}}[%{{.*}}][] : memref<?xi8> to memref<i64>
+// CHECK:         %[[V1:.*]] = memref.view %{{.*}}[%{{.*}}][] : memref<?xi8> to memref<i64>
+// CHECK:         memref.store %{{.*}}, %[[V0]][] : memref<i64>
+// CHECK:         hip.cast{{.*}} ins(%[[V0]] : memref<i64>)
+// CHECK:         memref.store %{{.*}}, %[[V1]][] : memref<i64>
+// CHECK:         hip.cast{{.*}} ins(%[[V1]] : memref<i64>)
+func.func @scalar_reuse_split(%ctx: !hip.context, %x: i64, %y: i64,
+                              %o0: memref<i32>, %o1: memref<i32>) {
+  %a = memref.alloc() : memref<i64>
+  memref.store %x, %a[] : memref<i64>
+  hip.cast(%ctx) ins(%a : memref<i64>) outs(%o0 : memref<i32>) {to = 6 : i64}
+  memref.store %y, %a[] : memref<i64>
+  hip.cast(%ctx) ins(%a : memref<i64>) outs(%o1 : memref<i32>) {to = 6 : i64}
+  memref.dealloc %a : memref<i64>
+  return
+}
+
+// --- Multi-element array-fill buffer written by two stores to DIFFERENT
+//     indices is NOT a reuse hazard (it is one logical shape vector being
+//     filled element by element, read as a whole). It must keep ONE slot —
+//     splitting per store would break the consumer that reads the full
+//     buffer. ---
+// CHECK-LABEL: func.func @multi_elem_fill_not_split
+// CHECK:         hip.get_host_scratch
+// CHECK:         memref.view %{{.*}} : memref<?xi8> to memref<2xi64>
+// CHECK-NOT:     memref.view %{{.*}} : memref<?xi8> to memref<2xi64>
+func.func @multi_elem_fill_not_split(%ctx: !hip.context, %x: i64, %y: i64,
+                                     %o: memref<2xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %a = memref.alloc() : memref<2xi64>
+  memref.store %x, %a[%c0] : memref<2xi64>
+  memref.store %y, %a[%c1] : memref<2xi64>
+  hip.cast(%ctx) ins(%a : memref<2xi64>) outs(%o : memref<2xi32>) {to = 6 : i64}
+  memref.dealloc %a : memref<2xi64>
+  return
+}
+
 // --- Host scalar reached through memref.reinterpret_cast: CSE fuses two
 //     from_elements shape-arith buffers into one alloc and reinterpret_casts
 //     it for the second (smaller) use, so the host store reaches its hip
