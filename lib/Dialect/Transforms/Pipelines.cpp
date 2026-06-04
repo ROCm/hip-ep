@@ -137,6 +137,27 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // get the same treatment as ops in main_graph (constant lowering, op
   // mapping, etc.) -- the conversion pass already iterates all func.func
   // ops in the module.
+  //
+  // ONNX-side shape refinement is intentionally NOT done here. The
+  // importer is responsible for emitting `tensor<*xT>` (unranked) for
+  // values whose shape it does not know, and `tensor<>` (rank-0) only
+  // for genuine scalars. Any unranked tensors that survive into the
+  // HIP dialect are refined post-conversion by `--hip-infer-shapes`
+  // via `ReifyRankedShapedTypeOpInterface`. See
+  // `docs/design/unranked-tensor-handling.md` for the full contract.
+  //
+  // TODO(unranked-import-contract): the unranked-import contract on
+  // the importer side ships in MorphiZen PR #228
+  // (https://github.com/ROCm/MorphiZen/pull/228). Until that PR is
+  // merged AND the `3rd-party/morphizen` submodule here is bumped
+  // past the merge, the importer still emits `tensor<>` (rank-0) for
+  // values it has no shape for, which `--convert-onnx-to-hip` will
+  // misinterpret as a genuine scalar on Loop-heavy models (any
+  // `onnx.Concat` / `onnx.Add` etc. inside an outlined body whose
+  // operand was unranked at import will fail rank-aware conversion).
+  // When this submodule is bumped: re-run the LIT suite here and
+  // every Python perf test under `test/python/` on a Loop-heavy
+  // model end-to-end, then delete this TODO.
   pm.addPass(createOnnxLoopOutlinePass());
 
   if (fs) {
