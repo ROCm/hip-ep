@@ -8,6 +8,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -82,6 +83,138 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 /// tensor mode per the interface contract.
 SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
                                                     Value source);
+
+/// Compute the NumPy-broadcast result shape over `operands` and lift each
+/// output dim to an `OpFoldResult`. Static result dims become `IndexAttr`
+/// (no IR emitted); dynamic result dims become `tensor.dim` against
+/// whichever operand contributes the runtime extent — right-aligned, and
+/// preferring the canonical side (in-range and != 1) when multiple
+/// operands could contribute. The canonical-side preference matches the
+/// batch-dim contract in `MatmulOp::reifyResultShapes` and ensures that
+/// a future `tensor.dim` of the result folds back to the operand that
+/// actually determines the size at runtime.
+///
+/// Used by elementwise ops that take broadcast-shape operands and write
+/// the broadcast result into their `outs` (add, mul, sub, div, min, mod,
+/// equal, less, and, where, ...). The output dtype is taken from the
+/// op's `outs` operand and is independent of this helper — comparisons
+/// (equal, less) emit i1 outs while the operands are typically f32/f16,
+/// and the helper handles both cases identically (it only looks at
+/// shapes).
+///
+/// All operands must be `RankedTensorType`-typed Values (the interface
+/// contract for `reifyResultShapes` callers). Returns an empty vector
+/// if broadcast fails — verifiers should already have caught this, but
+/// reify bails defensively to avoid materializing nonsense IR.
+SmallVector<OpFoldResult> reifyBroadcastShape(OpBuilder &b, Location loc,
+                                              ValueRange operands);
+
+/// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
+/// `perm` must be a permutation of `[0, rank-1)` and have the same length
+/// as `input`'s rank — the verifier should already guarantee this; the
+/// helper bails (returns empty) on mismatch.
+///
+/// Each output dim `i`:
+///   - emits `IndexAttr(input.shape[perm[i]])` when that dim is static,
+///   - emits `tensor.dim %input, perm[i]` otherwise.
+///
+/// `input` must be a `RankedTensorType`-typed Value.
+SmallVector<OpFoldResult> reifyTransposeByPerm(OpBuilder &b, Location loc,
+                                               Value input,
+                                               ArrayRef<int64_t> perm);
+
+/// Reify the result shape of a gather op as
+/// `output = data.shape[:axis] ++ indices.shape ++ data.shape[axis+1:]`.
+/// `axis` is normalized into `[0, data.rank)` (negative axis follows ONNX
+/// convention). The helper bails (returns empty) on a malformed axis.
+///
+/// `data` and `indices` must be `RankedTensorType`-typed Values.
+SmallVector<OpFoldResult> reifyGatherWithAxis(OpBuilder &b, Location loc,
+                                              Value data, Value indices,
+                                              int64_t axis);
+
+/// Reify the result shape of a `gather_nd` op as
+/// `batch_dims_from_data ++ indices.shape[batch_dims:-1] ++
+///  data.shape[batch_dims + indices.shape[-1]:]`.
+/// Per ONNX GatherND semantics, output rank =
+/// `q + r - indices.shape[-1] - 1 - batch_dims`, where `q = rank(indices)`
+/// and `r = rank(data)`. The helper bails (returns empty) when the
+/// trailing index-tuple width (`indices.shape[-1]`) is dynamic — the
+/// output rank itself is then unknown and reify cannot run.
+///
+/// `data` and `indices` must be `RankedTensorType`-typed Values.
+SmallVector<OpFoldResult> reifyGatherND(OpBuilder &b, Location loc, Value data,
+                                        Value indices, int64_t batchDims);
+
+/// Reify the result shape of a reduction op (reduce_sum / reduce_max /
+/// reduce_prod) given `data`, the `axes` operand (rank-1 i64 tensor),
+/// and the `keepdims` / `noop_with_empty_axes` attributes.
+///
+/// Tries to introspect `axes` as an `arith.constant` (the typical case
+/// after the OnnxToHip converter materializes it from the ONNX
+/// attribute). When successful:
+///   - keepdims=1: axes-listed dims become `IndexAttr(1)`; non-axes
+///     dims pass through from `data`.
+///   - keepdims=0: axes-listed dims are dropped from the output rank;
+///     non-axes dims pass through.
+///   - Empty axes + noop_with_empty_axes=0: ALL dims become 1
+///     (keepdims=1) or output is rank-0 (keepdims=0).
+///   - Empty axes + noop_with_empty_axes=1: output equals input
+///     (no reduction).
+///
+/// Returns `success()` and writes the reified dim list into `out` when
+/// `axes` can be introspected. Returns `failure()` when `axes` is not a
+/// recognised constant — the caller should then fall back to
+/// `reifyElementwiseSameShape(output)` to keep the reify interface
+/// non-failing.
+///
+/// Uses `LogicalResult` (rather than the empty-vector sentinel used by
+/// the other helpers in this header) because a valid rank-0 reduction
+/// result has an empty dim list, which would otherwise be
+/// indistinguishable from the bail path.
+LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
+                                         Value axes, int64_t keepdims,
+                                         int64_t noopWithEmptyAxes,
+                                         SmallVectorImpl<OpFoldResult> &out);
+
+/// One-shot reify body for ONNX-style reduction ops (reduce_sum,
+/// reduce_max, reduce_prod). Tries `reifyReductionWithKeepdims` first
+/// to recover per-input-dim mappings from a constant `axes` operand.
+/// When `axes` is not a recognised constant, falls back to the shared
+/// `HipDpsOp` outs-lift default so the reify interface always
+/// succeeds (the only honest answer when we cannot decide which dims
+/// were reduced is the type of the `outs` operand the converter
+/// already picked).
+///
+/// `op` must implement both `HipDpsOp` (so the fallback can walk
+/// `getDpsInits()`) and have a `RankedTensorType` `data` operand.
+/// Returns `failure()` only on the no-tensor-results / non-tensor
+/// `data` defensive paths; otherwise always returns `success()`.
+///
+/// Used as the body of `Hip_DpsOp_Reduction`'s auto-emitted reify
+/// dispatcher; see `Hip_DpsOp_Reduction` in `HipOps.td`.
+LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
+                                  Value axes, int64_t keepdims,
+                                  int64_t noopWithEmptyAxes, Operation *op,
+                                  ReifiedRankedShapedTypeDims &reified);
+
+/// One-shot reify body for elementwise NumPy-broadcast ops (add, mul,
+/// sub, div, min, mod, equal, less, and, where, ...). Wraps
+/// `reifyBroadcastShape` with the per-op guards (no-results bail,
+/// every operand must be `RankedTensorType`) and writes the lifted
+/// dim list into `reified`.
+///
+/// `operands` is the list of broadcast input operands in the order
+/// they should be aligned (right-aligned for NumPy broadcast).
+/// Returns `failure()` on any defensive bail or when broadcast itself
+/// fails (verifier should already have caught the latter; reify bails
+/// to avoid materializing nonsense IR).
+///
+/// Used as the body of `Hip_DpsOp_Broadcast`'s auto-emitted reify
+/// dispatcher; see `Hip_DpsOp_Broadcast` in `HipOps.td`.
+LogicalResult reifyBroadcastShapeFor(OpBuilder &b, Location loc,
+                                     ValueRange operands, Operation *op,
+                                     ReifiedRankedShapedTypeDims &reified);
 
 } // namespace hip
 } // namespace mlir
