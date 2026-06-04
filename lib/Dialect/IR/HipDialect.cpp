@@ -156,6 +156,28 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+// Result types are mechanically the `v_init` operand types — matches the
+// `LoopOp::verify` contract, so any caller that uses an InferType-aware
+// builder (operand types only, no explicit result types) is verifier-clean
+// by construction.
+//
+// Memref-mode v_init produces 0 result types (DPS post-bufferization
+// convention; the verifier rejects mixed mode anyway).
+LogicalResult
+LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                         ValueRange operands, DictionaryAttr attributes,
+                         OpaqueProperties properties, RegionRange regions,
+                         SmallVectorImpl<Type> &inferredReturnTypes) {
+  LoopOpAdaptor adaptor(operands, attributes, properties, regions);
+  auto vInit = adaptor.getVInit();
+  inferredReturnTypes.reserve(vInit.size());
+  for (Value v : vInit) {
+    if (isa<RankedTensorType>(v.getType()))
+      inferredReturnTypes.push_back(v.getType());
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // Helpers for DPS compute ops (custom parse/print, verify, interfaces)
 //===----------------------------------------------------------------------===//

@@ -429,6 +429,21 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
 
   // hip.loop result types: same as the (loop-carried portion of) yield ops
   // minus the cond_out slot, i.e. the original onnx.Loop's result types.
+  //
+  // For dynamic-shape exports the original onnx.Loop result types may
+  // disagree with v_init operand types — the hip.loop verifier rejects
+  // in that case (canonical trigger: the importer leaves result / body
+  // block-arg types as rank-0 placeholders while upstream shape
+  // inference has already refined v_init to a richer dynamic shape).
+  // The fix is recursive shape refinement on the outlined body func,
+  // which is follow-up work; once body arg / yield / op types agree
+  // with v_init, migrate this construction to the InferTypeOpInterface-aware
+  // LoopOp::create overload (drops the explicit result-types argument;
+  // LoopOp::inferReturnTypes sources them from v_init). Premature
+  // migration without body refinement leaves the body func signature
+  // under-refined while the hip.loop call site passes refined v_carry
+  // values — type-mismatched at the LLVM lowering call boundary. Keep
+  // the explicit construction here until that work lands.
   SmallVector<Type> hipLoopResultTypes(loopOp->getResultTypes());
 
   auto hipLoopOp = LoopOp::create(

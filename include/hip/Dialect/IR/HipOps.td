@@ -203,6 +203,8 @@ def Hip_LoopOp : Hip_Op<"loop",
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
      DeclareOpInterfaceMethods<DestinationStyleOpInterface,
                                ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<InferTypeOpInterface,
+                               ["inferReturnTypes"]>,
      DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Outlined-body counted/conditional loop";
   let description = [{
