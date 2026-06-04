@@ -2881,10 +2881,16 @@ extern "C" int hip_matmul_nbits(
    *
    * When M >= kBlockDim (16): WMMA intrinsics (RDNA3 fast path)
    * When M <  kBlockDim:      GEMV kernel with COL_MAJOR=true
+   *
+   * WMMA tile configs with BN=32 target narrow-N (e.g. router 4096x32).
+   * At prefill batch M>1 they have produced large CPU/EP divergence while
+   * wide-N tiles (4096x4096) stay healthy; route N<=64 through the naive
+   * batched kernel below instead.
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
+  constexpr int kWmmaMinOutputN = 64;
 
-  if (wmma_data_format && M >= kBlockDim) {
+  if (wmma_data_format && M >= kBlockDim && N > kWmmaMinOutputN) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "
         "K=%lld bs=%lld zp=%s bias=%s\n",
