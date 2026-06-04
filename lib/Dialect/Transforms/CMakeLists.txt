@@ -7,6 +7,7 @@ add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
   BufferUtils.cpp
   GenerateInterface.cpp
+  InferShapesPass.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
@@ -46,5 +47,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRFuncToLLVM
   MLIRAffineToStandard
   MLIRReconcileUnrealizedCasts
+  MLIRInferTypeOpInterface
+  MLIRTensorDialect
   flatbuffers::flatbuffers
 )
