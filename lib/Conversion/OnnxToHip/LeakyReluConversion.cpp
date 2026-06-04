@@ -30,6 +30,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -39,6 +40,8 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// Build a 0-D `arith.constant` of the given float type. (See the comment in
+/// ReluConversion.cpp for why we do not use `onnx.Constant` here.)
 static mlir::Value buildFloatScalar(mlir::PatternRewriter &rewriter,
                                     mlir::Location loc, mlir::FloatType ft,
                                     double value) {
@@ -48,10 +51,7 @@ static mlir::Value buildFloatScalar(mlir::PatternRewriter &rewriter,
   apf.convert(ft.getFloatSemantics(), llvm::APFloat::rmNearestTiesToEven,
               &losesInfo);
   auto valueAttr = mlir::DenseElementsAttr::get(scalarType, apf);
-  mlir::OperationState state(loc, "onnx.Constant");
-  state.addTypes(scalarType);
-  state.addAttribute("value", valueAttr);
-  return rewriter.create(state)->getResult(0);
+  return mlir::arith::ConstantOp::create(rewriter, loc, valueAttr).getResult();
 }
 
 struct LeakyReluToHip : public mlir::RewritePattern {
