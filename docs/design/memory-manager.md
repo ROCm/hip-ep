@@ -10,6 +10,9 @@ The Memory Manager is a GPU memory allocator specialized for LLM inference.
 It manages three allocation classes — KV cache blocks, activation tensors, and
 generic buffers — with separate allocation strategies for each.
 
+MM supports both device memory (`hipMalloc`) and host-mapped memory
+(`hipHostMalloc(hipHostMallocMapped)`) through its HAL abstraction.
+
 MM is compiled to LLVM bitcode and merged into `runtime.bc` via `llvm-link`,
 so model DLLs call MM functions directly with zero FFI overhead.
 
@@ -24,7 +27,7 @@ include/mm/
 
 lib/MemoryManager/
   mm_core.cpp       Singleton coordinator — dispatches to subsystems, tracks global metrics
-  mm_hal.h/cpp      Hardware abstraction layer — wraps hipMalloc/hipFree
+  mm_hal.h/cpp      Hardware abstraction layer — wraps hipMalloc/hipFree + hipHostMalloc/hipHostFree
   mm_handle_table.h/cpp   Opaque 64-bit handle → AllocInfo registry
   mm_activation.h/cpp     Segregated free-list arena for activation tensors (8 size classes)
   mm_kv_manager.h/cpp     Block manager for paged KV cache with refcounted CoW fork
@@ -56,7 +59,8 @@ lib/MemoryManager/
 - **HandleTable**: maps opaque `handle_t` values to `AllocInfo` metadata
   (pointer, size, class, lifetime, device).
 - **RocmHal**: thin wrapper over HIP runtime. Translates `hipError_t` to
-  `mm::Status`.
+  `mm::Status`. Supports both device allocations (`hipMalloc`/`hipFree`) and
+  host-mapped allocations (`hipHostMalloc(hipHostMallocMapped)`/`hipHostFree`).
 
 ## Call Tree: Allocation
 
@@ -67,7 +71,9 @@ mm::alloc(size, hints, stream)
  │    ├─ find size class (binary search on upper bounds)
  │    ├─ pop from free_list if available (zero hipMalloc)
  │    └─ else: hal->malloc
- ├─ else → hal->malloc (generic / weight)
+ ├─ if MemoryClass::HostMapped → hal->host_mapped_malloc
+ │    └─ hipHostMalloc(ptr, size, hipHostMallocMapped)
+ ├─ else → hal->malloc (generic / weight / scratch)
  ├─ HandleTable::insert(ptr, metadata)
  └─ update atomic counters (total_allocated, peak)
 ```
@@ -96,6 +102,7 @@ mm::free(handle, stream)
  │    └─ if 0 → hal->free + erase physical entry
  ├─ if Activation → ActivationArena::release
  │    └─ push ptr back to size-class free_list (reuse)
+ ├─ if HostMapped → hal->host_mapped_free (hipHostFree)
  ├─ else → hal->free
  └─ HandleTable::erase
 ```

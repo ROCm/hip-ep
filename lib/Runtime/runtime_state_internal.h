@@ -82,6 +82,14 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
+  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
+  // GPU pool by hip-materialize-host-scalars.
+  // Allocated via MM with MemoryClass::HostMapped (hipHostMallocMapped):
+  // host-writable AND GPU-readable. Grow-on-demand, never shrinks.
+  void *host_scratch_base;
+  size_t host_scratch_size;
+  mm::handle_t host_scratch_handle;
+
   // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
   // Caches hipBLASLt descriptors + algorithms by GEMM shape.
   void *gqa_gemm_cache;

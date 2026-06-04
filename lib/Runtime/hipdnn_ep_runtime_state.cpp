@@ -243,6 +243,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_scratch_handle = mm::kInvalidHandle;
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
+  state->host_scratch_base = nullptr;
+  state->host_scratch_size = 0;
+  state->host_scratch_handle = mm::kInvalidHandle;
   state->gqa_gemm_cache = nullptr;
   state->mha_gemm_cache = nullptr;
   state->causal_conv_cache = nullptr;
@@ -906,6 +909,13 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->qmoe_host_scratch_size = 0;
   }
 
+  if (state->host_scratch_handle != mm::kInvalidHandle) {
+    (void)mm::free(state->host_scratch_handle);
+    state->host_scratch_handle = mm::kInvalidHandle;
+    state->host_scratch_base = nullptr;
+    state->host_scratch_size = 0;
+  }
+
   // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
   // allocated). The stream sync at the top of cleanup has already drained
   // any in-flight kernel that may have been holding loop_*_dev pointers,
@@ -1136,6 +1146,48 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state) {
     return nullptr;
   }
   return state->pool_base;
+}
+
+//===----------------------------------------------------------------------===//
+// Host-Mapped Scratch Support
+//===----------------------------------------------------------------------===//
+
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
+  if (!state) {
+    fprintf(stderr,
+            "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");
+    return nullptr;
+  }
+  if (needed_size > state->host_scratch_size) {
+    if (state->host_scratch_handle != mm::kInvalidHandle) {
+      if (state->stream)
+        HIP_CLEANUP(hipStreamSynchronize(state->stream));
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: growing host scratch "
+              "%zu -> %zu bytes (rare; first time this large)\n",
+              state->host_scratch_size, needed_size);
+      fflush(stderr);
+      (void)mm::free(state->host_scratch_handle);
+      state->host_scratch_handle = mm::kInvalidHandle;
+      state->host_scratch_base = nullptr;
+      state->host_scratch_size = 0;
+    }
+    mm::AllocHints hints;
+    hints.mem_class = mm::MemoryClass::HostMapped;
+    hints.lifetime = mm::Lifetime::Static;
+    mm::handle_t handle = mm::alloc(needed_size, &hints);
+    if (handle == mm::kInvalidHandle) {
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: mm::alloc failed "
+              "(%zu -> %zu bytes)\n",
+              state->host_scratch_size, needed_size);
+      return nullptr;
+    }
+    state->host_scratch_handle = handle;
+    state->host_scratch_base = mm::get_ptr(handle);
+    state->host_scratch_size = needed_size;
+  }
+  return state->host_scratch_base;
 }
 
 //===----------------------------------------------------------------------===//
