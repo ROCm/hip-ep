@@ -459,11 +459,14 @@ mlir::hip::reifyReductionShape(OpBuilder &b, Location loc, Value data,
   }
 
   // Fallback: lift the DPS `outs` operand's own shape via the shared
-  // `HipDpsOp` default. `cast<HipDpsOp>(op).reifyResultShapes` is the
+  // `HipDpsOp` default. `cast<HipDpsOp>(op).reifyResultShapes` dispatches
+  // through the `HipDpsOp` interface concept and lands on the
   // interface-default body in `HipDpsOpInterface.cpp` — it walks
   // `getDpsInits()` and lifts each via `tensor::getMixedSizes` /
-  // `memref::getMixedSizes`. This is NOT the per-op virtual dispatch
-  // (which would recurse back into THIS function for reduction ops);
-  // it is a static call to the interface's shared default body.
+  // `memref::getMixedSizes`. Reduction ops override the SEPARATE
+  // `ReifyRankedShapedTypeOpInterface::reifyResultShapes` (auto-emitted
+  // by `Hip_DpsOp_Reduction` and the body of THIS function), but do not
+  // override the `HipDpsOp` interface method, so the call below resolves
+  // to the default body and does not recurse.
   return cast<HipDpsOp>(op).reifyResultShapes(b, reified);
 }

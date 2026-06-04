@@ -510,8 +510,8 @@ func.func @refine_gather_nd_structural(%ctx: !hip.context,
 // only; dim 0 stays dynamic. Same path covers `hip.reduce_max` and
 // `hip.reduce_prod` (one helper, three thunks). When `axes` is not a
 // constant the helper bails and the op falls through to a no-op
-// outs-shape fallback — verified by `noop_on_static` upstream of
-// here, since the fallback only emits dim ops that the pass discards.
+// outs-shape fallback — verified by `noop_on_static` earlier in this
+// file, since the fallback only emits dim ops that the pass discards.
 // CHECK-LABEL: func.func @refine_reduce_sum_keepdims_constant_axes
 // CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<?x1xf16>
 // CHECK:         %[[Y:.*]] = hip.reduce_sum
