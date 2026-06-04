@@ -26,8 +26,9 @@ namespace {
 //     int64_t outer,        // N * C  — number of independent (n, c) slices
 //     int64_t reduce_size,  // product of spatial dims (D_1 * ... * D_k)
 //     int64_t data_type,    // HIPDNN_EP_DATATYPE_* enum
-//     int64_t mode,         // HIPDNN_EP_GLOBAL_POOL_* enum (0=AVG, 1=MAX, 2=LP)
-//     int64_t p)            // LP norm exponent (only used when mode == LP)
+//     int64_t mode,         // HIPDNN_EP_GLOBAL_POOL_* enum (0=AVG, 1=MAX,
+//     2=LP) int64_t p)            // LP norm exponent (only used when mode ==
+//     LP)
 // : (ptr, ptr, ptr, i64, i64, i64, i64, i64) -> i32
 //
 // `outer` and `reduce_size` are computed from the input descriptor so dynamic
@@ -110,9 +111,8 @@ struct GlobalPoolOpLowering : public ConvertOpToLLVMPattern<GlobalPoolOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 8> args = {statePtr,    inputPtr, outputPtr, outer,
-                                  reduceSize,  dataTypeVal, modeVal,
-                                  pVal};
+    SmallVector<Value, 8> args = {statePtr,   inputPtr,    outputPtr, outer,
+                                  reduceSize, dataTypeVal, modeVal,   pVal};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

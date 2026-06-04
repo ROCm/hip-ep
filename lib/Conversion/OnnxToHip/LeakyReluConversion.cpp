@@ -105,10 +105,10 @@ struct LeakyReluToHip : public mlir::RewritePattern {
 
     // hip.where(cond, alphaX, x) -> y.
     mlir::Value whereInit = createEmptyTensor(rewriter, loc, resultType, x);
-    mlir::Value y = mlir::hip::WhereOp::create(rewriter, loc, resultType,
-                                               context, cond, alphaX, x,
-                                               whereInit)
-                        ->getResult(0);
+    mlir::Value y =
+        mlir::hip::WhereOp::create(rewriter, loc, resultType, context, cond,
+                                   alphaX, x, whereInit)
+            ->getResult(0);
 
     rewriter.replaceOp(op, y);
     return mlir::success();

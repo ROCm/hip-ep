@@ -508,8 +508,7 @@ int wrap_miopenConvolutionTranspose(
              (long long)group, hipdnn_ep_datatype_name(data_type));
 
   // Mock: zero the output (real implementation calls MIOpen transpose conv).
-  size_t output_size =
-      input_n * output_c * output_h * output_w * sizeof(float);
+  size_t output_size = input_n * output_c * output_h * output_w * sizeof(float);
   memset(output, 0, output_size);
 
   return 0;
