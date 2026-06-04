@@ -213,3 +213,126 @@ module {
   // CHECK: %[[ADD:.*]] = "onnx.Add"(%[[V_IN]], %[[CAP]])
   // CHECK: return %[[ADD]] : tensor<16xf32>
 }
+
+// -----
+
+// PR #265 commit 2 — body func v_carry arg type comes from the v_init
+// operand type, NOT from the original onnx.Loop body block v_in arg
+// type. The two diverge whenever upstream shape inference has refined
+// the SSA value feeding v_init but the body block region was not
+// re-shape-inferred (the canonical HF ONNX export shape — see Qwen
+// regression test below).
+//
+// Here we drift them artificially: %A is `tensor<16xf32>` so v_init is
+// rank-1 static, while the body block v_in arg is declared
+// `tensor<?xf32>` (rank-1 dynamic). After outlining:
+//
+//   * hip.loop.result_type[0]  = `tensor<16xf32>` (from
+//     `LoopOp::inferReturnTypes`, which reads v_init).
+//   * outlined-func arg slot 3 = `tensor<16xf32>` (sourced from v_init,
+//     not from the under-refined body block arg).
+//
+// Both invariants are required for the loop verifier
+// (`result_type[i] == v_init[i].type`) and for the LLVM lowering's
+// trampoline construction, which reads the body func argument types
+// directly to build per-arg memref descriptor structs (see
+// LoopLowering.cpp:155 and `inference_compute`'s call boundary).
+module {
+  func.func @main_graph_v_init_refined(%A: tensor<16xf32>) -> tensor<16xf32> {
+    %M = "onnx.Constant"() {value = dense<4> : tensor<i64>} : () -> tensor<i64>
+    %cond_init = "onnx.Constant"() {value = dense<1> : tensor<i1>} : () -> tensor<i1>
+    %v_final = "onnx.Loop"(%M, %cond_init, %A) ({
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<i1>, %acc_in: tensor<?xf32>):
+      %acc_out = "onnx.Identity"(%acc_in) : (tensor<?xf32>) -> tensor<?xf32>
+      %cond_out = "onnx.Identity"(%cond_in) : (tensor<i1>) -> tensor<i1>
+      "onnx.Yield"(%cond_out, %acc_out) : (tensor<i1>, tensor<?xf32>) -> ()
+    }) : (tensor<i64>, tensor<i1>, tensor<16xf32>) -> tensor<16xf32>
+    return %v_final : tensor<16xf32>
+  }
+
+  // CHECK-LABEL: func.func @main_graph_v_init_refined
+  // hip.loop.result_type derived from v_init (tensor<16xf32>), not from
+  // the under-refined onnx.Loop body output (tensor<?xf32>).
+  // CHECK: %[[R:.*]] = hip.loop
+  // CHECK-SAME: iter_args(%{{.*}} : tensor<16xf32>)
+  // CHECK-SAME: -> (tensor<16xf32>)
+  // CHECK-SAME: body @main_graph_v_init_refined_loop_body_n0
+  // CHECK: return %[[R]] : tensor<16xf32>
+  //
+  // Body func arg slot 3 (v_carry) has the REFINED v_init type
+  // (tensor<16xf32>), not the under-refined body block v_in arg type
+  // (tensor<?xf32>).
+  // CHECK-LABEL: func.func private @main_graph_v_init_refined_loop_body_n0
+  // CHECK-SAME: (%{{.*}}: !hip.context,
+  // CHECK-SAME:  %{{.*}}: tensor<i64>,
+  // CHECK-SAME:  %{{.*}}: tensor<i1>,
+  // CHECK-SAME:  %[[V_IN:.*]]: tensor<16xf32>) -> tensor<?xf32>
+}
+
+// -----
+
+// PR #265 commit 2 — Qwen3.5-9B vision encoder regression closure.
+//
+// Lifted shape from /scratch/fhanuman/RCOmEP/ir_dump/qwen_vision_new.ir.0
+// (search for `onnx.Loop`). The HF Qwen3.5-9B vision-encoder ONNX export
+// ships an `onnx.Loop` whose body terminal `Concat(rank-0-block-arg,
+// rank-3-mha-output) -> rank-0` declares a rank-0 v_carry-out type
+// because shape inference does not recurse into Loop body regions;
+// the `onnx.Loop`'s declared result follows that rank-0 yield. The v_init
+// operand fed in from the outer graph, by contrast, was shape-inferred
+// to a rank-3 dynamic type (`tensor<?x?x?xf16>`).
+//
+// Pre-PR-265, OnnxLoopOutlinePass took `loopOp->getResultTypes()`
+// verbatim for hip.loop's result types, so the bad rank-0 type flowed
+// straight through and the loop verifier (correctly) rejected:
+//
+//   error: 'hip.loop' op result type #0 ('tensor<f16>') must match
+//          v_init type #0 ('tensor<?x?x?xf16>')
+//
+// 10+ instances per compile, 3 compiles per session — the EP silently
+// fell back to CPU and the encoder did not actually offload to MorphiZenEP.
+//
+// Post-PR-265 (this commit), hip.loop's result types come from
+// `LoopOp::inferReturnTypes` (reads v_init); the outlined body func's
+// arg slot 3 comes from v_init too. Both are `tensor<?x?x?xf16>` here.
+// The body's cloned `onnx.Concat` retains its rank-0 declared result —
+// downstream type catch-up is `--hip-infer-shapes` Phase 2's job once
+// `--convert-onnx-to-hip` has converted the body ops.
+module {
+  func.func @qwen_vision_loop(%attn_in: tensor<?x?x?xf16>,
+                              %M: tensor<i64>,
+                              %newshape: tensor<4xi64>)
+      -> tensor<1x?x16x72xf16> {
+    %cond_init = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Loop"(%M, %cond_init, %attn_in) ({
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<ui8>, %acc: tensor<f16>):
+      %step = "onnx.Concat"(%acc, %attn_in) {axis = 1 : si64}
+              : (tensor<f16>, tensor<?x?x?xf16>) -> tensor<f16>
+      %cond_out = "onnx.Identity"(%cond_in) : (tensor<ui8>) -> tensor<ui8>
+      "onnx.Yield"(%cond_out, %step) : (tensor<ui8>, tensor<f16>) -> ()
+    }) : (tensor<i64>, none, tensor<?x?x?xf16>) -> tensor<f16>
+    %y = "onnx.Reshape"(%r, %newshape) {allowzero = 0 : si64}
+         : (tensor<f16>, tensor<4xi64>) -> tensor<1x?x16x72xf16>
+    return %y : tensor<1x?x16x72xf16>
+  }
+
+  // CHECK-LABEL: func.func @qwen_vision_loop
+  //
+  // hip.loop's result type is sourced from v_init via
+  // `LoopOp::inferReturnTypes`. Pre-PR-265 it was `tensor<f16>` (the
+  // rank-0 onnx.Loop declared result), which the verifier rejected.
+  // CHECK: %[[R:.*]] = hip.loop
+  // CHECK-SAME: iter_args(%{{.*}} : tensor<?x?x?xf16>)
+  // CHECK-SAME: -> (tensor<?x?x?xf16>)
+  // CHECK-SAME: cond_is_passthrough
+  //
+  // Body func arg slot 3 (v_carry) is the REFINED rank-3 v_init type,
+  // NOT the rank-0 type the original onnx.Loop body block declared
+  // for %arg4.
+  // CHECK-LABEL: func.func private @qwen_vision_loop_loop_body_n0
+  // CHECK-SAME: (%{{.*}}: !hip.context,
+  // CHECK-SAME:  %{{.*}}: tensor<i64>,
+  // CHECK-SAME:  %{{.*}}: tensor<ui8>,
+  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>,
+  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>) -> tensor<f16>
+}

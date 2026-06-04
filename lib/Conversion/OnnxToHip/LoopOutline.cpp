@@ -287,16 +287,44 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   SmallVector<Value> captureVals(capturedSet.begin(), capturedSet.end());
 
   // Build the outlined function signature:
-  //   arg0  : !hip.context  (threaded by us since AddHipContextArg has
-  //                          already run on the parent function)
-  //   args1..2+N : iter_t, cond_in_t, v_in_1..N  (same as the original body
-  //                                                block args)
-  //   args2+N..end : captures (in iteration order of the SetVector)
+  //   arg0       : !hip.context  (threaded by us since AddHipContextArg
+  //                                has already run on the parent function)
+  //   arg1       : iter_t        (from bodyBlock arg 0, original onnx
+  //                                body iter type — typically tensor<i64>)
+  //   arg2       : cond_in_t     (from bodyBlock arg 1, original onnx
+  //                                body cond type — typically tensor<i1>)
+  //   args[3..3+N) : v_carry_1..N  (types sourced from `vInitTensors`,
+  //                                  the `onnx.Loop`'s loop-carried
+  //                                  operands — i.e. the refined,
+  //                                  post-shape-inference types feeding
+  //                                  the loop from the outside).
+  //                                  Sourcing from v_init (rather than
+  //                                  bodyBlock's v_in args) is the key
+  //                                  invariant that lets `hip.loop`'s
+  //                                  `LoopOp::inferReturnTypes` derive
+  //                                  result types from operand types
+  //                                  without disagreement: hip.loop's
+  //                                  verifier requires
+  //                                  `result_type[i] == v_init[i].type`,
+  //                                  and result types == declared body
+  //                                  func return types at the v_carry
+  //                                  slots (modulo the cond_out slot,
+  //                                  see below). The cloned-from-onnx
+  //                                  body block args still use the
+  //                                  original (potentially under-
+  //                                  refined) onnx.Loop block-arg types
+  //                                  — `--hip-infer-shapes` Phase 2
+  //                                  catches the body op result types
+  //                                  up via `refineFuncBody` after this
+  //                                  pass runs.
+  //   args[3+N..) : captures (in iteration order of the SetVector)
   Type ctxType = ContextType::get(ctx);
   SmallVector<Type> argTypes;
   argTypes.push_back(ctxType);
-  for (BlockArgument a : bodyBlock.getArguments())
-    argTypes.push_back(a.getType());
+  argTypes.push_back(bodyBlock.getArgument(0).getType()); // iter_t
+  argTypes.push_back(bodyBlock.getArgument(1).getType()); // cond_in_t
+  for (Value v : vInitTensors)
+    argTypes.push_back(v.getType());
   for (Value c : captureVals)
     argTypes.push_back(c.getType());
 
@@ -308,6 +336,20 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   // host-side llvm.intr.memcpy on a device pointer (crash) since the
   // MemRefCopyOpLowering pattern bails out on i1 element type as a
   // non-byte-aligned width).
+  //
+  // The declared return types here track the cloned-from-onnx body op
+  // result types (= yield operand types) — NOT v_init types. Reasoning:
+  // at outline-pass exit the cloned body ops still have their original
+  // ONNX result types, so `func.return` operands match the declared
+  // return types. After `ConvertOnnxToHip` re-types the body ops via
+  // `InferTypeOpInterface` (driven by the now-v_init-refined entry
+  // block args), `--hip-infer-shapes` Phase 2 (`refineLoopSignatures`)
+  // syncs the declared return types in lockstep with the loop's v_init
+  // types — by which point the body op result types and func.return
+  // operand types have caught up too, so no `tensor.cast` insertion is
+  // needed on the func.return edge (`snapshotNonDpsInitUses` skips
+  // func.return when the parent func's declared return type already
+  // matches `newType`).
   SmallVector<Type> resultTypes;
   resultTypes.reserve(yieldOp->getNumOperands());
   unsigned yieldStartIdx = condIsPassthrough ? 1 : 0;
@@ -427,28 +469,17 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
     condI1Val = *condI1;
   }
 
-  // hip.loop result types: same as the (loop-carried portion of) yield ops
-  // minus the cond_out slot, i.e. the original onnx.Loop's result types.
-  //
-  // For dynamic-shape exports the original onnx.Loop result types may
-  // disagree with v_init operand types — the hip.loop verifier rejects
-  // in that case (canonical trigger: the importer leaves result / body
-  // block-arg types as rank-0 placeholders while upstream shape
-  // inference has already refined v_init to a richer dynamic shape).
-  // The fix is recursive shape refinement on the outlined body func,
-  // which is follow-up work; once body arg / yield / op types agree
-  // with v_init, migrate this construction to the InferTypeOpInterface-aware
-  // LoopOp::create overload (drops the explicit result-types argument;
-  // LoopOp::inferReturnTypes sources them from v_init). Premature
-  // migration without body refinement leaves the body func signature
-  // under-refined while the hip.loop call site passes refined v_carry
-  // values — type-mismatched at the LLVM lowering call boundary. Keep
-  // the explicit construction here until that work lands.
-  SmallVector<Type> hipLoopResultTypes(loopOp->getResultTypes());
-
+  // Build the hip.loop op via the `InferTypeOpInterface`-aware
+  // `LoopOp::create` overload (no explicit `v_final` argument).
+  // `LoopOp::inferReturnTypes` sources result types from the v_init
+  // operand types, which by construction (above) match the outlined
+  // body func's declared return types at the v_carry slots — the
+  // hip.loop verifier's `result_type[i] == v_init[i].type` invariant
+  // is satisfied automatically. Any residual under-refinement in the
+  // cloned body op result types is caught up by `--hip-infer-shapes`
+  // Phase 2 (`refineFuncBody` re-walk after body-arg sync).
   auto hipLoopOp = LoopOp::create(
       outerBuilder, loc,
-      /*v_final=*/hipLoopResultTypes,
       /*ctx=*/ctxVal,
       /*max_trip_count=*/*mIdx,
       /*cond_init=*/condI1Val,
