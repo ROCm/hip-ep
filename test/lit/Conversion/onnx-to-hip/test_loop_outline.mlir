@@ -35,9 +35,16 @@
 //   i1-true and forces `cond_is_passthrough` so the runtime takes the fast
 //   counted-loop path -- matches ONNX spec where missing cond means M is the
 //   only termination condition
+// - When v_init's operand type is more refined than the source onnx.Loop body
+//   block v_in arg (canonical case: importer emits `tensor<*xT>` for body
+//   block args inside Loop subgraphs), v_carry types on the outlined body
+//   func's entry block AND the `hip.loop` result types both come from v_init
+//   -- the outliner does not propagate the under-refined block arg type
+//   through. Refinement of the cloned body ops is left for `--hip-infer-shapes`
+//   post-conversion (see `docs/design/unranked-tensor-handling.md`)
 // ============================================================================
 
-// RUN: hip-mlir-opt --hip-add-context-arg --onnx-loop-outline --onnx-infer-shapes --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --onnx-loop-outline --split-input-file %s | FileCheck %s
 
 // -----
 
@@ -216,27 +223,21 @@ module {
 
 // -----
 
-// PR #265 commit 2 — body func v_carry arg type comes from the v_init
-// operand type, NOT from the original onnx.Loop body block v_in arg
-// type. The two diverge whenever upstream shape inference has refined
-// the SSA value feeding v_init but the body block region was not
-// re-shape-inferred (the canonical HF ONNX export shape — see Qwen
-// regression test below).
-//
-// Here we drift them artificially: %A is `tensor<16xf32>` so v_init is
-// rank-1 static, while the body block v_in arg is declared
-// `tensor<?xf32>` (rank-1 dynamic). After outlining:
-//
-//   * hip.loop.result_type[0]  = `tensor<16xf32>` (from
-//     `LoopOp::inferReturnTypes`, which reads v_init).
-//   * outlined-func arg slot 3 = `tensor<16xf32>` (sourced from v_init,
-//     not from the under-refined body block arg).
-//
-// Both invariants are required for the loop verifier
-// (`result_type[i] == v_init[i].type`) and for the LLVM lowering's
-// trampoline construction, which reads the body func argument types
-// directly to build per-arg memref descriptor structs (see
-// LoopLowering.cpp:155 and `inference_compute`'s call boundary).
+// Test 5: outline-time v_init plumbing.  When the v_init operand carries
+// a more-refined type than the source onnx.Loop body block v_in arg
+// (canonical case: importer emits `tensor<*xT>` for body block args
+// inside a Loop subgraph because ONNX shape inference does not recurse
+// into Loop bodies, while the v_init feeding the loop from the outer
+// graph carries the importer-derived rank), the outliner must source
+// the v_carry entry arg from v_init -- NOT from the body block arg.
+// Both invariants below are required for the loop verifier
+// (`hip.loop result_type[i] == v_init[i].type`) and for the LLVM
+// lowering's trampoline construction, which reads the body func
+// argument types directly to build per-arg memref descriptor structs
+// (see LoopLowering.cpp:155 and `inference_compute`'s call boundary).
+// Refinement of the cloned body ops' types happens later in the
+// pipeline via `--hip-infer-shapes`; this test pins only what
+// LoopOutline itself produces.
 module {
   func.func @main_graph_v_init_refined(%A: tensor<16xf32>) -> tensor<16xf32> {
     %M = "onnx.Constant"() {value = dense<4> : tensor<i64>} : () -> tensor<i64>
@@ -261,218 +262,85 @@ module {
   //
   // Body func arg slot 3 (v_carry) has the REFINED v_init type
   // (tensor<16xf32>), not the under-refined body block v_in arg type
-  // (tensor<?xf32>). The body func return is also refined: the
-  // `--onnx-infer-shapes` pass applies the Identity rule to the cloned
-  // body op (operand=tensor<16xf32>, existing result=tensor<?xf32>);
-  // `meetRankedTypes` produces tensor<16xf32> via same-rank dim meet
-  // and `syncFuncReturnTypes` propagates that into the declared func
-  // return type.
+  // (tensor<?xf32>). The body func's declared return type matches the
+  // cloned onnx.Identity result type as written in the source IR
+  // (tensor<?xf32>); refinement to tensor<16xf32> happens later via
+  // `--hip-infer-shapes` and is not part of LoopOutline's contract.
   // CHECK-LABEL: func.func private @main_graph_v_init_refined_loop_body_n0
   // CHECK-SAME: (%{{.*}}: !hip.context,
   // CHECK-SAME:  %{{.*}}: tensor<i64>,
   // CHECK-SAME:  %{{.*}}: tensor<i1>,
-  // CHECK-SAME:  %[[V_IN:.*]]: tensor<16xf32>) -> tensor<16xf32>
+  // CHECK-SAME:  %[[V_IN:.*]]: tensor<16xf32>) -> tensor<?xf32>
 }
 
 // -----
 
-// PR #265 commits 2 + 5 — Qwen3.5-9B vision encoder regression closure.
+// Test 6: regression closure for the canonical Loop-body shape gap.
 //
-// Lifted shape from a real HF Qwen3.5-9B vision-encoder ONNX export
-// (search the production IR dump for `onnx.Loop`). The export ships an
-// `onnx.Loop` whose body terminal `Concat(rank-0-block-arg,
-// rank-3-mha-output) -> rank-0` declares a rank-0 v_carry-out type
-// because shape inference does not recurse into Loop body regions;
-// the `onnx.Loop`'s declared result follows that rank-0 yield. The v_init
-// operand fed in from the outer graph, by contrast, was shape-inferred
-// to a rank-3 dynamic type (`tensor<?x?x?xf16>`).
+// Source pattern lifted from a real HF vision-encoder ONNX export with
+// an `onnx.Loop` whose body terminates in a Concat of the v_carry
+// block arg and a captured rank-3 tensor. ONNX protobuf shape
+// inference does not recurse into Loop body regions, so the importer
+// emits `tensor<*xf16>` (unranked) for the body block arg. The
+// `onnx.Loop`'s declared result type, by contrast, mirrors the v_init
+// operand fed in from the outer graph (rank-3 dynamic).
 //
-// Pre-PR-265, OnnxLoopOutlinePass took `loopOp->getResultTypes()`
-// verbatim for hip.loop's result types, so the bad rank-0 type flowed
-// straight through and the loop verifier (correctly) rejected:
+// Pre-fix, OnnxLoopOutlinePass took `loopOp->getResultTypes()`
+// verbatim for hip.loop's result types when the source onnx.Loop's
+// declared result was rank-0 / unranked, and the loop verifier
+// (correctly) rejected:
 //
-//   error: 'hip.loop' op result type #0 ('tensor<f16>') must match
+//   error: 'hip.loop' op result type #0 ('tensor<*xf16>') must match
 //          v_init type #0 ('tensor<?x?x?xf16>')
 //
-// 10+ instances per compile, 3 compiles per session — the EP silently
-// fell back to CPU and the encoder did not actually offload to the
-// MorphiZen EP.
-//
-// Post-PR-265 commit 2: hip.loop's result types come from
-// `LoopOp::inferReturnTypes` (reads v_init); the outlined body func's
-// arg slot 3 comes from v_init too. Both are `tensor<?x?x?xf16>` here.
-// But the cloned `onnx.Concat` still declared rank-0 -- ConvertOnnxToHip's
-// rank-aware pattern bailed -> one-shot-bufferize aborted -> still silent
-// CPU fallback (just relocated the failure point).
-//
-// Post-PR-265 (this CHECK shape): the `--onnx-infer-shapes` pass
-// (running between `--onnx-loop-outline` and `--convert-onnx-to-hip`)
-// applies the rules library to each cloned body op. The Concat rule
-// sees operand[0] is rank-0 (rank-mismatched relative to operand[1]'s
-// rank-3) and returns `tensor<?x?x?xf16>` -- rank correct, axis dim
-// conservatively dynamic. `meetRankedTypes` rank-promotes the Concat
-// result in place; the declared body func return type catches up via
-// `syncFuncReturnTypes`. The pipeline now actually converts and
-// bufferizes the body.
+// Post-fix: hip.loop result types come from `LoopOp::inferReturnTypes`
+// (reads v_init); the outlined body func's v_carry arg slot comes
+// from v_init too. The cloned `onnx.Concat` still carries its source
+// unranked result type at outline-pass exit -- that's refined to
+// ranked post-conversion by `--hip-infer-shapes` via
+// `ReifyRankedShapedTypeOpInterface`. This test pins only the
+// outline-time invariants.
 module {
-  func.func @qwen_vision_loop(%attn_in: tensor<?x?x?xf16>,
-                              %M: tensor<i64>,
-                              %newshape: tensor<4xi64>)
+  func.func @vision_encoder_loop(%attn_in: tensor<?x?x?xf16>,
+                                 %M: tensor<i64>,
+                                 %newshape: tensor<4xi64>)
       -> tensor<1x?x16x72xf16> {
     %cond_init = "onnx.NoValue"() {value} : () -> none
     %r = "onnx.Loop"(%M, %cond_init, %attn_in) ({
-    ^bb0(%iter: tensor<i64>, %cond_in: tensor<ui8>, %acc: tensor<f16>):
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<ui8>, %acc: tensor<*xf16>):
       %step = "onnx.Concat"(%acc, %attn_in) {axis = 1 : si64}
-              : (tensor<f16>, tensor<?x?x?xf16>) -> tensor<f16>
+              : (tensor<*xf16>, tensor<?x?x?xf16>) -> tensor<*xf16>
       %cond_out = "onnx.Identity"(%cond_in) : (tensor<ui8>) -> tensor<ui8>
-      "onnx.Yield"(%cond_out, %step) : (tensor<ui8>, tensor<f16>) -> ()
-    }) : (tensor<i64>, none, tensor<?x?x?xf16>) -> tensor<f16>
+      "onnx.Yield"(%cond_out, %step) : (tensor<ui8>, tensor<*xf16>) -> ()
+    }) : (tensor<i64>, none, tensor<?x?x?xf16>) -> tensor<*xf16>
     %y = "onnx.Reshape"(%r, %newshape) {allowzero = 0 : si64}
-         : (tensor<f16>, tensor<4xi64>) -> tensor<1x?x16x72xf16>
+         : (tensor<*xf16>, tensor<4xi64>) -> tensor<1x?x16x72xf16>
     return %y : tensor<1x?x16x72xf16>
   }
 
-  // CHECK-LABEL: func.func @qwen_vision_loop
+  // CHECK-LABEL: func.func @vision_encoder_loop
   //
   // hip.loop's result type is sourced from v_init via
-  // `LoopOp::inferReturnTypes`. Pre-PR-265 it was `tensor<f16>` (the
-  // rank-0 onnx.Loop declared result), which the verifier rejected.
+  // `LoopOp::inferReturnTypes`. Without that, the unranked source
+  // result type would flow through and the loop verifier would reject.
   // CHECK: %[[R:.*]] = hip.loop
   // CHECK-SAME: iter_args(%{{.*}} : tensor<?x?x?xf16>)
   // CHECK-SAME: -> (tensor<?x?x?xf16>)
   // CHECK-SAME: cond_is_passthrough
   //
-  // Body func arg slot 3 (v_carry) is the REFINED rank-3 v_init type,
-  // NOT the rank-0 type the original onnx.Loop body block declared
-  // for %arg4. Declared return type is also rank-3 dynamic: the
-  // `--onnx-infer-shapes` pass propagated the rank from operands via
-  // the Concat rule, and `syncFuncReturnTypes` updated the function
-  // signature to match the refined `func.return` operand type.
-  // CHECK-LABEL: func.func private @qwen_vision_loop_loop_body_n0
+  // Body func arg slot 3 (v_carry) is the rank-3 v_init type, NOT the
+  // unranked type the original onnx.Loop body block declared for
+  // %acc. The cloned onnx.Concat keeps its source unranked result
+  // type; the body func's declared return type matches. Refinement
+  // happens later via `--hip-infer-shapes`.
+  // CHECK-LABEL: func.func private @vision_encoder_loop_loop_body_n0
   // CHECK-SAME: (%{{.*}}: !hip.context,
   // CHECK-SAME:  %{{.*}}: tensor<i64>,
   // CHECK-SAME:  %{{.*}}: tensor<ui8>,
   // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>,
-  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
+  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>) -> tensor<*xf16>
   //
-  // Cloned Concat result type was tensor<f16> (rank-0 placeholder) in
-  // the source onnx.Loop body; `--onnx-infer-shapes` promotes it to
-  // all-dynamic at rank-3 via the rules library's Concat rule. Without
-  // this the next pipeline pass `--convert-onnx-to-hip` bails on the
-  // rank mismatch and the pipeline aborts at one-shot-bufferize ->
-  // silent CPU fallback.
   // CHECK: %[[CONCAT:.*]] = "onnx.Concat"
-  // CHECK-SAME: -> tensor<?x?x?xf16>
-  // CHECK: return %[[CONCAT]] : tensor<?x?x?xf16>
-}
-
-// -----
-
-// PR #265 — `--onnx-infer-shapes` rules-library dispatch on a single
-// body op.
-//
-// Minimal repro of the canonical Qwen pattern: a single
-// `onnx.Add(rank-0-block-arg, rank-3-capture) -> rank-0` in the body.
-// The block-arg is rank-0 in the source onnx.Loop because shape
-// inference did not recurse; the outliner sources the v_carry entry
-// arg from the v_init operand type (rank-3). The `--onnx-infer-shapes`
-// pass then promotes the Add result via the broadcast rule: max(rank-0,
-// rank-3) = rank-3, all-dim broadcast yields the rank-3 shape from
-// the higher-rank operand verbatim.
-//
-// What this case PINS beyond `qwen_vision_loop` above is the rules-
-// library contract in isolation: a body op whose result has a stale
-// rank-0 placeholder + at least one higher-rank operand gets its
-// result type rewritten by the rule, and the outlined func's declared
-// return type catches up via `syncFuncReturnTypes`. The `onnx.Add`
-// choice (instead of Concat) exercises the broadcast rule rather
-// than the concat-axis-sum path.
-//
-// `func.func @... -> ()` (void): the source `onnx.Loop`'s rank-0
-// declared result is unused at parse time, sidestepping the verifier
-// constraint that `return %r : T` must agree with the function's
-// declared return type at parse time -- which would clash with this
-// test's whole point of asserting the loop result gets refined to
-// rank-3 mid-pass. Letting `%r` go dead post-outlining is fine for a
-// LIT-only fixture.
-module {
-  func.func @refine_add_rank0_to_rank3(
-      %attn: tensor<?x?x?xf16>, %M: tensor<i64>) {
-    %cond = "onnx.NoValue"() {value} : () -> none
-    %r = "onnx.Loop"(%M, %cond, %attn) ({
-    ^bb0(%it: tensor<i64>, %ci: tensor<ui8>, %acc: tensor<f16>):
-      %step = "onnx.Add"(%acc, %attn)
-              : (tensor<f16>, tensor<?x?x?xf16>) -> tensor<f16>
-      %co = "onnx.Identity"(%ci) : (tensor<ui8>) -> tensor<ui8>
-      "onnx.Yield"(%co, %step) : (tensor<ui8>, tensor<f16>) -> ()
-    }) : (tensor<i64>, none, tensor<?x?x?xf16>) -> tensor<f16>
-    return
-  }
-
-  // CHECK-LABEL: func.func @refine_add_rank0_to_rank3
-  //
-  // Outlined body func: declared return rank-3 (post-`syncFuncReturnTypes`).
-  // CHECK-LABEL: func.func private @refine_add_rank0_to_rank3_loop_body_n0
-  // CHECK-SAME: -> tensor<?x?x?xf16>
-  //
-  // Cloned Add result type promoted from rank-0 to rank-3 by the rules
-  // library's broadcast rule.
-  // CHECK: %[[ADD:.*]] = "onnx.Add"
-  // CHECK-SAME: -> tensor<?x?x?xf16>
-  // CHECK: return %[[ADD]] : tensor<?x?x?xf16>
-}
-
-// -----
-
-// PR #265 — rules-library safety belt.
-//
-// Verifies that the `--onnx-infer-shapes` rules library correctly
-// returns null Type (caller leaves the op alone) for ops outside the
-// library's coverage. `onnx.ReduceSum` with `keepdims=0` over all
-// axes IS a real rank-3 -> rank-0 op (the source IR is correct).
-// The pass MUST NOT promote its result back to rank-3, or downstream
-// passes would receive an op claiming rank-3 output where the actual
-// computation produces a scalar.
-//
-// The mechanism: the rules library has no rule for `onnx.ReduceSum`,
-// so `refineResultTypeFromOperands(op, 0)` returns null. The pass's
-// `if (!candidate) continue;` then skips the op entirely. This is the
-// safety belt against new export shapes adding rank-changing ops we
-// have not yet reasoned about: silently-correct, never miscompiled.
-module {
-  func.func @reduce_sum_stays_rank0(
-      %x: tensor<?x?x?xf32>, %M: tensor<i64>) -> tensor<f32> {
-    %cond = "onnx.NoValue"() {value} : () -> none
-    %r = "onnx.Loop"(%M, %cond, %x) ({
-    ^bb0(%it: tensor<i64>, %ci: tensor<ui8>, %acc: tensor<?x?x?xf32>):
-      // ReduceSum with keepdims=0 over all axes: rank-3 -> rank-0.
-      // This is a TRUE rank-changing op -- the helper must leave it
-      // alone or the IR would lie about the result rank.
-      %sum = "onnx.ReduceSum"(%acc) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64}
-             : (tensor<?x?x?xf32>) -> tensor<f32>
-      // Identity of the rank-3 acc -- result is also rank-3, and the
-      // rules library's Identity rule produces a candidate that
-      // matches the existing result type, so `meetRankedTypes` is a
-      // no-op (no setType call).
-      %step = "onnx.Identity"(%acc) : (tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
-      %co = "onnx.Identity"(%ci) : (tensor<ui8>) -> tensor<ui8>
-      "onnx.Yield"(%co, %step) : (tensor<ui8>, tensor<?x?x?xf32>) -> ()
-    }) : (tensor<i64>, none, tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
-    %sum = "onnx.ReduceSum"(%r) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64}
-           : (tensor<?x?x?xf32>) -> tensor<f32>
-    return %sum : tensor<f32>
-  }
-
-  // CHECK-LABEL: func.func @reduce_sum_stays_rank0
-  //
-  // Outlined body func: declared return is rank-3 (the `onnx.Identity`
-  // step value, which the helper leaves at its existing rank-3 type).
-  // The `onnx.ReduceSum` inside the body retains its rank-0 result.
-  // CHECK-LABEL: func.func private @reduce_sum_stays_rank0_loop_body_n0
-  // CHECK-SAME: -> tensor<?x?x?xf32>
-  //
-  // ReduceSum result stays rank-0 -- the rules library has no rule
-  // for it, so the helper skips it (safety belt).
-  // CHECK: "onnx.ReduceSum"
-  // CHECK-SAME: -> tensor<f32>
+  // CHECK-SAME: -> tensor<*xf16>
+  // CHECK: return %[[CONCAT]] : tensor<*xf16>
 }
