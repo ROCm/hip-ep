@@ -109,26 +109,11 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           key: dep-llvm-${{ env.LLVM_TAG }}
 
-      - name: Cache protobuf-install
-        id: cache-protobuf
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ runner.workspace }}/protobuf-install
-          key: dep-protobuf-${{ env.PROTO_TAG }}
-
-      - name: Cache flatbuffers-install
-        id: cache-flatbuffers
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ runner.workspace }}/flatbuffers-install
-          key: dep-flatbuffers-${{ env.FLATBUFFERS_TAG }}
-
-      - name: Cache gtest-install
-        id: cache-gtest
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ runner.workspace }}/gtest-install
-          key: dep-gtest-${{ env.GTEST_VERSION }}
+      # protobuf / flatbuffers / gtest are NOT pre-built or cached here anymore:
+      # cmake/deps.cmake resolves them (find_package first, from-source
+      # FetchContent fallback) during the project build. With no prefix install
+      # they take the from-source path (sccache-accelerated). gtest is only
+      # pulled when unit tests are enabled (morphizen_ENABLE_UNIT_TEST=OFF here).
 
       # -----------------------------------------------------------------------
       # TheRock HIP SDK: downloaded fresh every run (not cached). The tarball
@@ -272,14 +257,16 @@ jobs:
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
       # -----------------------------------------------------------------------
-      # Build LLVM/MLIR/LLD from source into llvm-install.
-      # Only mlir;lld are enabled and only the X86 backend is built: the project
-      # find_package()s LLVM/MLIR/LLD (no Clang) and lib/Target/LLVM links the
-      # X86 codegen + lldCOFF/lldCommon for the in-process COFF DLL linker.
-      # /MT matches the rest of the toolchain; RTTI/zlib/zstd are off to match
-      # the morphizen build options. LLVM_INSTALL_UTILS=ON ships FileCheck (+
-      # not/count) into bin/, which the LIT suite needs. Cold build is
-      # multi-hour; sccache + the shared llvm-install cache amortize it.
+      # Build LLVM/MLIR/LLD/Clang from source into llvm-install.
+      # Projects clang;mlir;lld, X86 backend only. The EP find_package()s
+      # LLVM/MLIR/LLD and lib/Target/LLVM links X86 codegen + lldCOFF/lldCommon
+      # for the in-process COFF DLL linker; clang is shipped so lib/Runtime's
+      # runtime-bitcode step uses a version-matched clang from the prefix (and
+      # so this build stays identical to cmake/deps.cmake's from-source
+      # fallback). /MT matches the toolchain; RTTI/zlib/zstd off match morphizen.
+      # LLVM_INSTALL_UTILS=ON ships FileCheck (+ not/count) for the LIT suite.
+      # Cold build is multi-hour (clang dominates); sccache + the shared
+      # llvm-install cache amortize it.
       # -----------------------------------------------------------------------
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -292,7 +279,7 @@ jobs:
           git -C "$SRC" checkout FETCH_HEAD
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="mlir;lld" \
+            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD=X86 \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
@@ -309,79 +296,10 @@ jobs:
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
       # -----------------------------------------------------------------------
-      # Build protobuf (+ bundled abseil) from source into protobuf-install.
-      # CMAKE_CXX_STANDARD=17 is REQUIRED: abseil pins its installed options.h
-      # ABI from a configure-time `_MSVC_LANG >= 201703` probe. Without it MSVC
-      # defaults to C++14, abseil pins ABSL_OPTION_USE_STD_STRING_VIEW=0 (own
-      # string_view) while the libs compile under C++17 (std::string_view) ->
-      # unresolved `absl::...::CopyToEncodedBuffer` at EP DLL link time.
-      # Recipe otherwise mirrors docker/build.sh; /MT matches the toolchain.
+      # protobuf, flatbuffers and gtest are no longer pre-built here -- they are
+      # resolved by cmake/deps.cmake during Configure/Build (find_package first,
+      # from-source FetchContent fallback, sccache-accelerated).
       # -----------------------------------------------------------------------
-      - name: Build protobuf from source
-        if: steps.cache-protobuf.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          SRC="${{ runner.workspace }}/src-protobuf"
-          git clone --depth 1 --branch "${{ env.PROTO_TAG }}" --recursive \
-            https://github.com/protocolbuffers/protobuf.git "$SRC"
-          cmake -G Ninja -S "$SRC" -B "${{ runner.workspace }}/build-protobuf" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/protobuf-install" \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_CXX_STANDARD=17 \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -Dprotobuf_BUILD_TESTS=OFF \
-            -Dprotobuf_BUILD_EXAMPLES=OFF \
-            -Dprotobuf_WITH_ZLIB=OFF \
-            -Dprotobuf_BUILD_SHARED_LIBS=OFF \
-            -Dprotobuf_INSTALL=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-protobuf" --target install
-
-      # -----------------------------------------------------------------------
-      # Build flatbuffers from source into flatbuffers-install (docker/build.sh
-      # recipe + /MT).
-      # -----------------------------------------------------------------------
-      - name: Build flatbuffers from source
-        if: steps.cache-flatbuffers.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          SRC="${{ runner.workspace }}/src-flatbuffers"
-          git clone --depth 1 --branch "${{ env.FLATBUFFERS_TAG }}" \
-            https://github.com/google/flatbuffers.git "$SRC"
-          cmake -G Ninja -S "$SRC" -B "${{ runner.workspace }}/build-flatbuffers" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/flatbuffers-install" \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -DFLATBUFFERS_BUILD_TESTS=OFF \
-            -DFLATBUFFERS_BUILD_FLATC=ON \
-            -DFLATBUFFERS_BUILD_FLATLIB=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-flatbuffers" --target install
-
-      # -----------------------------------------------------------------------
-      # Build GTest from source and install into gtest-install.
-      # cmake/deps.cmake does find_package(GTest CONFIG QUIET) first; if found
-      # via CMAKE_PREFIX_PATH it skips FetchContent entirely.
-      # Requires MSVC env (cl.exe + ninja) hence placed after Setup MSVC.
-      # -----------------------------------------------------------------------
-      - name: Build GTest
-        if: steps.cache-gtest.outputs.cache-hit != 'true'
-        shell: cmd
-        run: |
-          curl -fsSL "https://github.com/google/googletest/archive/refs/tags/v${{ env.GTEST_VERSION }}.zip" -o gtest.zip
-          unzip -q gtest.zip
-          cmake -G Ninja -B gtest-build -S "googletest-${{ env.GTEST_VERSION }}" ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/gtest-install" ^
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" ^
-            -DBUILD_GMOCK=ON
-          ninja -C gtest-build install
-          rd /s /q gtest-build "googletest-${{ env.GTEST_VERSION }}"
-          del gtest.zip
 
       # -----------------------------------------------------------------------
       # Configure
@@ -394,7 +312,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" \
             -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/protobuf-install;${{ runner.workspace }}/flatbuffers-install;${{ runner.workspace }}/gtest-install" \
+            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/install" \
             -DBUILD_EP=ON \
             -DBUILD_HIP_TOOLS=ON \

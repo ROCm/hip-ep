@@ -143,21 +143,24 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
 ```
 
-### 2. Build the C++ Dependencies from Source
+### 2. C++ Dependencies (resolved automatically by CMake)
 
-You must build LLVM/MLIR/LLD, protobuf and flatbuffers from source yourself (from a Visual Studio Developer shell) and install them into `../prebuilt-local/` — there is no prebuilt download. Use the following pinned versions; the exact cmake invocations are the `Build LLVM/MLIR/LLD from source`, `Build protobuf from source` and `Build flatbuffers from source` steps in [`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml), which is the canonical recipe (point each `-DCMAKE_INSTALL_PREFIX` at the shared `../prebuilt-local/`).
+The build resolves LLVM/MLIR/LLD, protobuf, flatbuffers and ONNX Runtime via [`cmake/deps.cmake`](../cmake/deps.cmake): it uses `find_package` first (so a prebuilt/installed prefix on `CMAKE_PREFIX_PATH` is reused), and otherwise falls back to building them from source (ONNX Runtime is downloaded as the official release archive). So a fresh tree needs no manual dependency setup — just configure (step 3). The cold from-source LLVM build (clang;mlir;lld, X86) is the long pole (multi-hour).
+
+Pinned versions live in [`cmake/deps.txt`](../cmake/deps.txt) (single source of truth, kept in lockstep with the CI workflow):
 
 | Component | Source | Version |
 |---|---|---|
-| LLVM / MLIR / LLD | `github.com/llvm/llvm-project` | tag `llvmorg-22.1.0` (`mlir;lld`, X86 only, `/MT`, `LLVM_INSTALL_UTILS=ON` for FileCheck) |
-| Protobuf (+ abseil) | `github.com/protocolbuffers/protobuf` | `v34.0` (build with `CMAKE_CXX_STANDARD=17`) |
+| LLVM / MLIR / LLD (+ clang) | `github.com/llvm/llvm-project` | tag `llvmorg-22.1.0` |
+| Protobuf (+ abseil) | `github.com/protocolbuffers/protobuf` | `v34.0` |
 | FlatBuffers | `github.com/google/flatbuffers` | `v25.12.19` |
+| ONNX Runtime | `github.com/microsoft/onnxruntime` (release archive) | `v1.25.1` |
 
-The LLVM build is the long pole (multi-hour cold build).
+To reuse locally prebuilt deps instead of building from source, install them into a prefix and pass it via `-DCMAKE_PREFIX_PATH`.
 
 ### 3. Build onnx-hipdnn-ep
 
-**Prerequisites**: Complete steps 1-2 (build ONNX Runtime, build the C++ dependencies from source) and install [TheRock SDK](https://repo.amd.com/rocm/tarball/). Recommended version: **TheRock 7.11.0**.
+**Prerequisites**: The C++ dependencies (step 2) are resolved automatically by CMake. Install [TheRock SDK](https://repo.amd.com/rocm/tarball/) and point `THEROCK_DIST` at it (auto-download of TheRock is a planned follow-up). Recommended version: **TheRock 7.11.0**.
 
 Run from the project root:
 

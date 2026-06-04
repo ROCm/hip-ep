@@ -82,26 +82,8 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           key: dep-llvm-${{ env.LLVM_TAG }}
 
-      - name: Cache protobuf-install
-        id: cache-protobuf
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ runner.workspace }}/protobuf-install
-          key: dep-protobuf-${{ env.PROTO_TAG }}
-
-      - name: Cache flatbuffers-install
-        id: cache-flatbuffers
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ runner.workspace }}/flatbuffers-install
-          key: dep-flatbuffers-${{ env.FLATBUFFERS_TAG }}
-
-      - name: Cache gtest-install
-        id: cache-gtest
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ runner.workspace }}/gtest-install
-          key: dep-gtest-${{ env.GTEST_VERSION }}
+      # protobuf / flatbuffers / gtest: resolved by cmake/deps.cmake during the
+      # build (from-source FetchContent fallback), not pre-built or cached here.
 
       # -----------------------------------------------------------------------
       # llvm-lit.py requires the lit pip package at runtime. Pin Python to
@@ -227,7 +209,7 @@ jobs:
           git -C "$SRC" checkout FETCH_HEAD
           cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="mlir;lld" \
+            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD=X86 \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
@@ -244,75 +226,14 @@ jobs:
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
       # -----------------------------------------------------------------------
-      # Build protobuf (+ bundled abseil) into protobuf-install.
-      # CMAKE_CXX_STANDARD=17 is REQUIRED (see windows-build.yml for the abseil
-      # options.h ABI rationale). Identical recipe -> shared cache.
+      # protobuf, flatbuffers and gtest are resolved by cmake/deps.cmake during
+      # Configure/Build (from-source FetchContent fallback), not pre-built here.
       # -----------------------------------------------------------------------
-      - name: Build protobuf from source
-        if: steps.cache-protobuf.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          SRC="${{ runner.workspace }}/src-protobuf"
-          git clone --depth 1 --branch "${{ env.PROTO_TAG }}" --recursive \
-            https://github.com/protocolbuffers/protobuf.git "$SRC"
-          cmake -G Ninja -S "$SRC" -B "${{ runner.workspace }}/build-protobuf" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/protobuf-install" \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_CXX_STANDARD=17 \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -Dprotobuf_BUILD_TESTS=OFF \
-            -Dprotobuf_BUILD_EXAMPLES=OFF \
-            -Dprotobuf_WITH_ZLIB=OFF \
-            -Dprotobuf_BUILD_SHARED_LIBS=OFF \
-            -Dprotobuf_INSTALL=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-protobuf" --target install
-
-      # -----------------------------------------------------------------------
-      # Build flatbuffers into flatbuffers-install. Identical recipe -> shared.
-      # -----------------------------------------------------------------------
-      - name: Build flatbuffers from source
-        if: steps.cache-flatbuffers.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          SRC="${{ runner.workspace }}/src-flatbuffers"
-          git clone --depth 1 --branch "${{ env.FLATBUFFERS_TAG }}" \
-            https://github.com/google/flatbuffers.git "$SRC"
-          cmake -G Ninja -S "$SRC" -B "${{ runner.workspace }}/build-flatbuffers" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/flatbuffers-install" \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -DFLATBUFFERS_BUILD_TESTS=OFF \
-            -DFLATBUFFERS_BUILD_FLATC=ON \
-            -DFLATBUFFERS_BUILD_FLATLIB=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-flatbuffers" --target install
-
-      # -----------------------------------------------------------------------
-      # Build GTest into gtest-install. Identical recipe -> shared cache.
-      # -----------------------------------------------------------------------
-      - name: Build GTest
-        if: steps.cache-gtest.outputs.cache-hit != 'true'
-        shell: cmd
-        run: |
-          curl -fsSL "https://github.com/google/googletest/archive/refs/tags/v${{ env.GTEST_VERSION }}.zip" -o gtest.zip
-          unzip -q gtest.zip
-          cmake -G Ninja -B gtest-build -S "googletest-${{ env.GTEST_VERSION }}" ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/gtest-install" ^
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" ^
-            -DBUILD_GMOCK=ON
-          ninja -C gtest-build install
-          rd /s /q gtest-build "googletest-${{ env.GTEST_VERSION }}"
-          del gtest.zip
 
       # -----------------------------------------------------------------------
       # Configure with BUILD_MOCK_RUNTIME=ON (no ROCm/TheRock required).
-      # CMAKE_PREFIX_PATH lists all source-built dep prefixes (no merge/copy).
+      # ORT + LLVM come from the cached prefixes; deps.cmake source-builds the
+      # rest. (BUILD_MOCK_RUNTIME=ON also gates off the TheRock auto-download.)
       # -----------------------------------------------------------------------
       - name: Configure
         shell: bash
@@ -322,7 +243,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" \
             -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/protobuf-install;${{ runner.workspace }}/flatbuffers-install;${{ runner.workspace }}/gtest-install" \
+            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DBUILD_EP=ON \
             -DBUILD_HIP_TOOLS=ON \

@@ -29,12 +29,22 @@ endif()
 
 message(STATUS "Found Python: ${Python3_EXECUTABLE}")
 
-# Clang REQUIRED for bitcode generation
-find_program(CLANG_EXECUTABLE NAMES clang clang-cl
-    PATHS
-        ${LLVM_BINARY_DIR}/bin       # When LLVM built from source
-        ${LLVM_TOOLS_BINARY_DIR}     # When LLVM installed via package
-)
+# Clang REQUIRED for bitcode generation.
+# When LLVM is built from source as a subproject the `clang` target exists but
+# its .exe is not present at configure time, so find_program cannot see it --
+# use the target directly (the bitcode custom commands below then gain a
+# build-time dependency on it). Fall back to find_program for the prebuilt /
+# installed-LLVM case.
+if(TARGET clang)
+    set(CLANG_EXECUTABLE clang)
+    message(STATUS "Using in-tree clang target for bitcode generation")
+else()
+    find_program(CLANG_EXECUTABLE NAMES clang clang-cl
+        PATHS
+            ${LLVM_BINARY_DIR}/bin       # When LLVM built from source
+            ${LLVM_TOOLS_BINARY_DIR}     # When LLVM installed via package
+    )
+endif()
 
 if(NOT CLANG_EXECUTABLE)
     message(FATAL_ERROR
@@ -57,12 +67,18 @@ endif()
 
 message(STATUS "Found Clang for bitcode generation: ${CLANG_EXECUTABLE}")
 
-# llvm-link REQUIRED for combining bitcode files
-find_program(LLVM_LINK_EXECUTABLE NAMES llvm-link
-    PATHS
-        ${LLVM_BINARY_DIR}/bin
-        ${LLVM_TOOLS_BINARY_DIR}
-)
+# llvm-link REQUIRED for combining bitcode files. Same in-tree-target-first
+# logic as clang above (llvm-link is a standard LLVM tool target).
+if(TARGET llvm-link)
+    set(LLVM_LINK_EXECUTABLE llvm-link)
+    message(STATUS "Using in-tree llvm-link target")
+else()
+    find_program(LLVM_LINK_EXECUTABLE NAMES llvm-link
+        PATHS
+            ${LLVM_BINARY_DIR}/bin
+            ${LLVM_TOOLS_BINARY_DIR}
+    )
+endif()
 
 if(NOT LLVM_LINK_EXECUTABLE)
     message(FATAL_ERROR "llvm-link not found (required for combining runtime modules)")

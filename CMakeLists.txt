@@ -88,9 +88,25 @@ endif()
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
 
 if(BUILD_HIP_TOOLS)
-  find_package(LLVM REQUIRED CONFIG)
-  find_package(MLIR REQUIRED CONFIG)
-  find_package(flatbuffers REQUIRED CONFIG)
+  # When BUILD_EP=ON these are already resolved by cmake/deps.cmake (find_package
+  # against a prefix, or a from-source fallback) and reused here. When building
+  # the tools standalone (BUILD_EP=OFF) deps.cmake did not run, so resolve them.
+  #
+  # HIPDNN_LLVM_EMBEDDED means LLVM/MLIR came from a FetchContent subdirectory
+  # build: the targets, helper functions and LLVM_*/MLIR_* consumer variables
+  # are already set, and find_package against the in-configure build tree would
+  # fail -- so skip it in that mode.
+  if(NOT HIPDNN_LLVM_EMBEDDED)
+    if(NOT LLVM_FOUND)
+      find_package(LLVM REQUIRED CONFIG)
+    endif()
+    if(NOT MLIR_FOUND)
+      find_package(MLIR REQUIRED CONFIG)
+    endif()
+  endif()
+  if(NOT flatbuffers_FOUND AND NOT TARGET flatbuffers::flatbuffers)
+    find_package(flatbuffers REQUIRED CONFIG)
+  endif()
 
   # cpptrace for crash backtraces
   include(FetchContent)
