@@ -2,19 +2,27 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- ReluConversion.cpp - Decompose onnx.Relu into onnx.Max ------------===//
+//===- ReluConversion.cpp - onnx.Relu -> hip.max -------------------------===//
 //
-// Relu(x) = max(0, x). We emit `onnx.Max(x, 0)` so that the same MaxToHip
-// conversion (which delegates to MIOpen's miopenOpTensor) handles it. The
-// scalar zero broadcasts against `x`; the Max pattern supports broadcast.
+// Relu(x) = max(0, x). We lower it as a single `hip.max` against a 0-D
+// `onnx.Constant` zero (which broadcasts against `x`). Emitting the HIP
+// dialect op directly — not `onnx.Max` — is required because the
+// convert-onnx-to-hip pass runs with
+//   GreedyRewriteStrictness::ExistingOps
+// so any onnx.* op we synthesize would survive past the pass and trip
+// "op was not bufferized" downstream.
 //
 //   Before:
 //     %y = "onnx.Relu"(%x) : (tensor<...xT>) -> tensor<...xT>
 //
 //   After:
-//     %zero = "onnx.Constant"() {value = dense<0> : tensor<T>} : () ->
-//     tensor<T> %y    = "onnx.Max"(%x, %zero) : (tensor<...xT>, tensor<T>)
-//                                         -> tensor<...xT>
+//     %zero = "onnx.Constant"() {value = dense<0> : tensor<T>} : () -> tensor<T>
+//     %init = tensor.empty(...) : tensor<...xT>
+//     %y    = hip.max(%ctx) ins(%x, %zero : ..., tensor<T>) outs(%init : ...)
+//
+// `onnx.Constant` is intentionally retained — it is folded / handled by the
+// generic constant-handling path and is the canonical way for an ONNX
+// converter to introduce a literal at this stage.
 //
 //===----------------------------------------------------------------------===//
 
@@ -49,8 +57,8 @@ static mlir::Value buildZeroScalar(mlir::PatternRewriter &rewriter,
   return rewriter.create(state)->getResult(0);
 }
 
-struct ReluDecompose : public mlir::RewritePattern {
-  ReluDecompose(mlir::MLIRContext *ctx)
+struct ReluToHipMax : public mlir::RewritePattern {
+  ReluToHipMax(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Relu", /*benefit=*/1, ctx) {}
 
   mlir::LogicalResult
@@ -60,6 +68,11 @@ struct ReluDecompose : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.Relu expects 1 operand and 1 result");
 
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
     mlir::Location loc = op->getLoc();
     mlir::Value x = op->getOperand(0);
     auto xType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
@@ -68,10 +81,15 @@ struct ReluDecompose : public mlir::RewritePattern {
 
     mlir::Value zero = buildZeroScalar(rewriter, loc, xType.getElementType());
 
-    mlir::OperationState maxState(loc, "onnx.Max");
-    maxState.addOperands({x, zero});
-    maxState.addTypes(op->getResult(0).getType());
-    mlir::Operation *maxOp = rewriter.create(maxState);
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    // Init tensor for DPS output. Use `x` as the shape source so dynamic
+    // dims of the result are tied to the same SSA values as `x` (the scalar
+    // zero has rank 0 and carries no dim info).
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, x);
+
+    auto maxOp = mlir::hip::MaxOp::create(rewriter, loc, resultType, context,
+                                          x, zero, init);
     rewriter.replaceOp(op, maxOp->getResult(0));
     return mlir::success();
   }
@@ -81,7 +99,7 @@ struct ReluDecompose : public mlir::RewritePattern {
 
 void populateReluConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
-  patterns.add<ReluDecompose>(ctx);
+  patterns.add<ReluToHipMax>(ctx);
 }
 
 } // namespace hip

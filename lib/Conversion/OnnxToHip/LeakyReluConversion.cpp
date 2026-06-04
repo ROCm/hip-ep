@@ -2,10 +2,13 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- LeakyReluConversion.cpp - Decompose onnx.LeakyRelu ----------------===//
+//===- LeakyReluConversion.cpp - onnx.LeakyRelu -> hip.{mul,less,where} --===//
 //
-// LeakyRelu(x, alpha) = x if x >= 0 else alpha*x. Lowered without a new
-// kernel via Mul + Less + Where:
+// LeakyRelu(x, alpha) = x if x >= 0 else alpha*x. Decomposed without a new
+// kernel into Mul + Less + Where — but emitted as HIP-dialect ops directly,
+// not onnx.* ops, because the convert-onnx-to-hip driver runs with
+// GreedyRewriteStrictness::ExistingOps and would not pick up newly-created
+// onnx.* nodes.
 //
 //   Before:
 //     %y = "onnx.LeakyRelu"(%x) {alpha = 0.1 : f32}
@@ -14,9 +17,12 @@
 //   After:
 //     %zero   = "onnx.Constant"() {value = dense<0.0> : tensor<T>}
 //     %alpha  = "onnx.Constant"() {value = dense<alpha> : tensor<T>}
-//     %alphaX = "onnx.Mul"(%alpha, %x)
-//     %cond   = "onnx.Less"(%x, %zero)
-//     %y      = "onnx.Where"(%cond, %alphaX, %x)
+//     %i0     = tensor.empty(...) : tensor<...xT>
+//     %alphaX = hip.mul(%ctx) ins(%alpha, %x : ...) outs(%i0 : ...)
+//     %ci     = tensor.empty(...) : tensor<...xi1>
+//     %cond   = hip.less(%ctx) ins(%x, %zero : ...) outs(%ci : tensor<...xi1>)
+//     %iy     = tensor.empty(...) : tensor<...xT>
+//     %y      = hip.where(%ctx) ins(%cond, %alphaX, %x : ...) outs(%iy : ...)
 //
 // Type T is one of bf16/f16/f32/f64 per the ONNX spec.
 //
@@ -48,8 +54,8 @@ static mlir::Value buildFloatScalar(mlir::PatternRewriter &rewriter,
   return rewriter.create(state)->getResult(0);
 }
 
-struct LeakyReluDecompose : public mlir::RewritePattern {
-  LeakyReluDecompose(mlir::MLIRContext *ctx)
+struct LeakyReluToHip : public mlir::RewritePattern {
+  LeakyReluToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.LeakyRelu", /*benefit=*/1, ctx) {}
 
   mlir::LogicalResult
@@ -68,6 +74,11 @@ struct LeakyReluDecompose : public mlir::RewritePattern {
     if (!ft)
       return rewriter.notifyMatchFailure(op, "float element type required");
 
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
     double alphaVal = 0.01;
     if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
       alphaVal = attr.getValueAsDouble();
@@ -75,23 +86,31 @@ struct LeakyReluDecompose : public mlir::RewritePattern {
     mlir::Value zero = buildFloatScalar(rewriter, loc, ft, 0.0);
     mlir::Value alpha = buildFloatScalar(rewriter, loc, ft, alphaVal);
 
-    mlir::OperationState mulState(loc, "onnx.Mul");
-    mulState.addOperands({alpha, x});
-    mulState.addTypes(xType);
-    mlir::Value alphaX = rewriter.create(mulState)->getResult(0);
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
+    // hip.mul(alpha, x) -> alphaX. `x` is the rank source for the init.
+    mlir::Value mulInit = createEmptyTensor(rewriter, loc, resultType, x);
+    mlir::Value alphaX = mlir::hip::MulOp::create(rewriter, loc, resultType,
+                                                  context, alpha, x, mulInit)
+                             ->getResult(0);
+
+    // hip.less(x, zero) -> cond (i1, same shape as x).
     auto condType =
         mlir::RankedTensorType::get(xType.getShape(), rewriter.getI1Type());
-    mlir::OperationState lessState(loc, "onnx.Less");
-    lessState.addOperands({x, zero});
-    lessState.addTypes(condType);
-    mlir::Value cond = rewriter.create(lessState)->getResult(0);
+    mlir::Value condInit = createEmptyTensor(rewriter, loc, condType, x);
+    mlir::Value cond = mlir::hip::LessOp::create(rewriter, loc, condType,
+                                                 context, x, zero, condInit)
+                           ->getResult(0);
 
-    mlir::OperationState whereState(loc, "onnx.Where");
-    whereState.addOperands({cond, alphaX, x});
-    whereState.addTypes(op->getResult(0).getType());
-    mlir::Operation *whereOp = rewriter.create(whereState);
-    rewriter.replaceOp(op, whereOp->getResult(0));
+    // hip.where(cond, alphaX, x) -> y.
+    mlir::Value whereInit = createEmptyTensor(rewriter, loc, resultType, x);
+    mlir::Value y = mlir::hip::WhereOp::create(rewriter, loc, resultType,
+                                               context, cond, alphaX, x,
+                                               whereInit)
+                        ->getResult(0);
+
+    rewriter.replaceOp(op, y);
     return mlir::success();
   }
 };
@@ -100,7 +119,7 @@ struct LeakyReluDecompose : public mlir::RewritePattern {
 
 void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx) {
-  patterns.add<LeakyReluDecompose>(ctx);
+  patterns.add<LeakyReluToHip>(ctx);
 }
 
 } // namespace hip
