@@ -4,6 +4,20 @@
 ##
 include(FetchContent)
 
+# Parse cmake/deps.txt into DEP_URL_<name> / DEP_HASH_<name>.
+# Each non-comment line is `name;url;hash`. file(STRINGS) preserves the
+# embedded ';' so each line is one list element we split with POP_FRONT.
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/deps.txt" _HIPDNN_DEPS_LIST)
+foreach(_dep IN LISTS _HIPDNN_DEPS_LIST)
+  if(_dep MATCHES "^#" OR _dep STREQUAL "")
+    continue()
+  endif()
+  list(POP_FRONT _dep _dep_name)
+  list(POP_FRONT _dep _dep_url)
+  set(DEP_URL_${_dep_name} "${_dep_url}")
+  set(DEP_HASH_${_dep_name} "${_dep}")  # remaining column = hash (may be empty)
+endforeach()
+
 # Function to get git version info for a component
 function(morphizen_add_version_info)
   set(options)
@@ -122,11 +136,220 @@ if(WIN32)
 endif()
 FetchContent_Declare(
   cpptrace
-  GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
-  GIT_TAG v0.8.3
+  GIT_REPOSITORY ${DEP_URL_cpptrace}
+  GIT_TAG ${DEP_HASH_cpptrace}
 )
 FetchContent_MakeAvailable(cpptrace)
 set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
+
+# ONNX Runtime resolution (find_package first, official release zip fallback).
+#
+# The EP links onnxruntime::onnxruntime (headers + import lib). We resolve it
+# here, BEFORE add_subdirectory(3rd-party/morphizen), so morphizen's
+# find_onnxruntime.cmake -- guarded by `if(NOT TARGET onnxruntime::onnxruntime)`
+# -- reuses our target instead of running its own find_package.
+#
+# Tier 1: find_package against CMAKE_PREFIX_PATH (CI installs a source-built
+#   ORT, possibly carrying unreleased patches, into its prefix -> hits here).
+# Tier 2: download the official microsoft/onnxruntime release zip (public host)
+#   and synthesize the IMPORTED target. ORT is NOT built as a subdirectory:
+#   its CMake vendors its own protobuf/abseil/flatbuffers/onnx at versions that
+#   collide with ours, so a source subbuild is not viable (download only).
+find_package(onnxruntime CONFIG QUIET)
+if(NOT onnxruntime_FOUND AND NOT TARGET onnxruntime::onnxruntime)
+  if(WIN32)
+    set(_ort_url "${DEP_URL_onnxruntime_win}")
+    set(_ort_raw_hash "${DEP_HASH_onnxruntime_win}")
+  else()
+    set(_ort_url "${DEP_URL_onnxruntime_linux}")
+    set(_ort_raw_hash "${DEP_HASH_onnxruntime_linux}")
+  endif()
+
+  # Derive the semantic version from the URL (single source) for the version gate.
+  string(REGEX MATCH "/v([0-9]+\\.[0-9]+\\.[0-9]+)/" _ort_ver_match "${_ort_url}")
+  set(ORT_VERSION "${CMAKE_MATCH_1}")
+
+  message(STATUS "onnxruntime not found via find_package; fetching ${_ort_url}")
+  if(_ort_raw_hash)
+    FetchContent_Declare(onnxruntime URL "${_ort_url}" URL_HASH "SHA256=${_ort_raw_hash}")
+  else()
+    FetchContent_Declare(onnxruntime URL "${_ort_url}")
+  endif()
+  FetchContent_MakeAvailable(onnxruntime)
+
+  add_library(onnxruntime::onnxruntime SHARED IMPORTED)
+  if(WIN32)
+    set_target_properties(onnxruntime::onnxruntime PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${onnxruntime_SOURCE_DIR}/include"
+      IMPORTED_IMPLIB "${onnxruntime_SOURCE_DIR}/lib/onnxruntime.lib"
+      IMPORTED_LOCATION "${onnxruntime_SOURCE_DIR}/lib/onnxruntime.dll")
+  else()
+    set_target_properties(onnxruntime::onnxruntime PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${onnxruntime_SOURCE_DIR}/include"
+      IMPORTED_LOCATION "${onnxruntime_SOURCE_DIR}/lib/libonnxruntime.so")
+  endif()
+
+  # check-ort-version.cmake reads this; the synthesized path must set it
+  # explicitly or the version gate degrades to a WARNING.
+  set(onnxruntime_VERSION "${ORT_VERSION}")
+  message(STATUS "onnxruntime::onnxruntime synthesized from release zip (v${ORT_VERSION})")
+endif()
+
+# ---------------------------------------------------------------------------
+# Source-built C++ deps: find_package first, from-source FetchContent fallback.
+#
+# All three are resolved here, BEFORE add_subdirectory(3rd-party/morphizen),
+# so morphizen (and the top-level BUILD_HIP_TOOLS block) reuse the same target
+# instead of resolving their own. find_package wins when a prefix is present
+# (prebuilt locally, or CI's source-built install per PR #276); the fallback
+# only fires in a fresh tree with nothing installed. Recipes/versions mirror
+# the from-source steps in .github/workflows/windows-build.yml.
+# ---------------------------------------------------------------------------
+
+# flatbuffers (top-level schemas consume flatbuffers::flatbuffers + flatc).
+# Version-pinned: the schemas use string field defaults under --gen-object-api,
+# which require flatc >= the pinned version. An older flatbuffers that happens
+# to sit on CMAKE_PREFIX_PATH (e.g. TheRock bundles an older one) is rejected
+# here so the from-source build provides a new-enough flatc.
+string(REGEX REPLACE "^v" "" _fb_version "${DEP_HASH_flatbuffers}")
+find_package(flatbuffers ${_fb_version} CONFIG QUIET)
+if(NOT flatbuffers_FOUND AND NOT TARGET flatbuffers::flatbuffers)
+  message(STATUS "flatbuffers >= ${_fb_version} not found; building from source")
+  set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(FLATBUFFERS_BUILD_FLATC ON CACHE BOOL "" FORCE)
+  set(FLATBUFFERS_BUILD_FLATLIB ON CACHE BOOL "" FORCE)
+  FetchContent_Declare(flatbuffers
+    GIT_REPOSITORY ${DEP_URL_flatbuffers}
+    GIT_TAG ${DEP_HASH_flatbuffers}
+    GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(flatbuffers)
+  # The source build defines the plain `flatbuffers`/`flatc` targets but NOT the
+  # `flatbuffers::` namespaced aliases that the installed package config exports.
+  # Create them so downstream guards (`if(NOT TARGET flatbuffers::flatbuffers)`)
+  # and consumers see the from-source build instead of falling back to an older
+  # flatbuffers on CMAKE_PREFIX_PATH (e.g. TheRock's).
+  if(NOT TARGET flatbuffers::flatbuffers AND TARGET flatbuffers)
+    add_library(flatbuffers::flatbuffers ALIAS flatbuffers)
+  endif()
+  if(NOT TARGET flatbuffers::flatc AND TARGET flatc)
+    add_executable(flatbuffers::flatc ALIAS flatc)
+  endif()
+endif()
+
+# protobuf (+ bundled abseil). Name "Protobuf" matches morphizen's
+# FetchContent_Declare so the first-populated wins and morphizen reuses it.
+# CMAKE_CXX_STANDARD=17 is required (abseil pins its installed options.h ABI
+# from a configure-time _MSVC_LANG probe; C++14 default -> CopyToEncodedBuffer
+# link error). See windows-build.yml "Build protobuf from source".
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND AND NOT TARGET protobuf::libprotobuf)
+  message(STATUS "protobuf not found; building from source (${DEP_HASH_protobuf})")
+  set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
+  set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  set(protobuf_INSTALL ON CACHE BOOL "" FORCE)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "" FORCE)
+  # SYSTEM marks protobuf's (and bundled abseil's) include dirs as system
+  # headers so their C4100/C4127/etc. warnings don't trip morphizen-core's
+  # /W4 /WX. Mirrors morphizen's own protobuf FetchContent_Declare.
+  FetchContent_Declare(Protobuf
+    SYSTEM
+    GIT_REPOSITORY ${DEP_URL_protobuf}
+    GIT_TAG ${DEP_HASH_protobuf}
+    GIT_SHALLOW TRUE
+    GIT_SUBMODULES_RECURSE TRUE
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(Protobuf)
+endif()
+
+# LLVM/MLIR/LLD resolution.
+#
+# Tier 1 (preferred): find_package against an installed prefix (a prebuilt
+#   LLVM+MLIR+LLD, or CI's source-built install). HIPDNN_LLVM_EMBEDDED stays
+#   unset, so the standard LLVM_*/MLIR_* consumer variables come from the
+#   package configs.
+# Tier 2 (fallback): build LLVM/MLIR/LLD from source as a FetchContent
+#   subdirectory. The build tree has no consumable package config during the
+#   same configure, so we set the consumer variables by hand and rely on the
+#   in-tree-defined helper functions (mlir_tablegen, llvm_map_components_to_libnames,
+#   add_mlir_dialect, ...). See llvm/docs/CMake.rst + the FOSDEM MLIR-dialect talk.
+#
+# The sticky HIPDNN_LLVM_EMBEDDED flag makes reconfigures of a from-source tree
+# safe: morphizen's deps.cmake caches MLIR_DIR/LLVM_DIR pointing at the build
+# tree, and a plain find_package(MLIR) on the next configure would then fail in
+# the build-tree LLVMConfig includes -- so once embedded we skip find_package
+# entirely and clear those stale cache entries.
+if(HIPDNN_LLVM_EMBEDDED)
+  unset(MLIR_DIR CACHE)
+  unset(LLVM_DIR CACHE)
+endif()
+
+if(NOT HIPDNN_LLVM_EMBEDDED)
+  find_package(MLIR CONFIG QUIET)
+endif()
+
+if(MLIR_FOUND AND NOT HIPDNN_LLVM_EMBEDDED)
+  find_package(LLVM REQUIRED CONFIG)
+else()
+  message(STATUS "LLVM/MLIR not found; building from source (${DEP_HASH_llvm})")
+  # clang is built in-tree so a from-source bootstrap is fully self-contained:
+  # lib/Runtime gets a version-matched clang for runtime bitcode with no
+  # external dependency. Kept identical to the CI LLVM build so the prefix that
+  # CI caches (find_package path) and this fallback produce equivalent toolsets.
+  set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
+  set(LLVM_TARGETS_TO_BUILD "X86" CACHE STRING "" FORCE)
+  set(LLVM_ENABLE_RTTI OFF CACHE BOOL "" FORCE)
+  set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
+  set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  set(LLVM_INSTALL_UTILS ON CACHE BOOL "" FORCE)  # FileCheck/not/count for LIT
+  FetchContent_Declare(llvm-project
+    GIT_REPOSITORY ${DEP_URL_llvm}
+    GIT_TAG ${DEP_HASH_llvm}
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR llvm
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(llvm-project)
+
+  # Embedded (subdirectory) LLVM. Do NOT find_package the build tree: a
+  # sub-build in the same configure has no consumable package config yet (its
+  # LLVMConfig.cmake include()s exports that are not materialized during the
+  # same run -- this is the canonical reason the "embedded" path skips
+  # find_package; see llvm/docs/CMake.rst + FOSDEM MLIR-dialect talk). The
+  # in-tree build already defined the MLIR/LLVM targets and the helper
+  # functions (mlir_tablegen, llvm_map_components_to_libnames, add_mlir_dialect,
+  # ...) globally, so downstream just needs the consumer variables set by hand.
+  set(HIPDNN_LLVM_EMBEDDED ON CACHE BOOL "LLVM provided via FetchContent subdirectory" FORCE)
+  set(LLVM_INCLUDE_DIRS
+    "${llvm-project_SOURCE_DIR}/llvm/include"
+    "${llvm-project_BINARY_DIR}/include" CACHE PATH "" FORCE)
+  set(MLIR_INCLUDE_DIRS
+    "${llvm-project_SOURCE_DIR}/mlir/include"
+    "${llvm-project_BINARY_DIR}/tools/mlir/include" CACHE PATH "" FORCE)
+  set(LLVM_CMAKE_DIR "${llvm-project_SOURCE_DIR}/llvm/cmake/modules" CACHE PATH "" FORCE)
+  set(MLIR_CMAKE_DIR "${llvm-project_SOURCE_DIR}/mlir/cmake/modules" CACHE PATH "" FORCE)
+  # Tool dirs so downstream find_program (e.g. lib/Runtime's llvm-link/opt
+  # lookup) resolves against the in-tree LLVM build. clang is always built
+  # in-tree (clang;mlir;lld), so lib/Runtime's runtime-bitcode step uses the
+  # version-matched in-tree clang target.
+  set(LLVM_BINARY_DIR "${llvm-project_BINARY_DIR}" CACHE PATH "" FORCE)
+  set(LLVM_TOOLS_BINARY_DIR "${llvm-project_BINARY_DIR}/bin" CACHE PATH "" FORCE)
+  # LLD headers (lld/Common/Driver.h) live in a separate source tree; the
+  # prebuilt path gets them from the merged LLVM include prefix, but the
+  # subdirectory layout keeps them under lld/include + the generated build dir.
+  include_directories(SYSTEM
+    "${llvm-project_SOURCE_DIR}/llvm/include"
+    "${llvm-project_BINARY_DIR}/include"
+    "${llvm-project_SOURCE_DIR}/mlir/include"
+    "${llvm-project_BINARY_DIR}/tools/mlir/include"
+    "${llvm-project_SOURCE_DIR}/lld/include"
+    "${llvm-project_BINARY_DIR}/tools/lld/include")
+endif()
 
 # Add morphizen subdirectory.
 #
