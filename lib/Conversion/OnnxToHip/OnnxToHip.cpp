@@ -718,6 +718,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
       populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
       populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
       populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
+      // Pow(x, const_scalar) -> onnx.Mul / onnx.Sqrt / onnx.Reciprocal.
+      // Must run here (not in convertComputeOps) because once
+      // lowerOnnxConstants externalizes the exponent constant, the scalar
+      // value is no longer in IR. See PowerConversion.cpp.
+      populatePowDecompositionPatterns(preLoweringPatterns, ctx);
       mlir::GreedyRewriteConfig preLoweringConfig;
       preLoweringConfig.setStrictness(
           mlir::GreedyRewriteStrictness::ExistingOps);
