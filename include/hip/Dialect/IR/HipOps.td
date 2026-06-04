@@ -444,7 +444,9 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp<"conv"> {
+def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "2D convolution operation using MIOpen (in-place)";
   let description = [{
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
@@ -1104,7 +1106,11 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
-def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
+def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax",
+                                    /*traits=*/[],
+                                    /*outsAccessor=*/"Output",
+                                    /*autoReify=*/1,
+                                    /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -1193,7 +1199,7 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
 
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
-                            /*autoReify=*/1,
+                            /*autoReify=*/0,
                             /*autoInfer=*/1,
                             /*declareInfer=*/1> {
   let summary = "Generate 1-D range tensor";
@@ -2475,7 +2481,7 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
 def Hip_PadOp : Hip_DpsOp<"pad",
                           /*traits=*/[AttrSizedOperandSegments],
                           /*outsAccessor=*/"Output",
-                          /*autoReify=*/1,
+                          /*autoReify=*/0,
                           /*autoInfer=*/1,
                           /*declareInfer=*/1> {
   let summary = "Pad a tensor with constant / reflect / edge / wrap";
@@ -2525,7 +2531,7 @@ def Hip_PadOp : Hip_DpsOp<"pad",
 
 def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
                            /*outsAccessor=*/"Output",
-                           /*autoReify=*/1,
+                           /*autoReify=*/0,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Tile a tensor by repeating along each dimension";
@@ -2561,7 +2567,7 @@ def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
 
 def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
                              /*outsAccessor=*/"Output",
-                             /*autoReify=*/1,
+                             /*autoReify=*/0,
                              /*autoInfer=*/1,
                              /*declareInfer=*/1> {
   let summary = "Broadcast a tensor to a target shape";
@@ -2665,7 +2671,7 @@ def Hip_LessOp : Hip_DpsOp_Broadcast<"less", /*operandGetters=*/["Lhs", "Rhs"]> 
 def Hip_SliceOp : Hip_DpsOp<"slice",
                             /*traits=*/[AttrSizedOperandSegments],
                             /*outsAccessor=*/"Output",
-                            /*autoReify=*/1,
+                            /*autoReify=*/0,
                             /*autoInfer=*/1,
                             /*declareInfer=*/1> {
   let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";
@@ -2935,7 +2941,9 @@ def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
   }];
 }
 
-def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
+def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
+                              /*autoReify=*/1,
+                              /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
   let description = [{
     Implements the standard ONNX NonZero operator (opset 13+):
