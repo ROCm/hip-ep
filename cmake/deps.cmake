@@ -127,6 +127,64 @@ else()
   endif()
 endif()
 
+# TheRock ROCm SDK auto-download (real builds only).
+#
+# THEROCK_DIST may already be set by the top-level explicit cache-var/env block
+# in CMakeLists.txt. When it is absent (and this is a real build) we download
+# the official tarball from the public AMD host and extract it under the build
+# tree, so a fresh real build needs no manual SDK setup. The pin lives in
+# cmake/deps.txt (therock;<base-url>;<rocm-version>); the full tarball basename
+# is derived from the host OS + the first HIP_ARCHITECTURES entry. Skipped for
+# BUILD_MOCK_RUNTIME=ON (no GPU/HIP), so mock never triggers a download.
+if(NOT BUILD_MOCK_RUNTIME AND (NOT THEROCK_DIST OR NOT EXISTS "${THEROCK_DIST}/bin"))
+  set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
+  if(NOT EXISTS "${_therock_root}/bin")
+    if(WIN32)
+      set(_therock_os "windows")
+    else()
+      set(_therock_os "linux")
+    endif()
+    set(_therock_arch "${HIP_ARCHITECTURES}")
+    if(_therock_arch MATCHES ";")
+      list(GET _therock_arch 0 _therock_arch)
+    endif()
+    if(NOT _therock_arch)
+      message(FATAL_ERROR
+        "Cannot derive the TheRock tarball: set -DHIP_ARCHITECTURES=<gfxNNNN> "
+        "(GPU arch), or provide -DTHEROCK_DIST=/path/to/therock.")
+    endif()
+    set(_therock_base "therock-dist-${_therock_os}-${_therock_arch}-${DEP_HASH_therock}")
+    set(_therock_url "${DEP_URL_therock}/${_therock_base}.tar.gz")
+    set(_therock_tgz "${CMAKE_BINARY_DIR}/${_therock_base}.tar.gz")
+    if(NOT EXISTS "${_therock_tgz}")
+      message(STATUS "THEROCK_DIST not provided; downloading ${_therock_url}")
+      file(DOWNLOAD "${_therock_url}" "${_therock_tgz}" SHOW_PROGRESS STATUS _therock_dl)
+      list(GET _therock_dl 0 _therock_dl_code)
+      if(NOT _therock_dl_code EQUAL 0)
+        file(REMOVE "${_therock_tgz}")
+        message(FATAL_ERROR "TheRock download failed (${_therock_dl}). "
+          "Set -DTHEROCK_DIST=/path/to/therock to use a local SDK instead.")
+      endif()
+    endif()
+    file(MAKE_DIRECTORY "${_therock_root}")
+    message(STATUS "Extracting TheRock SDK into ${_therock_root} ...")
+    # tar (ships with Windows 10+/Linux) flattens the single top-level dir;
+    # file(ARCHIVE_EXTRACT) has no --strip-components.
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E env tar -xzf "${_therock_tgz}"
+              -C "${_therock_root}" --strip-components=1
+      RESULT_VARIABLE _therock_tar_rc)
+    if(NOT _therock_tar_rc EQUAL 0)
+      message(FATAL_ERROR "TheRock extraction failed (tar rc=${_therock_tar_rc}).")
+    endif()
+  endif()
+  set(THEROCK_DIST "${_therock_root}"
+      CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
+  message(STATUS "[onnx-hipdnn-ep] THEROCK_DIST (auto-downloaded): ${THEROCK_DIST}")
+  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
+  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
+endif()
+
 # cpptrace for crash backtraces
 set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
 set(BUILD_SHARED_LIBS OFF)
