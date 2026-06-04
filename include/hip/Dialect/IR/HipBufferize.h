@@ -65,6 +65,7 @@ inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
+    Conv1dOp::attachInterface<HipDstBufferizableModel<Conv1dOp>>(*ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
