@@ -280,7 +280,7 @@ cmake --install "$BUILD_DIR"
 #
 # We do NOT bundle TheRock-origin .so files (libamdhip64, libhsa-runtime64,
 # librocm_sysdeps_*, libamd_comgr_loader, ...). Matches the Windows
-# artifact contract (gpu-perf-accuracy-test.yml downloads TheRock
+# artifact contract (the windows-build.yml gpu-test job downloads TheRock
 # separately on the GPU host). Reasons:
 #   1. Halves artifact size (310 -> 150 MB).
 #   2. libamd_comgr_loader.so is a stub that dlopens libamd_comgr.so.3 at
