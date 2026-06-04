@@ -272,7 +272,7 @@ struct MiopenSoftmaxOpLowering
       return rewriter.notifyMatchFailure(
           op, "miopen.softmax only supports f32/f16/bf16");
 
-    SmallVector<Type> paramTypes = {ptrType,  ptrType, ptrType,
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
                                     i64Type, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenSoftmax, paramTypes, voidType);
@@ -306,7 +306,9 @@ struct MiopenSoftmaxOpLowering
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
-        rows, cols, createI64Const(dataType)};
+        rows,
+        cols,
+        createI64Const(dataType)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

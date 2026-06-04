@@ -70,15 +70,13 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
 
   int hip_dtype = hipdnn_ep_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_global_pool: unsupported data_type %lld\n",
+    fprintf(stderr, "[REAL] wrap_global_pool: unsupported data_type %lld\n",
             (long long)data_type);
     return -1;
   }
 
   if (mode != HIPDNN_EP_GLOBAL_POOL_AVERAGE &&
-      mode != HIPDNN_EP_GLOBAL_POOL_MAX &&
-      mode != HIPDNN_EP_GLOBAL_POOL_LP) {
+      mode != HIPDNN_EP_GLOBAL_POOL_MAX && mode != HIPDNN_EP_GLOBAL_POOL_LP) {
     fprintf(stderr, "[REAL] wrap_global_pool: unsupported mode %lld\n",
             (long long)mode);
     return -1;
@@ -106,9 +104,9 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
                     type_name, (long long)data_type, (long long)elem_size,
                     (long long)p);
 
-  int result = hip_global_pool(stream, input, output, outer, reduce_size,
-                               hip_dtype, static_cast<int>(mode),
-                               static_cast<int>(p));
+  int result =
+      hip_global_pool(stream, input, output, outer, reduce_size, hip_dtype,
+                      static_cast<int>(mode), static_cast<int>(p));
   if (result != 0) {
     fprintf(stderr, "[REAL] wrap_global_pool (%s): kernel launch failed (%d)\n",
             op_label, result);
