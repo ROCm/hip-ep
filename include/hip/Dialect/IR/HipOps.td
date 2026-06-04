@@ -444,7 +444,9 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp<"conv"> {
+def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "2D convolution operation using MIOpen (in-place)";
   let description = [{
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
@@ -1104,7 +1106,11 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
-def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
+def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax",
+                                    /*traits=*/[],
+                                    /*outsAccessor=*/"Output",
+                                    /*autoReify=*/1,
+                                    /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -2935,7 +2941,9 @@ def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
   }];
 }
 
-def Hip_NonZeroOp : Hip_DpsOp<"nonzero"> {
+def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
+                              /*autoReify=*/1,
+                              /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
   let description = [{
     Implements the standard ONNX NonZero operator (opset 13+):
