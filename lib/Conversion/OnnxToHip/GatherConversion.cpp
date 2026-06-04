@@ -75,8 +75,8 @@ struct GatherToHip : public mlir::RewritePattern {
                                       resultType.getElementType(), dynSizes);
 
     // Create hip.gather operation
-    auto gatherOp = mlir::hip::GatherOp::create(
-        rewriter, loc, resultType, context, data, indices, init, axisAttr);
+    auto gatherOp = mlir::hip::GatherOp::create(rewriter, loc, context, data,
+                                                indices, init, axisAttr);
 
     rewriter.replaceOp(op, gatherOp->getResult(0));
     return mlir::success();

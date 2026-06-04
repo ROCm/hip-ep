@@ -98,7 +98,7 @@ struct SizeToConstantOrHipSize : public mlir::RewritePattern {
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
         mlir::ValueRange{});
 
-    auto hipOp = mlir::hip::SizeOp::create(rewriter, loc, resultType, context,
+    auto hipOp = mlir::hip::SizeOp::create(rewriter, loc, context,
                                            op->getOperand(0), init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();

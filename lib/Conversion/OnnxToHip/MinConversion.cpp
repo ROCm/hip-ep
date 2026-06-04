@@ -56,8 +56,8 @@ MinToHip::matchAndRewrite(mlir::Operation *op,
     mlir::Value source =
         (accType.getRank() == stepResultType.getRank()) ? accumulate : rhs;
     mlir::Value init = createEmptyTensor(rewriter, loc, stepResultType, source);
-    auto minOp = mlir::hip::MinOp::create(rewriter, loc, stepResultType,
-                                          context, accumulate, rhs, init);
+    auto minOp =
+        mlir::hip::MinOp::create(rewriter, loc, context, accumulate, rhs, init);
     accumulate = minOp->getResult(0);
   }
 

@@ -306,3 +306,273 @@ func.func @refine_gemm_2d_from_inputs(%ctx: !hip.context,
     : tensor<?x?xf32>
   return %y : tensor<?x?xf32>
 }
+
+// -----
+
+// Same-shape unary ops (silu, sigmoid, softplus, gelu, reciprocal, sqrt,
+// not, cos, sin, neg, cast, sign, cumsum, scatter_nd) opt INTO the
+// shared `HipDpsOp` default reify (`autoReify=1`), which lifts each
+// output dim from the DPS `outs` operand's runtime shape. The DPS
+// contract pins `result.type == outs.type`, so the consumer-side pass
+// has signal to refine only when `outs` carries static dims that the
+// result type doesn't (rare in practice; the in-tree converters keep
+// `outs.type` aligned with the inferred ONNX result type from the
+// start). When `outs` is fully dynamic, the pass becomes a no-op for
+// these ops — `hip.cos` is the canonical example pinned here.
+// CHECK-LABEL: func.func @noop_on_cos_dynamic_outs
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
+// CHECK:         %[[Y:.*]] = hip.cos
+// CHECK-SAME:                  outs(%[[E]] : tensor<?x?x?xf32>) : tensor<?x?x?xf32>
+// CHECK-NOT:     tensor.cast
+// CHECK:         return %[[Y]] : tensor<?x?x?xf32>
+func.func @noop_on_cos_dynamic_outs(%ctx: !hip.context,
+                                    %x: tensor<?x?x4096xf32>,
+                                    %d0: index, %d1: index, %d2: index)
+    -> tensor<?x?x?xf32> {
+  %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
+  %y = hip.cos(%ctx)
+    ins(%x : tensor<?x?x4096xf32>)
+    outs(%e : tensor<?x?x?xf32>)
+    : tensor<?x?x?xf32>
+  return %y : tensor<?x?x?xf32>
+}
+
+// -----
+
+// `hip.size` produces a rank-0 `tensor<i64>` — its reify returns a
+// shape entry with an empty inner dim list. The pass has nothing to
+// refine (rank-0 is already maximally static), but must not crash on
+// the empty inner list. CHECK that the op survives the pass unchanged
+// and no `tensor.cast` barrier is inserted (the result type is already
+// the same as the function's return type).
+// CHECK-LABEL: func.func @noop_on_size_rank_zero
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<i64>
+// CHECK:         %[[Y:.*]] = hip.size
+// CHECK-SAME:                  outs(%[[E]] : tensor<i64>) : tensor<i64>
+// CHECK-NOT:     tensor.cast
+// CHECK:         return %[[Y]] : tensor<i64>
+func.func @noop_on_size_rank_zero(%ctx: !hip.context,
+                                  %x: tensor<?x?xf16>) -> tensor<i64> {
+  %e = tensor.empty() : tensor<i64>
+  %y = hip.size(%ctx)
+    ins(%x : tensor<?x?xf16>)
+    outs(%e : tensor<i64>)
+    : tensor<i64>
+  return %y : tensor<i64>
+}
+
+// -----
+
+// 2-operand broadcast ops (miopen.add, mul, add, min, div, equal, and,
+// sub, less, mod) all reify their result shape via NumPy broadcast over
+// both inputs — covered here by `hip.add` as a representative. The
+// canonical-side pick is exercised: lhs=<?x4> contributes the static `4`
+// at dim 1, rhs=<2x?> contributes the static `2` at dim 0, so the
+// fully-dynamic result type tightens to `tensor<2x4xf16>`.
+//
+// Note: `hip.add` uses a custom assembly format (alongside `hip.mul`
+// and `hip.miopen.add`) that emits the result type with `-> type`, not
+// `: type` — the latter is the TableGen `assemblyFormat` convention
+// used by the other commit-2 broadcast ops (min, div, equal, and, sub,
+// where, less, mod) and by `hip.matmul`.
+// CHECK-LABEL: func.func @refine_add_broadcast_canonical_pick
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x4xf16>
+// CHECK:         %[[Y:.*]] = hip.add
+// CHECK-SAME:                  outs(%[[E]] : tensor<2x4xf16>) -> tensor<2x4xf16>
+// CHECK:         tensor.cast %[[Y]] : tensor<2x4xf16> to tensor<?x?xf16>
+func.func @refine_add_broadcast_canonical_pick(%ctx: !hip.context,
+                                                %lhs: tensor<?x4xf16>,
+                                                %rhs: tensor<2x?xf16>,
+                                                %d0: index, %d1: index)
+    -> tensor<?x?xf16> {
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf16>
+  %y = hip.add(%ctx)
+    ins(%lhs, %rhs : tensor<?x4xf16>, tensor<2x?xf16>)
+    outs(%e : tensor<?x?xf16>)
+    -> tensor<?x?xf16>
+  return %y : tensor<?x?xf16>
+}
+
+// -----
+
+// 3-operand `hip.where` reifies its result shape via NumPy broadcast over
+// `condition`, `x`, `y`. With cond=<1x4xi1>, x=<2x1xf32>, y=<2x4xf32>,
+// the broadcast result is `tensor<2x4xf32>` — `where` is the only
+// commit-2 op with a non-binary input list, so it gets its own LIT case
+// to guard the variadic helper path. `hip.where` uses TableGen
+// `assemblyFormat` so the trailing result type is printed with `:`.
+// CHECK-LABEL: func.func @refine_where_3operand_broadcast
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x4xf32>
+// CHECK:         %[[Y:.*]] = hip.where
+// CHECK-SAME:                  outs(%[[E]] : tensor<2x4xf32>) : tensor<2x4xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<2x4xf32> to tensor<?x?xf32>
+func.func @refine_where_3operand_broadcast(%ctx: !hip.context,
+                                            %cond: tensor<1x4xi1>,
+                                            %x: tensor<2x1xf32>,
+                                            %y: tensor<2x4xf32>,
+                                            %d0: index, %d1: index)
+    -> tensor<?x?xf32> {
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+  %out = hip.where(%ctx)
+    ins(%cond, %x, %y : tensor<1x4xi1>, tensor<2x1xf32>, tensor<2x4xf32>)
+    outs(%e : tensor<?x?xf32>)
+    : tensor<?x?xf32>
+  return %out : tensor<?x?xf32>
+}
+
+// -----
+
+// `hip.transpose` (PR #263 commit 3) reifies its result shape by
+// permuting the input shape via the static `perm` attribute — output
+// dim i comes from input dim `perm[i]`. With input=<2x?x4096xf16> and
+// perm=[2, 0, 1], the result tightens from fully-dynamic
+// `tensor<?x?x?xf16>` to `tensor<4096x2x?xf16>` (dim 0 = input dim 2 =
+// 4096, dim 1 = input dim 0 = 2; dim 2 = input dim 1 stays dynamic).
+// CHECK-LABEL: func.func @refine_transpose_perm_driven
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<4096x2x?xf16>
+// CHECK:         %[[Y:.*]] = hip.transpose
+// CHECK-SAME:                  outs(%[[E]] : tensor<4096x2x?xf16>){{.*}}: tensor<4096x2x?xf16>
+// CHECK:         tensor.cast %[[Y]] : tensor<4096x2x?xf16> to tensor<?x?x?xf16>
+func.func @refine_transpose_perm_driven(%ctx: !hip.context,
+                                        %x: tensor<2x?x4096xf16>,
+                                        %d0: index, %d1: index, %d2: index)
+    -> tensor<?x?x?xf16> {
+  %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf16>
+  %y = hip.transpose(%ctx)
+    ins(%x : tensor<2x?x4096xf16>)
+    outs(%e : tensor<?x?x?xf16>)
+    {perm = [2, 0, 1]}
+    : tensor<?x?x?xf16>
+  return %y : tensor<?x?x?xf16>
+}
+
+// -----
+
+// `hip.gather` (PR #263 commit 3) reifies output as
+// `data.shape[:axis] ++ indices.shape ++ data.shape[axis+1:]`. With
+// data=<?x4xf32>, indices=<2x?xi64>, axis=0: output dims =
+// [indices[0]=2, indices[1]=?, data[1]=4] = `tensor<2x?x4xf32>`. The
+// pass tightens dim 0 (static 2 from indices) and dim 2 (static 4 from
+// data); dim 1 stays dynamic.
+// CHECK-LABEL: func.func @refine_gather_axis_split
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<2x?x4xf32>
+// CHECK:         %[[Y:.*]] = hip.gather
+// CHECK-SAME:                  outs(%[[E]] : tensor<2x?x4xf32>){{.*}}: tensor<2x?x4xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<2x?x4xf32> to tensor<?x?x?xf32>
+func.func @refine_gather_axis_split(%ctx: !hip.context,
+                                    %data: tensor<?x4xf32>,
+                                    %indices: tensor<2x?xi64>,
+                                    %d0: index, %d1: index, %d2: index)
+    -> tensor<?x?x?xf32> {
+  %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
+  %y = hip.gather(%ctx)
+    ins(%data, %indices : tensor<?x4xf32>, tensor<2x?xi64>)
+    outs(%e : tensor<?x?x?xf32>)
+    {axis = 0 : i64}
+    : tensor<?x?x?xf32>
+  return %y : tensor<?x?x?xf32>
+}
+
+// -----
+
+// `hip.gather_nd` (PR #263 commit 3) reifies output as
+// `data.shape[:batch_dims] ++ indices.shape[batch_dims:-1] ++
+//  data.shape[batch_dims + indices.shape[-1]:]`. With data=<3x4x5xf32>,
+// indices=<2x2xi64> (tupleWidth=2), batch_dims=0: output rank =
+// 2 + 3 - 2 - 1 - 0 = 2; output = [] ++ [indices[0]=2] ++ [data[2]=5] =
+// `tensor<2x5xf32>`.
+// CHECK-LABEL: func.func @refine_gather_nd_structural
+// CHECK:         %[[E:.*]] = tensor.empty() : tensor<2x5xf32>
+// CHECK:         %[[Y:.*]] = hip.gather_nd
+// CHECK-SAME:                  outs(%[[E]] : tensor<2x5xf32>){{.*}}: tensor<2x5xf32>
+// CHECK:         tensor.cast %[[Y]] : tensor<2x5xf32> to tensor<?x?xf32>
+func.func @refine_gather_nd_structural(%ctx: !hip.context,
+                                       %data: tensor<3x4x5xf32>,
+                                       %indices: tensor<2x2xi64>,
+                                       %d0: index, %d1: index)
+    -> tensor<?x?xf32> {
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+  %y = hip.gather_nd(%ctx)
+    ins(%data, %indices : tensor<3x4x5xf32>, tensor<2x2xi64>)
+    outs(%e : tensor<?x?xf32>)
+    {batch_dims = 0 : i64}
+    : tensor<?x?xf32>
+  return %y : tensor<?x?xf32>
+}
+
+// -----
+
+// `hip.reduce_sum` (PR #263 commit 3) reifies output by introspecting
+// the `axes` operand as an `arith.constant`. With data=<?x4096xf16>,
+// axes=dense<[1]>, keepdims=1, noop_with_empty_axes=0: dim 0 passes
+// through from data (dynamic — emits `tensor.dim %data`), dim 1 is the
+// reduced axis with keepdims=1 → static 1. The pass tightens dim 1
+// only; dim 0 stays dynamic. Same path covers `hip.reduce_max` and
+// `hip.reduce_prod` (one helper, three thunks). When `axes` is not a
+// constant the helper bails and the op falls through to a no-op
+// outs-shape fallback — verified by `noop_on_static` earlier in this
+// file, since the fallback only emits dim ops that the pass discards.
+// CHECK-LABEL: func.func @refine_reduce_sum_keepdims_constant_axes
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<?x1xf16>
+// CHECK:         %[[Y:.*]] = hip.reduce_sum
+// CHECK-SAME:                  outs(%[[E]] : tensor<?x1xf16>){{.*}}: tensor<?x1xf16>
+// CHECK:         tensor.cast %[[Y]] : tensor<?x1xf16> to tensor<?x?xf16>
+func.func @refine_reduce_sum_keepdims_constant_axes(%ctx: !hip.context,
+                                                    %data: tensor<?x4096xf16>,
+                                                    %d0: index, %d1: index)
+    -> tensor<?x?xf16> {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf16>
+  %y = hip.reduce_sum(%ctx)
+    ins(%data, %axes : tensor<?x4096xf16>, tensor<1xi64>)
+    outs(%e : tensor<?x?xf16>)
+    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    : tensor<?x?xf16>
+  return %y : tensor<?x?xf16>
+}
+
+// -----
+
+// `hip.pad` (along with tile, expand, slice, range) uses the shared
+// `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
+// `getDpsInits()` and lifts each output dim from the DPS `outs`
+// operand's runtime shape via `tensor::getMixedSizes`. Static dims
+// become `IndexAttr` (which the pass can use to tighten); dynamic
+// dims emit `tensor.dim %output, %i` (a no-op tightening that the
+// pass discards). Per-op arithmetic for these ops (e.g.
+// `tensor::PadOp`'s `affine.apply (d0 + d1 + d2)` recipe) is deferred.
+//
+// This LIT case is the contract guard for the default outs-lift path:
+//   1. The op's reify ALWAYS returns success() — no crash, no failure
+//      propagation up to the pass.
+//   2. Fully-dynamic `outs` survives the pass intact: the pass walks
+//      the lifted `tensor.dim` outputs, finds nothing it can use to
+//      tighten, and leaves the op unchanged.
+//
+// We also exercise the optional `cval` branch of pad's assembly format
+// here (the most common ONNX Pad shape) — the reify path doesn't read
+// `cval` but we want to make sure the auto-emit works on the variant
+// with a non-empty optional segment, not just the bare-minimum shape.
+//
+// (Same default path also covers tile, expand, slice, range — one LIT
+// case is enough to guard the contract.)
+// CHECK-LABEL: func.func @refine_pad_dps_out_fallback
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+// CHECK:         %[[Y:.*]] = hip.pad
+// CHECK-SAME:                  outs(%[[E]] : tensor<?x?xf32>){{.*}}: tensor<?x?xf32>
+// CHECK:         return %[[Y]] : tensor<?x?xf32>
+func.func @refine_pad_dps_out_fallback(%ctx: !hip.context,
+                                       %data: tensor<3x2xf32>,
+                                       %pads: tensor<4xi64>,
+                                       %cval: tensor<f32>,
+                                       %d0: index, %d1: index)
+    -> tensor<?x?xf32> {
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+  %y = hip.pad(%ctx)
+    ins(%data, %pads : tensor<3x2xf32>, tensor<4xi64>)
+    cval(%cval : tensor<f32>)
+    outs(%e : tensor<?x?xf32>)
+    {mode = "constant"}
+    : tensor<?x?xf32>
+  return %y : tensor<?x?xf32>
+}

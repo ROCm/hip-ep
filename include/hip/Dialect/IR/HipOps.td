@@ -45,14 +45,15 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 //                     (walks `getDpsInits()`, reads each init's runtime
 //                     shape — covers the typical same-shape DPS case).
 //                     Default 1. Ops with a tighter shape source opt
-//                     out with `autoReify=0` and write their own body
-//                     in `HipReifyResultShapesImpl.cpp`. Examples:
-//                     matmul (recomputes M/N from input operands);
-//                     rope, rms_norm, qmoe (source dims from `$input`
-//                     so refinement propagates from upstream rather
-//                     than freezing at the destination buffer's
-//                     allocation-time shape); matmul_nbits, gemm
-//                     (mixed input + attribute dims).
+//                     out with `autoReify=0` and either pass a
+//                     `customReifyBody` (sub-bases) or write a
+//                     hand-written body in `HipReifyResultShapesImpl.cpp`.
+//                     Examples: matmul (recomputes M/N from input
+//                     operands); rope, rms_norm, qmoe (source dims
+//                     from `$input` so refinement tracks the operand's
+//                     runtime shape rather than freezing at the
+//                     destination buffer's allocation-time shape);
+//                     matmul_nbits, gemm (mixed input + attribute dims).
 //   `autoInfer`     : when 1, emit a per-op `inferReturnTypes` that
 //                     pushes the outs operand's tensor type into
 //                     `results` (or pushes nothing for memref mode, so
@@ -74,6 +75,17 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 //                     overload (lets converter callsites drop the
 //                     explicit `resultType` argument). Default 0; ops
 //                     opt in in lockstep with `autoInfer`.
+//   `customReifyBody` : optional string; when non-empty, replaces the
+//                     `autoReify` body with a custom one. The string
+//                     is the function BODY (between `{` and `}`) of
+//                     `<Op>::reifyResultShapes(OpBuilder &b,
+//                     ReifiedRankedShapedTypeDims &reified)`. Used by
+//                     parameterized sub-bases (`Hip_DpsOp_Reduction`,
+//                     `Hip_DpsOp_Broadcast`) to inject per-shape-class
+//                     boilerplate without each leaf op duplicating it.
+//                     Mutually exclusive with `autoReify=1` (sub-bases
+//                     pass `autoReify=0` and a non-empty
+//                     `customReifyBody`). Default `""`.
 //
 // Generated dispatcher example for matmul:
 //   - `extraClassDefinition` produces:
@@ -94,7 +106,8 @@ class Hip_DpsOp<string mnemonic,
                 string outsAccessor = "Output",
                 bit autoReify = 1,
                 bit autoInfer = 0,
-                bit declareInfer = 0> :
+                bit declareInfer = 0,
+                string customReifyBody = ""> :
     Hip_Op<mnemonic, !listconcat([
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
@@ -110,14 +123,24 @@ class Hip_DpsOp<string mnemonic,
       traits)> {
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
   let extraClassDefinition = !strconcat(
-    !if(autoReify, [{
-      ::mlir::LogicalResult $cppClass::reifyResultShapes(
-          ::mlir::OpBuilder &b,
-          ::mlir::ReifiedRankedShapedTypeDims &reified) {
-        return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
-            .reifyResultShapes(b, reified);
-      }
-    }], ""),
+    !if(!ne(customReifyBody, ""),
+        !strconcat([{
+          ::mlir::LogicalResult $cppClass::reifyResultShapes(
+              ::mlir::OpBuilder &b,
+              ::mlir::ReifiedRankedShapedTypeDims &reified) {
+        }],
+        customReifyBody,
+        [{
+          }
+        }]),
+        !if(autoReify, [{
+          ::mlir::LogicalResult $cppClass::reifyResultShapes(
+              ::mlir::OpBuilder &b,
+              ::mlir::ReifiedRankedShapedTypeDims &reified) {
+            return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+                .reifyResultShapes(b, reified);
+          }
+        }], "")),
     !if(autoInfer, !strconcat([{
       ::llvm::LogicalResult $cppClass::inferReturnTypes(
           ::mlir::MLIRContext *,
@@ -137,6 +160,65 @@ class Hip_DpsOp<string mnemonic,
     }]), "")
   );
 }
+
+// Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
+// reduce_max, reduce_prod). Auto-emits a `reifyResultShapes` body
+// that calls `mlir::hip::reifyReductionShape` — which tries
+// `reifyReductionWithKeepdims` first to recover per-input-dim
+// mappings from a constant `axes` operand and falls back to the
+// shared `HipDpsOp` outs-lift default when `axes` is not a
+// recognised constant. Each leaf op contributes only its TableGen
+// declaration; no per-op `.cpp` thunk is needed.
+//
+// Contract on the leaf op: must declare operands `$data` (input
+// tensor), `$axes` (rank-1 i64 tensor), `$output` (DPS init),
+// integer attributes `$keepdims` and `$noop_with_empty_axes`.
+class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
+    Hip_DpsOp<mnemonic, traits,
+              /*outsAccessor=*/"Output",
+              /*autoReify=*/0,
+              /*autoInfer=*/1,
+              /*declareInfer=*/1,
+              /*customReifyBody=*/[{
+                return ::mlir::hip::reifyReductionShape(
+                    b, getLoc(), getData(), getAxes(),
+                    getKeepdims(), getNoopWithEmptyAxes(),
+                    getOperation(), reified);
+              }]>;
+
+// Parameterized sub-base for elementwise NumPy-broadcast ops (add,
+// mul, sub, div, min, mod, equal, less, and, where, miopen.add).
+// Auto-emits a `reifyResultShapes` body that calls
+// `mlir::hip::reifyBroadcastShapeFor` with the broadcast input
+// operands — output element type is independent of this reify path
+// and is taken from the `outs` operand by the converter.
+//
+// `operandGetters` is the list of ODS-generated accessor stems for
+// the broadcast inputs, in right-alignment order. The auto-emitted
+// body builds a `{getXX(), getYY(), ...}` initialiser list from
+// these names. Most ops pass `["Lhs", "Rhs"]`; ops with non-default
+// operand naming pass that naming (`["A", "B"]` for `miopen.add`,
+// `["Condition", "X", "Y"]` for `where`).
+//
+// `outsAccessor` defaults to `"Output"`; pass the leaf op's actual
+// outs accessor stem (e.g. `"C"` for `miopen.add`) so the inherited
+// auto-emitted `inferReturnTypes` reads the correct outs type.
+class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
+                          string outsAccessor = "Output",
+                          list<Trait> traits = []> :
+    Hip_DpsOp<mnemonic, traits,
+              outsAccessor,
+              /*autoReify=*/0,
+              /*autoInfer=*/1,
+              /*declareInfer=*/1,
+              /*customReifyBody=*/!strconcat(
+                "return ::mlir::hip::reifyBroadcastShapeFor("
+                "b, getLoc(), {",
+                !interleave(
+                  !foreach(g, operandGetters, "get" # g # "()"),
+                  ", "),
+                "}, getOperation(), reified);"
+              )>;
 
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
@@ -921,7 +1003,9 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   }];
 }
 
-def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
+def Hip_MiopenAddOp : Hip_DpsOp_Broadcast<"miopen.add",
+                                          /*operandGetters=*/["A", "B"],
+                                          /*outsAccessor=*/"C"> {
   let summary = "Element-wise add via miopenOpTensor(miopenTensorOpAdd)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -934,7 +1018,7 @@ def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
   let hasVerifier = 1;
 }
 
-def Hip_MulOp : Hip_DpsOp<"mul"> {
+def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise multiplication";
   let description = [{
     Performs elementwise multiplication: output = lhs * rhs
@@ -961,7 +1045,7 @@ def Hip_MulOp : Hip_DpsOp<"mul"> {
   let hasVerifier = 1;
 }
 
-def Hip_AddOp : Hip_DpsOp<"add"> {
+def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise addition";
   let description = [{
     Performs elementwise addition: output = lhs + rhs
@@ -988,7 +1072,7 @@ def Hip_AddOp : Hip_DpsOp<"add"> {
   let hasVerifier = 1;
 }
 
-def Hip_MinOp : Hip_DpsOp<"min"> {
+def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise minimum";
   let description = [{
     Performs elementwise minimum: output = min(lhs, rhs)
@@ -1034,7 +1118,11 @@ def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
 
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
-def Hip_TransposeOp : Hip_DpsOp<"transpose"> {
+def Hip_TransposeOp : Hip_DpsOp<"transpose", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/0,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
   let summary = "N-D transpose with arbitrary permutation (ONNX Transpose)";
   let description = [{
     Permutes the dimensions of the input tensor according to the `perm`
@@ -1070,7 +1158,11 @@ def Hip_TransposeOp : Hip_DpsOp<"transpose"> {
   let hasVerifier = 1;
 }
 
-def Hip_GatherOp : Hip_DpsOp<"gather"> {
+def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/0,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
   let summary = "Gather elements along an axis";
   let description = [{
     Gathers elements from data tensor along the given axis using indices.
@@ -1099,7 +1191,11 @@ def Hip_GatherOp : Hip_DpsOp<"gather"> {
   }];
 }
 
-def Hip_RangeOp : Hip_DpsOp<"range"> {
+def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
   let summary = "Generate 1-D range tensor";
   let description = [{
     Implements ONNX Range semantics:
@@ -1125,7 +1221,11 @@ def Hip_RangeOp : Hip_DpsOp<"range"> {
   }];
 }
 
-def Hip_SiluOp : Hip_DpsOp<"silu"> {
+def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins
     Hip_ContextType:$ctx,
@@ -1137,7 +1237,11 @@ def Hip_SiluOp : Hip_DpsOp<"silu"> {
   let hasVerifier = 1;
 }
 
-def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
+                              /*outsAccessor=*/"Y",
+                              /*autoReify=*/1,
+                              /*autoInfer=*/1,
+                              /*declareInfer=*/1> {
   let summary = "Sigmoid activation";
   let description = [{
     Applies sigmoid activation: y = 1 / (1 + exp(-x))
@@ -1164,7 +1268,11 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
   }];
 }
 
-def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
+def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
+                               /*outsAccessor=*/"Y",
+                               /*autoReify=*/1,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
   let summary = "Softplus activation: y = ln(exp(x) + 1)";
   let description = [{
     Applies the softplus activation function element-wise.
@@ -1194,7 +1302,11 @@ def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
   }];
 }
 
-def Hip_GeluOp : Hip_DpsOp<"gelu"> {
+def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "GELU activation (Gaussian Error Linear Unit)";
   let description = [{
     Applies the GELU activation function element-wise.
@@ -1230,7 +1342,11 @@ def Hip_GeluOp : Hip_DpsOp<"gelu"> {
   }];
 }
 
-def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal"> {
+def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
+                                 /*outsAccessor=*/"Y",
+                                 /*autoReify=*/1,
+                                 /*autoInfer=*/1,
+                                 /*declareInfer=*/1> {
   let summary = "Element-wise reciprocal: y = 1/x";
   let description = [{
     Computes the reciprocal of each element.
@@ -1260,7 +1376,11 @@ def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal"> {
   }];
 }
 
-def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
+def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Element-wise square root: y = sqrt(x)";
   let description = [{
     Computes the square root of each element.
@@ -1290,7 +1410,7 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
   }];
 }
 
-def Hip_DivOp : Hip_DpsOp<"div"> {
+def Hip_DivOp : Hip_DpsOp_Broadcast<"div", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise division";
   let description = [{
     Performs elementwise division: output = lhs / rhs
@@ -1321,7 +1441,7 @@ def Hip_DivOp : Hip_DpsOp<"div"> {
   }];
 }
 
-def Hip_EqualOp : Hip_DpsOp<"equal"> {
+def Hip_EqualOp : Hip_DpsOp_Broadcast<"equal", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Element-wise equality comparison: c = (a == b)";
   let description = [{
     Compares two input tensors element-wise for equality.
@@ -1353,7 +1473,7 @@ def Hip_EqualOp : Hip_DpsOp<"equal"> {
   }];
 }
 
-def Hip_AndOp : Hip_DpsOp<"and"> {
+def Hip_AndOp : Hip_DpsOp_Broadcast<"and", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Element-wise logical AND: c = a && b";
   let description = [{
     Computes element-wise logical AND of two boolean tensors (i1).
@@ -1385,7 +1505,11 @@ def Hip_AndOp : Hip_DpsOp<"and"> {
   }];
 }
 
-def Hip_NotOp : Hip_DpsOp<"not"> {
+def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise logical NOT: y = !x";
   let description = [{
     Computes the logical NOT of each element (boolean/i1).
@@ -1415,7 +1539,11 @@ def Hip_NotOp : Hip_DpsOp<"not"> {
   }];
 }
 
-def Hip_CosOp : Hip_DpsOp<"cos"> {
+def Hip_CosOp : Hip_DpsOp<"cos", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise cosine: y = cos(x)";
   let description = [{
     Computes the cosine of each element.
@@ -1445,7 +1573,11 @@ def Hip_CosOp : Hip_DpsOp<"cos"> {
   }];
 }
 
-def Hip_SinOp : Hip_DpsOp<"sin"> {
+def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise sine: y = sin(x)";
   let description = [{
     Computes the sine of each element.
@@ -1475,7 +1607,11 @@ def Hip_SinOp : Hip_DpsOp<"sin"> {
   }];
 }
 
-def Hip_NegOp : Hip_DpsOp<"neg"> {
+def Hip_NegOp : Hip_DpsOp<"neg", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Element-wise negation: y = -x";
   let description = [{
     Negates each element of the input tensor.
@@ -1507,7 +1643,7 @@ def Hip_NegOp : Hip_DpsOp<"neg"> {
   }];
 }
 
-def Hip_SubOp : Hip_DpsOp<"sub"> {
+def Hip_SubOp : Hip_DpsOp_Broadcast<"sub", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise subtraction";
   let description = [{
     Performs elementwise subtraction: output = lhs - rhs
@@ -1538,7 +1674,8 @@ def Hip_SubOp : Hip_DpsOp<"sub"> {
   }];
 }
 
-def Hip_WhereOp : Hip_DpsOp<"where"> {
+def Hip_WhereOp : Hip_DpsOp_Broadcast<"where",
+                                      /*operandGetters=*/["Condition", "X", "Y"]> {
   let summary = "Elementwise selection: output = condition ? x : y";
   let description = [{
     Implements ONNX Where: output[i] = condition[i] ? x[i] : y[i].
@@ -1578,7 +1715,11 @@ def Hip_WhereOp : Hip_DpsOp<"where"> {
   }];
 }
 
-def Hip_CastOp : Hip_DpsOp<"cast"> {
+def Hip_CastOp : Hip_DpsOp<"cast", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Type conversion operation";
   let description = [{
     Converts input tensor from one data type to another.
@@ -1608,7 +1749,7 @@ def Hip_CastOp : Hip_DpsOp<"cast"> {
   }];
 }
 
-def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
+def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
   let summary = "Reduce tensor by summing along axes";
   let description = [{
     Computes the sum of input tensor elements along the specified axes.
@@ -1643,7 +1784,7 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
   }];
 }
 
-def Hip_ReduceMaxOp : Hip_DpsOp<"reduce_max"> {
+def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
   let summary = "Reduce tensor by taking maximum along axes";
   let description = [{
     Computes the max of input tensor elements along the specified axes.
@@ -2291,7 +2432,11 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[],
   }];
 }
 
-def Hip_CumSumOp : Hip_DpsOp<"cumsum"> {
+def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
+                             /*outsAccessor=*/"Y",
+                             /*autoReify=*/1,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
   let summary = "Cumulative sum along an axis";
   let description = [{
     Computes the cumulative sum of input tensor elements along the given axis.
@@ -2327,7 +2472,12 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum"> {
   }];
 }
 
-def Hip_PadOp : Hip_DpsOp<"pad", [AttrSizedOperandSegments]> {
+def Hip_PadOp : Hip_DpsOp<"pad",
+                          /*traits=*/[AttrSizedOperandSegments],
+                          /*outsAccessor=*/"Output",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
   let summary = "Pad a tensor with constant / reflect / edge / wrap";
   let description = [{
     Pads input tensor along the axes selected by `axes` (or all axes if
@@ -2373,7 +2523,11 @@ def Hip_PadOp : Hip_DpsOp<"pad", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Hip_TileOp : Hip_DpsOp<"tile"> {
+def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
+                           /*outsAccessor=*/"Output",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Tile a tensor by repeating along each dimension";
   let description = [{
     Constructs a new tensor by repeating `input` along each dimension by the
@@ -2405,7 +2559,11 @@ def Hip_TileOp : Hip_DpsOp<"tile"> {
   }];
 }
 
-def Hip_ExpandOp : Hip_DpsOp<"expand"> {
+def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/1,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
   let summary = "Broadcast a tensor to a target shape";
   let description = [{
     Broadcasts `input` to the target `shape` following NumPy broadcast rules.
@@ -2438,7 +2596,7 @@ def Hip_ExpandOp : Hip_DpsOp<"expand"> {
   }];
 }
 
-def Hip_ReduceProdOp : Hip_DpsOp<"reduce_prod"> {
+def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
   let summary = "Reduce tensor by multiplying elements along axes";
   let description = [{
     Computes the product of input tensor elements along the specified axes.
@@ -2473,7 +2631,7 @@ def Hip_ReduceProdOp : Hip_DpsOp<"reduce_prod"> {
   }];
 }
 
-def Hip_LessOp : Hip_DpsOp<"less"> {
+def Hip_LessOp : Hip_DpsOp_Broadcast<"less", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Element-wise less-than comparison: c = (a < b)";
   let description = [{
     Compares two input tensors element-wise. Output is a boolean tensor (i1)
@@ -2504,7 +2662,12 @@ def Hip_LessOp : Hip_DpsOp<"less"> {
   }];
 }
 
-def Hip_SliceOp : Hip_DpsOp<"slice", [AttrSizedOperandSegments]> {
+def Hip_SliceOp : Hip_DpsOp<"slice",
+                            /*traits=*/[AttrSizedOperandSegments],
+                            /*outsAccessor=*/"Output",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
   let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";
   let description = [{
     Native fallback for ONNX Slice when the OnnxToHip pass cannot decompose
@@ -2558,7 +2721,11 @@ def Hip_SliceOp : Hip_DpsOp<"slice", [AttrSizedOperandSegments]> {
   }];
 }
 
-def Hip_GatherNDOp : Hip_DpsOp<"gather_nd"> {
+def Hip_GatherNDOp : Hip_DpsOp<"gather_nd", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/0,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
   let summary = "GatherND: gather slices using N-D index tuples";
   let description = [{
     Gathers slices of `data` indexed by the trailing dimension of `indices`.
@@ -2594,7 +2761,11 @@ def Hip_GatherNDOp : Hip_DpsOp<"gather_nd"> {
   }];
 }
 
-def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd"> {
+def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
   let summary = "ScatterND: scatter updates into a data tensor using N-D index tuples";
   let description = [{
     Implements the standard ONNX ScatterND operator: produce an `output`
@@ -2649,7 +2820,11 @@ def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd"> {
   }];
 }
 
-def Hip_SignOp : Hip_DpsOp<"sign"> {
+def Hip_SignOp : Hip_DpsOp<"sign", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Element-wise sign: y = sign(x)";
   let description = [{
     Computes the element-wise sign of the input. Returns +1 / 0 / -1 for
@@ -2680,7 +2855,7 @@ def Hip_SignOp : Hip_DpsOp<"sign"> {
   }];
 }
 
-def Hip_ModOp : Hip_DpsOp<"mod"> {
+def Hip_ModOp : Hip_DpsOp_Broadcast<"mod", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Element-wise modulo / fmod operation";
   let description = [{
     Performs element-wise binary modulo. Implements the standard ONNX Mod
@@ -2715,7 +2890,11 @@ def Hip_ModOp : Hip_DpsOp<"mod"> {
   }];
 }
 
-def Hip_SizeOp : Hip_DpsOp<"size"> {
+def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
   let summary = "Total element count of a tensor (ONNX Size, dynamic-shape path)";
   let description = [{
     Implements the runtime path of the standard ONNX Size operator
