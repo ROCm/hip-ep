@@ -22,6 +22,8 @@ public:
   virtual Status set_device(int device_id) = 0;
   virtual Status malloc(void **ptr, std::size_t size) = 0;
   virtual Status free(void *ptr) = 0;
+  virtual Status host_mapped_malloc(void **ptr, std::size_t size) = 0;
+  virtual Status host_mapped_free(void *ptr) = 0;
   virtual Status memset_async(void *ptr, int value, std::size_t size,
                               stream_t stream) = 0;
 };

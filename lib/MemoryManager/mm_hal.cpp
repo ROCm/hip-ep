@@ -35,6 +35,14 @@ public:
 
   Status free(void *ptr) override { return hip_error_to_status(hipFree(ptr)); }
 
+  Status host_mapped_malloc(void **ptr, std::size_t size) override {
+    return hip_error_to_status(hipHostMalloc(ptr, size, hipHostMallocMapped));
+  }
+
+  Status host_mapped_free(void *ptr) override {
+    return hip_error_to_status(hipHostFree(ptr));
+  }
+
   Status memset_async(void *ptr, int value, std::size_t size,
                       stream_t stream) override {
     return hip_error_to_status(

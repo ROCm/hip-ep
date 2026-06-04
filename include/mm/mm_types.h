@@ -34,7 +34,8 @@ enum class MemoryClass : std::uint8_t {
   Weight = 1,
   Activation = 2,
   KvCache = 3,
-  Scratch = 4
+  Scratch = 4,
+  HostMapped = 5
 };
 
 enum class Lifetime : std::uint8_t {

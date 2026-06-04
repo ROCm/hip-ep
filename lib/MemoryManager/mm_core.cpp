@@ -108,7 +108,10 @@ void shutdown() {
         info.mem_class == MemoryClass::Activation) {
       return;
     }
-    (void)g_state.hal->free(info.ptr);
+    if (info.mem_class == MemoryClass::HostMapped)
+      (void)g_state.hal->host_mapped_free(info.ptr);
+    else
+      (void)g_state.hal->free(info.ptr);
   });
   g_state.handles.clear();
   g_state.total_allocated.store(0, std::memory_order_relaxed);
@@ -148,6 +151,12 @@ handle_t alloc(std::size_t size_bytes, const AllocHints *hints) {
       ptr = arena_alloc.ptr;
       reserved_size = arena_alloc.reserved_size;
     }
+  }
+
+  if (!ptr && local_hints.mem_class == MemoryClass::HostMapped) {
+    Status st = g_state.hal->host_mapped_malloc(&ptr, reserved_size);
+    if (st != Status::Ok || !ptr)
+      return kInvalidHandle;
   }
 
   if (!ptr) {
@@ -196,6 +205,10 @@ Status free(handle_t handle) {
   Status st = Status::Ok;
   if (info.mem_class == MemoryClass::Activation) {
     g_state.activation.release(info.ptr, g_state.hal);
+  } else if (info.mem_class == MemoryClass::HostMapped) {
+    st = g_state.hal->host_mapped_free(info.ptr);
+    if (st != Status::Ok)
+      return st;
   } else {
     st = g_state.hal->free(info.ptr);
     if (st != Status::Ok)
