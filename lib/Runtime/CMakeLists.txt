@@ -401,7 +401,6 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/runtime_clip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_config.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_hal.bc
