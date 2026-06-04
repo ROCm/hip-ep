@@ -108,21 +108,26 @@ if(BUILD_HIP_TOOLS)
     find_package(flatbuffers REQUIRED CONFIG)
   endif()
 
-  # cpptrace for crash backtraces
-  include(FetchContent)
-  set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
-  set(BUILD_SHARED_LIBS OFF)
-  if(WIN32)
-    set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
-    set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
+  # cpptrace for crash backtraces. When BUILD_EP=ON, cmake/deps.cmake already
+  # declared it (pinned from cmake/deps.txt) -- skip here to avoid a redundant
+  # declaration. Only the standalone tools build (BUILD_EP=OFF) falls through;
+  # deps.txt is not parsed in that path, so the version is pinned inline.
+  if(NOT TARGET cpptrace::cpptrace)
+    include(FetchContent)
+    set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
+    set(BUILD_SHARED_LIBS OFF)
+    if(WIN32)
+      set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
+      set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
+    endif()
+    FetchContent_Declare(
+      cpptrace
+      GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+      GIT_TAG v0.8.3
+    )
+    FetchContent_MakeAvailable(cpptrace)
+    set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
   endif()
-  FetchContent_Declare(
-    cpptrace
-    GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
-    GIT_TAG v0.8.3
-  )
-  FetchContent_MakeAvailable(cpptrace)
-  set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
