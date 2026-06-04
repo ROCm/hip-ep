@@ -50,10 +50,10 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 //                     hand-written body in `HipReifyResultShapesImpl.cpp`.
 //                     Examples: matmul (recomputes M/N from input
 //                     operands); rope, rms_norm, qmoe (source dims
-//                     from `$input` so refinement propagates from
-//                     upstream rather than freezing at the destination
-//                     buffer's allocation-time shape); matmul_nbits,
-//                     gemm (mixed input + attribute dims).
+//                     from `$input` so refinement tracks the operand's
+//                     runtime shape rather than freezing at the
+//                     destination buffer's allocation-time shape);
+//                     matmul_nbits, gemm (mixed input + attribute dims).
 //   `autoInfer`     : when 1, emit a per-op `inferReturnTypes` that
 //                     pushes the outs operand's tensor type into
 //                     `results` (or pushes nothing for memref mode, so
