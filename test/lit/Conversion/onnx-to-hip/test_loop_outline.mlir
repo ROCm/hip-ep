@@ -184,7 +184,9 @@ module {
 // synthesizes `arith.constant true : i1` for hip.loop's cond_init and
 // forces `cond_is_passthrough` -- the LLVM lowering then picks the fast
 // path `hipdnn_ep_run_counted_loop`, identical to a dynamically-detected
-// passthrough case.  Matches Qwen3.5 vision encoder loop topology.
+// passthrough case.  Matches the canonical HF vision-encoder counted-
+// attention-loop topology (Loop with no cond_init, fixed trip count
+// from the encoder depth, body is one iter of attention).
 module {
   func.func @main_graph_no_cond(%A: tensor<16xf32>, %B: tensor<16xf32>) -> tensor<16xf32> {
     %M = "onnx.Constant"() {value = dense<4> : tensor<i64>} : () -> tensor<i64>
@@ -279,11 +281,13 @@ module {
 //
 // Source pattern lifted from a real HF vision-encoder ONNX export with
 // an `onnx.Loop` whose body terminates in a Concat of the v_carry
-// block arg and a captured rank-3 tensor. ONNX protobuf shape
-// inference does not recurse into Loop body regions, so the importer
-// emits `tensor<*xf16>` (unranked) for the body block arg. The
-// `onnx.Loop`'s declared result type, by contrast, mirrors the v_init
-// operand fed in from the outer graph (rank-3 dynamic).
+// block arg and a captured rank-3 tensor. The importer's shape
+// inference has no per-iter rank for the body block arg (no caller
+// has visited the loop yet at import time), so it emits
+// `tensor<*xf16>` (unranked) for that arg and for every body-internal
+// value derived from it. The `onnx.Loop`'s declared result type, by
+// contrast, mirrors the v_init operand fed in from the outer graph
+// (rank-3 dynamic).
 //
 // Pre-fix, OnnxLoopOutlinePass took `loopOp->getResultTypes()`
 // verbatim for hip.loop's result types when the source onnx.Loop's
