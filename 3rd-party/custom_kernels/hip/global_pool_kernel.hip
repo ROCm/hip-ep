@@ -69,6 +69,8 @@ template <> __device__ inline double from_float<double>(float v) {
 // Per-mode reduction primitives.
 
 template <int MODE> __device__ inline float pool_init() {
+  // -INFINITY is the HIP/CUDA-portable idiom; std::numeric_limits<float>::
+  // infinity() is __host__-only and would fail to compile in __device__ code.
   if constexpr (MODE == kModeMax)
     return -INFINITY;
   return 0.0f;
