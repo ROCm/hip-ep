@@ -159,6 +159,31 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO) {
         return false;
       continue;
     }
+    // memref.copy reads/writes the buffer but produces NO aliasing result, so
+    // it is a terminal use. A tiny host-staged scalar/shape buffer copied
+    // to/from another buffer is host-mapping-safe: the runtime memrefCopy
+    // lowering issues hipMemcpyAsync, which accepts host-mapped (UMA) operands
+    // just as it accepts pool ones. The canonical site is the bufferized
+    // Concat/insert_slice that stages grid-dim scalars into a shape vector
+    // (vision rope `ReduceMax -> Reshape -> Gather -> Range` arithmetic): each
+    // scalar slot is filled via `memref.copy <scalar-view>, <shape-subview>`.
+    // It does NOT by itself flag host I/O (memref.copy is a stream op, not a
+    // host store), so a buffer used ONLY by hip ops + memref.copy stays in the
+    // GPU pool where it belongs.
+    if (isa<memref::CopyOp>(user))
+      continue;
+    // memref.reshape(%src, %shape) -> result aliases %src's data; %shape is
+    // read as the shape vector. If our value is the source, recurse into the
+    // aliasing result (its users determine safety). If our value is the shape
+    // operand, the reshape just reads our (host-staged) shape buffer — a
+    // terminal, host-mapping-safe use — so accept without recursing (the
+    // result aliases %src, not us).
+    if (auto reshape = dyn_cast<memref::ReshapeOp>(user)) {
+      if (reshape.getSource() == memrefVal &&
+          !classifyHostScalarUsers(reshape.getResult(), sawHostIO))
+        return false;
+      continue;
+    }
     return false;
   }
   return true;

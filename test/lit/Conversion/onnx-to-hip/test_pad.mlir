@@ -84,9 +84,13 @@ module {
   // CHECK: tensor.empty(%[[OUT0]]) : tensor<?x6xf32>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
 
-  // Dynamic output dims with a non-constant `pads` (function arg):
-  // the per-axis padding amounts are extracted at runtime via
-  // tensor.extract + arith.index_cast.
+  // Dynamic output dims with a non-constant `pads` (function arg): the
+  // per-axis padding amounts are read on the HOST through a synchronized
+  // hip.readback_scalar (extract_slice -> collapse_shape -> readback_scalar ->
+  // index_cast), NOT a bare tensor.extract. A bare extract bufferizes to an
+  // unsynchronized host load of the device-resident pads buffer and SEGVs when
+  // `pads` is an externalized constant on a true-device-memory target -- see
+  // PadConversion.cpp's extractAsIndex.
   func.func @pad_dyn_output_dyn_pads(%data: tensor<?x?xf32>, %pads: tensor<4xi64>) -> tensor<?x?xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
     %r = "onnx.Pad"(%data, %pads, %none, %none) {mode = "constant"} : (tensor<?x?xf32>, tensor<4xi64>, none, none) -> tensor<?x?xf32>
@@ -95,13 +99,11 @@ module {
 
   // CHECK-LABEL: func.func @pad_dyn_output_dyn_pads
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x?xf32>, %[[P:.*]]: tensor<4xi64>)
-  // For each dynamic output dim we should see:
-  //   tensor.dim(data) + index_cast(extract pads) + index_cast(extract pads)
-  // The exact order is implementation-defined, so just assert that
-  // both axes were visited and that the muli/addi chain feeds tensor.empty.
-  // CHECK: tensor.extract %[[P]]{{\[}}%{{.*}}{{\]}} : tensor<4xi64>
-  // CHECK: arith.index_cast %{{.*}} : i64 to index
-  // CHECK: tensor.extract %[[P]]{{\[}}%{{.*}}{{\]}} : tensor<4xi64>
+  // Each padded axis's two pad entries are read via the synchronized readback
+  // path; the index_cast results feed the addi chain into tensor.empty.
+  // CHECK: tensor.extract_slice %[[P]]
+  // CHECK: tensor.collapse_shape
+  // CHECK: hip.readback_scalar(%[[CTX]], %{{.*}} : tensor<i64>) -> i64
   // CHECK: arith.index_cast %{{.*}} : i64 to index
   // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
   // CHECK: hip.pad
