@@ -48,7 +48,6 @@ jobs:
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: "28608"
       GTEST_VERSION: "1.15.0"
-      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       SCCACHE_GHA_ENABLED: "true"
       OGA_REPO: AMDmoore/onnxruntime-genai
       OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
@@ -116,20 +115,11 @@ jobs:
       # pulled when unit tests are enabled (morphizen_ENABLE_UNIT_TEST=OFF here).
 
       # -----------------------------------------------------------------------
-      # TheRock HIP SDK: downloaded fresh every run (not cached). The tarball
-      # is large and would eat into the 10 GB repo cache budget needed by the
-      # source-built dep caches above; the AMD CDN download is fast enough.
+      # TheRock HIP SDK is NOT downloaded explicitly here: with no -DTHEROCK_DIST
+      # passed to Configure, cmake/deps.cmake auto-downloads + extracts it into
+      # the build tree (<build>/_therock) during configure. This exercises the
+      # default auto-download path in CI. (gpu-test downloads TheRock itself.)
       # -----------------------------------------------------------------------
-      - name: Download & extract TheRock
-        shell: bash
-        run: |
-          THEROCK_DIST="$(cygpath -u '${{ runner.workspace }}/therock-dist')"
-          mkdir -p "$THEROCK_DIST"
-          curl -fsSL \
-            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" \
-            -o therock.tar.gz
-          tar -xzf therock.tar.gz -C "$THEROCK_DIST" --strip-components=1
-          rm therock.tar.gz
 
       # -----------------------------------------------------------------------
       # llvm-lit.py (from prebuilt) requires the lit pip package at runtime.
@@ -316,7 +306,6 @@ jobs:
             "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/install" \
             -DBUILD_EP=ON \
             -DBUILD_HIP_TOOLS=ON \
-            "-DTHEROCK_DIST=${{ runner.workspace }}/therock-dist" \
             -DHIP_ARCHITECTURES=gfx1151 \
             -Dmorphizen_ENABLE_UNIT_TEST=OFF \
             -DBUILD_MOCK_RUNTIME=OFF \
@@ -443,8 +432,10 @@ jobs:
           # gpu-test job can restore them at the expected location.
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
-          # amdhip64_7.dll – HIP runtime required at inference time
-          cp "${{ runner.workspace }}/therock-dist/bin/amdhip64_7.dll" staging/bin/
+          # amdhip64_7.dll – HIP runtime required at inference time. TheRock was
+          # auto-downloaded by cmake/deps.cmake into the build tree's _therock.
+          THEROCK_DIR="../build/$(basename "$PWD")/_therock"
+          cp "$THEROCK_DIR/bin/amdhip64_7.dll" staging/bin/
 
           # MorphiZen EP config
           cp etc/morphizen_config.json staging/
