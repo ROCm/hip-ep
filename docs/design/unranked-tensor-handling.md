@@ -14,6 +14,20 @@ from comments in `lib/Conversion/OnnxToHip/LoopOutline.cpp`,
 `include/hip/InitAllPasses.h`, and
 `lib/Dialect/Transforms/Pipelines.cpp`.
 
+> **TODO (in-flight)**: the importer-side half of this contract ships
+> in [MorphiZen PR #228](https://github.com/ROCm/MorphiZen/pull/228).
+> Until that PR is merged and the `3rd-party/morphizen` submodule is
+> bumped past the merge, the importer in this repo still emits
+> `tensor<>` (rank-0) for values whose shape it could not derive,
+> not `tensor<*xT>`. The EP-side cleanup (deletion of
+> `--onnx-infer-shapes` and `RefineOnnxResultType`) has been done in
+> anticipation of #228, but Loop-heavy models (any `onnx.Loop` body
+> containing rank-aware ops like `onnx.Concat` / `onnx.Add`) will
+> fail conversion until the bump lands. When the submodule is
+> bumped: re-run the in-tree LIT suite plus the Python perf tests
+> on at least one Loop-heavy model end-to-end, then delete this
+> note.
+
 ## The problem we are solving
 
 ONNX's protobuf `TensorShapeProto` distinguishes three states:
@@ -24,10 +38,13 @@ ONNX's protobuf `TensorShapeProto` distinguishes three states:
 | `shape: {}` (empty repeated field) | Rank-0 scalar. |
 | No `shape` field at all | Unknown rank. |
 
-ONNX shape inference does not recurse into `Loop` / `If` / `Scan` body
-subgraphs by default. A real HuggingFace export (e.g. Qwen3.5-9B
-vision encoder) ships hundreds of body-internal values that fall into
-the third bucket — "unknown rank."
+In practice, real HuggingFace exports of vision encoders / text
+encoders that contain a counted attention loop (an `onnx.Loop` whose
+body is the per-token / per-step attention block) ship hundreds of
+body-internal values in the third bucket — "unknown rank" — because
+the importer-side shape-inference step has no per-iteration rank to
+assign to the body block args, and the inference walk inside the body
+fans out from those unranked roots.
 
 MLIR's tensor types distinguish two states:
 
@@ -98,19 +115,30 @@ ort-bridge): preserve unranked tensors at the ORT boundary`).
 ## Pipeline ordering
 
 ```
-              [importer side]                        [EP side]
-ONNX file → ort-bridge → mlir-imp → MLIR module → onnx-to-hip pipeline
+              [importer side]                       [EP side]
+ONNX file → ort-bridge → mlir-imp → MLIR module → onnx-to-hip-pipeline
                                        (with        ├─ simplify-onnx
                                         tensor<*x>  ├─ hip-add-context-arg
                                         for unknown ├─ onnx-loop-outline
                                         ranks)      ├─ convert-onnx-to-hip
-                                                    └─ hip-to-llvm
-                                                       (incl. hip-infer-shapes)
+                                                    │  (tail:)
+                                                    ├─ hip-infer-shapes  ← single refinement
+                                                    ├─ one-shot-bufferize
+                                                    ├─ buffer-deallocation
+                                                    ├─ hip-optimize-memrefs
+                                                    ├─ hip-pool-allocs
+                                                    └─ ...
+                                                  → hip-to-llvm-pipeline
+                                                    ├─ expand-strided-metadata
+                                                    ├─ lower-affine
+                                                    ├─ convert-hip-to-llvm
+                                                    └─ generate-interface
 ```
 
 The single refinement step on the EP side is `--hip-infer-shapes`,
-which runs once after conversion. There is no per-dialect ONNX-level
-inference pass.
+which runs once at the head of the ONNX-to-HIP pipeline tail
+(immediately after `--convert-onnx-to-hip`, before bufferize). There
+is no per-dialect ONNX-level inference pass.
 
 ## Why we don't run ONNX shape inference in the EP
 
