@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -12,6 +13,8 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
+
+#include "hip/Dialect/IR/HipShapeUtils.h"
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -395,6 +398,43 @@ void MatmulOp::getEffects(
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
+
+/// Read the shape of `v` if it is a `RankedTensorType` or `MemRefType`;
+/// returns an empty ArrayRef otherwise (caller must guard against this with
+/// `verifyDpsComputeOp`, which already rejects non-shaped data operands).
+static ArrayRef<int64_t> getShapeOf(Value v) {
+  if (auto t = dyn_cast<RankedTensorType>(v.getType()))
+    return t.getShape();
+  if (auto m = dyn_cast<MemRefType>(v.getType()))
+    return m.getShape();
+  return {};
+}
+
+LogicalResult MatmulOp::verify() {
+  // First the cross-cutting DPS contract (all-tensor-or-all-memref +
+  // result-count parity); failures here also rule out bogus operand types,
+  // so the matmul shape check below can rely on getShapeOf().
+  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  // Static shape check via the shared matmul helper. The lambda is
+  // invoked once; it returns `{outputShape}` on success or `{}` on shape
+  // mismatch (in which case it has already issued a diagnostic on `*this`).
+  return mlir::hip::verifyHipOpShape(
+      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
+        SmallVector<int64_t> outShape =
+            mlir::hip::inferMatmulShape(getShapeOf(getA()), getShapeOf(getB()),
+                                        [&]() { return this->emitOpError(); });
+        if (outShape.empty())
+          return {};
+        return {std::move(outShape)};
+      });
+}
+
+// `MatmulOp::reifyResultShapes` lives in
+// `lib/Dialect/IR/HipReifyResultShapesImpl.cpp`. See the header banner in
+// that file and `docs/design/hip-shape-inference.md` for the rationale.
 
 //===----------------------------------------------------------------------===//
 // RmsNormOp: ins(input, scale), outs(output)
