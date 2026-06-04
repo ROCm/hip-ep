@@ -137,12 +137,15 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // get the same treatment as ops in main_graph (constant lowering, op
   // mapping, etc.) -- the conversion pass already iterates all func.func
   // ops in the module.
+  //
+  // ONNX-side shape refinement is intentionally NOT done here. The
+  // importer is responsible for emitting `tensor<*xT>` (unranked) for
+  // values whose shape it does not know, and `tensor<>` (rank-0) only
+  // for genuine scalars. Any unranked tensors that survive into the
+  // HIP dialect are refined post-conversion by `--hip-infer-shapes`
+  // via `ReifyRankedShapedTypeOpInterface`. See
+  // `docs/design/unranked-tensor-handling.md` for the full contract.
   pm.addPass(createOnnxLoopOutlinePass());
-
-  // Refine rank-0 placeholder result types on outlined-body `onnx.*` ops
-  // before the convert pass walks them.  See OnnxInferShapesPass.cpp for
-  // why ONNX protobuf shape inference cannot do this on its own.
-  pm.addPass(createOnnxInferShapesPass());
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
@@ -166,7 +169,6 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
   pm.addPass(createOnnxLoopOutlinePass());
-  pm.addPass(createOnnxInferShapesPass());
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());

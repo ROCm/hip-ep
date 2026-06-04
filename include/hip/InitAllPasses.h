@@ -29,9 +29,13 @@ namespace hip::compiler {
 namespace detail {
 /// Minimal ONNX dialect stub that claims the "onnx" namespace and
 /// permits unknown operations, avoiding a dependency on the full
-/// onnx-mlir library. `onnx.*` op shape refinement is handled by the
-/// standalone `--onnx-infer-shapes` pass (op-name-keyed rules
-/// dispatch); no OpInterface is attached to this dialect.
+/// onnx-mlir library. The importer is responsible for emitting
+/// `tensor<*xT>` (unranked) for values whose shape it does not know;
+/// any unranked tensors that survive into the HIP dialect are refined
+/// post-conversion by `--hip-infer-shapes` via
+/// `ReifyRankedShapedTypeOpInterface`. See
+/// `docs/design/unranked-tensor-handling.md` for the cross-repo
+/// contract.
 class OnnxStubDialect : public mlir::Dialect {
 public:
   explicit OnnxStubDialect(mlir::MLIRContext *ctx)

@@ -335,28 +335,6 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   ];
 }
 
-def OnnxInferShapesPass : Pass<"onnx-infer-shapes", "mlir::ModuleOp"> {
-  let summary = "Refine `onnx.*` op result types from operand types";
-  let description = [{
-    Walks every `func.func` in the module, refines each `onnx.*` op's
-    rank-0 / under-refined result types using a per-op-name rules
-    library, and syncs each function's declared return types from its
-    terminator's operand types. Idempotent and a no-op when no
-    refinement is possible -- safe to run unconditionally.
-
-    Pipeline placement (set in `Pipelines.cpp::buildOnnxToHipPipeline`):
-      simplify-onnx -> hip-add-context-arg -> onnx-loop-outline ->
-      *onnx-infer-shapes* -> convert-onnx-to-hip -> hip-infer-shapes
-
-    See `lib/Conversion/OnnxToHip/OnnxInferShapesPass.cpp` for the full
-    rationale and an IR example, and `RefineOnnxResultType.h` for the
-    rules-library contract.
-  }];
-  let dependentDialects = [
-    "mlir::func::FuncDialect"
-  ];
-}
-
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
   let summary = "Replace extern memref.global constants with "
