@@ -75,11 +75,14 @@ BENCHMARK = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\oga-source
 DEFAULT_ARGV = [
     "-i", r"C:\Users\Administrator\Downloads\Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu",
     "--image_path", r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\test\python\images\tower.jpg",
-    "-g", "4",
-    "-m", "512",
-    "-r", "1",
+    "-g", "64",
+    "-m", "2048",
+    "-r", "10",
     "-w", "1",
+    "-k", "1",
+    "-p", "1.0",
     "-v",
+    "-mo",
 ]
 
 # ---------------------------------------------------------------------------
