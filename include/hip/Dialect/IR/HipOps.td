@@ -299,6 +299,67 @@ def Hip_ConvOp : Hip_DpsOp<"conv"> {
   }];
 }
 
+def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
+  let summary = "2D transposed convolution / deconvolution using MIOpen "
+                "(in-place)";
+  let description = [{
+    Performs 2D transposed convolution (a.k.a. deconvolution) using MIOpen's
+    `miopenTranspose` convolution mode (`miopenConvolutionForward` with a
+    transpose-mode descriptor).
+
+    Uses destination-passing style: output buffer is provided as argument,
+    operation writes result in-place.
+
+    Tensor layouts (NCHW), matching ONNX ConvTranspose:
+    - input:  [N, C, H, W]            (C = input channels)
+    - weights:[C, M/group, kH, kW]    (note: input channels come first, unlike
+                                       the forward Conv weight layout [M, C, ...])
+    - bias:   [M]                     (optional)
+    - output: [N, M, H', W']          (M = weights.dim(1) * group)
+
+    Attributes:
+    - kernel_shape:    Array of kernel dimensions [kH, kW]
+    - strides:         Array of stride values [sH, sW]
+    - pads:            Array of padding values [top, left, bottom, right]
+    - dilations:       Array of dilation values [dH, dW]
+    - output_padding:  Array of extra output padding [oH, oW] (ONNX "adjs")
+    - group:           Number of groups for grouped transposed convolution
+
+    Example:
+    ```mlir
+    hip.conv_transpose(%ctx) ins(%input, %weights, %bias :
+                       memref<1x1x3x3xf32, 1>,
+                       memref<1x2x3x3xf32, 1>,
+                       memref<2xf32, 1>)
+                   outs(%output : memref<1x2x5x5xf32, 1>)
+                   {kernel_shape = [3, 3], strides = [1, 1],
+                    pads = [0, 0, 0, 0], dilations = [1, 1],
+                    output_padding = [0, 0], group = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weights,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64ArrayAttr:$output_padding,
+    I64Attr:$group
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
+    type($input) `,` type($weights) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^ )?
+  }];
+}
+
 // ===== hipBLASLt ops =========================================================
 
 def Hip_MatmulOp : Hip_DpsOp<"matmul"> {

@@ -46,6 +46,8 @@ inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
+inline constexpr const char *kMiopenConvolutionTranspose =
+    "wrap_miopenConvolutionTranspose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
 inline constexpr const char *kWrapMiopenT5LayerNormForward =
     "wrap_miopenT5LayerNormForward";
@@ -340,6 +342,8 @@ void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateConvLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateConvTransposeLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
