@@ -487,16 +487,18 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       return success();
     }
 
-    // Pitched 2D copy: last dim contiguous (stride 1), collapse leading dims.
-    // Destination must be dense row-major (typical output buffer); source may
-    // be a strided view into a parent allocation.
+    // Pitched 2D copy: last dim contiguous (stride 1) on BOTH sides, and a
+    // common contiguous suffix exists (computed below as splitDim). Either
+    // side may be a strided subview into a parent allocation — the canonical
+    // case is Concat / insert_slice, which bufferizes to a memref.subview on
+    // the destination side: the slice's outer strides inherit the parent's
+    // (larger) pitch, while the inner suffix [axis..rank-1] is still
+    // contiguous. The splitDim finder + outer-collapse loop below cover both
+    // src-strided and dst-strided shapes, so we do NOT require either side
+    // to be dense row-major here.
     if (rank < 2)
       return rewriter.notifyMatchFailure(
           op, "rank-1 non-uniform stride needs different lowering");
-
-    if (!strideVectorsEqual(dstStrides, ArrayRef<int64_t>(*denseStridesOr)))
-      return rewriter.notifyMatchFailure(
-          op, "expect dense row-major destination for pitched copy");
 
     if (srcStrides[static_cast<unsigned>(rank - 1)] != 1 ||
         dstStrides[static_cast<unsigned>(rank - 1)] != 1)
