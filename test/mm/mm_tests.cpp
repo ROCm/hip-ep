@@ -63,6 +63,30 @@ TEST(MemoryManagerTest, ActivationArenaReusesBlocks) {
   mm::shutdown();
 }
 
+TEST(MemoryManagerTest, HostMappedAllocFree) {
+  mm::Config cfg = make_config();
+  ASSERT_EQ(mm::init(&cfg), mm::Status::Ok);
+
+  mm::AllocHints hints;
+  hints.mem_class = mm::MemoryClass::HostMapped;
+  mm::handle_t handle = mm::alloc(4096, &hints);
+  ASSERT_NE(handle, mm::kInvalidHandle);
+  void *ptr = mm::get_ptr(handle);
+  EXPECT_NE(ptr, nullptr);
+
+  mm::AllocInfo info;
+  ASSERT_EQ(mm::query(handle, &info), mm::Status::Ok);
+  EXPECT_EQ(info.mem_class, mm::MemoryClass::HostMapped);
+
+  EXPECT_EQ(mm::free(handle), mm::Status::Ok);
+
+  auto snap = mm::metrics_snapshot();
+  EXPECT_EQ(snap.alloc_count, 1u);
+  EXPECT_EQ(snap.free_count, 1u);
+
+  mm::shutdown();
+}
+
 TEST(MemoryManagerTest, KvAllocForkAndFree) {
   mm::Config cfg = make_config();
   ASSERT_EQ(mm::init(&cfg), mm::Status::Ok);

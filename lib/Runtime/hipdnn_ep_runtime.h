@@ -208,6 +208,10 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // Used by hip.get_pool lowering in generated compute kernels
 void *hipdnn_ep_get_pool_base(RuntimeState *state);
 
+// Host-mapped scratch for tiny host-fed scalars (hip-materialize-host-scalars).
+// Grow-on-demand; allocated via MM with MemoryClass::HostMapped.
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
+
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
