@@ -17,6 +17,15 @@ add_dependencies(HipDialectIR
   HipOpsIncGen
 )
 
+# HipDialect.cpp pulls in the TableGen-generated op definitions for every Hip op
+# (each now carrying the DPS/reify/infer interface bodies). With the conv1d op
+# added on top of the shape-inference cascade, the single translation unit
+# exceeds MSVC's default COFF section limit (fatal error C1128). /bigobj raises
+# it. No-op on non-MSVC compilers.
+if(MSVC)
+  target_compile_options(HipDialectIR PRIVATE /bigobj)
+endif()
+
 target_link_libraries(HipDialectIR PUBLIC
   MLIRIR
   MLIRSupport

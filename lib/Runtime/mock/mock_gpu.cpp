@@ -476,6 +476,34 @@ int wrap_miopenConvolutionForward(
   return 0;
 }
 
+int wrap_conv1d(RuntimeState *state, const void *input, const void *weights,
+                const void *bias, void *output, int64_t N, int64_t Cin,
+                int64_t Lin, int64_t Cout, int64_t K, int64_t stride,
+                int64_t pad, int64_t element_size_bytes) {
+  if (!state || !input || !weights || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_conv1d\n");
+    return -1;
+  }
+
+  const int64_t Lout = (Lin + 2 * pad - K) / stride + 1;
+  MOCK_PRINT("[MOCK] wrap_conv1d(\n");
+  MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld],\n", (long long)N, (long long)Cin,
+             (long long)Lin);
+  MOCK_PRINT("[MOCK]   weights=[%lld,%lld,%lld],\n", (long long)Cout,
+             (long long)Cin, (long long)K);
+  MOCK_PRINT("[MOCK]   output=[%lld,%lld,%lld],\n", (long long)N,
+             (long long)Cout, (long long)Lout);
+  MOCK_PRINT("[MOCK]   stride=%lld, pad=%lld, bias=%s, elem=%lld)\n",
+             (long long)stride, (long long)pad, bias ? "yes" : "null",
+             (long long)element_size_bytes);
+
+  // Mock: fill output with zeros (real impl dispatches to MIOpen 4D conv).
+  size_t output_bytes =
+      (size_t)N * (size_t)Cout * (size_t)Lout * (size_t)element_size_bytes;
+  memset(output, 0, output_bytes);
+  return 0;
+}
+
 int wrap_causal_conv_with_state(
     RuntimeState *state, const void *input, const void *weight,
     const void *bias, const void *past_state, void *output, void *present_state,

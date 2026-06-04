@@ -232,6 +232,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
+  state->conv_scratch = nullptr;
+  state->conv_scratch_size = 0;
   state->gqa_gemm_cache = nullptr;
   state->mha_gemm_cache = nullptr;
   state->causal_conv_cache = nullptr;
@@ -981,6 +983,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
   }
 
+  // Free wrap_conv1d MIOpen workspace pool (if allocated). The stream
+  // sync above has drained any in-flight conv that may still be reading it.
+  if (state->conv_scratch) {
+    HIP_CLEANUP(hipFree(state->conv_scratch));
+  }
+
   // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
   // allocated). The stream sync at the top of cleanup has already drained
   // any in-flight kernel that may have been holding loop_*_dev pointers,
@@ -1560,6 +1568,54 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
     return -1;
   }
   state->qmoe_host_scratch_size = alloc_size;
+  return 0;
+}
+
+// wrap_conv1d MIOpen workspace pool. Same grow-on-demand policy as qmoe_scratch
+// above. Single-buffer reuse is safe because the stream is serialised: the
+// next conv only launches after the previous miopenConvolutionForward (+ bias
+// add) has consumed the workspace.
+void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state) {
+  return state ? state->conv_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
+                                        size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->conv_scratch_size >= needed_size)
+    return 0;
+
+  // 1.5x growth amortisation mirrors workspace / qmoe_scratch.
+  size_t alloc_size = needed_size;
+  if (state->conv_scratch_size > 0) {
+    size_t grown = state->conv_scratch_size + state->conv_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->conv_scratch) {
+    // Drain any in-flight conv that may still be reading the old workspace
+    // before we free it. Growth is rare (only on first call per new shape)
+    // so the sync cost is amortised away.
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->conv_scratch));
+    state->conv_scratch = nullptr;
+    state->conv_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->conv_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
+            "bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->conv_scratch_size = alloc_size;
   return 0;
 }
 
