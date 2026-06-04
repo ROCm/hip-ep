@@ -212,6 +212,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   // HIP dialect-specific lowerings
   populateMemoryLoweringPatterns(typeConverter, patterns);
   populateConvLoweringPatterns(typeConverter, patterns);
+  populateConvTransposeLoweringPatterns(typeConverter, patterns);
   populateMatmulLoweringPatterns(typeConverter, patterns);
   populateElementwiseLoweringPatterns(typeConverter, patterns);
   populatePowerLoweringPatterns(typeConverter, patterns);

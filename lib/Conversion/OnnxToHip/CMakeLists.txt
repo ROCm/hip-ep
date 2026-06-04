@@ -17,6 +17,7 @@ add_library(OnnxToHip STATIC
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
   ConvConversion.cpp
+  ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
   GqaConversion.cpp
