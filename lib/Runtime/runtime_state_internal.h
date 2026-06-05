@@ -43,11 +43,24 @@ struct RuntimeState {
   void *shared_constants_mapping; // Win32 file mapping HANDLE
   void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
 
-  // Memory pooling support
-  void *pool_base;        // Single large memory pool
-  size_t pool_size;       // Total pool size in bytes
-  size_t *buffer_offsets; // Offset for each buffer in the pool
-  size_t num_buffers;     // Number of buffers in the pool
+  // Memory pooling support — multi-domain (Stage 7).
+  //
+  // hip-pool-allocs partitions a function's pooled allocs into independent
+  // dominance domains; each domain owns one contiguous GPU pool that grows on
+  // demand. Domain 0 carries the legacy single-pool semantics (eagerly sized
+  // by hipdnn_ep_pool_init using static offsets) so single-domain models are
+  // bit-identical to the pre-multi-domain runtime. Domains 1..N start empty
+  // and grow lazily on the first hipdnn_ep_get_pool_base(state, domain_id, ...)
+  // call.
+  //
+  // kMaxPoolDomains matches the cap enforced in PoolAllocs::partitionByDomain;
+  // the partition pass fails compilation before any IR is emitted that would
+  // exceed it, so this is a hard upper bound.
+  static constexpr int kMaxPoolDomains = 8;
+  void *pool_base[kMaxPoolDomains];  // Per-domain GPU pool base pointers
+  size_t pool_size[kMaxPoolDomains]; // Per-domain pool size in bytes
+  size_t *buffer_offsets;            // Offsets for static buffers in domain 0
+  size_t num_buffers;                // Static buffer count in domain 0
 
   // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.

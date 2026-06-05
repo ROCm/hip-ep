@@ -480,14 +480,18 @@ func.func @dim_from_host_scratch(
 // different dominance domains and emit two `hip.get_pool` calls — one
 // anchored above `%alloc0`, one between the load and `%alloc1`.
 //
+// Domain 0 prints with no attr-dict (default-elided). Domain 1 prints with
+// `{domain_id = 1 : i64}` so the runtime selects the right pool slot.
+//
 // CHECK-LABEL: func.func @multi_domain_two_pools
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
 // CHECK:         memref.dim %{{.*}}, %{{.*}}
 // CHECK:         %[[POOL0:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) : memref<?xi8>
+// CHECK-NOT:     domain_id
 // CHECK:         %[[V0:.*]] = memref.view %[[POOL0]]{{.*}} to memref<?x16xf32>
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[V0]] :
 // CHECK:         memref.load
-// CHECK:         %[[POOL1:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL1:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) {domain_id = 1 : i64} : memref<?xi8>
 // CHECK:         %[[V1:.*]] = memref.view %[[POOL1]]{{.*}} to memref<?x16xf32>
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[V1]] :
 // CHECK:         return %[[V1]]
@@ -512,10 +516,11 @@ func.func @multi_domain_two_pools(
 //
 // CHECK-LABEL: func.func @multi_domain_three_pools
 // CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK-NOT:     domain_id
 // CHECK:         memref.load
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}) {domain_id = 1 : i64} : memref<?xi8>
 // CHECK:         memref.load
-// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         hip.get_pool({{.*}}) {domain_id = 2 : i64} : memref<?xi8>
 // CHECK:         return
 func.func @multi_domain_three_pools(
     %ctx: !hip.context,

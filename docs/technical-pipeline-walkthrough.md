@@ -354,7 +354,7 @@ Lowers all HIP dialect ops to LLVM dialect — function calls to the EP runtime:
 | `hip.hipdnn_graph` | `hipdnn_graph_execute(ctx, graph_id, num_tensors, uids, ptrs)` | hipdnn_graph_runtime.dll |
 | `hip.matmul` | `wrap_hipblasLtMatmul(ctx, A, B, C, M, N, K, batch, elem_size)` | EP runtime (linked into model.dll) |
 | `hip.sigmoid` | `wrap_miopenActivationForward(ctx, in, out, num_elems, alpha, beta)` | EP runtime (linked into model.dll) |
-| `hip.get_pool` | `hipdnn_ep_get_pool_base(ctx, size)` | EP runtime |
+| `hip.get_pool` | `hipdnn_ep_get_pool_base(ctx, domain_id, size)` | EP runtime |
 | `hip.get_constant` | `hipdnn_ep_constant_get(ctx, index)` | EP runtime |
 
 The function signature is lowered to the C ABI with explicit memref descriptors
