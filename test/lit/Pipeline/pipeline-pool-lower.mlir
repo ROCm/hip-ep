@@ -19,7 +19,8 @@
 // CHECK-LABEL: llvm.func @static_pool_to_llvm
 // CHECK-SAME:    (%[[CTX:[a-z0-9]+]]: !llvm.ptr,
 // CHECK:         %[[POOL_SIZE:.*]] = llvm.mlir.constant(512 : index) : i64
-// CHECK:         llvm.call @hipdnn_ep_get_pool_base(%[[CTX]], %[[POOL_SIZE]]) : (!llvm.ptr, i64) -> !llvm.ptr
+// CHECK:         %[[DOM:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK:         llvm.call @hipdnn_ep_get_pool_base(%[[CTX]], %[[DOM]], %[[POOL_SIZE]]) : (!llvm.ptr, i32, i64) -> !llvm.ptr
 // CHECK:         llvm.mlir.constant(256 : index) : i64
 // CHECK:         llvm.call @wrap_hipblasLtMatmul(%[[CTX]],
 // CHECK:         llvm.call @hip_miopen_softmax(%[[CTX]],
@@ -44,7 +45,8 @@ func.func @static_pool_to_llvm(
 // CHECK-SAME:    (%[[CTX2:[a-z0-9]+]]: !llvm.ptr,
 // CHECK:         %[[C32:[a-z0-9_]+]] = llvm.mlir.constant(32 : index) : i64
 // CHECK:         llvm.mul %arg15, %[[C32]] : i64
-// CHECK:         llvm.call @hipdnn_ep_get_pool_base(%[[CTX2]], %{{[0-9]+}}) : (!llvm.ptr, i64) -> !llvm.ptr
+// CHECK:         %[[DOM2:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK:         llvm.call @hipdnn_ep_get_pool_base(%[[CTX2]], %[[DOM2]], %{{[0-9]+}}) : (!llvm.ptr, i32, i64) -> !llvm.ptr
 // CHECK:         llvm.call @wrap_hipblasLtMatmul(%[[CTX2]],
 // CHECK:         llvm.call @hip_miopen_softmax(%[[CTX2]],
 // CHECK:         llvm.return
