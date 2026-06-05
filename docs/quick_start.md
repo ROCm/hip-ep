@@ -154,51 +154,41 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 
 ### 2. Build onnx-hipdnn-ep
 
-**Prerequisites**: C++ dependencies are resolved automatically by CMake -- a fresh tree needs no manual setup (the cold from-source LLVM build is the long pole, multi-hour). The TheRock ROCm SDK is also automatic for real builds: pass `-DTHEROCK_DIST=/path/to/therock` to reuse a local SDK, otherwise it is auto-downloaded (needs `-DHIP_ARCHITECTURES=<gfxNNNN>`). Mock builds (`-DBUILD_MOCK_RUNTIME=ON`) need no SDK.
+`scripts/build.py` is the cross-platform build driver (the same one used on Linux
+and in CI): it ensures submodules, sets up the build, resolves every dependency
+via `cmake/deps.cmake` (TheRock SDK + GPU arch auto-detected for real builds),
+and runs the cmake configure/build/install plus the LIT tests. A fresh tree needs
+no manual dependency setup; the cold from-source LLVM build is the long pole
+(multi-hour).
+
+On Windows the default generator is "Visual Studio 17 2022" (it locates MSVC on
+its own, so no special prompt is needed). To use Ninja instead, run from an
+"x64 Native Tools Command Prompt for VS" and pass `--cmake_generator Ninja`.
 
 Run from the project root:
 
 ```bash
+mkdir -p ../local
 LOCAL_DIR=$(cd ../local && pwd)
-# For new users of this project, we recommend using the HIP provided by therock.
-# If you really want to use a pre-installed HIP instead, you can skip this unset.
+# For new users we recommend the HIP shipped by TheRock; unset a pre-installed
+# HIP so it does not interfere (skip if you intend to use a pre-installed HIP).
 unset HIP_PATH
 
-cmake -S . -B ../build/$(basename $PWD) \
-  -G Ninja \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-  -DCMAKE_BUILD_TYPE=Release \
-  "-DCMAKE_INSTALL_PREFIX=$LOCAL_DIR" \
-  -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-  -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
-  -DBUILD_EP=ON \
-  -DBUILD_MOCK_RUNTIME=OFF \
-  -DBUILD_HIP_TOOLS=ON
+python scripts/build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
+#   --mock                    mock runtime (no GPU/HIP/TheRock)
+#   --hip_arch gfx1151        target GPU; auto-detected by default. Set it for a
+#                             cross-machine build+run -- the *target* GPU's arch
+#                             (e.g. from `offload-arch.exe` on that machine)
+#   --therock_dist <path>     reuse a local TheRock SDK (else auto-downloaded)
+#   --cmake_generator Ninja   use Ninja (run from an x64 Native Tools prompt)
+#   --config RelWithDebInfo   build type (default Release)
+#   --skip_tests              skip the LIT tests (run by default after install)
+#   --clean                   remove build/ and install/
 ```
 
-**Key options:**
-
-| Option | Value | Notes |
-|--------|-------|-------|
-| `-G Ninja` | — | Recommended for faster builds; MSVC generator also works |
-| `CMAKE_MSVC_RUNTIME_LIBRARY` | `MultiThreaded` | Static CRT (`/MT`); must match the dependencies |
-| `CMAKE_BUILD_TYPE` | `Release` | Deps are built Release; Debug CRT (`/MTd`) is incompatible |
-| `CMAKE_INSTALL_PREFIX` | `$LOCAL_DIR` | Where to install |
-| `CMAKE_C/CXX_COMPILER_LAUNCHER` | `sccache` | Omit if sccache is not installed |
-| `THEROCK_DIST` | Path to TheRock SDK | Optional: reuse a local SDK; auto-downloaded if omitted (real builds) |
-| `HIP_ARCHITECTURES` | GPU architecture (e.g., `gfx1151`) | Auto-detected from the build host. Pass explicitly only for a cross-machine build+run: set the *target* GPU's arch (run `offload-arch.exe` on the target machine to print it). Also selects the TheRock auto-download tarball. |
-| `BUILD_EP` | `ON` (default `OFF`) | Build the MorphiZen Execution Provider (+ ONNX Runtime, protobuf, morphizen) |
-| `BUILD_HIP_TOOLS` | `ON` (default `OFF`) | Build the HIP MLIR tools (hip-mlir-opt, hip-compiler) + flatbuffers schemas |
-| `BUILD_MOCK_RUNTIME` | default `ON` | Mock runtime (no GPU/HIP/TheRock); set `OFF` for a real GPU build |
-| `BUILD_HIP_UNIT_TESTS` | default `ON` | Register LIT + E2E tests with CTest |
-
-#### Build
-
-```bash
-cmake --build ../build/$(basename $PWD) --config Release --parallel
-cmake --install ../build/$(basename $PWD) --config Release
-```
+`--cmake_prefix_path "$LOCAL_DIR"` lets the build reuse an ONNX Runtime you
+installed in step 1; omit it and ORT is auto-downloaded. The MorphiZen EP, HIP
+tools and LIT tests are built and installed into `../local/`.
 
 ### 3. Build OGA (onnxruntime-genai)
 

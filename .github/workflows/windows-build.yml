@@ -289,41 +289,23 @@ jobs:
       # -----------------------------------------------------------------------
 
       # -----------------------------------------------------------------------
-      # Configure
+      # Build onnx-hipdnn-ep via the cross-platform scripts/build.py (same driver
+      # as the Linux CI and docs/quick_start.md). Cached LLVM/ORT prefixes are
+      # injected; protobuf/flatbuffers build from source and TheRock auto-downloads
+      # via cmake/deps.cmake. build.py's default build/install dirs resolve to
+      # ${{ runner.workspace }}/build/<repo> and ${{ runner.workspace }}/install
+      # (repo.parent), matching what the later staging step expects. The LIT tests
+      # run inside build.py after install.
       # -----------------------------------------------------------------------
-      - name: Configure
+      - name: Build onnx-hipdnn-ep
         shell: bash
         run: |
-          cmake -S . -B ../build/$(basename "$PWD") \
-            -G Ninja \
-            -DBUILD_SHARED_LIBS=OFF \
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" \
-            -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
-            "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/install" \
-            -DBUILD_EP=ON \
-            -DBUILD_HIP_TOOLS=ON \
-            -DHIP_ARCHITECTURES=gfx1151 \
-            -Dmorphizen_ENABLE_UNIT_TEST=OFF \
-            -DBUILD_MOCK_RUNTIME=OFF \
-            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-
-
-      # -----------------------------------------------------------------------
-      # Build & Install
-      # -----------------------------------------------------------------------
-      - name: Build & Install
-        shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --parallel $(nproc) --target install
-
-      # -----------------------------------------------------------------------
-      # Run LIT tests (FileCheck-based IR tests; no GPU required)
-      # -----------------------------------------------------------------------
-      - name: Run LIT tests
-        shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --target check-hip-mlir-lit
+          python scripts/build.py \
+            --config Release \
+            --cmake_generator Ninja \
+            --hip_arch gfx1151 \
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
 
       # -----------------------------------------------------------------------
       # Build OGA (onnxruntime-genai) for model_benchmark.exe

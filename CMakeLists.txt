@@ -63,12 +63,9 @@ endif()
 # ==============================================================================
 # HIP MLIR Compiler Tools (optional)
 # ==============================================================================
-# Build the MLIR-based HIP compiler tools (hip-mlir-opt, hip-compiler).
-# Requires LLVM and MLIR to be available via find_package.
-#
-# Usage:
-#   cmake -B build -S . -DBUILD_HIP_TOOLS=ON \
-#     [-DONNX_MLIR_SRC=/path/to/onnx-mlir -DONNX_MLIR_BUILD=/path/to/build]
+# Build the MLIR-based HIP compiler tools (hip-mlir-opt, hip-compiler). LLVM/MLIR
+# are resolved by cmake/deps.cmake (included above); enable with
+# -DBUILD_HIP_TOOLS=ON.
 # ==============================================================================
 if(BUILD_HIP_TOOLS)
   # LLVM/MLIR, flatbuffers and cpptrace are fully resolved by cmake/deps.cmake
@@ -89,9 +86,8 @@ if(BUILD_HIP_TOOLS)
   include_directories(${LLVM_INCLUDE_DIRS})
   include_directories(${MLIR_INCLUDE_DIRS})
 
-  # onnx-mlir is no longer required. The convert-onnx-to-hip pass uses
-  # MLIR's generic Operation API to match ONNX ops by name, so no onnx-mlir
-  # headers or libraries are needed.
+  # The convert-onnx-to-hip pass matches ONNX ops by name via MLIR's generic
+  # Operation API, so no onnx-mlir headers or libraries are needed.
 
   list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
   list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")

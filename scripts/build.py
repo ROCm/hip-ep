@@ -73,7 +73,10 @@ def run_subprocess(args, cwd=None, env=None, capture_stdout=False):
         my_env.update(env)
     log.info(" ".join(shlex.quote(a) for a in args))
     return subprocess.run(
-        args, cwd=cwd, env=my_env, check=True,
+        args,
+        cwd=cwd,
+        env=my_env,
+        check=True,
         stdout=subprocess.PIPE if capture_stdout else None,
         text=True if capture_stdout else None,
     )
@@ -102,7 +105,9 @@ def update_submodules():
     log.info("Checking git submodules ...")
     r = subprocess.run(
         ["git", "submodule", "status", "--recursive"],
-        capture_output=True, text=True, cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        cwd=str(REPO),
     )
     uninitialized = any(
         ln.strip().startswith("-") for ln in r.stdout.splitlines() if ln.strip()
@@ -112,7 +117,9 @@ def update_submodules():
         return
     log.info("  initializing submodules ...")
     run_subprocess(["git", "submodule", "sync", "--recursive"], cwd=str(REPO))
-    run_subprocess(["git", "submodule", "update", "--init", "--recursive"], cwd=str(REPO))
+    run_subprocess(
+        ["git", "submodule", "update", "--init", "--recursive"], cwd=str(REPO)
+    )
 
 
 def default_generator():
@@ -142,11 +149,52 @@ def check_toolchain(generator):
 
 
 # ---------------------------------------------------------------------------
-# GPU architecture detection (Linux: amdgpu kernel sysfs)
+# GPU architecture detection (no ROCm/TheRock needed)
+#   Linux:   amdgpu kernel sysfs (/sys/class/kfd)
+#   Windows: the driver-provided HIP runtime (amdhip64_*.dll), via ctypes
 # ---------------------------------------------------------------------------
 
 
-def detect_hip_arch():
+def _detect_hip_arch_windows():
+    """Read gcnArchName from the driver-provided HIP runtime via ctypes.
+
+    Loads amdhip64_*.dll (shipped by the GPU driver in System32 -- no ROCm or
+    TheRock needed) and reads gcnArchName through the fixed hipDeviceProp_t
+    offsets, mirroring LLVM's offload-arch. Returns a gfx string or None.
+    """
+    import ctypes
+
+    # gcnArchName offset matches HIP's R0600 (6.x+) hipDeviceProp_t layout.
+    class _PropR0600(ctypes.Structure):
+        _fields_ = [
+            ("_pad", ctypes.c_char * 1160),
+            ("gcnArchName", ctypes.c_char * 256),
+            ("_pad2", ctypes.c_char * 56),
+        ]
+
+    for dll in ("amdhip64_7.dll", "amdhip64_6.dll", "amdhip64.dll"):
+        try:
+            lib = ctypes.WinDLL(dll)
+        except OSError:
+            continue
+        try:
+            get_count = lib.hipGetDeviceCount
+            get_props = lib.hipGetDevicePropertiesR0600
+        except AttributeError:
+            continue
+        count = ctypes.c_int(0)
+        if get_count(ctypes.byref(count)) != 0 or count.value <= 0:
+            continue
+        prop = _PropR0600()
+        if get_props(ctypes.byref(prop), 0) != 0:
+            continue
+        name = prop.gcnArchName.decode("ascii", "ignore").strip()
+        if name:
+            return name.split(":", 1)[0]  # drop feature flags (gfx1151:xnack-)
+    return None
+
+
+def _detect_hip_arch_linux():
     """Read gfx_target_version from /sys/class/kfd topology (no ROCm needed).
 
     gfx_target_version encodes the arch as major*10000 + minor*100 + step
@@ -171,6 +219,11 @@ def detect_hip_arch():
         major, minor, step = ver // 10000, (ver // 100) % 100, ver % 100
         return f"gfx{major}{minor:x}{step:x}"
     return None
+
+
+def detect_hip_arch():
+    """Detect the local AMD GPU's gfx arch (TheRock-free). Returns gfx or None."""
+    return _detect_hip_arch_windows() if IS_WINDOWS else _detect_hip_arch_linux()
 
 
 # ---------------------------------------------------------------------------
@@ -218,10 +271,17 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
 
 def build_targets(args, build_dir):
     step("Build")
-    run_subprocess([
-        "cmake", "--build", str(build_dir),
-        "--config", args.config, "--parallel", str(args.parallel),
-    ])
+    run_subprocess(
+        [
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--config",
+            args.config,
+            "--parallel",
+            str(args.parallel),
+        ]
+    )
     step("Install")
     run_subprocess(["cmake", "--install", str(build_dir), "--config", args.config])
 
@@ -229,10 +289,17 @@ def build_targets(args, build_dir):
 def run_tests(args, build_dir):
     """Run the LIT suite (MLIR pass verification; no GPU needed)."""
     step("Test (check-hip-mlir-lit)")
-    run_subprocess([
-        "cmake", "--build", str(build_dir),
-        "--config", args.config, "--target", "check-hip-mlir-lit",
-    ])
+    run_subprocess(
+        [
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--config",
+            args.config,
+            "--target",
+            "check-hip-mlir-lit",
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -244,32 +311,61 @@ def parse_arguments():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--config", default="Release",
-                   choices=["Release", "RelWithDebInfo", "Debug"],
-                   help="build configuration (default: Release)")
+    p.add_argument(
+        "--config",
+        default="Release",
+        choices=["Release", "RelWithDebInfo", "Debug"],
+        help="build configuration (default: Release)",
+    )
     p.add_argument("--build_dir", default=str(WORKSPACE / "build" / PROJECT_NAME))
     p.add_argument("--install_dir", default=str(WORKSPACE / "install"))
-    p.add_argument("--cmake_generator", default=None,
-                   help="cmake generator (default: 'Visual Studio 17 2022' on Windows, Ninja elsewhere)")
-    p.add_argument("--cmake_extra_defines", action="append", default=[], metavar="KEY=VALUE",
-                   help="extra -D<KEY=VALUE> forwarded to cmake configure (repeatable)")
-    p.add_argument("--cmake_prefix_path", default="",
-                   help="extra prefixes (';'-separated) forwarded to CMAKE_PREFIX_PATH, "
-                        "e.g. CI-built/cached llvm-install;ort-install")
-    p.add_argument("--therock_dist", default="",
-                   help="path to a TheRock ROCm SDK (else cmake/deps.cmake auto-downloads)")
-    p.add_argument("--hip_arch", default="",
-                   help="GPU arch (e.g. gfx1151); auto-detected on Linux if unset")
-    p.add_argument("--mock", action="store_true",
-                   help="mock runtime (no GPU/HIP/TheRock)")
-    p.add_argument("--skip_submodule_sync", action="store_true",
-                   help="do not sync/update git submodules")
-    p.add_argument("--clean", action="store_true",
-                   help="remove build/ and install/ then exit")
-    p.add_argument("--skip_build", action="store_true",
-                   help="configure only; do not build/install")
-    p.add_argument("--skip_tests", action="store_true",
-                   help="do not run the LIT tests after install")
+    p.add_argument(
+        "--cmake_generator",
+        default=None,
+        help="cmake generator (default: 'Visual Studio 17 2022' on Windows, Ninja elsewhere)",
+    )
+    p.add_argument(
+        "--cmake_extra_defines",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="extra -D<KEY=VALUE> forwarded to cmake configure (repeatable)",
+    )
+    p.add_argument(
+        "--cmake_prefix_path",
+        default="",
+        help="extra prefixes (';'-separated) forwarded to CMAKE_PREFIX_PATH, "
+        "e.g. CI-built/cached llvm-install;ort-install",
+    )
+    p.add_argument(
+        "--therock_dist",
+        default="",
+        help="path to a TheRock ROCm SDK (else cmake/deps.cmake auto-downloads)",
+    )
+    p.add_argument(
+        "--hip_arch",
+        default="",
+        help="GPU arch (e.g. gfx1151); auto-detected on Linux if unset",
+    )
+    p.add_argument(
+        "--mock", action="store_true", help="mock runtime (no GPU/HIP/TheRock)"
+    )
+    p.add_argument(
+        "--skip_submodule_sync",
+        action="store_true",
+        help="do not sync/update git submodules",
+    )
+    p.add_argument(
+        "--clean", action="store_true", help="remove build/ and install/ then exit"
+    )
+    p.add_argument(
+        "--skip_build", action="store_true", help="configure only; do not build/install"
+    )
+    p.add_argument(
+        "--skip_tests",
+        action="store_true",
+        help="do not run the LIT tests after install",
+    )
     p.add_argument("--allow_running_as_root", action="store_true")
     p.add_argument("-j", "--parallel", type=int, default=os.cpu_count() or 4)
     return p.parse_args()
@@ -313,11 +409,9 @@ def main():
     mock = args.mock
     hip_arch = args.hip_arch.strip()
     if not mock and not hip_arch:
-        hip_arch = detect_hip_arch() if not IS_WINDOWS else ""
+        hip_arch = detect_hip_arch() or ""
         if hip_arch:
             log.info(f"auto-detected HIP_ARCHITECTURES={hip_arch}")
-        elif IS_WINDOWS:
-            log.info("HIP_ARCHITECTURES unset; cmake/deps.cmake will auto-detect on Windows")
         else:
             log.info("no AMD GPU detected and no --hip_arch; falling back to --mock")
             mock = True
