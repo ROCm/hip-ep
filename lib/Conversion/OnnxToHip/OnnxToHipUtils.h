@@ -169,6 +169,40 @@ getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
   return ctx;
 }
 
+/// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
+///
+/// Emits one `hip.gqa` op with the 19-slot AttrSizedOperandSegments layout
+/// and replaces \p op's results positionally with the hip.gqa's results
+/// (callers with fewer than 3 results — e.g. cross-attn or fused-QKV
+/// Attention — simply drop the trailing present_* outputs on the floor).
+///
+/// Defined in HipGqaBuilder.cpp.  Shared between
+/// MultiHeadAttentionConversion.cpp and AttentionConversion.cpp.
+///
+/// \param numHeads        N (== kv_num_heads; HPG=1, multi-head, not GQA)
+/// \param scale           ONNX `scale` attr, or 0.0 sentinel for "auto-compute
+///                        1/sqrt(head_size) at runtime"
+/// \param noCausal        true for bidirectional (encoder / cross-attn);
+///                        false for causal (decoder self-attn)
+/// \param pastKey/pastValue  Past KV-cache buffers; nullptr when absent
+///                        (encoder / cross-attn).  When null the corresponding
+///                        operand_segment_size is 0.
+/// \param seqlensK        1-D [B] i32 (must already be in scope; either a
+///                        runtime arg or an arith.constant)
+/// \param totalSeqLen     scalar i32 (must already be in scope)
+/// \param outputType      hip.gqa output[0] type (== query type)
+/// \param presentKeyType  hip.gqa present_key type (BNSH); for cross-attn or
+///                        encoder paths an unused-but-required DPS init buffer
+/// \param presentValueType ditto for present_value
+mlir::LogicalResult
+buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
+                mlir::Value context, mlir::Value query, mlir::Value key,
+                mlir::Value value, mlir::Value pastKey, mlir::Value pastValue,
+                mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
+                float scale, bool noCausal, mlir::RankedTensorType outputType,
+                mlir::RankedTensorType presentKeyType,
+                mlir::RankedTensorType presentValueType);
+
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
@@ -200,6 +234,8 @@ void populateGqaConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx);
+void populateAttentionConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
