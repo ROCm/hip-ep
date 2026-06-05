@@ -14,9 +14,8 @@
 //             following view-like ops transitively via BufferViewFlowAnalysis.
 //   Phase 2 - Partition:  split allocs into static (compile-time byte size)
 //             and dynamic (runtime byte size) groups.
-//   Phase 3 - Static packing:  greedy best-fit offset assignment inspired by
-//             greedy best-fit strip packing.  Allocs whose
-//             lifetimes don't overlap may share the same offset range.
+//   Phase 3 - Static packing:  greedy best-fit offset assignment.  Allocs
+//             whose lifetimes don't overlap may share the same offset range.
 //   Phase 4 - Dynamic packing:  group by structural byte-size key (same
 //             static factor + same dynamic SSA operands).  Within each group,
 //             bin non-overlapping lifetimes so they share an offset at runtime.
@@ -41,8 +40,6 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
-
-#include <functional>
 
 #define DEBUG_TYPE "hip-pool-allocs"
 
@@ -72,6 +69,103 @@ struct AllocInfo {
 /// True when two allocs' [def, lastUse] intervals overlap.
 static bool lifetimesOverlap(const AllocInfo &a, const AllocInfo &b) {
   return !(a.lastUseIndex < b.defIndex || b.lastUseIndex < a.defIndex);
+}
+
+//===----------------------------------------------------------------------===//
+// findLatestLegalInsertionPoint - dominator-aware insertion in a single block
+//===----------------------------------------------------------------------===//
+//
+// PoolAllocs::runOnOperation enforces single-block functions, so SSA
+// dominance inside the function body collapses to "comes earlier in the
+// block". The helper picks the latest position in the block consistent
+// with two ordering constraints:
+//
+//   - every op in `requiredAfter`  must come strictly before the result;
+//   - every op in `requiredBefore` must come strictly after the result.
+//
+// "Latest" (rather than "earliest") matters for Phase 5: emitting the
+// per-bucket size arithmetic just below its dyn-operand defs (instead of
+// hoisting it to block start) keeps the size SSA close to the IR that
+// produced it and avoids reordering unrelated ops.
+
+/// Latest position in `block` such that:
+///   - every op in `requiredAfter` comes strictly before the result, AND
+///   - every op in `requiredBefore` comes strictly after the result.
+///
+/// All input ops must already live in `block`; the caller is responsible
+/// for filtering out cross-block / cross-region defs (those already
+/// dominate any insertion point inside `block` and need not be considered).
+///
+/// Returns `std::nullopt` when the constraints are infeasible — i.e. some
+/// op in `requiredAfter` is at-or-after some op in `requiredBefore`. That
+/// situation cannot arise for the bucket cases we care about (the
+/// alloc's dyn-operand defs always dominate the alloc itself), but a
+/// future caller might pass an inconsistent set; signaling infeasibility
+/// is cleaner than asserting.
+///
+/// Returns `Block::end()` when both lists are empty (a fresh empty block,
+/// or a caller that passed nothing) — a degenerate but well-defined point.
+///
+/// Example:
+///
+/// ```mlir
+/// // requiredAfter: [%size_def]   requiredBefore: [%alloc]
+/// %size_def = arith.muli %dim, %c4 : index
+/// %something_else = ...                  // ← returned iterator points here
+/// %alloc = memref.alloc(%size_def) : memref<?xf16>
+/// ```
+///
+/// The returned iterator is `std::next(%size_def's iterator)`, i.e. the
+/// position immediately after the latest predecessor. Callers feed this
+/// to `OpBuilder::setInsertionPoint(block, *iter)` (or, when the
+/// requiredBefore list is non-empty, simply `setInsertionPoint(*iter)` is
+/// equivalent because the iterator points at the operation we want to
+/// insert before).
+static std::optional<Block::iterator>
+findLatestLegalInsertionPoint(Block &block, ArrayRef<Operation *> requiredAfter,
+                              ArrayRef<Operation *> requiredBefore) {
+  // `lo` = the latest op in `requiredAfter`. If non-empty, the result
+  // must be strictly after `lo` (i.e. iterator = std::next(lo)).
+  Operation *lo = nullptr;
+  for (Operation *op : requiredAfter) {
+    assert(op && op->getBlock() == &block &&
+           "findLatestLegalInsertionPoint: requiredAfter op outside block");
+    if (!lo || lo->isBeforeInBlock(op))
+      lo = op;
+  }
+
+  // `hi` = the earliest op in `requiredBefore`. If non-empty, the result
+  // must be strictly before `hi`.
+  Operation *hi = nullptr;
+  for (Operation *op : requiredBefore) {
+    assert(op && op->getBlock() == &block &&
+           "findLatestLegalInsertionPoint: requiredBefore op outside block");
+    if (!hi || op->isBeforeInBlock(hi))
+      hi = op;
+  }
+
+  // Both empty: degenerate, hand back end() so OpBuilder can no-op.
+  if (!lo && !hi)
+    return block.end();
+
+  // Only `requiredBefore` constrained: insert immediately before the
+  // earliest one.
+  if (!lo)
+    return Block::iterator(hi);
+
+  // Only `requiredAfter` constrained: insert immediately after the
+  // latest one. `Block::end()` is a valid result if `lo` is the
+  // terminator.
+  if (!hi)
+    return std::next(Block::iterator(lo));
+
+  // Both constrained: feasible iff lo is strictly before hi. The strict
+  // comparison matches the contract ("strictly before"/"strictly after"):
+  // when lo == hi (same op required to be both predecessor and successor)
+  // there is no legal insertion point.
+  if (!lo->isBeforeInBlock(hi))
+    return std::nullopt;
+  return std::next(Block::iterator(lo));
 }
 
 //===----------------------------------------------------------------------===//
@@ -173,11 +267,37 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
 /// A bucket groups dynamic allocs that share the same runtime byte size.
 /// Within a bucket, each "bin" holds allocs with non-overlapping lifetimes
 /// that can share a single offset at runtime.
+///
+/// Phase 4 (`packDynamicAllocs`) populates the structural fields:
+///   `staticFactor`, `dynOperands`, and `bins`.
+///
+/// Phase 5 (`emitBucketSize`) populates the SSA-value fields:
+///   `byteSizeValue` (= staticFactor * product(dynOperands), inserted at
+///                    the builder's current position), and
+///   `alignedSize`   (= alignUp(byteSizeValue, alignment), or the same
+///                    SSA value when staticFactor is already aligned).
+///
+/// Splitting structural analysis from SSA emission lets Phase 5 pick a
+/// per-bucket insertion point — see `findLatestLegalInsertionPoint` — so
+/// the size arithmetic naturally lands AFTER every dyn-operand def of
+/// the bucket AND above the earliest pooled alloc in the function (the
+/// pool acquisition itself is anchored there, and pool size depends on
+/// every bucket's `alignedSize`).
 struct DynBucket {
-  Value byteSizeValue; ///< SSA value for the unaligned byte size
-  Value alignedSize;   ///< SSA value for the aligned byte size (cached)
-  SmallVector<SmallVector<AllocInfo *>>
-      bins; ///< bins of non-overlapping allocs
+  /// Element bytes times the product of static dims of this bucket's
+  /// MemRefType. Multiplying by `dynOperands` yields the runtime byte
+  /// size; rounded up to alignment when not already a multiple.
+  int64_t staticFactor;
+  /// SSA values for the dynamic dimensions, in declaration order. All
+  /// allocs in the bucket share the same dyn operands by construction.
+  SmallVector<Value, 2> dynOperands;
+  /// Bins of non-overlapping allocs sharing one runtime offset.
+  SmallVector<SmallVector<AllocInfo *>> bins;
+
+  /// Populated by `emitBucketSize` at Phase 5 emission time. Null until
+  /// then.
+  Value byteSizeValue;
+  Value alignedSize;
 };
 
 /// Structural key for grouping allocs with identical runtime byte sizes.
@@ -192,9 +312,17 @@ struct DynSizeKey {
 };
 
 /// Group dynamic allocs into buckets and bins.
+///
+/// Pure structural analysis: no SSA values are emitted. Each returned
+/// `DynBucket` carries the `staticFactor` and `dynOperands` needed to
+/// rebuild the size at any insertion point during Phase 5; `byteSizeValue`
+/// and `alignedSize` start out null.
+///
+/// Allocs are grouped by the structural key `{staticFactor, dynOperands}`.
+/// Within each group, allocs whose lifetimes do not overlap are bin-packed
+/// (first-fit) so they can share a single offset at runtime.
 static SmallVector<DynBucket>
-packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics, OpBuilder &builder,
-                  Location loc, int64_t alignment) {
+packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics) {
   struct KeyedInfo {
     DynSizeKey key;
     AllocInfo *info;
@@ -221,72 +349,82 @@ packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics, OpBuilder &builder,
     keyed.push_back({key, &info});
   }
 
-  // Step 2: one byte-size SSA value per unique key.
-  SmallVector<std::pair<DynSizeKey, Value>> uniqueKeys;
-  auto findOrCreateByteSize = [&](const DynSizeKey &key) -> Value {
-    for (auto &[k, v] : uniqueKeys)
-      if (k == key)
-        return v;
-    Value byteSize =
-        arith::ConstantIndexOp::create(builder, loc, key.staticFactor);
-    for (Value dynDim : key.dynOperands)
-      byteSize = builder.createOrFold<arith::MulIOp>(loc, byteSize, dynDim);
-    uniqueKeys.push_back({key, byteSize});
-    return byteSize;
-  };
-
-  // Step 3: group by byte-size SSA value.  Track the staticFactor alongside
-  // each group so step 4 can skip alignment when the factor is already a
-  // multiple of the alignment (e.g. staticFactor=256 with alignment=256).
-  struct SizeGroup {
-    int64_t staticFactor;
-    SmallVector<AllocInfo *> infos;
-  };
-  llvm::MapVector<Value, SizeGroup> bySize;
-  for (auto &[key, info] : keyed) {
-    Value sizeVal = findOrCreateByteSize(key);
-    auto &group = bySize[sizeVal];
-    group.staticFactor = key.staticFactor;
-    group.infos.push_back(info);
-  }
-
-  // Step 4: first-fit bin packing within each group.
+  // Step 2: group allocs by structural key. We keep insertion order so the
+  // emit phase processes buckets in the order they were first encountered;
+  // SmallVector + linear scan is fine because the number of unique keys is
+  // small (≤ tens on real models).
   SmallVector<DynBucket> buckets;
-  for (auto &[sizeVal, group] : bySize) {
-    auto &infos = group.infos;
-    DynBucket bucket;
-    bucket.byteSizeValue = sizeVal;
-    // When staticFactor is a multiple of alignment, the byte size
-    // (staticFactor * dynDim0 * dynDim1 * ...) is guaranteed to be aligned
-    // regardless of the dynamic dimensions, so emitAlignUp is a no-op.
-    // Skipping it avoids an expensive divui + supporting arithmetic.
-    if (group.staticFactor % alignment == 0)
-      bucket.alignedSize = sizeVal;
-    else
-      bucket.alignedSize = emitAlignUp(builder, loc, sizeVal, alignment);
-    for (AllocInfo *info : infos) {
-      bool placed = false;
-      for (auto &bin : bucket.bins) {
-        bool conflicts = false;
-        for (AllocInfo *existing : bin) {
-          if (lifetimesOverlap(*info, *existing)) {
-            conflicts = true;
-            break;
-          }
-        }
-        if (!conflicts) {
-          bin.push_back(info);
-          placed = true;
+  auto findOrCreateBucket = [&](const DynSizeKey &key) -> DynBucket & {
+    for (auto &b : buckets)
+      if (b.staticFactor == key.staticFactor &&
+          b.dynOperands == key.dynOperands)
+        return b;
+    DynBucket b;
+    b.staticFactor = key.staticFactor;
+    b.dynOperands.assign(key.dynOperands.begin(), key.dynOperands.end());
+    buckets.push_back(std::move(b));
+    return buckets.back();
+  };
+
+  // Step 3: first-fit bin packing within each bucket. Two allocs share a
+  // bin iff their lifetimes don't overlap; bins map 1:1 to runtime
+  // offsets.
+  for (auto &[key, info] : keyed) {
+    DynBucket &bucket = findOrCreateBucket(key);
+    bool placed = false;
+    for (auto &bin : bucket.bins) {
+      bool conflicts = false;
+      for (AllocInfo *existing : bin) {
+        if (lifetimesOverlap(*info, *existing)) {
+          conflicts = true;
           break;
         }
       }
-      if (!placed)
-        bucket.bins.push_back({info});
+      if (!conflicts) {
+        bin.push_back(info);
+        placed = true;
+        break;
+      }
     }
-    buckets.push_back(std::move(bucket));
+    if (!placed)
+      bucket.bins.push_back({info});
   }
 
   return buckets;
+}
+
+/// Emit the SSA values describing a bucket's runtime byte size at the
+/// builder's current insertion point. Populates `bucket.byteSizeValue`
+/// and `bucket.alignedSize`.
+///
+/// Before:
+/// ```mlir
+/// // builder at some point dominated by all bucket.dynOperands
+/// ```
+/// After (general case):
+/// ```mlir
+/// %static = arith.constant <staticFactor> : index
+/// %byte   = arith.muli %static, %dyn0 : index
+/// %byte   = arith.muli %byte,   %dyn1 : index    // for each dyn operand
+/// // alignedSize = alignUp(%byte, alignment), unless staticFactor is
+/// // already a multiple of alignment — then alignedSize == byteSizeValue.
+/// ```
+static void emitBucketSize(OpBuilder &builder, Location loc, DynBucket &bucket,
+                           int64_t alignment) {
+  Value byteSize =
+      arith::ConstantIndexOp::create(builder, loc, bucket.staticFactor);
+  for (Value dynDim : bucket.dynOperands)
+    byteSize = builder.createOrFold<arith::MulIOp>(loc, byteSize, dynDim);
+  bucket.byteSizeValue = byteSize;
+  // When staticFactor is a multiple of alignment, the byte size
+  // (staticFactor * dynDim0 * dynDim1 * ...) is guaranteed to already
+  // be a multiple of alignment regardless of the dynamic dimensions, so
+  // alignUp would be a semantic no-op. Skip it explicitly to avoid
+  // emitting the divui + muli + addi triple it would otherwise produce.
+  if (bucket.staticFactor % alignment == 0)
+    bucket.alignedSize = byteSize;
+  else
+    bucket.alignedSize = emitAlignUp(builder, loc, byteSize, alignment);
 }
 
 //===----------------------------------------------------------------------===//
@@ -304,160 +442,6 @@ struct PoolAllocsPass : public impl::PoolAllocsPassBase<PoolAllocsPass> {
   void runOnOperation() override;
 };
 
-/// Recursively resolve `dim(src, i)` through any chain of
-/// `memref.collapse_shape` / `memref.expand_shape`, emitting pure arithmetic
-/// (`arith.muli` for collapse, `arith.divui` for the dynamic dim of an expand
-/// group) over `memref.dim` of the chain's root memref. Both intermediate ops
-/// are pure descriptor edits, so this rewrite preserves semantics; it pushes
-/// every dim query down to the chain root, where the source is hoistable
-/// (function arg, alloc, or memref.view).
-///
-/// IR example (collapse case — dim of a collapse_shape becomes a product
-/// of dims of the source memref):
-///
-///   Before:
-///     %c = memref.collapse_shape %src [[0], [1, 2]]
-///             : memref<?x?x4xf16> into memref<?x?xf16>
-///     %d = memref.dim %c, %c1 : memref<?x?xf16>     // i = 1
-///
-///   After (one step of the recursion, with K = 4 absorbed from the source):
-///     %d_src = memref.dim %src, %c1 : memref<?x?x4xf16>
-///     %k     = arith.constant 4 : index
-///     %d     = arith.muli %d_src, %k : index
-///
-/// IR example (expand case — dynamic output dim becomes div of the input
-/// dim by the static partner factor):
-///
-///   Before:
-///     %e = memref.expand_shape %src [[0, 1]] output_shape [%n, %k]
-///             : memref<?xf16> into memref<?x4xf16>     // K = 4
-///     %d = memref.dim %e, %c0 : memref<?x4xf16>        // i = 0 (dynamic)
-///
-///   After:
-///     %d_src = memref.dim %src, %c0 : memref<?xf16>
-///     %k     = arith.constant 4 : index
-///     %d     = arith.divui %d_src, %k : index
-///
-/// Bounded recursion: each step strips one reshape layer, so depth equals the
-/// reshape-chain depth. In practice ≤ 2 (typical case: a same-rank dynamic
-/// Reshape pair around a per-head norm op).
-static Value resolveDimAtSource(OpBuilder &b, Location loc, Value src,
-                                int64_t i) {
-  Operation *def = src.getDefiningOp();
-  // memref.dim(memref.alloc(d0, d1, ...), i) -> i-th dyn operand of alloc.
-  // The dyn operand is the actual SSA value the alloc was sized by — its
-  // defining op (typically `memref.dim` of a function arg or another alloc,
-  // possibly via arith) is hoistable through the rest of the chain. Crucially
-  // we DO NOT emit a fresh `memref.dim %alloc, i` here, because after Phase 5
-  // the alloc gets replaced by a `memref.view` placed at the pool prelude;
-  // hoisted dim ops would then reference a view that lives later in the
-  // block (dominance error). Returning the dyn operand SSA value directly
-  // sidesteps the entire problem.
-  if (auto alloc = dyn_cast_or_null<memref::AllocOp>(def)) {
-    auto srcType = cast<MemRefType>(src.getType());
-    if (i < 0 || i >= srcType.getRank())
-      return Value();
-    if (!srcType.isDynamicDim(i))
-      return arith::ConstantIndexOp::create(b, loc, srcType.getDimSize(i));
-    int64_t dynIdx = 0;
-    for (int64_t j = 0; j < i; ++j)
-      if (srcType.isDynamicDim(j))
-        ++dynIdx;
-    auto dynSizes = alloc.getDynamicSizes();
-    if (dynIdx < static_cast<int64_t>(dynSizes.size()))
-      return dynSizes[dynIdx];
-  }
-  if (auto collapse = dyn_cast_or_null<memref::CollapseShapeOp>(def)) {
-    auto reassoc = collapse.getReassociationIndices();
-    if (i >= 0 && i < static_cast<int64_t>(reassoc.size())) {
-      Value collSrc = collapse.getSrc();
-      Value acc;
-      for (int64_t srcDim : reassoc[i]) {
-        Value d = resolveDimAtSource(b, loc, collSrc, srcDim);
-        acc = acc ? b.createOrFold<arith::MulIOp>(loc, acc, d) : d;
-      }
-      if (acc)
-        return acc;
-    }
-  } else if (auto expand = dyn_cast_or_null<memref::ExpandShapeOp>(def)) {
-    auto resultType = cast<MemRefType>(expand.getResult().getType());
-    if (i >= 0 && i < resultType.getRank() && !resultType.isDynamicDim(i))
-      return arith::ConstantIndexOp::create(b, loc, resultType.getDimSize(i));
-    auto reassoc = expand.getReassociationIndices();
-    int64_t srcIdx = -1;
-    for (int64_t j = 0; j < static_cast<int64_t>(reassoc.size()) && srcIdx < 0;
-         ++j)
-      if (llvm::is_contained(reassoc[j], i))
-        srcIdx = j;
-    if (srcIdx >= 0) {
-      const auto &group = reassoc[srcIdx];
-      int64_t staticProduct = 1;
-      bool ok = true;
-      for (int64_t outIdx : group) {
-        if (outIdx == i)
-          continue;
-        if (resultType.isDynamicDim(outIdx)) {
-          ok = false;
-          break;
-        }
-        staticProduct *= resultType.getDimSize(outIdx);
-      }
-      if (ok) {
-        Value srcDim = resolveDimAtSource(b, loc, expand.getSrc(), srcIdx);
-        if (staticProduct == 1)
-          return srcDim;
-        Value div = arith::ConstantIndexOp::create(b, loc, staticProduct);
-        return b.createOrFold<arith::DivUIOp>(loc, srcDim, div);
-      }
-    }
-  }
-  // Base case: emit memref.dim on src directly. The source is the chain root
-  // (alloc / function arg / view / non-reshape op) — `memref.dim` on it is
-  // hoistable.
-  auto srcType = cast<MemRefType>(src.getType());
-  if (!srcType.isDynamicDim(i))
-    return arith::ConstantIndexOp::create(b, loc, srcType.getDimSize(i));
-  Value idxVal = arith::ConstantIndexOp::create(b, loc, i);
-  return memref::DimOp::create(b, loc, src, idxVal);
-}
-
-/// Fold `memref.dim(memref.collapse_shape(src), i)` and
-/// `memref.dim(memref.expand_shape(src), i)` into pure arithmetic on
-/// `memref.dim(root, ...)`. Required for PoolAllocs's hoisting to succeed
-/// when dim queries originate from reshape chains produced by the same-rank
-/// dynamic Reshape decomposition (expand_shape + collapse_shape).
-///
-/// MLIR's stock canonicalizer leaves these alone for dynamic dims; without
-/// this fold the surviving `memref.dim %some_reshape` would be hoisted (it's
-/// in `isHoistable`) but its operand `%some_reshape` is not hoistable —
-/// yielding an SSA dominance error in Phase 4.
-///
-/// The replacement uses `arith.muli` (collapse) and `arith.divui` (expand
-/// with absorbed static factor); both are in `isHoistable`.
-static void foldDimOfReshape(func::FuncOp funcOp) {
-  SmallVector<memref::DimOp> worklist;
-  funcOp.walk([&](memref::DimOp op) {
-    Operation *def = op.getSource().getDefiningOp();
-    if (def &&
-        (isa<memref::AllocOp>(def) || isa<memref::CollapseShapeOp>(def) ||
-         isa<memref::ExpandShapeOp>(def)))
-      worklist.push_back(op);
-  });
-
-  for (memref::DimOp dimOp : worklist) {
-    auto idxAttr = getConstantIntValue(dimOp.getIndex());
-    if (!idxAttr)
-      continue; // dynamic index — can't fold structurally
-    OpBuilder b(dimOp);
-    Value replacement =
-        resolveDimAtSource(b, dimOp.getLoc(), dimOp.getSource(), *idxAttr);
-    if (replacement && replacement != dimOp.getResult()) {
-      dimOp.replaceAllUsesWith(replacement);
-      dimOp.erase();
-    }
-  }
-}
-
 void PoolAllocsPass::runOnOperation() {
   func::FuncOp funcOp = getOperation();
 
@@ -471,12 +455,6 @@ void PoolAllocsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
-  // Pre-pass: simplify `memref.dim` of `memref.collapse_shape`/
-  // `memref.expand_shape` so the hoist worklist below can ascend through to
-  // the original source memref. Without this, a surviving dim-of-collapse
-  // breaks Phase 4's SSA dominance for any same-rank dynamic Reshape
-  // decomposed into expand_shape + collapse_shape.
-  foldDimOfReshape(funcOp);
   // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
   // instead of sequential op indices.
   if (!funcOp.getBody().hasOneBlock()) {
@@ -519,6 +497,12 @@ void PoolAllocsPass::runOnOperation() {
   }
 
   if (allInfos.size() < 2) {
+    // Nothing to pool: a single alloc would just be replaced by a
+    // single-view-into-pool, which is strictly worse than leaving the
+    // alloc in place. Still emit zeroed pool metadata so downstream
+    // consumers (GenerateInterface) see the attributes regardless of
+    // input shape — a missing attribute would crash the metadata
+    // reader, while a zeroed one is a well-defined "no pool".
     ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
     OpBuilder zeroBuilder(funcOp.getContext());
     moduleOp->setAttr("hipdnn.pool_size", zeroBuilder.getI64IntegerAttr(0));
@@ -555,140 +539,134 @@ void PoolAllocsPass::runOnOperation() {
     staticPoolSize = std::max(staticPoolSize, end);
   }
 
-  // ----- Phase 4: pack dynamics ----------------------------------------
+  // ----- Phase 4: pack dynamics (structural only — no SSA emission) ---
 
   Location loc = funcOp.getLoc();
   OpBuilder builder(funcOp.getContext());
 
-  // Pool setup must be inserted before the first alloc. Dynamic allocs use
-  // SSA values for their sizes (e.g. memref.dim extracting a dimension from
-  // a function argument). These ops may appear between allocs in the block.
-  // Move them before the first alloc so they dominate the pool size
-  // computation. Safe because they only depend on function arguments.
-  Operation *firstPooledAlloc = allInfos.front().allocOp.getOperation();
-  for (auto &info : allInfos)
-    if (info.allocOp->isBeforeInBlock(firstPooledAlloc))
-      firstPooledAlloc = info.allocOp.getOperation();
-
-  // Recursively hoist the def-chain that computes each dynamic size in
-  // front of the first pooled alloc.  A single-level hoist is not enough:
-  // dynamic sizes are typically computed as `arith.muli %dim, %const` where
-  // %dim itself comes from `memref.dim %arg, %i` and %const from
-  // `arith.constant`.  Moving only the muli but leaving its operands behind
-  // breaks SSA dominance for the pool-size arithmetic emitted in Phase 5.
-  //
-  // Whitelist intentionally narrow: only side-effect-free pure ops whose
-  // operands are themselves trivial (block args, constants, or other
-  // whitelisted ops).  This guarantees the move never reorders observable
-  // behavior — the ops are restricted to shape/index arithmetic, never any
-  // op that might read or mutate buffers.
-  auto isHoistable = [](Operation *op) {
-    return isa<memref::DimOp, arith::ConstantOp, arith::ConstantIndexOp,
-               arith::MulIOp, arith::AddIOp, arith::SubIOp, arith::IndexCastOp,
-               // Division: needed when a Reshape is decomposed into
-               // expand_shape(input, [..., dyn/K, K, ...]) + collapse_shape,
-               // which emits `arith.divui %dim, K` for the dynamic absorber.
-               // Same purity guarantee as MulIOp/AddIOp — pure index/integer
-               // arithmetic, no side effects, safe to hoist.
-               arith::DivUIOp, arith::DivSIOp>(op);
-  };
-  llvm::SetVector<Operation *> hoistWorklist;
-  for (auto &info : dynamics)
-    for (Value dynDim : info.allocOp.getDynamicSizes())
-      if (auto *defOp = dynDim.getDefiningOp())
-        hoistWorklist.insert(defOp);
-
-  // Worklist grows as we walk operands of ops we visit; SetVector preserves
-  // the discovery order while preventing duplicate visits.  We process
-  // index-by-index instead of pop_back so additions during the loop are
-  // visited before we exit.
-  for (size_t idx = 0; idx < hoistWorklist.size(); ++idx) {
-    Operation *op = hoistWorklist[idx];
-    if (!isHoistable(op))
-      continue; // Not hoistable; leave it alone — Phase 5's createOrFold
-                // will see the original SSA value at its current position.
-                // If that position post-dominates firstPooledAlloc the
-                // verifier will catch the SSA error so we fail loudly.
-    for (Value operand : op->getOperands())
-      if (auto *defOp = operand.getDefiningOp())
-        hoistWorklist.insert(defOp);
-  }
-
-  // Move ops so their final layout has each operand defined before its uses.
-  // Each `moveBefore(firstPooledAlloc)` places the op immediately before
-  // firstPooledAlloc, displacing any previously-moved ops up by one slot. So
-  // the final top-to-bottom order in the prelude is the REVERSE of the move
-  // order. To make operands dominate uses, we therefore want move order:
-  //   uses (consumers) first, operands (producers) last.
-  //
-  // The previous implementation used `hoistWorklist` directly via reverse
-  // iteration, which works for linear chains (BFS produces consumer-first,
-  // reverse gives operand-first move order, final layout = operand-then-
-  // consumer). It breaks for shared producers reached through multiple
-  // consumers: BFS may add the consumer before the producer, but the
-  // producer can also be added directly by a different alloc's worklist
-  // entry, ending up later in `hoistWorklist`. Reverse iteration then moves
-  // the producer EARLIER than the consumer that uses it, leaving the final
-  // layout with the consumer above the producer — SSA dominance error.
-  //
-  // Fix: depth-first post-order topological sort over the hoistable subset,
-  // then iterate the sort in reverse for the move order. DFS post-order
-  // guarantees operands precede uses; reversing gives the consumer-first
-  // move sequence we need.
-  llvm::DenseSet<Operation *> hoistSet;
-  for (Operation *op : hoistWorklist)
-    if (isHoistable(op))
-      hoistSet.insert(op);
-
-  SmallVector<Operation *> sorted;
-  llvm::DenseSet<Operation *> visited;
-  std::function<void(Operation *)> visit = [&](Operation *op) {
-    if (!op || !hoistSet.count(op))
-      return;
-    if (!visited.insert(op).second)
-      return;
-    for (Value operand : op->getOperands())
-      visit(operand.getDefiningOp());
-    sorted.push_back(op);
-  };
-  for (Operation *op : hoistWorklist)
-    visit(op);
-
-  // `sorted` is DFS post-order: operands precede uses. Iterate FORWARD so
-  // operands are moved first; each subsequent `moveBefore(firstPooledAlloc)`
-  // places the next op at -1 and displaces all earlier moves up by one.
-  // Final layout: first-moved (operands) at the top, last-moved (uses) at
-  // the bottom of the prelude — exactly the dominance order we need.
-  for (auto it = sorted.begin(); it != sorted.end(); ++it) {
-    Operation *defOp = *it;
-    if (defOp->getBlock() != firstPooledAlloc->getBlock())
-      continue; // Defined in a different region/block — already dominates.
-    if (defOp == firstPooledAlloc)
-      continue;
-    if (defOp->isBeforeInBlock(firstPooledAlloc))
-      continue; // Already in the right place.
-    defOp->moveBefore(firstPooledAlloc);
-  }
-
-  builder.setInsertionPoint(firstPooledAlloc);
-
-  auto dynBuckets = packDynamicAllocs(dynamics, builder, loc, align);
+  auto dynBuckets = packDynamicAllocs(dynamics);
   NumDynBuckets += dynBuckets.size();
-
-  // ----- Phase 5: emit pool + views -----------------------------------
-
   bool hasDynamic = !dynBuckets.empty();
 
-  // 5a. Compute total pool size as an SSA value.
-  // Uses createOrFold so that trivial ops (addi(x,0), muli(x,1)) are
-  // folded away automatically by the arith dialect's fold methods.
   if (!hasDynamic && staticPoolSize == 0)
     return;
 
-  Value poolSize;
-  if (hasDynamic) {
-    poolSize = arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
+  // ----- Phase 5: emit pool + views -----------------------------------
+  //
+  // Per-bucket size arithmetic and the pool acquisition are placed at
+  // dominator-derived points selected by `findLatestLegalInsertionPoint`.
+  //
+  // Critical invariant: there is exactly ONE `hip.get_pool` per function,
+  // and every `memref.view` replacing a pooled alloc consumes its result.
+  // The pool therefore must dominate every pooled alloc in the function
+  // — its insertion point is anchored at the EARLIEST pooled alloc.
+  // Pool size is `sum_buckets(alignedSize * numBins)`, so each bucket's
+  // `alignedSize` must in turn dominate the pool, and therefore must
+  // also live above the earliest alloc. We pass the same
+  // `requiredBefore = allAllocOps` to both calls and let the helper
+  // compute the per-call insertion point from each call's
+  // `requiredAfter` set:
+  //
+  //   - Per bucket: requiredAfter = dyn-operand defs of THIS bucket.
+  //     Position lands above the earliest alloc but at or below the
+  //     latest dyn-operand def — naturally placing each bucket's size
+  //     close to the IR that produced its inputs.
+  //   - Pool acquisition: requiredAfter = every bucket's `alignedSize`.
+  //     Position lands above the earliest alloc and at or below the
+  //     LAST bucket size emitted.
+  //   - View replacement: unchanged, at each alloc's original site.
+  //     Offsets dominate by construction (helper's contract).
+  //
+  // Before:
+  // ```mlir
+  // %d0 = memref.dim %arg, %c0 : memref<?x?xf16>   // bucket dyn operand
+  // ... unrelated ops ...
+  // %a0 = memref.alloc(%d0) : memref<?xf16>        // earliest alloc
+  // ... unrelated ops ...
+  // %a1 = memref.alloc(%d0) : memref<?xf16>
+  // ```
+  // After (size + pool + views inserted at dominator-derived anchors):
+  // ```mlir
+  // %d0 = memref.dim %arg, %c0 : memref<?x?xf16>
+  // ... unrelated ops ...
+  // %static = arith.constant <staticFactor> : index
+  // %byte   = arith.muli %static, %d0 : index
+  // %aligned = ...                                  // when needed
+  // %pool   = hip.get_pool(%ctx, %size) : memref<?xi8>
+  // ... offset arithmetic ...
+  // %v0 = memref.view %pool[%off0][%d0] : memref<?xi8> to memref<?xf16>
+  // ... unrelated ops ...
+  // %v1 = memref.view %pool[%off1][%d0] : memref<?xi8> to memref<?xf16>
+  // ```
 
+  // Cached `requiredBefore` for both insertion-point calls — every
+  // pooled alloc in the function. The helper picks the earliest of the
+  // set, so passing the full list (instead of just the earliest) keeps
+  // the call correct under any future allocation reordering inside the
+  // function body.
+  SmallVector<Operation *> allAllocOps;
+  allAllocOps.reserve(allInfos.size());
+  for (auto &info : allInfos)
+    allAllocOps.push_back(info.allocOp.getOperation());
+
+  for (auto &bucket : dynBuckets) {
+    SmallVector<Operation *> requiredAfter;
+    for (Value dynOp : bucket.dynOperands)
+      if (auto *def = dynOp.getDefiningOp())
+        if (def->getBlock() == &block)
+          requiredAfter.push_back(def);
+    auto ip = findLatestLegalInsertionPoint(block, requiredAfter, allAllocOps);
+    if (!ip) {
+      // Infeasible iff some dyn-operand def of this bucket lives
+      // at-or-after the earliest pooled alloc in the function. That
+      // requires the dyn-operand to be defined BETWEEN two pooled
+      // allocs (e.g. `memref.dim` of an earlier alloc consumed by a
+      // later alloc) — a pattern a Stage 0 IR audit confirmed does not
+      // occur in practice on lowered transformer graphs. The legacy
+      // hoist path supported it via code motion; the dominator-emit
+      // path intentionally does not, so we surface it as a hard
+      // failure to flag any future regression.
+      funcOp.emitError(
+          "hip-pool-allocs: cannot place bucket size arithmetic at a "
+          "legal point in the block (a dyn-operand def is at-or-after "
+          "the earliest pooled alloc)");
+      return signalPassFailure();
+    }
+    builder.setInsertionPoint(&block, *ip);
+    emitBucketSize(builder, loc, bucket, align);
+  }
+
+  // Pool acquisition insertion point: after every bucket's aligned size
+  // SSA value, before every alloc.
+  {
+    SmallVector<Operation *> requiredAfter;
+    for (auto &bucket : dynBuckets) {
+      // alignedSize is the LATEST op in the bucket's size chain. When
+      // staticFactor is already aligned, alignedSize == byteSizeValue
+      // (still the latest). Block args and folded constants have no
+      // defining op and need no constraint.
+      Value v = bucket.alignedSize ? bucket.alignedSize : bucket.byteSizeValue;
+      if (!v)
+        continue;
+      if (auto *def = v.getDefiningOp())
+        if (def->getBlock() == &block)
+          requiredAfter.push_back(def);
+    }
+    auto ip = findLatestLegalInsertionPoint(block, requiredAfter, allAllocOps);
+    if (!ip) {
+      funcOp.emitError(
+          "hip-pool-allocs: cannot place hip.get_pool at a legal point "
+          "(some bucket size arithmetic is at-or-after an alloc)");
+      return signalPassFailure();
+    }
+    builder.setInsertionPoint(&block, *ip);
+  }
+
+  // Pool size = staticPoolSize + sum_buckets(alignedSize * numBins).
+  // Uses createOrFold so trivial ops (addi(x, 0), muli(x, 1)) are folded
+  // away by the arith dialect's fold methods.
+  Value poolSize = arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
+  if (hasDynamic) {
     for (auto &bucket : dynBuckets) {
       Value numBinsVal = arith::ConstantIndexOp::create(
           builder, loc, static_cast<int64_t>(bucket.bins.size()));
@@ -697,15 +675,13 @@ void PoolAllocsPass::runOnOperation() {
       poolSize =
           builder.createOrFold<arith::AddIOp>(loc, poolSize, contribution);
     }
-  } else {
-    poolSize = arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
   }
 
   LLVM_DEBUG(llvm::dbgs() << "Pool: static=" << staticPoolSize << " bytes, "
                           << dynBuckets.size() << " dynamic buckets, "
                           << allInfos.size() << " total allocs\n");
 
-  // 5b. Acquire the pool via hip.get_pool(%ctx, %pool_size).
+  // Acquire the pool via hip.get_pool(%ctx, %pool_size).
   if (funcOp.getNumArguments() == 0 ||
       !isa<hip::ContextType>(funcOp.getArgument(0).getType())) {
     funcOp.emitError("function missing !hip.context as arg 0 — "
@@ -717,21 +693,20 @@ void PoolAllocsPass::runOnOperation() {
       MemRefType::get({ShapedType::kDynamic}, builder.getIntegerType(8));
   Value pool = hip::GetPoolOp::create(builder, loc, poolType, ctx, poolSize);
 
-  // 5c. Compute byte offsets for every alloc and store in allocToOffset.
+  // Compute byte offsets for every alloc and store in allocToOffset.
+  // Static offsets are emitted as constants right after the pool. Dynamic
+  // offsets are walked bucket-by-bucket, base advancing past each bucket
+  // so distinct buckets never alias.
   DenseMap<Operation *, Value> allocToOffset;
-
   for (auto &[info, offset] : staticAssignments) {
     Value offsetVal = arith::ConstantIndexOp::create(builder, loc, offset);
     allocToOffset[info->allocOp.getOperation()] = offsetVal;
   }
-
   if (hasDynamic) {
     Value currentBase =
         arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
-
     for (auto &bucket : dynBuckets) {
       for (auto [binIdx, bin] : llvm::enumerate(bucket.bins)) {
-        // offset = currentBase + binIdx * alignedBucketSize
         Value binIdxVal = arith::ConstantIndexOp::create(
             builder, loc, static_cast<int64_t>(binIdx));
         Value binContrib = builder.createOrFold<arith::MulIOp>(
@@ -741,8 +716,6 @@ void PoolAllocsPass::runOnOperation() {
         for (AllocInfo *info : bin)
           allocToOffset[info->allocOp.getOperation()] = binOffset;
       }
-
-      // Advance base past this entire bucket.
       Value numBinsVal = arith::ConstantIndexOp::create(
           builder, loc, static_cast<int64_t>(bucket.bins.size()));
       Value bucketTotal = builder.createOrFold<arith::MulIOp>(
@@ -752,7 +725,9 @@ void PoolAllocsPass::runOnOperation() {
     }
   }
 
-  // 5d. Replace each original alloc with a memref.view into the pool.
+  // Replace each original alloc with a memref.view into the pool.
+  // The view lands at the alloc's original site — offsets dominate by
+  // construction (helper-anchored above the pool acquisition).
   SmallVector<int64_t> staticOffsets;
   for (auto &info : allInfos) {
     auto it = allocToOffset.find(info.allocOp.getOperation());
@@ -778,7 +753,7 @@ void PoolAllocsPass::runOnOperation() {
       staticOffsets.push_back(-1);
   }
 
-  // 5d'. Erase deallocs that now target views — the pool is owned by the
+  // Erase deallocs that now target views — the pool is owned by the
   // runtime state (not this function), so no pool dealloc is inserted.
   SmallVector<memref::DeallocOp> orphanedDeallocs;
   funcOp.walk([&](memref::DeallocOp op) {
@@ -788,7 +763,7 @@ void PoolAllocsPass::runOnOperation() {
   for (auto op : orphanedDeallocs)
     op.erase();
 
-  // 5e. Attach pool metadata to the module for GenerateInterface.
+  // Attach pool metadata to the module for GenerateInterface.
   ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
   MLIRContext *mlirCtx = funcOp.getContext();
   moduleOp->setAttr("hipdnn.pool_size",
