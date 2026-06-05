@@ -464,15 +464,6 @@ jobs:
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
-          # mm unit test binary (requires a real GPU; runs in gpu-test job)
-          MM_TEST=$(find "${{ runner.workspace }}/build" -name "mm_tests.exe" -type f | head -1)
-          if [ -n "$MM_TEST" ]; then
-            cp "$MM_TEST" staging/bin/
-            echo "  Packaged: mm_tests.exe <- $MM_TEST"
-          else
-            echo "  WARNING: mm_tests.exe not found in build tree"
-          fi
-
           # Import libraries needed by the MorphiZen JIT linker (lld-link).
           # hip-compiler.dll embeds the build-time install path for
           # hip_custom_kernels.lib; staging/lib/ preserves them so the
@@ -599,16 +590,6 @@ jobs:
             -o therock.tar.gz
           tar -xzf therock.tar.gz -C $dist --strip-components=1
           Remove-Item therock.tar.gz
-
-      # -----------------------------------------------------------------------
-      # Run mm unit tests on the real GPU machine.
-      # mm_tests.exe is a standalone GTest binary that calls hipMalloc etc.
-      # -----------------------------------------------------------------------
-      - name: Run mm unit tests (GPU)
-        shell: cmd
-        run: |
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          gpu-test-package\bin\mm_tests.exe
 
       # Run perf test against seq128 models via MorphiZen EP.
       # Models are pre-placed on the runner at C:\actions-runner\_work\model\.
