@@ -20,30 +20,35 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # CACHE_VERSION numbering resets at the Docker switch (the pre-Docker
-  # inline-yml history is no longer reachable). Bump when docker/Dockerfile
-  # or docker/build.sh meaningfully changes what lands under prebuilt-local/
-  # (ORT + protobuf + flatbuffers install trees).
-  CACHE_VERSION: "1"
-  # Pinned versions — kept in lockstep with docker/build.sh defaults.
+  # CACHE_VERSION: bump when the layout of a cached prefix changes shape.
+  CACHE_VERSION: "3"
+  # Route sccache through the GitHub Actions cache (mirrors windows-build.yml).
+  SCCACHE_GHA_ENABLED: "true"
+  # Pins (kept in lockstep with cmake/deps.txt; mirrors windows-build.yml's env).
+  # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
+  # only invalidates the llvm-install cache.
+  LLVM_TAG: llvmorg-22.1.0
   ONNXRUNTIME_VERSION: "1.25.1"
-  # Space-separated list of microsoft/onnxruntime PR numbers to fetch from
-  # github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply` on top
-  # of the pinned ONNXRUNTIME_VERSION tag during docker/build.sh A.5. The
-  # PR list is also part of the prebuilt-local and ort-src cache keys, so
-  # editing this list auto-invalidates both. Kept in lockstep with
-  # docker/build.sh defaults. Remove a PR number once its fix lands in the
-  # pinned ONNXRUNTIME_VERSION release.
+  # Space-separated microsoft/onnxruntime PR numbers. Non-empty => build ORT
+  # from source and `git apply` each PR on top of the pinned tag; empty => use
+  # the official prebuilt release. Part of the ort-install cache key. Remove a
+  # PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: "28608"
-  THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
   # OGA fork+pin matches windows-build.yml so both platforms produce
   # ABI-compatible OGA binaries against the same ORT and tokenizer surface.
+  OGA_REPO: AMDmoore/onnxruntime-genai
   OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
+  # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
+  # explicitly (scripts/build.py auto-detects from /sys on a real GPU host).
+  HIP_ARCHITECTURES: gfx1151
 
 jobs:
   build-linux:
     # No draft-PR gate: the cache-priming strategy needs every PR push.
     runs-on: ubuntu-latest
+    # Cold-cache builds are multi-hour (from-source LLVM dominates); the
+    # llvm-install cache amortizes it. 360 is the GitHub-hosted maximum.
+    timeout-minutes: 360
     steps:
       # ROCm/MorphiZen is private — reuse the same deploy key as windows-build.yml.
       - name: Setup SSH key for MorphiZen submodule
@@ -51,11 +56,10 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
 
-      # Check the repo into a sibling-layout subdir so the workspace root
-      # (= $github.workspace) can hold prebuilt-local/, therock-dist/,
-      # onnxruntime/, onnxruntime-genai/, build/, install/ as siblings of
-      # onnx-hipdnn-ep/. This matches the layout docker/run.sh expects
-      # (resolves WORKSPACE as $SOURCE_DIR/..).
+      # Sibling-layout checkout: $github.workspace holds llvm-install/,
+      # ort-install/, build/, install/ as siblings of onnx-hipdnn-ep/, matching
+      # the layout scripts/build.py derives (WORKSPACE = repo/..). TheRock is
+      # auto-downloaded into the build tree by cmake/deps.cmake.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -64,10 +68,9 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # Run `git submodule update` on the HOST with ssh-agent loaded —
-      # docker/build.sh A.2 detects the populated checkout and skips its own
-      # submodule update, so the container does NOT need SSH credentials
-      # for the private morphizen repo.
+      # Initialize submodules on the HOST with ssh-agent loaded so the private
+      # MorphiZen repo is populated; scripts/build.py then sees them present
+      # and skips its own submodule update (needs no SSH).
       - name: Checkout MorphiZen submodule
         working-directory: onnx-hipdnn-ep
         run: |
@@ -76,143 +79,353 @@ jobs:
             "https://github.com/ROCm/MorphiZen.git"
           git submodule update --init --recursive --depth 1
 
-      # ubuntu-latest ships ~14 GB usable SSD. Image build + cold ORT need
-      # ~25 GB; reclaim ~30 GB by pruning preinstalled toolchains we don't use.
+      # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build + ORT
+      # need much more. Reclaim ~30 GB by pruning preinstalled toolchains.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
-          tool-cache: false        # keep Python toolchain
-          docker-images: true      # ~10 GB
-          android: true            # ~10 GB
-          dotnet: true             # ~3 GB
-          haskell: true            # ~5 GB
-          large-packages: false    # skipped: very slow, marginal gain
-          swap-storage: true       # ~4 GB
+          tool-cache: false
+          docker-images: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: true
 
-      # -----------------------------------------------------------------------
-      # Caches live as siblings of the source checkout (matches the layout
-      # docker/build.sh expects). Cache misses get repopulated by the Docker
-      # build step below via the idempotent A.4-A.9 pipeline.
-      # -----------------------------------------------------------------------
-      - name: Cache prebuilt-local
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ github.workspace }}/prebuilt-local
-          # The `ortpr-<list>` segment embeds the ONNXRUNTIME_PR_PATCHES env
-          # verbatim, so editing the PR list auto-invalidates the cached
-          # install prefix. docker/build.sh A.5 fetches each PR's `.patch`
-          # from GitHub and applies it after the ORT clone.
-          key: linux-deps-v${{ env.CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
-
-      - name: Cache ORT source clone
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ github.workspace }}/onnxruntime
-          # PR list is in the key so changing the patched PR set forces a
-          # fresh clone (avoids "patch already applied" failures from
-          # re-applying a different version of the same PR on top of an
-          # old apply).
-          key: ort-src-v${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
-
-      - name: Cache OGA source clone
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ github.workspace }}/onnxruntime-genai
-          key: oga-src-${{ env.OGA_REF }}
-
-      # Cache the OGA INSTALL outputs (not the full build/ tree). With
-      # docker/build.sh A.9's have_oga() guard, a cache hit on this key
-      # means we skip the 5-10 min OGA build entirely. ORT version is in
-      # the key because OGA's libonnxruntime-genai.so links libonnxruntime.so
-      # at its pinned ABI; an ORT version bump must invalidate the OGA
-      # outputs. ${OGA_REF} is the primary update knob — change it in env
-      # above to roll OGA forward and the cache key automatically misses.
-      - name: Cache OGA install outputs
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: |
-            ${{ github.workspace }}/install/bin/model_benchmark
-            ${{ github.workspace }}/install/lib/libonnxruntime-genai.so
-            ${{ github.workspace }}/install/lib/libonnxruntime-genai.so.0
-          key: oga-out-v${{ env.CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
-
-      # -----------------------------------------------------------------------
-      # The actual build: one docker invocation runs all of A.4-A.9
-      # (TheRock + ORT + protobuf + flatbuffers + project + OGA). Each step
-      # has its own `[skip]` short-circuit when the corresponding install
-      # artifact is already in place from the cache.
-      #
-      # The same image + recipe is what local developers run via
-      # `./docker/run.sh build` — see docs/quick_start_linux.md.
-      # -----------------------------------------------------------------------
-      - name: Build via Docker
-        working-directory: onnx-hipdnn-ep
-        env:
-          # OGA_REF is the single source of truth for which OGA SHA gets
-          # cloned + built. docker/run.sh forwards it into the container
-          # and docker/build.sh A.9 reads it as the checkout target. Bump
-          # OGA_REF in this workflow's env block to roll OGA forward —
-          # nothing else needs to change.
-          OGA_REF: ${{ env.OGA_REF }}
-          # ONNXRUNTIME_PR_PATCHES forwards the same workflow-level PR list
-          # that drove the cache key into docker/build.sh A.5, which fetches
-          # each PR's `.patch` from GitHub and applies it on the freshly
-          # cloned ORT source.
-          ONNXRUNTIME_PR_PATCHES: ${{ env.ONNXRUNTIME_PR_PATCHES }}
+      - name: Install build toolchain
         run: |
           set -euo pipefail
-          ./docker/run.sh image
-          BUILD_OGA=1 ./docker/run.sh build
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build git ca-certificates curl
+          # backend-mlir-compiler needs cmake >= 3.29; pip cmake wins over apt's.
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cmake ninja lit
+          cmake --version
+          ninja --version
+
+      # sccache (GitHub Actions cache backend) accelerates the from-source
+      # compiles (LLVM, the project, OGA) on cache miss. Mirrors windows-build.yml.
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       # -----------------------------------------------------------------------
-      # Stage the artifact:
-      #   staging/bin/  hip-onnx-runner, hip-compiler, hip-mlir-opt,
-      #                 hip-test-dll, hip-inspect-dll, model_benchmark,
-      #                 onnxruntime_perf_test
-      #   staging/lib/  libhip-compiler.so, libonnxruntime_morphizen_ep.so,
-      #                 libonnxruntime.so*, libonnxruntime-genai.so*,
-      #                 libhip_custom_kernels.a (needed at per-model
-      #                 DLL link time)
-      #   staging/etc/  morphizen_config.json
-      #
-      # The artifact does NOT bundle TheRock (deploy host installs ROCm
-      # separately and exports THEROCK_DIST) nor the Python wheels (the
-      # Linux build deliberately omits ORT --build_wheel and OGA
-      # --skip_wheel so the wheels can't satisfy `import onnxruntime`
-      # anyway).
-      #
-      # docker/build.sh A.7b runs a 2-pass `ldd` inside the container
-      # and bundles prebuilt-local transitive .so files into install/lib/,
-      # so the bulk `cp -a install/. staging/` here is most of the work.
-      # Filter out artifact-irrelevant pieces shipped only for local
-      # developers / SDK consumers: the static archives we statically
-      # link into hip-compiler.so (libcpptrace.a, libdwarf.a, libzstd.a,
-      # libHipCInterface.a), pkgconfig descriptors, and the duplicate
-      # morphizen_config.json that the submodule's install rule drops
-      # into bin/.
+      # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
+      # concern, so the prefix build lives here (not in scripts/build.py). Recipe
+      # is kept identical to windows-build.yml + cmake/deps.cmake's from-source
+      # fallback: clang;mlir;lld, X86 only, RTTI/zlib/zstd off, INSTALL_UTILS on.
+      # -----------------------------------------------------------------------
+      - name: Cache LLVM install prefix
+        id: cache-llvm
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ github.workspace }}/llvm-install
+          # Keyed only on the LLVM tag: a protobuf/ORT bump must not evict the
+          # multi-hour LLVM cache.
+          key: linux-llvm-v${{ env.CACHE_VERSION }}-${{ env.LLVM_TAG }}
+
+      - name: Build LLVM/MLIR/LLD from source
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          SRC="${{ github.workspace }}/llvm-project"
+          git clone --depth 1 --branch "${{ env.LLVM_TAG }}" \
+            https://github.com/llvm/llvm-project.git "$SRC"
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ github.workspace }}/build-llvm" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/llvm-install" \
+            -DLLVM_ENABLE_RTTI=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ github.workspace }}/build-llvm" --target install
+          rm -rf "$SRC" "${{ github.workspace }}/build-llvm"
+
+      # -----------------------------------------------------------------------
+      # ONNX Runtime built from source into ort-install (cached), mirroring
+      # windows-build.yml: checkout (actions/checkout) -> apply PR patches ->
+      # build.sh -> cmake --install. The prefix is consumed by scripts/build.py
+      # (find_package) and reused as OGA's ORT_HOME. Each step is gated on the
+      # ort-install cache so a warm run skips the 50-90 min build.
+      # -----------------------------------------------------------------------
+      - name: Cache ONNX Runtime install prefix
+        id: cache-ort
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ github.workspace }}/ort-install
+          key: linux-ort-v${{ env.CACHE_VERSION }}-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
+
+      - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Microsoft/onnxruntime
+          ref: v${{ env.ONNXRUNTIME_VERSION }}
+          path: source-onnxruntime
+          submodules: true
+          fetch-depth: 1
+          show-progress: false
+
+      # Apply microsoft/onnxruntime PR patches listed in ONNXRUNTIME_PR_PATCHES
+      # on top of the pinned tag. The fresh checkout always lands clean, so the
+      # patches apply directly (the PR list is in the ort-install cache key, so
+      # editing it forces a rebuild). Empty list => nothing to apply.
+      - name: Apply ONNX Runtime PR patches
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        working-directory: source-onnxruntime
+        env:
+          ORT_PRS: ${{ env.ONNXRUNTIME_PR_PATCHES }}
+        run: |
+          set -euo pipefail
+          prs="$(echo "$ORT_PRS" | xargs || true)"
+          if [ -z "$prs" ]; then
+            echo "ONNXRUNTIME_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          fi
+          for pr in $prs; do
+            url="https://github.com/microsoft/onnxruntime/pull/${pr}.patch"
+            echo "Fetching $url"
+            curl -fsSL "$url" -o "/tmp/ort-pr-${pr}.patch"
+            echo "Applying PR #${pr}"
+            git apply --whitespace=nowarn "/tmp/ort-pr-${pr}.patch"
+          done
+
+      - name: Build ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        working-directory: source-onnxruntime
+        run: |
+          set -euo pipefail
+          ./build.sh \
+            --config Release \
+            --build_shared_lib \
+            --parallel \
+            --compile_no_warning_as_error \
+            --skip_submodule_sync \
+            --build_dir "${{ github.workspace }}/build-onnxruntime" \
+            --skip_tests \
+            --cmake_generator Ninja \
+            --cmake_extra_defines \
+              CMAKE_C_COMPILER_LAUNCHER=sccache \
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+      - name: Install ORT into ort-install
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # ORT's Linux build.sh writes to <build_dir>/Release.
+          cmake --install "${{ github.workspace }}/build-onnxruntime/Release" \
+            --prefix "${{ github.workspace }}/ort-install"
+          # perf_test is not a cmake install target; copy it into the cached prefix.
+          PERF=$(find "${{ github.workspace }}/build-onnxruntime" -name onnxruntime_perf_test -type f | head -1)
+          if [ -z "$PERF" ]; then
+            echo "ERROR: onnxruntime_perf_test not found in build tree"
+            exit 1
+          fi
+          mkdir -p "${{ github.workspace }}/ort-install/bin"
+          cp "$PERF" "${{ github.workspace }}/ort-install/bin/"
+
+      # TheRock is auto-downloaded fresh by cmake/deps.cmake during the configure
+      # (not cached, matching windows-build.yml's TheRock handling).
+
+      # -----------------------------------------------------------------------
+      # Build this project natively via the plain scripts/build.py. Deps are
+      # injected as prefixes (llvm-install + ort-install); protobuf/flatbuffers
+      # are resolved from source and TheRock auto-downloaded by cmake/deps.cmake.
+      # Runtime .so bundling + closure happen in a later step (not in build.py).
+      # -----------------------------------------------------------------------
+      - name: Build onnx-hipdnn-ep
+        run: |
+          set -euo pipefail
+          python3 onnx-hipdnn-ep/scripts/build.py \
+            --config Release \
+            --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
+            --cmake_prefix_path "${{ github.workspace }}/llvm-install;${{ github.workspace }}/ort-install"
+
+      # -----------------------------------------------------------------------
+      # OGA (onnxruntime-genai) for model_benchmark. Mirrors windows-build.yml:
+      # a dedicated step using the ort-install prefix as ORT_HOME. Kept out of
+      # scripts/build.py (whose target is the project .so) because OGA is a
+      # CI/artifact concern.
+      # -----------------------------------------------------------------------
+      - name: Cache OGA artifacts
+        id: cache-oga
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ github.workspace }}/oga-artifacts
+          key: linux-oga-v${{ env.CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+
+      # Checkout + build are skipped on an OGA cache hit (step-level gate,
+      # mirroring windows-build.yml); the install-copy below always runs so the
+      # cached artifacts land in install/ either way.
+      - name: Checkout OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_REF }}
+          submodules: recursive
+          path: onnxruntime-genai
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Build OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          ART="${{ github.workspace }}/oga-artifacts"
+          ORT_PREFIX="${{ github.workspace }}/ort-install"
+          ORT_HOME="${{ github.workspace }}/oga-ort-home"
+          mkdir -p "$ORT_HOME/include" "$ORT_HOME/lib"
+          # ORT_HOME wants flat C API headers + the .so. Source-built ORT nests
+          # headers under include/onnxruntime/; the prebuilt tgz is already flat.
+          if [ -d "$ORT_PREFIX/include/onnxruntime" ]; then
+            cp -r "$ORT_PREFIX/include/onnxruntime/." "$ORT_HOME/include/"
+          else
+            cp -r "$ORT_PREFIX/include/." "$ORT_HOME/include/"
+          fi
+          cp -a "$ORT_PREFIX"/lib/libonnxruntime.so* "$ORT_HOME/lib/" 2>/dev/null || true
+          cp -a "$ORT_PREFIX"/lib/libonnxruntime_providers_shared.so* "$ORT_HOME/lib/" 2>/dev/null || true
+          # --skip_wheel: the OGA python wheel needs an ORT python wheel at
+          # import time, which we don't build; the C++ artifacts are enough.
+          python3 onnxruntime-genai/build.py \
+            --config Release \
+            --cmake_generator Ninja \
+            --ort_home "$ORT_HOME" \
+            --skip_tests --skip_examples --skip_wheel \
+            --parallel \
+            --build_dir "${{ github.workspace }}/build-oga" \
+            --cmake_extra_defines \
+              CMAKE_C_COMPILER_LAUNCHER=sccache \
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+          mkdir -p "$ART"
+          cp "${{ github.workspace }}/build-oga/Release/benchmark/c/model_benchmark" "$ART/"
+          cp -a "${{ github.workspace }}/build-oga/Release"/libonnxruntime-genai.so* "$ART/"
+
+      - name: Install OGA artifacts into install/
+        run: |
+          set -euo pipefail
+          ART="${{ github.workspace }}/oga-artifacts"
+          cp "$ART/model_benchmark" "${{ github.workspace }}/install/bin/"
+          cp -a "$ART"/libonnxruntime-genai.so* "${{ github.workspace }}/install/lib/"
+
+      # -----------------------------------------------------------------------
+      # Bundle the runtime .so into install/lib so the artifact is
+      # self-contained with LD_LIBRARY_PATH=install/lib:$THEROCK/lib. scripts/
+      # build.py is kept plain (just configure/build/install), so this packaging
+      # step lives in CI. 2-pass ldd: copy only ort-install-resolved libs (ORT +
+      # its transitive); TheRock + system libs stay out of the artifact. Then
+      # verify every install/ binary + .so resolves with install/lib + TheRock.
+      # -----------------------------------------------------------------------
+      - name: Bundle runtime .so + verify closure
+        run: |
+          set -euo pipefail
+          INSTALL="${{ github.workspace }}/install"
+          ORT="${{ github.workspace }}/ort-install"
+          THEROCK="${{ github.workspace }}/build/onnx-hipdnn-ep/_therock"
+          stage_pass() {
+            LD_LIBRARY_PATH="$THEROCK/lib:$ORT/lib:$INSTALL/lib" ldd "$@" 2>/dev/null \
+              | awk -v p="$ORT" 'index($3, p) == 1 {print $3}' | sort -u \
+              | while read -r src; do
+                  dst="$INSTALL/lib/$(basename "$src")"
+                  [ -e "$dst" ] && continue
+                  cp -a "$src" "$dst"
+                  real=$(readlink -f "$src"); rb=$(basename "$real")
+                  if [ "$rb" != "$(basename "$src")" ] && [ ! -e "$INSTALL/lib/$rb" ]; then
+                    cp -a "$real" "$INSTALL/lib/"
+                  fi
+                done
+          }
+          stage_pass \
+            "$INSTALL"/lib/libonnxruntime_morphizen_ep.so \
+            "$INSTALL"/lib/libhip-compiler.so \
+            "$INSTALL"/bin/hip-compiler \
+            "$INSTALL"/bin/hip-onnx-runner \
+            "$INSTALL"/bin/hip-test-dll \
+            "$INSTALL"/bin/model_benchmark
+          prev=0
+          for _ in 1 2 3 4; do
+            mapfile -t libs < <(find "$INSTALL/lib" -maxdepth 1 -name 'lib*.so*' -type f)
+            [ "${#libs[@]}" -eq 0 ] && break
+            stage_pass "${libs[@]}"
+            cnt=$(find "$INSTALL/lib" -maxdepth 1 -name 'lib*.so*' -type f | wc -l)
+            [ "$cnt" -eq "$prev" ] && break
+            prev=$cnt
+          done
+          echo "[stage] $(find "$INSTALL/lib" -name 'lib*.so*' | wc -l) lib*.so* in $INSTALL/lib"
+          fail=0
+          while IFS= read -r t; do
+            u=$(LD_LIBRARY_PATH="$INSTALL/lib:$THEROCK/lib" ldd "$t" 2>&1 | grep -F "not found" || true)
+            if [ -n "$u" ]; then echo "ERROR: unresolved deps in $t:"; echo "$u"; fail=1; fi
+          done < <(
+            find "$INSTALL/bin" -maxdepth 1 -type f -executable 2>/dev/null
+            find "$INSTALL/lib" -maxdepth 1 -name 'lib*.so*' -type f 2>/dev/null
+          )
+          [ "$fail" = 0 ] || { echo "ERROR: install/ is not self-contained"; exit 1; }
+          echo "[verify] install/ closure OK"
+
+      # -----------------------------------------------------------------------
+      # Bundle our from-source clang/lld into install/llvm so per-model DLL
+      # linking at runtime uses the same LLVM the EP was built against (not
+      # TheRock's ROCm clang). LLVM is built static (no LLVM_LINK_LLVM_DYLIB), so
+      # the driver binaries depend only on system libs -- ship the binaries +
+      # clang resource dir, and ldd-grab any stray non-system dep (normally none).
+      # -----------------------------------------------------------------------
+      - name: Bundle clang/lld toolchain
+        run: |
+          set -euo pipefail
+          LLVM="${{ github.workspace }}/llvm-install"
+          DEST="${{ github.workspace }}/install/llvm"
+          mkdir -p "$DEST/bin" "$DEST/lib"
+          # Driver + linker. cp -a keeps the clang->clang-NN / ld.lld->lld
+          # symlinks; the real binaries are copied by the same globs.
+          cp -a "$LLVM"/bin/clang* "$DEST/bin/"
+          for t in lld ld.lld ld64.lld lld-link; do
+            [ -e "$LLVM/bin/$t" ] && cp -a "$LLVM/bin/$t" "$DEST/bin/" || true
+          done
+          # clang resource dir (builtins/crt the -shared link may reference).
+          [ -d "$LLVM/lib/clang" ] && cp -a "$LLVM/lib/clang" "$DEST/lib/" || true
+          # Copy only non-system shared-lib deps (static LLVM => normally none).
+          for b in "$DEST"/bin/*; do
+            [ -f "$b" ] || continue
+            ldd "$b" 2>/dev/null | awk '$3 ~ /^\// && $3 !~ /^\/(usr|lib|lib64)\// {print $3}'
+          done | sort -u | while read -r src; do
+            [ -e "$DEST/lib/$(basename "$src")" ] || cp -a "$src" "$DEST/lib/"
+          done
+          echo "[clang] bundled $(du -sh "$DEST" | cut -f1) into install/llvm"
+          "$DEST/bin/clang++" --version | head -1
+
+      # -----------------------------------------------------------------------
+      # Stage the artifact from install/ (the bundling steps above made it
+      # self-contained). Drop dev-only pieces. Does NOT bundle TheRock (deploy
+      # host installs ROCm separately).
       # -----------------------------------------------------------------------
       - name: Stage Linux GPU test package
         run: |
           set -euo pipefail
           mkdir -p staging/bin staging/lib staging/etc
-
           cp -a "${{ github.workspace }}/install/bin/." staging/bin/
           cp -a "${{ github.workspace }}/install/lib/." staging/lib/
+          # Our from-source clang/lld toolchain for runtime per-model DLL linking.
+          cp -a "${{ github.workspace }}/install/llvm" staging/llvm
 
-          # ORT latency tool lives in prebuilt-local (A.5 copies it
-          # there from ORT's build dir); cmake --install of this project
-          # doesn't re-stage it into install/bin/.
-          cp "${{ github.workspace }}/prebuilt-local/bin/onnxruntime_perf_test" \
-              staging/bin/
+          # onnxruntime_perf_test only exists on the from-source ORT path
+          # (ONNXRUNTIME_PR_PATCHES); the prebuilt release tarball omits it.
+          if [ -f "${{ github.workspace }}/ort-install/bin/onnxruntime_perf_test" ]; then
+            cp "${{ github.workspace }}/ort-install/bin/onnxruntime_perf_test" staging/bin/
+          else
+            echo "note: onnxruntime_perf_test not present (prebuilt ORT path) — skipping"
+          fi
 
-          # Repo etc/ is the canonical source for morphizen_config.json
-          # (the submodule's bin/ copy gets dropped below).
           cp onnx-hipdnn-ep/etc/morphizen_config.json staging/etc/
 
-          # Drop artifact-irrelevant content. The static archives are
-          # already whole-archived into the shipped .so files; the .pc
-          # files are dev-time pkg-config descriptors; bin/<config> is
-          # the submodule-install duplicate of etc/<config>.
           rm -f staging/lib/libHipCInterface.a \
                 staging/lib/libcpptrace.a \
                 staging/lib/libdwarf.a \
@@ -220,7 +433,7 @@ jobs:
           rm -rf staging/lib/pkgconfig
           rm -f staging/bin/morphizen_config.json
 
-          chmod +x staging/bin/*
+          chmod +x staging/bin/* 2>/dev/null || true
 
           echo "=== Staged package contents ==="
           find staging/ -maxdepth 3 \( -type f -o -type l \) | sort
