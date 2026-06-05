@@ -2,6 +2,14 @@
 # ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
+
+# protobuf::protoc / protobuf::libprotobuf are provided by cmake/deps.cmake or
+# the morphizen subdirectory (find_package or from-source fallback). Only resolve
+# standalone when the targets are absent.
+if(NOT TARGET protobuf::libprotobuf)
+  find_package(Protobuf CONFIG REQUIRED)
+endif()
+
 get_filename_component(_proto_name metadata.proto NAME_WE)
 set(PROTO_SRCS ${CMAKE_CURRENT_BINARY_DIR}/${_proto_name}.pb.cc)
 set(PROTO_HDRS ${CMAKE_CURRENT_BINARY_DIR}/${_proto_name}.pb.h)
