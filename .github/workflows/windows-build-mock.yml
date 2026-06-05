@@ -228,33 +228,16 @@ jobs:
       # -----------------------------------------------------------------------
 
       # -----------------------------------------------------------------------
-      # Configure with BUILD_MOCK_RUNTIME=ON (no ROCm/TheRock required).
-      # ORT + LLVM come from the cached prefixes; deps.cmake source-builds the
-      # rest. (BUILD_MOCK_RUNTIME=ON also gates off the TheRock auto-download.)
+      # Build (mock) via the cross-platform scripts/build.py. --mock sets
+      # BUILD_MOCK_RUNTIME=ON (no ROCm/TheRock); ORT + LLVM come from the cached
+      # prefixes and cmake/deps.cmake source-builds the rest. The LIT tests run
+      # inside build.py after install.
       # -----------------------------------------------------------------------
-      - name: Configure
+      - name: Build onnx-hipdnn-ep (mock)
         shell: bash
         run: |
-          cmake -S . -B ../build/$(basename "$PWD")-mock \
-            -G Ninja \
-            -DBUILD_SHARED_LIBS=OFF \
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" \
-            -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DBUILD_EP=ON \
-            -DBUILD_HIP_TOOLS=ON \
-            -DONNX_HIP_INCLUDE_LIT_TESTS=ON \
-            -Dmorphizen_ENABLE_UNIT_TEST=OFF \
-            -DBUILD_MOCK_RUNTIME=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
-            --fresh
-
-      - name: Build
-        shell: bash
-        run: cmake --build ../build/$(basename "$PWD")-mock --parallel $(nproc)
-
-      - name: Run LIT tests
-        shell: bash
-        run: cmake --build ../build/$(basename "$PWD")-mock --target check-hip-mlir-lit
+          python scripts/build.py \
+            --mock \
+            --config Release \
+            --cmake_generator Ninja \
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install"

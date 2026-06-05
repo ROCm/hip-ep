@@ -51,53 +51,6 @@ if(_HIPDNN_NEED_TOOLCHAIN)
   #   3. Auto-downloaded from the pinned TheRock release when neither is set.
   # The resolved path is added to CMAKE_PREFIX_PATH so find_package(hip) finds it.
   if(NOT BUILD_MOCK_RUNTIME)
-    # Auto-detect the GPU arch (TheRock-free) when the caller didn't pass
-    # -DHIP_ARCHITECTURES. Mirrors LLVM's offload-arch: compile + run a tiny probe
-    # that loads the driver-provided HIP runtime (amdhip64_*.dll in System32 --
-    # shipped by the GPU driver, not TheRock) and reads gcnArchName via the fixed
-    # hipDeviceProp_t struct offsets, so it needs no HIP headers, no static device
-    # table, and no TheRock. A missing driver / non-Windows host / cross-compile
-    # leaves HIP_ARCHITECTURES unset and falls through to the explicit-required
-    # error in the auto-download below.
-    if(NOT HIP_ARCHITECTURES AND WIN32 AND NOT CMAKE_CROSSCOMPILING)
-      set(_arch_probe "${CMAKE_CURRENT_BINARY_DIR}/_hipdnn_detect_arch.cpp")
-      file(WRITE "${_arch_probe}" [==[
-#include <windows.h>
-#include <cstdio>
-#include <cstring>
-// gcnArchName offsets match HIP's R0600 (6.x+) / R0000 (legacy) hipDeviceProp_t.
-typedef struct alignas(8) { char p[1160]; char gcnArchName[256]; char p2[56];  } P6;
-typedef struct alignas(8) { char p[396];  char gcnArchName[256]; char p2[1024]; } P0;
-typedef int (*C_t)(int *);
-typedef int (*G6_t)(P6 *, int);
-typedef int (*G0_t)(P0 *, int);
-int main() {
-  const wchar_t *names[] = {L"amdhip64_7.dll", L"amdhip64_6.dll", L"amdhip64.dll"};
-  HMODULE h = nullptr;
-  for (auto n : names) { h = LoadLibraryW(n); if (h) break; }
-  if (!h) return 1;
-  auto getCount = (C_t)GetProcAddress(h, "hipGetDeviceCount");
-  auto p6 = (G6_t)GetProcAddress(h, "hipGetDevicePropertiesR0600");
-  auto p0 = (G0_t)GetProcAddress(h, "hipGetDevicePropertiesR0000");
-  if (!getCount) return 2;
-  int cnt = 0; if (getCount(&cnt) != 0 || cnt <= 0) return 3;
-  if (p6) { P6 pr; std::memset(&pr, 0, sizeof(pr)); if (p6(&pr, 0) == 0 && pr.gcnArchName[0]) { std::printf("%s\n", pr.gcnArchName); return 0; } }
-  if (p0) { P0 pr; std::memset(&pr, 0, sizeof(pr)); if (p0(&pr, 0) == 0 && pr.gcnArchName[0]) { std::printf("%s\n", pr.gcnArchName); return 0; } }
-  return 4;
-}
-]==])
-      try_run(_arch_run_rc _arch_compiled
-        "${CMAKE_CURRENT_BINARY_DIR}/_hipdnn_arch_probe" "${_arch_probe}"
-        RUN_OUTPUT_VARIABLE _arch_out)
-      if(_arch_compiled AND _arch_run_rc EQUAL 0)
-        # gcnArchName may carry feature flags (e.g. gfx1151:xnack-); keep the base target.
-        string(REGEX MATCH "gfx[0-9a-f]+" HIP_ARCHITECTURES "${_arch_out}")
-      endif()
-      if(HIP_ARCHITECTURES)
-        message(STATUS "[onnx-hipdnn-ep] auto-detected HIP_ARCHITECTURES=${HIP_ARCHITECTURES} (via driver HIP runtime)")
-      endif()
-    endif()
-
     set(THEROCK_DIST "" CACHE PATH "TheRock ROCm SDK distribution path")
     if(THEROCK_DIST)
       # Provided via -DTHEROCK_DIST: use as-is.
