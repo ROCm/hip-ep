@@ -450,7 +450,11 @@ int hip_rope_forward(
  * =========================================================================
  *
  * Individual kernel launchers for the 12-step GQA pipeline (Step 0 + Steps 1-11).
- * All FP16 only. The orchestration (hipBLASLt GEMMs, workspace, temp
+ * The pure data-movement kernels (append / concat / rope / transpose / expand /
+ * split) take element_size_bytes (2 = fp16, 4 = fp32) and dispatch to the
+ * matching typed kernel -- this fp32-enables the decomposed GQA pipeline used
+ * by the Whisper no_causal path. The fused / flash decode kernels remain FP16
+ * only (Llama / gpt-oss). The orchestration (hipBLASLt GEMMs, workspace, temp
  * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
 
@@ -461,11 +465,12 @@ int hip_rope_forward(
  * Use when past and present share the same buffer (aliased / in-place).
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
  * derived from seqlens_k[b]+1-sq (per-batch) and the host past_len is ignored.
- * Pass NULL for host-side past_len. */
+ * Pass NULL for host-side past_len.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_kv_cache_append(
     void* stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
-    const void* seqlens_k);
+    const void* seqlens_k, int element_size_bytes);
 
 /* KV cache concat: concatenate past data and new tokens into a fresh present
  * buffer.  Fills present [B,G,present_seq,d] by copying past data from
@@ -473,42 +478,48 @@ int hip_gqa_kv_cache_append(
  * from current BSHD [B,sq,G,d] at [past_len,past_len+sq).
  * past_seq and present_seq are the actual sequence dimensions (strides) of the
  * respective buffers.  Handles the stride mismatch (past_seq != present_seq)
- * in a single kernel launch. */
+ * in a single kernel launch.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_kv_cache_concat(
     void* stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq);
+    int past_seq, int present_seq, int element_size_bytes);
 
-/* Internal GQA RoPE (half-rotated, FP16):
+/* Internal GQA RoPE (half-rotated):
  * out[d] = in[d]*cos - in[d+half]*sin
  * out[d+half] = in[d+half]*cos + in[d]*sin
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
- * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored. */
+ * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_rope(
     void* stream, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
-    const void* seqlens_k);
+    const void* seqlens_k, int element_size_bytes);
 
 /* Transpose middle two dims of 4D tensor:
- * [B, dim1, dim2, D] -> [B, dim2, dim1, D] */
+ * [B, dim1, dim2, D] -> [B, dim2, dim1, D]
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_transpose_mid_dims(
     void* stream, const void* src, void* dst,
-    int batch_size, int dim1, int dim2, int D);
+    int batch_size, int dim1, int dim2, int D, int element_size_bytes);
 
 /* KV group expansion: replicate G groups -> H heads.
- * For head h, copies from group g = h / heads_per_group. */
+ * For head h, copies from group g = h / heads_per_group.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_expand_kv(
     void* stream, const void* src, void* dst,
     int total_heads, int heads_per_group,
-    int src_stride, int dst_stride, int copy_elems);
+    int src_stride, int dst_stride, int copy_elems, int element_size_bytes);
 
 /* Split packed QKV [B*S, (H+2*G)*d] into separate Q, K, V buffers.
- * Q: [B*S, H*d], K: [B*S, G*d], V: [B*S, G*d] */
+ * Q: [B*S, H*d], K: [B*S, G*d], V: [B*S, G*d]
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_split_qkv(
     void* stream, const void* packed, void* Q, void* K, void* V,
-    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim);
+    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim,
+    int element_size_bytes);
 
 /* Causal mask (prefill only): S[k,q] = -inf where k > past_len + q.
  * When local_window_size > 0, also masks k < past_len + q - local_window_size + 1. */
@@ -548,6 +559,16 @@ int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
 int hip_gqa_softmax_f32_to_f16(
     void* stream, const void* input_f32, void* output_f16,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax);
+
+/* Column-wise softmax: fp32 input -> fp32 output.
+ * Same as hip_gqa_softmax_f32_to_f16 but writes fp32 probabilities, feeding
+ * the fp32 Value GEMM on the Whisper no_causal fp32 decomposed path.
+ * input_batch_stride and output_batch_stride are both in float elements. */
+int hip_gqa_softmax_f32_to_f32(
+    void* stream, const void* input_f32, void* output_f32,
     int total_head_queries, int rows, int cols,
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
