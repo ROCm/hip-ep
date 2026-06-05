@@ -154,10 +154,10 @@ sequenceDiagram
   DLL->>DLL: main_graph: %M = memref.dim(input)
   DLL->>RT: hipdnn_ep_alloc_output(state, out_idx, [%M,4096], rank, elem)
   RT->>EP: allocator.allocate(self, out_idx, shape, rank, elem)
-  EP->>EP: ort_idx = output_index_map[out_idx]; GetOutput(ort_idx, shape)
-  EP-->>RT: device pointer (zero-copy if ORT buffer is GPU; else scratch)
+  EP->>EP: ort_idx = output_index_map[out_idx], then GetOutput(ort_idx, shape)
+  EP-->>RT: device pointer (zero-copy if ORT buffer is GPU, else scratch)
   RT-->>DLL: device pointer -> memref descriptor
-  DLL->>DLL: producer kernel writes the buffer; stream_sync
+  DLL->>DLL: producer kernel writes the buffer, then stream_sync
   DLL-->>EP: return
   EP->>EP: drain any pending D2H (scratch -> host OrtValue), free scratch
 ```
