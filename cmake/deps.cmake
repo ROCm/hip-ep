@@ -315,24 +315,18 @@ if(BUILD_EP)
   #   collide with ours, so a source subbuild is not viable (download only).
   find_package(onnxruntime CONFIG QUIET)
   if(NOT onnxruntime_FOUND AND NOT TARGET onnxruntime::onnxruntime)
+    # deps.txt pins a single onnxruntime row (release base URL + version in the
+    # hash column); derive the per-OS release archive name from the host.
+    set(ORT_VERSION "${DEP_HASH_onnxruntime}")
     if(WIN32)
-      set(_ort_url "${DEP_URL_onnxruntime_win}")
-      set(_ort_raw_hash "${DEP_HASH_onnxruntime_win}")
+      set(_ort_archive "onnxruntime-win-x64-${ORT_VERSION}.zip")
     else()
-      set(_ort_url "${DEP_URL_onnxruntime_linux}")
-      set(_ort_raw_hash "${DEP_HASH_onnxruntime_linux}")
+      set(_ort_archive "onnxruntime-linux-x64-${ORT_VERSION}.tgz")
     endif()
-
-    # Derive the semantic version from the URL (single source) for the version gate.
-    string(REGEX MATCH "/v([0-9]+\\.[0-9]+\\.[0-9]+)/" _ort_ver_match "${_ort_url}")
-    set(ORT_VERSION "${CMAKE_MATCH_1}")
+    set(_ort_url "${DEP_URL_onnxruntime}/v${ORT_VERSION}/${_ort_archive}")
 
     message(STATUS "onnxruntime not found via find_package; fetching ${_ort_url}")
-    if(_ort_raw_hash)
-      FetchContent_Declare(onnxruntime URL "${_ort_url}" URL_HASH "SHA256=${_ort_raw_hash}")
-    else()
-      FetchContent_Declare(onnxruntime URL "${_ort_url}")
-    endif()
+    FetchContent_Declare(onnxruntime URL "${_ort_url}")
     FetchContent_MakeAvailable(onnxruntime)
 
     add_library(onnxruntime::onnxruntime SHARED IMPORTED)
