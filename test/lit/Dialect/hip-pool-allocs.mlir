@@ -469,3 +469,68 @@ func.func @dim_from_host_scratch(
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x16xf32>) outs(%alloc1 : memref<?x16xf32>)
   return %alloc1 : memref<?x16xf32>
 }
+
+// ===== Multi-domain: two pools (host-load splits the dyn-def graph) =====
+//
+// `%alloc0` consumes a dim derived from a function arg (hoist-feasible above
+// `%alloc0` itself). A `memref.load` then produces a NEW dim BELOW `%alloc0`,
+// which `%alloc1` consumes. The load is non-speculatable so it cannot be
+// hoisted above `%alloc0`; therefore `%alloc1`'s pool anchor must come AFTER
+// the load, which puts it below `%alloc0`. The two allocs end up in
+// different dominance domains and emit two `hip.get_pool` calls — one
+// anchored above `%alloc0`, one between the load and `%alloc1`.
+//
+// CHECK-LABEL: func.func @multi_domain_two_pools
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK:         memref.dim %{{.*}}, %{{.*}}
+// CHECK:         %[[POOL0:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) : memref<?xi8>
+// CHECK:         %[[V0:.*]] = memref.view %[[POOL0]]{{.*}} to memref<?x16xf32>
+// CHECK:         hip.miopen.softmax{{.*}}outs(%[[V0]] :
+// CHECK:         memref.load
+// CHECK:         %[[POOL1:.*]] = hip.get_pool(%[[CTX]], %{{.*}}) : memref<?xi8>
+// CHECK:         %[[V1:.*]] = memref.view %[[POOL1]]{{.*}} to memref<?x16xf32>
+// CHECK:         hip.miopen.softmax{{.*}}outs(%[[V1]] :
+// CHECK:         return %[[V1]]
+func.func @multi_domain_two_pools(
+    %ctx: !hip.context,
+    %x: memref<?x16xf32>,
+    %scratch: memref<2xindex>) -> memref<?x16xf32> {
+  %c0 = arith.constant 0 : index
+  %d0 = memref.dim %x, %c0 : memref<?x16xf32>
+  %alloc0 = memref.alloc(%d0) : memref<?x16xf32>
+  hip.miopen.softmax(%ctx) ins(%x : memref<?x16xf32>) outs(%alloc0 : memref<?x16xf32>)
+  %d1 = memref.load %scratch[%c0] : memref<2xindex>
+  %alloc1 = memref.alloc(%d1) : memref<?x16xf32>
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x16xf32>) outs(%alloc1 : memref<?x16xf32>)
+  return %alloc1 : memref<?x16xf32>
+}
+
+// ===== Multi-domain: three pools (cascading load+alloc chain) =====
+//
+// Three back-to-back load+alloc chains: each load produces a fresh dyn dim
+// BELOW the previous alloc, so each alloc opens a new domain.
+//
+// CHECK-LABEL: func.func @multi_domain_three_pools
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         memref.load
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         memref.load
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         return
+func.func @multi_domain_three_pools(
+    %ctx: !hip.context,
+    %x: memref<?x16xf32>,
+    %scratch: memref<3xindex>) -> memref<?x16xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = memref.dim %x, %c0 : memref<?x16xf32>
+  %alloc0 = memref.alloc(%d0) : memref<?x16xf32>
+  hip.miopen.softmax(%ctx) ins(%x : memref<?x16xf32>) outs(%alloc0 : memref<?x16xf32>)
+  %d1 = memref.load %scratch[%c0] : memref<3xindex>
+  %alloc1 = memref.alloc(%d1) : memref<?x16xf32>
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x16xf32>) outs(%alloc1 : memref<?x16xf32>)
+  %d2 = memref.load %scratch[%c1] : memref<3xindex>
+  %alloc2 = memref.alloc(%d2) : memref<?x16xf32>
+  hip.miopen.softmax(%ctx) ins(%alloc1 : memref<?x16xf32>) outs(%alloc2 : memref<?x16xf32>)
+  return %alloc2 : memref<?x16xf32>
+}
