@@ -100,8 +100,14 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
   }
 };
 
-// --- GetPoolOp: hip.get_pool(%ctx, %pool_size) : memref<?xi8>
-//     -> llvm.call @hipdnn_ep_get_pool_base(state, size) + memref descriptor
+// --- GetPoolOp:
+//     hip.get_pool(%ctx, %pool_size) {domain_id = N} : memref<?xi8>
+//       -> llvm.call @hipdnn_ep_get_pool_base(state, N, size) + memref desc.
+//
+// The domain_id attribute (default 0) is materialized as an i32 constant
+// argument so the runtime can select the right per-domain pool slot.
+// Single-domain models emit `domain_id = 0` and round-trip identically to
+// the pre-multi-domain IR (printer elides the default).
 struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -111,18 +117,28 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     MemRefType memRefType = cast<MemRefType>(op.getPool().getType());
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipGetPoolBase, {ptrType, i64Type}, ptrType);
+    // Runtime ABI: hipdnn_ep_get_pool_base(state: ptr, domain_id: i32,
+    // needed_size: i64) -> ptr.
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kHipGetPoolBase,
+                               {ptrType, i32Type, i64Type}, ptrType);
     if (failed(funcOp))
       return failure();
 
     Value poolSize = adaptor.getPoolSize();
-    Value rawPtr = LLVM::CallOp::create(rewriter, loc, *funcOp,
-                                        ValueRange{adaptor.getCtx(), poolSize})
-                       .getResult();
+    Value domainIdVal = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type,
+        rewriter.getI32IntegerAttr(
+            static_cast<int32_t>(op.getDomainId())));
+    Value rawPtr =
+        LLVM::CallOp::create(
+            rewriter, loc, *funcOp,
+            ValueRange{adaptor.getCtx(), domainIdVal, poolSize})
+            .getResult();
 
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);

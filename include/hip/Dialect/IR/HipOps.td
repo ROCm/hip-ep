@@ -249,19 +249,30 @@ def Hip_AllocOp : Hip_Op<"alloc",
 
 def Hip_GetPoolOp : Hip_Op<"get_pool",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Get the runtime-owned GPU memory pool (grow-on-demand)";
+  let summary = "Get a runtime-owned GPU memory pool (grow-on-demand)";
   let description = [{
-    Returns a reference to the runtime-managed GPU memory pool.  The runtime
-    guarantees that the returned buffer is at least %pool_size bytes.  If the
-    current pool is smaller, the runtime grows it (realloc) transparently.
+    Returns a reference to one of the runtime-managed GPU memory pools.  The
+    runtime guarantees that the returned buffer is at least %pool_size bytes.
+    If the current pool is smaller, the runtime grows it (realloc)
+    transparently.
+
+    The optional `domain_id` attribute selects which pool to access (default
+    0).  hip-pool-allocs partitions a function's pooled allocs into
+    independent dominance domains and emits one hip.get_pool per domain;
+    domains are independent so growing one does not affect any other.  Old
+    single-pool textual MLIR (without the attribute) parses as
+    `domain_id = 0`, and the printer omits the attribute when it equals the
+    default — single-domain output is bit-identical to pre-multi-domain IR.
 
     Example:
     ```mlir
-    %pool = hip.get_pool(%ctx, %size) : memref<?xi8>
+    %pool0 = hip.get_pool(%ctx, %size_a) : memref<?xi8>
+    %pool1 = hip.get_pool(%ctx, %size_b) {domain_id = 1 : i64} : memref<?xi8>
     ```
   }];
 
-  let arguments = (ins Hip_ContextType:$ctx, Index:$pool_size);
+  let arguments = (ins Hip_ContextType:$ctx, Index:$pool_size,
+                       DefaultValuedAttr<I64Attr, "0">:$domain_id);
   let results = (outs AnyMemRef:$pool);
   let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";
 }

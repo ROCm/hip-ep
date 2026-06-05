@@ -802,7 +802,13 @@ void PoolAllocsPass::runOnOperation() {
       }
     }
 
-    Value pool = hip::GetPoolOp::create(builder, loc, poolType, ctx, poolSize);
+    // Tag the get_pool with this domain's id so the runtime grows the right
+    // backing buffer. domain_id == 0 round-trips as the default attribute and
+    // is elided by the printer, keeping single-domain output bit-identical to
+    // the pre-Stage-7 IR.
+    Value pool = hip::GetPoolOp::create(
+        builder, loc, poolType, ctx, poolSize,
+        builder.getI64IntegerAttr(static_cast<int64_t>(domainId)));
 
     // Per-alloc offsets in this domain's pool. Static offsets are emitted
     // as constants right after the pool; dynamic offsets walk the buckets
