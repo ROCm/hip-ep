@@ -43,31 +43,10 @@ if(MSVC)
   endforeach()
 endif()
 
-# ==============================================================================
-# TheRock ROCm SDK Configuration
-# ==============================================================================
-# THEROCK_DIST points to the TheRock ROCm SDK installation directory.
-# It can be set via:
-#   1. CMake cache variable: -DTHEROCK_DIST=/path/to/therock
-#   2. Environment variable: THEROCK_DIST=/path/to/therock
-# ==============================================================================
-set(THEROCK_DIST "" CACHE PATH "TheRock ROCm SDK distribution path")
-if(NOT THEROCK_DIST AND DEFINED ENV{THEROCK_DIST})
-  set(THEROCK_DIST "$ENV{THEROCK_DIST}")
-endif()
-
-# Strip any trailing whitespace from THEROCK_DIST
-if(THEROCK_DIST)
-  string(STRIP "${THEROCK_DIST}" THEROCK_DIST)
-  message(STATUS "[onnx-hipdnn-ep] THEROCK_DIST: ${THEROCK_DIST}")
-
-  # Add to CMAKE_PREFIX_PATH for find_package
-  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
-  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
-endif()
-
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
+option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 
 # Centralized dependency resolution. Always included; internally partitions by
 # BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the
@@ -92,26 +71,11 @@ endif()
 #     [-DONNX_MLIR_SRC=/path/to/onnx-mlir -DONNX_MLIR_BUILD=/path/to/build]
 # ==============================================================================
 if(BUILD_HIP_TOOLS)
-  # LLVM/MLIR, flatbuffers and cpptrace are resolved by cmake/deps.cmake (which
-  # runs for any BUILD_EP or BUILD_HIP_TOOLS tree). The guards below only reuse
-  # what deps.cmake already populated; they never resolve a dependency twice.
-  #
-  # HIPDNN_LLVM_EMBEDDED means LLVM/MLIR came from a FetchContent subdirectory
-  # build: the targets, helper functions and LLVM_*/MLIR_* consumer variables
-  # are already set, and find_package against the in-configure build tree would
-  # fail -- so skip it in that mode.
-  if(NOT HIPDNN_LLVM_EMBEDDED)
-    if(NOT LLVM_FOUND)
-      find_package(LLVM REQUIRED CONFIG)
-    endif()
-    if(NOT MLIR_FOUND)
-      find_package(MLIR REQUIRED CONFIG)
-    endif()
-  endif()
-  if(NOT flatbuffers_FOUND AND NOT TARGET flatbuffers::flatbuffers)
-    find_package(flatbuffers REQUIRED CONFIG)
-  endif()
-
+  # LLVM/MLIR, flatbuffers and cpptrace are fully resolved by cmake/deps.cmake
+  # (included above for any BUILD_EP or BUILD_HIP_TOOLS tree): find_package
+  # against a prefix, or a from-source FetchContent build that sets the LLVM_*/
+  # MLIR_* consumer variables and helper functions directly. The block below
+  # only consumes what deps.cmake already populated.
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
   message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
@@ -143,8 +107,6 @@ if(BUILD_HIP_TOOLS)
   # ==============================================================================
   # Mock vs Real Runtime Configuration
   # ==============================================================================
-  option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
-
   if(BUILD_MOCK_RUNTIME)
     message(STATUS "Building with MOCK runtime (no GPU required)")
   else()
@@ -176,8 +138,6 @@ if(BUILD_HIP_TOOLS)
   #   ctest --test-dir <build> -C Release     # run all tests
   #   ctest -R MorphizenMLIRLitTests          # run LIT tests only
   # ==============================================================================
-  option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
-
   if(BUILD_HIP_UNIT_TESTS)
     include(CTest)
     enable_testing()

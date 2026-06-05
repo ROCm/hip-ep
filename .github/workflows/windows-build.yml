@@ -37,8 +37,6 @@ jobs:
       # resolves LLVM via find_package against this build, so that fallback is
       # unused.
       LLVM_TAG: llvmorg-22.1.0
-      FLATBUFFERS_TAG: v25.12.19
-      PROTO_TAG: v34.0
       ONNXRUNTIME_VERSION: "1.25.1"
       # Space-separated list of microsoft/onnxruntime PR numbers to fetch
       # from github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply`
@@ -47,7 +45,6 @@ jobs:
       # editing this list auto-invalidates the cached ORT install prefix.
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: "28608"
-      GTEST_VERSION: "1.15.0"
       SCCACHE_GHA_ENABLED: "true"
       OGA_REPO: AMDmoore/onnxruntime-genai
       OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2

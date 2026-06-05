@@ -106,9 +106,7 @@ message(STATUS "Found morphizen-foundation: ${MORPHIZEN_FOUNDATION_INCLUDE_DIR}"
 # ============================================================================
 # STEP 2: Determine Runtime Mode (Mock or Real)
 # ============================================================================
-
-# Default to Mock runtime (no GPU required)
-option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+# BUILD_MOCK_RUNTIME is declared once in the top-level CMakeLists.txt.
 
 if(NOT BUILD_MOCK_RUNTIME)
     # Try to find ROCm components
