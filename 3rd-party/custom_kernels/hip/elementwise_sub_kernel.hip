@@ -6,6 +6,7 @@
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
@@ -18,6 +19,39 @@ __global__ void elementwise_sub_i64_kernel(
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < num_elements) {
     output[idx] = lhs[idx] - rhs[idx];
+  }
+}
+
+__global__ void elementwise_sub_i32_kernel(
+    const int32_t* __restrict__ lhs,
+    const int32_t* __restrict__ rhs,
+    int32_t* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = lhs[idx] - rhs[idx];
+  }
+}
+
+__global__ void elementwise_sub_f32_kernel(
+    const float* __restrict__ lhs,
+    const float* __restrict__ rhs,
+    float* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = lhs[idx] - rhs[idx];
+  }
+}
+
+__global__ void elementwise_sub_f16_kernel(
+    const __half* __restrict__ lhs,
+    const __half* __restrict__ rhs,
+    __half* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = __float2half(__half2float(lhs[idx]) - __half2float(rhs[idx]));
   }
 }
 
@@ -35,19 +69,34 @@ extern "C" int hip_elementwise_sub(
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
   switch (hip_dtype) {
-    case HIP_DTYPE_INT64: {
-      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_elementwise_sub: dtype=INT64, "
-              "num_elements=%lld, grid=%d, block=%d\n",
-              (long long)num_elements, grid_size, kBlockSize);
-
+    case HIP_DTYPE_INT64:
       hipLaunchKernelGGL(elementwise_sub_i64_kernel,
                          dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                          static_cast<const int64_t*>(lhs),
                          static_cast<const int64_t*>(rhs),
-                         static_cast<int64_t*>(output),
-                         num_elements);
+                         static_cast<int64_t*>(output), num_elements);
       break;
-    }
+    case HIP_DTYPE_INT32:
+      hipLaunchKernelGGL(elementwise_sub_i32_kernel,
+                         dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const int32_t*>(lhs),
+                         static_cast<const int32_t*>(rhs),
+                         static_cast<int32_t*>(output), num_elements);
+      break;
+    case HIP_DTYPE_FLOAT32:
+      hipLaunchKernelGGL(elementwise_sub_f32_kernel,
+                         dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const float*>(lhs),
+                         static_cast<const float*>(rhs),
+                         static_cast<float*>(output), num_elements);
+      break;
+    case HIP_DTYPE_FLOAT16:
+      hipLaunchKernelGGL(elementwise_sub_f16_kernel,
+                         dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const __half*>(lhs),
+                         static_cast<const __half*>(rhs),
+                         static_cast<__half*>(output), num_elements);
+      break;
     default:
       fprintf(stderr,
               "[custom_kernels] hip_elementwise_sub: unsupported dtype=%d\n",

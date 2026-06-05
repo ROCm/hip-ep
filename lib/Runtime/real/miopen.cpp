@@ -98,28 +98,74 @@
 //
 // BENEFIT: Eliminates malloc/free from hot path.
 
+// Map HIPDNN_EP_DATATYPE_* to miopenDataType_t for the conv tensor
+// descriptors. Mirrors hipdnn_ep_to_miopen_type in elementwise.cpp /
+// activation.cpp — copy kept local so this TU has no link-time dependency on
+// those siblings (each runtime .cpp is compiled to its own bitcode and the
+// shared bitcode link only resolves wrap_* entry points).
+static miopenDataType_t conv_to_miopen_type(int64_t data_type, bool &ok) {
+  ok = true;
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return miopenFloat;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return miopenHalf;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return miopenBFloat16;
+  default:
+    ok = false;
+    return miopenFloat;
+  }
+}
+
 // MIOpen convolution forward implementation
-// Follows opaque RuntimeState pattern - extracts handle/stream from state
+// Follows opaque RuntimeState pattern - extracts handle/stream from state.
+//
+// `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
+// input, weights, and output tensor descriptors. All three buffers MUST share
+// the same element type — MIOpen's miopenConvolutionForward does not support
+// mixed-precision descriptors. This matches the host-side ConvConversion
+// invariant that all three operands use `resultType.getElementType()`.
+//
+// Historical note: prior to the data_type parameter the descriptors were
+// hardcoded to miopenFloat (fp32), which silently passed wrong strides to
+// MIOpen when the actual buffers were fp16 (e.g. SigLIP / ViT patch
+// embedding). MIOpen then read out-of-bounds bytes as the second-half stride
+// for every row, producing NaN/Inf at fp16-max in the output and cascading
+// NaN through the rest of the network.
 int wrap_miopenConvolutionForward(
     RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
     int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
   OP_PROFILE(
       "conv",
       [&] {
-        char b[64];
-        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld,k=%lldx%lldx%lld",
+        char b[80];
+        const char *dt = (data_type == HIPDNN_EP_DATATYPE_HALF)       ? "f16"
+                         : (data_type == HIPDNN_EP_DATATYPE_BFLOAT16) ? "bf16"
+                                                                      : "f32";
+        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld,k=%lldx%lldx%lld,%s",
                  (long long)input_n, (long long)input_c, (long long)input_h,
                  (long long)input_w, (long long)weights_k, (long long)kernel_h,
-                 (long long)kernel_w);
+                 (long long)kernel_w, dt);
         return std::string(b);
       },
       state);
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
+    return -1;
+  }
+
+  bool dt_ok;
+  miopenDataType_t miopen_dt = conv_to_miopen_type(data_type, dt_ok);
+  if (!dt_ok) {
+    fprintf(
+        stderr,
+        "[REAL] wrap_miopenConvolutionForward: unsupported data_type %lld\n",
+        (long long)data_type);
     return -1;
   }
 
@@ -151,22 +197,24 @@ int wrap_miopenConvolutionForward(
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
 
-  // Set tensor descriptors with explicit NCHW layout (float32).
+  // Set tensor descriptors with explicit NCHW layout. The dtype is taken
+  // from the caller (data_type) — the previous hardcoded `miopenFloat`
+  // produced silent fp16-stride-as-fp32 corruption on fp16 models.
   // miopenSet4dTensorDescriptor leaves layout as UNKNOWN which triggers
   // warnings in MIOpen 7.12+.
   {
     int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        input_desc, miopenFloat, miopenTensorNCHW, in_dims, 4));
+        input_desc, miopen_dt, miopenTensorNCHW, in_dims, 4));
 
     int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h, (int)kernel_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        weights_desc, miopenFloat, miopenTensorNCHW, w_dims, 4));
+        weights_desc, miopen_dt, miopenTensorNCHW, w_dims, 4));
 
     int out_dims[] = {(int)input_n, (int)weights_k, (int)output_h,
                       (int)output_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        output_desc, miopenFloat, miopenTensorNCHW, out_dims, 4));
+        output_desc, miopen_dt, miopenTensorNCHW, out_dims, 4));
   }
 
   // Create convolution descriptor
@@ -223,6 +271,55 @@ int wrap_miopenConvolutionForward(
   MIOPEN_CHECK(miopenConvolutionForward(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
       conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
+
+  // Apply bias if provided. ONNX Conv carries an optional [K]-shaped bias
+  // term that gets broadcast-added to the [N,K,H,W] output. MIOpen's
+  // miopenConvolutionForward does NOT add bias and miopenConvolutionForwardBias
+  // restricts alpha/beta to alpha=1,beta=0 (i.e. it *overwrites* y with the
+  // bias, not the y+=bias you'd expect from the name). Use miopenOpTensor
+  // instead, which supports proper broadcast (bias desc shape [1,K,1,1]) AND
+  // accumulation (beta=0, alpha1=1, alpha2=1 → C = A + B, with A==C in-place
+  // satisfying MIOpen's "tensor A must equal tensor C" constraint).
+  //
+  // Skipping this silently produces conv-without-bias and typically passes
+  // downstream NaN/Inf checks because in practice the bias is small compared
+  // to dominant downstream additives (e.g. position embeddings), but the
+  // resulting feature map is wrong and any test comparing against a CPU
+  // reference will fail — both immediately (cosine < 1.0 on the conv
+  // output) and cumulatively (drift cascades through residual streams to
+  // produce NaN at the model output once values exceed fp16 range a few
+  // layers in).
+  if (bias) {
+    miopenTensorDescriptor_t bias_desc = nullptr;
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
+    {
+      int bias_dims[] = {1, (int)weights_k, 1, 1};
+      miopenStatus_t bs = miopenSetNdTensorDescriptorWithLayout(
+          bias_desc, miopen_dt, miopenTensorNCHW, bias_dims, 4);
+      if (bs != miopenStatusSuccess) {
+        miopenDestroyTensorDescriptor(bias_desc);
+        fprintf(stderr,
+                "[REAL] wrap_miopenConvolutionForward: bias desc setup "
+                "failed (%d)\n",
+                bs);
+        result = -1;
+        goto cleanup;
+      }
+    }
+    float a1 = 1.0f, a2 = 1.0f, bz = 0.0f;
+    miopenStatus_t bs =
+        miopenOpTensor(miopen_handle, miopenTensorOpAdd, &a1, output_desc,
+                       output, &a2, bias_desc, bias, &bz, output_desc, output);
+    miopenDestroyTensorDescriptor(bias_desc);
+    if (bs != miopenStatusSuccess) {
+      fprintf(stderr,
+              "[REAL] wrap_miopenConvolutionForward: bias miopenOpTensor "
+              "failed (%d)\n",
+              bs);
+      result = -1;
+      goto cleanup;
+    }
+  }
 
 cleanup:
   // Best-effort cleanup: free all allocated resources
