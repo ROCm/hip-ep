@@ -102,6 +102,19 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     test/lit/Pipelines/ asserts this ordering does not regress.
   pm.addNestedPass<func::FuncOp>(hip::createMaterializeHostScalarsPass());
 
+  // 6c. Hoist speculatable size arithmetic feeding `memref.alloc` dynamic
+  //     operands above the earliest dynamic alloc in the entry block.
+  //     PoolAllocs's single-block dominator-emit phase requires every
+  //     dyn-operand SSA def to dominate the earliest pooled alloc; this
+  //     pass establishes that precondition for IR where canonicalize left
+  //     speculatable arith interleaved with allocs.  No-op for
+  //     already-feasible IR; PoolAllocs.cpp itself is unchanged.  Uses
+  //     `mlir::isSpeculatable` (the same predicate upstream LICM uses) so
+  //     traps (e.g. `arith.divsi` with a runtime-zero divisor) are not
+  //     speculated across the move.  See HoistAllocSizeArith.cpp for the
+  //     algorithm and rationale.
+  pm.addNestedPass<func::FuncOp>(hip::createHoistAllocSizeArithPass());
+
   pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
 
   // 7. Lower remaining bufferization ops to memref

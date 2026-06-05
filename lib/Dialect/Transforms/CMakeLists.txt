@@ -7,6 +7,7 @@ add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
   BufferUtils.cpp
   GenerateInterface.cpp
+  HoistAllocSizeArith.cpp
   InferShapesPass.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp
