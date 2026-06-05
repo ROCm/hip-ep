@@ -9,8 +9,6 @@
 #include "op_profile.h"
 #include "runtime_state_internal.h"
 
-#include "mm/mm_api.h"
-
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
@@ -76,13 +74,16 @@ static int prepare_constants_array(RuntimeState *state,
                                    const mlir::hip::HipModelMetaInfo *meta);
 static size_t
 compute_constants_total_size(const mlir::hip::HipModelMetaInfo *meta);
+static uint64_t
+compute_constants_fingerprint(const mlir::hip::HipModelMetaInfo *meta);
 static int hipmalloc_and_fixup(RuntimeState *state,
                                const mlir::hip::HipModelMetaInfo *meta,
                                size_t total_size);
 static bool try_attach_shared_constants(RuntimeState *state,
                                         const mlir::hip::HipModelMetaInfo *meta,
                                         size_t total_size);
-static void publish_shared_constants(RuntimeState *state, size_t total_size);
+static void publish_shared_constants(RuntimeState *state, size_t total_size,
+                                     uint64_t fingerprint);
 static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
                                const char *constants_filename);
 static int per_entry_load_constants(RuntimeState *state,
@@ -90,31 +91,12 @@ static int per_entry_load_constants(RuntimeState *state,
                                     morphizen::FileSystem *fs,
                                     const char *constants_filename);
 
-static int ensure_mm_initialized() {
-  if (mm::is_initialized())
-    return 0;
-  mm::Config cfg = mm::config_default();
-  cfg.device_id = 0;
-  cfg.enable_debug_log = hipdnn_ep_debug_enabled();
-  auto status = mm::init(&cfg);
-  if (status != mm::Status::Ok) {
-    fprintf(stderr, "Memory manager init failed (status=%d)\n",
-            static_cast<int>(status));
-    return 1;
-  }
-  return 0;
-}
-
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size) {
   auto t0 = timing_now();
 
   if (!out_state || !fs) {
     fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_with_fs\n");
-    return 1;
-  }
-
-  if (ensure_mm_initialized() != 0) {
     return 1;
   }
 
@@ -150,6 +132,11 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // 2. Try to attach a process-wide shared constants blob (OGA pipeline
   //    optimization: prefill+decode share the same constants, so the
   //    second model can skip both hipMalloc and the data load entirely).
+  //    Cache key includes a fingerprint over the per-constant descriptors
+  //    (offset/size/source) so two compiled DLLs that happen to have the
+  //    same total_size but different constants content -- e.g. a fixed-shape
+  //    and dynamic-shape variant of the same model whose compiler folded
+  //    different shape constants -- never collide.
   size_t total_size = compute_constants_total_size(meta);
   if (try_attach_shared_constants(*out_state, meta, total_size)) {
     TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs "
@@ -199,7 +186,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   // 5. Publish the freshly loaded blob to the shared cache (best-effort;
   //    failure means subsequent models won't be able to share).
-  publish_shared_constants(*out_state, total_size);
+  publish_shared_constants(*out_state, total_size,
+                           compute_constants_fingerprint(meta));
 
   TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
              elapsed_since(t0));
@@ -227,7 +215,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
-  state->gpu_constants_handle = mm::kInvalidHandle;
   state->constants_is_shared = false;
   state->shared_constants_mapping = nullptr;
   state->shared_constants_view = nullptr;
@@ -237,10 +224,10 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
-  state->workspace_handle = mm::kInvalidHandle;
+  state->host_scratch_base = nullptr;
+  state->host_scratch_size = 0;
   state->qmoe_scratch = nullptr;
   state->qmoe_scratch_size = 0;
-  state->qmoe_scratch_handle = mm::kInvalidHandle;
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
   state->gqa_gemm_cache = nullptr;
@@ -365,6 +352,108 @@ static int prepare_constants_array(RuntimeState *state,
   return 0;
 }
 
+// 64-bit FNV-1a fingerprint over per-constant descriptor metadata.
+//
+// What this hashes:
+//   * meta->constants_filename() once at the top (the single external-data
+//     file all FileRefSource entries reference in the current EP design)
+//   * a fixed 32-byte descriptor PER constant: (offset, size, source_type,
+//     source_specific_u64) where source_specific_u64 is the splat value
+//     bytes / file_offset / sidecar_offset depending on the kind.
+//
+// What this does NOT hash (and why this is fast):
+//   * The multi-GB constants blob itself is never touched. The cost is
+//     O(num_constants) descriptor scans -- ~22 KB for gemma3 (687 entries).
+//   * Per-constant FileRefSource.path is intentionally skipped: every
+//     FileRefSource in a single model points to meta->constants_filename
+//     (the EP only emits one external-data file per model), and that is
+//     already covered by the global constants_filename hash above. If a
+//     future EP design ever produces per-constant FileRefSource paths that
+//     differ from constants_filename, this fingerprint would alias models
+//     that share blob layout but read from different files -- update this
+//     function then.
+//
+// Correctness contract: identical fingerprint <=> the constants blob bytes
+// loaded will also be identical (modulo the path-uniqueness assumption
+// above). Sole purpose: extend the SHARED_CONSTANTS cache key beyond just
+// total_size so that two DLLs whose constants happen to be the same size
+// but with different content (different splat values, different file
+// offsets, ...) do not silently alias.
+static uint64_t
+compute_constants_fingerprint(const mlir::hip::HipModelMetaInfo *meta) {
+  constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
+  constexpr uint64_t kFnvPrime = 1099511628211ULL;
+  uint64_t h = kFnvOffset;
+  auto fnv_update = [&h](const void *data, size_t len) {
+    const uint8_t *p = static_cast<const uint8_t *>(data);
+    for (size_t i = 0; i < len; ++i) {
+      h ^= p[i];
+      h *= kFnvPrime;
+    }
+  };
+  if (!meta)
+    return h;
+  if (auto *fname = meta->constants_filename())
+    fnv_update(fname->c_str(), fname->size());
+
+  auto *constants = meta->constants();
+  if (!constants)
+    return h;
+
+  // Pack each constant into a fixed-size 32-byte descriptor:
+  //   [0..7]  : offset    (u64)
+  //   [8..15] : size      (u64)
+  //   [16..23]: source_type (u8 in [16]; [17..23] zero-padded for stability)
+  //   [24..31]: source-specific scalar (splat elem_bytes / file_offset /
+  //             sidecar_offset / 0)
+  // Hashed in a single fnv_update per constant -- no per-source switch in
+  // the hot loop.
+  uint8_t buf[32];
+  for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
+    auto *c = constants->Get(i);
+    std::memset(buf, 0, sizeof(buf));
+    uint64_t off = c->offset();
+    uint64_t sz = c->size();
+    std::memcpy(buf + 0, &off, 8);
+    std::memcpy(buf + 8, &sz, 8);
+    buf[16] = static_cast<uint8_t>(c->source_type());
+
+    switch (c->source_type()) {
+    case mlir::hip::ConstantSource::SplatSource: {
+      auto *splat = c->source_as_SplatSource();
+      if (splat) {
+        if (auto *eb = splat->elem_bytes()) {
+          size_t n_bytes = std::min<size_t>(eb->size(), 8);
+          if (n_bytes > 0)
+            std::memcpy(buf + 24, eb->data(), n_bytes);
+        }
+      }
+      break;
+    }
+    case mlir::hip::ConstantSource::FileRefSource: {
+      auto *fref = c->source_as_FileRefSource();
+      if (fref) {
+        int64_t fo = fref->file_offset();
+        std::memcpy(buf + 24, &fo, 8);
+      }
+      break;
+    }
+    case mlir::hip::ConstantSource::SidecarSource: {
+      auto *side = c->source_as_SidecarSource();
+      if (side) {
+        int64_t so = side->sidecar_offset();
+        std::memcpy(buf + 24, &so, 8);
+      }
+      break;
+    }
+    default:
+      break;
+    }
+    fnv_update(buf, sizeof(buf));
+  }
+  return h;
+}
+
 // Sum of max(end = offset + size) across all constants -- this is the
 // size of the single VRAM blob that backs gpu_constants_blob.
 static size_t
@@ -388,25 +477,12 @@ static int hipmalloc_and_fixup(RuntimeState *state,
                                const mlir::hip::HipModelMetaInfo *meta,
                                size_t total_size) {
   auto t_prev = timing_now();
-  mm::AllocHints hints;
-  hints.mem_class = mm::MemoryClass::Weight;
-  hints.lifetime = mm::Lifetime::Static;
-  hints.alignment = 256;
-  mm::handle_t handle = mm::alloc(total_size, &hints);
-  if (handle == mm::kInvalidHandle) {
-    fprintf(stderr, "mm::alloc failed for constants blob (%zu bytes)\n",
+  if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
+    fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
             total_size);
     return 1;
   }
-  state->gpu_constants_handle = handle;
-  state->gpu_constants_blob = mm::get_ptr(handle);
-  if (!state->gpu_constants_blob) {
-    fprintf(stderr, "mm::get_ptr returned null for constants blob\n");
-    (void)mm::free(handle);
-    state->gpu_constants_handle = mm::kInvalidHandle;
-    return 1;
-  }
-  TIMING_LOG("[Session] MM alloc VRAM: %.3fs (%zu bytes)\n",
+  TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
              record_elapsed(t_prev), total_size);
   auto *constants = meta->constants();
   for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
@@ -444,9 +520,11 @@ static bool try_attach_shared_constants(RuntimeState *state,
   if (total_size == 0)
     return false;
 
+  uint64_t fp = compute_constants_fingerprint(meta);
   char shm_name[128];
-  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
-           (unsigned long)GetCurrentProcessId(), total_size);
+  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu_%016llx",
+           (unsigned long)GetCurrentProcessId(), total_size,
+           (unsigned long long)fp);
 
   void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
   if (!existing_map)
@@ -487,17 +565,20 @@ static bool try_attach_shared_constants(RuntimeState *state,
 // later models with the same total_size can attach. Best-effort:
 // failures are silently tolerated (the model still works, just no
 // sharing). On non-Windows: no-op.
-static void publish_shared_constants(RuntimeState *state, size_t total_size) {
+static void publish_shared_constants(RuntimeState *state, size_t total_size,
+                                     uint64_t fingerprint) {
 #ifndef _WIN32
   (void)state;
   (void)total_size;
+  (void)fingerprint;
 #else
   if (total_size == 0)
     return;
 
   char shm_name[128];
-  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
-           (unsigned long)GetCurrentProcessId(), total_size);
+  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu_%016llx",
+           (unsigned long)GetCurrentProcessId(), total_size,
+           (unsigned long long)fingerprint);
 
   void *new_map =
       CreateFileMappingA((void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
@@ -886,24 +967,16 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
 
   // Free shared workspace (if allocated)
-  if (state->workspace_handle != mm::kInvalidHandle) {
-    (void)mm::free(state->workspace_handle);
-    state->workspace_handle = mm::kInvalidHandle;
-    state->workspace = nullptr;
-    state->workspace_size = 0;
+  if (state->workspace) {
+    HIP_CLEANUP(hipFree(state->workspace));
   }
 
   // Free qmoe device scratch + pinned host mirror (if allocated)
-  if (state->qmoe_scratch_handle != mm::kInvalidHandle) {
-    (void)mm::free(state->qmoe_scratch_handle);
-    state->qmoe_scratch_handle = mm::kInvalidHandle;
-    state->qmoe_scratch = nullptr;
-    state->qmoe_scratch_size = 0;
+  if (state->qmoe_scratch) {
+    HIP_CLEANUP(hipFree(state->qmoe_scratch));
   }
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
-    state->qmoe_host_scratch = nullptr;
-    state->qmoe_host_scratch_size = 0;
   }
 
   // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
@@ -925,7 +998,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   if (state->device_error_flag) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
-    state->device_error_flag = nullptr;
+  }
+
+  // Free host-mapped scratch buffer (if allocated)
+  if (state->host_scratch_base) {
+    HIP_CLEANUP(hipHostFree(state->host_scratch_base));
   }
 
   // Free memory pool (if allocated)
@@ -938,33 +1015,23 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Free the single constants blob and the pointer array.
   // With shared constants, only the last reference frees the GPU memory.
-  if (state->shared_constants_view) {
+  if (state->gpu_constants_blob) {
 #ifdef _WIN32
-    auto *smeta = (SharedConstantsMeta *)state->shared_constants_view;
-    long remaining = shm_ref_dec(&smeta->ref_count);
-    fprintf(stderr, "[SHARED_CONSTANTS] Cleanup: ref_count=%ld\n", remaining);
-    if (remaining <= 0) {
-      if (state->gpu_constants_handle != mm::kInvalidHandle) {
-        (void)mm::free(state->gpu_constants_handle);
-      } else if (state->gpu_constants_blob) {
+    if (state->shared_constants_view) {
+      auto *smeta = (SharedConstantsMeta *)state->shared_constants_view;
+      long remaining = shm_ref_dec(&smeta->ref_count);
+      fprintf(stderr, "[SHARED_CONSTANTS] Cleanup: ref_count=%ld\n", remaining);
+      if (remaining <= 0) {
         HIP_CLEANUP(hipFree(state->gpu_constants_blob));
       }
-    }
-    UnmapViewOfFile(state->shared_constants_view);
-    if (state->shared_constants_mapping)
-      CloseHandle(state->shared_constants_mapping);
-    state->shared_constants_view = nullptr;
-    state->shared_constants_mapping = nullptr;
+      UnmapViewOfFile(state->shared_constants_view);
+      if (state->shared_constants_mapping)
+        CloseHandle(state->shared_constants_mapping);
+    } else
 #endif
-    state->gpu_constants_handle = mm::kInvalidHandle;
-    state->gpu_constants_blob = nullptr;
-  } else if (state->gpu_constants_handle != mm::kInvalidHandle) {
-    (void)mm::free(state->gpu_constants_handle);
-    state->gpu_constants_handle = mm::kInvalidHandle;
-    state->gpu_constants_blob = nullptr;
-  } else if (state->gpu_constants_blob) {
-    HIP_CLEANUP(hipFree(state->gpu_constants_blob));
-    state->gpu_constants_blob = nullptr;
+    {
+      HIP_CLEANUP(hipFree(state->gpu_constants_blob));
+    }
   }
   if (state->gpu_constants)
     free(state->gpu_constants);
@@ -1130,12 +1197,86 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
   return pool_ptr + offset;
 }
 
-void *hipdnn_ep_get_pool_base(RuntimeState *state) {
+void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
   }
+  // Grow-on-demand: when dynamic shapes produce larger intermediates than
+  // the static pool allocated at inference_init, reallocate. The pool
+  // never shrinks — subsequent calls with smaller needed_size are no-ops.
+  if (needed_size > state->pool_size) {
+    // Sync the stream before freeing: the previous inference may have
+    // dispatched async kernels that still hold pointers into the pool.
+    // hipFree on an in-flight buffer is undefined behavior — synchronize
+    // first to drain pending work. Grow events are rare (only when an
+    // input shape exceeds anything seen before) so the cost is amortized.
+    if (state->pool_base) {
+      if (state->stream)
+        HIP_CLEANUP(hipStreamSynchronize(state->stream));
+      fprintf(stderr,
+              "hipdnn_ep_get_pool_base: growing pool %zu -> %zu bytes "
+              "(rare; first time this large input shape was seen)\n",
+              state->pool_size, needed_size);
+      fflush(stderr);
+      HIP_CLEANUP(hipFree(state->pool_base));
+    }
+    void *new_base = nullptr;
+    if (hipMalloc(&new_base, needed_size) != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_get_pool_base: hipMalloc failed for pool grow "
+              "(%zu -> %zu bytes)\n",
+              state->pool_size, needed_size);
+      state->pool_base = nullptr;
+      state->pool_size = 0;
+      return nullptr;
+    }
+    state->pool_base = new_base;
+    state->pool_size = needed_size;
+  }
   return state->pool_base;
+}
+
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
+  if (!state) {
+    fprintf(stderr,
+            "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");
+    return nullptr;
+  }
+  // Mirrors hipdnn_ep_get_pool_base growth semantics for the host-mapped
+  // scratch buffer that backs hip.get_host_scratch. One allocation per
+  // function for all tiny host-fed scalars routed away from the GPU pool by
+  // hip-materialize-host-scalars; grown only when shape changes increase the
+  // total demand; never shrinks. hipHostMalloc(hipHostMallocMapped) memory is
+  // host-writable AND GPU-readable via the device pointer mapping, so the
+  // same pointer can be stored into from host code and then read by
+  // subsequent GPU kernels.
+  if (needed_size > state->host_scratch_size) {
+    if (state->host_scratch_base) {
+      if (state->stream)
+        HIP_CLEANUP(hipStreamSynchronize(state->stream));
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: growing host scratch "
+              "%zu -> %zu bytes (rare; first time this large)\n",
+              state->host_scratch_size, needed_size);
+      fflush(stderr);
+      HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+    }
+    void *new_base = nullptr;
+    if (hipHostMalloc(&new_base, needed_size, hipHostMallocMapped) !=
+        hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: hipHostMalloc failed "
+              "(%zu -> %zu bytes)\n",
+              state->host_scratch_size, needed_size);
+      state->host_scratch_base = nullptr;
+      state->host_scratch_size = 0;
+      return nullptr;
+    }
+    state->host_scratch_base = new_base;
+    state->host_scratch_size = needed_size;
+  }
+  return state->host_scratch_base;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1177,30 +1318,23 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   // Grow: free old, allocate new.
   // Sync the stream first to ensure no in-flight kernel is still using the
   // old workspace buffer (prevents use-after-free on async GPU execution).
-  if (state->workspace_handle != mm::kInvalidHandle) {
+  if (state->workspace) {
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    (void)mm::free(state->workspace_handle);
-    state->workspace_handle = mm::kInvalidHandle;
+    HIP_CLEANUP(hipFree(state->workspace));
     state->workspace = nullptr;
     state->workspace_size = 0;
   }
 
-  mm::AllocHints hints;
-  hints.mem_class = mm::MemoryClass::Activation;
-  hints.lifetime = mm::Lifetime::Request;
-  mm::handle_t handle = mm::alloc(alloc_size, &hints);
-  if (handle == mm::kInvalidHandle) {
+  if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
     fprintf(
         stderr,
-        "hipdnn_ep_state_ensure_workspace: mm::alloc failed for %zu bytes\n",
+        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
         alloc_size);
     std::abort();
   }
 
-  state->workspace_handle = handle;
-  state->workspace = mm::get_ptr(handle);
   state->workspace_size = alloc_size;
   RUNTIME_DEBUG_LOG(
       "[workspace] Allocated shared workspace: %zu bytes (requested %zu)\n",
@@ -1277,29 +1411,22 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
       alloc_size = grown;
   }
 
-  if (state->qmoe_scratch_handle != mm::kInvalidHandle) {
+  if (state->qmoe_scratch) {
     if (state->stream) {
       HIP_CLEANUP(hipStreamSynchronize(state->stream));
     }
-    (void)mm::free(state->qmoe_scratch_handle);
-    state->qmoe_scratch_handle = mm::kInvalidHandle;
+    HIP_CLEANUP(hipFree(state->qmoe_scratch));
     state->qmoe_scratch = nullptr;
     state->qmoe_scratch_size = 0;
   }
 
-  mm::AllocHints hints;
-  hints.mem_class = mm::MemoryClass::Activation;
-  hints.lifetime = mm::Lifetime::Request;
-  mm::handle_t handle = mm::alloc(alloc_size, &hints);
-  if (handle == mm::kInvalidHandle) {
+  if (hipMalloc(&state->qmoe_scratch, alloc_size) != hipSuccess) {
     fprintf(stderr,
-            "hipdnn_ep_state_ensure_qmoe_scratch: mm::alloc failed for %zu "
+            "hipdnn_ep_state_ensure_qmoe_scratch: hipMalloc failed for %zu "
             "bytes\n",
             alloc_size);
     return -1;
   }
-  state->qmoe_scratch_handle = handle;
-  state->qmoe_scratch = mm::get_ptr(handle);
   state->qmoe_scratch_size = alloc_size;
   return 0;
 }

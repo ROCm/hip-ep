@@ -17,7 +17,6 @@
 #ifndef HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
-#include "mm/mm_types.h"
 #include "runtime_types.h"
 
 // Internal runtime state structure
@@ -34,7 +33,6 @@ struct RuntimeState {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
-  mm::handle_t gpu_constants_handle;
 
   // OGA pipeline shared constants cache: prefill and decode models share
   // the same constants blob via process-wide named shared memory + atomic
@@ -55,7 +53,17 @@ struct RuntimeState {
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
   void *workspace;
   size_t workspace_size;
-  mm::handle_t workspace_handle;
+
+  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
+  // GPU pool by hip-materialize-host-scalars.
+  // hipHostMalloc(hipHostMallocMapped): host-writable AND GPU-readable.
+  // Grow-on-demand via hipdnn_ep_get_host_scratch_base(); never shrinks.
+  // hipHostFree'd in cleanup. Why: on some targets the regular GPU pool is
+  // real device memory; host stores into it SEGV. Other targets silently
+  // worked because hipMalloc returned UMA-mapped host memory there, masking
+  // the bug.
+  void *host_scratch_base;
+  size_t host_scratch_size;
 
   // Per-state scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
@@ -65,7 +73,7 @@ struct RuntimeState {
   // call, every layer, every inference. On 24-layer gpt-oss-20b that's 192
   // mallocs + 192 frees per token; HIP's hipMalloc takes ~50 us each on
   // Windows, so the storm cost ~10-12 ms/token and bottlenecked decode TPS to
-  // ~40 tok/s versus a Vulkan baseline of ~70 on the same gfx1151.
+  // roughly half the Vulkan baseline on the same hardware.
   //
   // Layout policy: one contiguous buffer sized to fit ALL sub-buffers for the
   // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
@@ -78,7 +86,6 @@ struct RuntimeState {
   // Malloc'd once with hipHostMallocDefault; reused across calls without sync.
   void *qmoe_scratch;
   size_t qmoe_scratch_size;
-  mm::handle_t qmoe_scratch_handle;
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
