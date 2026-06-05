@@ -287,59 +287,6 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
 
-    # Compile MemoryManager sources to bitcode so model DLLs need no separate mm.lib.
-    # These files include private mm headers from lib/MemoryManager/ and public mm
-    # headers from include/mm/, plus HIP headers from THEROCK_DIST/include.
-    set(MM_SOURCE_DIR ${CMAKE_SOURCE_DIR}/lib/MemoryManager)
-    set(MM_PUBLIC_HEADERS
-        ${CMAKE_SOURCE_DIR}/include/mm/mm_api.h
-        ${CMAKE_SOURCE_DIR}/include/mm/mm_types.h
-        ${CMAKE_SOURCE_DIR}/include/mm/mm_config.h
-        ${CMAKE_SOURCE_DIR}/include/mm/mm_kv.h)
-    set(MM_PRIVATE_HEADERS
-        ${MM_SOURCE_DIR}/mm_hal.h
-        ${MM_SOURCE_DIR}/mm_handle_table.h
-        ${MM_SOURCE_DIR}/mm_kv_manager.h
-        ${MM_SOURCE_DIR}/mm_activation.h)
-
-    macro(compile_mm_to_bitcode SOURCE_NAME OUTPUT_BC)
-        set(_MM_FLAGS "")
-        if(NOT WIN32)
-            list(APPEND _MM_FLAGS "-fPIC")
-        endif()
-        list(APPEND _MM_FLAGS
-            "-I" "${CMAKE_SOURCE_DIR}/include"
-            "-I" "${MM_SOURCE_DIR}"
-            "-I" "${THEROCK_DIST}/include"
-            "-D__HIP_PLATFORM_AMD__")
-        add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
-            COMMAND ${CLANG_EXECUTABLE}
-                    -c -emit-llvm -std=c++17
-                    -D_CRT_SECURE_NO_WARNINGS
-                    $<$<CONFIG:Debug>:-O0>
-                    $<$<NOT:$<CONFIG:Debug>>:-DNDEBUG>
-                    $<$<NOT:$<CONFIG:Debug>>:-O2>
-                    ${_MM_FLAGS}
-                    "${MM_SOURCE_DIR}/${SOURCE_NAME}"
-                    -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
-            DEPENDS
-                "${MM_SOURCE_DIR}/${SOURCE_NAME}"
-                ${MM_PUBLIC_HEADERS}
-                ${MM_PRIVATE_HEADERS}
-            COMMENT "Compiling mm/${SOURCE_NAME} to bitcode"
-            VERBATIM
-            COMMAND_EXPAND_LISTS
-        )
-    endmacro()
-
-    compile_mm_to_bitcode(mm_config.cpp       mm_config.bc)
-    compile_mm_to_bitcode(mm_hal.cpp          mm_hal.bc)
-    compile_mm_to_bitcode(mm_handle_table.cpp mm_handle_table.bc)
-    compile_mm_to_bitcode(mm_activation.cpp   mm_activation.bc)
-    compile_mm_to_bitcode(mm_kv_manager.cpp   mm_kv_manager.bc)
-    compile_mm_to_bitcode(mm_core.cpp         mm_core.bc)
-
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
@@ -392,12 +339,6 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_config.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_hal.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_handle_table.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_activation.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_kv_manager.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_core.bc
     )
 else()
     # Mock runtime for testing without GPU
