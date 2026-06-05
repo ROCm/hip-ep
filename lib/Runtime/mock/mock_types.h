@@ -27,6 +27,7 @@ struct hipDeviceProp_t {
 #define hipMemcpyDeviceToHost 1
 #define hipHostMallocDefault 0
 #define hipHostMallocMapped 0
+#define hipHostMallocNonCoherent 0
 #define hipEventDisableTiming 0
 
 // MIOpen tensor layout enum (subset used by the runtime)
