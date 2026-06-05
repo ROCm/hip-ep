@@ -34,46 +34,12 @@
 
 #if defined(_MSC_VER) && defined(__clang__) && defined(__HIP__)
 
-// Layer 1: predefine the MS STL's `_CLANG_BUILTIN*` macros to empty.
+// The MS STL's `_CLANG_BUILTIN1` / `_CLANG_BUILTIN2` / `_CLANG_BUILTIN2_TEMPLATED`
+// expansion in `<cmath>` is what produces the conflicting `inline` overloads.
+// Pre-define them as empty so the expansion produces no declarations.
 #define _CLANG_BUILTIN1(NAME)
 #define _CLANG_BUILTIN2(NAME)
 #define _CLANG_BUILTIN2_TEMPLATED(NAME)
-
-// Layer 2: rename the colliding function names before <cmath> pulls them in.
-// Comparison ops (`_CLANG_BUILTIN2` family).
-#define isgreater __msvc_hip_isgreater
-#define isgreaterequal __msvc_hip_isgreaterequal
-#define isless __msvc_hip_isless
-#define islessequal __msvc_hip_islessequal
-#define islessgreater __msvc_hip_islessgreater
-#define isunordered __msvc_hip_isunordered
-// Predicates (`_CLANG_BUILTIN1` family) — included defensively; the CI
-// failure surfaced only the BUILTIN2 conflicts but the same MS STL change
-// could expose BUILTIN1 conflicts on a future patch level.
-#define isfinite __msvc_hip_isfinite
-#define isinf __msvc_hip_isinf
-#define isnan __msvc_hip_isnan
-#define isnormal __msvc_hip_isnormal
-
-// Force-include <cmath> NOW so the MS STL emits the renamed declarations
-// while our `#define`s are still in scope. The header guard prevents the
-// auto-included `__clang_hip_runtime_wrapper.h` chain from reintroducing
-// the conflicting names later in the TU.
-#include <cmath>
-
-// Restore the original names so subsequent code (kernel device functions,
-// downstream includes like `<hip/hip_runtime.h>`) sees `isgreater` resolve
-// to clang-hip's `__device__` overloads.
-#undef isgreater
-#undef isgreaterequal
-#undef isless
-#undef islessequal
-#undef islessgreater
-#undef isunordered
-#undef isfinite
-#undef isinf
-#undef isnan
-#undef isnormal
 
 #endif // _MSC_VER && __clang__ && __HIP__
 
