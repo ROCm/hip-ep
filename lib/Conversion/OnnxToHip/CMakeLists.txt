@@ -22,6 +22,8 @@ add_library(OnnxToHip STATIC
   RotaryEmbeddingConversion.cpp
   GqaConversion.cpp
   MultiHeadAttentionConversion.cpp
+  AttentionConversion.cpp
+  HipGqaBuilder.cpp
   GatherConversion.cpp
   GatherShapeFold.cpp
   ReshapeShapeFold.cpp
