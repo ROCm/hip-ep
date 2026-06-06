@@ -30,9 +30,9 @@ Licensed under the MIT License.
 
 The MLIR compiler converts ONNX models into a single-block `func.func @main_graph` whose body contains hundreds of `memref.alloc` ops — one per intermediate tensor materialised on the GPU. Three constraints shape the memory plan:
 
-1. **No per-inference `hipMalloc`.** Every `memref.alloc` left intact at lowering time becomes a runtime `hipMalloc` + `hipFree` pair on the hot path. With ~30 transient tensors per layer and 32 layers per inference, that is ~1000 round-trips through the AMD allocator per token. Steady-state decode TPS collapses if any one of these allocs survives.
+1. **No per-inference allocator traffic.** Any `memref.alloc` left intact at lowering becomes a runtime allocate + free pair issued on *every* inference. Allocator calls are expensive and sit on the critical path; a function that materializes many transient buffers pays that cost multiplied by the buffer count on every invocation. The plan must keep allocation off the per-inference path.
 
-2. **Bounded host memory growth.** Once a model has run at its largest steady-state shape, no further allocator activity should occur. Sessions with stable shape see zero `hipMalloc` per inference; sessions whose shape grows pay one resize cost per shape change.
+2. **Bounded, monotonic memory growth.** Buffers are reused across inferences, not re-acquired. A stable workload performs no allocator calls after warm-up; a workload whose required sizes grow pays one resize per new high-water size and never shrinks. The footprint grows only when the working set genuinely grows, never per inference.
 
 3. **SSA dominance.** Every value consumed inside the function body must be dominated by its definition. That includes the size operand of `hip.get_pool` and the offset operand of every `memref.view` derived from it. With dynamic shapes — where alloc sizes are runtime arithmetic over input dims — emitting `hip.get_pool` at function entry forces every dim-arith chain to also live at function entry, which does not always hold.
 
@@ -154,7 +154,7 @@ Stage 9 retires entirely (pipeline call + LIT fixture removed) when any of:
 
 The pass originally shipped as a Tier-1 wrapper plus a Tier-2 custom-pattern pass `--hip-resolve-reshape-dims` that explicitly rewrote `tensor.dim` of `collapse_shape` and the SSA-valued slot of `tensor.dim` of `expand_shape`. The custom patterns were necessary because the upstream `Reify{Expand,Collapse}ShapeOp` external models had never been registered in this project's dialect registry — without registration, the upstream `DimOfReifyRankedShapedTypeOpInterface` pattern silently failed on every reshape-dim query.
 
-Once the registration was added, every Tier-2 case folds via upstream as cleanly or cleaner (e.g. mixed static/dyn collapse groups become `affine.apply [s0 * 32]` instead of `arith.muli %dyn, %c32`), so the Tier-2 pass was retired and the wrapper now stands alone. The Gemma-3 4B IT dynamic OGA bench at `prompt=128 gen=128` improved on this transition as the cleaner reify-driven IR composes better with bufferize's allocation sizing.
+Once the registration was added, every Tier-2 case folds via upstream as cleanly or cleaner (e.g. mixed static/dyn collapse groups become `affine.apply [s0 * 32]` instead of `arith.muli %dyn, %c32`), so the Tier-2 pass was retired and the wrapper now stands alone. End-to-end compile of dynamic-shape models also improved on this transition: the cleaner reify-driven IR (static factors folded into `affine.apply` rather than scattered `arith.muli`) composes better with bufferize's allocation sizing.
 
 ### `hip-hoist-alloc-size-arith`
 
@@ -330,7 +330,7 @@ Why greedy textual-order: the ordering of allocs in the block IS the dataflow or
 
 #### Single-domain output
 
-For typical transformer decoder graphs (after `hip-hoist-alloc-size-arith`), every alloc's dyn-operand defs dominate every pooled alloc, so the first probe of `D[0]` always succeeds and the partition returns a single domain containing every alloc. That input shape is exactly what the pre-multi-domain phases consumed; downstream Phases 2..5 are bit-identical to the pre-Stage-6 code path.
+In the common case (after `hip-hoist-alloc-size-arith` has run), every alloc's dyn-operand defs dominate every pooled alloc, so the first probe of `D[0]` always succeeds and the partition returns a single domain containing every alloc. That input shape is exactly what the pre-multi-domain phases consumed; downstream Phases 2..5 are bit-identical to the pre-Stage-6 code path.
 
 #### Multi-domain output
 
