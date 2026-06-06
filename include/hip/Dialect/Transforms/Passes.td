@@ -402,6 +402,39 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def ResolveTensorDimsPass
+    : Pass<"hip-resolve-tensor-dims", "mlir::func::FuncOp"> {
+  let summary = "Fold `tensor.dim` queries via upstream reify patterns "
+                "(pre-bufferize)";
+  let description = [{
+    Per-`func.func` greedy rewrite that wraps upstream MLIR's
+    `populateResolveRankedShapedTypeResultDimsPatterns` (plus the
+    `InferShapedTypeOpInterface` companion populator and the tensor-
+    dialect canonicalisers) in a single fixed point. Folds `tensor.dim`
+    of any op carrying `ReifyRankedShapedTypeOpInterface` --
+    `tensor.expand_shape`, `tensor.collapse_shape`, `tensor.pad`, and
+    every HIP DPS op (which carries the interface via the dialect's
+    own external models registered in `InitAllPasses.h`).
+
+    Coverage assumes
+    `mlir::tensor::registerInferTypeOpInterfaceExternalModels` has
+    been wired into the dialect registry; without that registration
+    the upstream patterns are inert and reshape-dim queries silently
+    fall through to bufferize, where they get materialised as
+    `memref.dim` of a reshape op and explode the dominance domain
+    count of `--hip-pool-allocs`.
+
+    Pipeline placement: between `--hip-infer-shapes` and
+    `--one-shot-bufferize`, so refined dim values propagate into
+    bufferize's allocation sizing. Idempotent.
+  }];
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   let summary = "Refine dynamic dims in HIP DPS op result types via "
                 "`ReifyRankedShapedTypeOpInterface`";
