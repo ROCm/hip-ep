@@ -19,6 +19,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/MLIRContext.h"
@@ -60,6 +61,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
