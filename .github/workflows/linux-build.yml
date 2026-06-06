@@ -35,8 +35,11 @@ env:
   # docker/build.sh defaults. Remove a PR number once its fix lands in the
   # pinned ONNXRUNTIME_VERSION release.
   ONNXRUNTIME_PR_PATCHES: "28608"
-  # THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
-  THEROCK_VERSION: therock-dist-linux-gfx120X-all-7.11.0
+  THEROCK_VERSION: therock-dist-linux-gfx1151-7.11.0
+  # if you want to test rx9070, uncomment below line.
+  # THEROCK_VERSION: therock-dist-linux-gfx120X-all-7.11.0
+
+  # if you want to test rx9070, set HIP_ARCHITECTURES to "gfx1201"
   # HIP_ARCHITECTURES MUST match the GPU family inside THEROCK_VERSION.
   # gfx120X TheRock SDK pairs with RDNA 4 SKUs (gfx1200/gfx1201); gfx1151
   # TheRock pairs with Strix Halo. Always update both env values in
@@ -47,7 +50,9 @@ env:
   # the listed --offload-arch targets. Use a semicolon list
   # ("gfx1200;gfx1201") for a multi-arch artifact; build time and library
   # size both scale linearly with the list length.
-  HIP_ARCHITECTURES: "gfx1201"
+  
+  HIP_ARCHITECTURES: "gfx1151"
+  #  HIP_ARCHITECTURES: "gfx1201"
   # Single integer used for BOTH the renumbered UID and GID of Ubuntu
   # 24.04's default `ubuntu:ubuntu` user inside the image (see the long
   # block comment around the `RUN if id ubuntu` line in docker/Dockerfile
