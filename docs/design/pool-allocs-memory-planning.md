@@ -64,7 +64,7 @@ Several passes cooperate to produce the final pooled IR. The relevant stretch of
     → ...
 ```
 
-The 1c step (`--hip-resolve-tensor-dims`) is **pre-bufferize and load-bearing**. It operates on `tensor.dim` queries against `tensor.expand_shape` / `tensor.collapse_shape` — operations that bufferize lowers to `memref.expand_shape` / `memref.collapse_shape` whose shape SSA (`output_shape` operands and reassociation maps) is opaque to the post-bufferize `memref.dim` patterns. Pre-bufferize is the last useful position. Without it, downstream `hip-pool-allocs` sees one scattered `memref.dim` query per reshape site and partitions them into separate dominance domains — graphs with per-layer same-rank dynamic `onnx.Reshape` (typical: norm / projection chains in transformer decoders) blow past the 8-domain cap and the partition signals failure. After 1c, the chain bottoms out at `tensor.dim %arg, %const` on a function argument and pool-allocs sees a single domain. See the dedicated subsection in Cooperating Passes below.
+The 1c step (`--hip-resolve-tensor-dims`) is **pre-bufferize and load-bearing**. It operates on `tensor.dim` queries against `tensor.expand_shape` / `tensor.collapse_shape` — operations that bufferize lowers to `memref.expand_shape` / `memref.collapse_shape` whose shape SSA (`output_shape` operands and reassociation maps) is opaque to the post-bufferize `memref.dim` patterns. Pre-bufferize is the last useful position. Without it, downstream `hip-pool-allocs` sees one scattered `memref.dim` query per reshape site and partitions them into separate dominance domains — graphs with per-layer same-rank dynamic `onnx.Reshape` (typical: norm / projection chains in transformer decoders) fragment into one pool per reshape site, wasting pool-prefix overhead and defeating the point of pooling (the partition is unbounded, so this degrades efficiency rather than failing compilation). After 1c, the chain bottoms out at `tensor.dim %arg, %const` on a function argument and pool-allocs sees a single domain. See the dedicated subsection in Cooperating Passes below.
 
 The 6a/6b/6c ordering is load-bearing and **load-bearing in the order shown** — the Pipelines.cpp comments around each `addNestedPass` call spell out why:
 
@@ -82,7 +82,7 @@ Each pass has a single, named purpose — no internal phases that quietly do wor
 
 ### `hip-resolve-tensor-dims` (Stage 9)
 
-A single `func.func`-nested pass, run between `hip-infer-shapes` and `one-shot-bufferize`. Resolves `tensor.dim` queries that arise from same-rank dynamic `onnx.Reshape` decompositions (e.g. transformer-decoder `q_norm`/`k_norm`/projection chains lowered as `tensor.expand_shape + tensor.collapse_shape` pairs). Without it, the queries cross the bufferize boundary as scattered `memref.dim` ops on the resulting reshape ops; pool-allocs then partitions per reshape site and the dominance partition exceeds the 8-domain cap.
+A single `func.func`-nested pass, run between `hip-infer-shapes` and `one-shot-bufferize`. Resolves `tensor.dim` queries that arise from same-rank dynamic `onnx.Reshape` decompositions (e.g. transformer-decoder `q_norm`/`k_norm`/projection chains lowered as `tensor.expand_shape + tensor.collapse_shape` pairs). Without it, the queries cross the bufferize boundary as scattered `memref.dim` ops on the resulting reshape ops; pool-allocs then partitions per reshape site, fragmenting the function into many single-alloc domains and degrading pooling efficiency (the partition is unbounded, so this is a perf cost, not a compile failure).
 
 #### Implementation
 
@@ -320,8 +320,7 @@ for alloc in allocs sorted by defIndex:
     if D ∪ {alloc} is feasible: keep, break
     else:                                   roll back
   else:                                    // no D accepted
-    if len(domains) + 1 > kMaxDomains: signal failure
-    domains.append(Domain([alloc]))
+    domains.append(Domain([alloc]))         // unbounded — one more pool
 return domains
 ```
 
@@ -337,7 +336,9 @@ For typical transformer decoder graphs (after `hip-hoist-alloc-size-arith`), eve
 
 A second domain opens iff some alloc's dyn-operand chain comes from values defined **below** the earliest alloc of every existing domain. The canonical trigger is a `memref.load` from a host-scratch slot whose `memref.store` lives between two pooled allocs — the load cannot be hoisted (memory side effect) and the alloc that consumes it cannot share a domain with allocs above the load.
 
-The hard cap `kMaxDomains = 8` matches the runtime's `kMaxPoolDomains = 8` and is very generous: real graphs produce 1 (canonical) or 2 (one host-load chain). Hitting the cap signals a hard pass failure with a diagnostic pointing at missing upstream canonicalisation. The cap is intentional — soft-merging unrelated domains would produce silent mis-placement; surfacing as a compile error is safer.
+**The domain count is unbounded — there is no compile-time cap.** The partition produces exactly as many domains as the dataflow requires (real graphs produce 1, canonical, or 2, one host-load chain), and the runtime backs them with per-domain pool arrays sized at `inference_init` from the `hipdnn.domain_count` metadata field (default 1 when absent). A fixed cap is not acceptable in production: it would turn a legitimate-but-unusual graph (e.g. several independent host-scratch chains) into a hard compile failure with no correct fallback. Soft-merging unrelated domains is never done — it would silently mis-place allocations — so the only correct behavior is to open another pool, which the dynamic backing makes free.
+
+A surprisingly high domain count still usually means upstream canonicalisation (`hip-resolve-tensor-dims`, `hip-hoist-alloc-size-arith`) left scattered size queries in place, which hurts pooling efficiency. That condition is surfaced as a non-fatal advisory (see Failure Modes), never as a compile error.
 
 ### Phase 2: Static / Dynamic Split
 
@@ -519,16 +520,16 @@ The `domain_id` attribute is materialised as a small `i32` constant immediately 
 ```cpp
 struct RuntimeState {
   // ... other fields (constants blob, stream, library handles, ...) ...
-  static constexpr int kMaxPoolDomains = 8;
-  void   *pool_base[kMaxPoolDomains];   // per-domain GPU pool base pointers
-  size_t  pool_size[kMaxPoolDomains];   // per-domain pool size in bytes
+  int     num_pool_domains;             // = hipdnn.domain_count (default 1)
+  void  **pool_base;                    // [num_pool_domains] per-domain GPU pool base pointers
+  size_t *pool_size;                    // [num_pool_domains] per-domain pool size in bytes
   size_t *buffer_offsets;               // offsets for static buffers in domain 0
   size_t  num_buffers;                  // static buffer count in domain 0
   // ... host scratch, qmoe scratch, descriptor caches, ... ...
 };
 ```
 
-`kMaxPoolDomains == 8` matches the cap enforced by `partitionByDominanceDomain`. The pass fails compilation before emitting IR that would exceed it, so the array size is a hard upper bound.
+There is no compile-time domain cap. `pool_base` / `pool_size` are heap arrays allocated once at `inference_init` with `num_pool_domains` entries — the value of `hipdnn.domain_count` from the metadata blob, or `1` when that attribute is absent (single-domain models). Both arrays are zero-initialised (`calloc`) so every domain starts NULL/0, and freed in `hipdnn_ep_state_cleanup`. The array length is data-driven by the compiled model, never a fixed constant.
 
 ### Runtime entry points
 
@@ -538,17 +539,19 @@ Three entry points consume this state. All declared in `lib/Runtime/hipdnn_ep_ru
 
 ```cpp
 int hipdnn_ep_pool_init(RuntimeState *state,
+                        int           num_domains,
                         size_t        pool_size,
                         const size_t *buffer_offsets,
                         size_t        num_buffers);
 ```
 
-Called once from `inference_init` with values pulled from the FlatBuffers metadata blob. Maps to the legacy attribute trio:
+Called once from `inference_init` with values pulled from the FlatBuffers metadata blob. Maps to the attribute set:
 
+- `num_domains` ← `hipdnn.domain_count` (or `1` when absent). Sets `state->num_pool_domains` and `calloc`s the `pool_base` / `pool_size` arrays to that length (all NULL/0).
 - `pool_size` ← `hipdnn.pool_size` (= domain 0's static prefix in bytes)
 - `buffer_offsets` / `num_buffers` ← the constant entries of `hipdnn.buffer_offsets` (= the static-offset slots in domain 0)
 
-If `pool_size > 0`, allocates `state->pool_base[0]` via `hipMalloc(pool_size)` — eagerly, so the first inference does not pay the malloc latency. If `pool_size == 0`, leaves `pool_base[0]` NULL and lets the dynamic grow path own the first allocation. `state->pool_size[0]` is set to `pool_size`. **`pool_base[1..kMaxPoolDomains-1]` start NULL and are lazily allocated by the first `hip.get_pool(domain=N)` call.**
+After the arrays are allocated: if `pool_size > 0`, allocates `state->pool_base[0]` via `hipMalloc(pool_size)` — eagerly, so the first inference does not pay the malloc latency. If `pool_size == 0`, leaves `pool_base[0]` NULL and lets the dynamic grow path own the first allocation. `state->pool_size[0]` is set to `pool_size`. **`pool_base[1..num_domains-1]` start NULL and are lazily allocated by the first `hip.get_pool(domain=N)` call.**
 
 The `buffer_offsets` array is `memcpy`'d into a `malloc`'d slot on `state` for use by `hipdnn_ep_get_buffer_from_pool` (next).
 
@@ -570,11 +573,11 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state,
 
 Called by every `hip.get_pool` lowering. Behaviour:
 
-- Range-checks `domain_id ∈ [0, kMaxPoolDomains)`. Out-of-range returns NULL with a stderr diagnostic flagging the violation as a compiler bug (the partition cap should have prevented it).
+- Range-checks `domain_id ∈ [0, state->num_pool_domains)`. Out-of-range returns NULL with a stderr diagnostic flagging the violation as a compiler bug (the `domain_id` baked into the IR must match the `hipdnn.domain_count` the arrays were sized from).
 - If `needed_size > state->pool_size[domain_id]`, grows: `hipStreamSynchronize(state->stream)` (so any in-flight kernel reading the old buffer finishes), `hipFree(old)`, `hipMalloc(needed_size)`, store new base + size. **Stream sync covers all domains** because they share a single compute stream, but the grow itself only touches the one domain — `pool_base[M]` for M ≠ domain_id are untouched.
 - If `needed_size <= state->pool_size[domain_id]`, just returns the existing base.
 - Pools never shrink. A session that hits a peak shape keeps that footprint until cleanup.
-- Cleanup (`hipdnn_ep_state_cleanup`): `hipFree` every non-NULL `pool_base[i]`.
+- Cleanup (`hipdnn_ep_state_cleanup`): `hipFree` every non-NULL `pool_base[i]` for `i ∈ [0, num_pool_domains)`, then `free` the `pool_base` / `pool_size` arrays themselves.
 
 ---
 
@@ -597,7 +600,7 @@ Alternatives considered:
 
 The greedy approach picked here is correct for single-block functions because textual order = SSA dominance order, and the greedy rule is exactly "join the first domain whose existing constraints still admit a common dominator with this alloc's operands". Most-recent-first iteration is robust to future reorderings of the domain list without changing semantics.
 
-The cap of 8 domains is chosen so that pathological IR (which the cap protects against) is impossible on real models — typical models produce 1 or 2 — but a future graph that legitimately has, say, 3 host-scratch chains is still accommodated.
+The partition is unbounded in the number of domains it can produce. An earlier design capped it at 8 and failed compilation past that, on the theory that a high count only ever indicated pathological IR. That is the wrong trade for production: a graph that *legitimately* needs many domains (several independent host-scratch chains) would fail to compile with no correct fallback, and the only alternative — soft-merging unrelated domains — is silently incorrect. Since the runtime backs domains with a `calloc`'d array sized from `hipdnn.domain_count`, opening another domain costs one more array slot, so there is no reason to cap. A high count is now a perf advisory (it points at missing upstream canonicalisation), not an error.
 
 ### Best-fit static packing, first-fit bin packing
 
@@ -819,7 +822,6 @@ At runtime, `pool_base[0]` was eagerly malloc'd at session start to 256 bytes (t
 | `funcOp.getBody().hasOneBlock() == false` | "hip-pool-allocs requires single-block functions" | Run earlier passes that collapse control flow into region-bearing ops. |
 | `funcOp.getNumArguments() == 0 || arg0 not !hip.context` | "function missing !hip.context as arg 0 — run hip-add-context-arg before hip-pool-allocs" | Add `--hip-add-context-arg` to the pipeline. |
 | `alignment` not a positive power of 2 | "alignment must be a positive power of 2 (got N)" | Fix the pass option. |
-| Domain count > `kMaxDomains` (= 8) | "dominance partition exceeded the cap of 8 domains; this strongly suggests upstream hoisting (--hip-hoist-alloc-size-arith) is missing or canonicalization left unhoistable size arithmetic in place" | Triage upstream pre-conditions in this order: (1) `hip-resolve-tensor-dims` is in the pipeline AND `mlir::tensor::registerInferTypeOpInterfaceExternalModels` has been called on the dialect registry (without either, per-layer same-rank dynamic Reshape chains scatter `memref.dim` ops onto bufferized reshape ops and force one domain per reshape site); (2) `hip-hoist-alloc-size-arith` is in the pipeline; (3) any speculatable arithmetic that could be hoisted but is not (e.g. an `arith.divui` whose operands could not all be proven safe). |
 | `findLatestLegalInsertionPoint` returns `nullopt` for a bucket | "cannot place bucket size arithmetic at a legal point in the block (a dyn-operand def is at-or-after the earliest pooled alloc in its domain)" | Either the hoist pass is missing, or Phase 1.5 partition logic regressed (a dyn-operand below the earliest alloc was admitted into a domain whose anchor is above it). Verify the pipeline; if hoist is in place, this is a partition bug. |
 | `findLatestLegalInsertionPoint` returns `nullopt` for the pool itself | "cannot place hip.get_pool at a legal point dominating its domain's allocs" | Same root cause as the bucket-placement variant; surfaces in the second insertion-point query (per-domain pool acquisition rather than per-bucket size arith). |
 
@@ -831,6 +833,7 @@ At runtime, `pool_base[0]` was eagerly malloc'd at session start to 256 bytes (t
 | Fewer than 2 pooled allocs (after dropping `result.use_empty()` allocs) | Emit zeroed legacy attrs and return. |
 | All allocs are static and lifetime-disjoint | Phase 4 produces no buckets; Phase 3 packs everything into the static prefix; pool acquisition uses a constant `pool_size`. |
 | Per-domain: domain has no dynamic buckets AND `staticPoolSize == 0` | Phase 5 skips emission of `hip.get_pool` and the offset arithmetic for that domain entirely (no work to do, no SSA values to thread). The domain still appears in `hipdnn.pool_sizes` as `0` so downstream metadata indexing stays consistent across domains. |
+| Domain count unexpectedly high (advisory threshold) | Non-fatal remark suggesting missing upstream canonicalisation; compilation continues with one pool per domain. Triage in this order: (1) `hip-resolve-tensor-dims` is in the pipeline AND `mlir::tensor::registerInferTypeOpInterfaceExternalModels` has been called on the dialect registry (without either, per-layer same-rank dynamic Reshape chains scatter `memref.dim` ops onto bufferized reshape ops and force one domain per reshape site); (2) `hip-hoist-alloc-size-arith` is in the pipeline; (3) any speculatable arithmetic that could be hoisted but is not (e.g. an `arith.divui` whose operands could not all be proven safe). The compiled model is still correct — each extra domain is a valid independent pool — but pooling efficiency suffers. |
 
 ### Statistics (collected via LLVM `STATISTIC` macros)
 
