@@ -29,6 +29,8 @@ WORKSPACE="$(cd "$SOURCE_DIR/.." && pwd -P)"
 : "${IMAGE:=hipdnn-ep-build:llvm22-noble}"
 : "${CONTAINER_NAME:=${USER}.hipdnn-ep.shell}"
 : "${HIP_ARCHITECTURES:=gfx1151}"
+# if you want to test rx9070, uncomment below line.
+# : "${HIP_ARCHITECTURES:=gfx1201}"  
 # Single integer used for both the renumbered UID and GID of the default
 # `ubuntu` user inside the image (parks the squatter so the entrypoint can
 # claim HOST_UID/HOST_GID, typically 1000/1000). Default matches CI; only

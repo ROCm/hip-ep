@@ -103,6 +103,12 @@ mkdir -p ../prebuilt/$RUN_ID
 After extraction, `<workspace>/prebuilt/$RUN_ID/` matches the
 build-from-source `install/` layout (`bin/`, `lib/`, `etc/`).
 
+## If you want to test for another Architecture
+if you want to build for gfx1201 ( rx 9070xt), you need modify below place before you build
+1. in  .github/workflows/linux-build.yml, change value of THEROCK_VERSION & HIP_ARCHITECTURES, as comments specified.
+2. in docker/build.sh, change value of THEROCK_VERSION & HIP_ARCHITECTURES
+3. in docker/run.sh, change value of HIP_ARCHITECTURES
+
 ## Open a container shell and set `$ROOT`
 
 Both paths converge here. `./docker/run.sh shell` opens a long-lived

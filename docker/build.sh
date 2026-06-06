@@ -21,6 +21,8 @@ set -euo pipefail
 
 : "${SOURCE_DIR:?SOURCE_DIR not set — run.sh should pass it via -e}"
 : "${HIP_ARCHITECTURES:=gfx1151}"
+# if you want to test rx9070, uncomment below line.
+# : "${HIP_ARCHITECTURES:=gfx1201}"  
 : "${ONNXRUNTIME_VERSION:=1.25.1}"
 # Space-separated list of microsoft/onnxruntime PR numbers to fetch from
 # github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply` on top
@@ -32,6 +34,9 @@ set -euo pipefail
 : "${PROTOBUF_REF:=v34.0}"
 : "${FLATBUFFERS_REF:=v25.12.19}"
 : "${THEROCK_VERSION:=therock-dist-linux-gfx1151-7.11.0}"
+# if you want to test rx9070, uncomment below line.
+# : "${THEROCK_VERSION:=therock-dist-linux-gfx120X-all-7.11.0}"
+
 # OGA pin (single source of truth; CI overrides via linux-build.yml env).
 : "${OGA_REF:=2615301864b4d2397231d443865cb96111cc5fc2}"
 : "${BUILD_OGA:=0}"
