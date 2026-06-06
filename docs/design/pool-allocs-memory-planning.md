@@ -80,7 +80,7 @@ Each pass has a single, named purpose — no internal phases that quietly do wor
 
 ## Cooperating Passes
 
-### `hip-resolve-tensor-dims` (Stage 9)
+### `hip-resolve-tensor-dims`
 
 A single `func.func`-nested pass, run between `hip-infer-shapes` and `one-shot-bufferize`. Resolves `tensor.dim` queries that arise from same-rank dynamic `onnx.Reshape` decompositions (e.g. transformer-decoder `q_norm`/`k_norm`/projection chains lowered as `tensor.expand_shape + tensor.collapse_shape` pairs). Without it, the queries cross the bufferize boundary as scattered `memref.dim` ops on the resulting reshape ops; pool-allocs then partitions per reshape site, fragmenting the function into many single-alloc domains and degrading pooling efficiency (the partition is unbounded, so this is a perf cost, not a compile failure).
 
@@ -138,23 +138,23 @@ Inherited from upstream — `DimOfReifyRankedShapedTypeOpInterface` carries `set
 
 The pass emits no new `tensor.dim` ops on reshape operands once it has converged. A second invocation has no work; the LIT fixture `test/lit/Dialect/hip-resolve-tensor-dims.mlir` pins this down across the canonical cases (collapse with two/three dyn sources, mixed static/dyn, expand at static and dynamic slots, chained collapse-of-expand, fully-static tensors, no-op on functions without reshape-dim queries).
 
-#### What Stage 9 cannot fix
+#### What this pass cannot fix
 
-Queries reaching values produced by `memref.load` of a host-scratch slot or other memory-mutating ops survive into bufferize. Those are exactly the chains `hip-pool-allocs`'s multi-domain partition is designed to handle (the `%alloc_11` case in the worked example below). Stage 9 removes the structural noise from reshape chains; the partition handles the residue.
+Queries reaching values produced by `memref.load` of a host-scratch slot or other memory-mutating ops survive into bufferize. Those are exactly the chains `hip-pool-allocs`'s multi-domain partition is designed to handle (the `%alloc_11` case in the worked example below). This pass removes the structural noise from reshape chains; the partition handles the residue.
 
 #### Retirement
 
-Stage 9 retires entirely (pipeline call + LIT fixture removed) when any of:
+This pass retires entirely (pipeline call + LIT fixture removed) when any of:
 
 1. Upstream MLIR's `tensor::DimOp::fold` learns `tensor.expand_shape` / `tensor.collapse_shape` chains directly (the LIT fixture becomes a regression catcher for the upstream fold and the pipeline entry is removed; the external-model registration stays as cheap insurance).
 2. The compiler migrates to an IREE-style `ShapeAwareOpInterface` that carries explicit shape SSA on HIP-dialect ops, eliminating `tensor.dim` queries from dynamic-shape IR entirely.
 3. The same-rank dynamic Reshape decomposition in `ReshapeConversion.cpp` is replaced by a single op that emits no `expand_shape` / `collapse_shape` pair (the canonical trigger disappears; the pass keeps doing useful work for any other reshape-pair-emitting path).
 
-#### History (2026-06)
+#### History
 
-The pass originally shipped as a Tier-1 wrapper plus a Tier-2 custom-pattern pass `--hip-resolve-reshape-dims` that explicitly rewrote `tensor.dim` of `collapse_shape` and the SSA-valued slot of `tensor.dim` of `expand_shape`. The custom patterns were necessary because the upstream `Reify{Expand,Collapse}ShapeOp` external models had never been registered in this project's dialect registry — without registration, the upstream `DimOfReifyRankedShapedTypeOpInterface` pattern silently failed on every reshape-dim query.
+The pass originally shipped as this upstream-pattern wrapper plus a separate custom-pattern pass `--hip-resolve-reshape-dims` that explicitly rewrote `tensor.dim` of `collapse_shape` and the SSA-valued slot of `tensor.dim` of `expand_shape`. The custom patterns were necessary because the upstream `Reify{Expand,Collapse}ShapeOp` external models had never been registered in this project's dialect registry — without registration, the upstream `DimOfReifyRankedShapedTypeOpInterface` pattern silently failed on every reshape-dim query.
 
-Once the registration was added, every Tier-2 case folds via upstream as cleanly or cleaner (e.g. mixed static/dyn collapse groups become `affine.apply [s0 * 32]` instead of `arith.muli %dyn, %c32`), so the Tier-2 pass was retired and the wrapper now stands alone. End-to-end compile of dynamic-shape models also improved on this transition: the cleaner reify-driven IR (static factors folded into `affine.apply` rather than scattered `arith.muli`) composes better with bufferize's allocation sizing.
+Once the registration was added, every case the custom pass handled folds via upstream as cleanly or cleaner (e.g. mixed static/dyn collapse groups become `affine.apply [s0 * 32]` instead of `arith.muli %dyn, %c32`), so the custom pass was retired and the wrapper now stands alone. End-to-end compile of dynamic-shape models also improved on this transition: the cleaner reify-driven IR (static factors folded into `affine.apply` rather than scattered `arith.muli`) composes better with bufferize's allocation sizing.
 
 ### `hip-hoist-alloc-size-arith`
 
@@ -213,9 +213,9 @@ A second invocation finds nothing below `earliestAlloc` that still needs moving 
 
 Chains that reach a `memref.load` of a value computed mid-block (the canonical case is a host-scratch slot used to pass a runtime-dependent scalar from CPU to GPU). Those chains stay where they are; pool-allocs handles them by partitioning into domains.
 
-### `hip-pool-allocs` (Stages 6 and 7)
+### `hip-pool-allocs`
 
-The subject of this doc. Stage 6 introduced the dominance-domain partition; Stage 7 evolved the runtime ABI to back N independent grow-on-demand pools.
+The subject of this doc. It partitions allocations into dominance domains and replaces each `memref.alloc` with a `memref.view` into one of N independent, grow-on-demand runtime pools, acquired per domain via `hip.get_pool`.
 
 ### Briefly: `hip-materialize-host-scalars`
 
@@ -330,7 +330,7 @@ Why greedy textual-order: the ordering of allocs in the block IS the dataflow or
 
 #### Single-domain output
 
-In the common case (after `hip-hoist-alloc-size-arith` has run), every alloc's dyn-operand defs dominate every pooled alloc, so the first probe of `D[0]` always succeeds and the partition returns a single domain containing every alloc. That input shape is exactly what the pre-multi-domain phases consumed; downstream Phases 2..5 are bit-identical to the pre-Stage-6 code path.
+In the common case (after `hip-hoist-alloc-size-arith` has run), every alloc's dyn-operand defs dominate every pooled alloc, so the first probe of `D[0]` always succeeds and the partition returns a single domain containing every alloc. Phases 2..5 then run on that single domain exactly as they would with no partitioning step at all — single-domain IR and metadata are identical whether or not a second domain is ever needed.
 
 #### Multi-domain output
 
@@ -432,7 +432,7 @@ Set the builder there and emit:
 %pool = hip.get_pool(%ctx, %pool_size) {domain_id = N : i64} : memref<?xi8>
 ```
 
-Domain `N == 0` omits the `domain_id` attribute — the operation definition declares it as `DefaultValuedAttr<I64Attr, "0">` so the printer elides it. Single-domain textual IR is bit-identical to the pre-Stage-6 output.
+Domain `N == 0` omits the `domain_id` attribute — the operation definition declares it as `DefaultValuedAttr<I64Attr, "0">` so the printer elides it. A single-domain function therefore prints no `domain_id` anywhere, so its textual IR is unchanged by the existence of multi-domain support.
 
 #### Per-alloc offset assignment + view replacement
 
@@ -653,7 +653,7 @@ Alternative considered: a function-scoped "dealloc on exit" would let the pass s
 
 ## Worked Example: Two-Domain Partition
 
-Hand-traced from a real production case — the `embedding.onnx` sub-model of an encoder-style multimodal pipeline whose `main_graph` has eight pooled allocs and triggers a two-domain split. Walkthrough condensed from `.cursor/plans/dynamic-shape-pool-allocs.plan.md`.
+Hand-traced from a real production case — the `embedding.onnx` sub-model of an encoder-style multimodal pipeline whose `main_graph` has eight pooled allocs and triggers a two-domain split.
 
 ### Input IR — alloc inventory
 
@@ -672,7 +672,7 @@ Eight allocs in the entry block, classified by dyn-operand chain:
 
 All deallocs land at function tail; every alloc's lifetime overlaps every other's, so there are no intra-domain bin-sharing opportunities in this graph beyond same-key buckets.
 
-### Stage hoist analysis (runs before pool-allocs)
+### Hoist analysis (runs before pool-allocs)
 
 `hip-hoist-alloc-size-arith` walks SSA backward from each pooled alloc's dyn-operands:
 
@@ -683,7 +683,7 @@ All deallocs land at function tail; every alloc's lifetime overlaps every other'
 | `%7 = arith.muli %6, %c4096` | speculatable; operand `%6` will be hoisted | **hoist to before earliest alloc** (after `%6`) |
 | `%26` chain | reaches `%11 = memref.load %expand_shape_9[%c0]` — NOT speculatable | hoist stops at the load; the chain stays where it was |
 
-Net Stage hoist effect: moves exactly two ops (`%6`, `%7`) above the earliest pooled alloc. Allocs depending on `%7` (`%alloc_6`, `%alloc_8`) become feasible for a single-domain placement; `%alloc_11`'s chain is unchanged.
+Net hoist effect: moves exactly two ops (`%6`, `%7`) above the earliest pooled alloc. Allocs depending on `%7` (`%alloc_6`, `%alloc_8`) become feasible for a single-domain placement; `%alloc_11`'s chain is unchanged.
 
 ### Phase 1.5 partition
 
