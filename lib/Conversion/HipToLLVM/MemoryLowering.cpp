@@ -132,13 +132,11 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
     Value poolSize = adaptor.getPoolSize();
     Value domainIdVal = LLVM::ConstantOp::create(
         rewriter, loc, i32Type,
-        rewriter.getI32IntegerAttr(
-            static_cast<int32_t>(op.getDomainId())));
-    Value rawPtr =
-        LLVM::CallOp::create(
-            rewriter, loc, *funcOp,
-            ValueRange{adaptor.getCtx(), domainIdVal, poolSize})
-            .getResult();
+        rewriter.getI32IntegerAttr(static_cast<int32_t>(op.getDomainId())));
+    Value rawPtr = LLVM::CallOp::create(
+                       rewriter, loc, *funcOp,
+                       ValueRange{adaptor.getCtx(), domainIdVal, poolSize})
+                       .getResult();
 
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);
