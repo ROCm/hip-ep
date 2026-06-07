@@ -294,8 +294,8 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
         } else {
           const bool has_param =
               dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty();
-          auto pit = has_param ? dim_param_map.find((*dp)[d])
-                               : dim_param_map.end();
+          auto pit =
+              has_param ? dim_param_map.find((*dp)[d]) : dim_param_map.end();
           if (has_param && pit != dim_param_map.end()) {
             // Identity dynamic dim: equals input[pit].shape[pit] at runtime.
             ds->set_input_idx(pit->second.first);
