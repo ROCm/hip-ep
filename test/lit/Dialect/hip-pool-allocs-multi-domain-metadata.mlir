@@ -12,7 +12,7 @@
 //     are still emitted (legacy ABI, consumed by GenerateInterface today).
 //   * `hipdnn.pool_size` equals `hipdnn.pool_sizes[0]` for backward compat.
 //   * `hipdnn.domain_count`, `hipdnn.pool_sizes`, `hipdnn.buffer_domains`
-//     are emitted only when `domain_count > 1` (the Stage-7 runtime ABI).
+//     are emitted only when `domain_count > 1` (the multi-domain runtime ABI).
 //   * `hipdnn.buffer_domains` is parallel to `hipdnn.buffer_offsets` and
 //     records which pool each pooled alloc came from, in textual order.
 //===----------------------------------------------------------------------===//
