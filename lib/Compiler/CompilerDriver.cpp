@@ -169,14 +169,23 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   // Symbols exported from the generated DLL:
   //   inference_init/compute/cleanup       — runtime entry points
   //   inference_get_metadata_json          — model metadata query
+  //   inference_infer_shapes               — data-independent output-shape fn
+  //                                          (present only when the model has
+  //                                          a compiled @infer_shapes; EP
+  //                                          resolves the symbol optionally and
+  //                                          falls back to DimSource if absent,
+  //                                          so old DLLs keep working)
   //   test_hip_from_dll                    — diagnostic hook for test-model-dll
   //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
   //                                          hook (called from EP-side
   //                                          MlirCustomOp::Compute() entry)
-  std::vector<std::string> export_symbols = {
-      "inference_init",    "inference_compute",
-      "inference_cleanup", "inference_get_metadata_json",
-      "test_hip_from_dll", "hipdnn_ep_runtime_begin_compute"};
+  std::vector<std::string> export_symbols = {"inference_init",
+                                             "inference_compute",
+                                             "inference_cleanup",
+                                             "inference_get_metadata_json",
+                                             "inference_infer_shapes",
+                                             "test_hip_from_dll",
+                                             "hipdnn_ep_runtime_begin_compute"};
   std::vector<std::string> libraries;
   std::vector<std::string> library_paths;
   discoverLibraries(libraries, library_paths);
