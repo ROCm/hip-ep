@@ -165,3 +165,55 @@ func.func @do_not_hoist_through_load(%arg0: memref<?xi64>,
   memref.dealloc %alloc_1 : memref<?xf16>
   return
 }
+
+// --- 7. `arith.divsi` with a *runtime* (non-constant) divisor between two
+//        dynamic allocs.  `arith.divsi` is `ConditionallySpeculatable`:
+//        `mlir::isSpeculatable` returns true only when the divisor is a
+//        known-non-zero constant (case 2 above).  Here the divisor is a
+//        `memref.dim` result, which could be zero at runtime — the op may
+//        trap, so `isSpeculatable` returns false and the pass must NOT
+//        hoist `%div` (it stays below the first alloc).  The two
+//        speculatable `memref.dim` operands already dominate the alloc, so
+//        they are untouched.  This is the negative counterpart to case 2
+//        and guards the "div with runtime divisor stays put" invariant
+//        called out in the pass's header comment.
+// CHECK-LABEL: func.func @do_not_hoist_runtime_divisor_divsi
+// CHECK:         %[[DIM:.*]] = memref.dim
+// CHECK-NEXT:    %[[DIVISOR:.*]] = memref.dim
+// CHECK-NEXT:    %[[ALLOC0:.*]] = memref.alloc(%[[DIM]])
+// CHECK-NEXT:    %[[DIV:.*]] = arith.divsi %[[DIM]], %[[DIVISOR]]
+// CHECK-NEXT:    %[[ALLOC1:.*]] = memref.alloc(%[[DIV]])
+func.func @do_not_hoist_runtime_divisor_divsi(%arg0: memref<?xi64>,
+                                              %arg1: memref<?xi64>) {
+  %c0 = arith.constant 0 : index
+  %dim = memref.dim %arg0, %c0 : memref<?xi64>
+  %divisor = memref.dim %arg1, %c0 : memref<?xi64>
+  %alloc = memref.alloc(%dim) : memref<?xf16>
+  %div = arith.divsi %dim, %divisor : index
+  %alloc_1 = memref.alloc(%div) : memref<?xf16>
+  memref.dealloc %alloc : memref<?xf16>
+  memref.dealloc %alloc_1 : memref<?xf16>
+  return
+}
+
+// --- 8. Same as case 7 for `arith.divui`.  Both signed and unsigned
+//        integer division are `ConditionallySpeculatable` and both trap on
+//        a zero divisor, so a runtime divisor blocks the hoist identically.
+// CHECK-LABEL: func.func @do_not_hoist_runtime_divisor_divui
+// CHECK:         %[[DIM:.*]] = memref.dim
+// CHECK-NEXT:    %[[DIVISOR:.*]] = memref.dim
+// CHECK-NEXT:    %[[ALLOC0:.*]] = memref.alloc(%[[DIM]])
+// CHECK-NEXT:    %[[DIV:.*]] = arith.divui %[[DIM]], %[[DIVISOR]]
+// CHECK-NEXT:    %[[ALLOC1:.*]] = memref.alloc(%[[DIV]])
+func.func @do_not_hoist_runtime_divisor_divui(%arg0: memref<?xi64>,
+                                              %arg1: memref<?xi64>) {
+  %c0 = arith.constant 0 : index
+  %dim = memref.dim %arg0, %c0 : memref<?xi64>
+  %divisor = memref.dim %arg1, %c0 : memref<?xi64>
+  %alloc = memref.alloc(%dim) : memref<?xf16>
+  %div = arith.divui %dim, %divisor : index
+  %alloc_1 = memref.alloc(%div) : memref<?xf16>
+  memref.dealloc %alloc : memref<?xf16>
+  memref.dealloc %alloc_1 : memref<?xf16>
+  return
+}
