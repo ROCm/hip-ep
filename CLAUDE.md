@@ -90,16 +90,6 @@ This project's authoritative build + GPU test loop runs on a **gfx1151 Windows h
 
 See **[docs/remote-dev-workflow.md](docs/remote-dev-workflow.md)** for: SSH+`cmd.exe` quoting/chaining gotchas, the SMB-share + SSH split (edit through the share, run through SSH), the cygwin `git` contamination warning, conda env Python disambiguation, and the OGA build-defense reference table (what each `build_oga()` flag protects against).
 
-## Local-only memory
-
-Per-clone host-specific notes (workspace paths, container image tags,
-machine-specific recipes that would not transfer to other developers) live
-at [.cursor/CLAUDE.local.md](.cursor/CLAUDE.local.md). The entire `.cursor/`
-directory is git-ignored, so each developer's `CLAUDE.local.md` stays out
-of commits without any per-clone setup. **If `.cursor/CLAUDE.local.md`
-exists, read and apply it as a local-only extension of this file before
-answering host- or build-related questions.**
-
 ## Critical Build Gotchas
 
 - **`HIPDNN_EP_STRICT=1` aborts on MLIR pass failure** (opt-in, applies across all build configs including Release) so the cpptrace SIGABRT handler prints a backtrace pinpointing the failing pass — instead of returning `false` to ORT and silently falling back to CPU (which masks the bug behind a "passing" CPU-vs-CPU accuracy test). Default behaviour in every config is soft-fail + ORT's CPU fallback, so multi-session pipelines that register MorphiZenEP only for `HipDataTransferImpl` visibility (e.g. OGA's gemma3 embedding/vision sub-sessions where MorphiZen does no compute and the graph claim is expected to fail) work without crashing. **Turn `HIPDNN_EP_STRICT=1` on whenever validating that a model is fully offloaded** — any graph MorphiZen claims but cannot compile is then a hard crash. Symptom when set: process aborts with `[CompilerDriver] aborting on pass failure (HIPDNN_EP_STRICT=1).` followed by a stack trace through `runMLIRPasses → compileImpl → compile → hip_compile_with_fs → MlirCompiler::compileFromBytecode → ... → MorphiZenEP::GetCapability`. CI / accuracy tests on models that should be fully offloaded should set it so silent CPU fallback can't pass cosine=1.0 against a CPU baseline.
