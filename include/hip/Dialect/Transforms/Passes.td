@@ -428,10 +428,13 @@ def ResolveTensorDimsPass
     `--one-shot-bufferize`, so refined dim values propagate into
     bufferize's allocation sizing. Idempotent.
   }];
+  // affine + arith are materialised by the upstream reify folds
+  // (`affine.apply` for collapse products, `arith.constant` for static
+  // slots); tensor is already loaded as the input dialect, so it is not
+  // listed here.
   let dependentDialects = [
     "mlir::affine::AffineDialect",
-    "mlir::arith::ArithDialect",
-    "mlir::tensor::TensorDialect"
+    "mlir::arith::ArithDialect"
   ];
 }
 

@@ -14,16 +14,26 @@
 // composes the upstream `Compose{Expand,Collapse}OfX` patterns so chains
 // like `dim(collapse(expand(arg)))` collapse end-to-end in one pass.
 //
+// Before:  // %arg : tensor<?x?x4096xf16>
+//          %e  = tensor.expand_shape   %arg ... -> tensor<?x?x32x128xf16>
+//          %c  = tensor.collapse_shape %e   ... -> tensor<?x?x128xf16>
+//          %d  = tensor.dim %c, %c1                  // dim of a reshape result
+// After:   %d1 = tensor.dim %arg, %c1                // on the chain root
+//          %d  = affine.apply affine_map<()[s0] -> (s0 * 32)>()[%d1]
+//          // the expand/collapse ops are dead-code-eliminated
+//
 // Coverage assumes
 // `mlir::tensor::registerInferTypeOpInterfaceExternalModels` has been
 // wired into the dialect registry (see `InitAllPasses.h` and
 // `tools/hip-mlir-opt/hip-mlir-opt.cpp`).  Without that registration the
-// upstream `DimOf{,Reify}ShapedTypeOpInterface` patterns silently no-op
-// on `tensor.{expand,collapse}_shape`, the `tensor.dim` queries leak
+// upstream reify patterns silently no-op on
+// `tensor.{expand,collapse}_shape`, the `tensor.dim` queries leak
 // through bufferize as `memref.dim` of a reshape op, and downstream
-// `--hip-pool-allocs` partitions them into separate dominance domains
-// (the canonical regression: Gemma-3 q_norm / k_norm pairs blow the
-// 8-domain cap).
+// `--hip-pool-allocs` then sees one scattered dim query per reshape
+// site and fragments them into many single-alloc dominance domains --
+// a pooling-efficiency cost (one tiny pool each), not a hard failure.
+// The canonical trigger is per-layer same-rank dynamic `onnx.Reshape`
+// pairs (norm / projection chains).
 //
 // Pipeline placement: between `--hip-infer-shapes` and
 // `--one-shot-bufferize` so refined dim values propagate into
@@ -66,10 +76,10 @@ void ResolveTensorDimsPass::runOnOperation() {
   // Upstream reify-driven dim folds.  `populateResolveRankedShapedType...`
   // contributes
   // `DimOfReifyRankedShapedTypeOpInterface<{memref,tensor}::DimOp>`, which
-  // dispatches through the op's `reifyDimOfResult` / `reifyShapeOfResult` /
-  // `reifyResultShapes` chain.  The companion populator covers ops on
-  // `InferShapedTypeOpInterface` (used for `tensor.dim` of HIP DPS results that
-  // go through `reifyReturnTypeShapes`).
+  // dispatches through the op's `reifyResultShapes`
+  // (`ReifyRankedShapedTypeOpInterface`).  The companion populator covers ops
+  // on `InferShapedTypeOpInterface` (`tensor.dim` of HIP DPS results, via
+  // `reifyReturnTypeShapes`).
   memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
   memref::populateResolveShapedTypeResultDimsPatterns(patterns);
 
