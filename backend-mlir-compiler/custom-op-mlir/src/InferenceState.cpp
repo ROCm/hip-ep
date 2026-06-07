@@ -61,10 +61,9 @@ InferenceState::InferenceState(PrivateTag, void *state,
     // DimSource path. Note inference_infer_shapes takes no state_ handle: it is
     // a pure data-independent shape program with no RuntimeState dependency.
     infer_shapes_fn_ =
-        plugin_
-            ->get_method<int, const int64_t *const *, const int64_t *, int64_t,
-                         int64_t *const *, const int64_t *, int64_t>(
-                "inference_infer_shapes");
+        plugin_->get_method<int, const int64_t *const *, const int64_t *,
+                            int64_t, const void *const *, int64_t *const *,
+                            const int64_t *, int64_t>("inference_infer_shapes");
     MY_LOG(2) << "infer_shapes symbol "
               << (infer_shapes_fn_ ? "resolved" : "not exported (no-op)");
   }
@@ -205,6 +204,7 @@ void InferenceState::begin_compute() const {
 int InferenceState::infer_shapes(const int64_t *const *input_shapes,
                                  const int64_t *input_ranks,
                                  int64_t input_count,
+                                 const void *const *input_data,
                                  int64_t *const *output_shapes,
                                  const int64_t *output_ranks,
                                  int64_t output_count) const {
@@ -212,8 +212,8 @@ int InferenceState::infer_shapes(const int64_t *const *input_shapes,
   if (!infer_shapes_fn_) {
     return 0;
   }
-  return infer_shapes_fn_(input_shapes, input_ranks, input_count, output_shapes,
-                          output_ranks, output_count);
+  return infer_shapes_fn_(input_shapes, input_ranks, input_count, input_data,
+                          output_shapes, output_ranks, output_count);
 }
 
 // ----------------------------------------------------------------------------
