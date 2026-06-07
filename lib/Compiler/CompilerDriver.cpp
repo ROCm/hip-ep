@@ -250,8 +250,7 @@ bool CompilerDriver::runMLIRPasses(
       // mistaken for an extension.
       llvm::StringRef pathRef(dumpPath);
       llvm::StringRef ext = llvm::sys::path::extension(pathRef);
-      llvm::StringRef stem =
-          pathRef.drop_back(static_cast<size_t>(ext.size()));
+      llvm::StringRef stem = pathRef.drop_back(static_cast<size_t>(ext.size()));
       std::string counter = "." + std::to_string(sCompileSeq.fetch_add(1));
       finalPath = (llvm::Twine(stem) + counter + ext).str();
     }

@@ -58,9 +58,9 @@ struct RuntimeState {
   // of num_pool_domains entries, reallocated (zero-filling new slots) the first
   // time a higher domain_id is observed — by hipdnn_ep_get_pool_base for the
   // lazy domains and by hipdnn_ep_pool_init for domain 0. Every domain_id is
-  // first seen on the cold first inference, so num_pool_domains stabilises after
-  // that and no further array realloc happens at steady state — mirroring the
-  // grow-on-demand contract of the individual pools. realloc-move is safe
+  // first seen on the cold first inference, so num_pool_domains stabilises
+  // after that and no further array realloc happens at steady state — mirroring
+  // the grow-on-demand contract of the individual pools. realloc-move is safe
   // because nothing caches &pool_base[i] across calls; pool_base[domain_id] is
   // re-derived from state on every access.
   int num_pool_domains;   // Number of slots currently allocated in the arrays
