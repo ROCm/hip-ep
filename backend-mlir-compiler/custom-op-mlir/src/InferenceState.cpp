@@ -43,7 +43,7 @@ InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<morphizen::Plugin> plugin,
                                const std::string &temp_dll_path)
     : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path),
-      begin_compute_fn_(nullptr) {
+      begin_compute_fn_(nullptr), infer_shapes_fn_(nullptr) {
   // Cache the begin_compute symbol so the per-Compute() invocation is a
   // single indirect call. Older model.dlls do not export this symbol; in
   // that case we leave begin_compute_fn_ null and begin_compute() becomes
@@ -53,6 +53,18 @@ InferenceState::InferenceState(PrivateTag, void *state,
         plugin_->get_method<void, void *>("hipdnn_ep_runtime_begin_compute");
     MY_LOG(2) << "begin_compute symbol "
               << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
+
+    // Cache the output-shape program (BuildShapeFunctionPass + GenerateInterface
+    // emit it only when the graph's outputs need it). Null on older model.dlls
+    // -> infer_shapes() is a no-op and marshal_output_tensors falls back to the
+    // DimSource path. Note inference_infer_shapes takes no state_ handle: it is
+    // a pure data-independent shape program with no RuntimeState dependency.
+    infer_shapes_fn_ =
+        plugin_->get_method<int, const int64_t *const *, const int64_t *,
+                            int64_t, int64_t *const *, const int64_t *,
+                            int64_t>("inference_infer_shapes");
+    MY_LOG(2) << "infer_shapes symbol "
+              << (infer_shapes_fn_ ? "resolved" : "not exported (no-op)");
   }
   // Safety net: warn loudly when the seqlens_k cache is effectively on
   // but the model.dll predates the begin_compute export. Without the
@@ -186,6 +198,19 @@ void InferenceState::begin_compute() const {
   if (begin_compute_fn_ && state_) {
     begin_compute_fn_(state_);
   }
+}
+
+int InferenceState::infer_shapes(const int64_t *const *input_shapes,
+                                 const int64_t *input_ranks, int64_t input_count,
+                                 int64_t *const *output_shapes,
+                                 const int64_t *output_ranks,
+                                 int64_t output_count) const {
+  // No-op on model.dlls that predate the export (see has_infer_shapes()).
+  if (!infer_shapes_fn_) {
+    return 0;
+  }
+  return infer_shapes_fn_(input_shapes, input_ranks, input_count, output_shapes,
+                          output_ranks, output_count);
 }
 
 // ----------------------------------------------------------------------------

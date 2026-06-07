@@ -264,36 +264,23 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
         int64_t dim_val = normalizeDim((*shape_ptr)[d]);
         output_proto->add_shape(dim_val);
 
-        // For dynamic dims, look up the symbolic name and resolve to the
-        // input tensor that defines it.  Static dims emit explicit sentinel
-        // values (input_idx=-1, dim_idx=-1, resolved=false) so the wire
-        // format is unambiguous: a `resolved=false` DimSource that carries
-        // -1 sentinels can never be confused with a real (input 0, dim 0)
-        // source by a future consumer that bug-skips the `resolved` check.
-        // marshal_output_tensors ignores unresolved entries and falls back
-        // to Output.shape regardless.
+        // Classify each output dim into one of three runtime-resolution
+        // strategies (see DimResolution in metadata.proto):
+        //   - static (dim_val >= 0)            -> DIM_STATIC
+        //   - dynamic, identity copy of an input dim (shares a dim_param with
+        //     a graph input)                   -> DIM_FROM_INPUT  (DimSource)
+        //   - dynamic, non-identity function of inputs (no shared dim_param;
+        //     e.g. a vision patch-merger seq collapse) -> DIM_FROM_SHAPE_FN
+        // The SHAPE_FN case is resolved at runtime by the model.dll's
+        // inference_infer_shapes program (emitted by BuildShapeFunctionPass).
+        // We intentionally do NOT hard-fail here for a missing dim_param: the
+        // shape function can express dims that no single input dim does, so a
+        // dim_param-less dynamic dim is delegated to it instead of aborting
+        // the compile. If the shape function ALSO cannot resolve it (returns
+        // the kDynamic sentinel at runtime), the EP raises a clear per-output
+        // CHECK at inference time.
         auto *ds = output_proto->add_dim_sources();
-        if (dim_val == -1) {
-          // Fail at compile time rather than at runtime so the user sees a
-          // clear error naming the output, dim index, and dim_param name
-          // instead of a generic "dim still -1" CHECK from the EP.
-          CHECK(dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty())
-              << "Output '" << output.name() << "' dim " << d
-              << " is dynamic but has no symbolic name in dim_params_map; "
-              << "cannot emit DimSource. Either fix the model to expose a "
-              << "dim_param for this dimension, or freeze it to a constant.";
-          const auto &param_name = (*dp)[d];
-          auto pit = dim_param_map.find(param_name);
-          CHECK(pit != dim_param_map.end())
-              << "Output '" << output.name() << "' dim " << d
-              << " has dim_param '" << param_name
-              << "' but no graph input declares this symbolic name; cannot "
-              << "resolve at runtime. Outputs can only carry symbolic dims "
-              << "that also appear on at least one input.";
-          ds->set_input_idx(pit->second.first);
-          ds->set_dim_idx(pit->second.second);
-          ds->set_resolved(true);
-        } else {
+        if (dim_val != -1) {
           // Static dim: emit explicit sentinels so the wire format
           // unambiguously distinguishes "not populated" from
           // "intentionally references (input 0, dim 0)" without relying
@@ -303,6 +290,28 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
           ds->set_input_idx(-1);
           ds->set_dim_idx(-1);
           ds->set_resolved(false);
+          ds->set_resolution(mlir_metadata::DIM_STATIC);
+        } else {
+          const bool has_param =
+              dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty();
+          auto pit = has_param ? dim_param_map.find((*dp)[d])
+                               : dim_param_map.end();
+          if (has_param && pit != dim_param_map.end()) {
+            // Identity dynamic dim: equals input[pit].shape[pit] at runtime.
+            ds->set_input_idx(pit->second.first);
+            ds->set_dim_idx(pit->second.second);
+            ds->set_resolved(true);
+            ds->set_resolution(mlir_metadata::DIM_FROM_INPUT);
+          } else {
+            // Non-identity dynamic dim: delegate to inference_infer_shapes.
+            ds->set_input_idx(-1);
+            ds->set_dim_idx(-1);
+            ds->set_resolved(false);
+            ds->set_resolution(mlir_metadata::DIM_FROM_SHAPE_FN);
+            MY_LOG(1) << "Output '" << output.name() << "' dim " << d
+                      << " has no input-shared dim_param; will be resolved by "
+                         "inference_infer_shapes at runtime.";
+          }
         }
       }
     } else {

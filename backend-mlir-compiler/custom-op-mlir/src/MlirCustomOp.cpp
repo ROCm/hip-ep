@@ -243,15 +243,22 @@ static std::vector<int> build_present_to_past_input_idx(
 // output_index_map maps from metadata output index (= DLL output index) to
 // the ORT kernel context output index.
 // For dynamic shapes (dim == -1 in metadata), resolves the actual dimension
-// value from the corresponding input tensor using DimSource references.
+// value via the per-dim DimResolution strategy:
+//   - DIM_FROM_INPUT   -> copy input_idx.shape[dim_idx] (DimSource)
+//   - DIM_FROM_SHAPE_FN-> the model.dll's inference_infer_shapes program
+//                         (called once up-front for all outputs)
 // present_to_past_input_idx is precomputed at MlirCustomOp construction;
 // entry is -1 for outputs that are not `present.*` tensors.
+// `inputs` is the metadata input list (DLL/compiler order), used to build the
+// shape-program's input argument rows.
 TensorData marshal_output_tensors(
     OrtKernelContext *context,
     const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
+    const google::protobuf::RepeatedPtrField<mlir_metadata::Input> &inputs,
     const std::vector<int> &output_index_map,
     const std::vector<int> &input_index_map,
-    const std::vector<int> &present_to_past_input_idx) {
+    const std::vector<int> &present_to_past_input_idx,
+    const customop::InferenceState *inference_state) {
   if (outputs.size() == 0) {
     LOG(FATAL) << "No output shapes in metadata";
   }
@@ -263,10 +270,85 @@ TensorData marshal_output_tensors(
   data.tensors.resize(outputs.size());
   data.shapes.resize(outputs.size());
 
+  // ---- Shape-program (inference_infer_shapes) resolution ------------------
+  // Some dynamic output dims are non-identity functions of the input dims
+  // (e.g. a vision patch-merger seq collapse) that no single input dim
+  // expresses; build_metadata_json marks those DIM_FROM_SHAPE_FN. Resolve
+  // them by calling the model.dll's data-independent shape program once,
+  // feeding it every input's runtime shape and reading back every output's
+  // shape. Skipped entirely (zero cost) when no output needs it or the DLL
+  // predates the export.
+  bool need_shape_fn = false;
+  for (int i = 0; i < outputs.size() && !need_shape_fn; ++i) {
+    const auto &om = outputs[i];
+    for (int d = 0; d < om.dim_sources_size(); ++d) {
+      if (om.dim_sources(d).resolution() == mlir_metadata::DIM_FROM_SHAPE_FN) {
+        need_shape_fn = true;
+        break;
+      }
+    }
+  }
+
+  std::vector<std::vector<int64_t>> shape_fn_out; // [output][dim], empty if N/A
+  if (need_shape_fn && inference_state &&
+      inference_state->has_infer_shapes()) {
+    // Build input rows in DLL/metadata order from the actual runtime shapes.
+    const int input_count = inputs.size();
+    std::vector<std::vector<int64_t>> in_shapes(input_count);
+    std::vector<const int64_t *> in_ptrs(input_count);
+    std::vector<int64_t> in_ranks(input_count);
+    for (int k = 0; k < input_count; ++k) {
+      CHECK(k < static_cast<int>(input_index_map.size()))
+          << "Shape program: metadata input " << k
+          << " has no input_index_map entry (have "
+          << input_index_map.size() << ")";
+      auto src = ctx.GetInput(input_index_map[k]);
+      in_shapes[k] = src.GetTensorTypeAndShapeInfo().GetShape();
+      in_ptrs[k] = in_shapes[k].data();
+      in_ranks[k] = static_cast<int64_t>(in_shapes[k].size());
+    }
+
+    // Pre-size per-output buffers to each output's rank; the program fills
+    // every dim (unresolved dims come back as a negative kDynamic sentinel).
+    const int output_count = outputs.size();
+    shape_fn_out.resize(output_count);
+    std::vector<int64_t *> out_ptrs(output_count);
+    std::vector<int64_t> out_ranks(output_count);
+    for (int j = 0; j < output_count; ++j) {
+      shape_fn_out[j].assign(outputs[j].shape().size(), 0);
+      out_ptrs[j] = shape_fn_out[j].data();
+      out_ranks[j] = static_cast<int64_t>(shape_fn_out[j].size());
+    }
+
+    int rc = inference_state->infer_shapes(
+        in_ptrs.data(), in_ranks.data(), input_count, out_ptrs.data(),
+        out_ranks.data(), output_count);
+    CHECK(rc == 0) << "inference_infer_shapes failed with code " << rc;
+  }
+
   for (int i = 0; i < outputs.size(); ++i) {
     const auto &output_meta = outputs[i];
     data.shapes[i].assign(output_meta.shape().begin(),
                           output_meta.shape().end());
+
+    // First pass: fill DIM_FROM_SHAPE_FN dims from the shape-program result.
+    // A negative value means the program could not resolve the dim (kDynamic
+    // sentinel) -- leave it -1 so the DimSource fallback / past override below
+    // gets a chance, and the post-loop CHECK reports it if nothing resolves.
+    if (!shape_fn_out.empty()) {
+      for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
+        if (data.shapes[i][d] != -1)
+          continue;
+        if (d >= output_meta.dim_sources_size())
+          continue;
+        if (output_meta.dim_sources(d).resolution() !=
+            mlir_metadata::DIM_FROM_SHAPE_FN)
+          continue;
+        int64_t v = shape_fn_out[i][d];
+        if (v >= 0)
+          data.shapes[i][d] = v;
+      }
+    }
 
     // Resolve dynamic dims (-1) using DimSource entries from metadata.
     // Each DimSource with resolved=true says "this output dim equals
@@ -356,10 +438,13 @@ TensorData marshal_output_tensors(
     for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
       CHECK(data.shapes[i][d] >= 0)
           << "Output '" << output_meta.name() << "' dim " << d
-          << " is still dynamic (-1) after DimSource resolution. "
-          << "This means the compiler emitted no resolvable DimSource and "
-          << "no past-input override fired. Check that the dynamic dim has "
-          << "a dim_param shared with at least one input.";
+          << " is still dynamic (-1) after shape-program, DimSource, and "
+          << "past-input override resolution. Likely causes: (a) the dim is "
+          << "DIM_FROM_SHAPE_FN but inference_infer_shapes returned kDynamic "
+          << "(the shape program could not express it -- e.g. a data-dependent "
+          << "or hip.loop-carried dim), or (b) the loaded model.dll predates "
+          << "the inference_infer_shapes export (delete the cached "
+          << "morphizen_mlir_* DLL so it recompiles with the shape program).";
     }
 
     int ort_idx = output_index_map[i];
@@ -631,9 +716,9 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   if (!perf_enabled()) {
     // --- Fast path: original behaviour, no timing overhead. ---
     auto inputs = marshal_input_tensors(context, input_index_map_);
-    auto outputs =
-        marshal_output_tensors(context, metadata_.outputs(), output_index_map_,
-                               input_index_map_, present_to_past_input_idx_);
+    auto outputs = marshal_output_tensors(
+        context, metadata_.outputs(), metadata_.inputs(), output_index_map_,
+        input_index_map_, present_to_past_input_idx_, inference_state_.get());
 
     int ret = inference_state_->compute(&inputs.span, &outputs.span);
     if (ret != 0) {
@@ -655,9 +740,9 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   const auto t_enter = clock::now();
   auto inputs = marshal_input_tensors(context, input_index_map_);
   const auto t_after_in = clock::now();
-  auto outputs =
-      marshal_output_tensors(context, metadata_.outputs(), output_index_map_,
-                             input_index_map_, present_to_past_input_idx_);
+  auto outputs = marshal_output_tensors(
+      context, metadata_.outputs(), metadata_.inputs(), output_index_map_,
+      input_index_map_, present_to_past_input_idx_, inference_state_.get());
   const auto t_after_out = clock::now();
 
   // Stream used by inference_compute (first field of RuntimeState).  May be

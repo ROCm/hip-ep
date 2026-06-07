@@ -12,15 +12,36 @@ message Metadata {
   repeated Input inputs = 3;
 }
 
-// Tracks which input tensor dimension provides a dynamic output dimension's
-// runtime value. `resolved` disambiguates the {input_idx=0, dim_idx=0}
-// default — a real (input 0, dim 0) source has resolved=true; an
-// unresolved dim (or a static dim with no source needed) has resolved=false.
-// Consumers MUST treat resolved=false as "do not use input_idx/dim_idx".
+// How a single output dimension's runtime value is obtained by the EP.
+// Stored per-dim in DimSource.resolution (see below). Proto3 default is the
+// first enumerator (DIM_STATIC=0), so an old metadata blob that predates this
+// field decodes every dim as DIM_STATIC — which is only ever correct for a
+// dim whose shape[i] >= 0, exactly the legacy "no resolution needed" case.
+enum DimResolution {
+  // shape[i] >= 0: the compile-time-static dim is used verbatim, no runtime
+  // resolution needed.
+  DIM_STATIC = 0;
+  // shape[i] == -1 and the dim shares a dim_param with a graph input: the EP
+  // reads input_idx.shape[dim_idx] at runtime (the DimSource fast path).
+  DIM_FROM_INPUT = 1;
+  // shape[i] == -1 and the dim is a non-identity function of input dims (e.g.
+  // a vision patch-merger seq-length collapse) that no single input dim
+  // expresses: the EP calls the model.dll's inference_infer_shapes shape
+  // program to compute it. input_idx/dim_idx are sentinels (-1) and unused.
+  DIM_FROM_SHAPE_FN = 2;
+}
+
+// Tracks how a single output dimension's runtime value is resolved. `resolved`
+// disambiguates the {input_idx=0, dim_idx=0} default — a real (input 0, dim 0)
+// source has resolved=true; an unresolved dim (or a static dim with no source
+// needed) has resolved=false. Consumers MUST treat resolved=false as "do not
+// use input_idx/dim_idx". `resolution` is the authoritative selector for the
+// runtime strategy (resolved==true iff resolution==DIM_FROM_INPUT).
 message DimSource {
   int32 input_idx = 1;
   int32 dim_idx = 2;
   bool resolved = 3;
+  DimResolution resolution = 4;
 }
 
 message Input {
