@@ -1273,7 +1273,8 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
   }
   // Grow the per-domain arrays the first time this domain_id is seen. There is
   // no compile-time cap: the array grows to whatever the compiled function's
-  // hip.get_pool ids require, which is a cold-path event on the first inference.
+  // hip.get_pool ids require, which is a cold-path event on the first
+  // inference.
   if (!ensure_pool_domains(state, domain_id + 1)) {
     return nullptr;
   }
