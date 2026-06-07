@@ -2,25 +2,38 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// FileCheck test for the multi-domain cap diagnostic emitted by
-// --hip-pool-allocs when a single function would require more than
-// kMaxDomains (= 8) dominance domains.
+// FileCheck test for the unbounded multi-domain path of --hip-pool-allocs.
 //
-// In practice this only triggers when upstream hoisting
-// (--hip-hoist-alloc-size-arith) is missing or unable to lift size
-// arithmetic above pooled allocs — every realistic post-hoist transformer
-// graph collapses to 1 or 2 domains.
+// There is NO compile-time cap on the dominance-domain count: the runtime
+// grows its per-domain pool arrays on demand, so a function that partitions
+// into many domains must compile successfully and emit one hip.get_pool per
+// domain plus the multi-domain metadata. Above an advisory threshold (8) the
+// pass emits a NON-FATAL remark suggesting that upstream hoisting may be
+// missing — compilation continues regardless.
+//
+// In practice a well-canonicalised post-hoist graph collapses to 1 or 2
+// domains; the cascading chains below deliberately defeat merging to exercise
+// the high-domain-count path.
 //===----------------------------------------------------------------------===//
 
-// RUN: not hip-mlir-opt --hip-pool-allocs %s 2>&1 | FileCheck %s
+// Functional check: the pass succeeds and tags the module with a 9-domain
+// metadata blob (one get_pool anchor per domain).
+// RUN: hip-mlir-opt --hip-pool-allocs %s | FileCheck %s
 
-// CHECK: hip-pool-allocs: dominance partition exceeded the cap of 8 domains
+// Diagnostic check: the advisory remark fires (and the pass still succeeds).
+// RUN: hip-mlir-opt --hip-pool-allocs --verify-diagnostics %s
+
+// Module attributes (incl. the multi-domain metadata) print before the body.
+// CHECK: hipdnn.domain_count = 9
+// CHECK-LABEL: func.func @many_domains
+// CHECK-COUNT-9: hip.get_pool
 
 // 9 cascading load+alloc chains -> 9 domains. Each new load is non-
 // speculatable and is positioned below all previous allocs, so partition
-// cannot merge it into any existing domain. The 9th chain pushes domain
-// count past kMaxDomains and triggers the diagnostic above.
-func.func @cap_exceeded(
+// cannot merge it into any existing domain. The 9th chain pushes the domain
+// count past the advisory threshold and triggers the remark below.
+// expected-remark@+1 {{hip-pool-allocs: dominance partition produced 9 domains}}
+func.func @many_domains(
     %ctx: !hip.context,
     %x: memref<?x16xf32>,
     %scratch: memref<16xindex>) -> memref<?x16xf32> {
