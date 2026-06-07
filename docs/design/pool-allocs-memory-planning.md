@@ -336,7 +336,7 @@ In the common case (after `hip-hoist-alloc-size-arith` has run), every alloc's d
 
 A second domain opens iff some alloc's dyn-operand chain comes from values defined **below** the earliest alloc of every existing domain. The canonical trigger is a `memref.load` from a host-scratch slot whose `memref.store` lives between two pooled allocs — the load cannot be hoisted (memory side effect) and the alloc that consumes it cannot share a domain with allocs above the load.
 
-**The domain count is unbounded — there is no compile-time cap.** The partition produces exactly as many domains as the dataflow requires (real graphs produce 1, canonical, or 2, one host-load chain), and the runtime backs them with per-domain pool arrays sized at `inference_init` from the `hipdnn.domain_count` metadata field (default 1 when absent). A fixed cap is not acceptable in production: it would turn a legitimate-but-unusual graph (e.g. several independent host-scratch chains) into a hard compile failure with no correct fallback. Soft-merging unrelated domains is never done — it would silently mis-place allocations — so the only correct behavior is to open another pool, which the dynamic backing makes free.
+**The domain count is unbounded — there is no compile-time cap.** The partition produces exactly as many domains as the dataflow requires (real graphs produce 1, canonical, or 2, one host-load chain), and the runtime backs them with per-domain pool arrays that grow on demand — `num_pool_domains` starts at 1 (domain 0) and the arrays realloc, zero-filling new slots, the first time a higher `domain_id` is seen (on the cold first inference). A fixed cap is not acceptable in production: it would turn a legitimate-but-unusual graph (e.g. several independent host-scratch chains) into a hard compile failure with no correct fallback. Soft-merging unrelated domains is never done — it would silently mis-place allocations — so the only correct behavior is to open another pool, which the dynamic backing makes free.
 
 A surprisingly high domain count still usually means upstream canonicalisation (`hip-resolve-tensor-dims`, `hip-hoist-alloc-size-arith`) left scattered size queries in place, which hurts pooling efficiency. That condition is surfaced as a non-fatal advisory (see Failure Modes), never as a compile error.
 
@@ -520,7 +520,7 @@ The `domain_id` attribute is materialised as a small `i32` constant immediately 
 ```cpp
 struct RuntimeState {
   // ... other fields (constants blob, stream, library handles, ...) ...
-  int     num_pool_domains;             // = hipdnn.domain_count (default 1)
+  int     num_pool_domains;             // slots currently allocated; grows on demand
   void  **pool_base;                    // [num_pool_domains] per-domain GPU pool base pointers
   size_t *pool_size;                    // [num_pool_domains] per-domain pool size in bytes
   size_t *buffer_offsets;               // offsets for static buffers in domain 0
@@ -529,7 +529,7 @@ struct RuntimeState {
 };
 ```
 
-There is no compile-time domain cap. `pool_base` / `pool_size` are heap arrays allocated once at `inference_init` with `num_pool_domains` entries — the value of `hipdnn.domain_count` from the metadata blob, or `1` when that attribute is absent (single-domain models). Both arrays are zero-initialised (`calloc`) so every domain starts NULL/0, and freed in `hipdnn_ep_state_cleanup`. The array length is data-driven by the compiled model, never a fixed constant.
+There is no compile-time domain cap. `pool_base` / `pool_size` are heap arrays of `num_pool_domains` entries that **grow on demand**: domain 0's slot is ensured at `inference_init`, and the arrays are reallocated (zero-filling the new slots) the first time a higher `domain_id` is observed — by `hipdnn_ep_get_pool_base`. Every `domain_id` is first seen on the cold first inference, so `num_pool_domains` stabilises after that and no further array realloc happens at steady state. `realloc`-move is safe because nothing caches `&pool_base[i]` across calls; `pool_base[domain_id]` is re-derived from `state` on every access. Freed in `hipdnn_ep_state_cleanup`.
 
 ### Runtime entry points
 
@@ -539,19 +539,17 @@ Three entry points consume this state. All declared in `lib/Runtime/hipdnn_ep_ru
 
 ```cpp
 int hipdnn_ep_pool_init(RuntimeState *state,
-                        int           num_domains,
                         size_t        pool_size,
                         const size_t *buffer_offsets,
                         size_t        num_buffers);
 ```
 
-Called once from `inference_init` with values pulled from the FlatBuffers metadata blob. Maps to the attribute set:
+Called once from `inference_init` with values pulled from the FlatBuffers metadata blob. Maps to the legacy attribute set:
 
-- `num_domains` ← `hipdnn.domain_count` (or `1` when absent). Sets `state->num_pool_domains` and `calloc`s the `pool_base` / `pool_size` arrays to that length (all NULL/0).
 - `pool_size` ← `hipdnn.pool_size` (= domain 0's static prefix in bytes)
 - `buffer_offsets` / `num_buffers` ← the constant entries of `hipdnn.buffer_offsets` (= the static-offset slots in domain 0)
 
-After the arrays are allocated: if `pool_size > 0`, allocates `state->pool_base[0]` via `hipMalloc(pool_size)` — eagerly, so the first inference does not pay the malloc latency. If `pool_size == 0`, leaves `pool_base[0]` NULL and lets the dynamic grow path own the first allocation. `state->pool_size[0]` is set to `pool_size`. **`pool_base[1..num_domains-1]` start NULL and are lazily allocated by the first `hip.get_pool(domain=N)` call.**
+It ensures the per-domain arrays have a slot for domain 0 (`ensure_pool_domains(1)`) before touching `pool_base[0]`. The runtime does **not** read `hipdnn.domain_count` to pre-size the arrays — higher domains are grown lazily (below), so the compiled `domain_count` is informational metadata only. Then: if `pool_size > 0`, allocates `state->pool_base[0]` via `hipMalloc(pool_size)` — eagerly, so the first inference does not pay the malloc latency. If `pool_size == 0`, leaves `pool_base[0]` NULL and lets the dynamic grow path own the first allocation. `state->pool_size[0]` is set to `pool_size`. **Domains 1..N have no array slot yet; the first `hip.get_pool(domain=N)` call grows the arrays and lazily allocates that domain's pool.**
 
 The `buffer_offsets` array is `memcpy`'d into a `malloc`'d slot on `state` for use by `hipdnn_ep_get_buffer_from_pool` (next).
 
@@ -573,7 +571,7 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state,
 
 Called by every `hip.get_pool` lowering. Behaviour:
 
-- Range-checks `domain_id ∈ [0, state->num_pool_domains)`. Out-of-range returns NULL with a stderr diagnostic flagging the violation as a compiler bug (the `domain_id` baked into the IR must match the `hipdnn.domain_count` the arrays were sized from).
+- Rejects `domain_id < 0` (returns NULL + stderr diagnostic flagging a compiler bug — `hip-pool-allocs` assigns domain ids starting at 0). There is no upper bound: `ensure_pool_domains(domain_id + 1)` grows the per-domain arrays (zero-filling new slots) the first time a higher `domain_id` is seen, a cold-path event on the first inference.
 - If `needed_size > state->pool_size[domain_id]`, grows: `hipStreamSynchronize(state->stream)` (so any in-flight kernel reading the old buffer finishes), `hipFree(old)`, `hipMalloc(needed_size)`, store new base + size. **Stream sync covers all domains** because they share a single compute stream, but the grow itself only touches the one domain — `pool_base[M]` for M ≠ domain_id are untouched.
 - If `needed_size <= state->pool_size[domain_id]`, just returns the existing base.
 - Pools never shrink. A session that hits a peak shape keeps that footprint until cleanup.
@@ -600,7 +598,7 @@ Alternatives considered:
 
 The greedy approach picked here is correct for single-block functions because textual order = SSA dominance order, and the greedy rule is exactly "join the first domain whose existing constraints still admit a common dominator with this alloc's operands". Most-recent-first iteration is robust to future reorderings of the domain list without changing semantics.
 
-The partition is unbounded in the number of domains it can produce. An earlier design capped it at 8 and failed compilation past that, on the theory that a high count only ever indicated pathological IR. That is the wrong trade for production: a graph that *legitimately* needs many domains (several independent host-scratch chains) would fail to compile with no correct fallback, and the only alternative — soft-merging unrelated domains — is silently incorrect. Since the runtime backs domains with a `calloc`'d array sized from `hipdnn.domain_count`, opening another domain costs one more array slot, so there is no reason to cap. A high count is now a perf advisory (it points at missing upstream canonicalisation), not an error.
+The partition is unbounded in the number of domains it can produce. An earlier design capped it at 8 and failed compilation past that, on the theory that a high count only ever indicated pathological IR. That is the wrong trade for production: a graph that *legitimately* needs many domains (several independent host-scratch chains) would fail to compile with no correct fallback, and the only alternative — soft-merging unrelated domains — is silently incorrect. Since the runtime backs domains with grow-on-demand arrays (reallocated the first time a higher `domain_id` is seen), opening another domain costs one more array slot on the cold first inference, so there is no reason to cap. A high count is now a perf advisory (it points at missing upstream canonicalisation), not an error.
 
 ### Best-fit static packing, first-fit bin packing
 
@@ -809,7 +807,7 @@ hipdnn.buffer_domains = [0, 0, 0, 0, 0, 0, 0, 1]             : array<i64>
           : (!llvm.ptr, i32, i64) -> !llvm.ptr
 ```
 
-At runtime, `pool_base[0]` was eagerly malloc'd at session start to 256 bytes (the static prefix); the first inference's larger `%dom0_total` triggers the grow path on D0 only. `pool_base[1]` was NULL at session start; the first call to `hip.get_pool(%dom1_total) {domain_id = 1}` allocates it lazily. Subsequent inferences with stable `%dim, %dim_0, %26` are zero-allocation; a shape that pushes `needed_size` beyond the current capacity triggers grow on the affected domain only — the other pool is untouched.
+At runtime, `pool_base[0]` was eagerly malloc'd at session start to 256 bytes (the static prefix); the first inference's larger `%dom0_total` triggers the grow path on D0 only. the domain-1 array slot did not exist at session start; the first call to `hip.get_pool(%dom1_total) {domain_id = 1}` grows the per-domain arrays and allocates `pool_base[1]` lazily. Subsequent inferences with stable `%dim, %dim_0, %26` are zero-allocation; a shape that pushes `needed_size` beyond the current capacity triggers grow on the affected domain only — the other pool is untouched.
 
 ---
 
