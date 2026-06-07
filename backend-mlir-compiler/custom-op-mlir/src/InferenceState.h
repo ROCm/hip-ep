@@ -61,6 +61,29 @@ public:
   // Execute inference computation
   int compute(span_t *inputs, span_t *outputs) const;
 
+  // True when the model.dll exports inference_infer_shapes (resolved once in
+  // create()). False on older model.dlls that predate BuildShapeFunctionPass;
+  // callers fall back to the DimSource path in that case.
+  bool has_infer_shapes() const { return infer_shapes_fn_ != nullptr; }
+
+  // Run the data-independent output-shape program (inference_infer_shapes)
+  // emitted by BuildShapeFunctionPass. Maps every graph input's runtime dims
+  // to every graph output's dims via pure index arithmetic (no kernels, no
+  // device work). Used to resolve dynamic output dims that DimSource cannot
+  // express (non-identity functions of input dims, e.g. vision patch mergers).
+  //
+  //   input_shapes[k]  -> int64_t[input_ranks[k]]  (k in DLL/metadata order)
+  //   output_shapes[j] -> int64_t[output_ranks[j]] buffers the program fills
+  //
+  // Dims the program cannot resolve are written as a kDynamic sentinel
+  // (INT64_MIN); the caller treats negative results as "unresolved". Returns
+  // false (a no-op) when has_infer_shapes() is false. Returns the program's
+  // own status code otherwise (0 == success).
+  int infer_shapes(const int64_t *const *input_shapes,
+                   const int64_t *input_ranks, int64_t input_count,
+                   int64_t *const *output_shapes, const int64_t *output_ranks,
+                   int64_t output_count) const;
+
   // Mark the start of a new forward pass before inference_compute. If the
   // model.dll exports hipdnn_ep_runtime_begin_compute (resolved once in
   // create()) it is invoked to invalidate per-Compute() runtime caches
@@ -104,6 +127,15 @@ private:
   // predates the export.
   using BeginComputeFn = void (*)(void *);
   BeginComputeFn begin_compute_fn_;
+
+  // Cached function pointer for inference_infer_shapes. Resolved once in
+  // create() (same backward-compat contract as begin_compute_fn_): null when
+  // the model.dll predates the export, in which case infer_shapes() is a
+  // no-op and the EP resolves dynamic dims purely via DimSource.
+  using InferShapesFn = int (*)(const int64_t *const *, const int64_t *,
+                                int64_t, int64_t *const *, const int64_t *,
+                                int64_t);
+  InferShapesFn infer_shapes_fn_;
 };
 
 } // namespace mlir_compilation::customop
