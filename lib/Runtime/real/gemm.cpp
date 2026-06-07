@@ -520,22 +520,32 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  // hip_gemm_wmma_fp16 assumes row-major fp16 A[M,K] and B[K,N], writes exactly
-  // output=A*B, and has no bias/scale/transpose handling. Non-matching Gemm
-  // calls fall through to the hipBLASLt path below.
-  if (gemm_wmma_dispatch_enabled() && typeCode == kTypeFloat16 && transA == 0 &&
-      transB == 0 && C == nullptr && alpha == 1.0f && (K % 16) == 0 &&
-      (N % 16) == 0) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: dispatch=WMMA M=%lld N=%lld K=%lld\n",
-                      (long long)M, (long long)N, (long long)K);
-    int rc = hip_gemm_wmma_fp16(stream, A, B, output, static_cast<int>(M),
-                                static_cast<int>(K), static_cast<int>(N));
+  // WMMA opt-in path. hip_gemm_wmma_fp16 is a standard ONNX Gemm entry
+  // (output = alpha*op(A)*op(B) + beta*C); the caller only gates on fp16 data
+  // with K % 16 == 0 and N % 16 == 0. Every other ONNX Gemm attribute
+  // (transA / transB / alpha / beta / shape of C) is validated inside the
+  // kernel host function, which returns >0 when it cannot handle the request so
+  // we transparently fall through to the hipBLASLt path below.
+  if (gemm_wmma_dispatch_enabled() && typeCode == kTypeFloat16 &&
+      (K % 16) == 0 && (N % 16) == 0) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_gemm: dispatch=WMMA M=%lld N=%lld K=%lld transA=%lld "
+        "transB=%lld alpha=%f beta=%f C=%p cDim0=%lld cDim1=%lld\n",
+        (long long)M, (long long)N, (long long)K, (long long)transA,
+        (long long)transB, alpha, beta, C, (long long)cDim0, (long long)cDim1);
+    int rc = hip_gemm_wmma_fp16(
+        stream, A, B, C, output, static_cast<int>(M), static_cast<int>(N),
+        static_cast<int>(K), alpha, beta, static_cast<int>(transA),
+        static_cast<int>(transB), static_cast<int>(cDim0),
+        static_cast<int>(cDim1));
     if (rc == 0)
       return 0;
-    fprintf(stderr,
-            "wrap_gemm: hip_gemm_wmma_fp16 failed (rc=%d) for M=%lld N=%lld "
-            "K=%lld; falling back to hipBLASLt path\n",
-            rc, (long long)M, (long long)N, (long long)K);
+    if (rc < 0)
+      fprintf(stderr,
+              "wrap_gemm: hip_gemm_wmma_fp16 launch failed (rc=%d) for M=%lld "
+              "N=%lld K=%lld; falling back to hipBLASLt path\n",
+              rc, (long long)M, (long long)N, (long long)K);
+    // rc > 0: configuration unsupported by WMMA -> silently fall through.
   }
 
   GemmState *gs = GemmState::get_op_state(state, op_state_slot);
