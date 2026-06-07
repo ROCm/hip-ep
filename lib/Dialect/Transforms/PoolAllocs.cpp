@@ -9,18 +9,18 @@
 // memref.view at a computed byte offset. Each pool is acquired via
 // hip.get_pool(%ctx, %pool_size) so the runtime can grow on demand.
 //
-// Single-domain output (the canonical transformer-decoder case where every
-// pooled alloc's dyn-operand defs sit above the earliest alloc) is
-// bit-identical to the pre-multi-domain output: one hip.get_pool, one set
-// of views, the legacy `hipdnn.pool_size` / `hipdnn.buffer_count` /
-// `hipdnn.buffer_offsets` module attributes only.
+// Single-domain output (the canonical case where every pooled alloc's
+// dyn-operand defs sit above the earliest alloc) is bit-identical to the
+// pre-multi-domain output: one hip.get_pool, one set of views, the legacy
+// `hipdnn.pool_size` / `hipdnn.buffer_count` / `hipdnn.buffer_offsets`
+// module attributes only.
 //
 // Multi-domain output emerges only when some alloc's dyn-operand chain comes
 // from values defined BELOW an earlier pooled alloc — typically a
 // `memref.load` of a host-staged scalar that itself sits between two pooled
 // allocs and cannot be hoisted above the earlier one. Each domain gets its
 // own hip.get_pool (one anchor per domain) plus per-domain offsets; the
-// runtime side (Stage 7) maps each domain to a separate growable buffer.
+// multi-domain runtime maps each domain to a separate growable buffer.
 //
 // Algorithm overview:
 //   Phase 1   - Liveness: assign [defIndex, lastUseIndex] to each alloc,
@@ -206,14 +206,16 @@ struct Domain {
   SmallVector<AllocInfo *> allocs;
 };
 
-/// Hard cap on the number of domains a single function may produce. Real
-/// transformer graphs produce 1 (the canonical case after upstream hoisting)
-/// or 2 (when a host-load-dependent alloc forces a second domain). 8 is
-/// comfortable headroom for any realistic graph; exceeding it almost
-/// certainly indicates a bug upstream (missing canonicalization, unhoisted
-/// arithmetic that should have been hoisted by `--hip-hoist-alloc-size-arith`,
-/// etc.) and we surface it as a hard pass failure.
-static constexpr unsigned kMaxDomains = 8;
+/// Advisory threshold on the number of domains a single function produces.
+/// This is NOT a cap — the runtime grows its per-domain pool arrays on demand
+/// with no upper bound, so any domain count compiles and runs correctly. But a
+/// well-canonicalised graph produces 1 domain (the typical case after upstream
+/// hoisting) or 2 (when a host-load-dependent alloc forces a second domain).
+/// A count far above that usually means upstream hoisting is missing or some
+/// size arithmetic that `--hip-hoist-alloc-size-arith` should have lifted is
+/// still pinned below its allocs — so we emit a non-fatal remark to flag the
+/// likely pre-condition gap, then proceed normally.
+static constexpr unsigned kDomainCountAdvisoryThreshold = 8;
 
 /// Greedy textual-order clustering of pooled allocs into dominance domains.
 ///
@@ -225,7 +227,6 @@ static constexpr unsigned kMaxDomains = 8;
 ///       if D ∪ {A} still admits a single common insertion point: keep
 ///       else: roll back
 ///     if no D accepted A: open a new domain {A}
-///   if domain count > kMaxDomains: bail (returns std::nullopt)
 ///
 /// Most-recent-first iteration order is deliberate: domains created later
 /// have later first-allocs and so their dominance window admits the
@@ -237,14 +238,12 @@ static constexpr unsigned kMaxDomains = 8;
 /// is always the most recent one — but we still walk in reverse-creation
 /// order to remain robust against future reorderings.
 ///
-/// Single-domain output (typical post-hoist transformer): every alloc's
+/// Single-domain output (the typical post-hoist case): every alloc's
 /// dyn-operand defs dominate every pooled alloc, so the first probe of D0
 /// always succeeds and partitionByDominanceDomain returns one domain
-/// containing every alloc — exactly the pre-Stage-6 input shape for
-/// downstream Phase 2..5.
-///
-/// Returns std::nullopt when the partition would exceed `kMaxDomains`.
-static std::optional<SmallVector<Domain>>
+/// containing every alloc — exactly the single-domain input shape the
+/// downstream packing phases expect.
+static SmallVector<Domain>
 partitionByDominanceDomain(MutableArrayRef<AllocInfo> allInfos, Block &block) {
   SmallVector<AllocInfo *> ordered;
   ordered.reserve(allInfos.size());
@@ -283,8 +282,6 @@ partitionByDominanceDomain(MutableArrayRef<AllocInfo> allInfos, Block &block) {
       domain.allocs.pop_back();
     }
     if (!merged) {
-      if (domains.size() + 1 > kMaxDomains)
-        return std::nullopt;
       Domain d;
       d.allocs.push_back(info);
       domains.push_back(std::move(d));
@@ -300,7 +297,7 @@ partitionByDominanceDomain(MutableArrayRef<AllocInfo> allInfos, Block &block) {
 // Assigns a byte offset in a 1D address space to each static alloc.
 // Two allocs whose lifetimes don't overlap may share the same address range.
 //
-// Example (static attention model, 4 allocs of 32768 bytes each):
+// Example (4 static allocs of 32768 bytes each, fully overlapping lifetimes):
 //
 //   Alloc  Lifetime      Offset assigned   Why
 //   -----  ------------  ----------------  -------------------------------
@@ -648,17 +645,20 @@ void PoolAllocsPass::runOnOperation() {
 
   // ----- Phase 1.5: partition allocs into dominance domains ------------
 
-  auto domainsOpt = partitionByDominanceDomain(allInfos, block);
-  if (!domainsOpt) {
-    funcOp.emitError("hip-pool-allocs: dominance partition exceeded the cap "
-                     "of ")
-        << kMaxDomains
-        << " domains; this strongly suggests upstream hoisting "
-           "(--hip-hoist-alloc-size-arith) is missing or canonicalization "
-           "left unhoistable size arithmetic in place";
-    return signalPassFailure();
+  SmallVector<Domain> domains = partitionByDominanceDomain(allInfos, block);
+
+  // The domain count is unbounded — the runtime grows its per-domain pool
+  // arrays on demand — so a high count is correct, just suspicious. Emit a
+  // non-fatal remark (compilation continues) pointing at the likely missing
+  // upstream pre-condition, rather than failing the pass.
+  if (domains.size() > kDomainCountAdvisoryThreshold) {
+    funcOp.emitRemark("hip-pool-allocs: dominance partition produced ")
+        << domains.size() << " domains (advisory threshold "
+        << kDomainCountAdvisoryThreshold
+        << "); this usually means upstream hoisting "
+           "(--hip-hoist-alloc-size-arith) is missing or canonicalization left "
+           "unhoistable size arithmetic in place. Compilation continues.";
   }
-  SmallVector<Domain> domains = std::move(*domainsOpt);
 
   LLVM_DEBUG({
     llvm::dbgs() << "Domains: " << domains.size() << "\n";
@@ -805,7 +805,7 @@ void PoolAllocsPass::runOnOperation() {
     // Tag the get_pool with this domain's id so the runtime grows the right
     // backing buffer. domain_id == 0 round-trips as the default attribute and
     // is elided by the printer, keeping single-domain output bit-identical to
-    // the pre-Stage-7 IR.
+    // the pre-multi-domain IR.
     Value pool = hip::GetPoolOp::create(
         builder, loc, poolType, ctx, poolSize,
         builder.getI64IntegerAttr(static_cast<int64_t>(domainId)));
@@ -897,10 +897,10 @@ void PoolAllocsPass::runOnOperation() {
   //     hipdnn.buffer_count   = i64           // total pooled allocs
   //     hipdnn.buffer_offsets = array<i64>    // -1 for dynamic offsets
   //
-  //   Emitted only when domain_count > 1 (consumed by the Stage 7
-  //   runtime — older runtimes silently ignore the extra attrs and would
-  //   alias all domains onto a single pool, which is incorrect; the
-  //   compiler/runtime ABI bump in Stage 7 fixes that):
+  //   Emitted only when domain_count > 1 (consumed by the multi-domain
+  //   runtime — older runtimes predating the multi-domain ABI silently ignore
+  //   the extra attrs and would alias all domains onto a single pool, which is
+  //   incorrect; the compiler/runtime ABI bump fixes that):
   //     hipdnn.domain_count   = i64
   //     hipdnn.pool_sizes     = array<i64>    // per-domain static prefix
   //     hipdnn.buffer_domains = array<i64>    // per-buffer domain id
