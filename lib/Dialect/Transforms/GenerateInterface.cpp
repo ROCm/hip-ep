@@ -275,33 +275,42 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
 ///   int inference_infer_shapes(
 ///       const int64_t* const* input_shapes,  const int64_t* input_ranks,
 ///       int64_t input_count,
+///       const void* const*    input_data,
 ///       int64_t* const*       output_shapes, const int64_t* output_ranks,
 ///       int64_t output_count);
 ///
 /// Body: load each input dim (flattened over inputs in (tensor, dim)
-/// row-major order) into the i64 args of the lowered `@infer_shapes`; call it;
-/// scatter the i64 results (same flattening over outputs) into the
-/// caller-allocated `output_shapes` rows. `input_ranks` / `*_count` /
-/// `output_ranks` are accepted for ABI stability but unused: the per-tensor
-/// ranks are compile-time constants from the module's shape metadata, the same
-/// iteration inference_compute uses. The flattening MUST match
-/// BuildShapeFunctionPass: @infer_shapes args = one i64 per (input tensor, dim)
-/// over `hipdnn.input_shapes`; results = one i64 per (output tensor, dim) over
-/// `hipdnn.output_shapes`.
+/// row-major order) into the leading args of the lowered `@infer_shapes`;
+/// then, for closed-form data-dependent shape fns (e.g. ONNX Range), load each
+/// recorded scalar VALUE out of `input_data` (per the `hipdnn.shape_fn_data_
+/// args` module attribute) into the trailing data args; call it; scatter the
+/// i64 results (same flattening over outputs) into the caller-allocated
+/// `output_shapes` rows. `input_ranks` / `*_count` / `output_ranks` are
+/// accepted for ABI stability but unused: the per-tensor ranks are
+/// compile-time constants from the module's shape metadata. `input_data` is
+/// only dereferenced for the inputs the shape program actually reads (the
+/// data-args descriptors); the EP passes a pointer per input regardless. The
+/// flattening MUST match BuildShapeFunctionPass: @infer_shapes args = one i64
+/// per (input tensor, dim) over `hipdnn.input_shapes`, then one per data arg
+/// over `hipdnn.shape_fn_data_args`; results = one i64 per (output tensor,
+/// dim) over `hipdnn.output_shapes`.
 ///
-/// Generated IR (input [B,S,4096] -> [B*S,4096]; @infer_shapes lowered to
-/// (i64,i64,i64) -> !llvm.struct<(i64,i64)>):
-///   llvm.func @inference_infer_shapes(%is, %ir, %ic, %os, %or, %oc) -> i32 {
-///     %p0 = llvm.load %is                  // input_shapes[0]
-///     %d0 = llvm.load %p0                   // [0]
-///     %g1 = llvm.getelementptr %p0[1]; %d1 = llvm.load %g1
-///     %g2 = llvm.getelementptr %p0[2]; %d2 = llvm.load %g2
+/// NOTE: adding `input_data` is an ABI break vs older model.dlls (6-arg). The
+/// EP and model.dll are versioned together; clear the cached `morphizen_mlir_*`
+/// DLLs after this change (same policy as any generated-interface change).
+///
+/// Generated IR (data-dependent Range(start,limit,delta) -> [count];
+/// @infer_shapes lowered to (ptr,i64,i64,i64) -> i64, three rank-0 i64 inputs
+/// so zero dim args + three data args from `hipdnn.shape_fn_data_args`):
+///   llvm.func @inference_infer_shapes(%is, %ir, %ic, %id, %os, %or, %oc) ->
+///   i32 {
 ///     %nil = llvm.mlir.zero : !llvm.ptr             // unused !hip.context
-///     %r  = llvm.call @infer_shapes(%nil, %d0, %d1, %d2)  // struct<(i64,i64)>
-///     %o0 = llvm.extractvalue %r[0]; %o1 = llvm.extractvalue %r[1]
-///     %q0 = llvm.load %os                  // output_shapes[0]
-///     llvm.store %o0, %q0
-///     %h1 = llvm.getelementptr %q0[1]; llvm.store %o1, %h1
+///     %r0 = llvm.load %id;        %s = llvm.load %r0   // input_data[0] ->
+///     start %g1 = llvm.getelementptr %id[1]; %r1 = llvm.load %g1; %l =
+///     llvm.load %r1 %g2 = llvm.getelementptr %id[2]; %r2 = llvm.load %g2; %dl
+///     = llvm.load %r2 %cnt = llvm.call @infer_shapes(%nil, %s, %l, %dl)   //
+///     i64 count %q0 = llvm.load %os                  // output_shapes[0]
+///     llvm.store %cnt, %q0
 ///     llvm.return %c0_i32
 ///   }
 void generateInferenceInferShapes(ModuleOp module) {
@@ -325,7 +334,10 @@ void generateInferenceInferShapes(ModuleOp module) {
   Type i32Type = builder.getI32Type();
   Type i64Type = builder.getI64Type();
 
-  SmallVector<Type> paramTypes = {ptrType, ptrType, i64Type,
+  // ABI: in_shapes, in_ranks, in_count, in_data, out_shapes, out_ranks,
+  // out_count. The in_data pointer array (arg 3) feeds the trailing data args
+  // for closed-form data-dependent shape fns; shifts out_* down by one.
+  SmallVector<Type> paramTypes = {ptrType, ptrType, i64Type, ptrType,
                                   ptrType, ptrType, i64Type};
   auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
   auto funcOp = LLVM::LLVMFuncOp::create(builder, loc, "inference_infer_shapes",
@@ -337,7 +349,8 @@ void generateInferenceInferShapes(ModuleOp module) {
   builder.setInsertionPointToStart(entry);
 
   Value inShapes = entry->getArgument(0);
-  Value outShapes = entry->getArgument(3);
+  Value inData = entry->getArgument(3);
+  Value outShapes = entry->getArgument(4);
 
   // @infer_shapes's arg 0 is the (unused) !hip.context, lowered to !llvm.ptr.
   // The shape program never dereferences it; pass null. The flattened input
@@ -357,6 +370,37 @@ void generateInferenceInferShapes(ModuleOp module) {
       Value elt = LLVM::GEPOp::create(builder, loc, ptrType, i64Type, row,
                                       ArrayRef<LLVM::GEPArg>{dIdx});
       callArgs.push_back(LLVM::LoadOp::create(builder, loc, i64Type, elt));
+    }
+  }
+
+  // Trailing data args (closed-form data-dependent shape fns, e.g. Range):
+  // for each descriptor in `hipdnn.shape_fn_data_args` (in slot order, the
+  // same order BuildShapeFunctionPass appended the @infer_shapes params), read
+  // input_data[input_idx], byte-offset to the scalar, and load it with the
+  // exact type the lowered @infer_shapes param expects.
+  auto dataArgs = module->getAttrOfType<ArrayAttr>("hipdnn.shape_fn_data_args");
+  if (dataArgs) {
+    ArrayRef<Type> inferParams = inferFn.getFunctionType().getParams();
+    Type i8Type = builder.getI8Type();
+    for (Attribute a : dataArgs) {
+      auto d = cast<DictionaryAttr>(a);
+      int64_t inputIdx = cast<IntegerAttr>(d.get("input_idx")).getInt();
+      int64_t elemOffset = cast<IntegerAttr>(d.get("elem_offset")).getInt();
+      int64_t elemBits = cast<IntegerAttr>(d.get("elem_bits")).getInt();
+      // Load type = the matching lowered @infer_shapes param (index->i64,
+      // i32->i32, f32->f32, …). callArgs.size() is the next param position.
+      Type loadTy = inferParams[callArgs.size()];
+      Value tIdx = LLVM::ConstantOp::create(
+          builder, loc, i64Type, builder.getI64IntegerAttr(inputIdx));
+      Value rowSlot = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                          inData, ArrayRef<LLVM::GEPArg>{tIdx});
+      Value row = LLVM::LoadOp::create(builder, loc, ptrType, rowSlot);
+      int64_t byteOffset = elemOffset * (elemBits / 8);
+      Value bOff = LLVM::ConstantOp::create(
+          builder, loc, i64Type, builder.getI64IntegerAttr(byteOffset));
+      Value elt = LLVM::GEPOp::create(builder, loc, ptrType, i8Type, row,
+                                      ArrayRef<LLVM::GEPArg>{bOff});
+      callArgs.push_back(LLVM::LoadOp::create(builder, loc, loadTy, elt));
     }
   }
 

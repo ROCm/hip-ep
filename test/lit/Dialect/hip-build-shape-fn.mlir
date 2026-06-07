@@ -13,8 +13,12 @@
 //   * non-identity B*S collapse  -> affine.apply product over input dims
 //                                   + static dim as a constant
 //   * identity output dim        -> the matching scalar arg, verbatim
-//   * data-dependent output dim  -> kDynamic (INT64_MIN) sentinel; the EP
-//                                   falls back to DimSource for that dim
+//   * closed-form data-dependent -> tensor.extract on an input scalar becomes
+//     output dim (Range-like)       an extra @infer_shapes VALUE arg, recorded
+//                                   in the hipdnn.shape_fn_data_args attr
+//   * non-resolvable data dim    -> kDynamic (INT64_MIN) sentinel (e.g. a
+//                                   tensor.extract with a non-constant index);
+//                                   the EP falls back to DimSource for that dim
 //   * @main_graph itself is never mutated by the pass
 
 // -----
@@ -52,12 +56,33 @@ func.func @main_graph(%a: tensor<?x4096xf16>) -> tensor<?x4096xf16> {
 
 // -----
 
-// Data-dependent: the output dim is read from tensor CONTENTS (tensor.extract),
-// not from any input shape. The slice cannot be rooted at input dims -> emit
-// the kDynamic sentinel so the EP falls back to DimSource for this dim.
+// Closed-form data-dependent (Range-like): the output dim is read from input
+// CONTENTS via tensor.extract on a static-shape input with a constant index.
+// The slice roots at the extract (a data leaf) -> @infer_shapes gains a VALUE
+// arg (i64, after the input's dim args) and emits hipdnn.shape_fn_data_args.
 func.func @main_graph(%a: tensor<4xi64>) -> tensor<?xf16> {
   %c0 = arith.constant 0 : index
   %v = tensor.extract %a[%c0] : tensor<4xi64>
+  %d = arith.index_cast %v : i64 to index
+  %e = tensor.empty(%d) : tensor<?xf16>
+  return %e : tensor<?xf16>
+}
+// CHECK: hipdnn.shape_fn_data_args = [{elem_bits = 64 : i64, elem_offset = 0 : i64, input_idx = 0 : i64}]
+// CHECK-LABEL: func.func @infer_shapes
+// CHECK-SAME: (%{{[^:]+}}: !hip.context, %{{[^:]+}}: index, %[[V:[^:]+]]: i64) -> index
+// CHECK: %[[D:.+]] = arith.index_cast %[[V]] : i64 to index
+// CHECK: return %[[D]] : index
+
+// -----
+
+// Non-resolvable data dim: tensor.extract with a NON-constant index (the index
+// itself comes from another input's value). The element offset is not
+// statically known -> the extract is rejected as a leaf -> kDynamic sentinel,
+// EP falls back to DimSource.
+func.func @main_graph(%a: tensor<4xi64>, %b: tensor<i64>) -> tensor<?xf16> {
+  %idx = tensor.extract %b[] : tensor<i64>
+  %i = arith.index_cast %idx : i64 to index
+  %v = tensor.extract %a[%i] : tensor<4xi64>
   %d = arith.index_cast %v : i64 to index
   %e = tensor.empty(%d) : tensor<?xf16>
   return %e : tensor<?xf16>

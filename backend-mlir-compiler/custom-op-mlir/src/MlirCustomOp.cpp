@@ -296,6 +296,14 @@ TensorData marshal_output_tensors(
     std::vector<std::vector<int64_t>> in_shapes(input_count);
     std::vector<const int64_t *> in_ptrs(input_count);
     std::vector<int64_t> in_ranks(input_count);
+    // Raw host-readable data pointer per input. Closed-form data-dependent
+    // shape fns (e.g. Range, whose 1-D length = ceildiv(limit-start, delta))
+    // read scalar VALUES out of these; the model.dll only dereferences the
+    // inputs its shape program actually reads (per hipdnn.shape_fn_data_args),
+    // so passing a pointer for every input is safe. The EP allocator maps GPU
+    // input buffers host-accessible (hipHostMallocMapped) and CPU inputs are
+    // natively host memory, so GetTensorRawData() is host-readable here.
+    std::vector<const void *> in_data(input_count);
     for (int k = 0; k < input_count; ++k) {
       CHECK(k < static_cast<int>(input_index_map.size()))
           << "Shape program: metadata input " << k
@@ -305,6 +313,7 @@ TensorData marshal_output_tensors(
       in_shapes[k] = src.GetTensorTypeAndShapeInfo().GetShape();
       in_ptrs[k] = in_shapes[k].data();
       in_ranks[k] = static_cast<int64_t>(in_shapes[k].size());
+      in_data[k] = src.GetTensorRawData();
     }
 
     // Pre-size per-output buffers to each output's rank; the program fills
@@ -319,9 +328,9 @@ TensorData marshal_output_tensors(
       out_ranks[j] = static_cast<int64_t>(shape_fn_out[j].size());
     }
 
-    int rc = inference_state->infer_shapes(in_ptrs.data(), in_ranks.data(),
-                                           input_count, out_ptrs.data(),
-                                           out_ranks.data(), output_count);
+    int rc = inference_state->infer_shapes(
+        in_ptrs.data(), in_ranks.data(), input_count, in_data.data(),
+        out_ptrs.data(), out_ranks.data(), output_count);
     CHECK(rc == 0) << "inference_infer_shapes failed with code " << rc;
   }
 

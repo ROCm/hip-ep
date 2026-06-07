@@ -260,6 +260,23 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
       const std::vector<std::string> *dp =
           (it != all_dim_params.end()) ? &it->second : nullptr;
 
+      // Data-dependent output detection (7b): an output whose extent depends on
+      // input *data values* (a reduction count), not on input shapes, has a
+      // dynamic dim that neither a shared dim_param nor the shape program can
+      // express — the shape program yields only the compile-time UPPER BOUND.
+      // The canonical case is ONNX NonZero (trailing dim = count of non-zero
+      // elements). We detect it by the producing node's op type (the EP-side
+      // metadata is built from the ONNX graph, so the MLIR DataDependentResult
+      // trait is not visible here; this op-type set is the ONNX-level mirror of
+      // that trait). Such dynamic dims are classified DIM_FROM_COUNT so the EP
+      // runs the bounded-scratch + count + trim path instead of trusting the
+      // shape program's upper bound as the final extent.
+      bool output_is_data_dependent = false;
+      if (auto producer = graphRef.find_node(output.name())) {
+        const std::string &op = producer->op_type();
+        output_is_data_dependent = (op == "NonZero");
+      }
+
       for (int d = 0; d < static_cast<int>(shape_ptr->size()); ++d) {
         int64_t dim_val = normalizeDim((*shape_ptr)[d]);
         output_proto->add_shape(dim_val);
@@ -302,6 +319,18 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
             ds->set_dim_idx(pit->second.second);
             ds->set_resolved(true);
             ds->set_resolution(mlir_metadata::DIM_FROM_INPUT);
+          } else if (output_is_data_dependent) {
+            // Reduction-count dynamic dim (e.g. NonZero): the shape program can
+            // only express the upper bound; the EP resolves the true extent
+            // post-compute from the count side-channel and trims. See
+            // DIM_FROM_COUNT in metadata.proto.
+            ds->set_input_idx(-1);
+            ds->set_dim_idx(-1);
+            ds->set_resolved(false);
+            ds->set_resolution(mlir_metadata::DIM_FROM_COUNT);
+            MY_LOG(1) << "Output '" << output.name() << "' dim " << d
+                      << " is data-dependent (producer is a reduction-count "
+                         "op); will be resolved by the EP count + trim path.";
           } else {
             // Non-identity dynamic dim: delegate to inference_infer_shapes.
             ds->set_input_idx(-1);

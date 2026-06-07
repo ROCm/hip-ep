@@ -29,6 +29,17 @@ enum DimResolution {
   // expresses: the EP calls the model.dll's inference_infer_shapes shape
   // program to compute it. input_idx/dim_idx are sentinels (-1) and unused.
   DIM_FROM_SHAPE_FN = 2;
+  // shape[i] == -1 and the extent depends on input *data values* (a reduction
+  // count), not on input shapes — canonically ONNX NonZero, whose trailing dim
+  // is the number of non-zero elements. The shape program can only bound this
+  // dim by its compile-time upper bound (the input element count), since the
+  // true value is knowable only after scanning the data. The EP therefore: runs
+  // the op into a scratch buffer sized at that upper bound; reads back the true
+  // count the kernel recorded in a per-RuntimeState side-channel keyed by the
+  // scratch pointer; binds the ORT output to [rank, count]; and copies the
+  // valid [:, :count] prefix in. input_idx/dim_idx are sentinels (-1) and
+  // unused. Set when the producing HIP op carries the DataDependentResult trait.
+  DIM_FROM_COUNT = 3;
 }
 
 // Tracks how a single output dimension's runtime value is resolved. `resolved`

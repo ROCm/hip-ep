@@ -73,6 +73,11 @@ public:
   // express (non-identity functions of input dims, e.g. vision patch mergers).
   //
   //   input_shapes[k]  -> int64_t[input_ranks[k]]  (k in DLL/metadata order)
+  //   input_data[k]    -> raw host-readable bytes of input k (closed-form
+  //                       data-dependent shape fns, e.g. Range, read scalar
+  //                       VALUES out of these; only the inputs the program
+  //                       actually reads are dereferenced — the caller passes a
+  //                       pointer per input regardless, null when unavailable)
   //   output_shapes[j] -> int64_t[output_ranks[j]] buffers the program fills
   //
   // Dims the program cannot resolve are written as a kDynamic sentinel
@@ -81,8 +86,8 @@ public:
   // own status code otherwise (0 == success).
   int infer_shapes(const int64_t *const *input_shapes,
                    const int64_t *input_ranks, int64_t input_count,
-                   int64_t *const *output_shapes, const int64_t *output_ranks,
-                   int64_t output_count) const;
+                   const void *const *input_data, int64_t *const *output_shapes,
+                   const int64_t *output_ranks, int64_t output_count) const;
 
   // Mark the start of a new forward pass before inference_compute. If the
   // model.dll exports hipdnn_ep_runtime_begin_compute (resolved once in
@@ -133,8 +138,8 @@ private:
   // the model.dll predates the export, in which case infer_shapes() is a
   // no-op and the EP resolves dynamic dims purely via DimSource.
   using InferShapesFn = int (*)(const int64_t *const *, const int64_t *,
-                                int64_t, int64_t *const *, const int64_t *,
-                                int64_t);
+                                int64_t, const void *const *, int64_t *const *,
+                                const int64_t *, int64_t);
   InferShapesFn infer_shapes_fn_;
 };
 

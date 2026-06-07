@@ -255,6 +255,16 @@ void ConvertHipToLLVMPass::runOnOperation() {
   // stages would require a reconcile-unrealized-casts cleanup pass.
   populateFuncToLLVMConversionPatterns(typeConverter, patterns);
   populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
+  // ceildivsi/floordivsi/ceildivui have no one-step LLVM form; each expands to
+  // primitive arith — e.g. ceildivsi(a,b) is a/b rounded toward +inf by adding
+  // 1 when the division has a nonzero remainder and the operands share a sign
+  // (cmp + select). The closed-form ONNX Range length is ceildiv(limit - start,
+  // delta), and that same expression is mirrored into the @infer_shapes shape
+  // program, so both the main graph and the shape function reach this pass
+  // carrying an arith.ceildivsi. Seeding the expand patterns into this single
+  // conversion lets the expanded primitives re-legalize through the arith→LLVM
+  // patterns below in the same fixpoint, avoiding a separate arith-expand pass.
+  arith::populateCeilFloorDivExpandOpsPatterns(patterns);
   arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
   cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
 

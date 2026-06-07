@@ -2952,7 +2952,8 @@ def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
   }];
 }
 
-def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
+def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[DataDependentResult],
+                              /*outsAccessor=*/"Y",
                               /*autoReify=*/1,
                               /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
