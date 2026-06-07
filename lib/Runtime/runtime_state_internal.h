@@ -43,7 +43,7 @@ struct RuntimeState {
   void *shared_constants_mapping; // Win32 file mapping HANDLE
   void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
 
-  // Memory pooling support — multi-domain (Stage 7).
+  // Memory pooling support — multi-domain.
   //
   // hip-pool-allocs partitions a function's pooled allocs into independent
   // dominance domains; each domain owns one contiguous GPU pool that grows on
@@ -53,14 +53,21 @@ struct RuntimeState {
   // and grow lazily on the first hipdnn_ep_get_pool_base(state, domain_id, ...)
   // call.
   //
-  // kMaxPoolDomains matches the cap enforced in PoolAllocs::partitionByDomain;
-  // the partition pass fails compilation before any IR is emitted that would
-  // exceed it, so this is a hard upper bound.
-  static constexpr int kMaxPoolDomains = 8;
-  void *pool_base[kMaxPoolDomains];  // Per-domain GPU pool base pointers
-  size_t pool_size[kMaxPoolDomains]; // Per-domain pool size in bytes
-  size_t *buffer_offsets;            // Offsets for static buffers in domain 0
-  size_t num_buffers;                // Static buffer count in domain 0
+  // The per-domain pool arrays are themselves grown on demand: there is no
+  // compile-time cap on the domain count. pool_base/pool_size are heap arrays
+  // of num_pool_domains entries, reallocated (zero-filling new slots) the first
+  // time a higher domain_id is observed — by hipdnn_ep_get_pool_base for the
+  // lazy domains and by hipdnn_ep_pool_init for domain 0. Every domain_id is
+  // first seen on the cold first inference, so num_pool_domains stabilises after
+  // that and no further array realloc happens at steady state — mirroring the
+  // grow-on-demand contract of the individual pools. realloc-move is safe
+  // because nothing caches &pool_base[i] across calls; pool_base[domain_id] is
+  // re-derived from state on every access.
+  int num_pool_domains;   // Number of slots currently allocated in the arrays
+  void **pool_base;       // [num_pool_domains] per-domain GPU pool base ptrs
+  size_t *pool_size;      // [num_pool_domains] per-domain pool size in bytes
+  size_t *buffer_offsets; // Offsets for static buffers in domain 0
+  size_t num_buffers;     // Static buffer count in domain 0
 
   // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.

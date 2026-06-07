@@ -219,8 +219,10 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // pool is grown via stream-sync + hipFree + hipMalloc. Pools never shrink and
 // are independent across domains: growing domain N does not touch domain M.
 //
-// `domain_id` must be in [0, kMaxPoolDomains); the runtime returns NULL and
-// logs to stderr otherwise.
+// There is no compile-time cap on `domain_id`: the per-domain arrays are
+// themselves grown on demand the first time a higher id is seen (a cold-path
+// event on the first inference). A negative `domain_id` returns NULL with a
+// stderr diagnostic (it would indicate a compiler bug — ids start at 0).
 //
 // Returns: GPU base pointer for the selected domain (NULL on bad domain_id
 //          or allocation failure).
