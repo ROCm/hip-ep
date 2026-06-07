@@ -272,7 +272,8 @@ Module metadata:
   Always: legacy single-domain attrs (hipdnn.pool_size, hipdnn.buffer_count,
           hipdnn.buffer_offsets).
   When domain count > 1: also emit hipdnn.domain_count, hipdnn.pool_sizes,
-          hipdnn.buffer_domains (consumed by the runtime).
+          hipdnn.buffer_domains (informational module metadata; NOT read by
+          GenerateInterface or the runtime -- see Module-Attribute Contract).
 ```
 
 ### Phase 1: Liveness Analysis
@@ -448,7 +449,7 @@ After all domains: walk the function once to find any `memref.dealloc` whose ope
 
 ## Module-Attribute Contract
 
-Pool-allocs writes module-level attributes that downstream `GenerateInterface` reads to produce the FlatBuffers metadata blob baked into `model.dll`. The contract is **additive**: legacy single-domain attributes are emitted on every run; multi-domain attributes are emitted only when `domain_count > 1`.
+Pool-allocs writes module-level attributes. The **legacy single-domain** attrs are read by downstream `GenerateInterface` to produce the FlatBuffers metadata blob baked into `model.dll` (and drive `hipdnn_ep_pool_init`). The **multi-domain** attrs are informational module metadata — emitted for inspection and debugging, but NOT consumed by `GenerateInterface` or the runtime today. Multi-domain wiring is carried entirely by the `hip.get_pool {domain_id}` ops themselves (see the Compiler-Runtime ABI section), not by these attributes. The contract is **additive**: legacy attributes are emitted on every run; multi-domain attributes are emitted only when `domain_count > 1`.
 
 ### Always emitted (legacy contract)
 
@@ -468,7 +469,7 @@ A single-domain model produces only these three. A pre-multi-domain runtime that
 | `hipdnn.pool_sizes` | `array<i64>` | Per-domain static prefix in bytes. Length = `domain_count`. |
 | `hipdnn.buffer_domains` | `array<i64>` | Per-buffer domain id (which pool a buffer lives in). Length = `buffer_count`. |
 
-A pre-multi-domain runtime would silently ignore these extra attrs and alias all domains onto its single pool slot, which is **incorrect** (pools are independent). The runtime ABI bump described next is what makes multi-domain output safe to ship.
+These attrs are **not** read by `GenerateInterface` or the runtime — they are informational metadata for inspection tools and debugging. Multi-domain correctness does not depend on them: it is carried by the per-domain `hip.get_pool {domain_id}` ops, which lower (Compiler-Runtime ABI section) to `hipdnn_ep_get_pool_base(state, domain_id, size)` calls emitted directly into `main_graph`. The runtime keeps an independent grow-on-demand pool per `domain_id`. What would be unsafe is a runtime predating that ABI bump (no `domain_id` parameter on `get_pool_base`) — regardless of these attributes.
 
 ### Trivial-input edge case
 
