@@ -1242,7 +1242,12 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
   // Static buffers always live in domain 0 (the legacy single-pool case).
   // Multi-domain functions only use the dynamic hip.get_pool path; this entry
   // is kept for the eager-static-offset path.
-  if (!state || !state->pool_base[0]) {
+  // pool_base is a lazily-allocated heap array (null until pool_init or the
+  // first ensure_pool_domains). Check the array pointer and that domain 0 has
+  // a slot BEFORE indexing [0] — otherwise calling this before pool_init (or
+  // on a pool_size==0 model whose arrays were never grown) is a null deref.
+  if (!state || !state->pool_base || state->num_pool_domains < 1 ||
+      !state->pool_base[0]) {
     fprintf(stderr, "Invalid state or pool not initialized\n");
     return nullptr;
   }
