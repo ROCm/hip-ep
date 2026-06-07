@@ -827,6 +827,11 @@ int main(int argc, char *argv[]) {
       "p", "positive-only",
       "Generate positive-only random inputs (for Sqrt/Reciprocal testing)",
       "false", true);
+  mo.add_option("D", "dyn-dim",
+                "Concrete value for dynamic (-1) input dims other than batch "
+                "(dim 0 is always set to 1). Lets models with dynamic spatial "
+                "or sequence dims run",
+                "16");
 
   try {
     mo.parse(argc, argv);
@@ -850,6 +855,7 @@ int main(int argc, char *argv[]) {
   const bool use_input_files = !input_dir_str.empty();
   const int graph_optimization_level = mo.get<int>("graph-opt-level");
   const bool positive_only = mo.get<bool>("positive-only");
+  const int64_t dyn_dim_value = mo.get<int>("dyn-dim");
 
   if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
       !l2norm_arg[1].empty()) {
@@ -1025,9 +1031,17 @@ int main(int argc, char *argv[]) {
   std::vector<Ort::Value> input_tensors;
 
   for (size_t i = 0; i < input_count; ++i) {
+    // Resolve every dynamic (-1) dim to a concrete extent so ORT can allocate
+    // the tensor. Batch (dim 0) collapses to 1; any other dynamic dim (e.g.
+    // dynamic spatial H/W on a conv input, or a dynamic sequence length) uses
+    // --dyn-dim. Without this, non-leading dynamic dims stayed -1 and tensor
+    // creation failed with "negative value in shape".
     auto shape = input_shapes[i];
-    if (!shape.empty() && shape[0] == -1)
-      shape[0] = 1;
+    for (size_t d = 0; d < shape.size(); ++d) {
+      if (shape[d] != -1)
+        continue;
+      shape[d] = (d == 0) ? 1 : dyn_dim_value;
+    }
 
     size_t elem_size = element_byte_size(input_types[i]);
     int64_t n_elems = calculate_product(shape);

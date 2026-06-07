@@ -290,8 +290,7 @@ TensorData marshal_output_tensors(
   }
 
   std::vector<std::vector<int64_t>> shape_fn_out; // [output][dim], empty if N/A
-  if (need_shape_fn && inference_state &&
-      inference_state->has_infer_shapes()) {
+  if (need_shape_fn && inference_state && inference_state->has_infer_shapes()) {
     // Build input rows in DLL/metadata order from the actual runtime shapes.
     const int input_count = inputs.size();
     std::vector<std::vector<int64_t>> in_shapes(input_count);
@@ -300,8 +299,8 @@ TensorData marshal_output_tensors(
     for (int k = 0; k < input_count; ++k) {
       CHECK(k < static_cast<int>(input_index_map.size()))
           << "Shape program: metadata input " << k
-          << " has no input_index_map entry (have "
-          << input_index_map.size() << ")";
+          << " has no input_index_map entry (have " << input_index_map.size()
+          << ")";
       auto src = ctx.GetInput(input_index_map[k]);
       in_shapes[k] = src.GetTensorTypeAndShapeInfo().GetShape();
       in_ptrs[k] = in_shapes[k].data();
@@ -320,9 +319,9 @@ TensorData marshal_output_tensors(
       out_ranks[j] = static_cast<int64_t>(shape_fn_out[j].size());
     }
 
-    int rc = inference_state->infer_shapes(
-        in_ptrs.data(), in_ranks.data(), input_count, out_ptrs.data(),
-        out_ranks.data(), output_count);
+    int rc = inference_state->infer_shapes(in_ptrs.data(), in_ranks.data(),
+                                           input_count, out_ptrs.data(),
+                                           out_ranks.data(), output_count);
     CHECK(rc == 0) << "inference_infer_shapes failed with code " << rc;
   }
 

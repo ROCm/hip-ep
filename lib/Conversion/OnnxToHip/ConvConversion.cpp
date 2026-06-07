@@ -81,12 +81,71 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
     group = attr.getValue().getSExtValue();
 
-  // Create output tensor
+  // Create the output (DPS destination) tensor. For each DYNAMIC output dim we
+  // must materialize its runtime extent. The naive "output dim == input dim"
+  // copy is only correct for the batch axis and for stride-1 same-padding
+  // convs; a strided / downsampling conv has spatial extents that are a
+  // non-identity floor-division of the input extent, so we emit that
+  // arithmetic here. This is what lets the downstream shape program
+  // (BuildShapeFunctionPass) fold the true output extent and the EP size the
+  // ORT output buffer correctly for dynamic-spatial vision-style models.
+  //
+  // ONNX Conv output spatial formula (explicit pads; auto_pad NOTSET — the
+  // SAME_*/VALID auto_pad modes are not handled here, matching the rest of
+  // this converter which reads only the explicit `pads` attribute):
+  //   out[s] = floor((in[s] + pad_begin[s] + pad_end[s]
+  //                   - dilation[s]*(kernel[s]-1) - 1) / stride[s]) + 1
+  // The pad/dilation/kernel/stride terms are all compile-time constants, so
+  // each spatial dim collapses to a single `addi/divsi/addi` chain over
+  // `tensor.dim(input, dimIdx)` (divsi == floor for the non-negative numerator
+  // any valid conv produces). divsi/addi are speculatable with the constant
+  // divisor and are hoistable by hip-hoist-alloc-size-arith / hip-pool-allocs.
+  //
+  // Before (strides=[2,2], pads=[1,1,1,1], k=3x3, input <1x3x?x?>):
+  //   %h = tensor.dim %in, 2
+  //   %w = tensor.dim %in, 3
+  //   %o = tensor.empty(%h, %w) : tensor<1x16x?x?xf32>   // WRONG: out==in
+  // After:
+  //   %h  = tensor.dim %in, 2
+  //   %h1 = arith.addi %h, -1                            // +
+  //   (pad_lo+pad_hi-dil*(k-1)-1) %h2 = arith.divsi %h1, 2 // / stride %ho =
+  //   arith.addi %h2, 1 (… same for W …) %o  = tensor.empty(%ho, %wo) :
+  //   tensor<1x16x?x?xf32>
+  const int64_t rank = resultType.getRank();
+  const int64_t numSpatial = static_cast<int64_t>(kernelShape.size());
+  // Leading (non-spatial) output dims: N (batch) and C (channels).
+  const int64_t numLeading = rank - numSpatial;
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
-    if (resultType.isDynamicDim(dimIdx))
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx));
+  for (int64_t dimIdx : llvm::seq<int64_t>(rank)) {
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+    mlir::Value sz;
+    if (dimIdx < numLeading) {
+      // Batch (dim 0) passes through from the input; output channels (dim 1)
+      // equal the weight tensor's leading dim (M). Both are rarely dynamic
+      // (channels are a static architecture constant), handled for safety.
+      sz = (dimIdx == 0)
+               ? mlir::tensor::DimOp::create(rewriter, loc, input, 0)
+               : mlir::tensor::DimOp::create(rewriter, loc, weights, 0);
+    } else {
+      const int64_t s = dimIdx - numLeading;
+      const int64_t padLo = pads[s];
+      const int64_t padHi = pads[numSpatial + s];
+      const int64_t cConst =
+          padLo + padHi - dilations[s] * (kernelShape[s] - 1) - 1;
+      mlir::Value inDim =
+          mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx);
+      mlir::Value cVal =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, cConst);
+      mlir::Value sum = mlir::arith::AddIOp::create(rewriter, loc, inDim, cVal);
+      mlir::Value strideVal =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, strides[s]);
+      mlir::Value div =
+          mlir::arith::DivSIOp::create(rewriter, loc, sum, strideVal);
+      mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+      sz = mlir::arith::AddIOp::create(rewriter, loc, div, one);
+    }
+    dynSizes.push_back(sz);
   }
 
   mlir::Value init =

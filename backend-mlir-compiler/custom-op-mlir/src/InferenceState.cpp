@@ -54,15 +54,17 @@ InferenceState::InferenceState(PrivateTag, void *state,
     MY_LOG(2) << "begin_compute symbol "
               << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
 
-    // Cache the output-shape program (BuildShapeFunctionPass + GenerateInterface
-    // emit it only when the graph's outputs need it). Null on older model.dlls
+    // Cache the output-shape program (BuildShapeFunctionPass +
+    // GenerateInterface emit it only when the graph's outputs need it). Null on
+    // older model.dlls
     // -> infer_shapes() is a no-op and marshal_output_tensors falls back to the
     // DimSource path. Note inference_infer_shapes takes no state_ handle: it is
     // a pure data-independent shape program with no RuntimeState dependency.
     infer_shapes_fn_ =
-        plugin_->get_method<int, const int64_t *const *, const int64_t *,
-                            int64_t, int64_t *const *, const int64_t *,
-                            int64_t>("inference_infer_shapes");
+        plugin_
+            ->get_method<int, const int64_t *const *, const int64_t *, int64_t,
+                         int64_t *const *, const int64_t *, int64_t>(
+                "inference_infer_shapes");
     MY_LOG(2) << "infer_shapes symbol "
               << (infer_shapes_fn_ ? "resolved" : "not exported (no-op)");
   }
@@ -201,7 +203,8 @@ void InferenceState::begin_compute() const {
 }
 
 int InferenceState::infer_shapes(const int64_t *const *input_shapes,
-                                 const int64_t *input_ranks, int64_t input_count,
+                                 const int64_t *input_ranks,
+                                 int64_t input_count,
                                  int64_t *const *output_shapes,
                                  const int64_t *output_ranks,
                                  int64_t output_count) const {
