@@ -531,4 +531,74 @@ def ResolveExternConstantsPass
   ];
 }
 
+def BuildShapeFunctionPass
+    : Pass<"hip-build-shape-fn", "mlir::ModuleOp"> {
+  let summary = "Emit a pure @infer_shapes function computing @main_graph "
+                "output dims from input dims";
+  let description = [{
+    Generates a standalone, data-independent shape function `@infer_shapes`
+    that computes every `@main_graph` output dimension as pure index
+    arithmetic over the input tensor dimensions. The MorphiZen EP calls the
+    exported `inference_infer_shapes` before `ctx.GetOutput()` to size output
+    buffers for models whose output dim is NOT a simple copy of an input dim
+    (vision patch mergers, flattens, reshapes) — cases the `DimSource`
+    identity rule cannot express. `DimSource` is retained as a fast path and
+    fallback; this pass never hard-fails.
+
+    Construction (IREE backward-slice recipe, specialized to root every dim at
+    a `@main_graph` input arg):
+
+      1. Clone `@main_graph` into a throwaway scratch func (so `@main_graph`
+         itself is never mutated).
+      2. Materialize `tensor.dim %result, %d` on every scratch return operand /
+         dim and make those the scratch func's results.
+      3. Run the same reify-driven folds as `--hip-resolve-tensor-dims`
+         (`populateResolve{Ranked,}ShapedTypeResultDimsPatterns` + tensor
+         canonicalizers) so each dim query collapses to arithmetic over
+         `tensor.dim %arg, %c` leaves (the heavy hip.* compute folds away).
+      4. For each resolved dim, walk its operand DAG. A dim is RESOLVED iff its
+         slice bottoms out only at constants and `tensor.dim` on input-tensor
+         block args, through pure `arith`/`affine` ops. Clone that slice into
+         `@infer_shapes`, remapping each `tensor.dim %arg, %c` leaf to the
+         corresponding scalar function argument. A dim whose slice touches a
+         hip.* result, a `tensor.dim` on a non-arg (e.g. a `hip.loop` result —
+         see the ONNX `Loop` follow-up), or any data-dependent op is
+         UNRESOLVED → emit `kDynamic` (INT64_MIN) so the EP falls back to
+         `DimSource` for that dim.
+      5. Erase the scratch func.
+
+    Signature contract (so `GenerateInterface` can wrap it without extra
+    metadata): `@infer_shapes` takes one `index` arg per (input tensor, dim)
+    in row-major flattened order over all inputs, and returns one `index` per
+    (output tensor, dim) flattened over all outputs. Arg/result counts equal
+    the sums of input/output ranks — derivable from the same `input_ranks` /
+    `output_ranks` the C ABI already carries. Static output dims become
+    `arith.constant`; the `!hip.context` arg and any non-tensor input args are
+    skipped (only EP-visible tensor inputs contribute dims).
+
+    Before (`@main_graph`: [B,S,D] -> Reshape -> [B*S, D], D=4096):
+    ```mlir
+    func.func @main_graph(%ctx: !hip.context, %a: tensor<?x?x4096xf16>)
+        -> tensor<?x4096xf16> { ... return %r : tensor<?x4096xf16> }
+    ```
+    After (sibling func added; `@main_graph` untouched):
+    ```mlir
+    // args = [a.dim0, a.dim1, a.dim2]; results = [out.dim0, out.dim1]
+    func.func @infer_shapes(%d0: index, %d1: index, %d2: index)
+        -> (index, index) {
+      %bs = affine.apply affine_map<()[s0, s1] -> (s0 * s1)>()[%d0, %d1]
+      %c4096 = arith.constant 4096 : index
+      return %bs, %c4096 : index, index
+    }
+    ```
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect",
+    "mlir::tensor::TensorDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::affine::AffineDialect"
+  ];
+}
+
 #endif // HIP_PASSES

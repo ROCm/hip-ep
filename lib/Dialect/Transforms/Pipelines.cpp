@@ -23,6 +23,30 @@ using namespace mlir;
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
 static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
+  // 1a. Emit the pure `@infer_shapes` shape program (input dims -> output dims)
+  //     as one of the first tail passes — immediately after
+  //     `--convert-onnx-to-hip`, while the IR is still tensor-level and the
+  //     output producers carry `ReifyRankedShapedTypeOpInterface`
+  //     (tensor.collapse_shape / expand_shape / HIP DPS ops). The pass clones a
+  //     throwaway scratch of @main_graph and runs the same reify-driven
+  //     `tensor.dim` folds internally on that clone, so it does NOT depend on
+  //     `--hip-infer-shapes` / `--hip-resolve-tensor-dims` having refined the
+  //     real @main_graph first — placement before them is intentional and keeps
+  //     the shape program built from the cleanest post-conversion tensor IR,
+  //     before bufferization rewrites the producers.
+  //
+  //     @main_graph is never mutated. The emitted func has an unused
+  //     `!hip.context` arg 0 (matching the module-wide invariant established by
+  //     `--hip-add-context-arg`) and otherwise only `index` args/results, so it
+  //     flows through bufferize / out-params / dealloc untouched (no tensor
+  //     types), is lowered to `llvm.func` by `--convert-hip-to-llvm`, and
+  //     GenerateInterface wraps it as the exported `inference_infer_shapes`.
+  //     No-op (skips) when an output is not a ranked tensor. The EP uses it to
+  //     size output buffers for non-identity output dims (vision patch mergers,
+  //     flattens) that `DimSource` cannot express. See
+  //     `BuildShapeFunction.cpp`.
+  pm.addPass(hip::createBuildShapeFunctionPass());
+
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc

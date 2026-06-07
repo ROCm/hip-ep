@@ -6,12 +6,14 @@
 //===----------------------------------------------------------------------===//
 // Generate Interface Pass - Create C-compatible interface functions
 //===----------------------------------------------------------------------===//
-// This pass generates four C-ABI compatible functions that wrap the internal
+// This pass generates the C-ABI compatible functions that wrap the internal
 // @main_graph function:
 // - inference_init: Allocate context, create handles, upload constants
 // - inference_compute: Parse inputs/outputs, call @main_graph
 // - inference_cleanup: Free resources
 // - inference_get_metadata_json: Return JSON metadata (input/output shapes)
+// - inference_infer_shapes: Data-independent output-shape function (emitted
+//     only when @infer_shapes is present, i.e. BuildShapeFunctionPass ran).
 //===----------------------------------------------------------------------===//
 
 #include "compilation_options_generated.h"
@@ -259,6 +261,150 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
   LLVM::ReturnOp::create(builder, loc, addr);
 }
 
+/// Generate inference_infer_shapes() — the data-independent output-shape
+/// function the EP calls before allocating output buffers, for output dims
+/// that are non-identity functions of input dims (vision patch mergers,
+/// flattens) which `DimSource` cannot express.
+///
+/// No-op (skipped) when `@infer_shapes` is absent — e.g. hip-to-llvm-only
+/// pipelines, or models whose output is not a ranked tensor so
+/// BuildShapeFunctionPass bailed. Old model.dlls predating this export keep
+/// working on the EP's DimSource path.
+///
+/// ABI (raw symbol; matches the EP-side caller):
+///   int inference_infer_shapes(
+///       const int64_t* const* input_shapes,  const int64_t* input_ranks,
+///       int64_t input_count,
+///       int64_t* const*       output_shapes, const int64_t* output_ranks,
+///       int64_t output_count);
+///
+/// Body: load each input dim (flattened over inputs in (tensor, dim)
+/// row-major order) into the i64 args of the lowered `@infer_shapes`; call it;
+/// scatter the i64 results (same flattening over outputs) into the
+/// caller-allocated `output_shapes` rows. `input_ranks` / `*_count` /
+/// `output_ranks` are accepted for ABI stability but unused: the per-tensor
+/// ranks are compile-time constants from the module's shape metadata, the same
+/// iteration inference_compute uses. The flattening MUST match
+/// BuildShapeFunctionPass: @infer_shapes args = one i64 per (input tensor, dim)
+/// over `hipdnn.input_shapes`; results = one i64 per (output tensor, dim) over
+/// `hipdnn.output_shapes`.
+///
+/// Generated IR (input [B,S,4096] -> [B*S,4096]; @infer_shapes lowered to
+/// (i64,i64,i64) -> !llvm.struct<(i64,i64)>):
+///   llvm.func @inference_infer_shapes(%is, %ir, %ic, %os, %or, %oc) -> i32 {
+///     %p0 = llvm.load %is                  // input_shapes[0]
+///     %d0 = llvm.load %p0                   // [0]
+///     %g1 = llvm.getelementptr %p0[1]; %d1 = llvm.load %g1
+///     %g2 = llvm.getelementptr %p0[2]; %d2 = llvm.load %g2
+///     %nil = llvm.mlir.zero : !llvm.ptr             // unused !hip.context
+///     %r  = llvm.call @infer_shapes(%nil, %d0, %d1, %d2)  // struct<(i64,i64)>
+///     %o0 = llvm.extractvalue %r[0]; %o1 = llvm.extractvalue %r[1]
+///     %q0 = llvm.load %os                  // output_shapes[0]
+///     llvm.store %o0, %q0
+///     %h1 = llvm.getelementptr %q0[1]; llvm.store %o1, %h1
+///     llvm.return %c0_i32
+///   }
+void generateInferenceInferShapes(ModuleOp module) {
+  // Lowered to llvm.func by --convert-hip-to-llvm (index args -> i64, multiple
+  // results -> a returned struct). Absent on pipelines where
+  // BuildShapeFunctionPass did not run.
+  auto inferFn = module.lookupSymbol<LLVM::LLVMFuncOp>("infer_shapes");
+  if (!inferFn)
+    return;
+
+  auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
+  auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
+  if (!inputShapes || !outputShapes)
+    return;
+
+  OpBuilder builder(module.getContext());
+  Location loc = module.getLoc();
+  builder.setInsertionPointToEnd(module.getBody());
+
+  Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
+  Type i32Type = builder.getI32Type();
+  Type i64Type = builder.getI64Type();
+
+  SmallVector<Type> paramTypes = {ptrType, ptrType, i64Type,
+                                  ptrType, ptrType, i64Type};
+  auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
+  auto funcOp = LLVM::LLVMFuncOp::create(builder, loc, "inference_infer_shapes",
+                                         funcType);
+  funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
+  funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
+
+  Block *entry = funcOp.addEntryBlock(builder);
+  builder.setInsertionPointToStart(entry);
+
+  Value inShapes = entry->getArgument(0);
+  Value outShapes = entry->getArgument(3);
+
+  // @infer_shapes's arg 0 is the (unused) !hip.context, lowered to !llvm.ptr.
+  // The shape program never dereferences it; pass null. The flattened input
+  // dims follow.
+  SmallVector<Value> callArgs;
+  callArgs.push_back(LLVM::ZeroOp::create(builder, loc, ptrType));
+  for (auto i : llvm::seq<size_t>(0, inputShapes.size())) {
+    int64_t rank = cast<DenseI64ArrayAttr>(inputShapes.getValue()[i]).size();
+    Value tIdx = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                          builder.getI64IntegerAttr(i));
+    Value rowSlot = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                        inShapes, ArrayRef<LLVM::GEPArg>{tIdx});
+    Value row = LLVM::LoadOp::create(builder, loc, ptrType, rowSlot);
+    for (int64_t d : llvm::seq<int64_t>(0, rank)) {
+      Value dIdx = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                            builder.getI64IntegerAttr(d));
+      Value elt = LLVM::GEPOp::create(builder, loc, ptrType, i64Type, row,
+                                      ArrayRef<LLVM::GEPArg>{dIdx});
+      callArgs.push_back(LLVM::LoadOp::create(builder, loc, i64Type, elt));
+    }
+  }
+
+  auto call = LLVM::CallOp::create(builder, loc, inferFn, callArgs);
+
+  // Collect the i64 results, accounting for how func->llvm lowered the
+  // multi-result function: void (0 results), a bare i64 (1 result), or a
+  // struct (≥2 results).
+  SmallVector<Value> outDims;
+  Type retTy = inferFn.getFunctionType().getReturnType();
+  if (!isa<LLVM::LLVMVoidType>(retTy)) {
+    Value r = call.getResult();
+    if (auto st = dyn_cast<LLVM::LLVMStructType>(retTy)) {
+      for (auto i : llvm::seq<size_t>(0, st.getBody().size()))
+        outDims.push_back(LLVM::ExtractValueOp::create(
+            builder, loc, r, ArrayRef<int64_t>{static_cast<int64_t>(i)}));
+    } else {
+      outDims.push_back(r);
+    }
+  }
+
+  // Scatter into the caller-allocated output rows (same flattening as the
+  // @infer_shapes results).
+  size_t k = 0;
+  for (auto i : llvm::seq<size_t>(0, outputShapes.size())) {
+    int64_t rank = cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size();
+    Value tIdx = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                          builder.getI64IntegerAttr(i));
+    Value rowSlot =
+        LLVM::GEPOp::create(builder, loc, ptrType, ptrType, outShapes,
+                            ArrayRef<LLVM::GEPArg>{tIdx});
+    Value row = LLVM::LoadOp::create(builder, loc, ptrType, rowSlot);
+    for (int64_t d : llvm::seq<int64_t>(0, rank)) {
+      if (k >= outDims.size())
+        break;
+      Value dIdx = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                            builder.getI64IntegerAttr(d));
+      Value elt = LLVM::GEPOp::create(builder, loc, ptrType, i64Type, row,
+                                      ArrayRef<LLVM::GEPArg>{dIdx});
+      LLVM::StoreOp::create(builder, loc, outDims[k++], elt);
+    }
+  }
+
+  Value zero = LLVM::ConstantOp::create(builder, loc, i32Type,
+                                        builder.getI32IntegerAttr(0));
+  LLVM::ReturnOp::create(builder, loc, zero);
+}
+
 /// Build an LLVM memref descriptor struct {ptr, ptr, offset, sizes, strides}
 /// from a TensorBuffer's GPU pointer and shape pointer.
 static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
@@ -399,7 +545,12 @@ public:
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
 
-    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions\n");
+    // Conditional: only when BuildShapeFunctionPass emitted @infer_shapes
+    // (lowered to llvm.func by --convert-hip-to-llvm). No-op otherwise so
+    // hip-to-llvm-only pipelines and older flows are unaffected.
+    generateInferenceInferShapes(module);
+
+    COMPILER_DEBUG_LOG("[GenerateInterface] Generated interface functions\n");
   }
 
 private:
