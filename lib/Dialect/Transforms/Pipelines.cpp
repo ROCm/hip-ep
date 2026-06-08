@@ -22,7 +22,27 @@
 using namespace mlir;
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
-static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
+///
+/// \p useOutputAllocator selects the allocator pipeline. The classic pipeline
+/// runs `buffer-results-to-out-params` at slot 3 (each returned memref becomes
+/// a trailing out-param). The allocator pipeline SKIPS that pass and instead
+/// runs `hip-use-output-allocator` at slot 4.5 -- AFTER buffer-deallocation --
+/// to rewrite each returned `memref.alloc` into `hip.alloc_output` (EP-owned,
+/// allocated in-graph via the output-allocator callback).
+///
+/// The slot-4.5 placement is load-bearing and was chosen empirically (see the
+/// slot 4.5 comment below and test/lit/Pipeline/output-allocator-dealloc.mlir):
+/// `hip.alloc_output` carries a Write effect but NO Allocate effect, so if it
+/// were created BEFORE buffer-deallocation, the deallocation pass would treat
+/// the returned value as unowned and insert a `bufferization.clone` at the
+/// return -- an extra per-inference alloc + full-output copy that defeats the
+/// allocator's zero-copy goal. Running it AFTER buffer-deallocation, when the
+/// output is still a `memref.alloc` (Allocate effect => owned, returned
+/// directly with no clone), avoids that. It still runs BEFORE pool-allocs, so
+/// the EP-owned output never enters the GPU pool (pool-allocs only absorbs
+/// `memref.alloc`). See docs/design/output-allocator-design.md.
+static void buildOnnxToHipPipelineTail(OpPassManager &pm,
+                                       bool useOutputAllocator) {
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
@@ -67,17 +87,42 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
       bufferization::LayoutMapOption::IdentityLayoutMap;
   pm.addPass(bufferization::createOneShotBufferizePass(bufferizeOpts));
 
-  // 3. Convert tensor function results to out-params (memref)
-  bufferization::BufferResultsToOutParamsPassOptions outParamsOpts;
-  outParamsOpts.hoistStaticAllocs = true;
-  outParamsOpts.hoistDynamicAllocs = true;
-  outParamsOpts.addResultAttribute = true;
-  outParamsOpts.modifyPublicFunctions = true;
-  pm.addPass(bufferization::createBufferResultsToOutParamsPass(outParamsOpts));
+  // 3. Classic pipeline only: convert tensor function results to out-params
+  //    (memref). The allocator pipeline keeps results as returned memrefs here
+  //    and defers output handling to slot 4.5 (after buffer-deallocation) --
+  //    see that comment for the ownership/clone reason.
+  if (!useOutputAllocator) {
+    bufferization::BufferResultsToOutParamsPassOptions outParamsOpts;
+    outParamsOpts.hoistStaticAllocs = true;
+    outParamsOpts.hoistDynamicAllocs = true;
+    outParamsOpts.addResultAttribute = true;
+    outParamsOpts.modifyPublicFunctions = true;
+    pm.addPass(
+        bufferization::createBufferResultsToOutParamsPass(outParamsOpts));
+  }
 
   // 4. Insert ownership-based buffer deallocation
   bufferization::BufferDeallocationPipelineOptions deallocOpts;
   bufferization::buildBufferDeallocationPipeline(pm, deallocOpts);
+
+  // 4.5. Allocator pipeline only: rewrite each returned `memref.alloc` into
+  //      `hip.alloc_output` (EP-owned, allocated in-graph at runtime via the
+  //      output-allocator callback). FuncOp-scoped; leaves the function
+  //      signature + `return` intact.
+  //
+  //      Ordering is load-bearing -- it MUST run AFTER buffer-deallocation:
+  //      `hip.alloc_output` has a Write effect but NO Allocate effect, so the
+  //      ownership-based deallocation pass would treat it as an unowned value
+  //      at the `func.return` and clone it (`%c = bufferization.clone %out;
+  //      return %c`), adding a per-inference alloc + full-output copy. By
+  //      running here the deallocation pass sees the output as a plain
+  //      `memref.alloc` (Allocate effect => owned), so it returns it directly
+  //      with no clone and no dealloc. Still runs BEFORE pool-allocs (slot 6)
+  //      so the EP-owned output never enters the GPU pool, which only absorbs
+  //      `memref.alloc`. Verified by test/lit/Pipeline/
+  //      output-allocator-dealloc.mlir (both orderings).
+  if (useOutputAllocator)
+    pm.addNestedPass<func::FuncOp>(hip::createUseOutputAllocatorPass());
 
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
@@ -197,7 +242,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
     pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
   }
 
-  buildOnnxToHipPipelineTail(pm);
+  buildOnnxToHipPipelineTail(pm, options.useOutputAllocator);
 }
 
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
@@ -225,7 +270,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
     pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
   }
 
-  buildOnnxToHipPipelineTail(pm);
+  buildOnnxToHipPipelineTail(pm, options.useOutputAllocator);
 }
 
 void mlir::hip::buildHipToLLVMPipeline(
@@ -248,7 +293,15 @@ void mlir::hip::buildHipToLLVMPipeline(
 
   mlir::hip::CompilationOptionsT compOpts;
   compOpts.constants_file = options.constantsFile;
-  pm.addPass(createGenerateInterfacePass(compOpts));
+  // convert-hip-to-llvm (above) auto-detects whether it produced a 2-arg
+  // (allocator) or 3-arg (classic) main_graph by param count; this branch only
+  // selects the matching interface generator. The allocator generator emits a
+  // 2-arg inference_compute (no prepare_output/finalize_output/out-params);
+  // the classic generator emits the 3-arg interface.
+  if (options.useOutputAllocator)
+    pm.addPass(createGenerateAllocatorInterfacePass(compOpts));
+  else
+    pm.addPass(createGenerateInterfacePass(compOpts));
 }
 
 void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
@@ -256,10 +309,15 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
   OnnxToHipPipelineOptions onnxOpts;
   onnxOpts.externalizeOutputDir = options.constantsDir;
   onnxOpts.externalizeMinNumElements = options.externalizeMinNumElements;
+  // Both halves must agree on the flag: an allocator-shaped main_graph fed to
+  // the classic interface generator (or vice versa) would emit a compute
+  // wrapper whose arity disagrees with main_graph.
+  onnxOpts.useOutputAllocator = options.useOutputAllocator;
   buildOnnxToHipPipeline(pm, onnxOpts);
 
   HipToLLVMPipelineOptions llvmOpts;
   llvmOpts.constantsFile = options.constantsFile;
+  llvmOpts.useOutputAllocator = options.useOutputAllocator;
   buildHipToLLVMPipeline(pm, llvmOpts);
 }
 

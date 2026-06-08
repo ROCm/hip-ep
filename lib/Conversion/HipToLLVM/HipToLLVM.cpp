@@ -64,6 +64,30 @@ private:
           loc, memrefStruct, ArrayRef<int64_t>{kStridesIdx, dim}));
   }
 
+  // Rewrite @main_graph from the convert-hip-to-llvm internal ABI (context +
+  // unpacked memref params) into the runtime calling convention, auto-detecting
+  // classic vs allocator mode by param count (the use-output-allocator flag is
+  // not visible at this stage). Each memref unpacks to 3 + 2*rank params; a
+  // returned memref lowers to a by-value struct result (no extra param). The
+  // classic main_graph has input AND output params; the allocator main_graph
+  // has input params only and returns the in-graph-allocated output memref.
+  //
+  // Allocator mode (rank-1 input + in-graph-allocated output):
+  //   Before (outputs are NOT params; main_graph returns the memref
+  //   descriptor):
+  //     llvm.func @main_graph(%ctx, %inAlloc, %inAligned, %inOff, %inSz, %inSt)
+  //         -> !llvm.struct<(ptr,ptr,i64,array<1xi64>,array<1xi64>)> { ... }
+  //   After (wrapper drops the outputs ptr; ignores the returned descriptor --
+  //   the output reaches the EP via the hipdnn_ep_alloc_output callback):
+  //     llvm.func @main_graph_internal(...same...) -> !llvm.struct<...>
+  //     llvm.func @main_graph(%ctx: !llvm.ptr, %inputs: !llvm.ptr) -> i32 {
+  //       %m = llvm.load <inputs[0]> ; <unpack %m into internal args>
+  //       %_ = llvm.call @main_graph_internal(%ctx, <unpacked>) -> struct
+  //       llvm.return %c0_i32
+  //     }
+  // Classic mode is the same except the wrapper takes (%ctx, %inputs,
+  // %outputs), also unpacks each output out-param, and forwards the internal's
+  // i32/void result.
   LogicalResult transformMainFunction(ModuleOp module) {
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc)
@@ -93,41 +117,61 @@ private:
         (int64_t)outputShapesAttr.size() != outputCount)
       return module.emitError("Metadata mismatch: shapes array size != count");
 
+    // Each memref unpacks to allocatedPtr + alignedPtr + offset + sizes[rank]
+    // + strides[rank] = 3 + 2*rank LLVM params. The allocator main_graph has
+    // the INPUT params only (outputs are allocated in-graph and returned as a
+    // by-value struct, which adds no param); the classic main_graph also has
+    // the output out-params.
     constexpr unsigned kMemRefPtrs = 2;   // allocatedPtr + alignedPtr
     constexpr unsigned kMemRefOffset = 1; // offset scalar
-    unsigned expectedParams = 1;          // context
+    unsigned expectedAllocator = 1;       // context
     for (auto shapeAttr : inputShapesAttr) {
       int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
-      expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
+      expectedAllocator += kMemRefPtrs + kMemRefOffset + rank + rank;
     }
+    unsigned expectedClassic = expectedAllocator;
     for (auto shapeAttr : outputShapesAttr) {
       int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
-      expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
+      expectedClassic += kMemRefPtrs + kMemRefOffset + rank + rank;
     }
 
     unsigned actualParams = mainFunc.getFunctionType().getNumParams();
-    if (actualParams != expectedParams) {
+    // Check classic first so a zero-output graph (where expectedClassic ==
+    // expectedAllocator) defaults to the classic path.
+    bool allocatorMode;
+    if (actualParams == expectedClassic) {
+      allocatorMode = false;
+    } else if (actualParams == expectedAllocator) {
+      allocatorMode = true;
+    } else {
       return module.emitError()
-             << "[HipToLLVM] Parameter count mismatch: expected "
-             << expectedParams << ", got " << actualParams;
+             << "[HipToLLVM] @main_graph parameter count mismatch: expected "
+             << expectedClassic << " (classic) or " << expectedAllocator
+             << " (allocator), got " << actualParams;
     }
 
     OpBuilder builder(module.getContext());
     Location loc = mainFunc.getLoc();
 
     // Rename the original main_graph (with unpacked memref params) so we can
-    // create a new wrapper that takes the runtime's (ctx, inputs, outputs)
-    // signature and unpacks memref structs before forwarding the call.
+    // create a new wrapper that takes the runtime calling convention --
+    // (ctx, inputs, outputs) in classic mode, or (ctx, inputs) in allocator
+    // mode (outputs are allocated in-graph) -- and unpacks the input (and, in
+    // classic mode, output) memref structs before forwarding the call.
     mainFunc.setName("main_graph_internal");
     mainFunc.setLinkage(LLVM::Linkage::Private);
 
     Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
     Type i32Type = builder.getI32Type();
-    SmallVector<Type> newParamTypes = {ptrType, ptrType, ptrType};
+    // Allocator wrapper drops the trailing outputs pointer arg.
+    SmallVector<Type> newParamTypes =
+        allocatorMode ? SmallVector<Type>{ptrType, ptrType}
+                      : SmallVector<Type>{ptrType, ptrType, ptrType};
     auto newFuncType = LLVM::LLVMFunctionType::get(i32Type, newParamTypes);
 
-    // Create the new main_graph wrapper with the simplified (ctx, inputs,
-    // outputs) signature that the runtime expects.
+    // Create the new main_graph wrapper with the simplified runtime signature
+    // ((ctx, inputs, outputs) classic / (ctx, inputs) allocator) computed
+    // above.
     builder.setInsertionPoint(mainFunc);
     auto newMainFunc =
         builder.create<LLVM::LLVMFuncOp>(loc, "main_graph", newFuncType);
@@ -142,7 +186,6 @@ private:
 
     Value ctxArg = entryBlock->getArgument(0);
     Value inputsArg = entryBlock->getArgument(1);
-    Value outputsArg = entryBlock->getArgument(2);
 
     SmallVector<Value> mainInternalArgs;
     mainInternalArgs.push_back(ctxArg);
@@ -162,23 +205,37 @@ private:
                                      mainInternalArgs);
     }
 
-    for (int64_t i = 0; i < outputCount; i++) {
-      int64_t rank = cast<DenseI64ArrayAttr>(outputShapesAttr[i]).size();
-      Value outputIdxVal = builder.create<LLVM::ConstantOp>(
-          loc, i32Type, builder.getI32IntegerAttr(i));
-      Value outputSlotPtr = builder.create<LLVM::GEPOp>(
-          loc, ptrType, ptrType, outputsArg, ValueRange{outputIdxVal});
-      Value outputStructPtr =
-          builder.create<LLVM::LoadOp>(loc, ptrType, outputSlotPtr);
-      Type memrefStructType = getMemRefStructType(builder, rank, 1);
-      Value outputMemref =
-          builder.create<LLVM::LoadOp>(loc, memrefStructType, outputStructPtr);
-      unpackMemRefStructWithAddrCast(builder, loc, outputMemref, rank,
-                                     mainInternalArgs);
+    // Classic mode forwards each output out-param (unpacked memref struct) to
+    // the internal call. Allocator mode has no output args -- the internal
+    // main_graph allocates and returns the output via hip.alloc_output, so the
+    // outputs pointer is absent from the wrapper signature.
+    if (!allocatorMode) {
+      Value outputsArg = entryBlock->getArgument(2);
+      for (int64_t i = 0; i < outputCount; i++) {
+        int64_t rank = cast<DenseI64ArrayAttr>(outputShapesAttr[i]).size();
+        Value outputIdxVal = builder.create<LLVM::ConstantOp>(
+            loc, i32Type, builder.getI32IntegerAttr(i));
+        Value outputSlotPtr = builder.create<LLVM::GEPOp>(
+            loc, ptrType, ptrType, outputsArg, ValueRange{outputIdxVal});
+        Value outputStructPtr =
+            builder.create<LLVM::LoadOp>(loc, ptrType, outputSlotPtr);
+        Type memrefStructType = getMemRefStructType(builder, rank, 1);
+        Value outputMemref = builder.create<LLVM::LoadOp>(loc, memrefStructType,
+                                                          outputStructPtr);
+        unpackMemRefStructWithAddrCast(builder, loc, outputMemref, rank,
+                                       mainInternalArgs);
+      }
     }
 
+    // Forward to the internal main_graph and return the i32 status:
+    //   - allocator mode: the internal returns a memref descriptor (by-value
+    //     struct) for the in-graph-allocated output. Call it, DISCARD the
+    //     struct result (the output reaches the EP through the
+    //     hipdnn_ep_alloc_output callback, not the return value), and return 0.
+    //   - classic void internal (real lowering): call, return 0.
+    //   - classic i32 internal (hand-written LIT shape): call, forward result.
     auto internalRetTy = mainFunc.getFunctionType().getReturnType();
-    if (isa<LLVM::LLVMVoidType>(internalRetTy)) {
+    if (allocatorMode || isa<LLVM::LLVMVoidType>(internalRetTy)) {
       builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
       Value zero = builder.create<LLVM::ConstantOp>(
           loc, i32Type, builder.getI32IntegerAttr(0));
@@ -190,7 +247,9 @@ private:
     }
 
     COMPILER_DEBUG_LOG("[HipToLLVM] Transformed @main_graph signature: "
-                       << actualParams << " params -> 3 params\n");
+                       << actualParams << " params -> " << newParamTypes.size()
+                       << " params ("
+                       << (allocatorMode ? "allocator" : "classic") << ")\n");
     return success();
   }
 };
