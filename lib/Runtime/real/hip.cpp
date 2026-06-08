@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -137,10 +138,20 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
   char *srcBase = static_cast<char *>(sd->alignedPtr) + sd->offset * elemSize;
   char *dstBase = static_cast<char *>(dd->alignedPtr) + dd->offset * elemSize;
 
+  // Issue copies on the inference session stream instead of the default/null
+  // stream 0. Default-stream work serializes with the session stream (legacy
+  // implicit sync) -- every strided memref.copy (vision Concat/Slice/Tile
+  // chains) would otherwise stall the GPU and show up as inter-op idle in the
+  // prefill profile. NULL (before the first begin_compute on this thread)
+  // falls back to stream 0 = previous behavior.
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_get_current_stream());
+
   // Rank-0: a single element. No strides to honour.
   if (rank == 0) {
     hipError_t err =
-        hipMemcpyAsync(dstBase, srcBase, elemSize, hipMemcpyDeviceToDevice, 0);
+        hipMemcpyAsync(dstBase, srcBase, elemSize, hipMemcpyDeviceToDevice,
+                       stream);
     if (err != hipSuccess) {
       fprintf(stderr, "memrefCopy(rank-0) failed: %s\n",
               hipGetErrorString(err));
@@ -180,7 +191,8 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
   // Tier 1: fully contiguous on both sides — one flat memcpy.
   if (rowStart == 0) {
     hipError_t err =
-        hipMemcpyAsync(dstBase, srcBase, rowBytes, hipMemcpyDeviceToDevice, 0);
+        hipMemcpyAsync(dstBase, srcBase, rowBytes, hipMemcpyDeviceToDevice,
+                       stream);
     if (err != hipSuccess) {
       fprintf(stderr, "memrefCopy(%lld bytes contig) failed: %s\n",
               static_cast<long long>(rowBytes), hipGetErrorString(err));
@@ -199,7 +211,7 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
     int64_t dstPitch = dstStrides[0] * elemSize;
     hipError_t err =
         hipMemcpy2DAsync(dstBase, dstPitch, srcBase, srcPitch, rowBytes, height,
-                         hipMemcpyDeviceToDevice, 0);
+                         hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
       fprintf(stderr, "memrefCopy(rank-2 strided) failed: %s\n",
               hipGetErrorString(err));
@@ -211,7 +223,7 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
   // hipMemcpyAsync per contiguous row. This is correct for any rank and
   // stride pattern. Max rank is bounded by MLIR's descriptor layout; 12
   // is comfortably above anything we currently generate.
-  constexpr int64_t kMaxRank = 12;
+  constexpr int64_t kMaxRank = HIPDNN_MAX_MEMREF_RANK;
   if (rank > kMaxRank) {
     fprintf(stderr, "memrefCopy: rank %lld exceeds supported maximum %lld\n",
             static_cast<long long>(rank), static_cast<long long>(kMaxRank));
@@ -224,6 +236,20 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
   for (int64_t i = 0; i < outerRank; ++i)
     outerTotal *= srcSizes[i];
 
+  // Tier 3 fast path: a single parallel strided-copy kernel instead of
+  // `outerTotal` per-row hipMemcpyAsync launches (which dominate strided-copy
+  // heavy graphs -- e.g. ~2M tiny launches per Qwen3.5 vision prefill).
+  // `srcStrides`/`dstStrides` are the outer-dim element strides; `rowElems` is
+  // the contiguous inner suffix. The host per-row loop below is the fallback
+  // for element sizes the kernel does not handle (rc != 0).
+  {
+    int rc = hip_strided_copy(stream, dstBase, srcBase, elemSize,
+                              static_cast<int>(outerRank), srcSizes, srcStrides,
+                              dstStrides, rowElems, outerTotal);
+    if (rc == 0)
+      return;
+  }
+
   for (int64_t r = 0; r < outerTotal; ++r) {
     int64_t srcByteOff = 0;
     int64_t dstByteOff = 0;
@@ -232,7 +258,7 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
       dstByteOff += idx[i] * dstStrides[i] * elemSize;
     }
     hipError_t err = hipMemcpyAsync(dstBase + dstByteOff, srcBase + srcByteOff,
-                                    rowBytes, hipMemcpyDeviceToDevice, 0);
+                                    rowBytes, hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
       fprintf(stderr, "memrefCopy(strided row) failed: %s\n",
               hipGetErrorString(err));

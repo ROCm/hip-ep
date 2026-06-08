@@ -109,6 +109,48 @@ class TestConcat:
 
 
 # ---------------------------------------------------------------------------
+# Tier-3 strided memref.copy kernel (hip_strided_copy)
+# ---------------------------------------------------------------------------
+#
+# A last-axis Concat on rank >= 3 produces a destination `memref.subview`
+# whose contiguous suffix is only the innermost dim, so two or more outer
+# dims remain strided (rowStart >= 2 in memrefCopy). That is the generic
+# "Tier 3" regime, which the parallel `hip_strided_copy` kernel now handles
+# in a single launch instead of one hipMemcpyAsync per row. These cases pin
+# that path numerically against the ORT CPU reference, across the element
+# widths the kernel templates on (2/4/8 bytes) and with outer extents large
+# enough to span multiple thread blocks plus the grid-stride remainder.
+class TestStridedCopyTier3:
+    @pytest.mark.parametrize(
+        "dtype,shapes,axis",
+        [
+            # rank-3, last axis -> rowStart == 2 (outerRank == 2).
+            (np.float16, [[8, 16, 4], [8, 16, 4]], -1),   # 2-byte elems
+            (np.float32, [[8, 16, 5], [8, 16, 3]], -1),   # 4-byte elems
+            (np.int32, [[6, 9, 4], [6, 9, 7]], -1),       # 4-byte elems
+            (np.int64, [[5, 7, 3], [5, 7, 6]], -1),       # 8-byte elems
+            # Large outer extent: 4096 rows forces grid clamp + grid-stride loop.
+            (np.float16, [[64, 64, 2], [64, 64, 2]], -1),
+            # rank-4, last axis -> rowStart == 3 (outerRank == 3).
+            (np.float32, [[2, 3, 4, 5], [2, 3, 4, 6]], -1),
+            (np.int64, [[2, 2, 3, 4], [2, 2, 3, 4]], -1),
+        ],
+    )
+    def test_concat_last_axis_strided(self, model_runner, dtype, shapes, axis):
+        model = _make_concat_model(dtype, shapes, axis)
+        rng = np.random.default_rng(800 + sum(shapes[0]))
+        feeds = []
+        for s in shapes:
+            if np.issubdtype(dtype, np.integer):
+                feeds.append(rng.integers(-100, 100, s, dtype=dtype))
+            else:
+                feeds.append(rng.uniform(-2.0, 2.0, s).astype(dtype))
+        actual, expected = model_runner.run_sample(model, feeds)
+        # Pure data movement -- must be bit-exact, no tolerance.
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
 # Tile
 # ---------------------------------------------------------------------------
 def _make_tile_model(dtype, input_shape: list[int], repeats: list[int]):
