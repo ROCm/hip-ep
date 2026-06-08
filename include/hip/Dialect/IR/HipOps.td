@@ -1165,6 +1165,38 @@ def Hip_GeluOp : Hip_DpsOp<"gelu"> {
   }];
 }
 
+def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
+  let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
+  let description = [{
+    Applies LeakyRelu activation element-wise.
+    Implements the ONNX LeakyRelu operator.
+
+    Formula: Y = X if X >= 0, else alpha * X
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.leaky_relu(%ctx) ins(%x : memref<3x4xf32, 1>)
+                         outs(%y : memref<3x4xf32, 1>)
+                         {alpha = 0.01 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F64Attr, "0.01">:$alpha
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal"> {
   let summary = "Element-wise reciprocal: y = 1/x";
   let description = [{

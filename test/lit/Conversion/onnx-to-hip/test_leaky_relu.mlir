@@ -16,9 +16,8 @@ module {
   // CHECK-LABEL: func.func @leaky_relu_default
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<3x4xf32>)
   // CHECK-NOT: onnx.LeakyRelu
-  // CHECK: hip.mul(%[[CTX]])
-  // CHECK: hip.less(%[[CTX]])
-  // CHECK: hip.where(%[[CTX]])
+  // CHECK: hip.leaky_relu(%[[CTX]]) ins(%[[X]] : tensor<3x4xf32>)
+  // CHECK-SAME: {alpha = 1.000000e-02 : f64}
 
   func.func @leaky_relu_alpha(%x: tensor<2x3xf16>) -> tensor<2x3xf16> {
     %y = "onnx.LeakyRelu"(%x) {alpha = 0.2 : f32} : (tensor<2x3xf16>) -> tensor<2x3xf16>
@@ -27,9 +26,8 @@ module {
 
   // CHECK-LABEL: func.func @leaky_relu_alpha
   // CHECK-NOT: onnx.LeakyRelu
-  // CHECK: hip.mul
-  // CHECK: hip.less
-  // CHECK: hip.where
+  // CHECK: hip.leaky_relu
+  // CHECK-SAME: {alpha = 2.000000e-01 : f64}
 
   func.func @leaky_relu_dynamic(%x: tensor<?x?xf32>) -> tensor<?x?xf32> {
     %y = "onnx.LeakyRelu"(%x) {alpha = 0.05 : f32} : (tensor<?x?xf32>) -> tensor<?x?xf32>
@@ -40,7 +38,6 @@ module {
   // CHECK-SAME: (%[[CTX3:.*]]: !hip.context, %[[X3:.*]]: tensor<?x?xf32>)
   // CHECK-NOT: onnx.LeakyRelu
   // CHECK: tensor.dim
-  // CHECK: hip.mul(%[[CTX3]])
-  // CHECK: hip.less(%[[CTX3]])
-  // CHECK: hip.where(%[[CTX3]])
+  // CHECK: hip.leaky_relu(%[[CTX3]])
+  // CHECK-SAME: {alpha = 5.000000e-02 : f64}
 }
