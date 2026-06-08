@@ -143,5 +143,8 @@ if(BUILD_HIP_TOOLS)
 
     # E2E integration tests (compile MLIR → DLL → execute)
     add_subdirectory(test/e2e)
+
+    # Runtime unit tests (GPU-free; native against mock types)
+    add_subdirectory(test/runtime)
   endif()
 endif()
