@@ -270,6 +270,28 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def UseOutputAllocatorPass
+    : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
+  let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";
+  let description = [{
+    Replaces each graph-output memref.alloc (a value returned by func.return)
+    with hip.alloc_output, reusing the alloc's dynamic-size operands and setting
+    out_idx to the return operand position.  Output buffers are then obtained
+    from the EP output allocator (EP/runtime-owned) instead of being deallocated
+    or pooled.  Requires !hip.context as function argument 0; functions without
+    it are left unchanged.
+
+    Standalone for now -- registered for hip-mlir-opt and LIT but NOT wired into
+    any pipeline (the allocator pipeline placement is a later phase; see
+    docs/design/output-allocator-design.md).  Leaves the function signature and
+    func.return untouched.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   let summary = "Refine dynamic dims in HIP DPS op result types via "
                 "`ReifyRankedShapedTypeOpInterface`";
