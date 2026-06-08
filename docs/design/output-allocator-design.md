@@ -50,7 +50,7 @@ Let `main_graph` allocate each output **at the point where its shape is computed
 
 ```mermaid
 graph TD
-    A[one-shot-bufferize] --> B{Flag?}
+    A[one-shot-bufferize] --> B{"use-output-allocator?"}
     B -->|"Classic Pipeline (off)"| D1[buffer-results-to-out-params]
     B -->|"Allocator Pipeline (on)"| D2[hip-use-output-allocator]
 
@@ -105,11 +105,13 @@ generate-allocator-interface     ← NEW: allocator-aware
 
 Each pipeline has single responsibility, no conditional logic, clear semantics. Changes to allocator model don't affect classic path.
 
+**Selection.** A pipeline option `use-output-allocator` (default off → Classic) selects the branch, threaded through `OnnxToHipPipelineOptions` / `HipToLLVMPipelineOptions`. The EP enables it for models with shape-derived dynamic outputs.
+
 ---
 
 ## 3. Phased Design
 
-The design separates into four conceptual layers, each building on the previous.
+The design separates into five conceptual layers, each building on the previous.
 
 ### Phase 1: In-Graph Allocation Abstraction
 
@@ -193,7 +195,7 @@ llvm.store %N, %shape[1]
 
 **Strides:** Computed as row-major from shape.
 
-**Allocator contract:** Always returns device pointer (GPU buffer). DLL runtime never tracks memory types.
+**Returns** a `void*` device pointer; the DLL never tracks memory types. Full allocator contract in Phase 3.
 
 ---
 
@@ -202,7 +204,7 @@ llvm.store %N, %shape[1]
 **Allocator interface:**
 ```c
 typedef struct {
-  void *(*allocate)(void *self, int32_t out_idx,
+  void *(*allocate)(void *self, int64_t out_idx,
                     const int64_t *shape, int64_t rank, int64_t elem_size);
   void *self;  // opaque context
 } hipdnn_output_allocator_t;
@@ -253,7 +255,9 @@ int inference_compute(void *state, span_t *inputs) {
 | `main_graph(state, inputs_array, outputs_array)` | `main_graph(state, inputs_array)` |
 | Calls `finalize_output` per output | No `finalize_output` |
 
-**Design rationale:** Outputs are allocated in-graph via the allocator allocator function, which creates OrtValues directly. The `outputs` parameter serves no purpose and would be confusing.
+**Design rationale:** Outputs are allocated in-graph via the allocator callback, which creates OrtValues directly. The `outputs` parameter serves no purpose and would be confusing.
+
+**Return:** The pass leaves `main_graph`'s `return` alone. `convert-hip-to-llvm` wraps the body in the `-> i32` entry and returns `0`; the body's memref return is ignored, same as the classic path.
 
 ### Phase 5: EP Bridge and Zero-Copy
 
@@ -263,14 +267,14 @@ sequenceDiagram
     participant DLL_IC as DLL: inference_compute
     participant DLL_MG as DLL: main_graph
     participant RT as Runtime: hipdnn_ep_alloc_output
-    participant CB as EP allocator function: allocate_output
+    participant CB as EP allocator callback: allocate_output
     participant ORT as ORT: KernelContext
 
     EP->>RT: hipdnn_ep_set_output_allocator(state, &allocator)
     EP->>DLL_IC: inference_compute(state, inputs)
     DLL_IC->>DLL_MG: main_graph(state, inputs)
     Note over DLL_MG: %M = memref.dim %input, 0
-    DLL_MG->>RT: hip.alloc_output(%ctx, %M)
+    DLL_MG->>RT: hipdnn_ep_alloc_output(state, out_idx, shape)
     RT->>CB: allocator->allocate(self, out_idx, shape, ...)
     CB->>ORT: ctx.GetOutput(idx, shape)
     ORT-->>CB: OrtValue
@@ -282,7 +286,7 @@ sequenceDiagram
     Note over EP: Flush pending D2H transfers<br/>hipMemcpyAsync(host, scratch, ...)<br/>hipStreamSynchronize()
 ```
 
-**EP allocator allocator function implementation:**
+**EP allocator callback implementation:**
 
 ```cpp
 struct PendingD2H {
@@ -294,7 +298,7 @@ struct PendingD2H {
 class HipdnnEP {
   std::vector<PendingD2H> pending_d2h_;  // per-Compute() call
 
-  static void *allocate_output(void *self, int32_t out_idx,
+  static void *allocate_output(void *self, int64_t out_idx,
                             const int64_t *shape, int64_t rank,
                             int64_t elem_size) {
     auto *ep = static_cast<HipdnnEP*>(self);
@@ -347,12 +351,8 @@ class HipdnnEP {
 
 **Key design points:**
 
-1. **Allocator always returns GPU device pointer:**
-   - GPU OrtValue → returns ORT's buffer (zero-copy)
-   - Host OrtValue → allocates scratch, returns scratch (queues D2H)
+1. **Allocator returns a GPU device pointer** (Phase 3 contract): GPU output zero-copies ORT's buffer; host output gets scratch + queued D2H. The DLL only ever sees a device pointer.
 
-2. **DLL never knows about memory types:** Just uses device pointer for kernels
+2. **EP owns D2H:** After `inference_compute` returns, EP flushes all D2H transfers
 
-3. **EP owns D2H:** After `inference_compute` returns, EP flushes all D2H transfers
-
-4. **KV cache share-buffer:** For `present.*` outputs, allocator function can request capacity shape (`max_length`) to get pre-bound buffer
+3. **KV cache share-buffer:** For `present.*` outputs, the allocator callback can request capacity shape (`max_length`) to get pre-bound buffer
