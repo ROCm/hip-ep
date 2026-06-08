@@ -26,17 +26,18 @@ namespace mlir_compilation {
 //
 // Contract:
 //   compiled_dims[0..rank)  -- the compiled metadata shape; -1 marks a dim that
-//                              was dynamic at compile time (the ONLY dims we may
-//                              override; static dims are architecture constants
-//                              like batch/num_heads/head_dim and must never
-//                              change).
+//                              was dynamic at compile time (the ONLY dims we
+//                              may override; static dims are architecture
+//                              constants like batch/num_heads/head_dim and must
+//                              never change).
 //   past_dims[0..past_rank) -- the matching past input's actual runtime shape.
 //   out_dims[0..rank)       -- working shape, mutated in place.
 //
 // Rules (must match the prior inline logic in marshal_output_tensors):
 //   * rank mismatch (past_rank != rank)            -> no-op, return false.
 //   * compiled_dims[d] != -1 (static dim)          -> leave out_dims[d] alone.
-//   * past_dims[d] > out_dims[d] on a dynamic dim  -> out_dims[d] = past_dims[d].
+//   * past_dims[d] > out_dims[d] on a dynamic dim  -> out_dims[d] =
+//   past_dims[d].
 // The strictly-greater test is the proxy for shared-buffer mode: separate-
 // buffer (past_present_share_buffer=false) has past = prev_total < curr_total,
 // so the override correctly does nothing there.
