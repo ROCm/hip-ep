@@ -137,6 +137,9 @@ jobs:
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
+            -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
+            -DCMAKE_C_VISIBILITY_PRESET=hidden \
+            -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build "${{ runner.workspace }}/build-llvm" --target install
