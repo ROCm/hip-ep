@@ -476,29 +476,12 @@ def make_llama_inputs(cfg: LlamaModelConfig, seq_len=1, seed=0) -> dict:
 
 # ── Whisper-large-v3 setup ───────────────────────────────────────────────────
 #
-# Pinned to a specific revision of the tonythethompson/whisper-large-v3-genai
-# package on Hugging Face. This is the GenAI-flavoured fp32 export with the
-# encoder/decoder split into two ONNX files and the heavy weights kept in
-# external ``.data`` sidecars. We pin a revision so future Hub updates can't
-# silently change op shapes / opset / quantization layout out from under us.
-
-WHISPER_HF_REPO = "tonythethompson/whisper-large-v3-genai"
-WHISPER_HF_REVISION = "76ed340154f83f3bf02213b6793a3a638a67b297"
-WHISPER_HF_BASE = (
-    f"https://huggingface.co/{WHISPER_HF_REPO}/resolve/{WHISPER_HF_REVISION}"
-)
-# All 6 files needed for a working Whisper-large-v3 fp32 baseline. The
-# ``*.onnx.data`` sidecars hold the large initializers (external-data format)
-# and MUST sit next to the matching ``.onnx`` for ``onnx.load`` to resolve
-# them.
-WHISPER_FILES = (
-    "encoder.onnx",
-    "encoder.onnx.data",
-    "decoder.onnx",
-    "decoder.onnx.data",
-    "genai_config.json",
-    "tokenizer.json",
-)
+# The raw fp32 + fp16 Whisper ONNX bundles are PRODUCED by
+# ``scripts/build_whisper_models.py`` (the pinned OGA DirectML model builder,
+# from ``openai/whisper-large-v3`` at a pinned commit revision) — they are NOT
+# downloaded. The setup functions below are consume-only: they run the shared
+# decoder surgery + fix_shapes on an already-built raw bundle and raise
+# FileNotFoundError with a build hint if it is absent.
 
 
 @dataclass
@@ -523,50 +506,44 @@ class WhisperModelConfig:
 
 
 def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
-    """Idempotent end-to-end Whisper model preparation — FP32 ONLY.
+    """Idempotent fp32 Whisper preparation — CONSUMES a locally-built raw model.
 
-    Whisper-large-v3 is natively fp32 and the fp32 GPU path works end-to-end
-    (conv1d + gqa + gemm/matmul + layernorm all fp32-capable; greedy emits the
-    verbatim JFK quote). We do NOT make fp16 variants: the only reason fp16 ever
-    existed was a perf story, but "our fp16 vs DML/Vulkan/CPU fp32" is an unfair
-    comparison — the fair benchmark is the SAME native-fp32 model on every
-    backend. So Whisper runs fp32 everywhere, and the canonical fixed-shape names
-    (``encoder_fixed.onnx`` / ``decoder_fixed_*.onnx``) ARE the fp32 graphs.
+    The raw fp32 ONNX is produced by ``scripts/build_whisper_models.py`` (pinned
+    OGA DirectML builder) into ``model_dir`` — there is NO download (the old
+    external prebuilt was non-reproducible). This function only runs the shared
+    surgery + fix_shapes on the already-present raw bundle.
 
-    Stages (in order — each consumes the previous stage's output):
-
-    1. Download the 6 fp32 files from the pinned HF revision into ``model_dir``.
-    2. Inject ``past_sequence_length`` into every self-attention MHA of the
-       ORIGINAL fp32 decoder (``decoder_surgery.onnx``). This also re-sources the
-       position embedding via ``Gather(embed_positions, position_ids)`` and
-       re-types ``input_ids`` to int64 — see ``inject_seqlens_k``.
-    3. Run ``fix_shapes`` to lock the dynamic dim_params:
-       - encoder: just ``batch_size=1`` (``encoder_fixed.onnx``)
-       - decoder prefill: S=4 (``decoder_fixed_prefill.onnx``)
-       - decoder decode: S=1 (``decoder_fixed_decode.onnx``)
-       Both decoder variants pin ``past_sequence_length=total_sequence_length=
-       n_text_ctx=448`` so the same KV buffer is reusable across steps in
-       shared-buffer mode.
-
-    First-run wall-clock: dominated by the ~6 GB download; surgery / fix_shapes
-    are metadata-only passes (<1 s each, sharing the fp32 weight blob via
-    external-data references). Steady-state cost: 0 — every step is gated on
-    ``dst.exists()``.
+    Raises FileNotFoundError with a build hint if the raw model is absent, so
+    callers (pytest fixture / CLI) can skip/instruct cleanly.
     """
-    model_dir.mkdir(parents=True, exist_ok=True)
+    # Guard checks BOTH encoder + decoder: _apply_whisper_surgery_and_fix_shapes
+    # reads encoder.onnx (fix_shapes) too, so a half-built dir with one but not
+    # the other must fail here with the build hint, not crash later raw.
+    for fname in ("encoder.onnx", "decoder.onnx"):
+        if not (model_dir / fname).exists():
+            raise FileNotFoundError(
+                f"Whisper raw model incomplete at {model_dir} (missing {fname}). "
+                "Build it first: python build.py --build-whisper-models"
+            )
+    _apply_whisper_surgery_and_fix_shapes(model_dir)
 
-    # Stage 1: download
-    for fname in WHISPER_FILES:
-        dst = model_dir / fname
-        if not dst.exists():
-            download(f"{WHISPER_HF_BASE}/{fname}", dst)
 
-    # Stage 2: KV-cache surgery on the ORIGINAL fp32 decoder (past_sequence_length
-    # input + position_ids Gather + int64 input_ids — see inject_seqlens_k).
+def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
+    """Surgery + fix_shapes on a locally-built Whisper bundle (fp32 OR fp16).
+
+    Consumes ``model_dir/{encoder,decoder}.onnx`` (+ ``.data`` sidecars) and emits
+    ``decoder_surgery.onnx`` + the three canonical fixed-shape variants. This is
+    the SAME pipeline for both precisions: the fp16 OGA build has the identical
+    graph layout (node names, 8-input self-attn MHA, ``embed_positions`` Slice,
+    int32 ``input_ids``) as the locally-built fp32 model, so ``inject_seqlens_k`` and
+    ``fix_shapes`` apply unchanged. Idempotent (each step gates on its output).
+    """
+    # Stage 2: KV-cache surgery on the decoder (past_sequence_length input +
+    # position_ids Gather + int64 input_ids — see inject_seqlens_k).
     decoder_surgery = model_dir / "decoder_surgery.onnx"
     inject_seqlens_k(model_dir / "decoder.onnx", decoder_surgery)
 
-    # Stage 3: fix dynamic shapes — three fp32 variants with canonical names.
+    # Stage 3: fix dynamic shapes — three variants with canonical names.
     encoder_fixed = model_dir / "encoder_fixed.onnx"
     if not encoder_fixed.exists():
         fix_shapes(model_dir / "encoder.onnx", encoder_fixed, {"batch_size": 1})
@@ -600,6 +577,24 @@ def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
         )
 
 
+def setup_whisper_fp16_model_dir(model_dir: pathlib.Path) -> None:
+    """Idempotent fp16 Whisper preparation — CONSUMES a locally-built raw model.
+
+    Identical to ``setup_whisper_model_dir`` but for the fp16 bundle (built by
+    ``scripts/build_whisper_models.py`` with -p fp16). The fp16 OGA graph has the
+    same layout as fp32, so ``_apply_whisper_surgery_and_fix_shapes`` applies
+    unchanged. The fp16 lm_head stays fp32 (OGA convention) -> argmax-lossless.
+    """
+    # Guard checks BOTH encoder + decoder (see setup_whisper_model_dir).
+    for fname in ("encoder.onnx", "decoder.onnx"):
+        if not (model_dir / fname).exists():
+            raise FileNotFoundError(
+                f"Whisper fp16 raw model incomplete at {model_dir} (missing {fname}). "
+                "Build it first: python build.py --build-whisper-models"
+            )
+    _apply_whisper_surgery_and_fix_shapes(model_dir)
+
+
 def make_whisper_inputs(audio_path: pathlib.Path, cfg: WhisperModelConfig) -> dict:
     """Build encoder input from a 16 kHz mono WAV using the HF feature extractor.
 
@@ -621,7 +616,7 @@ def make_whisper_inputs(audio_path: pathlib.Path, cfg: WhisperModelConfig) -> di
 
     # The processor config (mel filterbanks, target sample rate, n_mels)
     # is the same across whisper-large-v3 variants — use the openai original
-    # so we don't depend on the tonythethompson package shipping a processor.
+    # so we don't depend on the built ONNX bundle shipping a processor.
     fe = WhisperFeatureExtractor.from_pretrained("openai/whisper-large-v3")
 
     audio, sr = sf.read(str(audio_path))

@@ -9,9 +9,10 @@ A standalone driver around the shared greedy-decode harness in
 ``test/python/whisper/whisper_infer.py`` — no pytest, no ``python -c``. Runs identically
 in PowerShell and Git Bash:
 
-    python scripts/transcribe_whisper.py path/to/audio_16k.wav             # GPU
+    python scripts/transcribe_whisper.py path/to/audio_16k.wav             # GPU fp16 (default)
     python scripts/transcribe_whisper.py path/to/audio_16k.wav --compare   # GPU+CPU
     python scripts/transcribe_whisper.py path/to/audio_16k.wav --cpu       # CPU only
+    python scripts/transcribe_whisper.py path/to/audio_16k.wav --fp32      # GPU fp32
 
 Audio must be **16 kHz mono**. Resample first if needed, e.g.:
     ffmpeg -i in.mp3 -ar 16000 -ac 1 out.wav
@@ -22,12 +23,18 @@ Prerequisites (same as the tests — see docs/whisper_quick_start.md):
   * ``python build.py`` has produced install/dist/bin/onnxruntime_morphizen_ep.dll
   * THEROCK_DIST + install/{therock,dist}/bin are on PATH (so the EP can link the
     model DLL). Without them the EP raises rather than silently falling back.
-The model is downloaded + prepared automatically on first run (~6 GB).
+  * The Whisper model must already be BUILT LOCALLY first:
+        python build.py --build-whisper-models
+    This script only PREPARES (surgery + fix_shapes) and transcribes — it does
+    NOT download or build the model. If the raw bundle is absent it exits with a
+    build hint rather than a raw traceback.
 """
 
 import argparse
 import pathlib
 import sys
+
+import numpy as np
 
 # Resolve the repo root from this script's location (scripts/ is at repo root),
 # so it works regardless of the current working directory. The shared whisper
@@ -38,9 +45,13 @@ sys.path.insert(0, str(REPO_ROOT / "test" / "python"))
 sys.path.insert(0, str(REPO_ROOT / "test" / "python" / "whisper"))
 
 import whisper_infer  # noqa: E402
-from conftest import setup_whisper_model_dir  # noqa: E402
+from conftest import (  # noqa: E402
+    setup_whisper_fp16_model_dir,
+    setup_whisper_model_dir,
+)
 
 MODEL_DIR = REPO_ROOT / "models" / "whisper-large-v3-onnx"
+MODEL_DIR_FP16 = REPO_ROOT / "models" / "whisper-large-v3-onnx-fp16"
 
 
 def main() -> int:
@@ -70,6 +81,15 @@ def main() -> int:
         help="max decoded tokens (default 200; raise for long clips, cap 448)",
     )
     ap.add_argument(
+        "--fp32",
+        action="store_true",
+        help="use the fp32 model instead of the default fp16. The DEFAULT is the "
+        "fp16 model (built locally via the OGA DML builder; body fp16, lm_head "
+        "fp32 so greedy is argmax-lossless) — it is faster than fp32 on GPU. Both "
+        "precisions must be built first via 'python build.py "
+        "--build-whisper-models' (see docs/whisper_quick_start.md).",
+    )
+    ap.add_argument(
         "--metrics",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -91,9 +111,28 @@ def main() -> int:
         print(f"[transcribe] ERROR: audio file not found: {audio_path}")
         return 1
 
-    # Ensure the prepared fp32 ONNX variants exist (idempotent; first run ~6 GB).
-    print(f"[transcribe] ensuring model at {MODEL_DIR}")
-    setup_whisper_model_dir(MODEL_DIR)
+    # Precision selection: fp16 (DEFAULT) or fp32 (--fp32). Both are built locally
+    # via the OGA DML builder (python build.py --build-whisper-models). dtype
+    # drives the KV/audio cast; lm_head stays fp32 in both so greedy argmax is
+    # lossless. fp16 is the default because it is faster on GPU and bit-faithful.
+    use_fp16 = not args.fp32
+    prec = "fp16" if use_fp16 else "fp32"
+    dtype = np.float16 if use_fp16 else np.float32
+    model_dir = MODEL_DIR_FP16 if use_fp16 else MODEL_DIR
+
+    # The model must already be built (python build.py --build-whisper-models);
+    # the setup helpers are consume-only and raise FileNotFoundError if absent.
+    print(f"[transcribe] preparing {prec} model at {model_dir}")
+    try:
+        if use_fp16:
+            setup_whisper_fp16_model_dir(model_dir)
+        else:
+            setup_whisper_model_dir(model_dir)
+    except FileNotFoundError as e:
+        print(f"[transcribe] ERROR: {e}")
+        print("[transcribe] Build the model first:")
+        print("    python build.py --build-whisper-models")
+        return 1
 
     print(f"[transcribe] loading audio features from {audio_path}")
     audio_fp = whisper_infer.load_audio_features(audio_path)
@@ -104,14 +143,18 @@ def main() -> int:
     audio_s = whisper_infer.audio_duration_s(audio_path)
 
     if run_cpu:
-        cpu_factory = whisper_infer.make_cpu_session_factory(MODEL_DIR)
+        cpu_factory = whisper_infer.make_cpu_session_factory(model_dir)
         cpu_timings = {} if args.metrics else None
         cpu_tokens = whisper_infer.greedy_decode_cpu(
-            cpu_factory, audio_fp, max_length=args.max_length, timings=cpu_timings
+            cpu_factory,
+            audio_fp,
+            max_length=args.max_length,
+            timings=cpu_timings,
+            dtype=dtype,
         )
         print(f"CPU: {whisper_infer.decode_text(cpu_tokens)!r}")
         if args.metrics:
-            _print_metrics(cpu_timings, audio_s, label="CPU EP (fp32)")
+            _print_metrics(cpu_timings, audio_s, label=f"CPU EP ({prec})")
 
     if run_gpu:
         # Cache GPU sessions so warmup + the timed run reuse the SAME sessions.
@@ -121,7 +164,7 @@ def main() -> int:
         # compile every graph twice. Caching also makes warmup meaningful — it
         # primes the very sessions the timed run uses.
         base_factory = whisper_infer.make_morphizen_session_factory(
-            REPO_ROOT, MODEL_DIR
+            REPO_ROOT, model_dir
         )
         _session_cache = {}
 
@@ -133,15 +176,19 @@ def main() -> int:
         if args.warmup:
             print("[transcribe] warmup pass (discarded) ...")
             whisper_infer.greedy_decode_morphizen(
-                gpu_factory, audio_fp, max_length=args.max_length
+                gpu_factory, audio_fp, max_length=args.max_length, dtype=dtype
             )
         timings = {} if args.metrics else None
         gpu_tokens = whisper_infer.greedy_decode_morphizen(
-            gpu_factory, audio_fp, max_length=args.max_length, timings=timings
+            gpu_factory,
+            audio_fp,
+            max_length=args.max_length,
+            timings=timings,
+            dtype=dtype,
         )
         print(f"GPU: {whisper_infer.decode_text(gpu_tokens)!r}")
         if args.metrics:
-            _print_metrics(timings, audio_s, label="MorphiZen EP (fp32, GPU)")
+            _print_metrics(timings, audio_s, label=f"MorphiZen EP ({prec}, GPU)")
 
     return 0
 

@@ -104,23 +104,24 @@ def make_morphizen_session_factory(repo_root, model_dir):
 # ── KV helpers ────────────────────────────────────────────────────────────────
 
 
-def encoder_cross_kv(enc_session, audio_fp):
-    """Run the fp32 encoder and return (hidden_states, cross_kv_dict).
+def encoder_cross_kv(enc_session, audio_fp, dtype=np.float32):
+    """Run the encoder and return (hidden_states, cross_kv_dict).
 
     cross_kv keys are the DECODER input names (``past_key_cross_*`` /
-    ``past_value_cross_*``); values are fp32. Indexed by NAME — the encoder
-    output order is blocked (all keys then all values), not interleaved.
+    ``past_value_cross_*``); values are cast to ``dtype`` to match the decoder's
+    KV precision. Indexed by NAME — the encoder output order is blocked (all keys
+    then all values), not interleaved. ``dtype`` is ``np.float32`` for the fp32
+    model and ``np.float16`` for the fp16 model (whose cross-KV outputs are
+    already fp16, so the cast is a no-op there).
     """
-    feats = audio_fp.astype(np.float32)
+    feats = audio_fp.astype(dtype)
     names = [o.name for o in enc_session.get_outputs()]
     out = enc_session.run(None, {"audio_features": feats})
     omap = dict(zip(names, out))
     cross = {}
     for i in range(N_LAYERS):
-        cross[f"past_key_cross_{i}"] = omap[f"present_key_cross_{i}"].astype(np.float32)
-        cross[f"past_value_cross_{i}"] = omap[f"present_value_cross_{i}"].astype(
-            np.float32
-        )
+        cross[f"past_key_cross_{i}"] = omap[f"present_key_cross_{i}"].astype(dtype)
+        cross[f"past_value_cross_{i}"] = omap[f"present_value_cross_{i}"].astype(dtype)
     return omap["hidden_states"], cross
 
 
@@ -140,13 +141,16 @@ def zeroed_self_past(dtype=np.float32):
 # ── Greedy decode ─────────────────────────────────────────────────────────────
 
 
-def greedy_decode_cpu(session_factory, audio_fp, max_length=200, timings=None):
-    """CPU fp32 greedy decode on the DYNAMIC (pre-surgery) graphs.
+def greedy_decode_cpu(
+    session_factory, audio_fp, max_length=200, timings=None, dtype=np.float32
+):
+    """CPU greedy decode on the DYNAMIC (pre-surgery) graphs.
 
     Reference path: the dynamic decoder grows an empty past per step. This is the
     only valid CPU reference — ORT's MHA ignores ``past_sequence_length`` without
     ``past_present_share_buffer`` (which the surgery can't set), so the static
-    graph on CPU would attend to all 448 zeroed slots.
+    graph on CPU would attend to all 448 zeroed slots. ``dtype`` selects model
+    precision (fp32 default / fp16) for the fp16 reference compare.
 
     If ``timings`` (a dict) is passed it is populated with the same keys as the
     GPU path (``enc_ms`` / ``prefill_ms`` / ``decode_ms`` / ``n_decode_steps``)
@@ -159,17 +163,15 @@ def greedy_decode_cpu(session_factory, audio_fp, max_length=200, timings=None):
 
     enc = session_factory("encoder.onnx")
     _t = time.perf_counter()
-    _, cross = encoder_cross_kv(enc, audio_fp)
+    _, cross = encoder_cross_kv(enc, audio_fp, dtype=dtype)
     enc_ms = (time.perf_counter() - _t) * 1e3
     dec = session_factory("decoder.onnx")
     out_names = [o.name for o in dec.get_outputs()]
     self_kv = {}
     for i in range(N_LAYERS):
-        self_kv[f"past_key_self_{i}"] = np.zeros(
-            (1, N_HEADS, 0, HEAD_DIM), dtype=np.float32
-        )
+        self_kv[f"past_key_self_{i}"] = np.zeros((1, N_HEADS, 0, HEAD_DIM), dtype=dtype)
         self_kv[f"past_value_self_{i}"] = np.zeros(
-            (1, N_HEADS, 0, HEAD_DIM), dtype=np.float32
+            (1, N_HEADS, 0, HEAD_DIM), dtype=dtype
         )
     tokens = list(START_TOKENS)
     ids = np.array([START_TOKENS], dtype=np.int32)
@@ -207,11 +209,21 @@ def greedy_decode_cpu(session_factory, audio_fp, max_length=200, timings=None):
 
 
 def greedy_decode_morphizen(
-    session_factory, audio_fp, max_length=200, timings=None, use_iobinding=True
+    session_factory,
+    audio_fp,
+    max_length=200,
+    timings=None,
+    use_iobinding=True,
+    dtype=np.float32,
 ):
-    """Fully-fp32 GPU greedy decode using the canonical fixed model variants.
+    """GPU greedy decode using the canonical fixed model variants.
 
-    Every op dispatches on the fp32 GPU path. The decoder self-attn uses the GQA
+    ``dtype`` selects the model precision: ``np.float32`` (default) for the fp32
+    model, ``np.float16`` for the fp16 model. It drives the audio_features cast
+    and all KV-cache buffer dtypes; the logits buffer stays fp32 either way
+    because the OGA fp16 build keeps lm_head fp32 (argmax-lossless).
+
+    Every op dispatches on the GPU path. The decoder self-attn uses the GQA
     seqlens_k convention (seqlens_k = total_tokens - 1), so past_sequence_length
     is fed as (past_tokens + S) - 1: S-1 at prefill, then the running total each
     decode step. position_ids is fed separately = [real_past .. real_past+S-1].
@@ -234,10 +246,14 @@ def greedy_decode_morphizen(
     decode step are inflated — warm up if you want steady-state numbers.
     """
     impl = _greedy_decode_iobinding if use_iobinding else _greedy_decode_numpy
-    return impl(session_factory, audio_fp, max_length=max_length, timings=timings)
+    return impl(
+        session_factory, audio_fp, max_length=max_length, timings=timings, dtype=dtype
+    )
 
 
-def _greedy_decode_iobinding(session_factory, audio_fp, max_length=200, timings=None):
+def _greedy_decode_iobinding(
+    session_factory, audio_fp, max_length=200, timings=None, dtype=np.float32
+):
     """FAST GPU-resident greedy decode: IOBinding + KV-cache aliasing.
 
     Keeps the whole KV cache on the GPU instead of marshaling 32×2 self-KV +
@@ -281,17 +297,19 @@ def _greedy_decode_iobinding(session_factory, audio_fp, max_length=200, timings=
     enc = session_factory("encoder_fixed.onnx")
     enc_names = [o.name for o in enc.get_outputs()]
     _t = time.perf_counter()
-    enc_out = dict(zip(enc_names, enc.run(None, {"audio_features": audio_fp})))
+    enc_out = dict(
+        zip(enc_names, enc.run(None, {"audio_features": audio_fp.astype(dtype)}))
+    )
     enc_ms = (time.perf_counter() - _t) * 1e3
 
     # ── Upload cross-KV to GPU ONCE (constant across the whole generation) ────
     cross_gpu = {}
     for i in range(N_LAYERS):
         cross_gpu[f"past_key_cross_{i}"] = _gpu_val(
-            enc_out[f"present_key_cross_{i}"].astype(np.float32)
+            enc_out[f"present_key_cross_{i}"].astype(dtype)
         )
         cross_gpu[f"past_value_cross_{i}"] = _gpu_val(
-            enc_out[f"present_value_cross_{i}"].astype(np.float32)
+            enc_out[f"present_value_cross_{i}"].astype(dtype)
         )
 
     # ── self-KV GPU buffers (448-slot, zeroed) aliased past<->present ─────────
@@ -299,10 +317,15 @@ def _greedy_decode_iobinding(session_factory, audio_fp, max_length=200, timings=
     self_gpu = {}
     for i in range(N_LAYERS):
         for kind in ("key", "value"):
-            self_gpu[(i, kind)] = _gpu_val(np.zeros(kv_shape, dtype=np.float32))
+            self_gpu[(i, kind)] = _gpu_val(np.zeros(kv_shape, dtype=dtype))
 
-    pref_logits_gpu = _gpu_empty([1, s0, CFG.n_vocab], np.float32)
-    dec_logits_gpu = _gpu_empty([1, 1, CFG.n_vocab], np.float32)
+    # The logits GPU buffer dtype must MATCH the graph's logits output dtype, or
+    # IOBinding raises "Unexpected output data type". The OGA fp16 build computes
+    # the lm_head in fp32 internally (so argmax is lossless) but CASTS logits back
+    # to fp16 at the graph output — so the bound buffer is fp16 for the fp16 model,
+    # fp32 for the fp32 model. The argmax read-back upcasts either way.
+    pref_logits_gpu = _gpu_empty([1, s0, CFG.n_vocab], dtype)
+    dec_logits_gpu = _gpu_empty([1, 1, CFG.n_vocab], dtype)
 
     def _bind_self_and_cross(io):
         for i in range(N_LAYERS):
@@ -377,30 +400,30 @@ def _greedy_decode_iobinding(session_factory, audio_fp, max_length=200, timings=
     return tokens
 
 
-def _greedy_decode_numpy(session_factory, audio_fp, max_length=200, timings=None):
+def _greedy_decode_numpy(
+    session_factory, audio_fp, max_length=200, timings=None, dtype=np.float32
+):
     """Simple numpy greedy decode (debug fallback for the IOBinding path).
 
     Re-marshals all 32×2 self-KV + 32×2 cross-KV tensors host<->device every
     step, so it is decode-plumbing-bound — NOT a representative GPU throughput.
     Kept because its structure mirrors ``greedy_decode_cpu`` exactly, which makes
     per-token CPU-vs-GPU divergence bisection trivial. Tokens are bit-identical
-    to the IOBinding path.
+    to the IOBinding path. ``dtype`` selects model precision (fp32 / fp16).
     """
     import time
 
     enc = session_factory("encoder_fixed.onnx")
     names = [o.name for o in enc.get_outputs()]
     _t = time.perf_counter()
-    out = dict(zip(names, enc.run(None, {"audio_features": audio_fp})))
+    out = dict(zip(names, enc.run(None, {"audio_features": audio_fp.astype(dtype)})))
     enc_ms = (time.perf_counter() - _t) * 1e3
     cross = {}
     for i in range(N_LAYERS):
-        cross[f"past_key_cross_{i}"] = out[f"present_key_cross_{i}"].astype(np.float32)
-        cross[f"past_value_cross_{i}"] = out[f"present_value_cross_{i}"].astype(
-            np.float32
-        )
+        cross[f"past_key_cross_{i}"] = out[f"present_key_cross_{i}"].astype(dtype)
+        cross[f"past_value_cross_{i}"] = out[f"present_value_cross_{i}"].astype(dtype)
 
-    self_kv = zeroed_self_past()
+    self_kv = zeroed_self_past(dtype)
     s0 = len(START_TOKENS)
     pref_dec = session_factory("decoder_fixed_prefill.onnx")
     pref_out = [o.name for o in pref_dec.get_outputs()]
