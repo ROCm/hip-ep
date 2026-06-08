@@ -52,16 +52,34 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elementSizeBytes));
 
     // axis attribute
+    int64_t axisAttr = op.getAxis();
     Value axisVal = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getAxis()));
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(axisAttr));
+
+    // axis_size = data.shape[axis]; inner_size = product(data.shape[axis+1:]).
+    int64_t dataRank = dataType.getRank();
+    if (axisAttr < 0)
+      axisAttr += dataRank;
+    Value axisSizeVal =
+        getMemRefDimSize(dataType, static_cast<unsigned>(axisAttr),
+                         adaptor.getData(), rewriter, loc);
+    Value innerSizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+    for (int64_t d : llvm::seq<int64_t>(axisAttr + 1, dataRank)) {
+      Value ds = getMemRefDimSize(dataType, static_cast<unsigned>(d),
+                                  adaptor.getData(), rewriter, loc);
+      innerSizeVal = LLVM::MulOp::create(rewriter, loc, innerSizeVal, ds);
+    }
 
     // int wrap_gather(RuntimeState* state, void* data, void* indices,
     //                 void* output, int64_t axis, int64_t data_num_elements,
     //                 int64_t indices_num_elements,
-    //                 int64_t output_num_elements, int64_t element_size_bytes)
-    SmallVector<Type, 9> paramTypes = {ptrType, ptrType, ptrType,
-                                       ptrType, i64Type, i64Type,
-                                       i64Type, i64Type, i64Type};
+    //                 int64_t output_num_elements,
+    //                 int64_t axis_size, int64_t inner_size,
+    //                 int64_t element_size_bytes)
+    SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                        i64Type, i64Type, i64Type, i64Type,
+                                        i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapGather, paramTypes, i32Type);
@@ -76,6 +94,8 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
                                dataNumElementsVal,
                                indicesNumElementsVal,
                                outputNumElementsVal,
+                               axisSizeVal,
+                               innerSizeVal,
                                elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
