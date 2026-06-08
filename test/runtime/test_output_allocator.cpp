@@ -19,6 +19,12 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
+// EP-side pure helper (GPU-free, header-only) shared by the allocator callback
+// and the classic marshal path. Tested here so the OGA share-buffer override
+// rules have direct coverage without a GPU / ORT session.
+#include "output_shape_override.h"
+
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 
@@ -143,6 +149,91 @@ void test_alloc_null_state() {
   CHECK(g_cap.calls == 0);
 }
 
+// ---------------------------------------------------------------------------
+// EP-side pure helper: apply_present_share_buffer_override. GPU-free, so it is
+// exercised in this same binary. These mirror the OGA past_present_share_buffer
+// rules that BOTH the allocator callback and the classic marshal path rely on;
+// the "multiple shapes" case stands in for a single dynamic-shape EP session
+// seeing several shapes back to back without recompilation.
+// ---------------------------------------------------------------------------
+using mlir_compilation::apply_present_share_buffer_override;
+
+// 8. Dynamic present seq dim bumped up to the larger past (max_length) buffer.
+void test_override_basic_dynamic() {
+  const int64_t compiled[4] = {1, 8, -1, 64};
+  const int64_t past[4] = {1, 8, 128, 64};
+  int64_t out[4] = {1, 8, 7, 64};
+  bool changed = apply_present_share_buffer_override(compiled, past, out, 4, 4);
+  CHECK(changed);
+  CHECK(out[2] == 128); // dynamic dim raised to past
+  CHECK(out[0] == 1 && out[1] == 8 && out[3] == 64);
+}
+
+// 9. Static dims are NEVER overridden, even if past differs.
+void test_override_static_dim_untouched() {
+  const int64_t compiled[4] = {1, 8, 128, 64}; // dim 2 static in compiled
+  const int64_t past[4] = {1, 8, 256, 64};
+  int64_t out[4] = {1, 8, 7, 64};
+  bool changed = apply_present_share_buffer_override(compiled, past, out, 4, 4);
+  CHECK(!changed);
+  CHECK(out[2] == 7); // untouched: static dim guard
+}
+
+// 10. Separate-buffer mode (past not strictly larger) -> no override.
+void test_override_past_not_larger() {
+  const int64_t compiled[4] = {1, 8, -1, 64};
+  const int64_t past[4] = {1, 8, 128, 64};
+  int64_t out[4] = {1, 8, 200, 64};
+  bool changed = apply_present_share_buffer_override(compiled, past, out, 4, 4);
+  CHECK(!changed);
+  CHECK(out[2] == 200);
+}
+
+// 11. Rank mismatch -> defensive no-op.
+void test_override_rank_mismatch() {
+  const int64_t compiled[4] = {1, 8, -1, 64};
+  const int64_t past[3] = {1, 8, 128};
+  int64_t out[4] = {1, 8, 7, 64};
+  bool changed = apply_present_share_buffer_override(compiled, past, out, 4, 3);
+  CHECK(!changed);
+  CHECK(out[2] == 7);
+}
+
+// 12. Two dynamic dims both overridden; static dims preserved.
+void test_override_multi_dynamic_dims() {
+  const int64_t compiled[4] = {-1, 8, -1, 64};
+  const int64_t past[4] = {5, 8, 128, 64};
+  int64_t out[4] = {3, 8, 7, 64};
+  bool changed = apply_present_share_buffer_override(compiled, past, out, 4, 4);
+  CHECK(changed);
+  CHECK(out[0] == 5 && out[2] == 128); // both dynamic dims raised
+  CHECK(out[1] == 8 && out[3] == 64);  // static dims preserved
+}
+
+// 13. One dynamic-shape session, several shapes back to back. The helper is
+//     pure / stateless, so each shape resolves independently regardless of any
+//     prior call (decode seq=1, prefill seq=128, long-context seq=64, and a
+//     separate-buffer case where past is smaller).
+void test_override_multiple_shapes_one_session() {
+  const int64_t compiled[4] = {1, 8, -1, 64};
+  struct Case {
+    int64_t out_seq, past_seq, expect;
+  };
+  const Case cases[] = {
+      {1, 128, 128},    // decode into a 128 buffer
+      {128, 256, 256},  // prefill into a 256 buffer
+      {64, 2048, 2048}, // long-context into a 2048 buffer
+      {300, 256, 300},  // past smaller -> no override (separate buffer)
+  };
+  for (const Case &c : cases) {
+    const int64_t past[4] = {1, 8, c.past_seq, 64};
+    int64_t out[4] = {1, 8, c.out_seq, 64};
+    apply_present_share_buffer_override(compiled, past, out, 4, 4);
+    CHECK(out[2] == c.expect);
+    CHECK(out[0] == 1 && out[1] == 8 && out[3] == 64);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -151,6 +242,12 @@ int main() {
   test_nullptr_setter_arg();
   test_set_null_state();
   test_alloc_null_state();
+  test_override_basic_dynamic();
+  test_override_static_dim_untouched();
+  test_override_past_not_larger();
+  test_override_rank_mismatch();
+  test_override_multi_dynamic_dims();
+  test_override_multiple_shapes_one_session();
   if (g_failures == 0) {
     std::printf("output_allocator unit test: ALL PASS\n");
     return 0;

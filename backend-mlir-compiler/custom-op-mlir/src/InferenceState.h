@@ -58,8 +58,22 @@ public:
   InferenceState(InferenceState &&) = delete;
   InferenceState &operator=(InferenceState &&) = delete;
 
-  // Execute inference computation
+  // Execute inference computation (classic 3-arg ABI).
   int compute(span_t *inputs, span_t *outputs) const;
+
+  // Execute inference in output-allocator mode: 2-arg inference_compute
+  // (state, inputs). Graph outputs are allocated in-graph via the callback
+  // previously installed by set_output_allocator(); there is no outputs span.
+  // Resolves the same "inference_compute" symbol as compute() but with the
+  // 2-arg ABI (the DLL exports exactly one arity, fixed at compile time).
+  int compute_allocator(span_t *inputs) const;
+
+  // Install (allocator != nullptr) or clear (nullptr) the output allocator on
+  // the model.dll's RuntimeState before compute_allocator(). Resolved once in
+  // the ctor (like begin_compute). Fatal if called with a non-null allocator
+  // but the DLL does not export the setter (a stale allocator-mode DLL would
+  // otherwise crash with a null output buffer).
+  void set_output_allocator(const output_allocator_t *allocator) const;
 
   // Mark the start of a new forward pass before inference_compute. If the
   // model.dll exports hipdnn_ep_runtime_begin_compute (resolved once in
@@ -104,6 +118,12 @@ private:
   // predates the export.
   using BeginComputeFn = void (*)(void *);
   BeginComputeFn begin_compute_fn_;
+
+  // Cached hipdnn_ep_set_output_allocator (resolved once in the ctor, like
+  // begin_compute_fn_). Null when the model.dll predates the export (classic
+  // DLLs); only used in output-allocator mode.
+  using SetOutputAllocatorFn = void (*)(void *, const output_allocator_t *);
+  SetOutputAllocatorFn set_output_allocator_fn_;
 };
 
 } // namespace mlir_compilation::customop
