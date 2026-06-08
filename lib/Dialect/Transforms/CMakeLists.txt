@@ -17,6 +17,7 @@ add_library(HipDialectTransforms STATIC
   PromoteStridedHipOperands.cpp
   ResolveExternConstants.cpp
   ResolveTensorDims.cpp
+  UseOutputAllocator.cpp
 )
 
 add_dependencies(HipDialectTransforms
