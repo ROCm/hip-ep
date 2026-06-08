@@ -341,37 +341,30 @@ static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
   builder.setInsertionPointToStart(continueBlock);
 }
 
-class GenerateInterfacePass
-    : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>> {
+// Shared implementation for the classic (out-param) and allocator interface
+// generators. The two PassWrapper subclasses at the end of this namespace
+// select the mode via the `allocatorMode` flag threaded through runImpl /
+// verifyPrerequisites / generateInferenceCompute; inference_init,
+// inference_cleanup, runtime declarations and metadata are identical in both
+// modes.
+class GenerateInterfacePassBase {
 public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateInterfacePass)
-
-  explicit GenerateInterfacePass(
+  explicit GenerateInterfacePassBase(
       const mlir::hip::CompilationOptionsT &compilationOptions)
       : compilationOptions_(compilationOptions) {}
-  explicit GenerateInterfacePass(
+  explicit GenerateInterfacePassBase(
       mlir::hip::CompilationOptionsT &&compilationOptions)
       : compilationOptions_(std::move(compilationOptions)) {}
 
-  StringRef getArgument() const final { return "generate-interface"; }
-  StringRef getDescription() const final {
-    return "Generate C interface wrapper functions (inference_init, "
-           "inference_compute, inference_cleanup, inference_get_metadata_json)";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<LLVM::LLVMDialect>();
-    registry.insert<func::FuncDialect>();
-    registry.insert<arith::ArithDialect>();
-  }
-
-  void runOnOperation() override {
-    ModuleOp module = getOperation();
-
-    if (failed(verifyPrerequisites(module))) {
-      signalPassFailure();
-      return;
-    }
+protected:
+  // Shared run body. allocatorMode=false emits the classic 3-arg interface;
+  // true emits the 2-arg allocator interface (graph outputs allocated in-graph
+  // via hip.alloc_output -- no outputs span, no prepare_output/finalize_output
+  // calls). Returns failure() only when prerequisites are unmet so the concrete
+  // pass can call signalPassFailure().
+  LogicalResult runImpl(ModuleOp module, bool allocatorMode) {
+    if (failed(verifyPrerequisites(module, allocatorMode)))
+      return failure();
 
     // Prefer the hip.constants_file attribute set by OnnxToHip pass;
     // compilation-option override is not yet wired end-to-end.
@@ -392,17 +385,19 @@ public:
     auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
     auto outputShapes =
         module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
-    generateInferenceCompute(module, inputShapes, outputShapes);
+    generateInferenceCompute(module, inputShapes, outputShapes, allocatorMode);
     generateInferenceCleanup(module);
 
     std::string json = buildMetadataJson(module, constantsFile);
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
 
-    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions\n");
+    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions ("
+                       << (allocatorMode ? "allocator" : "classic")
+                       << " mode)\n");
+    return success();
   }
 
-private:
   mlir::hip::CompilationOptionsT compilationOptions_;
 
   struct RuntimeFuncSpec {
@@ -466,7 +461,7 @@ private:
     }
   }
 
-  LogicalResult verifyPrerequisites(ModuleOp module) {
+  LogicalResult verifyPrerequisites(ModuleOp module, bool allocatorMode) {
     MLIRContext *ctx = module.getContext();
     Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type i32Type = IntegerType::get(ctx, 32);
@@ -494,13 +489,23 @@ private:
       return failure();
     }
 
+    // After convert-hip-to-llvm's transformMainFunction, @main_graph is the
+    // runtime-ABI wrapper: (ptr, ptr, ptr) -> i32 classic, (ptr, ptr) -> i32
+    // allocator (no outputs span). All params are opaque pointers; the result
+    // is the i32 status.
     auto mainType = mainFunc.getFunctionType();
-    if (mainType.getNumParams() != 3 || mainType.getParamType(0) != ptrType ||
-        mainType.getParamType(1) != ptrType ||
-        mainType.getParamType(2) != ptrType ||
-        mainType.getReturnType() != i32Type) {
+    unsigned expectedNumParams = allocatorMode ? 2 : 3;
+    bool sigOk = mainType.getNumParams() == expectedNumParams &&
+                 mainType.getReturnType() == i32Type;
+    if (sigOk)
+      for (unsigned p : llvm::seq<unsigned>(0, expectedNumParams))
+        sigOk &= mainType.getParamType(p) == ptrType;
+    if (!sigOk) {
       llvm::errs() << "[GenerateInterface] @main_graph has wrong signature.\n"
-                   << "Expected: (ptr, ptr, ptr) -> i32\n";
+                   << "Expected: "
+                   << (allocatorMode ? "(ptr, ptr) -> i32 (allocator)"
+                                     : "(ptr, ptr, ptr) -> i32 (classic)")
+                   << "\n";
       return failure();
     }
 
@@ -673,8 +678,15 @@ private:
   ///     // 9. Free input TensorBuffers
   ///     // On error: store error code, free inputs, return error
   ///   }
+  ///
+  /// Allocator mode (allocatorMode=true): the wrapper takes (state, inputs)
+  /// only; output-tensor handling (prepare_output, the output-memref array,
+  /// finalize_output) and the outputs span are all skipped -- graph outputs
+  /// are allocated in-graph by hip.alloc_output (lowered to the
+  /// hipdnn_ep_alloc_output callback) and written directly, so @main_graph is
+  /// called as (state, input_memrefs).
   void generateInferenceCompute(ModuleOp module, ArrayAttr inputShapes,
-                                ArrayAttr outputShapes) {
+                                ArrayAttr outputShapes, bool allocatorMode) {
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
     builder.setInsertionPointToEnd(module.getBody());
@@ -682,7 +694,10 @@ private:
     Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
     Type i32Type = builder.getI32Type();
     Type i64Type = builder.getI64Type();
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType};
+    // Allocator mode drops the trailing outputs span arg.
+    SmallVector<Type> paramTypes =
+        allocatorMode ? SmallVector<Type>{ptrType, ptrType}
+                      : SmallVector<Type>{ptrType, ptrType, ptrType};
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
     auto funcOp =
@@ -695,10 +710,17 @@ private:
 
     Value state = entryBlock->getArgument(0);
     Value inputsSpanPtr = entryBlock->getArgument(1);
-    Value outputsSpanPtr = entryBlock->getArgument(2);
+    // outputsSpanPtr is arg 2 in classic mode only; allocator mode has no
+    // outputs span (outputs are allocated in-graph).
+    Value outputsSpanPtr = allocatorMode ? Value() : entryBlock->getArgument(2);
 
     size_t numInputs = inputShapes ? inputShapes.size() : 0;
-    size_t numOutputs = outputShapes ? outputShapes.size() : 0;
+    // Forcing numOutputs to 0 in allocator mode skips every output loop below
+    // (buffer allocas, prepare_output, output-memref build, finalize_output)
+    // without scattering guards; the only output op the EP still owns is the
+    // in-graph hip.alloc_output emitted earlier in the pipeline.
+    size_t numOutputs =
+        (!allocatorMode && outputShapes) ? outputShapes.size() : 0;
 
     Value c0_i32 = LLVM::ConstantOp::create(builder, loc, i32Type,
                                             builder.getI32IntegerAttr(0));
@@ -868,10 +890,13 @@ private:
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
       mainSuccessBlock = funcOp.addBlock();
-      emitErrorCheckedCall(
-          builder, loc, mainFunc,
-          ValueRange{state, inputMemrefArray, outputMemrefArray}, errorCodePtr,
-          errorCleanupBlock, funcOp);
+      // Classic: @main_graph(state, in_memrefs, out_memrefs). Allocator:
+      // @main_graph(state, in_memrefs) -- outputs allocated in-graph.
+      SmallVector<Value> mainArgs = {state, inputMemrefArray};
+      if (!allocatorMode)
+        mainArgs.push_back(outputMemrefArray);
+      emitErrorCheckedCall(builder, loc, mainFunc, mainArgs, errorCodePtr,
+                           errorCleanupBlock, funcOp);
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     }
 
@@ -953,6 +978,66 @@ private:
   }
 };
 
+// Classic out-param interface generator: --generate-interface.
+class GenerateInterfacePass
+    : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>>,
+      public GenerateInterfacePassBase {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateInterfacePass)
+
+  using GenerateInterfacePassBase::GenerateInterfacePassBase;
+
+  StringRef getArgument() const final { return "generate-interface"; }
+  StringRef getDescription() const final {
+    return "Generate C interface wrapper functions (inference_init, "
+           "inference_compute, inference_cleanup, inference_get_metadata_json)";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<LLVM::LLVMDialect>();
+    registry.insert<func::FuncDialect>();
+    registry.insert<arith::ArithDialect>();
+  }
+
+  void runOnOperation() override {
+    if (failed(runImpl(getOperation(), /*allocatorMode=*/false)))
+      signalPassFailure();
+  }
+};
+
+// Allocator interface generator: --generate-allocator-interface. Emits the
+// 2-arg (state, inputs) inference_compute / @main_graph ABI; outputs are
+// allocated in-graph via hip.alloc_output. Pairs with the
+// hip-use-output-allocator ONNX-to-HIP pass and the allocator branch of
+// convert-hip-to-llvm's transformMainFunction.
+class GenerateAllocatorInterfacePass
+    : public PassWrapper<GenerateAllocatorInterfacePass,
+                         OperationPass<ModuleOp>>,
+      public GenerateInterfacePassBase {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateAllocatorInterfacePass)
+
+  using GenerateInterfacePassBase::GenerateInterfacePassBase;
+
+  StringRef getArgument() const final { return "generate-allocator-interface"; }
+  StringRef getDescription() const final {
+    return "Generate the allocator-mode C interface (2-arg inference_compute / "
+           "@main_graph; graph outputs allocated in-graph via "
+           "hip.alloc_output)";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<LLVM::LLVMDialect>();
+    registry.insert<func::FuncDialect>();
+    registry.insert<arith::ArithDialect>();
+  }
+
+  void runOnOperation() override {
+    if (failed(runImpl(getOperation(), /*allocatorMode=*/true)))
+      signalPassFailure();
+  }
+};
+
 } // namespace
 
 namespace mlir {
@@ -961,6 +1046,11 @@ namespace hip {
 std::unique_ptr<mlir::Pass> createGenerateInterfacePass(
     const mlir::hip::CompilationOptionsT &compilationOptions) {
   return std::make_unique<GenerateInterfacePass>(compilationOptions);
+}
+
+std::unique_ptr<mlir::Pass> createGenerateAllocatorInterfacePass(
+    const mlir::hip::CompilationOptionsT &compilationOptions) {
+  return std::make_unique<GenerateAllocatorInterfacePass>(compilationOptions);
 }
 
 } // namespace hip
