@@ -17,6 +17,10 @@ add_dependencies(HipDialectIR
   HipOpsIncGen
 )
 
+if(MSVC)
+  target_compile_options(HipDialectIR PRIVATE /bigobj)
+endif()
+
 target_link_libraries(HipDialectIR PUBLIC
   MLIRIR
   MLIRSupport
