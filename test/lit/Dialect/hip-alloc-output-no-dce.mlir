@@ -19,7 +19,11 @@ func.func @keeps_unused_alloc_output(%ctx: !hip.context, %m: index) {
   return
 }
 
-// --- Two identical ops: CSE must NOT merge them (side-effecting). ---
+// --- Two IDENTICAL ops must NOT be merged by CSE (side-effecting). out_idx is
+//     0 on BOTH on purpose: differing attributes would make CSE skip the merge
+//     for free, so the only thing that can keep them separate is the Write side
+//     effect -- which is exactly what this pins. (This hand-written IR is not a
+//     pass output; the pass would assign distinct out_idx by return position.)
 // CSE-LABEL: func.func @no_cse_alloc_output
 // CSE-COUNT-2: hip.alloc_output
 func.func @no_cse_alloc_output(%ctx: !hip.context, %m: index)
