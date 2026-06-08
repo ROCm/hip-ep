@@ -5,12 +5,17 @@ Licensed under the MIT License.
 # Whisper-large-v3 Quick Start
 
 End-to-end guide for running **Whisper-large-v3** speech-to-text on the MorphiZen
-EP from a fresh checkout: build the EP, download + compile the model, run the
+EP from a fresh checkout: build the EP, build + compile the model, run the
 tests, transcribe your own audio, and compare against CPU / Vulkan.
 
-Whisper is **fp32-only** on this stack (the model ships natively as fp32; the
-fair cross-backend benchmark is fp32-vs-fp32). The runtime still supports fp16
-for the Llama / gpt-oss family — Whisper just doesn't use it.
+Whisper runs **fp16 by default** — it is both faster on GPU and bit-faithful: the
+fp16 build keeps the `lm_head` in fp32 while the body is fp16, so greedy decoding
+is argmax-lossless (verbatim transcription, prefill logit cosine 1.0 vs the
+fp16 CPU reference). An **fp32** variant is also available (`--fp32`). **Both
+precisions are built locally by one command** — `python build.py
+--build-whisper-models` (via a pinned OGA DirectML model builder in an isolated
+venv) — so there is no separate opt-in build step. fp32 is selected at run time
+with `--fp32`; see §6 for fp16-vs-fp32 numbers.
 
 > **Shell:** commands in this guide are written for **Git Bash** (the repo's
 > convention, same as the main [Quick Start](quick_start.md) — launch it from an
@@ -64,7 +69,10 @@ conda activate hipdnn-ep
 ```
 
 Whisper needs **no extra pip installs** — the test audio is fetched from public
-URLs at runtime (no `datasets` / `jiwer` dependency).
+URLs at runtime (no `datasets` / `jiwer` dependency), and the model build
+(`python build.py --build-whisper-models`, §3) installs its pinned builder deps
+into a **dedicated isolated venv** (`install/whisper-builder-venv/`), so it never
+touches the `hipdnn-ep` env or shadows the OGA fork.
 
 ---
 
@@ -112,26 +120,38 @@ $env:Path = "$PWD\install\therock\bin;$PWD\install\dist\bin;$env:Path"
 
 ---
 
-## 3. Download + compile the model
+## 3. Build + compile the model
 
-Everything is automated by `setup_whisper_model_dir` — it downloads the ~6 GB
-fp32 ONNX from HuggingFace, applies the required ONNX surgery
-(`past_sequence_length` input + position-embed / token-embed fixes for the static
-shared-buffer KV cache), and runs `fix_shapes` to lock the static shapes. It is
-idempotent; first run is dominated by the download (~5–10 min), later runs are
-instant.
-
-Run the setup script (works identically in PowerShell and Git Bash):
-
-```
-python scripts/setup_whisper_model.py
-```
-
-Verify the variants were produced (`ls` on Git Bash, `dir` on PowerShell):
+Acquisition is **two steps**. First, **build the raw models** — `python build.py
+--build-whisper-models` builds BOTH the fp32 (`models/whisper-large-v3-onnx/`)
+and fp16 (`models/whisper-large-v3-onnx-fp16/`) bundles from
+`openai/whisper-large-v3` (pinned HF revision) via a pinned OGA DirectML model
+builder running in an isolated venv. No manual stock-OGA install is needed — the
+builder venv is self-contained. First run downloads HF weights + builds (~10 min);
+idempotent after.
 
 ```
-models/whisper-large-v3-onnx/
-  encoder.onnx (+.data), decoder.onnx (+.data), tokenizer.json, genai_config.json   (originals)
+python build.py --build-whisper-models
+```
+
+Then **prepare the model for the EP** — `setup_whisper_model.py` is consume-only:
+it applies the required ONNX surgery (`past_sequence_length` input + position-embed
+/ token-embed fixes for the static shared-buffer KV cache) and runs `fix_shapes`
+to lock the static shapes on the already-built raw bundle. It is idempotent and
+instant; if the raw model is absent it prints the build hint above and exits.
+
+```
+python scripts/setup_whisper_model.py          # fp16 (default)
+python scripts/setup_whisper_model.py --fp32   # fp32 model dir
+```
+
+Verify the variants were produced (`ls` on Git Bash, `dir` on PowerShell) — the
+default fp16 bundle lives in `models/whisper-large-v3-onnx-fp16/`, the fp32 bundle
+in `models/whisper-large-v3-onnx/`; both have the same file set:
+
+```
+models/whisper-large-v3-onnx-fp16/   (default; fp32 dir mirrors this layout)
+  encoder.onnx (+.data), decoder.onnx (+.data), tokenizer.json, genai_config.json   (built raw bundle)
   encoder_fixed.onnx, decoder_surgery.onnx,
   decoder_fixed_prefill.onnx (S=4), decoder_fixed_decode.onnx (S=1)                  (compiled-shape variants)
 ```
@@ -143,6 +163,23 @@ models/whisper-large-v3-onnx/
 > `Remove-Item "$env:TEMP\morphizen_mlir_*"` · **Git Bash:** `rm -f "$TEMP"/morphizen_mlir_*`.
 > **Always do this after pulling a runtime/kernel change** — the cache key is the
 > ONNX hash, not the runtime version, so stale DLLs are otherwise reused silently.
+
+---
+
+## 3b. Precisions (fp16 default, fp32 opt-out)
+
+fp16 is the **default** precision — faster on GPU and bit-faithful (fp32 `lm_head`
+keeps greedy argmax-lossless). Both bundles are produced **together** by the same
+`python build.py --build-whisper-models` in §3 — the pinned OGA DirectML model
+builder emits an fp16 body with an fp32 `lm_head` for the default model and an
+all-fp32 model for `--fp32`. `python scripts/setup_whisper_model.py` (default) and
+`--fp32` apply the SAME surgery + `fix_shapes`, writing
+`models/whisper-large-v3-onnx-fp16/` and `models/whisper-large-v3-onnx/`.
+
+No manual `onnxruntime-genai-directml` install is needed and the OGA fork
+installed by `build.py --build-oga` is never shadowed — the builder runs in its own
+isolated venv (see §0). The default transcribe / test commands run fp16; add
+`--fp32` to use the fp32 model instead (§5, §6).
 
 ---
 
@@ -245,6 +282,14 @@ and prints a `CPU:` and a `GPU:` line for an apples-to-apples check; `--cpu` run
 python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --compare
 ```
 
+The default run uses the fp16 model. Add `--fp32` to run the fp32 model instead
+(build both precisions first with `python build.py --build-whisper-models`, §3).
+The metrics label shows the precision:
+
+```
+python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --fp32
+```
+
 - Audio must be **16 kHz mono**. Resample first if needed (e.g. `ffmpeg -i in.mp3
   -ar 16000 -ac 1 out.wav`). The feature extractor
   (`transformers.WhisperFeatureExtractor`) pads/truncates to Whisper's 30 s
@@ -275,24 +320,38 @@ Pipeline phases (all on GPU):
 
 ## 6. Compare backends (CPU / DirectML / Vulkan)
 
-### MorphiZen vs CPU vs DirectML (same fp32 ONNX — the fair comparison)
+### MorphiZen vs CPU vs DirectML, fp32 + fp16 (the fair comparison)
 
 ```bash
 pytest test/python/whisper/test_whisper.py::test_perf_decode_tps -v -s
 ```
 
-Prints a decode-throughput table. Notes on what you'll see (gfx1151 reference):
+Prints a decode-throughput table across MorphiZen / CPU / DirectML for **both
+precisions**. The fp32 rows always run; the fp16 rows run only if the fp16 model
+is available (§3) and are skipped with a note otherwise. Reference numbers
+(gfx1151, jfk.wav ~11 s, 2026-06-08; numbers vary run-to-run):
 
-| Backend | precision | decode tok/s | transcription |
-|---|---|---|---|
-| MorphiZen EP | fp32 ONNX | ~18 | JFK quote ✅ |
-| CPU EP | fp32 ONNX | ~17 | JFK quote ✅ |
-| DirectML EP | fp32 ONNX | **fails** | cross-attn `MultiHeadAttention` unsupported on DML |
+| Backend | precision | decode tok/s | encoder ms | transcription |
+|---|---|---|---|---|
+| MorphiZen EP | **fp16** | **28.4** | **451** | JFK quote ✅ |
+| MorphiZen EP | fp32 | 20.8 | 2243 | JFK quote ✅ |
+| CPU EP | fp32 | 21.8 | — | JFK quote ✅ |
+| CPU EP | fp16 | 18.1 | — | JFK quote ✅ (emulated fp16) |
+| DirectML EP | fp32 / fp16 | **fails** | — | cross-attn `MultiHeadAttention` unsupported on DML |
 
-**MorphiZen vs CPU is the only apples-to-apples pair** (identical fp32 ONNX, same
-ORT API, same decode loop). DirectML **cannot run the Whisper decoder** — its
-`com.microsoft.MultiHeadAttention` rejects the cross-attention layout — so there
-is no DML number to compare.
+**fp16 is both correct AND faster on MorphiZen here** — decode 20.8→28.4 tok/s and
+encoder 2243→451 ms vs MorphiZen fp32, while still emitting the verbatim JFK quote
+(argmax-lossless because the OGA build keeps `lm_head` fp32). MorphiZen-fp32 vs
+CPU-fp32 is the apples-to-apples pair (identical ONNX, same ORT API, same loop);
+note run-to-run variance. CPU fp16 is *slower* than CPU fp32 (ORT CPU has no native
+fp16 compute — it's emulated). DirectML **cannot run the Whisper decoder** in
+either precision — `com.microsoft.MultiHeadAttention` rejects the cross-attention
+layout — confirmed by a controlled A/B (same `decoder.onnx`, same inputs, same
+call: runs on the **CPU EP**, aborts on the **DML EP** at the first cross-attn
+node, only the provider differs). The DML *encoder* runs fine; only the decoder
+cross-attn node is rejected. (Note: the model being OGA-`-e dml`-exported does
+**not** imply DML-EP support — `-e dml` sets the activation dtype/layout, not op
+coverage.) Re-run the perf test on your hardware for current figures.
 
 ### Vulkan (whisper.cpp) baseline
 

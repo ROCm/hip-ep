@@ -2,15 +2,13 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""End-to-end Whisper-large-v3 correctness on the MorphiZen EP — FP32 ONLY.
+"""End-to-end Whisper-large-v3 correctness on the MorphiZen EP (fp32 + fp16).
 
-Whisper-large-v3 is natively fp32. We run it fp32 everywhere: the only reason
-fp16 variants ever existed was a perf story, but "our fp16 vs DML/Vulkan/CPU
-fp32" is an unfair comparison — the fair benchmark is the SAME native-fp32 model
-on every backend. The fp32 GPU path works end-to-end (conv1d + gqa + gemm/matmul
-+ layernorm all fp32-capable), so correctness here is measured GPU-fp32 vs
-CPU-fp32 of the SAME model, and greedy transcription matches the JFK quote
-VERBATIM.
+Whisper-large-v3 is natively fp32 and fp32 is the DEFAULT path; correctness is
+measured GPU-fp32 vs CPU-fp32 of the SAME model, and greedy transcription matches
+the JFK quote VERBATIM. An fp16 variant (built locally via the OGA DML builder,
+body fp16 + fp32 lm_head) is ALSO covered by opt-in tests (the ``fp16_model``
+fixture builds it on demand and skips if the builder deps are absent).
 
   * ``test_encoder_correctness``         — encoder hidden_states cosine
                                             (GPU-fp32 ``encoder_fixed.onnx`` vs
@@ -21,6 +19,10 @@ VERBATIM.
                                             (GPU-fp32 static vs CPU-fp32 dynamic)
   * ``test_e2e_transcription_greedy``    — GPU-fp32 greedy text == CPU-fp32
                                             verbatim JFK quote (a REAL pass)
+  * ``test_fp16_e2e_transcription_greedy``    — GPU-fp16 greedy == CPU-fp16
+                                                (opt-in; needs the fp16 build)
+  * ``test_fp16_decoder_prefill_correctness`` — fp16 prefill logits cosine
+                                                (GPU-fp16 static vs CPU-fp16)
 
 Decoder reference choice (CRITICAL): the CPU reference is the DYNAMIC
 (pre-surgery, empty-growing past) fp32 decoder, NOT the surgered+static graph on
@@ -71,6 +73,7 @@ from conftest import (  # noqa: E402
     register_morphizen_ep,
     setup_jfk_sample,
     setup_librispeech_samples,
+    setup_whisper_fp16_model_dir,
     setup_whisper_model_dir,
 )
 
@@ -91,6 +94,9 @@ from whisper_infer import (  # noqa: E402
 )
 
 _MODEL_DIR = REPO_ROOT / "models" / "whisper-large-v3-onnx"
+# fp16 model lives in a SEPARATE dir so it never collides with the fp32 bundle.
+# It is built on demand (OGA DML builder) by the `fp16_model` fixture — opt-in.
+_MODEL_DIR_FP16 = REPO_ROOT / "models" / "whisper-large-v3-onnx-fp16"
 _CFG = WhisperModelConfig()
 _WHISPER_DATA = REPO_ROOT / "test" / "python" / "data" / "whisper"
 _AUDIO = _WHISPER_DATA / "jfk.wav"
@@ -125,6 +131,27 @@ def _setup():
     yield
 
 
+@pytest.fixture(scope="module")
+def fp16_model():
+    """Consume the pre-built fp16 Whisper bundle (opt-in — NOT autouse).
+
+    The fp16 bundle must be built ahead of time via
+    `python build.py --build-whisper-models` (it builds both fp32 and fp16 in an
+    isolated venv). This fixture only consumes the built raw model — it runs the
+    decoder surgery + fix_shapes on it. If the bundle is absent (unbuilt) or the
+    surgery fails, the fp16 tests skip cleanly rather than erroring — the fp32
+    suite is unaffected because this is a separate fixture only fp16 tests use.
+    """
+    try:
+        setup_whisper_fp16_model_dir(_MODEL_DIR_FP16)
+    except Exception as e:  # noqa: BLE001 — unbuilt model / surgery error → skip
+        pytest.skip(
+            f"fp16 Whisper model unavailable: {e!r} "
+            "(build it: python build.py --build-whisper-models)"
+        )
+    return _MODEL_DIR_FP16
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -136,13 +163,13 @@ def _cosine(a, b):
     return float(np.dot(a, b) / denom)
 
 
-def _cpu_session(model_name):
+def _cpu_session(model_name, model_dir=_MODEL_DIR):
     return ort.InferenceSession(
-        str(_MODEL_DIR / model_name), providers=["CPUExecutionProvider"]
+        str(model_dir / model_name), providers=["CPUExecutionProvider"]
     )
 
 
-def _morphizen_session(model_name):
+def _morphizen_session(model_name, model_dir=_MODEL_DIR):
     devices = register_morphizen_ep(REPO_ROOT)
     if not devices:
         pytest.skip("MorphiZen EP not found — run build.py first")
@@ -160,7 +187,7 @@ def _morphizen_session(model_name):
     # is harmless and keeps the helper uniform.
     so.add_session_config_entry("session.disable_aot_function_inlining", "1")
     so.add_provider_for_devices(devices, {})
-    return ort.InferenceSession(str(_MODEL_DIR / model_name), sess_options=so)
+    return ort.InferenceSession(str(model_dir / model_name), sess_options=so)
 
 
 def _assert_no_silent_fallback(stderr_text):
@@ -486,32 +513,44 @@ def test_decoder_decode_correctness():
 # ── End-to-end greedy transcription ──────────────────────────────────────────
 
 
-def _greedy_decode_cpu(audio_fp, max_length=200):
-    """CPU fp32 greedy reference — thin wrapper over the shared harness.
+def _greedy_decode_cpu(
+    audio_fp, max_length=200, model_dir=_MODEL_DIR, dtype=np.float32
+):
+    """CPU greedy reference — thin wrapper over the shared harness.
 
     Logic lives in ``whisper_infer.greedy_decode_cpu``; here we just bind the
-    pytest-skip-aware ``_cpu_session`` factory.
+    pytest-skip-aware ``_cpu_session`` factory. ``model_dir`` / ``dtype`` select
+    the fp32 (default) or fp16 model.
     """
     return whisper_infer.greedy_decode_cpu(
-        _cpu_session, audio_fp, max_length=max_length
+        lambda name: _cpu_session(name, model_dir),
+        audio_fp,
+        max_length=max_length,
+        dtype=dtype,
     )
 
 
-def _greedy_decode_morphizen(audio_fp, max_length=200):
-    """Fully-fp32 GPU greedy decode — thin wrapper over the shared harness.
+def _greedy_decode_morphizen(
+    audio_fp, max_length=200, model_dir=_MODEL_DIR, dtype=np.float32
+):
+    """GPU greedy decode — thin wrapper over the shared harness.
 
     Logic (encoder + 2-variant decoder loop, the seqlens_k / position_ids
     convention, the three correctness fixes) lives in
     ``whisper_infer.greedy_decode_morphizen``; here we bind the pytest-skip-aware
-    ``_morphizen_session`` factory so a missing EP skips cleanly.
+    ``_morphizen_session`` factory so a missing EP skips cleanly. ``model_dir`` /
+    ``dtype`` select the fp32 (default) or fp16 model.
     """
     return whisper_infer.greedy_decode_morphizen(
-        _morphizen_session, audio_fp, max_length=max_length
+        lambda name: _morphizen_session(name, model_dir),
+        audio_fp,
+        max_length=max_length,
+        dtype=dtype,
     )
 
 
 def _greedy_decode_morphizen_iobinding(
-    enc, pref_dec, dec, audio_fp, max_length=200, return_timing=False
+    enc, pref_dec, dec, audio_fp, max_length=200, return_timing=False, dtype=np.float32
 ):
     """OGA-style zero-copy GPU greedy decode via IOBinding + KV-cache aliasing.
 
@@ -561,17 +600,19 @@ def _greedy_decode_morphizen_iobinding(
     # ── Encoder (run once) — gives cross-KV ──────────────────────────────────
     enc_names = [o.name for o in enc.get_outputs()]
     t0 = time.perf_counter()
-    enc_out = dict(zip(enc_names, enc.run(None, {"audio_features": audio_fp})))
+    enc_out = dict(
+        zip(enc_names, enc.run(None, {"audio_features": audio_fp.astype(dtype)}))
+    )
     enc_ms = (time.perf_counter() - t0) * 1e3
 
     # ── Upload cross-KV to GPU ONCE (constant across the whole generation) ────
     cross_gpu = {}
     for i in range(_N_LAYERS):
         cross_gpu[f"past_key_cross_{i}"] = _gpu_val(
-            enc_out[f"present_key_cross_{i}"].astype(np.float32)
+            enc_out[f"present_key_cross_{i}"].astype(dtype)
         )
         cross_gpu[f"past_value_cross_{i}"] = _gpu_val(
-            enc_out[f"present_value_cross_{i}"].astype(np.float32)
+            enc_out[f"present_value_cross_{i}"].astype(dtype)
         )
 
     # ── Allocate self-KV GPU buffers (448-slot, zeroed) aliased past<->present ─
@@ -581,13 +622,16 @@ def _greedy_decode_morphizen_iobinding(
     self_gpu = {}
     for i in range(_N_LAYERS):
         for kind in ("key", "value"):
-            self_gpu[(i, kind)] = _gpu_val(np.zeros(kv_shape, dtype=np.float32))
+            self_gpu[(i, kind)] = _gpu_val(np.zeros(kv_shape, dtype=dtype))
 
-    # logits GPU output buffers (one per session — different graphs).
+    # logits GPU buffer dtype must match the graph's logits output dtype: the OGA
+    # fp16 build computes lm_head in fp32 but casts logits back to fp16 at the
+    # output, so the buffer is fp16 for the fp16 model (fp32 for fp32). Mismatch →
+    # IOBinding "Unexpected output data type". argmax read-back upcasts either way.
     pref_logits_shape = [1, s0, _CFG.n_vocab]
     dec_logits_shape = [1, 1, _CFG.n_vocab]
-    pref_logits_gpu = _gpu_empty(pref_logits_shape, np.float32)
-    dec_logits_gpu = _gpu_empty(dec_logits_shape, np.float32)
+    pref_logits_gpu = _gpu_empty(pref_logits_shape, dtype)
+    dec_logits_gpu = _gpu_empty(dec_logits_shape, dtype)
 
     def _bind_self_and_cross(io):
         for i in range(_N_LAYERS):
@@ -711,6 +755,115 @@ def test_e2e_transcription_greedy(capfd):
     )
 
 
+# ── fp16 correctness (opt-in: needs the locally-built fp16 OGA bundle) ─────────
+
+
+def test_fp16_e2e_transcription_greedy(fp16_model, capfd):
+    """fp16 GPU greedy transcription of jfk.wav == fp16 CPU quote.
+
+    The fp16 model is built by the OGA DML model builder (``fp16_model`` fixture).
+    Its body is fp16 but ``lm_head`` stays fp32, so greedy argmax is lossless —
+    the GPU fp16 text must match the CPU fp16 dynamic-reference text exactly AND be
+    the verbatim JFK quote. The CPU reference uses the DYNAMIC graph (the static
+    surgered graph is invalid on ORT CPU — it ignores past_sequence_length; see
+    the module docstring), so this is fp16-GPU-static vs fp16-CPU-dynamic.
+    """
+    os.environ["HIPDNN_EP_DEBUG"] = "1"
+    audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(np.float32)
+
+    cpu_tokens = _greedy_decode_cpu(audio, model_dir=fp16_model, dtype=np.float16)
+    cpu_text = _decode_text(cpu_tokens)
+
+    capfd.readouterr()
+    mz_tokens = _greedy_decode_morphizen(audio, model_dir=fp16_model, dtype=np.float16)
+    stderr_text = "".join(capfd.readouterr())
+    mz_text = _decode_text(mz_tokens)
+
+    print(f"\n[fp16-e2e] CPU(fp16) : {cpu_text!r}")
+    print(f"[fp16-e2e] GPU(fp16) : {mz_text!r}")
+
+    _assert_compiled_on_gpu(stderr_text)  # no silent CPU fallback
+    assert "country" in cpu_text.lower(), (
+        f"fp16 CPU reference looks wrong: {cpu_text!r}"
+    )
+    assert mz_tokens == cpu_tokens, (
+        f"fp16 transcription token mismatch:\n  cpu: {cpu_text!r}\n  mz : {mz_text!r}"
+    )
+
+
+def test_fp16_decoder_prefill_correctness(fp16_model, capfd):
+    """fp16 prefill last-token logits cosine: MorphiZen(fp16) vs CPU(fp16).
+
+    GPU runs the fixed fp16 ``decoder_fixed_prefill.onnx`` (static 448-slot shared
+    buffer); the reference is the dynamic fp16 ``decoder.onnx`` on the CPU EP, both
+    fed the SAME fp16 cross-KV from the CPU encoder so only the decoder kernels are
+    compared. lm_head is fp32 in both, so the logits compare is exact-ish.
+    """
+    os.environ["HIPDNN_EP_DEBUG"] = "1"
+    audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(np.float32)
+    s0 = len(_START_TOKENS)
+
+    # Shared fp16 cross-KV from the CPU encoder (isolate the decoder).
+    cpu_enc = _cpu_session("encoder.onnx", fp16_model)
+    _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=np.float16)
+
+    # ── CPU-fp16 reference: DYNAMIC decoder, empty (0-slot) past ──────────────
+    cpu_dec = _cpu_session("decoder.onnx", fp16_model)
+    cpu_out_names = [o.name for o in cpu_dec.get_outputs()]
+    zero_past = {}
+    for i in range(_N_LAYERS):
+        zero_past[f"past_key_self_{i}"] = np.zeros(
+            (1, _N_HEADS, 0, _HEAD_DIM), dtype=np.float16
+        )
+        zero_past[f"past_value_self_{i}"] = np.zeros(
+            (1, _N_HEADS, 0, _HEAD_DIM), dtype=np.float16
+        )
+    cpu_ref = dict(
+        zip(
+            cpu_out_names,
+            cpu_dec.run(
+                None,
+                {
+                    "input_ids": np.array([_START_TOKENS], dtype=np.int32),
+                    **zero_past,
+                    **cross,
+                },
+            ),
+        )
+    )
+    cpu_logits = np.asarray(cpu_ref["logits"][0, -1, :], dtype=np.float32)
+
+    # ── MorphiZen-fp16: static surgered prefill graph (448-slot shared buffer) ─
+    capfd.readouterr()
+    mz_pref = _morphizen_session("decoder_fixed_prefill.onnx", fp16_model)
+    mz_out_names = [o.name for o in mz_pref.get_outputs()]
+    self_kv = _zeroed_self_past(np.float16)
+    mz_out = dict(
+        zip(
+            mz_out_names,
+            mz_pref.run(
+                None,
+                {
+                    "input_ids": np.array([_START_TOKENS], dtype=np.int64),
+                    "past_sequence_length": np.array([s0 - 1], dtype=np.int32),
+                    "position_ids": np.arange(s0, dtype=np.int64),
+                    **self_kv,
+                    **cross,
+                },
+            ),
+        )
+    )
+    stderr_text = "".join(capfd.readouterr())
+    _assert_compiled_on_gpu(stderr_text)
+    mz_logits = np.asarray(mz_out["logits"][0, -1, :], dtype=np.float32)
+
+    cos = _cosine(cpu_logits, mz_logits)
+    print(
+        f"\n[fp16-prefill] last-token logits cosine (GPU-fp16 vs CPU-fp16) = {cos:.6f}"
+    )
+    assert cos > 0.98, f"fp16 prefill GPU-vs-CPU cosine = {cos} < 0.98"
+
+
 # ── Cross-backend decode-throughput benchmark (the fair fp32 comparison) ──────
 #
 # THE FAIR BENCHMARK: decode tok/s + transcription accuracy for the SAME
@@ -739,12 +892,13 @@ def test_e2e_transcription_greedy(capfd):
 #     the headline. NEVER run this with HIPDNN_EP_PERF=1 (it adds ~58% overhead).
 
 
-def _greedy_decode_dynamic_timed(enc, dec, audio_fp, max_length=200):
-    """Greedy decode on the DYNAMIC fp32 graphs (CPU or DML), with timings.
+def _greedy_decode_dynamic_timed(enc, dec, audio_fp, max_length=200, dtype=np.float32):
+    """Greedy decode on the DYNAMIC graphs (CPU or DML), with timings.
 
     `enc` / `dec` are pre-built InferenceSessions for ``encoder.onnx`` /
     ``decoder.onnx`` on the target EP. Returns
-    ``(tokens, enc_ms, prefill_ms, decode_ms, n_decode_steps)``.
+    ``(tokens, enc_ms, prefill_ms, decode_ms, n_decode_steps)``. ``dtype`` selects
+    the model precision (fp32 default / fp16) so the same loop times both.
 
     Mirrors ``_greedy_decode_cpu`` (same dynamic graph, same growing-past KV
     convention, same argmax greedy) but instruments encoder / prefill / decode
@@ -756,25 +910,25 @@ def _greedy_decode_dynamic_timed(enc, dec, audio_fp, max_length=200):
 
     enc_names = [o.name for o in enc.get_outputs()]
     t0 = time.perf_counter()
-    enc_out = dict(zip(enc_names, enc.run(None, {"audio_features": audio_fp})))
+    enc_out = dict(
+        zip(enc_names, enc.run(None, {"audio_features": audio_fp.astype(dtype)}))
+    )
     enc_ms = (time.perf_counter() - t0) * 1e3
     cross = {}
     for i in range(_N_LAYERS):
-        cross[f"past_key_cross_{i}"] = enc_out[f"present_key_cross_{i}"].astype(
-            np.float32
-        )
+        cross[f"past_key_cross_{i}"] = enc_out[f"present_key_cross_{i}"].astype(dtype)
         cross[f"past_value_cross_{i}"] = enc_out[f"present_value_cross_{i}"].astype(
-            np.float32
+            dtype
         )
 
     out_names = [o.name for o in dec.get_outputs()]
     self_kv = {}
     for i in range(_N_LAYERS):
         self_kv[f"past_key_self_{i}"] = np.zeros(
-            (1, _N_HEADS, 0, _HEAD_DIM), dtype=np.float32
+            (1, _N_HEADS, 0, _HEAD_DIM), dtype=dtype
         )
         self_kv[f"past_value_self_{i}"] = np.zeros(
-            (1, _N_HEADS, 0, _HEAD_DIM), dtype=np.float32
+            (1, _N_HEADS, 0, _HEAD_DIM), dtype=dtype
         )
 
     # Prefill (S=4 start tokens, empty past).
@@ -937,62 +1091,61 @@ def _bench_backend(run_one):
     return tokens, enc_ms, prefill_ms, decode_tps, n_steps
 
 
-def test_perf_decode_tps(capfd):
-    """Cross-backend fp32 decode tok/s + accuracy: MorphiZen / DirectML / CPU.
+def _perf_one_precision(audio, capfd, precision, model_dir, dtype, results):
+    """Bench MorphiZen / DirectML / CPU for ONE precision; fill ``results``.
 
-    All three run the SAME native-fp32 Whisper-large-v3 with the SAME greedy
-    decode-loop structure. MorphiZen runs the surgered fixed-shape form
-    (encoder_fixed + decoder_fixed_prefill/decode); CPU and DML run the dynamic
-    ORIGINAL onnx (encoder + decoder) — the only valid graph for ORT's MHA
-    kernel (see module docstring + CLAUDE.md). Prints a results table and
-    asserts every backend transcribes the JFK quote.
+    ``results`` is keyed by ``(backend_label, precision)`` →
+    ``(enc_ms, prefill_ms, decode_tps, text, n_steps)``. Each backend is
+    best-effort: a failure (EP missing, DML op gap, fp16 build absent) is logged
+    and skipped, never aborts the other rows.
     """
-    audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(np.float32)
-    results = {}  # label -> (enc_ms, prefill_ms, decode_tps, text, n_steps)
-
-    # ── MorphiZen EP (GPU, fixed-shape fp32) ─────────────────────────────────
-    os.environ["HIPDNN_EP_DEBUG"] = "1"
-    capfd.readouterr()
-    mz_enc = _morphizen_session("encoder_fixed.onnx")
-    mz_pref = _morphizen_session("decoder_fixed_prefill.onnx")
-    mz_dec = _morphizen_session("decoder_fixed_decode.onnx")
-    # OGA-style zero-copy decode: self-KV aliased GPU buffers (past==present),
-    # cross-KV bound once, per-step only tiny inputs + a single logits D2H. The
-    # 96-KV-tensor-per-step host<->device marshaling of the naive Python loop
-    # (which floored the decode at ~4.65 tok/s) is eliminated — this row now
-    # measures GPU kernels, not Python plumbing.
-    mz_tokens, mz_enc_ms, mz_pref_ms, mz_tps, mz_n = _bench_backend(
-        lambda: _greedy_decode_morphizen_iobinding(
-            mz_enc, mz_pref, mz_dec, audio, return_timing=True
+    # ── MorphiZen EP (GPU, fixed-shape) ──────────────────────────────────────
+    try:
+        os.environ["HIPDNN_EP_DEBUG"] = "1"
+        capfd.readouterr()
+        mz_enc = _morphizen_session("encoder_fixed.onnx", model_dir)
+        mz_pref = _morphizen_session("decoder_fixed_prefill.onnx", model_dir)
+        mz_dec = _morphizen_session("decoder_fixed_decode.onnx", model_dir)
+        # OGA-style zero-copy decode: self-KV aliased GPU buffers (past==present),
+        # cross-KV bound once, per-step tiny inputs + a single logits D2H — this
+        # row measures GPU kernels, not Python plumbing.
+        mz_tokens, mz_enc_ms, mz_pref_ms, mz_tps, mz_n = _bench_backend(
+            lambda: _greedy_decode_morphizen_iobinding(
+                mz_enc, mz_pref, mz_dec, audio, return_timing=True, dtype=dtype
+            )
         )
-    )
-    stderr_text = "".join(capfd.readouterr())
-    _assert_compiled_on_gpu(stderr_text)  # no silent CPU fallback
-    results["MorphiZen EP"] = (
-        mz_enc_ms,
-        mz_pref_ms,
-        mz_tps,
-        _decode_text(mz_tokens),
-        mz_n,
-    )
-    os.environ.pop("HIPDNN_EP_DEBUG", None)
+        stderr_text = "".join(capfd.readouterr())
+        _assert_compiled_on_gpu(stderr_text)  # no silent CPU fallback
+        results[("MorphiZen EP", precision)] = (
+            mz_enc_ms,
+            mz_pref_ms,
+            mz_tps,
+            _decode_text(mz_tokens),
+            mz_n,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[perf] MorphiZen EP {precision} FAILED: {e!r}")
+    finally:
+        os.environ.pop("HIPDNN_EP_DEBUG", None)
 
-    # ── DirectML EP (GPU, dynamic fp32) ──────────────────────────────────────
+    # ── DirectML EP (GPU, dynamic) ───────────────────────────────────────────
     dml_providers = get_amd_dml_providers()
     if dml_providers is None:
-        print("[perf] DirectML EP unavailable — skipping DML row")
+        print(f"[perf] DirectML EP unavailable — skipping DML {precision} row")
     else:
         try:
             dml_enc = ort.InferenceSession(
-                str(_MODEL_DIR / "encoder.onnx"), providers=dml_providers
+                str(model_dir / "encoder.onnx"), providers=dml_providers
             )
             dml_dec = ort.InferenceSession(
-                str(_MODEL_DIR / "decoder.onnx"), providers=dml_providers
+                str(model_dir / "decoder.onnx"), providers=dml_providers
             )
             dml_tokens, dml_enc_ms, dml_pref_ms, dml_tps, dml_n = _bench_backend(
-                lambda: _greedy_decode_dynamic_timed(dml_enc, dml_dec, audio)
+                lambda: _greedy_decode_dynamic_timed(
+                    dml_enc, dml_dec, audio, dtype=dtype
+                )
             )
-            results["DirectML EP"] = (
+            results[("DirectML EP", precision)] = (
                 dml_enc_ms,
                 dml_pref_ms,
                 dml_tps,
@@ -1000,54 +1153,82 @@ def test_perf_decode_tps(capfd):
                 dml_n,
             )
         except Exception as e:  # DML com.microsoft op coverage varies — report it
-            print(f"[perf] DirectML EP FAILED to run the dynamic fp32 decoder: {e!r}")
+            print(f"[perf] DirectML EP {precision} FAILED: {e!r}")
 
-    # ── CPU EP (dynamic fp32) ────────────────────────────────────────────────
-    cpu_enc = _cpu_session("encoder.onnx")
-    cpu_dec = _cpu_session("decoder.onnx")
-    cpu_tokens, cpu_enc_ms, cpu_pref_ms, cpu_tps, cpu_n = _bench_backend(
-        lambda: _greedy_decode_dynamic_timed(cpu_enc, cpu_dec, audio)
-    )
-    results["CPU EP"] = (
-        cpu_enc_ms,
-        cpu_pref_ms,
-        cpu_tps,
-        _decode_text(cpu_tokens),
-        cpu_n,
-    )
+    # ── CPU EP (dynamic) ─────────────────────────────────────────────────────
+    try:
+        cpu_enc = _cpu_session("encoder.onnx", model_dir)
+        cpu_dec = _cpu_session("decoder.onnx", model_dir)
+        cpu_tokens, cpu_enc_ms, cpu_pref_ms, cpu_tps, cpu_n = _bench_backend(
+            lambda: _greedy_decode_dynamic_timed(cpu_enc, cpu_dec, audio, dtype=dtype)
+        )
+        results[("CPU EP", precision)] = (
+            cpu_enc_ms,
+            cpu_pref_ms,
+            cpu_tps,
+            _decode_text(cpu_tokens),
+            cpu_n,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[perf] CPU EP {precision} FAILED: {e!r}")
+
+
+def test_perf_decode_tps(capfd):
+    """Cross-backend, cross-precision decode tok/s + accuracy.
+
+    Runs the SAME greedy decode-loop on MorphiZen / DirectML / CPU for BOTH
+    precisions: fp32 (the locally-built native fp32 model) and fp16 (the OGA DML build, body
+    fp16 + fp32 lm_head). MorphiZen runs the surgered fixed-shape form; CPU/DML run
+    the dynamic ORIGINAL onnx (the only valid graph for ORT's MHA kernel — see the
+    module docstring). The fp32 rows are unconditional; the fp16 rows are
+    best-effort (skipped with a note if the fp16 build is unavailable) so a machine
+    without the OGA builder still gets the full fp32 table.
+    """
+    audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(np.float32)
+    results = {}  # (label, precision) -> (enc_ms, prefill_ms, decode_tps, text, n)
+
+    # fp32 — always run (locally-built model is set up by the autouse fixture).
+    _perf_one_precision(audio, capfd, "fp32", _MODEL_DIR, np.float32, results)
+
+    # fp16 — best-effort: build on demand; skip the precision entirely on failure.
+    try:
+        setup_whisper_fp16_model_dir(_MODEL_DIR_FP16)
+        _perf_one_precision(audio, capfd, "fp16", _MODEL_DIR_FP16, np.float16, results)
+    except Exception as e:  # noqa: BLE001
+        print(f"[perf] fp16 unavailable (build failed) — fp32-only table: {e!r}")
 
     # ── Report ───────────────────────────────────────────────────────────────
-    print("\n" + "=" * 78)
-    print("Whisper-large-v3 fp32, jfk.wav (~11s audio), gfx1151")
-    print("=" * 78)
+    print("\n" + "=" * 86)
+    print("Whisper-large-v3 cross-backend x precision, jfk.wav (~11s audio), gfx1151")
+    print("=" * 86)
     print(
-        f"{'Backend':<13}| {'encoder ms':>10} | {'prefill ms':>10} | "
-        f"{'decode tok/s':>12} | transcription correct?"
+        f"{'Backend':<13}| {'prec':>5} | {'encoder ms':>10} | {'prefill ms':>10} | "
+        f"{'decode tok/s':>12} | correct?"
     )
-    print("-" * 78)
-    cpu_text = results["CPU EP"][3]
-    for label in ("MorphiZen EP", "DirectML EP", "CPU EP"):
-        if label not in results:
-            print(f"{label:<13}|    (unavailable / failed — see log above)")
-            continue
-        enc_ms, pref_ms, tps, text, _n = results[label]
-        correct = "country" in text.lower()
-        ok_str = "yes (JFK quote)" if correct else f"NO -> {text[:40]!r}"
-        print(
-            f"{label:<13}| {enc_ms:>10.1f} | {pref_ms:>10.1f} | {tps:>12.2f} | {ok_str}"
-        )
-    print("=" * 78)
-    for label in ("MorphiZen EP", "DirectML EP", "CPU EP"):
-        if label in results:
-            print(f"[transcription] {label:<13}: {results[label][3]!r}")
-    print("=" * 78)
+    print("-" * 86)
+    for precision in ("fp32", "fp16"):
+        for label in ("MorphiZen EP", "DirectML EP", "CPU EP"):
+            key = (label, precision)
+            if key not in results:
+                continue
+            enc_ms, pref_ms, tps, text, _n = results[key]
+            ok_str = "yes" if "country" in text.lower() else f"NO -> {text[:30]!r}"
+            print(
+                f"{label:<13}| {precision:>5} | {enc_ms:>10.1f} | {pref_ms:>10.1f} | "
+                f"{tps:>12.2f} | {ok_str}"
+            )
+    print("=" * 86)
 
-    # Accuracy gate: CPU is the fp32 reference, all available backends must match
-    # the JFK quote (fp32 everywhere → identical greedy).
-    assert "country" in cpu_text.lower(), f"CPU reference looks wrong: {cpu_text!r}"
-    for label, (_e, _p, _t, text, _n) in results.items():
+    # Accuracy gate: there MUST be a working fp32 reference, and every row that ran
+    # (any backend, any precision) must transcribe the JFK quote.
+    assert ("CPU EP", "fp32") in results, "fp32 CPU reference did not run"
+    cpu_text = results[("CPU EP", "fp32")][3]
+    assert "country" in cpu_text.lower(), (
+        f"CPU fp32 reference looks wrong: {cpu_text!r}"
+    )
+    for (label, precision), (_e, _p, _t, text, _n) in results.items():
         assert "country" in text.lower(), (
-            f"{label} transcription is not the JFK quote: {text!r}"
+            f"{label} {precision} transcription is not the JFK quote: {text!r}"
         )
 
 
