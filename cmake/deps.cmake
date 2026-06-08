@@ -200,9 +200,23 @@ if(_HIPDNN_NEED_TOOLCHAIN)
     set(CMAKE_C_VISIBILITY_PRESET hidden)
     set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
     FetchContent_MakeAvailable(llvm-project)
-    set(CMAKE_CXX_VISIBILITY_PRESET "${_hipdnn_saved_cxx_visibility}")
-    set(CMAKE_C_VISIBILITY_PRESET "${_hipdnn_saved_c_visibility}")
-    set(CMAKE_VISIBILITY_INLINES_HIDDEN "${_hipdnn_saved_inlines_hidden}")
+    # Restore. unset() when the original was empty -- CMake rejects an empty
+    # string as a *_VISIBILITY_PRESET value ("unsupported value \"\"").
+    if(_hipdnn_saved_cxx_visibility STREQUAL "")
+      unset(CMAKE_CXX_VISIBILITY_PRESET)
+    else()
+      set(CMAKE_CXX_VISIBILITY_PRESET "${_hipdnn_saved_cxx_visibility}")
+    endif()
+    if(_hipdnn_saved_c_visibility STREQUAL "")
+      unset(CMAKE_C_VISIBILITY_PRESET)
+    else()
+      set(CMAKE_C_VISIBILITY_PRESET "${_hipdnn_saved_c_visibility}")
+    endif()
+    if(_hipdnn_saved_inlines_hidden STREQUAL "")
+      unset(CMAKE_VISIBILITY_INLINES_HIDDEN)
+    else()
+      set(CMAKE_VISIBILITY_INLINES_HIDDEN "${_hipdnn_saved_inlines_hidden}")
+    endif()
 
     # Embedded (subdirectory) LLVM. Do NOT find_package the build tree: a
     # sub-build in the same configure has no consumable package config yet (its
