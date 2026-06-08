@@ -22,7 +22,8 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<3x4xi1>)
   // CHECK: %[[UB:.*]] = arith.constant 12 : index
   // CHECK: %[[INIT:.*]] = tensor.empty(%[[UB]]) : tensor<2x?xi64>
-  // CHECK: hip.nonzero(%[[CTX]]) ins(%[[IN]] : tensor<3x4xi1>) outs(%[[INIT]] : tensor<2x?xi64>) {input_data_type = 5 : i64}
+  // CHECK: %[[CNT:.*]] = tensor.empty() : tensor<1xi32>
+  // CHECK: hip.nonzero(%[[CTX]]) ins(%[[IN]] : tensor<3x4xi1>) outs(%[[INIT]], %[[CNT]] : tensor<2x?xi64>, tensor<1xi32>) {input_data_type = 5 : i64}
 
   // --- Case 2: f32 input, rank 3 ---
   func.func @nonzero_f32(%input: tensor<2x3x4xf32>) -> tensor<3x?xi64> {
@@ -34,7 +35,8 @@ module {
   // CHECK-SAME: (%[[CTX2:.*]]: !hip.context, %[[IN2:.*]]: tensor<2x3x4xf32>)
   // CHECK: %[[UB2:.*]] = arith.constant 24 : index
   // CHECK: %[[INIT2:.*]] = tensor.empty(%[[UB2]]) : tensor<3x?xi64>
-  // CHECK: hip.nonzero(%[[CTX2]]) ins(%[[IN2]] : tensor<2x3x4xf32>) outs(%[[INIT2]] : tensor<3x?xi64>) {input_data_type = 0 : i64}
+  // CHECK: %[[CNT2:.*]] = tensor.empty() : tensor<1xi32>
+  // CHECK: hip.nonzero(%[[CTX2]]) ins(%[[IN2]] : tensor<2x3x4xf32>) outs(%[[INIT2]], %[[CNT2]] : tensor<3x?xi64>, tensor<1xi32>) {input_data_type = 0 : i64}
 
   // --- Case 3: i64 input, rank 1 ---
   func.func @nonzero_i64(%input: tensor<8xi64>) -> tensor<1x?xi64> {
@@ -46,7 +48,8 @@ module {
   // CHECK-SAME: (%[[CTX3:.*]]: !hip.context, %[[IN3:.*]]: tensor<8xi64>)
   // CHECK: %[[UB3:.*]] = arith.constant 8 : index
   // CHECK: %[[INIT3:.*]] = tensor.empty(%[[UB3]]) : tensor<1x?xi64>
-  // CHECK: hip.nonzero(%[[CTX3]]) ins(%[[IN3]] : tensor<8xi64>) outs(%[[INIT3]] : tensor<1x?xi64>) {input_data_type = 4 : i64}
+  // CHECK: %[[CNT3:.*]] = tensor.empty() : tensor<1xi32>
+  // CHECK: hip.nonzero(%[[CTX3]]) ins(%[[IN3]] : tensor<8xi64>) outs(%[[INIT3]], %[[CNT3]] : tensor<1x?xi64>, tensor<1xi32>) {input_data_type = 4 : i64}
 
   // --- Case 4: dynamic input shape, rank 2 ---
   // Per-dim chain: upper bound = 1 * dim(input,0) * dim(input,1). The
@@ -71,7 +74,8 @@ module {
   // CHECK: tensor.dim %[[IN4]], %{{.*}} : tensor<?x?xf32>
   // CHECK: arith.muli %{{.*}}, %{{.*}} : index
   // CHECK: tensor.empty(%{{.*}}) : tensor<2x?xi64>
-  // CHECK: hip.nonzero(%[[CTX4]]) ins(%[[IN4]] : tensor<?x?xf32>) outs(%{{.*}} : tensor<2x?xi64>) {input_data_type = 0 : i64}
+  // CHECK: tensor.empty() : tensor<1xi32>
+  // CHECK: hip.nonzero(%[[CTX4]]) ins(%[[IN4]] : tensor<?x?xf32>) outs(%{{.*}}, %{{.*}} : tensor<2x?xi64>, tensor<1xi32>) {input_data_type = 0 : i64}
 
   // --- Case 5: partially dynamic input (mix of static + dynamic dims).
   // Static dims contribute a compile-time arith.constant; dynamic dims
@@ -109,8 +113,9 @@ module {
   // CHECK-SAME: (%[[CTX6:.*]]: !hip.context, %[[IN6:.*]]: tensor<2x4x8xui8>)
   // CHECK: %[[UB6:.*]] = arith.constant 64 : index
   // CHECK: %[[INIT6:.*]] = tensor.empty(%[[UB6]]) : tensor<3x?xi64>
+  // CHECK: %[[CNT6:.*]] = tensor.empty() : tensor<1xi32>
   // ui8 maps to the dedicated UINT8 slot (7), NOT INT8 (5) — the runtime
   // enum keeps signed/unsigned distinct so any future ordered-comparison
   // or arithmetic backend can dispatch correctly.
-  // CHECK: hip.nonzero(%[[CTX6]]) ins(%[[IN6]] : tensor<2x4x8xui8>) outs(%[[INIT6]] : tensor<3x?xi64>) {input_data_type = 7 : i64}
+  // CHECK: hip.nonzero(%[[CTX6]]) ins(%[[IN6]] : tensor<2x4x8xui8>) outs(%[[INIT6]], %[[CNT6]] : tensor<3x?xi64>, tensor<1xi32>) {input_data_type = 7 : i64}
 }

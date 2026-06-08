@@ -1432,15 +1432,41 @@ void ScatterNDOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// NonZeroOp: ins(x), outs(y)
+// NonZeroOp: ins(x), outs(y, count_buf)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange NonZeroOp::getDpsInitsMutable() { return getYMutable(); }
+// Two DPS outputs. Operand order (attributes are not operands): ctx(0), x(1),
+// y(2), count_buf(3). Both y and count_buf are DPS inits, so the range spans
+// operands [2, 4). The shared HipDpsOp::reifyResultShapes iterates
+// getDpsInits() and reifies each, so returning both here is all that auto-reify
+// needs.
+MutableOperandRange NonZeroOp::getDpsInitsMutable() {
+  return MutableOperandRange(getOperation(), /*start=*/2, /*length=*/2);
+}
 
 void NonZeroOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+// Hand-written because NonZero is the only HIP DPS op with two outputs, and the
+// auto-generated inferReturnTypes (Hip_DpsOp autoInfer=1) pushes only the
+// single outsAccessor result. Push both `y` and `count_buf` in DPS-init order
+// so the SSA result order (result[0]=y, result[1]=count_buf) matches what
+// NonZeroConversion builds. Only ranked-tensor outs become SSA results; in
+// memref mode (post-bufferize) both are memrefs and nothing is pushed.
+LogicalResult
+NonZeroOp::inferReturnTypes(MLIRContext *, std::optional<Location>,
+                            ValueRange operands, DictionaryAttr attrs,
+                            OpaqueProperties props, RegionRange regions,
+                            SmallVectorImpl<Type> &results) {
+  NonZeroOp::Adaptor adaptor(operands, attrs, props, regions);
+  if (auto t = dyn_cast<RankedTensorType>(adaptor.getY().getType()))
+    results.push_back(t);
+  if (auto t = dyn_cast<RankedTensorType>(adaptor.getCountBuf().getType()))
+    results.push_back(t);
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
