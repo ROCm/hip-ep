@@ -309,77 +309,36 @@ sequenceDiagram
     RT-->>DLL_MG: device_ptr
     Note over DLL_MG: compute into device_ptr
     DLL_MG-->>DLL_IC: return
+    Note over DLL_IC: inference_compute ends in hipdnn_ep_stream_sync<br/>(GenerateInterface), so all GPU writes are complete on return
     DLL_IC-->>EP: return
-    Note over EP: Flush pending D2H transfers<br/>hipMemcpyAsync(host, scratch, ...)<br/>hipStreamSynchronize()
+    Note over EP: clear allocator on RuntimeState (self must not dangle)<br/>then blocking hipMemcpy(host, scratch) per host output<br/>(GPU outputs: nothing — zero-copy)
 ```
 
-**EP allocator callback implementation:**
+**Status: implemented.** The illustrative pseudocode above is realized by these files (the per-model auto-enable heuristic is deferred — allocator mode is an explicit, default-off `use_output_allocator` provider option):
 
-```cpp
-struct PendingD2H {
-  void *scratch_ptr;   // GPU scratch buffer
-  void *host_ptr;      // Host destination (from OrtValue)
-  size_t bytes;
-};
+| Concern | Where |
+|---|---|
+| Compile flag (`use_output_allocator`) | [schemas/compilation_options.fbs](../../schemas/compilation_options.fbs) → [lib/Compiler/CompilerDriver.cpp](../../lib/Compiler/CompilerDriver.cpp) sets both `onnxToHipOpts.useOutputAllocator` and `hipToLlvmOpts.useOutputAllocator` |
+| Pipeline gating | [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp): classic `buffer-results-to-out-params` vs `hip-use-output-allocator`; `generate-interface` (3-arg) vs `generate-allocator-interface` (2-arg) |
+| EP front-end (provider option → compile JSON + metadata) | [backend-mlir-compiler/level-1-pass/src/pass_main.cpp](../../backend-mlir-compiler/level-1-pass/src/pass_main.cpp), [MlirCompiler.cpp](../../backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp) |
+| Mode-detection metadata | [backend-mlir-compiler/proto/metadata.proto](../../backend-mlir-compiler/proto/metadata.proto) (`use_output_allocator`) |
+| EP-local ABI mirror | `output_allocator_t` in [custom_op_mlir.hpp](../../backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp) (same `static_assert`s as the runtime struct) |
+| 2-arg dispatch + setter | [InferenceState.cpp](../../backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp) (`compute_allocator`, `set_output_allocator`) |
+| Callback + per-Compute ctx + host D2H | [MlirCustomOp.cpp](../../backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp) (`output_allocate_cb`, `OutputAllocatorCtx`, `compute_with_output_allocator`) |
+| Shared present.* override helper | [output_shape_override.h](../../backend-mlir-compiler/custom-op-mlir/src/output_shape_override.h) |
 
-class HipdnnEP {
-  std::vector<PendingD2H> pending_d2h_;  // per-Compute() call
+**Key design points (as built):**
 
-  static void *allocate_output(void *self, int64_t out_idx,
-                            const int64_t *shape, int64_t rank,
-                            int64_t elem_size) {
-    auto *ep = static_cast<HipdnnEP*>(self);
-    auto ort_idx = ep->dll_to_ort_output_index_[out_idx];
+1. **Single source of truth = compile flag + embedded metadata bit.** The `use_output_allocator` provider option drives BOTH halves of the pipeline (so `main_graph` arity and the `inference_compute` wrapper agree) AND is written into the model `Metadata`. The EP reads its dispatch arity from the *embedded* metadata (`metadata_.use_output_allocator()` in the `MlirCustomOp` ctor), not from the live provider option — so a reused ORT EPContext always reports the mode matching its own cached DLL's ABI, and arity can never disagree.
 
-    // Create ORT output tensor
-    auto out = ep->ctx_->GetOutput(ort_idx, {shape, shape + rank});
-    auto mem_info = out.GetTensorMemoryInfo();
+2. **The callback is `noexcept` across the C ABI.** `output_allocate_cb` is invoked from the model.dll's C runtime; a C++ exception unwinding through those frames is UB. The body is wrapped in `try/catch` and any failure (out-of-range `out_idx`, ORT throw, scratch `hipMalloc` failure) ends in `LOG(FATAL)` — it never returns null, because the lowering builds a memref from the returned pointer and a null write would segfault with no diagnostic.
 
-    // GPU output: zero-copy path
-    if (mem_info.GetDeviceType() == OrtDevice::GPU) {
-      return out.GetTensorMutableRawData();
-    }
+3. **Allocator returns a GPU device pointer** (Phase 3 contract). GPU outputs (EP `hipHostMalloc` allocator or OGA device memory: `memory_type == TENSOR_MEMORY_GPU`) zero-copy ORT's buffer. Host (CPU) outputs get an EP-owned GPU scratch pointer; the DLL writes there and the EP D2H-copies into ORT's host buffer after compute.
 
-    // Host output: allocate GPU scratch, queue D2H
-    size_t bytes = elem_size;
-    for (int64_t i = 0; i < rank; i++) bytes *= shape[i];
+4. **Host-output D2H is EP-side and real-build-only.** The GPU scratch (one buffer per output index, grow-on-demand, reused across `Compute()`, freed in the dtor) and the `hipMemcpy` are under `#ifndef BUILD_MOCK_RUNTIME` (the EP only links `hip::host` in non-mock builds; mock writes host memory directly). The generated 2-arg `inference_compute` already ends in `hipdnn_ep_stream_sync`, so writes are complete on return and a plain **blocking** `hipMemcpy` D2H suffices — no extra stream sync.
 
-    void *scratch = ep->scratch_allocator_->Alloc(bytes);
-    void *host_dest = out.GetTensorMutableRawData();
+5. **KV cache share-buffer override lives in the callback.** In allocator mode `marshal_output_tensors` is not called, so the present.*→past `max_length` override is replicated inside `output_allocate_cb`: for a `present.*` output it reads the matching `past_key_values.*` input's runtime shape and bumps each *dynamic* present dim up to the past capacity before `GetOutput`, so ORT returns the pre-bound shared `OrtValue` (pointer identity preserved for in-place GQA append). The override math is factored into the pure, GPU-free `apply_present_share_buffer_override` helper shared with the classic marshal path (so the two paths cannot drift) and unit-tested across several dynamic shapes.
 
-    ep->pending_d2h_.push_back({scratch, host_dest, bytes});
-    return scratch;  // DLL computes into scratch
-  }
+6. **Output-completeness guard.** Allocator mode requires every declared output to be produced in-graph (one `hip.alloc_output` → one callback). After `compute_allocator` returns, the EP asserts every metadata output index was served, else `LOG(FATAL)` naming the missing one. This turns the two unsupported graph shapes (passthrough output that returns a graph input; deduped aliased output) into a clear error instead of an unfilled ORT output. None of the target models have them.
 
-  Status Compute(OpKernelContext *ctx) override {
-    ctx_ = ctx;
-    pending_d2h_.clear();
-
-    // Install allocator
-    hipdnn_output_allocator_t allocator = {allocate_output, this};
-    hipdnn_ep_set_output_allocator(state_, &allocator);
-
-    // Run inference (allocator called in-graph)
-    span_t inputs[num_inputs];
-    // ... prepare inputs ...
-    int status = inference_compute(state_, inputs);
-
-    // Flush pending D2H transfers
-    for (auto &d2h : pending_d2h_) {
-      hipMemcpyAsync(d2h.host_ptr, d2h.scratch_ptr, d2h.bytes,
-                     hipMemcpyDeviceToHost, stream_);
-    }
-    hipStreamSynchronize(stream_);
-
-    return status == 0 ? Status::OK() : /* error */;
-  }
-};
-```
-
-**Key design points:**
-
-1. **Allocator returns a GPU device pointer** (Phase 3 contract): GPU output zero-copies ORT's buffer; host output gets scratch + queued D2H. The DLL only ever sees a device pointer.
-
-2. **EP owns D2H:** After `inference_compute` returns, EP flushes all D2H transfers
-
-3. **KV cache share-buffer:** For `present.*` outputs, the allocator callback can request capacity shape (`max_length`) to get pre-bound buffer
+7. **Per-Compute allocator install/clear.** The `OutputAllocatorCtx` lives on `compute_with_output_allocator`'s stack; the allocator is installed (with `self = &ctx`) before `compute_allocator` and cleared (`set_output_allocator(nullptr)`) immediately after, so `self` can never dangle into a later `Compute()`.
