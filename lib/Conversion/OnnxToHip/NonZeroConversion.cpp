@@ -45,9 +45,19 @@ static int64_t getHipdnnInputDataType(mlir::Type elemType) {
 //           and is materialised as the runtime `dynSize` of the
 //           `tensor.empty` init operand so the buffer is large enough to
 //           hold the worst case.
+// Output count_buf: tensor<1xi32>. Receives the actual non-zero count at
+//           runtime (written by the kernel via atomicAdd). The ONNX op has
+//           a single result (the indices), so count_buf has no ONNX-level
+//           consumer; downstream ScatterND backtraces its `indices` operand
+//           to this op and reads result[1] to bound the rows it processes
+//           (no D2H sync). Materialised as a second DPS init below.
+//
+// Benefit 2 (vs the default 1) so NonZero converts before ScatterND, letting
+// ScatterND's backtrace find a `hip.nonzero` rather than deferring on an
+// unconverted `onnx.NonZero`.
 struct NonZeroToHip : public mlir::RewritePattern {
   NonZeroToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.NonZero", /*benefit=*/1, ctx) {}
+      : RewritePattern("onnx.NonZero", /*benefit=*/2, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -119,15 +129,24 @@ struct NonZeroToHip : public mlir::RewritePattern {
             mlir::arith::MulIOp::create(rewriter, loc, upperBound, dim);
       }
     }
-    mlir::Value init = mlir::tensor::EmptyOp::create(
+    mlir::Value indicesInit = mlir::tensor::EmptyOp::create(
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
         mlir::ValueRange{upperBound});
 
-    // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
-    // result type == outs operand type.
+    // Second DPS init: tensor<1xi32> count buffer (static, no dynsize).
+    auto countType = mlir::RankedTensorType::get({1}, rewriter.getI32Type());
+    mlir::Value countInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, countType.getShape(), countType.getElementType(),
+        mlir::ValueRange{});
+
+    // Two results: result[0] = indices (Y), result[1] = count_buf. Custom
+    // NonZeroOp::inferReturnTypes (HipDialect.cpp) pushes both in this order.
     auto hipOp = mlir::hip::NonZeroOp::create(
-        rewriter, loc, context, op->getOperand(0), init,
+        rewriter, loc, mlir::TypeRange{resultType, countType}, context,
+        op->getOperand(0), indicesInit, countInit,
         rewriter.getI64IntegerAttr(inputDataType));
+    // Replace the ONNX op (single result) with the indices result only;
+    // count_buf stays live via the downstream ScatterND backtrace.
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

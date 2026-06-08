@@ -25,12 +25,16 @@ module {
     %r = "onnx.ScatterND"(%data, %indices, %updates)
         : (tensor<8xf32>, tensor<4x1xi64>, tensor<4xf32>) -> tensor<8xf32>
 
+    // No NonZero upstream -> a dummy 1xi32 valid_count init is added as the
+    // 4th `ins` operand and has_valid_count stays false (default, elided).
     // CHECK-NOT: onnx.ScatterND
     // CHECK: tensor.empty() : tensor<8xf32>
+    // CHECK: tensor.empty() : tensor<1xi32>
     // CHECK: hip.scatter_nd({{.*}}) ins(
-    // CHECK-SAME: : tensor<8xf32>, tensor<4x1xi64>, tensor<4xf32>)
+    // CHECK-SAME: : tensor<8xf32>, tensor<4x1xi64>, tensor<4xf32>, tensor<1xi32>)
     // CHECK-SAME: outs({{.*}} : tensor<8xf32>)
     // CHECK-NOT: reduction
+    // CHECK-NOT: has_valid_count
 
     return %r : tensor<8xf32>
   }
@@ -48,7 +52,7 @@ module {
 
     // CHECK-NOT: onnx.ScatterND
     // CHECK: hip.scatter_nd({{.*}}) ins(
-    // CHECK-SAME: : tensor<4x4x4xf32>, tensor<2x1xi64>, tensor<2x4x4xf32>)
+    // CHECK-SAME: : tensor<4x4x4xf32>, tensor<2x1xi64>, tensor<2x4x4xf32>, tensor<1xi32>)
     // CHECK-SAME: outs({{.*}} : tensor<4x4x4xf32>)
     // CHECK-NOT: reduction
 
@@ -110,5 +114,28 @@ module {
   // CHECK-DAG: %[[A1:.*]] = arith.constant 1 : index
   // CHECK-DAG: %[[D1:.*]] = tensor.dim %[[D]], %[[A1]] : tensor<?x?xf32>
   // CHECK: tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?xf32>
-  // CHECK: hip.scatter_nd({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<?x?xf32>, tensor<2x2xi64>, tensor<2xf32>) outs({{.*}} : tensor<?x?xf32>)
+  // CHECK: hip.scatter_nd({{.*}}) ins({{.*}}, {{.*}}, {{.*}}, {{.*}} : tensor<?x?xf32>, tensor<2x2xi64>, tensor<2xf32>, tensor<1xi32>) outs({{.*}} : tensor<?x?xf32>)
+
+  // Backtrace: indices originate from NonZero (through a Transpose), so the
+  // ScatterND must reuse the NonZero's count_buf (result #1) as valid_count
+  // and set has_valid_count = true. This is the canonical VLM
+  // NonZero -> Transpose -> ScatterND placeholder-substitution chain.
+  func.func @test_scatter_nd_backtrace_nonzero(
+      %cond: tensor<4x4xi1>,
+      %data: tensor<4x4xf32>,
+      %updates: tensor<?xf32>) -> tensor<4x4xf32> {
+    %nz = "onnx.NonZero"(%cond) : (tensor<4x4xi1>) -> tensor<2x?xi64>
+    %t = "onnx.Transpose"(%nz) {perm = [1, 0]}
+        : (tensor<2x?xi64>) -> tensor<?x2xi64>
+    %r = "onnx.ScatterND"(%data, %t, %updates)
+        : (tensor<4x4xf32>, tensor<?x2xi64>, tensor<?xf32>) -> tensor<4x4xf32>
+    return %r : tensor<4x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @test_scatter_nd_backtrace_nonzero
+  // The NonZero converts to a two-result hip.nonzero (indices + count_buf).
+  // CHECK: %[[NZ:.*]]:2 = hip.nonzero
+  // No dummy 1xi32 init is created here — valid_count is the NonZero count.
+  // CHECK: hip.scatter_nd
+  // CHECK-SAME: has_valid_count = true
 }

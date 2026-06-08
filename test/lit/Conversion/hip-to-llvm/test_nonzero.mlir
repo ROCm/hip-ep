@@ -4,11 +4,13 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.nonzero lowers to a single llvm.call into the wrap_nonzero
-// runtime stub, with the expected (state, in, out, num_elems, rank,
-// output_capacity, input_data_type) signature. Covers both fully static
-// inputs (num_elems computed at compile time) and partially dynamic
-// inputs (num_elems built from llvm.extractvalue + llvm.mul over the
-// MemRef descriptor sizes array).
+// runtime, with the expected 9-arg signature:
+//   (state, in, out, count_ptr, num_elems, rank, input_dims, output_capacity,
+//    input_data_type)
+// count_ptr is the second DPS out (count_buf); input_dims is a stack array of
+// the input shape dims. Covers both fully static inputs (num_elems computed at
+// compile time) and partially dynamic inputs (num_elems built from
+// llvm.extractvalue + llvm.mul over the MemRef descriptor sizes array).
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -18,14 +20,15 @@ module {
   func.func @nonzero_static_bool(
       %ctx: !hip.context,
       %input: memref<3x4xi1, 1>,
-      %output: memref<2x?xi64, 1>) {
+      %output: memref<2x?xi64, 1>,
+      %count: memref<1xi32, 1>) {
     // CHECK-LABEL: llvm.func @nonzero_static_bool
 
     hip.nonzero(%ctx) ins(%input : memref<3x4xi1, 1>)
-                      outs(%output : memref<2x?xi64, 1>)
+                      outs(%output, %count : memref<2x?xi64, 1>, memref<1xi32, 1>)
                       {input_data_type = 5 : i64}
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 
@@ -33,14 +36,15 @@ module {
   func.func @nonzero_static_f32(
       %ctx: !hip.context,
       %input: memref<2x3x4xf32, 1>,
-      %output: memref<3x?xi64, 1>) {
+      %output: memref<3x?xi64, 1>,
+      %count: memref<1xi32, 1>) {
     // CHECK-LABEL: llvm.func @nonzero_static_f32
 
     hip.nonzero(%ctx) ins(%input : memref<2x3x4xf32, 1>)
-                      outs(%output : memref<3x?xi64, 1>)
+                      outs(%output, %count : memref<3x?xi64, 1>, memref<1xi32, 1>)
                       {input_data_type = 0 : i64}
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 
@@ -49,11 +53,12 @@ module {
   func.func @nonzero_dynamic_f16(
       %ctx: !hip.context,
       %input: memref<?x?xf16, 1>,
-      %output: memref<2x?xi64, 1>) {
+      %output: memref<2x?xi64, 1>,
+      %count: memref<1xi32, 1>) {
     // CHECK-LABEL: llvm.func @nonzero_dynamic_f16
 
     hip.nonzero(%ctx) ins(%input : memref<?x?xf16, 1>)
-                      outs(%output : memref<2x?xi64, 1>)
+                      outs(%output, %count : memref<2x?xi64, 1>, memref<1xi32, 1>)
                       {input_data_type = 1 : i64}
 
     // Verify dynamic shape computation: descriptor.sizes[0] * descriptor.sizes[1].
@@ -62,7 +67,7 @@ module {
     // CHECK-DAG: llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 }

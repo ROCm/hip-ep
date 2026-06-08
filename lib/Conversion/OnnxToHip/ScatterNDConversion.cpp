@@ -9,6 +9,65 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// Backtrace the SSA chain from `indices` through ops that preserve element
+/// identity (Transpose/Reshape/Squeeze/Unsqueeze/Cast/Gather and their HIP /
+/// tensor equivalents) to find a `hip.nonzero`. If found, return its count_buf
+/// (result[1]) — the runtime row count to bound ScatterND's writes.
+///
+/// Returns {count_value, should_defer}:
+///   count_value : non-null if a converted `hip.nonzero` is found upstream.
+///   should_defer: true if an UNCONVERTED `onnx.NonZero` is found — the caller
+///                 returns failure() so the greedy rewriter retries this op
+///                 after NonZero converts (and exposes its count_buf result).
+static std::pair<mlir::Value, bool> traceToNonZeroCount(mlir::Value indices) {
+  mlir::Value current = indices;
+  // Bounded walk: the NonZero->ScatterND index chain in real exports is short
+  // (Transpose + a reshape or two); 16 hops is generous slack.
+  for (int depth = 0; depth < 16; ++depth) {
+    auto *defOp = current.getDefiningOp();
+    if (!defOp)
+      return {nullptr, false};
+
+    if (auto nonzeroOp = llvm::dyn_cast<mlir::hip::NonZeroOp>(defOp)) {
+      if (nonzeroOp->getNumResults() >= 2)
+        return {nonzeroOp->getResult(1), false};
+      return {nullptr, false};
+    }
+
+    // Unconverted onnx.NonZero: defer so the rewriter retries post-conversion.
+    if (defOp->getName().getStringRef() == "onnx.NonZero")
+      return {nullptr, true};
+
+    llvm::StringRef opName = defOp->getName().getStringRef();
+    // ONNX shape/identity ops carry the index data through operand 0.
+    if (opName == "onnx.Transpose" || opName == "onnx.Reshape" ||
+        opName == "onnx.Squeeze" || opName == "onnx.Unsqueeze" ||
+        opName == "onnx.Cast" || opName == "onnx.Gather") {
+      if (defOp->getNumOperands() >= 1) {
+        current = defOp->getOperand(0);
+        continue;
+      }
+    }
+    // HIP DPS equivalents take ctx as operand 0; the data input is operand 1.
+    if (opName == "hip.transpose" || opName == "hip.cast") {
+      if (defOp->getNumOperands() >= 2) {
+        current = defOp->getOperand(1);
+        continue;
+      }
+    }
+    // tensor reshape/cast descriptor ops carry data through operand 0.
+    if (opName == "tensor.cast" || opName == "tensor.collapse_shape" ||
+        opName == "tensor.expand_shape") {
+      if (defOp->getNumOperands() >= 1) {
+        current = defOp->getOperand(0);
+        continue;
+      }
+    }
+    return {nullptr, false};
+  }
+  return {nullptr, false};
+}
+
 /// onnx.ScatterND -> hip.scatter_nd
 ///
 /// Output shape matches `data` exactly (per ONNX spec), so the destination
@@ -27,6 +86,12 @@ namespace {
 /// `reduction` is forwarded as a string attribute (`"none"` by default).
 /// The runtime stub today only logs its parameters, so any reduction mode
 /// is accepted at compile time.
+///
+/// The conversion also backtraces `indices` (see traceToNonZeroCount): if it
+/// originates from a NonZero (possibly through Transpose/Reshape/...), that
+/// op's count_buf is passed as `valid_count` with `has_valid_count = true`, so
+/// the kernel processes only the runtime-valid rows. Otherwise a dummy 1xi32
+/// init is passed with `has_valid_count = false` (never read).
 struct ScatterNDToHip : public mlir::RewritePattern {
   ScatterNDToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ScatterND", /*benefit=*/1, ctx) {}
@@ -81,8 +146,24 @@ struct ScatterNDToHip : public mlir::RewritePattern {
     else
       reductionAttr = rewriter.getStringAttr("none");
 
+    // Backtrace indices to an upstream NonZero count_buf. If an unconverted
+    // onnx.NonZero is found, defer so the rewriter retries after it converts.
+    auto [validCount, shouldDefer] = traceToNonZeroCount(indices);
+    if (shouldDefer)
+      return rewriter.notifyMatchFailure(
+          op, "deferring: upstream onnx.NonZero not yet converted");
+    bool hasValidCount = (validCount != nullptr);
+    if (!validCount) {
+      // No NonZero upstream — dummy 1xi32 init (has_valid_count=false; never
+      // read by the kernel, present only to satisfy the operand list).
+      auto countType = mlir::RankedTensorType::get({1}, rewriter.getI32Type());
+      validCount = mlir::tensor::EmptyOp::create(
+          rewriter, loc, countType.getShape(), countType.getElementType());
+    }
+
     auto hipOp = mlir::hip::ScatterNDOp::create(
-        rewriter, loc, context, data, indices, updates, init, reductionAttr);
+        rewriter, loc, resultType, context, data, indices, updates, validCount,
+        init, reductionAttr, rewriter.getBoolAttr(hasValidCount));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }
