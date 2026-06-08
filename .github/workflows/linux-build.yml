@@ -195,19 +195,38 @@ jobs:
         if: steps.cache-ort.outputs.cache-hit != 'true'
         working-directory: source-onnxruntime
         run: |
-          set -euo pipefail
-          ./build.sh \
-            --config Release \
-            --build_shared_lib \
-            --parallel \
-            --compile_no_warning_as_error \
-            --skip_submodule_sync \
-            --build_dir "${{ runner.workspace }}/build-onnxruntime" \
-            --skip_tests \
-            --cmake_generator Ninja \
-            --cmake_extra_defines \
-              CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+          set -uo pipefail
+          # ORT pulls several deps via FetchContent from github archive URLs,
+          # which intermittently return 504. Retry so a transient download
+          # failure does not discard the (cached) LLVM build and force a cold
+          # rebuild on the next run. Resolved deps persist in the build tree and
+          # compiles are sccache-backed, so a retry is cheap.
+          build_ort() {
+            ./build.sh \
+              --config Release \
+              --build_shared_lib \
+              --parallel \
+              --compile_no_warning_as_error \
+              --skip_submodule_sync \
+              --build_dir "${{ runner.workspace }}/build-onnxruntime" \
+              --skip_tests \
+              --cmake_generator Ninja \
+              --cmake_extra_defines \
+                CMAKE_C_COMPILER_LAUNCHER=sccache \
+                CMAKE_CXX_COMPILER_LAUNCHER=sccache
+          }
+          attempt=1
+          max=3
+          while true; do
+            build_ort && break
+            if [ "$attempt" -ge "$max" ]; then
+              echo "ONNX Runtime build failed after $max attempts"
+              exit 1
+            fi
+            echo "Attempt $attempt failed (likely a transient dep download); retrying in 30s..."
+            attempt=$((attempt + 1))
+            sleep 30
+          done
 
       - name: Install ORT into ort-install
         if: steps.cache-ort.outputs.cache-hit != 'true'
