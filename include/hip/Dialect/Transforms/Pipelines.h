@@ -47,6 +47,13 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc("Skip writing constant data to constants.bin (metadata "
                      "only). Used for ORT EP live-compile path."),
       llvm::cl::init(false)};
+  Option<bool> useOutputAllocator{
+      *this, "use-output-allocator",
+      llvm::cl::desc(
+          "Allocator pipeline: replace buffer-results-to-out-params with "
+          "hip-use-output-allocator so graph outputs are allocated in-graph "
+          "via hip.alloc_output (default: false = classic out-params)"),
+      llvm::cl::init(false)};
 };
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.
@@ -58,6 +65,13 @@ struct HipToLLVMPipelineOptions
       llvm::cl::desc(
           "Constants filename embedded in metadata (default: constants.bin)"),
       llvm::cl::init("constants.bin")};
+  Option<bool> useOutputAllocator{
+      *this, "use-output-allocator",
+      llvm::cl::desc(
+          "Allocator pipeline: emit generate-allocator-interface (2-arg "
+          "inference_compute / main_graph; outputs allocated in-graph) instead "
+          "of generate-interface (default: false = classic 3-arg)"),
+      llvm::cl::init(false)};
 };
 
 /// Build the ONNX-to-HIP compilation pipeline.
@@ -112,6 +126,13 @@ struct HipdnnPipelineOptions
       llvm::cl::desc(
           "Minimum number of tensor elements to externalize (0 = disabled)"),
       llvm::cl::init(0)};
+  Option<bool> useOutputAllocator{
+      *this, "use-output-allocator",
+      llvm::cl::desc(
+          "Allocator pipeline: thread through to both the ONNX-to-HIP and "
+          "HIP-to-LLVM halves so outputs are allocated in-graph via "
+          "hip.alloc_output (default: false = classic out-params)"),
+      llvm::cl::init(false)};
 };
 
 /// Build the complete HIPDNN pipeline: ONNX→HIP→LLVM→Interface.
