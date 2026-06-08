@@ -209,8 +209,7 @@ parse_dim_params_map(const std::string &encoded) {
 // value. Uses dim_params_map model metadata (populated by IR converter from
 // ORT's GetSymbolicDimensions) to match dimensions across tensors.
 static std::string build_metadata_json(const CompilationArtifact &artifact,
-                                       Graph &graph,
-                                       bool useOutputAllocator) {
+                                       Graph &graph, bool useOutputAllocator) {
   mlir_metadata::Metadata metadata;
   metadata.set_artifact_filename(artifact.filename);
   // Same value as the compile flag (CompilationConfig::useOutputAllocator), so
