@@ -10,10 +10,12 @@
 #   18.x, which has no __main__.py. This caused MorphizenMLIRLitTests to
 #   always report "Passed" in CI despite never executing a single test.
 #
-# WHY NO_DEFAULT_PATH:
-#   HINTS restricts the search to Python's own Scripts/ and bin/ directories,
-#   preventing find_program from picking up a different lit.exe that may exist
-#   elsewhere on PATH (e.g. from the MSVC toolchain).
+# WHY NO_DEFAULT_PATH on Windows only:
+#   On Windows, HINTS + NO_DEFAULT_PATH pins the search to Python's own Scripts/
+#   dir so find_program can't grab an unrelated lit.exe from the MSVC toolchain
+#   on PATH. On Unix there is no such conflict, and pip frequently installs the
+#   lit console script outside the interpreter's own dir (e.g. /usr/local/bin or
+#   ~/.local/bin), so the default PATH search must stay enabled there.
 #
 # WHY the pip console_scripts lit.exe is safe from the multiprocessing loop:
 #   pip generates lit.exe as a compiled launcher that calls lit.main:main
@@ -26,10 +28,15 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 # Derive Python's Scripts/ (Windows) and bin/ (Unix) dirs from the interpreter
 # path — these are where pip installs console_scripts entry points like lit.
 get_filename_component(_python_dir "${Python3_EXECUTABLE}" DIRECTORY)
+if(WIN32)
+    set(_lit_no_default_path NO_DEFAULT_PATH)
+else()
+    set(_lit_no_default_path "")
+endif()
 find_program(LIT_EXECUTABLE
     NAMES lit
     HINTS "${_python_dir}/Scripts" "${_python_dir}/bin" "${_python_dir}"
-    NO_DEFAULT_PATH
+    ${_lit_no_default_path}
     REQUIRED
     DOC "lit test runner from pip install lit"
 )
