@@ -23,9 +23,12 @@ target_compile_features(test-output-allocator PRIVATE cxx_std_17)
 # lib/Runtime  -> hipdnn_ep_runtime.h, runtime_state_internal.h, hipdnn_ep_errors.h
 # lib/Runtime/mock -> runtime_types.h resolves to the GPU-free mock typedefs
 #   (void* handles), so nothing here needs the HIP/MIOpen/hipBLASLt SDK.
+# custom-op-mlir/src -> output_shape_override.h (the EP-side pure share-buffer
+#   override helper; header-only and dependency-free, so it adds no link deps).
 target_include_directories(test-output-allocator PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/Runtime
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+    ${CMAKE_SOURCE_DIR}/backend-mlir-compiler/custom-op-mlir/src
 )
 
 # Drop __declspec(dllexport) on the setter for this native build: the test does
