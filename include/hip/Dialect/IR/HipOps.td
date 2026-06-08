@@ -288,6 +288,38 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
   let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
 }
 
+def Hip_AllocOutputOp : Hip_Op<"alloc_output",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Obtain a graph-output buffer from the EP output allocator";
+  let description = [{
+    Allocates the buffer for graph output `out_idx` via the EP-supplied output
+    allocator, at the point in the graph where the output shape is known.
+    Operands: runtime context + one Index per dynamic dim of the result memref
+    (same operand convention as hip.alloc). The `out_idx` attribute identifies
+    which graph output this buffer is.
+
+    Unlike hip.alloc / hip.get_pool / hip.get_host_scratch, this op intentionally
+    does NOT carry an Allocate memory effect: the buffer is EP/runtime-owned (it
+    is a graph output), so buffer-deallocation must not free it and
+    hip-pool-allocs must not pool it. It DOES carry a Write effect so later
+    DCE/CSE cannot drop or merge it -- see AllocOutputOp::getEffects in
+    HipDialect.cpp for the rationale.
+
+    Example:
+    ```mlir
+    %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64} : memref<?x?xf16>
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Variadic<Index>:$dynamicSizes,
+                       I64Attr:$out_idx);
+  let results = (outs AnyMemRef:$memref);
+  let assemblyFormat = [{
+    `(` $ctx (`,` $dynamicSizes^ )? `)` attr-dict `:` type($memref)
+  }];
+  let hasVerifier = 1;
+}
+
 // ===== Control flow ==========================================================
 
 def Hip_LoopOp : Hip_Op<"loop",

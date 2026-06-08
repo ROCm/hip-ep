@@ -15,6 +15,7 @@ add_library(HipDialectTransforms STATIC
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
   ResolveExternConstants.cpp
+  UseOutputAllocator.cpp
 )
 
 add_dependencies(HipDialectTransforms
