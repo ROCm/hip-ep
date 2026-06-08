@@ -78,15 +78,16 @@ struct span_t {
   size_t count; // Number of tensors (must match the compiled model's I/O count)
 };
 
-// EP-side mirror of `hipdnn_output_allocator_t` (lib/Runtime/hipdnn_ep_runtime.h).
-// In output-allocator mode the EP installs one of these on the model.dll's
-// RuntimeState (via hipdnn_ep_set_output_allocator) before the 2-arg
-// inference_compute; the DLL's in-graph hip.alloc_output ops call back through
-// `allocate` to obtain each graph-output buffer at the point its shape is known.
-// Re-declared here (not shared) for the same decoupling reason as tensor_t.
+// EP-side mirror of `hipdnn_output_allocator_t`
+// (lib/Runtime/hipdnn_ep_runtime.h). In output-allocator mode the EP installs
+// one of these on the model.dll's RuntimeState (via
+// hipdnn_ep_set_output_allocator) before the 2-arg inference_compute; the DLL's
+// in-graph hip.alloc_output ops call back through `allocate` to obtain each
+// graph-output buffer at the point its shape is known. Re-declared here (not
+// shared) for the same decoupling reason as tensor_t.
 //
-// ABI / forward-compat: `struct_size` MUST stay first; the runtime setter copies
-// only min(caller_size, local_size) bytes, so the EP MUST set
+// ABI / forward-compat: `struct_size` MUST stay first; the runtime setter
+// copies only min(caller_size, local_size) bytes, so the EP MUST set
 // `struct_size = sizeof(output_allocator_t)`. New callbacks are APPENDED after
 // `allocate`; existing fields never move. The runtime header explicitly
 // requires this EP-side copy to carry the same asserts.

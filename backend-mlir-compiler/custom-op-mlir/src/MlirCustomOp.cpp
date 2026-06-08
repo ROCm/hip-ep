@@ -654,8 +654,7 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
                          int64_t rank, int64_t elem_size) noexcept {
   auto *octx = static_cast<OutputAllocatorCtx *>(self);
   try {
-    if (out_idx < 0 ||
-        out_idx >= static_cast<int64_t>(octx->outputs->size())) {
+    if (out_idx < 0 || out_idx >= static_cast<int64_t>(octx->outputs->size())) {
       LOG(FATAL) << "output allocator: out_idx " << out_idx << " out of range ("
                  << octx->outputs->size() << " outputs)";
     }
@@ -676,8 +675,8 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
       auto past_tensor = octx->ctx->GetInput(ort_past_idx);
       auto past_shape = past_tensor.GetTensorTypeAndShapeInfo().GetShape();
       apply_present_share_buffer_override(output_meta.shape().data(),
-                                         past_shape.data(), out_shape.data(),
-                                         out_shape.size(), past_shape.size());
+                                          past_shape.data(), out_shape.data(),
+                                          out_shape.size(), past_shape.size());
     }
 
     int ort_idx = (*octx->output_index_map)[static_cast<int>(out_idx)];

@@ -1383,8 +1383,10 @@ class BaseORTTests:
             # 1) Dynamic-shape stress: two prefill lengths, host D2H path.
             #    sq=128 reuses the classic golden key; sq=64 is a distinct shape
             #    in the SAME session (no recompile).
-            for seq_len, key in ((128, "dynamic_prefill_sq128"),
-                                 (64, "dynamic_prefill_sq64")):
+            for seq_len, key in (
+                (128, "dynamic_prefill_sq128"),
+                (64, "dynamic_prefill_sq64"),
+            ):
                 cfg = spec.make_cfg(seq_len)
                 inputs = spec.build_prefill_inputs(cfg, seq_len, seq_len)
                 dim_map = make_dim_map(seq_len, seq_len)
