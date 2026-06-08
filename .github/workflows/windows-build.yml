@@ -250,7 +250,7 @@ jobs:
       # for the in-process COFF DLL linker; clang is shipped so lib/Runtime's
       # runtime-bitcode step uses a version-matched clang from the prefix (and
       # so this build stays identical to cmake/deps.cmake's from-source
-      # fallback). /MT matches the toolchain; RTTI/zlib/zstd off match morphizen.
+      # fallback). /MT matches the toolchain; RTTI on, zlib/zstd off.
       # LLVM_INSTALL_UTILS=ON ships FileCheck (+ not/count) for the LIT suite.
       # Cold build is multi-hour (clang dominates); sccache + the shared
       # llvm-install cache amortize it.
@@ -270,7 +270,7 @@ jobs:
             -DLLVM_TARGETS_TO_BUILD=X86 \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=OFF \
+            -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
             -DLLVM_INCLUDE_TESTS=OFF \
