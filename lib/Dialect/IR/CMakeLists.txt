@@ -26,3 +26,10 @@ target_link_libraries(HipDialectIR PUBLIC
   MLIRTensorDialect
   MLIRMemRefDialect
 )
+
+# HipDialect.cpp aggregates every TableGen-generated op class (GET_OP_CLASSES).
+# As the dialect grows, this single translation unit exceeds the MSVC COFF
+# section limit (fatal error C1128); /bigobj raises it.
+if(MSVC)
+  target_compile_options(HipDialectIR PRIVATE /bigobj)
+endif()
