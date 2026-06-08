@@ -43,7 +43,7 @@ InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<morphizen::Plugin> plugin,
                                const std::string &temp_dll_path)
     : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path),
-      begin_compute_fn_(nullptr) {
+      begin_compute_fn_(nullptr), set_output_allocator_fn_(nullptr) {
   // Cache the begin_compute symbol so the per-Compute() invocation is a
   // single indirect call. Older model.dlls do not export this symbol; in
   // that case we leave begin_compute_fn_ null and begin_compute() becomes
@@ -53,6 +53,14 @@ InferenceState::InferenceState(PrivateTag, void *state,
         plugin_->get_method<void, void *>("hipdnn_ep_runtime_begin_compute");
     MY_LOG(2) << "begin_compute symbol "
               << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
+    // Output-allocator setter: optional, like begin_compute. Only invoked in
+    // allocator mode; classic DLLs leave this null.
+    set_output_allocator_fn_ =
+        plugin_->get_method<void, void *, const output_allocator_t *>(
+            "hipdnn_ep_set_output_allocator");
+    MY_LOG(2) << "set_output_allocator symbol "
+              << (set_output_allocator_fn_ ? "resolved"
+                                           : "not exported (no-op)");
   }
   // Safety net: warn loudly when the seqlens_k cache is effectively on
   // but the model.dll predates the begin_compute export. Without the
@@ -180,6 +188,39 @@ int InferenceState::compute(span_t *inputs, span_t *outputs) const {
     return -1;
   }
   return compute_fn(state_, inputs, outputs);
+}
+
+int InferenceState::compute_allocator(span_t *inputs) const {
+  // Same symbol as compute(), resolved with the 2-arg ABI. The DLL exports
+  // exactly one arity (fixed at compile time by use_output_allocator), so this
+  // is only ever called against an allocator-mode DLL.
+  auto compute_fn =
+      plugin_->get_method<int, void *, span_t *>("inference_compute");
+  if (!compute_fn) {
+    LOG(ERROR) << "inference_compute (2-arg allocator ABI) not found in plugin";
+    return -1;
+  }
+  return compute_fn(state_, inputs);
+}
+
+void InferenceState::set_output_allocator(
+    const output_allocator_t *allocator) const {
+  if (!set_output_allocator_fn_) {
+    // Installing an allocator on a DLL that cannot accept it would leave
+    // hip.alloc_output returning null -> guaranteed crash. Fail loudly with an
+    // actionable message instead. Clearing (nullptr) on such a DLL is a no-op.
+    if (allocator) {
+      LOG(FATAL) << "Model was compiled in output-allocator mode but the "
+                    "loaded model.dll does not export "
+                    "hipdnn_ep_set_output_allocator. The DLL is stale; delete "
+                    "%TEMP%/morphizen_mlir_* (or regenerate the EPContext) and "
+                    "rebuild so the linked runtime exports the setter.";
+    }
+    return;
+  }
+  if (state_) {
+    set_output_allocator_fn_(state_, allocator);
+  }
 }
 
 void InferenceState::begin_compute() const {
