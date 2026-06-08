@@ -172,10 +172,15 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
   //                                          hook (called from EP-side
   //                                          MlirCustomOp::Compute() entry)
-  std::vector<std::string> export_symbols = {
-      "inference_init",    "inference_compute",
-      "inference_cleanup", "inference_get_metadata_json",
-      "test_hip_from_dll", "hipdnn_ep_runtime_begin_compute"};
+  //   hipdnn_ep_set_output_allocator       — EP installs the output allocator
+  //                                          before inference_compute (Phase 5)
+  std::vector<std::string> export_symbols = {"inference_init",
+                                             "inference_compute",
+                                             "inference_cleanup",
+                                             "inference_get_metadata_json",
+                                             "test_hip_from_dll",
+                                             "hipdnn_ep_runtime_begin_compute",
+                                             "hipdnn_ep_set_output_allocator"};
   std::vector<std::string> libraries;
   std::vector<std::string> library_paths;
   discoverLibraries(libraries, library_paths);

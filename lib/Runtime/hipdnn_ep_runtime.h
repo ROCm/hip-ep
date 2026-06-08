@@ -165,6 +165,69 @@ typedef struct RuntimeState RuntimeState;
 // Thread safety: Not thread-safe (one inference per state at a time)
 //===----------------------------------------------------------------------===//
 
+//===----------------------------------------------------------------------===//
+// Output Allocator Contract
+//===----------------------------------------------------------------------===//
+//
+// The EP installs an output allocator before inference_compute; the generated
+// main_graph obtains each graph-output buffer from it at the point the output
+// shape is known (lowered from hip.alloc_output -> hipdnn_ep_alloc_output).
+//
+// ABI / forward-compatibility: a cached model.dll can embed OLDER runtime
+// bitcode than the EP that calls the setter (the cache key is the ONNX hash,
+// not the runtime version), so the struct is a cross-version boundary:
+//   - struct_size is field 0 and the caller sets it to sizeof(...). The setter
+//     copies only min(caller_size, local_size) bytes, so an older caller
+//     leaves new fields at defaults and a newer caller's unknown tail is
+//     ignored.
+//   - New callbacks are APPENDED after `allocate`; existing fields never move.
+//   - Total absence is handled by symbol resolution: a pre-allocator model.dll
+//     simply lacks the exported setter (GetProcAddress returns null -> no-op).
+typedef struct {
+  // ABI version/size guard. MUST stay first (offset 0). Caller sets
+  // struct_size = sizeof(hipdnn_output_allocator_t).
+  size_t struct_size;
+  void *self; // opaque EP context (borrowed; runtime never owns/frees)
+  void *(*allocate)(void *self, int64_t out_idx, const int64_t *shape,
+                    int64_t rank, int64_t elem_size);
+  // Append future callbacks BELOW; never reorder/remove existing members.
+} hipdnn_output_allocator_t;
+
+// Compile-time layout lock (mirrors the tensor_t static_assert idiom below).
+// The Phase 5 EP-side copy must carry the same asserts.
+static_assert(offsetof(hipdnn_output_allocator_t, struct_size) == 0,
+              "struct_size must remain first (ABI size guard)");
+static_assert(offsetof(hipdnn_output_allocator_t, self) == sizeof(size_t),
+              "self moved -- update all hipdnn_output_allocator_t copies");
+
+// dllexport so the setter survives LLVM optimization in the bitcode build (the
+// export_symbols list in CompilerDriver.cpp only adds linker-stage /EXPORT,
+// which runs AFTER opt and cannot keep an otherwise-uncalled symbol alive).
+// Applied to BOTH the declaration and the definition: MSVC -- which compiles
+// the same output_allocator.cpp natively for the GPU-free unit test -- treats a
+// decl/def dllexport mismatch as a hard error (C2375); clang only warns. The
+// unit test defines HIPDNN_EP_RT_NO_EXPORT so its exe does not export it.
+#if defined(_WIN32) && !defined(HIPDNN_EP_RT_NO_EXPORT)
+#define HIPDNN_EP_RT_EXPORT __declspec(dllexport)
+#else
+#define HIPDNN_EP_RT_EXPORT
+#endif
+
+// EP -> model.dll (exported), installs the allocator before inference_compute.
+// `state` is RuntimeState* to match every other state entry point; the EP side
+// resolves this by name and treats state as an opaque void* (pointer-
+// compatible), exactly like hipdnn_ep_runtime_begin_compute.
+HIPDNN_EP_RT_EXPORT void
+hipdnn_ep_set_output_allocator(RuntimeState *state,
+                               const hipdnn_output_allocator_t *allocator);
+
+// generated main_graph -> runtime (internal), forwards to the installed
+// callback. Returns a generic address-space-0 device pointer (the lowering
+// casts to the memref's address space). Returns null if none is installed.
+void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
+                             const int64_t *shape, int64_t rank,
+                             int64_t elem_size);
+
 // Initialize runtime state with external constant storage via FileSystem.
 // Used when compiled with hip_compile_with_fs.
 // Reads constants_filename and constant_sizes from the FlatBuffers blob
