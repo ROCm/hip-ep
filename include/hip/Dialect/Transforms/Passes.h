@@ -27,6 +27,15 @@ struct CompilationOptionsT;
 std::unique_ptr<mlir::Pass>
 createGenerateInterfacePass(const CompilationOptionsT &options);
 
+/// Creates the allocator-mode counterpart of createGenerateInterfacePass.
+/// Emits the same four C-ABI wrappers, but inference_compute and @main_graph
+/// use the 2-arg (state, inputs) ABI: graph outputs are allocated in-graph via
+/// hip.alloc_output (the hipdnn_ep_alloc_output runtime callback) rather than
+/// passed in as out-params. Pairs with the hip-use-output-allocator
+/// ONNX-to-HIP pass and the allocator branch of convert-hip-to-llvm.
+std::unique_ptr<mlir::Pass>
+createGenerateAllocatorInterfacePass(const CompilationOptionsT &options);
+
 } // namespace hip
 } // namespace mlir
 
