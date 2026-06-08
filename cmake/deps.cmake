@@ -183,7 +183,26 @@ if(_HIPDNN_NEED_TOOLCHAIN)
       GIT_SHALLOW TRUE
       SOURCE_SUBDIR llvm
       EXCLUDE_FROM_ALL)
+    # Build the in-tree LLVM/MLIR/clang with hidden ELF visibility (source
+    # hardening, scoped to the LLVM sub-build only). Defence-in-depth on top of
+    # the per-shared-library version scripts: with default visibility the
+    # statically-linked llvm:: symbols are exported into the global dynamic
+    # symbol table, where ROCm's libamd_comgr.so binds its own (versioned
+    # @LLVM_22.0) llvm:: references to our ABI-incompatible upstream-LLVM copy
+    # and segfaults during its in-process device-code compile. Hidden visibility
+    # keeps them out of .dynsym entirely. The presets are restored immediately
+    # after so our own targets (the EP entry points etc.) keep default
+    # visibility and export normally.
+    set(_hipdnn_saved_cxx_visibility "${CMAKE_CXX_VISIBILITY_PRESET}")
+    set(_hipdnn_saved_c_visibility "${CMAKE_C_VISIBILITY_PRESET}")
+    set(_hipdnn_saved_inlines_hidden "${CMAKE_VISIBILITY_INLINES_HIDDEN}")
+    set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+    set(CMAKE_C_VISIBILITY_PRESET hidden)
+    set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
     FetchContent_MakeAvailable(llvm-project)
+    set(CMAKE_CXX_VISIBILITY_PRESET "${_hipdnn_saved_cxx_visibility}")
+    set(CMAKE_C_VISIBILITY_PRESET "${_hipdnn_saved_c_visibility}")
+    set(CMAKE_VISIBILITY_INLINES_HIDDEN "${_hipdnn_saved_inlines_hidden}")
 
     # Embedded (subdirectory) LLVM. Do NOT find_package the build tree: a
     # sub-build in the same configure has no consumable package config yet (its
