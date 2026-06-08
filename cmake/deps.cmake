@@ -170,7 +170,7 @@ if(_HIPDNN_NEED_TOOLCHAIN)
     # CI caches (find_package path) and this fallback produce equivalent toolsets.
     set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
     set(LLVM_TARGETS_TO_BUILD "X86" CACHE STRING "" FORCE)
-    set(LLVM_ENABLE_RTTI OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_RTTI ON CACHE BOOL "" FORCE)
     set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
     set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
     set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)

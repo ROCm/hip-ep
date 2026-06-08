@@ -106,7 +106,7 @@ jobs:
       # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
       # concern, so the prefix build lives here (not in scripts/build.py). Recipe
       # matches cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
-      # RTTI/zlib/zstd off, INSTALL_UTILS on.
+      # RTTI on, zlib/zstd off, INSTALL_UTILS on.
       # -----------------------------------------------------------------------
       - name: Cache LLVM install prefix
         id: cache-llvm
@@ -129,7 +129,7 @@ jobs:
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD=X86 \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=OFF \
+            -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
             -DLLVM_INCLUDE_TESTS=OFF \
