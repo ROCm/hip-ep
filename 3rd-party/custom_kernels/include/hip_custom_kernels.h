@@ -1320,6 +1320,27 @@ int hip_causal_conv_step_decode(
     int64_t activation,
     int64_t element_size_bytes);
 
+// Prefill (seq_len > 1) fused causal depthwise 1D conv + bias + SiLU. One
+// launch replaces the MIOpen path (Find + 3 pitched memcpys + conv + bias +
+// activation + mul). fp32 accumulate; numerically matches the decode-step
+// kernel at seq_len==1. Same layout/contract as hip_causal_conv_step_decode
+// plus a seq_len argument. Supports kernel_size in [1,8], activation 0/1,
+// element_size 2/4; caller falls back to MIOpen for anything else.
+int hip_causal_conv_prefill(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes);
+
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
