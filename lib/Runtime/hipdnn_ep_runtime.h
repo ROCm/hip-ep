@@ -188,6 +188,15 @@ int hipdnn_ep_state_cleanup(RuntimeState *state);
 // Ownership: Caller does NOT own stream (destroyed in cleanup)
 void *hipdnn_ep_state_get_stream(RuntimeState *state);
 
+// Current inference session stream (hipStream_t as void*), set per Compute by
+// hipdnn_ep_runtime_begin_compute. Lets ABI-fixed runtime helpers that don't
+// receive `state` -- notably memrefCopy (MLIR memref.copy lowering) -- issue
+// their work on the session stream instead of the default/null stream (0).
+// Default-stream work serializes with the session stream (legacy implicit
+// sync) and shows up as GPU idle in the prefill profile. Returns NULL before
+// the first begin_compute on this thread (callers fall back to stream 0).
+void *hipdnn_ep_get_current_stream(void);
+
 // Get MIOpen handle from state (for MIOpen operations)
 // Returns: miopenHandle_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own handle (destroyed in cleanup)
