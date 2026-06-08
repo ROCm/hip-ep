@@ -2,57 +2,30 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- LeakyReluConversion.cpp - onnx.LeakyRelu -> hip.{mul,less,where} --===//
+//===- LeakyReluConversion.cpp - onnx.LeakyRelu -> hip.leaky_relu --------===//
 //
-// LeakyRelu(x, alpha) = x if x >= 0 else alpha*x. Decomposed without a new
-// kernel into Mul + Less + Where — but emitted as HIP-dialect ops directly,
-// not onnx.* ops, because the convert-onnx-to-hip driver runs with
-// GreedyRewriteStrictness::ExistingOps and would not pick up newly-created
-// onnx.* nodes.
+// Converts onnx.LeakyRelu to a single hip.leaky_relu op backed by a dedicated
+// HIP kernel, replacing the previous mul+less+where decomposition.
 //
 //   Before:
 //     %y = "onnx.LeakyRelu"(%x) {alpha = 0.1 : f32}
 //          : (tensor<...xT>) -> tensor<...xT>
 //
 //   After:
-//     %zero   = "onnx.Constant"() {value = dense<0.0> : tensor<T>}
-//     %alpha  = "onnx.Constant"() {value = dense<alpha> : tensor<T>}
-//     %i0     = tensor.empty(...) : tensor<...xT>
-//     %alphaX = hip.mul(%ctx) ins(%alpha, %x : ...) outs(%i0 : ...)
-//     %ci     = tensor.empty(...) : tensor<...xi1>
-//     %cond   = hip.less(%ctx) ins(%x, %zero : ...) outs(%ci : tensor<...xi1>)
-//     %iy     = tensor.empty(...) : tensor<...xT>
-//     %y      = hip.where(%ctx) ins(%cond, %alphaX, %x : ...) outs(%iy : ...)
+//     %init = tensor.empty(...) : tensor<...xT>
+//     %y    = hip.leaky_relu(%ctx) ins(%x : tensor<...xT>)
+//                                  outs(%init : tensor<...xT>)
+//                                  {alpha = 0.1 : f64}
 //
-// Type T is one of bf16/f16/f32/f64 per the ONNX spec.
+// Type T is one of f16/f32/f64 per the ONNX spec.
 //
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinTypes.h"
-
-#include "llvm/ADT/APFloat.h"
-
 namespace mlir {
 namespace hip {
 namespace {
-
-/// Build a 0-D `arith.constant` of the given float type. (See the comment in
-/// ReluConversion.cpp for why we do not use `onnx.Constant` here.)
-static mlir::Value buildFloatScalar(mlir::PatternRewriter &rewriter,
-                                    mlir::Location loc, mlir::FloatType ft,
-                                    double value) {
-  auto scalarType = mlir::RankedTensorType::get({}, ft);
-  llvm::APFloat apf(value);
-  bool losesInfo = false;
-  apf.convert(ft.getFloatSemantics(), llvm::APFloat::rmNearestTiesToEven,
-              &losesInfo);
-  auto valueAttr = mlir::DenseElementsAttr::get(scalarType, apf);
-  return mlir::arith::ConstantOp::create(rewriter, loc, valueAttr).getResult();
-}
 
 struct LeakyReluToHip : public mlir::RewritePattern {
   LeakyReluToHip(mlir::MLIRContext *ctx)
@@ -83,34 +56,14 @@ struct LeakyReluToHip : public mlir::RewritePattern {
     if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
       alphaVal = attr.getValueAsDouble();
 
-    mlir::Value zero = buildFloatScalar(rewriter, loc, ft, 0.0);
-    mlir::Value alpha = buildFloatScalar(rewriter, loc, ft, alphaVal);
-
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, x);
 
-    // hip.mul(alpha, x) -> alphaX. `x` is the rank source for the init.
-    mlir::Value mulInit = createEmptyTensor(rewriter, loc, resultType, x);
-    mlir::Value alphaX = mlir::hip::MulOp::create(rewriter, loc, resultType,
-                                                  context, alpha, x, mulInit)
-                             ->getResult(0);
-
-    // hip.less(x, zero) -> cond (i1, same shape as x).
-    auto condType =
-        mlir::RankedTensorType::get(xType.getShape(), rewriter.getI1Type());
-    mlir::Value condInit = createEmptyTensor(rewriter, loc, condType, x);
-    mlir::Value cond = mlir::hip::LessOp::create(rewriter, loc, condType,
-                                                 context, x, zero, condInit)
-                           ->getResult(0);
-
-    // hip.where(cond, alphaX, x) -> y.
-    mlir::Value whereInit = createEmptyTensor(rewriter, loc, resultType, x);
-    mlir::Value y =
-        mlir::hip::WhereOp::create(rewriter, loc, resultType, context, cond,
-                                   alphaX, x, whereInit)
-            ->getResult(0);
-
-    rewriter.replaceOp(op, y);
+    auto alphaAttr = rewriter.getF64FloatAttr(alphaVal);
+    auto hipOp = mlir::hip::LeakyReluOp::create(rewriter, loc, resultType,
+                                                 context, x, init, alphaAttr);
+    rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }
 };

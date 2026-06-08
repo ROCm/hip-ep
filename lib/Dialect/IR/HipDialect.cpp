@@ -736,6 +736,20 @@ void GeluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// LeakyReluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LeakyReluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void LeakyReluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GlobalPoolOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

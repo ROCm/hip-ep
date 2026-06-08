@@ -1001,6 +1001,21 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type, double alpha) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_leaky_relu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_leaky_relu(num_elements=%lld, data_type=%s(%lld), "
+             "alpha=%f)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, alpha);
+
+  return 0;
+}
+
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/miopen.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,

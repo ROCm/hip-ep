@@ -35,6 +35,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip
+    hip/leaky_relu_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/elementwise_unary_kernel.hip
     hip/elementwise_binary_kernel.hip
