@@ -5,6 +5,15 @@
 // Op-contract tests for hip.alloc_output: parser/printer round-trip (success)
 // and verifier rejection of a dynamic-size-operand count that does not match
 // the result memref's dynamic-dim count (failure).
+//
+// NOTE: these are OP-level tests. The op verifier is local -- it checks ONLY
+// the dynamic-size operand count against the result memref. It deliberately
+// does NOT tie out_idx to a func.return position: the op is valid standalone,
+// and an op cannot (and should not) non-locally inspect how/where its result is
+// returned. The "out_idx == return-operand position" contract is a property of
+// the hip-use-output-allocator PASS, covered in hip-use-output-allocator.mlir
+// (@two_outputs). Hence out_idx values below are free-form and intentionally
+// need not equal the return index.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
@@ -19,7 +28,9 @@ func.func @roundtrip_dynamic(%ctx: !hip.context, %m: index, %n: index) -> memref
 
 // -----
 
-// --- SUCCESS: static result, no dynamic sizes, round-trips. ---
+// --- SUCCESS: static result, no dynamic sizes, round-trips. out_idx = 1 here
+//     even though the value is returned at position 0 -- legal at the op level
+//     (see header note) and verifies that a non-zero out_idx round-trips. ---
 // CHECK-LABEL: func.func @roundtrip_static
 // CHECK:         hip.alloc_output(%{{.*}}) {out_idx = 1 : i64} : memref<4x8xf16>
 func.func @roundtrip_static(%ctx: !hip.context) -> memref<4x8xf16> {

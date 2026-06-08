@@ -97,3 +97,36 @@ func.func @aliased_output(%ctx: !hip.context, %M: index) -> (memref<?xf16>, memr
   %a = memref.alloc(%M) : memref<?xf16>
   return %a, %a : memref<?xf16>, memref<?xf16>
 }
+
+// --- Realistic graph with real hip ops (design doc "Add -> MatMul -> Sigmoid").
+//     The two intermediates (%t0 = add output, %t1 = matmul output) are NOT
+//     returned, so they stay memref.alloc (a later pass pools them). Only the
+//     returned sigmoid output is rewritten to hip.alloc_output, reusing the
+//     dynamic row count %M and getting out_idx = 0 (its return position). ---
+// CHECK-LABEL: func.func @main_graph
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK:         %[[M:.*]] = memref.dim
+// CHECK:         %[[T0:.*]] = memref.alloc(%[[M]]) : memref<?x64xf16>
+// CHECK:         hip.add(%[[CTX]]) ins({{.*}}) outs(%[[T0]] : memref<?x64xf16>)
+// CHECK:         %[[T1:.*]] = memref.alloc(%[[M]]) : memref<?x64xf16>
+// CHECK:         hip.matmul(%[[CTX]]) ins(%[[T0]]{{.*}}) outs(%[[T1]] : memref<?x64xf16>)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[M]]) {out_idx = 0 : i64} : memref<?x64xf16>
+// CHECK:         hip.sigmoid(%[[CTX]]) ins(%[[T1]] : memref<?x64xf16>) outs(%[[OUT]] : memref<?x64xf16>)
+// CHECK:         return %[[OUT]]
+func.func @main_graph(%ctx: !hip.context,
+                      %input: memref<?x64xf16>,
+                      %bias: memref<?x64xf16>,
+                      %w: memref<64x64xf16>) -> memref<?x64xf16> {
+  %c0 = arith.constant 0 : index
+  %M = memref.dim %input, %c0 : memref<?x64xf16>
+  %t0 = memref.alloc(%M) : memref<?x64xf16>
+  hip.add(%ctx) ins(%input, %bias : memref<?x64xf16>, memref<?x64xf16>)
+               outs(%t0 : memref<?x64xf16>)
+  %t1 = memref.alloc(%M) : memref<?x64xf16>
+  hip.matmul(%ctx) ins(%t0, %w : memref<?x64xf16>, memref<64x64xf16>)
+                  outs(%t1 : memref<?x64xf16>)
+  %out = memref.alloc(%M) : memref<?x64xf16>
+  hip.sigmoid(%ctx) ins(%t1 : memref<?x64xf16>) outs(%out : memref<?x64xf16>)
+  return %out : memref<?x64xf16>
+}
