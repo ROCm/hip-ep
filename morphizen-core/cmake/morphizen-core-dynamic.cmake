@@ -64,6 +64,15 @@ target_compile_definitions(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
 )
 target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_COMPILER_OPTIONS}>")
 target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
+
+# Localize the statically-linked LLVM symbols (version script) so ROCm's
+# libamd_comgr.so cannot bind its own @LLVM_22.0 llvm:: references to our
+# ABI-incompatible copy and segfault its in-process device-code compile.
+# Windows controls the same surface via onnxruntime_morphizen_ep.def.
+if(NOT MSVC)
+    target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_morphizen_ep.exports")
+endif()
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES
   VS_DEBUGGER_COMMAND "${CMAKE_INSTALL_PREFIX}\\bin\\test_onnx_runner.exe"
   VS_DEBUGGER_COMMAND_ARGUMENTS "${CMAKE_CURRENT_SOURCE_DIR}\\..\\..\\test_onnx_runner\\data\\pt_resnet50.onnx"
