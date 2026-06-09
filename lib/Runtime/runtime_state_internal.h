@@ -89,8 +89,8 @@ struct RuntimeState {
   void *host_scratch_base;
   size_t host_scratch_size;
 
-  // Output allocator installed by the EP before inference_compute (Phase 5)
-  // via hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
+  // Output allocator installed by the EP before inference_compute via
+  // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
   // allocate(self, ...). Borrowed: `self` is EP-owned, never freed here.
   // allocate == nullptr means no allocator is installed (the classic pipeline
   // never calls alloc_output); zero-initialized in initialize_state_handles.

@@ -4,7 +4,7 @@
  */
 
 //===----------------------------------------------------------------------===//
-// Output allocator runtime contract (Phase 3).
+// Output allocator runtime contract.
 //
 // Two entry points bridge the EP and the generated model.dll:
 //   * hipdnn_ep_set_output_allocator - EP-called, EXPORTED from model.dll.

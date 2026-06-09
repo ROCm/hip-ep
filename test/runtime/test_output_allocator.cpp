@@ -4,7 +4,7 @@
  */
 
 //===----------------------------------------------------------------------===//
-// GPU-free unit test for the Phase 3 output allocator runtime contract.
+// GPU-free unit test for the output allocator runtime contract.
 //
 // Compiles lib/Runtime/output_allocator.cpp natively against the MOCK runtime
 // types (no HIP), constructs a RuntimeState on the stack, and exercises the two
@@ -13,7 +13,7 @@
 //   * null-guard when no allocator is installed / cleared / null state
 //
 // The full end-to-end path (generated hip.alloc_output + EP-installed
-// allocator) only exists at Phase 4/5; this isolates the runtime contract.
+// allocator) is not wired up yet; this isolates the runtime contract.
 //===----------------------------------------------------------------------===//
 
 #include "hipdnn_ep_runtime.h"
