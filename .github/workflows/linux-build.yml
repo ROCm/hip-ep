@@ -37,7 +37,7 @@ env:
   OGA_REPO: AMDmoore/onnxruntime-genai
   OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
-  # explicitly (scripts/build.py auto-detects from /sys on a real GPU host).
+  # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx1151
 
 jobs:
@@ -53,7 +53,7 @@ jobs:
 
       # Checkout at the workspace root. build/, install/, llvm-install/,
       # ort-install/ live under ${{ runner.workspace }}
-      # (the repo's parent), which is the WORKSPACE scripts/build.py derives.
+      # (the repo's parent), which is the WORKSPACE build.py derives.
       # TheRock is auto-downloaded into the build tree by cmake/deps.cmake.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -63,7 +63,7 @@ jobs:
           show-progress: false
 
       # Initialize submodules on the HOST with ssh-agent loaded so the private
-      # MorphiZen repo is populated; scripts/build.py then sees them present
+      # MorphiZen repo is populated; build.py then sees them present
       # and skips its own submodule update (needs no SSH).
       - name: Checkout MorphiZen submodule
         run: |
@@ -104,7 +104,7 @@ jobs:
 
       # -----------------------------------------------------------------------
       # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in scripts/build.py). Recipe
+      # concern, so the prefix build lives here (not in build.py). Recipe
       # matches cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
       # RTTI on, zlib/zstd off, INSTALL_UTILS on.
       # -----------------------------------------------------------------------
@@ -148,7 +148,7 @@ jobs:
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->
       # apply PR patches -> build.sh -> cmake --install. The prefix is consumed
-      # by scripts/build.py
+      # by build.py
       # (find_package) and reused as OGA's ORT_HOME. Each step is gated on the
       # ort-install cache so a warm run skips the 50-90 min build.
       # -----------------------------------------------------------------------
@@ -232,7 +232,7 @@ jobs:
       # (not cached).
 
       # -----------------------------------------------------------------------
-      # Build this project natively via the plain scripts/build.py. Deps are
+      # Build this project natively via the plain build.py. Deps are
       # injected as prefixes (llvm-install + ort-install); protobuf/flatbuffers
       # are resolved from source and TheRock auto-downloaded by cmake/deps.cmake.
       # Runtime .so bundling + closure happen in a later step (not in build.py).
@@ -240,7 +240,7 @@ jobs:
       - name: Build onnx-hipdnn-ep
         run: |
           set -euo pipefail
-          python3 scripts/build.py \
+          python3 build.py \
             --config Release \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install"
@@ -248,7 +248,7 @@ jobs:
       # -----------------------------------------------------------------------
       # OGA (onnxruntime-genai) for model_benchmark: a dedicated step using the
       # ort-install prefix as ORT_HOME. Kept out of
-      # scripts/build.py (whose target is the project .so) because OGA is a
+      # build.py (whose target is the project .so) because OGA is a
       # CI/artifact concern.
       # -----------------------------------------------------------------------
       - name: Cache OGA artifacts

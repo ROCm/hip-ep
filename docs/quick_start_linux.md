@@ -8,10 +8,10 @@ Pick one entry path to populate `bin/` and `lib/`, point `$ROOT` at it, then
 follow the shared **Testing & Benchmarking** section — every tool runs the same
 way regardless of which entry path you chose.
 
-- **Build from source, native** (developers). `python scripts/build.py` builds
+- **Build from source, native** (developers). `python build.py` builds
   directly on the host (no Docker) into `<workspace>/install/`.
 - **Build from source, Docker** (developers who prefer isolation).
-  `./docker/run.sh build` runs the same `scripts/build.py` inside a container.
+  `./docker/run.sh build` runs the same `build.py` inside a container.
 - **Use the prebuilt package** (testers). `gh run download
   linux-gpu-test-package` lands the binaries under
   `<workspace>/prebuilt/<run-id>/`; no rebuild needed.
@@ -55,13 +55,13 @@ git submodule update --init --recursive
 
 ### Native (no Docker)
 
-`scripts/build.py` is a plain cross-platform driver: it ensures submodules,
+`build.py` is a plain cross-platform driver: it ensures submodules,
 checks the toolchain, auto-detects the GPU arch (from `/sys/class/kfd`), then
 runs the cmake configure/build/install into `<workspace>/install/`. All
 dependencies (incl. from-source LLVM) are resolved by `cmake/deps.cmake`.
 
 ```bash
-python3 scripts/build.py
+python3 build.py
 #   --hip_arch gfx1151        override target GPU (else auto-detected; falls
 #                             back to --mock if no AMD GPU is present)
 #   --mock                    mock runtime (no GPU/HIP/TheRock)
@@ -74,7 +74,7 @@ python3 scripts/build.py
 
 ```bash
 ./docker/run.sh image        # build the image once (first time only)
-./docker/run.sh build        # runs scripts/build.py inside the container
+./docker/run.sh build        # runs build.py inside the container
 #   HIP_ARCHITECTURES=gfx942 ./docker/run.sh build   # override target GPU
 ```
 
@@ -186,7 +186,7 @@ Run from the project root (inside the container if you used the Docker path).
 ### Model Inference with hip-onnx-runner
 
 `hip-onnx-runner` runs a single ONNX model through MorphiZen EP and reports
-timing. It is built by `scripts/build.py` and also ships in the prebuilt
+timing. It is built by `build.py` and also ships in the prebuilt
 package.
 
 > `hip-onnx-runner` runs with random inputs by default. LLM models need

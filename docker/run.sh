@@ -17,7 +17,7 @@
 # Env knobs (override on the command line, e.g. `HIP_ARCHITECTURES=gfx942 ./run.sh build`):
 #   IMAGE, CONTAINER_NAME, HIP_ARCHITECTURES.
 #
-# `build` runs the native driver scripts/build.py inside the container (docker
+# `build` runs the native driver build.py inside the container (docker
 # is just an isolation wrapper). OGA + ONNX-Runtime-from-source patching are CI
 # concerns (see .github/workflows/linux-build.yml), not local docker knobs.
 
@@ -112,14 +112,14 @@ cmd_build() {
     populate_common_args docker_args
     set -x
     # docker is now just an isolation wrapper around the same native driver
-    # scripts/build.py (no second build recipe). HIP_ARCHITECTURES is detected
+    # build.py (no second build recipe). HIP_ARCHITECTURES is detected
     # host-side above and passed in (the compile-only container has no GPU node
     # to auto-detect from). LLVM/ORT/protobuf/flatbuffers/TheRock are resolved
     # by cmake/deps.cmake; OGA is a CI concern and is not built here.
     docker run --rm -t \
         "${docker_args[@]}" \
         "$IMAGE" \
-        python3 "$SOURCE_DIR/scripts/build.py" --config Release --hip_arch "$HIP_ARCHITECTURES"
+        python3 "$SOURCE_DIR/build.py" --config Release --hip_arch "$HIP_ARCHITECTURES"
 }
 
 cmd_shell() {

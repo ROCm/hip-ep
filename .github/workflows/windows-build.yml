@@ -289,7 +289,7 @@ jobs:
       # -----------------------------------------------------------------------
 
       # -----------------------------------------------------------------------
-      # Build onnx-hipdnn-ep via the cross-platform scripts/build.py (same driver
+      # Build onnx-hipdnn-ep via the cross-platform build.py (same driver
       # as the Linux CI and docs/quick_start.md). Cached LLVM/ORT prefixes are
       # injected; protobuf/flatbuffers build from source and TheRock auto-downloads
       # via cmake/deps.cmake. build.py's default build/install dirs resolve to
@@ -300,7 +300,7 @@ jobs:
       - name: Build onnx-hipdnn-ep
         shell: bash
         run: |
-          python scripts/build.py \
+          python build.py \
             --config Release \
             --cmake_generator Ninja \
             --hip_arch gfx1151 \

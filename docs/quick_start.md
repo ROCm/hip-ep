@@ -154,7 +154,7 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 
 ### 2. Build onnx-hipdnn-ep
 
-`scripts/build.py` is the cross-platform build driver (the same one used on Linux
+`build.py` is the cross-platform build driver (the same one used on Linux
 and in CI): it ensures submodules, sets up the build, resolves every dependency
 via `cmake/deps.cmake` (TheRock SDK + GPU arch auto-detected for real builds),
 and runs the cmake configure/build/install plus the LIT tests. A fresh tree needs
@@ -174,7 +174,7 @@ LOCAL_DIR=$(cd ../local && pwd)
 # HIP so it does not interfere (skip if you intend to use a pre-installed HIP).
 unset HIP_PATH
 
-python scripts/build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
+python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 #   --mock                    mock runtime (no GPU/HIP/TheRock)
 #   --hip_arch gfx1151        target GPU; auto-detected by default. Set it for a
 #                             cross-machine build+run -- the *target* GPU's arch
