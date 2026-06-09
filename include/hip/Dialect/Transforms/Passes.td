@@ -106,6 +106,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
     "mlir::tensor::TensorDialect",
+    "mlir::linalg::LinalgDialect",
     "mlir::memref::MemRefDialect",
     "mlir::bufferization::BufferizationDialect"
   ];

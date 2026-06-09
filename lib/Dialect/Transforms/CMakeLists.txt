@@ -49,6 +49,9 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRFuncToLLVM
   MLIRAffineToStandard
   MLIRReconcileUnrealizedCasts
+  MLIRLinalgDialect
+  MLIRLinalgTransforms
+  MLIRSCFToControlFlow
   MLIRInferTypeOpInterface
   MLIRTensorDialect
   flatbuffers::flatbuffers
