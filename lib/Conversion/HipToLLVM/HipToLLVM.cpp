@@ -239,7 +239,7 @@ private:
     SmallVector<Value> mainInternalArgs;
     mainInternalArgs.push_back(ctxArg);
 
-    for (int64_t i = 0; i < inputCount; i++) {
+    for (int64_t i : llvm::seq<int64_t>(0, inputCount)) {
       int64_t rank = cast<DenseI64ArrayAttr>(inputShapesAttr[i]).size();
       Value inputIdxVal = builder.create<LLVM::ConstantOp>(
           loc, i32Type, builder.getI32IntegerAttr(i));
@@ -260,7 +260,7 @@ private:
     // outputs pointer is absent from the wrapper signature.
     if (!allocatorMode) {
       Value outputsArg = entryBlock->getArgument(2);
-      for (int64_t i = 0; i < outputCount; i++) {
+      for (int64_t i : llvm::seq<int64_t>(0, outputCount)) {
         int64_t rank = cast<DenseI64ArrayAttr>(outputShapesAttr[i]).size();
         Value outputIdxVal = builder.create<LLVM::ConstantOp>(
             loc, i32Type, builder.getI32IntegerAttr(i));
