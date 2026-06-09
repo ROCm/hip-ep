@@ -552,7 +552,8 @@ int wrap_miopenConvolutionForward(
     int64_t pad_right,   // Padding right
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
-    int64_t group);      // Number of groups
+    int64_t group,       // Number of groups
+    int64_t data_type);  // HIPDNN_EP_DATATYPE_* element type
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
