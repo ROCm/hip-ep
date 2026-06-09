@@ -4,11 +4,13 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.nonzero lowers to a single llvm.call into the wrap_nonzero
-// runtime stub, with the expected (state, in, out, num_elems, rank,
-// output_capacity, input_data_type) signature. Covers both fully static
-// inputs (num_elems computed at compile time) and partially dynamic
-// inputs (num_elems built from llvm.extractvalue + llvm.mul over the
-// MemRef descriptor sizes array).
+// runtime function, with the expected (state, in, out, num_elems, rank,
+// output_capacity, input_data_type, input_shape) signature. Covers both
+// fully static inputs (num_elems computed at compile time) and partially
+// dynamic inputs (num_elems built from llvm.extractvalue + llvm.mul over the
+// MemRef descriptor sizes array). Also checks that the host-side input_shape
+// array (i64[R]) is materialised on the stack via llvm.alloca and passed as
+// the trailing pointer argument.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -25,7 +27,9 @@ module {
                       outs(%output : memref<2x?xi64, 1>)
                       {input_data_type = 5 : i64}
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // Host-side input_shape array (rank 2) is built on the stack.
+    // CHECK: llvm.alloca %{{.*}} x !llvm.array<2 x i64>
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr) -> i32
     return
   }
 
@@ -40,7 +44,9 @@ module {
                       outs(%output : memref<3x?xi64, 1>)
                       {input_data_type = 0 : i64}
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // Host-side input_shape array (rank 3) is built on the stack.
+    // CHECK: llvm.alloca %{{.*}} x !llvm.array<3 x i64>
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr) -> i32
     return
   }
 
@@ -62,7 +68,9 @@ module {
     // CHECK-DAG: llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // Host-side input_shape array (rank 2) is built on the stack.
+    // CHECK: llvm.alloca %{{.*}} x !llvm.array<2 x i64>
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr) -> i32
     return
   }
 }

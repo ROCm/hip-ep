@@ -46,6 +46,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/layer_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
+    hip/nonzero_kernel.hip
     hip/gather_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/matmul_nbits_kernel.hip
