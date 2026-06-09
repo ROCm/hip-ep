@@ -94,6 +94,70 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
+/// Create a tensor.empty for a DPS init operand whose shape is the result of
+/// ONNX-style multidirectional (NumPy) broadcasting over multiple inputs.
+///
+/// Operand shapes are right-aligned with the result. For each dynamic
+/// dimension of \p resultType, the size is taken from the first operand that
+/// truly contributes to the broadcast extent at that axis -- i.e., an operand
+/// whose corresponding dim is not statically 1. Operands whose rank does not
+/// span the dimension (shorter rank, conceptually padded with 1 on the left)
+/// are skipped, as are operands whose dim is statically 1. If every operand
+/// is statically 1 at the axis (degenerate case for a dynamic result), we
+/// fall back to the first operand spanning the dim.
+///
+/// Returns failure if no ranked operand spans a dynamic result dim (e.g.
+/// every operand is unranked while the result is ranked-and-dynamic). We
+/// surface this through `FailureOr` rather than `assert` so that the check
+/// remains active in Release builds (assertions are stripped under NDEBUG)
+/// and the pattern fails cleanly via `notifyMatchFailure` instead of
+/// dereferencing a null Value at the next builder call.
+inline mlir::FailureOr<mlir::Value>
+createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                           mlir::RankedTensorType resultType,
+                           mlir::ValueRange operands) {
+  int64_t resultRank = resultType.getRank();
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+
+    mlir::Value chosen;
+    int64_t chosenDim = -1;
+    mlir::Value fallback;
+    int64_t fallbackDim = -1;
+    for (mlir::Value operand : operands) {
+      auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
+      if (!t)
+        continue;
+      int64_t offset = resultRank - t.getRank();
+      if (dimIdx < offset)
+        continue; // operand is broadcast (padded to 1) at this axis
+      int64_t operandDim = dimIdx - offset;
+      if (!fallback) {
+        fallback = operand;
+        fallbackDim = operandDim;
+      }
+      if (!t.isDynamicDim(operandDim) && t.getDimSize(operandDim) == 1)
+        continue; // statically broadcast, does not define the extent
+      chosen = operand;
+      chosenDim = operandDim;
+      break;
+    }
+    if (!chosen) {
+      chosen = fallback;
+      chosenDim = fallbackDim;
+    }
+    if (!chosen)
+      return mlir::failure();
+    dynSizes.push_back(
+        mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
+  }
+  return mlir::Value(
+      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynSizes));
+}
+
 /// Get !hip.context from function argument 0. Returns failure if the
 /// function has no arguments or the first argument is not !hip.context.
 inline mlir::FailureOr<mlir::Value>

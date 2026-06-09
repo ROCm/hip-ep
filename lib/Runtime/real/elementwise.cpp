@@ -10,6 +10,7 @@
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <unordered_map>
@@ -53,6 +54,22 @@ static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op, bool &ok) {
             (long long)tensor_op);
     ok = false;
     return miopenTensorOpMul;
+  }
+}
+
+// Map backend dtype enum -> hip_dtype_t for the custom-kernel integer path.
+static int elementwise_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
+  switch (hipdnn_type) {
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_INT32:
+    return HIP_DTYPE_INT32;
+  case HIPDNN_EP_DATATYPE_INT64:
+    return HIP_DTYPE_INT64;
+  default:
+    return -1;
   }
 }
 
@@ -225,6 +242,96 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     return -1;
   }
 
+  // Integer dtypes (i32/i64) aren't supported by miopenOpTensor's descriptors.
+  // Transformer text models build the attention mask in the integer domain
+  // (e.g. causal_mask * attention_mask), so MUL/ADD/MIN/MAX must work for
+  // integers. Materialise any broadcast via hip_expand into the per-state
+  // workspace, then run the flat same-shape integer kernel.
+  if (data_type == HIPDNN_EP_DATATYPE_INT32 ||
+      data_type == HIPDNN_EP_DATATYPE_INT64) {
+    void *stream = hipdnn_ep_state_get_stream(state);
+    const int hip_dtype = elementwise_hipdnn_to_hip_dtype(data_type);
+    const int64_t out_vol = out_n * out_c * out_h * out_w;
+    if (out_vol <= 0)
+      return 0;
+
+    const bool lhs_eq_out =
+        (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w);
+    const bool rhs_eq_out =
+        (rhs_n == out_n && rhs_c == out_c && rhs_h == out_h && rhs_w == out_w);
+
+    void *lhs_use = lhs;
+    void *rhs_use = rhs;
+
+    if (!lhs_eq_out || !rhs_eq_out) {
+      const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+      const size_t per_side = static_cast<size_t>(out_vol * elem_bytes);
+      const size_t needed =
+          per_side * static_cast<size_t>((!lhs_eq_out ? 1 : 0) +
+                                         (!rhs_eq_out ? 1 : 0));
+      if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
+        fprintf(stderr,
+                "wrap_miopenOpTensor: integer fallback workspace ensure failed "
+                "(%zu bytes)\n",
+                needed);
+        return -1;
+      }
+      uint8_t *ws_byte =
+          static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
+      const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
+      if (!lhs_eq_out) {
+        const int64_t in_lhs[4] = {lhs_n, lhs_c, lhs_h, lhs_w};
+        if (hip_expand(stream, lhs, ws_byte, in_lhs, 4, out_shape, 4,
+                       hip_dtype) != 0) {
+          fprintf(stderr,
+                  "wrap_miopenOpTensor: integer fallback hip_expand(lhs) "
+                  "failed\n");
+          return -1;
+        }
+        lhs_use = ws_byte;
+        ws_byte += per_side;
+      }
+      if (!rhs_eq_out) {
+        const int64_t in_rhs[4] = {rhs_n, rhs_c, rhs_h, rhs_w};
+        if (hip_expand(stream, rhs, ws_byte, in_rhs, 4, out_shape, 4,
+                       hip_dtype) != 0) {
+          fprintf(stderr,
+                  "wrap_miopenOpTensor: integer fallback hip_expand(rhs) "
+                  "failed\n");
+          return -1;
+        }
+        rhs_use = ws_byte;
+      }
+    }
+
+    int rc;
+    switch (tensor_op) {
+    case HIPDNN_EP_TENSOR_OP_MUL:
+      rc = hip_elementwise_mul(stream, lhs_use, rhs_use, output, out_vol,
+                               hip_dtype);
+      break;
+    case HIPDNN_EP_TENSOR_OP_ADD:
+      rc = hip_elementwise_add(stream, lhs_use, rhs_use, output, out_vol,
+                               hip_dtype);
+      break;
+    case HIPDNN_EP_TENSOR_OP_MIN:
+      rc = hip_elementwise_min(stream, lhs_use, rhs_use, output, out_vol,
+                               hip_dtype);
+      break;
+    case HIPDNN_EP_TENSOR_OP_MAX:
+      rc = hip_elementwise_max(stream, lhs_use, rhs_use, output, out_vol,
+                               hip_dtype);
+      break;
+    default:
+      fprintf(stderr,
+              "wrap_miopenOpTensor: integer fallback only supports "
+              "MUL/ADD/MIN/MAX (got tensor_op=%lld)\n",
+              (long long)tensor_op);
+      return -1;
+    }
+    return rc;
+  }
+
   // MIOpen's miopenOpTensor requires A.shape == C.shape; only B may broadcast
   // (dim==1) into A. Caller-provided lhs/rhs ordering is dictated by the
   // original ONNX graph and is not normalized by the lowering pass, so when
@@ -286,13 +393,17 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 //===----------------------------------------------------------------------===//
 
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t num_elements,
-                         int64_t element_size_bytes) {
+                         void *output, int64_t lhs_n, int64_t lhs_c,
+                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                         int64_t out_n, int64_t out_c, int64_t out_h,
+                         int64_t out_w, int64_t data_type) {
   OP_PROFILE(
       "sub",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld", (long long)out_n,
+                 (long long)out_c, (long long)out_h, (long long)out_w);
         return std::string(b);
       },
       state);
@@ -301,25 +412,80 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
     return -1;
   }
 
-  void *stream = hipdnn_ep_state_get_stream(state);
+  const int64_t out_vol = out_n * out_c * out_h * out_w;
+  if (out_vol <= 0)
+    return 0;
 
-  int hip_dtype;
-  switch (element_size_bytes) {
-  case 8:
-    hip_dtype = HIP_DTYPE_INT64;
-    break;
-  default:
-    RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_elementwise_sub: unsupported element_size=%lld, "
-        "only int64 (8 bytes) is currently supported via custom kernel\n",
-        (long long)element_size_bytes);
+  int hip_dtype = elementwise_hipdnn_to_hip_dtype(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr, "wrap_elementwise_sub: unsupported data_type=%s(%lld)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_elementwise_sub: num_elements=%lld, "
-      "element_size=%lld, dtype=%d -> calling hip_elementwise_sub\n",
-      (long long)num_elements, (long long)element_size_bytes, hip_dtype);
+  void *stream = hipdnn_ep_state_get_stream(state);
 
-  return hip_elementwise_sub(stream, lhs, rhs, output, num_elements, hip_dtype);
+  const bool lhs_eq_out =
+      (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w);
+  const bool rhs_eq_out =
+      (rhs_n == out_n && rhs_c == out_c && rhs_h == out_h && rhs_w == out_w);
+
+  void *lhs_use = lhs;
+  void *rhs_use = rhs;
+
+  if (!lhs_eq_out || !rhs_eq_out) {
+    const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+    const size_t per_side = static_cast<size_t>(out_vol * elem_bytes);
+    const size_t needed = per_side * static_cast<size_t>((!lhs_eq_out ? 1 : 0) +
+                                                         (!rhs_eq_out ? 1 : 0));
+    if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
+      fprintf(stderr,
+              "wrap_elementwise_sub: workspace ensure failed (%zu bytes)\n",
+              needed);
+      return -1;
+    }
+    void *ws = hipdnn_ep_state_get_workspace(state);
+    uint8_t *ws_byte = static_cast<uint8_t *>(ws);
+    const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
+
+    if (!lhs_eq_out) {
+      const int64_t in_lhs[4] = {lhs_n, lhs_c, lhs_h, lhs_w};
+      int rc =
+          hip_expand(stream, lhs, ws_byte, in_lhs, 4, out_shape, 4, hip_dtype);
+      if (rc != 0) {
+        fprintf(stderr, "wrap_elementwise_sub: hip_expand(lhs) failed (%d)\n",
+                rc);
+        return -1;
+      }
+      lhs_use = ws_byte;
+      ws_byte += per_side;
+    }
+    if (!rhs_eq_out) {
+      const int64_t in_rhs[4] = {rhs_n, rhs_c, rhs_h, rhs_w};
+      int rc =
+          hip_expand(stream, rhs, ws_byte, in_rhs, 4, out_shape, 4, hip_dtype);
+      if (rc != 0) {
+        fprintf(stderr, "wrap_elementwise_sub: hip_expand(rhs) failed (%d)\n",
+                rc);
+        return -1;
+      }
+      rhs_use = ws_byte;
+    }
+
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_elementwise_sub: broadcast expand lhs%s rhs%s -> "
+        "out=[%lld,%lld,%lld,%lld], dtype=%s\n",
+        lhs_eq_out ? "(ok)" : "(expanded)", rhs_eq_out ? "(ok)" : "(expanded)",
+        (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w,
+        hipdnn_ep_datatype_name(data_type));
+  } else {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_elementwise_sub: same-shape out=[%lld,%lld,%lld,%lld], "
+        "dtype=%s\n",
+        (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w,
+        hipdnn_ep_datatype_name(data_type));
+  }
+
+  return hip_elementwise_sub(stream, lhs_use, rhs_use, output, out_vol,
+                             hip_dtype);
 }

@@ -9,12 +9,13 @@
 // This test validates:
 // - hip.sub → llvm.call @wrap_elementwise_sub
 // - Type conversion: !hip.context → !llvm.ptr
-// - Static shapes: num_elements and elem_size computed at compile time
-// - Dynamic shapes: num_elements computed at runtime via llvm.mul of dims
+// - 4D broadcast descriptor: lhs/rhs/out shapes passed as 12 i64 dims
 // - Proper function signature for runtime API
 //
 // Expected: wrap_elementwise_sub(state, lhs_ptr, rhs_ptr, output_ptr,
-//                                 num_elements, elem_size)
+//                                 lhs_n, lhs_c, lhs_h, lhs_w,
+//                                 rhs_n, rhs_c, rhs_h, rhs_w,
+//                                 out_n, out_c, out_h, out_w, data_type)
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -31,7 +32,7 @@ module {
     hip.sub(%ctx) ins(%lhs, %rhs : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
                   outs(%output : memref<128x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -47,7 +48,7 @@ module {
     hip.sub(%ctx) ins(%lhs, %rhs : memref<1024xf16, 1>, memref<1024xf16, 1>)
                   outs(%output : memref<1024xf16, 1>)
 
-    // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -63,8 +64,7 @@ module {
     hip.sub(%ctx) ins(%lhs, %rhs : memref<?x512xf32, 1>, memref<?x512xf32, 1>)
                   outs(%output : memref<?x512xf32, 1>)
 
-    // CHECK: llvm.mul {{.*}} : i64
-    // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }

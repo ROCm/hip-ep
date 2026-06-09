@@ -194,6 +194,42 @@ int hip_elementwise_div(
     int64_t num_elements,
     int hip_dtype);
 
+/* Same-shape commutative elementwise ops (Add/Mul/Min/Max). Cover integer
+ * dtypes (i32/i64) that miopenOpTensor cannot describe; the runtime
+ * materialises any broadcast via hip_expand before calling these. Supported
+ * hip_dtype: FLOAT16, FLOAT32, INT32, INT64. */
+int hip_elementwise_add(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_mul(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_min(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_max(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 int hip_elementwise_mod(
     void* stream,
     const void* lhs,
@@ -614,7 +650,10 @@ int hip_gather(
     int64_t data_num_elements,
     int64_t indices_num_elements,
     int64_t output_num_elements,
-    int element_size_bytes);
+    int64_t axis_size,
+    int64_t inner_size,
+    int element_size_bytes,
+    int indices_element_size_bytes);
 
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
