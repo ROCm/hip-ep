@@ -21,11 +21,11 @@
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hipdnn-pipeline='use-output-allocator=true' 2>&1 | FileCheck --check-prefix=ALLOC --implicit-check-not="llvm.call @hipdnn_ep_tensor_prepare_output" --implicit-check-not="llvm.call @hipdnn_ep_tensor_finalize_output" %s
-// RUN: hip-mlir-opt %s --hipdnn-pipeline 2>&1 | FileCheck --check-prefix=CLASSIC --implicit-check-not=hipdnn_ep_alloc_output --implicit-check-not=hipdnn.output_allocator %s
+// RUN: hip-mlir-opt %s --hipdnn-pipeline 2>&1 | FileCheck --check-prefix=CLASSIC --implicit-check-not=hipdnn_ep_alloc_output --implicit-check-not=hipdnn.use_output_allocator %s
 
-// --- Allocator: module attr is the single source of truth, then in-graph
-//     output allocation + 2-arg compute ABI. ---
-// ALLOC: hipdnn.output_allocator
+// --- Allocator: module attr (typed bool = true) is the single source of truth,
+//     then in-graph output allocation + 2-arg compute ABI. ---
+// ALLOC: hipdnn.use_output_allocator = true
 // ALLOC: llvm.call @hipdnn_ep_alloc_output
 // ALLOC: llvm.func @inference_compute(%{{[a-zA-Z0-9_]+}}: !llvm.ptr, %{{[a-zA-Z0-9_]+}}: !llvm.ptr) -> i32
 

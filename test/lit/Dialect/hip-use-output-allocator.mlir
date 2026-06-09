@@ -8,11 +8,16 @@
 // returned by func.return) into hip.alloc_output, reusing the alloc's dynamic
 // sizes and setting out_idx to the return position, while leaving intermediates,
 // passthrough outputs, private helpers, and context-less functions untouched.
-// The allocator-mode module attribute is set by the sibling
-// hip-set-output-allocator-attr pass, not here -- see that pass's LIT test.
+// The pass also stamps the hipdnn.use_output_allocator BoolAttr (= true) on the
+// enclosing module -- the allocator-mode marker that convert-hip-to-llvm and
+// generate-interface read by value.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-use-output-allocator %s 2>&1 | FileCheck %s
+
+// The module-level allocator-mode marker is stamped as a typed bool (= true),
+// not a presence-only unit attr, so downstream readers can test its value.
+// CHECK: module attributes {hipdnn.use_output_allocator = true}
 
 // --- Dynamic-shape output: replaced, reusing the alloc's %M, %N. ---
 // CHECK-LABEL: func.func @dynamic_output

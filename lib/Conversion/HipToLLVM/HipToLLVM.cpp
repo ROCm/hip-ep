@@ -101,8 +101,8 @@ private:
   // input (+ every output in classic mode) and the flat list exactly matches
   // main_graph_internal's exploded signature.
   //
-  // Allocator vs classic mode is read from the `hipdnn.output_allocator` module
-  // attribute (set by hip-set-output-allocator-attr); the expected param count
+  // Allocator vs classic mode is read from the `hipdnn.use_output_allocator`
+  // module attribute (set by hip-use-output-allocator); the expected param count
   // is then used only to verify @main_graph matches that mode. The classic
   // main_graph has input AND output params; the allocator main_graph has input
   // params only and returns the in-graph-allocated output as a by-value memref
@@ -181,11 +181,15 @@ private:
     }
 
     unsigned actualParams = mainFunc.getFunctionType().getNumParams();
-    // Mode is decided by the `hipdnn.output_allocator` module attribute (set by
-    // hip-set-output-allocator-attr), NOT by param count -- this disambiguates
-    // a zero-output graph, where expectedClassic == expectedAllocator. The
-    // count is then only used to verify @main_graph matches the chosen mode.
-    bool allocatorMode = module->hasAttr("hipdnn.output_allocator");
+    // Mode is decided by the `hipdnn.use_output_allocator` module attribute (set
+    // by hip-use-output-allocator), NOT by param count -- this disambiguates a
+    // zero-output graph, where expectedClassic == expectedAllocator. The count
+    // is then only used to verify @main_graph matches the chosen mode. The attr
+    // is a typed bool: read its VALUE (a module may carry it set to false), so
+    // absence and `= false` both mean classic mode.
+    auto allocatorAttr =
+        module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
+    bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
     unsigned expected = allocatorMode ? expectedAllocator : expectedClassic;
     if (actualParams != expected) {
       return module.emitError()

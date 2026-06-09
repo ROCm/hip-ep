@@ -344,8 +344,8 @@ static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
 // Generates the four C-ABI interface functions (inference_init,
 // inference_compute, inference_cleanup, inference_get_metadata_json) for a
 // lowered module. Allocator vs classic mode is read from the
-// `hipdnn.output_allocator` module attribute (set by hip-set-output-allocator-
-// attr) in place by verifyPrerequisites and generateInferenceCompute;
+// `hipdnn.use_output_allocator` module attribute (set by hip-use-output-
+// allocator) in place by verifyPrerequisites and generateInferenceCompute;
 // inference_init, inference_cleanup, runtime declarations and metadata are
 // identical in both modes.
 class GenerateInterfacePass
@@ -406,10 +406,11 @@ public:
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
 
+    auto allocatorAttr =
+        module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
+    bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
     COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions ("
-                       << (module->hasAttr("hipdnn.output_allocator")
-                               ? "allocator"
-                               : "classic")
+                       << (allocatorMode ? "allocator" : "classic")
                        << " mode)\n");
   }
 
@@ -478,7 +479,9 @@ private:
   }
 
   LogicalResult verifyPrerequisites(ModuleOp module) {
-    bool allocatorMode = module->hasAttr("hipdnn.output_allocator");
+    auto allocatorAttr =
+        module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
+    bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
     MLIRContext *ctx = module.getContext();
     Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type i32Type = IntegerType::get(ctx, 32);
@@ -696,7 +699,7 @@ private:
   ///     // On error: store error code, free inputs, return error
   ///   }
   ///
-  /// Allocator mode (module carries the `hipdnn.output_allocator` attr): the
+  /// Allocator mode (module's `hipdnn.use_output_allocator` attr is true): the
   /// wrapper takes (state, inputs) only; output-tensor handling
   /// (prepare_output, the output-memref array, finalize_output) and the outputs
   /// span are all skipped -- graph outputs are allocated in-graph by
@@ -705,7 +708,9 @@ private:
   /// @main_graph is called as (state, input_memrefs).
   void generateInferenceCompute(ModuleOp module, ArrayAttr inputShapes,
                                 ArrayAttr outputShapes) {
-    bool allocatorMode = module->hasAttr("hipdnn.output_allocator");
+    auto allocatorAttr =
+        module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
+    bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
     builder.setInsertionPointToEnd(module.getBody());

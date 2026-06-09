@@ -25,7 +25,7 @@ struct CompilationOptionsT;
 /// inference_init, inference_compute, inference_cleanup,
 /// inference_get_metadata_json. The classic 3-arg (state, inputs, outputs) vs
 /// 2-arg allocator (state, inputs) ABI is selected from the module's
-/// `hipdnn.output_allocator` attribute (set by hip-set-output-allocator-attr);
+/// `hipdnn.use_output_allocator` BoolAttr (set true by hip-use-output-allocator);
 /// in allocator mode graph outputs are allocated in-graph via hip.alloc_output
 /// (the hipdnn_ep_alloc_output runtime callback) rather than passed as
 /// out-params.
