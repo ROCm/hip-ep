@@ -348,23 +348,37 @@ static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
 // attr) in place by verifyPrerequisites and generateInferenceCompute;
 // inference_init, inference_cleanup, runtime declarations and metadata are
 // identical in both modes.
-class GenerateInterfacePassBase {
+class GenerateInterfacePass
+    : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>> {
 public:
-  explicit GenerateInterfacePassBase(
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateInterfacePass)
+
+  explicit GenerateInterfacePass(
       const mlir::hip::CompilationOptionsT &compilationOptions)
       : compilationOptions_(compilationOptions) {}
-  explicit GenerateInterfacePassBase(
+  explicit GenerateInterfacePass(
       mlir::hip::CompilationOptionsT &&compilationOptions)
       : compilationOptions_(std::move(compilationOptions)) {}
 
-protected:
-  // Shared run body. Returns failure() only when prerequisites are unmet so the
-  // concrete pass can call signalPassFailure(). The classic 3-arg vs 2-arg
-  // allocator interface is selected from the `hipdnn.output_allocator` module
-  // attribute by the callees (verifyPrerequisites / generateInferenceCompute).
-  LogicalResult runImpl(ModuleOp module) {
-    if (failed(verifyPrerequisites(module)))
-      return failure();
+  StringRef getArgument() const final { return "generate-interface"; }
+  StringRef getDescription() const final {
+    return "Generate C interface wrapper functions (inference_init, "
+           "inference_compute, inference_cleanup, inference_get_metadata_json)";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<LLVM::LLVMDialect>();
+    registry.insert<func::FuncDialect>();
+    registry.insert<arith::ArithDialect>();
+  }
+
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+
+    if (failed(verifyPrerequisites(module))) {
+      signalPassFailure();
+      return;
+    }
 
     // Prefer the hip.constants_file attribute set by OnnxToHip pass;
     // compilation-option override is not yet wired end-to-end.
@@ -397,9 +411,9 @@ protected:
                                ? "allocator"
                                : "classic")
                        << " mode)\n");
-    return success();
   }
 
+private:
   mlir::hip::CompilationOptionsT compilationOptions_;
 
   struct RuntimeFuncSpec {
@@ -1003,35 +1017,6 @@ protected:
                                      ValueRange{state});
 
     LLVM::ReturnOp::create(builder, loc, call.getResult());
-  }
-};
-
-// Interface generator: --generate-interface. Emits the four C-ABI wrappers; the
-// classic 3-arg vs 2-arg allocator ABI is selected from the module's
-// `hipdnn.output_allocator` attribute (read inside runImpl's callees).
-class GenerateInterfacePass
-    : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>>,
-      public GenerateInterfacePassBase {
-public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateInterfacePass)
-
-  using GenerateInterfacePassBase::GenerateInterfacePassBase;
-
-  StringRef getArgument() const final { return "generate-interface"; }
-  StringRef getDescription() const final {
-    return "Generate C interface wrapper functions (inference_init, "
-           "inference_compute, inference_cleanup, inference_get_metadata_json)";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<LLVM::LLVMDialect>();
-    registry.insert<func::FuncDialect>();
-    registry.insert<arith::ArithDialect>();
-  }
-
-  void runOnOperation() override {
-    if (failed(runImpl(getOperation())))
-      signalPassFailure();
   }
 };
 
