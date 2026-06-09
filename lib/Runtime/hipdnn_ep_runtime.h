@@ -694,9 +694,16 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 
 // Element-wise subtraction wrapper
 // Computes output = lhs - rhs element-wise
+// Sub with ONNX multidirectional broadcast (rank <= 4). Operand shapes are
+// passed as 4D (N, C, H, W), left-padded with 1 by the compiler. When lhs or
+// rhs does not match the output shape, the runtime materialises the broadcast
+// via hip_expand before the flat element-wise kernel. Supports f16/f32/i32/i64.
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t num_elements,
-                         int64_t element_size_bytes);
+                         void *output, int64_t lhs_n, int64_t lhs_c,
+                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                         int64_t out_n, int64_t out_c, int64_t out_h,
+                         int64_t out_w, int64_t data_type);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
@@ -730,10 +737,16 @@ int wrap_power(RuntimeState *state, void *input, void *output,
                double beta, double gamma);
 
 // Gather operation wrapper
+// `axis_size` = data.shape[axis]; `inner_size` = product of data.shape[axis+1:].
+// outer_size is derived as data_num_elements / (axis_size * inner_size).
+// `indices_element_size_bytes` is the byte width of the ONNX indices tensor
+// element type (4 for int32, 8 for int64) so the kernel reads them correctly.
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
-                int64_t element_size_bytes);
+                int64_t axis_size, int64_t inner_size,
+                int64_t element_size_bytes,
+                int64_t indices_element_size_bytes);
 
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
@@ -1064,8 +1077,15 @@ int wrap_sin(RuntimeState *state, void *input, void *output,
 int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
+// Div with ONNX multidirectional broadcast (rank <= 4). Operand shapes are
+// passed as 4D (N, C, H, W), left-padded with 1 by the compiler. When lhs or
+// rhs does not match the output shape, the runtime materialises the broadcast
+// via hip_expand before the flat element-wise kernel.
 int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type);
+             int64_t lhs_n, int64_t lhs_c, int64_t lhs_h, int64_t lhs_w,
+             int64_t rhs_n, int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+             int64_t out_n, int64_t out_c, int64_t out_h, int64_t out_w,
+             int64_t data_type);
 
 // CumSum operation wrapper (cumulative sum along an axis).
 // `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the

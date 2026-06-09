@@ -3,8 +3,10 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify hip.div lowers to llvm.call @wrap_div with signature
-//   (state, lhs, rhs, output, num_elements, data_type) -> i32.
+// Verify hip.div lowers to llvm.call @wrap_div with the 4D-broadcast signature
+//   (state, lhs, rhs, output,
+//    lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c, rhs_h, rhs_w,
+//    out_n, out_c, out_h, out_w, data_type) -> i32.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -20,7 +22,7 @@ module {
     hip.div(%ctx) ins(%a, %b : memref<128x64xf32, 1>, memref<128x64xf32, 1>)
                   outs(%c : memref<128x64xf32, 1>)
 
-    // CHECK: llvm.call @wrap_div({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_div({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -34,10 +36,7 @@ module {
     hip.div(%ctx) ins(%a, %b : memref<?x?xf16, 1>, memref<?x?xf16, 1>)
                   outs(%c : memref<?x?xf16, 1>)
 
-    // CHECK: llvm.extractvalue %{{.*}}[3, 0]
-    // CHECK: llvm.extractvalue %{{.*}}[3, 1]
-    // CHECK: llvm.mul %{{.*}}, %{{.*}} : i64
-    // CHECK: llvm.call @wrap_div({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_div({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 }

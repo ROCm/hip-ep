@@ -447,6 +447,147 @@ extern "C" int hip_elementwise_and(void *stream, const void *lhs,
   return static_cast<int>(err);
 }
 
+// =====================================================================
+// Add / Mul / Min / Max: y = op(a, b)  (same-shape, no broadcast here).
+//
+// These mirror the commutative MIOpen OpTensor ops but cover integer
+// dtypes (i32/i64) that miopenOpTensor cannot describe. The runtime
+// integer fallback in wrap_miopenOpTensor materialises any broadcast via
+// hip_expand first, so these kernels only ever see same-shape operands.
+// =====================================================================
+
+enum ElementwiseBinOp { EW_ADD = 0, EW_MUL = 1, EW_MIN = 2, EW_MAX = 3 };
+
+template <typename T, int OP>
+__global__ void elementwise_binop_kernel(const T *__restrict__ lhs,
+                                         const T *__restrict__ rhs,
+                                         T *__restrict__ output,
+                                         int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    T a = lhs[idx];
+    T b = rhs[idx];
+    T r;
+    if (OP == EW_ADD)
+      r = a + b;
+    else if (OP == EW_MUL)
+      r = a * b;
+    else if (OP == EW_MIN)
+      r = (a < b) ? a : b;
+    else
+      r = (a > b) ? a : b;
+    output[idx] = r;
+  }
+}
+
+template <int OP>
+__global__ void elementwise_binop_f16_kernel(const __half *__restrict__ lhs,
+                                             const __half *__restrict__ rhs,
+                                             __half *__restrict__ output,
+                                             int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __half2float(lhs[idx]);
+    float b = __half2float(rhs[idx]);
+    float r;
+    if (OP == EW_ADD)
+      r = a + b;
+    else if (OP == EW_MUL)
+      r = a * b;
+    else if (OP == EW_MIN)
+      r = (a < b) ? a : b;
+    else
+      r = (a > b) ? a : b;
+    output[idx] = __float2half(r);
+  }
+}
+
+template <int OP>
+static int launch_elementwise_binop(const char *name, void *stream,
+                                    const void *lhs, const void *rhs,
+                                    void *output, int64_t num_elements,
+                                    int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(elementwise_binop_f16_kernel<OP>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(lhs),
+                       static_cast<const __half *>(rhs),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(elementwise_binop_kernel<float, OP>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(lhs),
+                       static_cast<const float *>(rhs),
+                       static_cast<float *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT32:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(elementwise_binop_kernel<int32_t, OP>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t *>(lhs),
+                       static_cast<const int32_t *>(rhs),
+                       static_cast<int32_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT64:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(elementwise_binop_kernel<int64_t, OP>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int64_t *>(lhs),
+                       static_cast<const int64_t *>(rhs),
+                       static_cast<int64_t *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr, "[custom_kernels] %s: unsupported dtype=%d\n", name,
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] %s launch failed: %s\n", name,
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_elementwise_add(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  return launch_elementwise_binop<EW_ADD>("hip_elementwise_add", stream, lhs,
+                                          rhs, output, num_elements, hip_dtype);
+}
+
+extern "C" int hip_elementwise_mul(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  return launch_elementwise_binop<EW_MUL>("hip_elementwise_mul", stream, lhs,
+                                          rhs, output, num_elements, hip_dtype);
+}
+
+extern "C" int hip_elementwise_min(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  return launch_elementwise_binop<EW_MIN>("hip_elementwise_min", stream, lhs,
+                                          rhs, output, num_elements, hip_dtype);
+}
+
+extern "C" int hip_elementwise_max(void *stream, const void *lhs,
+                                   const void *rhs, void *output,
+                                   int64_t num_elements, int hip_dtype) {
+  return launch_elementwise_binop<EW_MAX>("hip_elementwise_max", stream, lhs,
+                                          rhs, output, num_elements, hip_dtype);
+}
+
 extern "C" int hip_elementwise_div(void *stream, const void *lhs,
                                    const void *rhs, void *output,
                                    int64_t num_elements, int hip_dtype) {
