@@ -402,6 +402,51 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def RelaxMultiDynExpandShapePass
+    : Pass<"hip-relax-multi-dyn-expand-shape", "mlir::func::FuncOp"> {
+  let summary = "Rewrite memref.expand_shape ops with multiple dynamic output "
+                "dims per reassociation group into memref.reinterpret_cast";
+  let description = [{
+    Workaround for upstream `expand-strided-metadata` (LLVM as of our
+    prebuilt) asserting "There must be at most one dynamic size per group"
+    when a `memref.expand_shape` carries a reassociation group containing
+    more than one dynamic output dim — even though the op carries explicit
+    `output_shape` operands that fully determine every dim's size.
+
+    This pass matches exactly that case and rewrites the op into a
+    `memref.reinterpret_cast` with explicit sizes/strides computed from the
+    `output_shape` operands and the source's static layout.  The resulting
+    `memref.reinterpret_cast` is already lowerable by the existing
+    downstream LLVM-conversion patterns.
+
+    Single-dyn-per-group `memref.expand_shape` and all `memref.collapse_shape`
+    are left untouched — upstream handles those correctly.
+
+    Canonical IR pattern that triggers a match (ONNX `Range -> Reshape`
+    materialising 2-D position_ids):
+
+        %expand = memref.expand_shape %src [[0, 1]]
+                  output_shape [%bs, %ss]
+                  : memref<?xi64> into memref<?x?xi64>
+
+    After this pass:
+
+        %cast = memref.reinterpret_cast %src to
+                  offset: [0], sizes: [%bs, %ss], strides: [%ss, 1]
+                  : memref<?xi64> to memref<?x?xi64>
+
+    Pipeline placement: very first sub-pass of `buildHipToLLVMPipeline`,
+    immediately before `memref::createExpandStridedMetadataPass()`.
+
+    Retirement: when upstream `expand-strided-metadata` is upgraded to
+    consult `output_shape`, this pass becomes a no-op and can be deleted.
+  }];
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def ResolveTensorDimsPass
     : Pass<"hip-resolve-tensor-dims", "mlir::func::FuncOp"> {
   let summary = "Fold `tensor.dim` queries via upstream reify patterns "
