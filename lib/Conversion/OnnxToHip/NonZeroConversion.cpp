@@ -123,8 +123,10 @@ struct NonZeroToHip : public mlir::RewritePattern {
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
         mlir::ValueRange{upperBound});
 
+    // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
+    // result type == outs operand type.
     auto hipOp = mlir::hip::NonZeroOp::create(
-        rewriter, loc, resultType, context, op->getOperand(0), init,
+        rewriter, loc, context, op->getOperand(0), init,
         rewriter.getI64IntegerAttr(inputDataType));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();

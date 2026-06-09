@@ -92,8 +92,8 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
                                     resultType.getElementType(), dynSizes);
 
   mlir::ArrayAttr permArrayAttr = rewriter.getI64ArrayAttr(perm);
-  auto hipOp = mlir::hip::TransposeOp::create(
-      rewriter, loc, resultType, context, data, init, permArrayAttr);
+  auto hipOp = mlir::hip::TransposeOp::create(rewriter, loc, context, data,
+                                              init, permArrayAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

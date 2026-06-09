@@ -32,8 +32,7 @@ struct LessToHip : public mlir::RewritePattern {
     mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
     mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
-    auto hipOp = mlir::hip::LessOp::create(rewriter, loc, resultType, context,
-                                           a, b, init);
+    auto hipOp = mlir::hip::LessOp::create(rewriter, loc, context, a, b, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

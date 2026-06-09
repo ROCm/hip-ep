@@ -114,9 +114,9 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   attrs.push_back(rewriter.getNamedAttr("dilations", dilationsAttr));
   attrs.push_back(rewriter.getNamedAttr("group", groupAttr));
 
-  // Create hip.conv operation using generic builder
-  auto hipOp = mlir::hip::ConvOp::create(
-      rewriter, loc, mlir::TypeRange{resultType}, operands, attrs);
+  // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
+  // result type == outs operand type.
+  auto hipOp = mlir::hip::ConvOp::create(rewriter, loc, operands, attrs);
 
   rewriter.replaceOp(op, hipOp.getResult(0));
   return mlir::success();

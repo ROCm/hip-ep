@@ -33,8 +33,8 @@ struct TileToHip : public mlir::RewritePattern {
     // Use input as the source for any dynamic dim sizes.
     mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
-    auto hipOp = mlir::hip::TileOp::create(rewriter, loc, resultType, context,
-                                           input, repeats, init);
+    auto hipOp =
+        mlir::hip::TileOp::create(rewriter, loc, context, input, repeats, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }
