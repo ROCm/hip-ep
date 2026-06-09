@@ -38,6 +38,20 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     the reference cases.
   pm.addPass(hip::createInferShapesPass());
 
+  // 1c. Fold `tensor.dim` queries on `tensor.expand_shape` /
+  //     `tensor.collapse_shape` chains into arithmetic on the chain
+  //     root's dims, in the tensor domain, before one-shot-bufferize.
+  //     The reshape ops' shape SSA (`output_shape` and reassociation
+  //     maps) is opaque to the post-bufferize `memref.dim` patterns,
+  //     so this is the last useful position.  Without it, downstream
+  //     `--hip-pool-allocs` sees one scattered dim query per reshape
+  //     site and fragments them into many single-alloc dominance
+  //     domains -- a pooling-efficiency cost (one tiny pool each), not
+  //     a failure -- on graphs with per-layer same-rank dynamic
+  //     `onnx.Reshape` (typical: norm / projection chains).  See
+  //     `ResolveTensorDims.cpp`.
+  pm.addNestedPass<func::FuncOp>(hip::createResolveTensorDimsPass());
+
   // 2. Bufferize tensor IR to memref IR
   //
   // Use IdentityLayoutMap for function boundaries: all EP inputs/outputs come
