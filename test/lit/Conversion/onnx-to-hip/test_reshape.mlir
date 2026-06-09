@@ -60,6 +60,23 @@ module {
     %result = "onnx.Reshape"(%data, %shape) : (tensor<1x128x4096xf16>, tensor<3xi64>) -> tensor<1x128x4096xf16>
     return %result : tensor<1x128x4096xf16>
   }
+
+  // --- Rank-0 scalar → rank-1 1-element (Qwen vision shape-arith chain) ---
+  // onnx.Reshape on a tensor<i64> scalar to tensor<1xi64> can't be expressed
+  // via tensor.expand_shape (source rank 0 can't supply a reassoc group).
+  // Lower via tensor.extract + tensor.from_elements.
+  func.func @test_reshape_scalar_to_1d(%data: tensor<i64>) -> tensor<1xi64> {
+    %shape = "onnx.Constant"() {value = dense<[1]> : tensor<1xi64>} : () -> tensor<1xi64>
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
+    return %result : tensor<1xi64>
+  }
+
+  // --- Rank-0 scalar → rank-3 1x1x1 (defensive: degenerate higher-rank case) ---
+  func.func @test_reshape_scalar_to_3d_unit(%data: tensor<f16>) -> tensor<1x1x1xf16> {
+    %shape = "onnx.Constant"() {value = dense<[1, 1, 1]> : tensor<3xi64>} : () -> tensor<3xi64>
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<f16>, tensor<3xi64>) -> tensor<1x1x1xf16>
+    return %result : tensor<1x1x1xf16>
+  }
 }
 
 // CHECK-LABEL: func.func @test_reshape_expand
@@ -87,3 +104,14 @@ module {
 // CHECK-NOT: tensor.expand_shape
 // CHECK-NOT: tensor.collapse_shape
 // CHECK: return
+
+// CHECK-LABEL: func.func @test_reshape_scalar_to_1d
+// CHECK: tensor.extract
+// CHECK: tensor.from_elements
+// CHECK-NOT: onnx.Reshape
+
+// CHECK-LABEL: func.func @test_reshape_scalar_to_3d_unit
+// CHECK: tensor.extract
+// CHECK: tensor.from_elements
+// CHECK: tensor.expand_shape
+// CHECK-NOT: onnx.Reshape
