@@ -217,10 +217,12 @@ bool CompilerDriver::runMLIRPasses(
   onnxToHipOpts.externalizeMinNumElements =
       mlir::hip::kDefaultExternalizeMinNumElements;
   onnxToHipOpts.skipConstantData = options.skip_constant_data;
-  // Allocator mode is gated in BOTH pipelines: the slot-4.5
-  // hip-use-output-allocator pass lives in the OnnxToHip tail, while the
-  // 2-arg interface (generate-allocator-interface) selection lives in the
-  // HipToLLVM pipeline -- both read this flag, so it must be set on both.
+  // Allocator mode is selected once, here, on the OnnxToHip half: when set, the
+  // slot-4.5 pair (hip-use-output-allocator + hip-set-output-allocator-attr)
+  // runs in the OnnxToHip tail and stamps the `hipdnn.output_allocator` module
+  // attribute. The HipToLLVM half (convert-hip-to-llvm + generate-interface)
+  // reads that attribute off the IR, so it needs no separate flag -- the mode
+  // rides on the module, keeping the two halves from ever disagreeing.
   onnxToHipOpts.useOutputAllocator = options.use_output_allocator;
 
   if (hipdnnHandle_) {
@@ -235,7 +237,6 @@ bool CompilerDriver::runMLIRPasses(
 
   mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
   hipToLlvmOpts.constantsFile = options.constants_file;
-  hipToLlvmOpts.useOutputAllocator = options.use_output_allocator;
   mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
 
   std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;

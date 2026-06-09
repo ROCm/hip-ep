@@ -308,8 +308,8 @@ sequenceDiagram
 
 | Concern | Where |
 |---|---|
-| Compile flag (`use_output_allocator`) | [schemas/compilation_options.fbs](../../schemas/compilation_options.fbs) → [lib/Compiler/CompilerDriver.cpp](../../lib/Compiler/CompilerDriver.cpp) sets both `onnxToHipOpts.useOutputAllocator` and `hipToLlvmOpts.useOutputAllocator` |
-| Pipeline gating | [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp): classic `buffer-results-to-out-params` vs `hip-use-output-allocator`; `generate-interface` (3-arg) vs `generate-allocator-interface` (2-arg) |
+| Compile flag (`use_output_allocator`) | [schemas/compilation_options.fbs](../../schemas/compilation_options.fbs) → [lib/Compiler/CompilerDriver.cpp](../../lib/Compiler/CompilerDriver.cpp) sets `onnxToHipOpts.useOutputAllocator` only; the slot-4.5 pass stamps `hipdnn.output_allocator` and the HipToLLVM half reads it off the IR |
+| Pipeline gating | [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp): classic `buffer-results-to-out-params` vs the slot-4.5 `hip-use-output-allocator` + `hip-set-output-allocator-attr`; one `generate-interface` reads the attribute to pick the 3-arg vs 2-arg ABI |
 | EP front-end (provider option → compile JSON + metadata) | [backend-mlir-compiler/level-1-pass/src/pass_main.cpp](../../backend-mlir-compiler/level-1-pass/src/pass_main.cpp), [MlirCompiler.cpp](../../backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp) |
 | Mode-detection metadata | [backend-mlir-compiler/proto/metadata.proto](../../backend-mlir-compiler/proto/metadata.proto) (`use_output_allocator`) |
 | EP-local ABI mirror | `output_allocator_t` in [custom_op_mlir.hpp](../../backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp) (same `static_assert`s as the runtime struct) |
@@ -319,7 +319,7 @@ sequenceDiagram
 
 **Key design points (as built):**
 
-1. **Single source of truth = compile flag + embedded metadata bit.** The `use_output_allocator` provider option drives BOTH halves of the pipeline (so `main_graph` arity and the `inference_compute` wrapper agree) AND is written into the model `Metadata`. The EP reads its dispatch arity from the *embedded* metadata (`metadata_.use_output_allocator()` in the `MlirCustomOp` ctor), not from the live provider option — so a reused ORT EPContext always reports the mode matching its own cached DLL's ABI, and arity can never disagree.
+1. **Single source of truth = compile flag → module attribute + embedded metadata bit.** The `use_output_allocator` provider option is set once on the OnnxToHip half, where the slot-4.5 `hip-set-output-allocator-attr` pass stamps the `hipdnn.output_allocator` module attribute. The HipToLLVM half (`convert-hip-to-llvm` + `generate-interface`) reads that attribute off the IR — so `main_graph` arity and the `inference_compute` wrapper agree without threading a second flag. The same compile flag is also written into the model `Metadata`. The EP reads its dispatch arity from the *embedded* metadata (`metadata_.use_output_allocator()` in the `MlirCustomOp` ctor), not from the live provider option — so a reused ORT EPContext always reports the mode matching its own cached DLL's ABI, and arity can never disagree.
 
 2. **The callback is `noexcept` across the C ABI.** `output_allocate_cb` is invoked from the model.dll's C runtime; a C++ exception unwinding through those frames is UB. The body is wrapped in `try/catch` and any failure (out-of-range `out_idx`, ORT throw, scratch `hipMalloc` failure) ends in `LOG(FATAL)` — it never returns null, because the lowering builds a memref from the returned pointer and a null write would segfault with no diagnostic.
 
