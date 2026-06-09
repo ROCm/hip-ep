@@ -218,8 +218,10 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->constants_is_shared = false;
   state->shared_constants_mapping = nullptr;
   state->shared_constants_view = nullptr;
+  // Per-domain pool arrays start empty; grown on demand (no compile-time cap).
+  state->num_pool_domains = 0;
   state->pool_base = nullptr;
-  state->pool_size = 0;
+  state->pool_size = nullptr;
   state->buffer_offsets = nullptr;
   state->num_buffers = 0;
   state->workspace = nullptr;
@@ -1005,10 +1007,22 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->host_scratch_base));
   }
 
-  // Free memory pool (if allocated)
+  // Free memory pools (if allocated) — one hipFree per non-null domain — then
+  // the per-domain arrays themselves.
   if (state->pool_base) {
-    HIP_CLEANUP(hipFree(state->pool_base));
+    for (int i = 0; i < state->num_pool_domains; ++i) {
+      if (state->pool_base[i]) {
+        HIP_CLEANUP(hipFree(state->pool_base[i]));
+      }
+    }
+    free(state->pool_base);
+    state->pool_base = nullptr;
   }
+  if (state->pool_size) {
+    free(state->pool_size);
+    state->pool_size = nullptr;
+  }
+  state->num_pool_domains = 0;
   if (state->buffer_offsets) {
     free(state->buffer_offsets);
   }
@@ -1136,6 +1150,43 @@ extern "C"
 // Memory Pooling Support
 //===----------------------------------------------------------------------===//
 
+// Grow the per-domain pool arrays so that index [needed_count - 1] is valid.
+// New slots are zero-filled (null base, size 0) so they behave exactly like the
+// fresh inline entries the fixed-size array used to provide. Mirrors the
+// grow-on-demand contract of the individual pools: never shrinks, and at steady
+// state (every domain already seen) this is a no-op. Returns false on OOM,
+// leaving the existing arrays intact. realloc-move is safe — callers re-derive
+// pool_base[domain_id] from state on every access, never caching element ptrs.
+static bool ensure_pool_domains(RuntimeState *state, int needed_count) {
+  if (needed_count <= state->num_pool_domains) {
+    return true;
+  }
+  auto *new_base = static_cast<void **>(
+      realloc(state->pool_base, sizeof(void *) * needed_count));
+  if (!new_base) {
+    fprintf(stderr, "Failed to grow pool_base array to %d domains\n",
+            needed_count);
+    return false;
+  }
+  state->pool_base = new_base;
+  auto *new_size = static_cast<size_t *>(
+      realloc(state->pool_size, sizeof(size_t) * needed_count));
+  if (!new_size) {
+    // pool_base already grew; leaving it larger than num_pool_domains is safe
+    // because num_pool_domains (updated below) still bounds every loop.
+    fprintf(stderr, "Failed to grow pool_size array to %d domains\n",
+            needed_count);
+    return false;
+  }
+  state->pool_size = new_size;
+  for (int i = state->num_pool_domains; i < needed_count; ++i) {
+    state->pool_base[i] = nullptr;
+    state->pool_size[i] = 0;
+  }
+  state->num_pool_domains = needed_count;
+  return true;
+}
+
 extern "C" {
 
 int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
@@ -1145,19 +1196,27 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
     return 1;
   }
 
-  // Allocate the memory pool
+  // Ensure domain 0's array slot exists before we write it. Lazy domains 1..N
+  // grow their slots on first hipdnn_ep_get_pool_base call.
+  if (!ensure_pool_domains(state, 1)) {
+    return 1;
+  }
+
+  // Eagerly size domain 0's pool from the static metadata baked at compile
+  // time. Multi-domain functions leave domains 1..N empty here; those are grown
+  // on first hip.get_pool call (lazy init).
   if (pool_size > 0) {
-    if (hipMalloc(&state->pool_base, pool_size) != hipSuccess) {
+    if (hipMalloc(&state->pool_base[0], pool_size) != hipSuccess) {
       fprintf(stderr, "Failed to allocate memory pool of size %zu bytes\n",
               pool_size);
       return 2; // Pool allocation failed
     }
   } else {
-    state->pool_base = nullptr;
+    state->pool_base[0] = nullptr;
   }
 
   // Store pool metadata
-  state->pool_size = pool_size;
+  state->pool_size[0] = pool_size;
   state->num_buffers = num_buffers;
 
   // Copy buffer offsets array
@@ -1165,9 +1224,9 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
     state->buffer_offsets = (size_t *)malloc(sizeof(size_t) * num_buffers);
     if (!state->buffer_offsets) {
       fprintf(stderr, "Failed to allocate buffer offsets array\n");
-      if (state->pool_base) {
-        HIP_CLEANUP(hipFree(state->pool_base));
-        state->pool_base = nullptr;
+      if (state->pool_base[0]) {
+        HIP_CLEANUP(hipFree(state->pool_base[0]));
+        state->pool_base[0] = nullptr;
       }
       return 1; // Allocation failed
     }
@@ -1180,7 +1239,15 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 }
 
 void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
-  if (!state || !state->pool_base) {
+  // Static buffers always live in domain 0 (the legacy single-pool case).
+  // Multi-domain functions only use the dynamic hip.get_pool path; this entry
+  // is kept for the eager-static-offset path.
+  // pool_base is a lazily-allocated heap array (null until pool_init or the
+  // first ensure_pool_domains). Check the array pointer and that domain 0 has
+  // a slot BEFORE indexing [0] — otherwise calling this before pool_init (or
+  // on a pool_size==0 model whose arrays were never grown) is a null deref.
+  if (!state || !state->pool_base || state->num_pool_domains < 1 ||
+      !state->pool_base[0]) {
     fprintf(stderr, "Invalid state or pool not initialized\n");
     return nullptr;
   }
@@ -1191,50 +1258,67 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
     return nullptr;
   }
 
-  // Return pointer at pool_base + offset
-  char *pool_ptr = static_cast<char *>(state->pool_base);
+  char *pool_ptr = static_cast<char *>(state->pool_base[0]);
   size_t offset = state->buffer_offsets[index];
   return pool_ptr + offset;
 }
 
-void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size) {
+void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
+                              size_t needed_size) {
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
   }
-  // Grow-on-demand: when dynamic shapes produce larger intermediates than
-  // the static pool allocated at inference_init, reallocate. The pool
-  // never shrinks — subsequent calls with smaller needed_size are no-ops.
-  if (needed_size > state->pool_size) {
+  if (domain_id < 0) {
+    fprintf(stderr,
+            "hipdnn_ep_get_pool_base: negative domain_id %d — this is a "
+            "compiler bug (hip-pool-allocs assigns domain ids starting at 0)\n",
+            domain_id);
+    return nullptr;
+  }
+  // Grow the per-domain arrays the first time this domain_id is seen. There is
+  // no compile-time cap: the array grows to whatever the compiled function's
+  // hip.get_pool ids require, which is a cold-path event on the first
+  // inference.
+  if (!ensure_pool_domains(state, domain_id + 1)) {
+    return nullptr;
+  }
+  // Grow-on-demand, per domain: when dynamic shapes produce larger
+  // intermediates than the current allocation for this domain, reallocate
+  // its pool. Pools never shrink, and other domains are untouched —
+  // growing domain N is independent of domain M.
+  if (needed_size > state->pool_size[domain_id]) {
     // Sync the stream before freeing: the previous inference may have
-    // dispatched async kernels that still hold pointers into the pool.
-    // hipFree on an in-flight buffer is undefined behavior — synchronize
-    // first to drain pending work. Grow events are rare (only when an
-    // input shape exceeds anything seen before) so the cost is amortized.
-    if (state->pool_base) {
+    // dispatched async kernels that still hold pointers into THIS domain's
+    // pool. hipFree on an in-flight buffer is undefined behavior. Other
+    // domains' in-flight pointers are unaffected since their backing memory
+    // is independent — but we still need a single stream sync because all
+    // domains share the runtime's compute stream. Grow events are rare so
+    // the cost is amortized.
+    if (state->pool_base[domain_id]) {
       if (state->stream)
         HIP_CLEANUP(hipStreamSynchronize(state->stream));
       fprintf(stderr,
-              "hipdnn_ep_get_pool_base: growing pool %zu -> %zu bytes "
+              "hipdnn_ep_get_pool_base: growing pool[%d] %zu -> %zu bytes "
               "(rare; first time this large input shape was seen)\n",
-              state->pool_size, needed_size);
+              domain_id, state->pool_size[domain_id], needed_size);
       fflush(stderr);
-      HIP_CLEANUP(hipFree(state->pool_base));
+      HIP_CLEANUP(hipFree(state->pool_base[domain_id]));
     }
     void *new_base = nullptr;
     if (hipMalloc(&new_base, needed_size) != hipSuccess) {
       fprintf(stderr,
-              "hipdnn_ep_get_pool_base: hipMalloc failed for pool grow "
+              "hipdnn_ep_get_pool_base: hipMalloc failed for pool[%d] grow "
               "(%zu -> %zu bytes)\n",
-              state->pool_size, needed_size);
-      state->pool_base = nullptr;
-      state->pool_size = 0;
+              domain_id, state->pool_size[domain_id], needed_size);
+      state->pool_base[domain_id] = nullptr;
+      state->pool_size[domain_id] = 0;
       return nullptr;
     }
-    state->pool_base = new_base;
-    state->pool_size = needed_size;
+    state->pool_base[domain_id] = new_base;
+    state->pool_size[domain_id] = needed_size;
   }
-  return state->pool_base;
+  return state->pool_base[domain_id];
 }
 
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
