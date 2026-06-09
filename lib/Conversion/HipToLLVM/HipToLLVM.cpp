@@ -65,12 +65,14 @@ private:
   }
 
   // Rewrite @main_graph from the convert-hip-to-llvm internal ABI (context +
-  // unpacked memref params) into the runtime calling convention, auto-detecting
-  // classic vs allocator mode by param count (the use-output-allocator flag is
-  // not visible at this stage). Each memref unpacks to 3 + 2*rank params; a
-  // returned memref lowers to a by-value struct result (no extra param). The
-  // classic main_graph has input AND output params; the allocator main_graph
-  // has input params only and returns the in-graph-allocated output memref.
+  // unpacked memref params) into the runtime calling convention. Allocator vs
+  // classic mode is read from the `hipdnn.output_allocator` module attribute
+  // (set by hip-set-output-allocator-attr); the expected param count is then
+  // used only to verify @main_graph matches that mode. Each memref unpacks to
+  // 3 + 2*rank params; a returned memref lowers to a by-value struct result (no
+  // extra param). The classic main_graph has input AND output params; the
+  // allocator main_graph has input params only and returns the
+  // in-graph-allocated output memref.
   //
   // Allocator mode (rank-1 input + in-graph-allocated output):
   //   Before (outputs are NOT params; main_graph returns the memref
@@ -136,18 +138,18 @@ private:
     }
 
     unsigned actualParams = mainFunc.getFunctionType().getNumParams();
-    // Check classic first so a zero-output graph (where expectedClassic ==
-    // expectedAllocator) defaults to the classic path.
-    bool allocatorMode;
-    if (actualParams == expectedClassic) {
-      allocatorMode = false;
-    } else if (actualParams == expectedAllocator) {
-      allocatorMode = true;
-    } else {
+    // Mode is decided by the `hipdnn.output_allocator` module attribute (set by
+    // hip-set-output-allocator-attr), NOT by param count -- this disambiguates
+    // a zero-output graph, where expectedClassic == expectedAllocator. The
+    // count is then only used to verify @main_graph matches the chosen mode.
+    bool allocatorMode = module->hasAttr("hipdnn.output_allocator");
+    unsigned expected = allocatorMode ? expectedAllocator : expectedClassic;
+    if (actualParams != expected) {
       return module.emitError()
              << "[HipToLLVM] @main_graph parameter count mismatch: expected "
-             << expectedClassic << " (classic) or " << expectedAllocator
-             << " (allocator), got " << actualParams;
+             << expected
+             << (allocatorMode ? " (allocator), got " : " (classic), got ")
+             << actualParams;
     }
 
     OpBuilder builder(module.getContext());
