@@ -64,32 +64,75 @@ private:
           loc, memrefStruct, ArrayRef<int64_t>{kStridesIdx, dim}));
   }
 
-  // Rewrite @main_graph from the convert-hip-to-llvm internal ABI (context +
-  // unpacked memref params) into the runtime calling convention. Allocator vs
-  // classic mode is read from the `hipdnn.output_allocator` module attribute
-  // (set by hip-set-output-allocator-attr); the expected param count is then
-  // used only to verify @main_graph matches that mode. Each memref unpacks to
-  // 3 + 2*rank params; a returned memref lowers to a by-value struct result (no
-  // extra param). The classic main_graph has input AND output params; the
-  // allocator main_graph has input params only and returns the
-  // in-graph-allocated output memref.
+  // Rewrite @main_graph from the convert-hip-to-llvm internal ABI into the
+  // runtime calling convention by splitting it into two functions:
   //
-  // Allocator mode (rank-1 input + in-graph-allocated output):
-  //   Before (outputs are NOT params; main_graph returns the memref
-  //   descriptor):
-  //     llvm.func @main_graph(%ctx, %inAlloc, %inAligned, %inOff, %inSz, %inSt)
-  //         -> !llvm.struct<(ptr,ptr,i64,array<1xi64>,array<1xi64>)> { ... }
-  //   After (wrapper drops the outputs ptr; ignores the returned descriptor --
-  //   the output reaches the EP via the hipdnn_ep_alloc_output callback):
-  //     llvm.func @main_graph_internal(...same...) -> !llvm.struct<...>
-  //     llvm.func @main_graph(%ctx: !llvm.ptr, %inputs: !llvm.ptr) -> i32 {
-  //       %m = llvm.load <inputs[0]> ; <unpack %m into internal args>
-  //       %_ = llvm.call @main_graph_internal(%ctx, <unpacked>) -> struct
-  //       llvm.return %c0_i32
-  //     }
+  //   main_graph_internal  the original graph body. Keeps the MLIR memref
+  //     calling convention: every memref arg is passed as a FLAT list of
+  //     scalars, not as one aggregate.
+  //   main_graph  a thin wrapper with the runtime's narrow ABI -- the EP only
+  //     knows how to call (ctx, inputs[, outputs]) where inputs/outputs are C
+  //     arrays of pointers to memref descriptor structs. It rebuilds the flat
+  //     argument list and calls main_graph_internal.
+  //
+  // The core idea is the "unpack" that bridges those two ABIs.
+  //
+  // A ranked memref lowers (MLIR's standard memref-to-LLVM convention) to a
+  // descriptor STRUCT with 3 + 2*rank fields:
+  //   { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
+  //      idx 0          idx 1       idx 2   idx 3        idx 4
+  // But MLIR does NOT pass that struct by value as one parameter: a memref
+  // parameter is EXPLODED into its 3 + 2*rank fields, i.e. that many separate
+  // scalar parameters (2 ptrs, the i64 offset, then rank i64 sizes and rank
+  // i64 strides). So for one rank-R input main_graph_internal's signature is
+  // literally (%alloc:ptr, %aligned:ptr, %off:i64, <rank sizes:i64>,
+  // <rank strides:i64>), NOT (%desc: struct<...>). That flat form is what
+  // "unpacked memref params" means throughout this file.
+  //
+  // The runtime can't produce that flat list -- it only hands the EP a single
+  // `inputs` pointer. So the wrapper, for each input i, does:
+  //   1. GEP inputs[i]   -> ptr to the i-th descriptor pointer
+  //   2. load it         -> ptr to the descriptor struct
+  //   3. load that       -> the {ptr,ptr,i64,[..],[..]} struct value
+  //   4. extractvalue field-by-field -> the 3 + 2*rank flat scalars
+  // Step 4 is the "unpack" (see unpackMemRefStructWithAddrCast, which also
+  // addrspace-casts the two ptrs back to addrspace(0)). Push those scalars in
+  // order into the internal call's arg list; do it for the context + every
+  // input (+ every output in classic mode) and the flat list exactly matches
+  // main_graph_internal's exploded signature.
+  //
+  // Allocator vs classic mode is read from the `hipdnn.output_allocator` module
+  // attribute (set by hip-set-output-allocator-attr); the expected param count
+  // is then used only to verify @main_graph matches that mode. The classic
+  // main_graph has input AND output params; the allocator main_graph has input
+  // params only and returns the in-graph-allocated output as a by-value memref
+  // struct result (which adds no parameter).
+  //
+  // Allocator mode, rank-1 input + in-graph-allocated output.
+  // Before (outputs are NOT params; the input is already exploded into
+  // 5 = 3 + 2*1 scalars; main_graph returns the output descriptor):
+  //   llvm.func @main_graph(%ctx, %inAlloc, %inAligned, %inOff, %inSz, %inSt)
+  //       -> !llvm.struct<(ptr,ptr,i64,array<1xi64>,array<1xi64>)> { ... }
+  // After (wrapper drops the outputs ptr and ignores the returned descriptor --
+  // the output reaches the EP via the hipdnn_ep_alloc_output callback):
+  //   llvm.func @main_graph_internal(<same 5 scalars>) -> !llvm.struct<...>
+  //   llvm.func @main_graph(%ctx: ptr, %inputs: ptr) -> i32 {
+  //     %p  = llvm.getelementptr %inputs[0]   ; &inputs[0]
+  //     %sp = llvm.load %p                     ; ptr to the descriptor
+  //     %m  = llvm.load %sp                     ; the descriptor struct value
+  //     ; ---- unpack %m into 5 scalars ----
+  //     %a  = llvm.extractvalue %m[0]          ; allocatedPtr
+  //     %al = llvm.extractvalue %m[1]          ; alignedPtr
+  //     %o  = llvm.extractvalue %m[2]          ; offset
+  //     %s0 = llvm.extractvalue %m[3, 0]       ; sizes[0]
+  //     %t0 = llvm.extractvalue %m[4, 0]       ; strides[0]
+  //     ; -----------------------------------
+  //     %_  = llvm.call @main_graph_internal(%ctx, %a, %al, %o, %s0, %t0)
+  //     llvm.return %c0_i32
+  //   }
   // Classic mode is the same except the wrapper takes (%ctx, %inputs,
-  // %outputs), also unpacks each output out-param, and forwards the internal's
-  // i32/void result.
+  // %outputs), unpacks each output out-param the same way, and forwards the
+  // internal's i32/void result.
   LogicalResult transformMainFunction(ModuleOp module) {
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc)
