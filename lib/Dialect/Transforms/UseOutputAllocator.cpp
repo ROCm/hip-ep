@@ -10,16 +10,28 @@
 // intermediates. `out_idx` is the operand position in func.return (= graph
 // output index); the alloc's dynamic-size operands are reused verbatim.
 //
-// Requires `!hip.context` as function argument 0 (used to build the new op);
-// functions without it are skipped. Intermediates (allocs NOT returned) and
+// Scope: ONLY public (graph-entry) functions are rewritten. Private helpers --
+// e.g. outlined `onnx.Loop` bodies -- also carry a `!hip.context` arg 0 and
+// return `memref.alloc`s, but their results are DLL-internal, never EP outputs;
+// rewriting them would emit an `out_idx` colliding with the real graph outputs.
+// Functions lacking `!hip.context` as argument 0 are likewise skipped (no
+// runtime handle to build the new op). Intermediates (allocs NOT returned) and
 // passthrough outputs (returns whose defining op is not a memref.alloc, e.g.
 // block args / views) are left untouched. The function signature and the
 // `func.return` terminator are intentionally NOT modified -- `convert-hip-to-
 // llvm` synthesizes the `-> i32` entry wrapper in a later phase.
 //
-// Standalone: registered for hip-mlir-opt / LIT but NOT inserted into any
-// pipeline (allocator-pipeline placement is a later phase; see
-// docs/design/output-allocator-design.md, Phase 1).
+// The pass also stamps the `hipdnn.use_output_allocator` unit attribute on the
+// parent module (the allocator-mode marker that later phases'
+// `convert-hip-to-llvm` / `generate-interface` read to select the allocator
+// ABI). The stamp is UNCONDITIONAL -- it runs even when no alloc is rewritten,
+// because the mode is decided by this pass being invoked (in-pipeline it is
+// scheduled only in allocator mode), not by whether the IR happened to contain
+// a returned alloc (a zero-output graph must still be marked). A FuncOp pass
+// writing its parent module relaxes MLIR's pass-isolation contract; it is safe
+// here because the write is an idempotent set of the same UnitAttr, and it
+// follows the established precedent in PoolAllocs (which stamps
+// hipdnn.pool_size the same way).
 //
 // Before:
 //   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
@@ -29,11 +41,13 @@
 //   }
 //
 // After:
-//   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
-//     %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64}
-//          : memref<?x?xf16>                              // EP-owned output
-//     hip.sigmoid(%ctx) ins(%t) outs(%out)
-//     return %out : memref<?x?xf16>
+//   module attributes {hipdnn.use_output_allocator} {
+//     func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
+//       %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64}
+//            : memref<?x?xf16>                            // EP-owned output
+//       hip.sigmoid(%ctx) ins(%t) outs(%out)
+//       return %out : memref<?x?xf16>
+//     }
 //   }
 //
 //===----------------------------------------------------------------------===//
@@ -43,10 +57,12 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
 
 #define DEBUG_TYPE "hip-use-output-allocator"
 
@@ -58,55 +74,70 @@ namespace hip {
 
 namespace {
 
+// Rewrites a returned `memref.alloc` (in a public function with a
+// `!hip.context` arg 0) into a `hip.alloc_output`, dropping any dealloc of the
+// buffer (the EP owns it). An alloc returned at more than one operand position
+// (aliased multi-output) matches once and is rewritten with its FIRST return
+// index -- the one-match-per-alloc structure of the pattern is what dedupes it.
+struct ReplaceOutputAllocPattern : public OpRewritePattern<memref::AllocOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(memref::AllocOp allocOp,
+                                PatternRewriter &rewriter) const override {
+    // Find if this alloc is returned (graph output) and at which index.
+    func::ReturnOp returnOp = nullptr;
+    int64_t outIdx = -1;
+    for (OpOperand &use : allocOp->getUses()) {
+      if (auto ret = dyn_cast<func::ReturnOp>(use.getOwner())) {
+        returnOp = ret;
+        outIdx = use.getOperandNumber();
+        break; // first occurrence (aliased outputs share one rewrite)
+      }
+    }
+    if (!returnOp)
+      return failure(); // not a graph output
+
+    auto func = allocOp->getParentOfType<func::FuncOp>();
+    // Only public (graph-entry) functions own EP outputs. Private helpers (e.g.
+    // outlined onnx.Loop bodies) also carry a !hip.context arg 0 and return
+    // memref.allocs, but their outputs are DLL-internal -> skip non-public.
+    if (!func || !func.isPublic())
+      return failure();
+
+    // Need !hip.context arg 0 to build hip.alloc_output.
+    if (func.getNumArguments() == 0 ||
+        !isa<ContextType>(func.getArgument(0).getType()))
+      return failure();
+    Value ctx = func.getArgument(0);
+
+    // EP owns the buffer now; drop any dealloc (it references the alloc
+    // result).
+    for (Operation *user : llvm::make_early_inc_range(allocOp->getUsers()))
+      if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
+        rewriter.eraseOp(dealloc);
+
+    auto allocOutput = AllocOutputOp::create(
+        rewriter, allocOp.getLoc(), allocOp.getType(), ctx,
+        allocOp.getDynamicSizes(), rewriter.getI64IntegerAttr(outIdx));
+
+    rewriter.replaceOp(allocOp, allocOutput.getResult());
+    return success();
+  }
+};
+
 struct UseOutputAllocatorPass
     : impl::UseOutputAllocatorPassBase<UseOutputAllocatorPass> {
   void runOnOperation() override {
-    func::FuncOp func = getOperation();
-    if (func.empty())
-      return;
+    RewritePatternSet patterns(&getContext());
+    patterns.add<ReplaceOutputAllocPattern>(&getContext());
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+      signalPassFailure();
 
-    // Need !hip.context arg 0 to build hip.alloc_output; skip gracefully if
-    // absent (utility / pre-context-arg functions have no runtime handle).
-    if (func.getNumArguments() == 0 ||
-        !isa<ContextType>(func.getArgument(0).getType()))
-      return;
-    Value ctx = func.getArgument(0);
-
-    // Collect returned memref.alloc outputs with their graph-output index (the
-    // operand position in func.return). Dedupe on the op: an alloc returned at
-    // more than one position (aliased multi-output) is rewritten exactly once
-    // with its FIRST index, so we never erase the same op twice.
-    SmallVector<std::pair<memref::AllocOp, int64_t>> work;
-    llvm::SmallPtrSet<Operation *, 8> seen;
-    func.walk([&](func::ReturnOp ret) {
-      for (auto [idx, val] : llvm::enumerate(ret.getOperands()))
-        if (auto alloc = val.getDefiningOp<memref::AllocOp>())
-          if (seen.insert(alloc.getOperation()).second)
-            work.emplace_back(alloc, static_cast<int64_t>(idx));
-    });
-
-    OpBuilder builder(func.getContext());
-    for (auto [alloc, outIdx] : work) {
-      builder.setInsertionPoint(alloc);
-      auto allocOutput = AllocOutputOp::create(
-          builder, alloc.getLoc(), alloc.getType(), ctx,
-          alloc.getDynamicSizes(), builder.getI64IntegerAttr(outIdx));
-
-      // EP owns the buffer now; drop any dealloc first (it references the alloc
-      // result). Collect-then-erase to avoid iterator invalidation. Returned
-      // values normally have no dealloc, but a buffer that is both returned and
-      // used as a scratch intermediate could -- erase it so the EP-owned buffer
-      // is never freed.
-      SmallVector<memref::DeallocOp> deallocs;
-      for (Operation *user : alloc->getUsers())
-        if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
-          deallocs.push_back(dealloc);
-      for (memref::DeallocOp dealloc : deallocs)
-        dealloc.erase();
-
-      alloc.replaceAllUsesWith(allocOutput.getResult());
-      alloc.erase();
-    }
+    // Stamp the allocator-mode marker on the parent module. UNCONDITIONAL: see
+    // the file header for why this must run even when nothing was rewritten.
+    if (auto module = getOperation()->getParentOfType<ModuleOp>())
+      module->setAttr("hipdnn.use_output_allocator",
+                      UnitAttr::get(&getContext()));
   }
 };
 
