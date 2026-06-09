@@ -194,15 +194,21 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
     which uses grow-on-demand semantics: the runtime grows the pool when the
     requested size exceeds current capacity.
 
-    Static allocations use greedy best-fit offset assignment (inspired by
-    greedy best-fit strip packing).  Dynamic allocations
-    are bucketed by their byte-size SSA value: non-overlapping lifetimes within
-    a bucket share an offset.
+    Static allocations use greedy best-fit offset assignment.  Dynamic
+    allocations are bucketed by their byte-size SSA value: non-overlapping
+    lifetimes within a bucket share an offset.
 
     Sub-buffer offsets are aligned to 256 bytes by default (configurable).
 
     Recommended pipeline position:
       hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
+
+    Emission strategy:
+      Per-bucket size arithmetic and the pool acquisition are anchored at
+      the latest legal point in the block — after every dyn-operand def
+      and before the earliest pooled alloc. No code motion, no hoist
+      whitelist, no reshape pre-folds. See `findLatestLegalInsertionPoint`
+      in PoolAllocs.cpp for the helper that picks the point.
   }];
   let options = [
     Option<"alignment", "alignment", "int64_t", /*default=*/"256",

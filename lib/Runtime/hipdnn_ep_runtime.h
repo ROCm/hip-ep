@@ -203,12 +203,31 @@ void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
 // Ownership: Caller does NOT own pointer (freed in cleanup)
 void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 
-// Get the base pointer of the GPU memory pool, growing it if needed.
-// Called from PoolAllocs-generated code at the start of each inference.
-// When needed_size exceeds the current allocation, the pool is grown via
-// hipFree + hipMalloc. The pool never shrinks.
-// Returns: GPU base pointer (NULL on allocation failure)
-void *hipdnn_ep_get_pool_base(RuntimeState *state, size_t needed_size);
+// Get the base pointer of one of the runtime's GPU memory pools, growing it
+// if needed. Called from PoolAllocs-generated code, once per emitted
+// hip.get_pool, at the start of each inference.
+//
+// `domain_id` selects which pool to access: hip-pool-allocs partitions the
+// function's pooled allocs into independent dominance domains and emits one
+// hip.get_pool per domain (id starts at 0). Domain 0 inherits the legacy
+// single-pool semantics — its pool was eagerly sized by hipdnn_ep_pool_init
+// using the static buffer offsets, so single-domain models are bit-identical
+// to the pre-multi-domain runtime. Domains 1..N start with size 0 and grow
+// lazily on their first call here.
+//
+// When `needed_size` exceeds the selected domain's current allocation, that
+// pool is grown via stream-sync + hipFree + hipMalloc. Pools never shrink and
+// are independent across domains: growing domain N does not touch domain M.
+//
+// There is no compile-time cap on `domain_id`: the per-domain arrays are
+// themselves grown on demand the first time a higher id is seen (a cold-path
+// event on the first inference). A negative `domain_id` returns NULL with a
+// stderr diagnostic (it would indicate a compiler bug — ids start at 0).
+//
+// Returns: GPU base pointer for the selected domain (NULL on bad domain_id
+//          or allocation failure).
+void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
+                              size_t needed_size);
 
 // Get the host-mapped scratch buffer base, growing it if needed. Called from
 // hip.get_host_scratch (emitted by hip-materialize-host-scalars) once per
