@@ -79,7 +79,7 @@ graph TD
 
 In the allocator branch `hip-use-output-allocator` does the IR rewrite. `convert-hip-to-llvm` and `generate-interface` are the SAME passes in both branches — they branch internally on the `hipdnn.output_allocator` module attribute, so there is no allocator-specific pass to keep in sync.
 
-> **The attribute is set by a one-line marker pass, `hip-set-output-allocator-attr`, run right after `hip-use-output-allocator`** (omitted from the diagram — it is not a transformation, just the mode switch). It is kept as its own trivial pass so the switch is a single deletable step once the allocator path is the only one and the readers can hard-code the mode (see "Deprecation plan"). Until then it is the single source of truth for the mode.
+> The attribute is set by a one-line marker pass, `hip-set-output-allocator-attr`, run right after `hip-use-output-allocator` (omitted from the diagram — it is not a transformation, just the mode switch). Keeping it as its own trivial pass makes the switch a single deletable step once the allocator path is the only one.
 
 **Pipeline A: Classic** (flag off, existing design)
 ```
@@ -242,9 +242,7 @@ The setter is the only output-allocator symbol the EP resolves by name; a pre-al
 
 ### Phase 4: Allocator-Aware Code Generation
 
-Status: implemented. Key files: [lib/Dialect/Transforms/UseOutputAllocator.cpp](../../lib/Dialect/Transforms/UseOutputAllocator.cpp) (FuncOp pass: rewrites returned allocs to `hip.alloc_output`), [lib/Dialect/Transforms/SetOutputAllocatorAttr.cpp](../../lib/Dialect/Transforms/SetOutputAllocatorAttr.cpp) (ModuleOp marker pass: sets the `hipdnn.output_allocator` module attribute — the deletable mode switch), [lib/Dialect/Transforms/GenerateInterface.cpp](../../lib/Dialect/Transforms/GenerateInterface.cpp) (single `generate-interface` pass; mode read from the attribute), [lib/Conversion/HipToLLVM/HipToLLVM.cpp](../../lib/Conversion/HipToLLVM/HipToLLVM.cpp) (`transformMainFunction` reads the attribute for mode + 2-arg vs 3-arg wrapper synthesis), [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp) (slot-4.5 ordering; one `generate-interface` for both modes), [include/hip/Dialect/Transforms/Pipelines.h](../../include/hip/Dialect/Transforms/Pipelines.h) (`useOutputAllocator` on `OnnxToHipPipelineOptions` + `HipdnnPipelineOptions`; **removed** from `HipToLLVMPipelineOptions`). LIT coverage: [test/lit/Dialect/hip-set-output-allocator-attr.mlir](../../test/lit/Dialect/hip-set-output-allocator-attr.mlir) (marker pass sets the attr, leaves bodies untouched), [test/lit/e2e/test_output_allocator_model.mlir](../../test/lit/e2e/test_output_allocator_model.mlir) (allocator 2-arg vs classic 3-arg `inference_compute`, attribute presence) and [test/lit/Conversion/hip-to-llvm/test_main_graph_param_mismatch.mlir](../../test/lit/Conversion/hip-to-llvm/test_main_graph_param_mismatch.mlir) (mode-specific param-count mismatch diagnostic, split-input-file).
-
-**One pass — mode from a module attribute.** A single `GenerateInterfacePass` (`runOnOperation`) emits both ABIs; there is no classic/allocator pass split. `verifyPrerequisites` and `generateInferenceCompute` each read `module->hasAttr("hipdnn.output_allocator")` into a local `allocatorMode` in place: allocator mode expects a 2-arg `main_graph` and skips the output-staging calls + `outputs` span; classic mode (no attribute) expects 3-arg and emits the full output staging. The classic-only staging is wrapped in explicit `if (!allocatorMode)` scopes (tagged `classic out-param staging - delete when classic is removed`) so the dead branch is mechanically removable — see "Deprecation plan" below. The change vs the phase-3 baseline is deliberately scoped to the attribute read + those guarded blocks; the pass class, constructors, and helper methods are otherwise untouched.
+A single `generate-interface` pass emits both ABIs, reading `hipdnn.output_allocator` to choose: no attribute → classic 3-arg `inference_compute`; attribute present → allocator 2-arg. The classic-only output staging is gated on the attribute so it is skipped in allocator mode.
 
 **`main_graph` mode + arity check.** `convert-hip-to-llvm` runs *before* interface generation; its `transformMainFunction` reads the **same** `hipdnn.output_allocator` attribute to pick the mode (it no longer guesses from the param count). It then computes the expected param count for that mode — each memref unpacks to `3 + 2*rank` LLVM params (allocatedPtr + alignedPtr + offset + sizes[rank] + strides[rank]); a returned memref lowers to a by-value struct result and adds no param; `expectedAllocator` = context + input memrefs, `expectedClassic` = `expectedAllocator` + output memrefs — and verifies `main_graph` matches, emitting a mode-specific `emitError` on mismatch. Because both `convert-hip-to-llvm` and `generate-interface` read the same attribute, the wrapper arity and the interface generator can never disagree (and a zero-output graph, where the two expected counts coincide, is disambiguated by the attribute rather than a classic-first tiebreak).
 
@@ -278,15 +276,6 @@ int inference_compute(void *state, span_t *inputs) {
 **Design rationale:** Outputs are allocated in-graph via the allocator callback, which creates OrtValues directly. The `outputs` parameter serves no purpose and would be confusing.
 
 **Return:** The pass leaves `main_graph`'s `return` alone. `convert-hip-to-llvm` wraps the body in the `-> i32` entry and returns `0`; the body's memref return is ignored, same as the classic path.
-
-**Deprecation plan (when classic out-params are removed).** The allocator path is the target end state; the classic out-param path is what gets retired. The codebase is staged so that retirement is a mechanical deletion rather than a rewrite:
-
-- In `generateInferenceCompute`, every classic-only block is wrapped in an `if (!allocatorMode)` scope and tagged with the comment `classic out-param staging - delete when classic is removed`. Removing classic = delete those scopes (output `TensorBuffer` allocas, the `prepare_output` loop, the output-memref array build, the `finalize_output` loop), drop the hoisted `outputMemrefArray` and the `outputsSpanPtr` arg, and make the wrapper unconditionally 2-arg.
-- `convert-hip-to-llvm::transformMainFunction` similarly collapses to the allocator branch (2-arg wrapper, discard returned descriptor).
-- The `useOutputAllocator` pipeline option (and the slot-3 vs slot-4.5 branch in `buildOnnxToHipPipelineTail`) collapses: `hip-use-output-allocator` always runs, and the whole mode switch is one deletable pass — drop `hip-set-output-allocator-attr` (the marker), make the readers hard-code allocator mode.
-- The module attribute itself can then be dropped once no reader needs to distinguish modes (delete the marker pass `SetOutputAllocatorAttr.cpp`, its TableGen def, its LIT test, and the `pm.addPass(createSetOutputAllocatorAttrPass())` line).
-
-Until then, both modes share one set of passes; the attribute is the only switch.
 
 ### Phase 5: EP Bridge and Zero-Copy
 
