@@ -284,6 +284,11 @@ private:
     //   - classic void internal (real lowering): call, return 0.
     //   - classic i32 internal (hand-written LIT shape): call, forward result.
     auto internalRetTy = mainFunc.getFunctionType().getReturnType();
+    // The `allocatorMode` term is required: in allocator mode internalRetTy is
+    // the memref descriptor struct (neither void nor i32), so without it this
+    // would fall into the else branch and return that struct from the i32
+    // wrapper -- a type mismatch. The attr routes allocator mode to discard +
+    // return 0 instead.
     if (allocatorMode || isa<LLVM::LLVMVoidType>(internalRetTy)) {
       builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
       Value zero = builder.create<LLVM::ConstantOp>(
