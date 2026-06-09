@@ -206,8 +206,6 @@ Status: implemented. Key files: [lib/Runtime/hipdnn_ep_runtime.h](../../lib/Runt
 **Allocator interface** (`lib/Runtime/hipdnn_ep_runtime.h`):
 ```c
 typedef struct {
-  size_t struct_size;  // ABI size guard, MUST be first (offset 0); caller sets
-                       // it to sizeof(hipdnn_output_allocator_t)
   void *self;          // opaque EP context (borrowed; runtime never owns/frees)
   void *(*allocate)(void *self, int64_t out_idx, const int64_t *shape,
                     int64_t rank, int64_t elem_size);
@@ -215,7 +213,7 @@ typedef struct {
 } hipdnn_output_allocator_t;
 ```
 
-`struct_size` is field 0 so the struct is a forward/backward-compatible ABI boundary: a cached `model.dll` can embed *older* runtime bitcode than the EP that installs the allocator (the model cache key is the ONNX hash, not the runtime version). The setter copies only `min(caller_struct_size, sizeof(local))` bytes — an older caller leaves new fields at their defaults; a newer caller's unknown tail is ignored — then normalizes the stored `struct_size` to the local layout. Field offsets are locked with `static_assert`s; the Phase 5 EP-side copy carries the same asserts. Total absence of the contract is handled one level up by symbol resolution: a pre-allocator `model.dll` simply lacks the exported setter, so `GetProcAddress` returns null and the EP no-ops.
+The struct crosses the `model.dll` <-> EP boundary, so its layout is a fixed ABI contract — treated exactly like `tensor_t` (the other cross-component wire struct): the layout is locked with `static_assert`s and the Phase 5 EP-side copy is declared identically. There is intentionally **no** self-describing size/version field. A cached `model.dll` can embed *older* runtime bitcode than the EP that installs the allocator (the model cache key is the ONNX hash, not the runtime version), but a layout change is an ABI break that requires rebuilding the `model.dll` — and the cache is invalidated the same way any other runtime change is, by deleting stale `model.dll`s (see CLAUDE.md "Stale compiled-model DLLs"). Total absence of the contract is handled one level up by symbol resolution: a pre-allocator `model.dll` simply lacks the exported setter, so `GetProcAddress` returns null and the EP no-ops.
 
 **Runtime entry points** (`lib/Runtime/output_allocator.cpp`):
 ```c
@@ -236,7 +234,7 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
 **Implementation notes:**
 - The two functions live in their own translation unit (`output_allocator.cpp`, not `hipdnn_ep_runtime_state.cpp`) so the GPU-free unit test can compile them natively against the mock runtime types — neither function touches HIP/MIOpen/hipBLASLt.
 - The setter is `__declspec(dllexport)` (Windows) via the `HIPDNN_EP_RT_EXPORT` macro applied to BOTH the declaration and the definition. dllexport keeps the symbol alive through LLVM optimization of the linked model bitcode (`export_symbols` in `CompilerDriver.cpp` is linker-stage only, runs after opt). The macro is on both decl and def because MSVC — which compiles the same source for the unit test — treats a decl/def dllexport mismatch as a hard error (C2375), whereas clang only warns; the unit test defines `HIPDNN_EP_RT_NO_EXPORT` to drop the attribute.
-- `RuntimeState::output_allocator` is zero-initialized in `initialize_state_handles` to `{sizeof(...), nullptr, nullptr}`; the classic pipeline never installs an allocator and never calls `hipdnn_ep_alloc_output`.
+- `RuntimeState::output_allocator` is zero-initialized in `initialize_state_handles` to `{nullptr, nullptr}`; the classic pipeline never installs an allocator and never calls `hipdnn_ep_alloc_output`.
 
 **Contract:** the allocator always returns a device pointer (GPU buffer). The allocator implementation (Phase 5) is responsible for:
 - GPU output: return ORT's GPU buffer pointer (zero-copy)

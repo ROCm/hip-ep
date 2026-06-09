@@ -173,32 +173,28 @@ typedef struct RuntimeState RuntimeState;
 // main_graph obtains each graph-output buffer from it at the point the output
 // shape is known (lowered from hip.alloc_output -> hipdnn_ep_alloc_output).
 //
-// ABI / forward-compatibility: a cached model.dll can embed OLDER runtime
-// bitcode than the EP that calls the setter (the cache key is the ONNX hash,
-// not the runtime version), so the struct is a cross-version boundary:
-//   - struct_size is field 0 and the caller sets it to sizeof(...). The setter
-//     copies only min(caller_size, local_size) bytes, so an older caller
-//     leaves new fields at defaults and a newer caller's unknown tail is
-//     ignored.
-//   - New callbacks are APPENDED after `allocate`; existing fields never move.
-//   - Total absence is handled by symbol resolution: a pre-allocator model.dll
-//     simply lacks the exported setter (GetProcAddress returns null -> no-op).
+// ABI: this struct crosses the model.dll <-> EP boundary, so its layout is a
+// contract -- treated exactly like tensor_t below (the other cross-component
+// wire struct): a fixed layout locked by static_asserts, with the Phase 5
+// EP-side copy declared identically. There is intentionally NO self-describing
+// size/version field: a layout change is an ABI break that requires rebuilding
+// the model.dll, and the model cache is invalidated the same way any other
+// runtime change is -- by deleting stale model.dlls (the cache key is the ONNX
+// hash, not the runtime version; see CLAUDE.md "Stale compiled-model DLLs").
+// Total absence of the contract is handled one level up by symbol resolution: a
+// pre-allocator model.dll simply lacks the exported setter, so GetProcAddress
+// returns null and the EP no-ops.
 typedef struct {
-  // ABI version/size guard. MUST stay first (offset 0). Caller sets
-  // struct_size = sizeof(hipdnn_output_allocator_t).
-  size_t struct_size;
   void *self; // opaque EP context (borrowed; runtime never owns/frees)
   void *(*allocate)(void *self, int64_t out_idx, const int64_t *shape,
                     int64_t rank, int64_t elem_size);
-  // Append future callbacks BELOW; never reorder/remove existing members.
 } hipdnn_output_allocator_t;
 
 // Compile-time layout lock (mirrors the tensor_t static_assert idiom below).
 // The Phase 5 EP-side copy must carry the same asserts.
-static_assert(offsetof(hipdnn_output_allocator_t, struct_size) == 0,
-              "struct_size must remain first (ABI size guard)");
-static_assert(offsetof(hipdnn_output_allocator_t, self) == sizeof(size_t),
-              "self moved -- update all hipdnn_output_allocator_t copies");
+static_assert(offsetof(hipdnn_output_allocator_t, self) == 0,
+              "self must remain first -- update all "
+              "hipdnn_output_allocator_t copies");
 
 // dllexport so the setter survives LLVM optimization in the bitcode build (the
 // export_symbols list in CompilerDriver.cpp only adds linker-stage /EXPORT,
