@@ -7,10 +7,17 @@
 // Verifies that the pass rewrites graph-output memref.alloc ops (values
 // returned by func.return) into hip.alloc_output, reusing the alloc's dynamic
 // sizes and setting out_idx to the return position, while leaving intermediates,
-// passthrough outputs, and context-less functions untouched.
+// passthrough outputs, private helpers, and context-less functions untouched.
+// Also verifies the pass stamps the hipdnn.use_output_allocator module attr.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-use-output-allocator %s 2>&1 | FileCheck %s
+
+// --- The pass stamps the allocator-mode marker on the module (unconditional,
+//     once per module). This file also contains functions the pass does NOT
+//     rewrite (private / no-context / passthrough), so a successful match here
+//     also shows the stamp is independent of whether any alloc was rewritten. ---
+// CHECK: module attributes {hipdnn.use_output_allocator}
 
 // --- Dynamic-shape output: replaced, reusing the alloc's %M, %N. ---
 // CHECK-LABEL: func.func @dynamic_output
@@ -129,4 +136,42 @@ func.func @main_graph(%ctx: !hip.context,
   %out = memref.alloc(%M) : memref<?x64xf16>
   hip.sigmoid(%ctx) ins(%t1 : memref<?x64xf16>) outs(%out : memref<?x64xf16>)
   return %out : memref<?x64xf16>
+}
+
+// --- Private function (e.g. an outlined onnx.Loop body): carries !hip.context
+//     arg 0 and returns a memref.alloc, but is NOT a public graph entry, so the
+//     pass leaves it untouched (its output is DLL-internal, never an EP output).
+//     Proves cross-function isolation: publics above are rewritten, this is not. ---
+// CHECK-LABEL: func.func private @loop_body
+// CHECK-NOT:     hip.alloc_output
+// CHECK:         memref.alloc
+func.func private @loop_body(%ctx: !hip.context, %M: index) -> memref<?xf16> {
+  %out = memref.alloc(%M) : memref<?xf16>
+  return %out : memref<?xf16>
+}
+
+// --- Public-only guard fires BEFORE dealloc erasure: a PRIVATE function keeps
+//     its memref.dealloc (contrast @returned_alloc_with_dealloc, public, where
+//     the dealloc IS erased). ---
+// CHECK-LABEL: func.func private @priv_with_dealloc
+// CHECK:         memref.alloc
+// CHECK:         memref.dealloc
+// CHECK-NOT:     hip.alloc_output
+func.func private @priv_with_dealloc(%ctx: !hip.context, %M: index) -> memref<?xf16> {
+  %out = memref.alloc(%M) : memref<?xf16>
+  memref.dealloc %out : memref<?xf16>
+  return %out : memref<?xf16>
+}
+
+// --- out_idx follows func.return POSITION, not definition order. %a is defined
+//     first but returned at index 1; %b is defined second but returned at index
+//     0. Each hip.alloc_output is emitted at its alloc's original site, so the
+//     dynamic one (%a, out_idx 1) prints before the static one (%b, out_idx 0). ---
+// CHECK-LABEL: func.func @return_order
+// CHECK:         hip.alloc_output(%[[CTX:.*]], %{{.*}}) {out_idx = 1 : i64} : memref<?xf16>
+// CHECK:         hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<4xf16>
+func.func @return_order(%ctx: !hip.context, %M: index) -> (memref<4xf16>, memref<?xf16>) {
+  %a = memref.alloc(%M) : memref<?xf16>
+  %b = memref.alloc() : memref<4xf16>
+  return %b, %a : memref<4xf16>, memref<?xf16>
 }

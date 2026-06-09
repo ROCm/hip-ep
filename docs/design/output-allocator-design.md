@@ -130,7 +130,7 @@ Introduce `hip.alloc_output` — an operation that allocates output buffers via 
 
 **Placement in pipeline:** After `one-shot-bufferize` (dynamic dims become live SSA values), before `buffer-deallocation` (so deallocator sees no Allocate effect and skips it), before `hip-pool-allocs` (so pooling skips EP-owned buffers).
 
-The `hip-use-output-allocator` pass replaces `memref.alloc` for graph outputs with `hip.alloc_output`, reusing the alloc's dynamic-size operands.
+The `hip-use-output-allocator` pass replaces `memref.alloc` for graph outputs with `hip.alloc_output`, reusing the alloc's dynamic-size operands. It rewrites **only public (graph-entry) functions** — private helpers such as outlined `onnx.Loop` bodies also carry a `!hip.context` arg 0 and return `memref.alloc`s, but their results are DLL-internal and must not become EP outputs, so they are skipped. The pass also stamps the `hipdnn.use_output_allocator` unit attribute on the module (the allocator-mode marker that `convert-hip-to-llvm` and `generate-interface` read to select the allocator ABI); the stamp is unconditional, since the mode is decided by running the pass rather than by whether any alloc was rewritten.
 
 **Example: Add → MatMul → Sigmoid**
 
