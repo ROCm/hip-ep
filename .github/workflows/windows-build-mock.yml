@@ -192,8 +192,8 @@ jobs:
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
       # -----------------------------------------------------------------------
-      # Build LLVM/MLIR/LLD from source into llvm-install (mlir;lld, X86, /MT).
-      # Identical recipe to windows-build.yml (shared cache).
+      # Build LLVM/MLIR/LLD from source into llvm-install (clang;mlir;lld, X86,
+      # /MT). Identical recipe to windows-build.yml (shared cache).
       # -----------------------------------------------------------------------
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
