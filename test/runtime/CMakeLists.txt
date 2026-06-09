@@ -12,7 +12,7 @@
 message(STATUS "Configuring runtime unit tests")
 
 # Compiles output_allocator.cpp natively (the same source that also becomes
-# runtime bitcode) so the Phase 3 allocator contract is tested directly.
+# runtime bitcode) so the allocator contract is tested directly.
 add_executable(test-output-allocator
     test_output_allocator.cpp
     ${CMAKE_SOURCE_DIR}/lib/Runtime/output_allocator.cpp

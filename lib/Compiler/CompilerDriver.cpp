@@ -174,7 +174,7 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   //                                          hook (called from EP-side
   //                                          MlirCustomOp::Compute() entry)
   //   hipdnn_ep_set_output_allocator       — EP installs the output allocator
-  //                                          before inference_compute (Phase 5)
+  //                                          before inference_compute
   std::vector<std::string> export_symbols = {"inference_init",
                                              "inference_compute",
                                              "inference_cleanup",

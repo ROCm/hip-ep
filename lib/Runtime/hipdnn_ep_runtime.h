@@ -175,8 +175,8 @@ typedef struct RuntimeState RuntimeState;
 //
 // ABI: this struct crosses the model.dll <-> EP boundary, so its layout is a
 // contract -- treated exactly like tensor_t below (the other cross-component
-// wire struct): a fixed layout locked by static_asserts, with the Phase 5
-// EP-side copy declared identically. There is intentionally NO self-describing
+// wire struct): a fixed layout locked by static_asserts, with the EP-side copy
+// declared identically. There is intentionally NO self-describing
 // size/version field: a layout change is an ABI break that requires rebuilding
 // the model.dll, and the model cache is invalidated the same way any other
 // runtime change is -- by deleting stale model.dlls (the cache key is the ONNX
@@ -191,7 +191,7 @@ typedef struct {
 } hipdnn_output_allocator_t;
 
 // Compile-time layout lock (mirrors the tensor_t static_assert idiom below).
-// The Phase 5 EP-side copy must carry the same asserts.
+// The EP-side copy must carry the same asserts.
 static_assert(offsetof(hipdnn_output_allocator_t, self) == 0,
               "self must remain first -- update all "
               "hipdnn_output_allocator_t copies");
