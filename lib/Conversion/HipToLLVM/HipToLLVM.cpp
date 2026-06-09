@@ -162,39 +162,39 @@ private:
         (int64_t)outputShapesAttr.size() != outputCount)
       return module.emitError("Metadata mismatch: shapes array size != count");
 
-    // Each memref unpacks to allocatedPtr + alignedPtr + offset + sizes[rank]
-    // + strides[rank] = 3 + 2*rank LLVM params. The allocator main_graph has
-    // the INPUT params only (outputs are allocated in-graph and returned as a
-    // by-value struct, which adds no param); the classic main_graph also has
-    // the output out-params.
-    constexpr unsigned kMemRefPtrs = 2;   // allocatedPtr + alignedPtr
-    constexpr unsigned kMemRefOffset = 1; // offset scalar
-    unsigned expectedAllocator = 1;       // context
-    for (auto shapeAttr : inputShapesAttr) {
-      int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
-      expectedAllocator += kMemRefPtrs + kMemRefOffset + rank + rank;
-    }
-    unsigned expectedClassic = expectedAllocator;
-    for (auto shapeAttr : outputShapesAttr) {
-      int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
-      expectedClassic += kMemRefPtrs + kMemRefOffset + rank + rank;
-    }
-
-    unsigned actualParams = mainFunc.getFunctionType().getNumParams();
     // Mode is decided by the `hipdnn.use_output_allocator` module attribute (set
-    // by hip-use-output-allocator), NOT by param count -- this disambiguates a
-    // zero-output graph, where expectedClassic == expectedAllocator. The count
-    // is then only used to verify @main_graph matches the chosen mode. The attr
-    // is a typed bool: read its VALUE (a module may carry it set to false), so
-    // absence and `= false` both mean classic mode.
+    // by hip-use-output-allocator), NOT by param count. The attr is a typed
+    // bool: read its VALUE (a module may carry it set to false), so absence and
+    // `= false` both mean classic mode.
     auto allocatorAttr =
         module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
     bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
-    unsigned expected = allocatorMode ? expectedAllocator : expectedClassic;
-    if (actualParams != expected) {
+
+    // Each memref unpacks to allocatedPtr + alignedPtr + offset + sizes[rank]
+    // + strides[rank] = 3 + 2*rank LLVM params. Both modes have the context +
+    // input params; only classic mode adds the output out-params (in allocator
+    // mode outputs are allocated in-graph and returned as a by-value struct,
+    // which adds no param) -- so the attr gates whether the output scope is
+    // counted.
+    constexpr unsigned kMemRefPtrs = 2;   // allocatedPtr + alignedPtr
+    constexpr unsigned kMemRefOffset = 1; // offset scalar
+    unsigned expectedParams = 1;          // context
+    for (auto shapeAttr : inputShapesAttr) {
+      int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
+      expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
+    }
+    if (!allocatorMode) {
+      for (auto shapeAttr : outputShapesAttr) {
+        int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
+        expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
+      }
+    }
+
+    unsigned actualParams = mainFunc.getFunctionType().getNumParams();
+    if (actualParams != expectedParams) {
       return module.emitError()
              << "[HipToLLVM] @main_graph parameter count mismatch: expected "
-             << expected
+             << expectedParams
              << (allocatorMode ? " (allocator), got " : " (classic), got ")
              << actualParams;
     }
