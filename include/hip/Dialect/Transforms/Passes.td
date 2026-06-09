@@ -292,6 +292,22 @@ def UseOutputAllocatorPass
   ];
 }
 
+def SetOutputAllocatorAttrPass
+    : Pass<"hip-set-output-allocator-attr", "mlir::ModuleOp"> {
+  let summary = "Mark the module as output-allocator mode";
+  let description = [{
+    Sets the `hipdnn.output_allocator` unit attribute on the module -- the single
+    source of truth that downstream convert-hip-to-llvm and generate-interface
+    read to select the 2-arg allocator ABI (vs the classic 3-arg out-param ABI).
+
+    Deliberately separate from hip-use-output-allocator (which does the IR
+    rewrite): the allocator pipeline runs both at "slot 4.5", but isolating the
+    mode marker in its own trivial pass means it can be deleted in a single step
+    once the allocator path is the only path (classic out-params removed) -- the
+    rewrite pass needs no change.  See docs/design/output-allocator-design.md.
+  }];
+}
+
 def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   let summary = "Refine dynamic dims in HIP DPS op result types via "
                 "`ReifyRankedShapedTypeOpInterface`";

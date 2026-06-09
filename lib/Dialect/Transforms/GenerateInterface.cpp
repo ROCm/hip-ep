@@ -341,12 +341,13 @@ static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
   builder.setInsertionPointToStart(continueBlock);
 }
 
-// Shared implementation for the classic (out-param) and allocator interface
-// generators. The two PassWrapper subclasses at the end of this namespace
-// select the mode via the `allocatorMode` flag threaded through runImpl /
-// verifyPrerequisites / generateInferenceCompute; inference_init,
-// inference_cleanup, runtime declarations and metadata are identical in both
-// modes.
+// Generates the four C-ABI interface functions (inference_init,
+// inference_compute, inference_cleanup, inference_get_metadata_json) for a
+// lowered module. Allocator vs classic mode is read from the
+// `hipdnn.output_allocator` module attribute (set by hip-set-output-allocator-
+// attr) in place by verifyPrerequisites and generateInferenceCompute;
+// inference_init, inference_cleanup, runtime declarations and metadata are
+// identical in both modes.
 class GenerateInterfacePassBase {
 public:
   explicit GenerateInterfacePassBase(
@@ -357,13 +358,12 @@ public:
       : compilationOptions_(std::move(compilationOptions)) {}
 
 protected:
-  // Shared run body. allocatorMode=false emits the classic 3-arg interface;
-  // true emits the 2-arg allocator interface (graph outputs allocated in-graph
-  // via hip.alloc_output -- no outputs span, no prepare_output/finalize_output
-  // calls). Returns failure() only when prerequisites are unmet so the concrete
-  // pass can call signalPassFailure().
-  LogicalResult runImpl(ModuleOp module, bool allocatorMode) {
-    if (failed(verifyPrerequisites(module, allocatorMode)))
+  // Shared run body. Returns failure() only when prerequisites are unmet so the
+  // concrete pass can call signalPassFailure(). The classic 3-arg vs 2-arg
+  // allocator interface is selected from the `hipdnn.output_allocator` module
+  // attribute by the callees (verifyPrerequisites / generateInferenceCompute).
+  LogicalResult runImpl(ModuleOp module) {
+    if (failed(verifyPrerequisites(module)))
       return failure();
 
     // Prefer the hip.constants_file attribute set by OnnxToHip pass;
@@ -385,7 +385,7 @@ protected:
     auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
     auto outputShapes =
         module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
-    generateInferenceCompute(module, inputShapes, outputShapes, allocatorMode);
+    generateInferenceCompute(module, inputShapes, outputShapes);
     generateInferenceCleanup(module);
 
     std::string json = buildMetadataJson(module, constantsFile);
@@ -393,7 +393,9 @@ protected:
     generateInferenceGetMetadataJson(module);
 
     COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions ("
-                       << (allocatorMode ? "allocator" : "classic")
+                       << (module->hasAttr("hipdnn.output_allocator")
+                               ? "allocator"
+                               : "classic")
                        << " mode)\n");
     return success();
   }
@@ -461,7 +463,8 @@ protected:
     }
   }
 
-  LogicalResult verifyPrerequisites(ModuleOp module, bool allocatorMode) {
+  LogicalResult verifyPrerequisites(ModuleOp module) {
+    bool allocatorMode = module->hasAttr("hipdnn.output_allocator");
     MLIRContext *ctx = module.getContext();
     Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type i32Type = IntegerType::get(ctx, 32);
@@ -679,14 +682,16 @@ protected:
   ///     // On error: store error code, free inputs, return error
   ///   }
   ///
-  /// Allocator mode (allocatorMode=true): the wrapper takes (state, inputs)
-  /// only; output-tensor handling (prepare_output, the output-memref array,
-  /// finalize_output) and the outputs span are all skipped -- graph outputs
-  /// are allocated in-graph by hip.alloc_output (lowered to the
-  /// hipdnn_ep_alloc_output callback) and written directly, so @main_graph is
-  /// called as (state, input_memrefs).
+  /// Allocator mode (module carries the `hipdnn.output_allocator` attr): the
+  /// wrapper takes (state, inputs) only; output-tensor handling
+  /// (prepare_output, the output-memref array, finalize_output) and the outputs
+  /// span are all skipped -- graph outputs are allocated in-graph by
+  /// hip.alloc_output (lowered to the hipdnn_ep_alloc_output callback) and
+  /// written directly, so
+  /// @main_graph is called as (state, input_memrefs).
   void generateInferenceCompute(ModuleOp module, ArrayAttr inputShapes,
-                                ArrayAttr outputShapes, bool allocatorMode) {
+                                ArrayAttr outputShapes) {
+    bool allocatorMode = module->hasAttr("hipdnn.output_allocator");
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
     builder.setInsertionPointToEnd(module.getBody());
@@ -715,12 +720,12 @@ protected:
     Value outputsSpanPtr = allocatorMode ? Value() : entryBlock->getArgument(2);
 
     size_t numInputs = inputShapes ? inputShapes.size() : 0;
-    // Forcing numOutputs to 0 in allocator mode skips every output loop below
-    // (buffer allocas, prepare_output, output-memref build, finalize_output)
-    // without scattering guards; the only output op the EP still owns is the
-    // in-graph hip.alloc_output emitted earlier in the pipeline.
-    size_t numOutputs =
-        (!allocatorMode && outputShapes) ? outputShapes.size() : 0;
+    // Honest output count. In allocator mode the classic output staging below
+    // (buffer allocas, prepare_output, output-memref build, finalize_output) is
+    // skipped via `if (!allocatorMode)` scopes rather than by zeroing this
+    // count -- the only output op the EP owns is the in-graph hip.alloc_output
+    // emitted earlier in the pipeline.
+    size_t numOutputs = outputShapes ? outputShapes.size() : 0;
 
     Value c0_i32 = LLVM::ConstantOp::create(builder, loc, i32Type,
                                             builder.getI32IntegerAttr(0));
@@ -752,6 +757,10 @@ protected:
 
     SmallVector<Value> inputBuffers;
     SmallVector<Value> outputBuffers;
+    // Hoisted: assigned inside the classic `if (!allocatorMode)` output-memref
+    // scope below, read by the @main_graph call. Stays null in allocator mode
+    // (where it is never pushed onto the call args).
+    Value outputMemrefArray;
 
     // sizeof(TensorBuffer) in the runtime (6 fields, 48 bytes on 64-bit).
     // TODO: Replace with sizeof(TensorBuffer) or a runtime query once the
@@ -769,11 +778,16 @@ protected:
                                                tensorBufferSize, 0);
       inputBuffers.push_back(bufferPtr);
     }
-    for (auto i : llvm::seq<size_t>(0, numOutputs)) {
-      (void)i;
-      Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i8Type,
-                                               tensorBufferSize, 0);
-      outputBuffers.push_back(bufferPtr);
+    // classic out-param staging - delete when classic is removed. Allocator
+    // mode allocates outputs in-graph via hip.alloc_output, so no per-output
+    // TensorBuffer is staged here.
+    if (!allocatorMode) {
+      for (auto i : llvm::seq<size_t>(0, numOutputs)) {
+        (void)i;
+        Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i8Type,
+                                                 tensorBufferSize, 0);
+        outputBuffers.push_back(bufferPtr);
+      }
     }
 
     Block *errorCleanupBlock = funcOp.addBlock();
@@ -795,21 +809,24 @@ protected:
           errorCodePtr, errorCleanupBlock, funcOp);
     }
 
-    for (auto i : llvm::seq<size_t>(0, numOutputs)) {
-      Value bufferPtr = outputBuffers[i];
+    // classic out-param staging - delete when classic is removed.
+    if (!allocatorMode) {
+      for (auto i : llvm::seq<size_t>(0, numOutputs)) {
+        Value bufferPtr = outputBuffers[i];
 
-      Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
-                                                builder.getI64IntegerAttr(i));
+        Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                                  builder.getI64IntegerAttr(i));
 
-      Value rankVal = LLVM::ConstantOp::create(
-          builder, loc, i64Type,
-          builder.getI64IntegerAttr(
-              cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size()));
+        Value rankVal = LLVM::ConstantOp::create(
+            builder, loc, i64Type,
+            builder.getI64IntegerAttr(
+                cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size()));
 
-      emitErrorCheckedCall(
-          builder, loc, prepareOutputFunc,
-          ValueRange{state, outputsSpanPtr, indexVal, rankVal, bufferPtr},
-          errorCodePtr, errorCleanupBlock, funcOp);
+        emitErrorCheckedCall(
+            builder, loc, prepareOutputFunc,
+            ValueRange{state, outputsSpanPtr, indexVal, rankVal, bufferPtr},
+            errorCodePtr, errorCleanupBlock, funcOp);
+      }
     }
 
     // Build memref structs for @main call
@@ -844,35 +861,41 @@ protected:
       LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
     }
 
-    Value numOutputsVal = LLVM::ConstantOp::create(
-        builder, loc, i64Type, builder.getI64IntegerAttr(numOutputs));
-    Value outputMemrefArray = LLVM::AllocaOp::create(builder, loc, ptrType,
-                                                     ptrType, numOutputsVal, 0);
+    // classic out-param staging - delete when classic is removed. The
+    // output-memref array is forwarded to @main_graph in classic mode only;
+    // allocator mode leaves outputMemrefArray null and never passes it.
+    if (!allocatorMode) {
+      Value numOutputsVal = LLVM::ConstantOp::create(
+          builder, loc, i64Type, builder.getI64IntegerAttr(numOutputs));
+      outputMemrefArray = LLVM::AllocaOp::create(builder, loc, ptrType, ptrType,
+                                                 numOutputsVal, 0);
 
-    for (auto i : llvm::seq<size_t>(0, numOutputs)) {
-      int64_t rank = cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size();
+      for (auto i : llvm::seq<size_t>(0, numOutputs)) {
+        int64_t rank =
+            cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size();
 
-      Value bufferPtr = outputBuffers[i];
-      Value gpuPtrRaw = LLVM::CallOp::create(builder, loc, getGpuPtrFunc,
-                                             ValueRange{bufferPtr})
-                            .getResult();
-      Value shapePtr = LLVM::CallOp::create(builder, loc, getShapePtrFunc,
-                                            ValueRange{bufferPtr})
-                           .getResult();
+        Value bufferPtr = outputBuffers[i];
+        Value gpuPtrRaw = LLVM::CallOp::create(builder, loc, getGpuPtrFunc,
+                                               ValueRange{bufferPtr})
+                              .getResult();
+        Value shapePtr = LLVM::CallOp::create(builder, loc, getShapePtrFunc,
+                                              ValueRange{bufferPtr})
+                             .getResult();
 
-      Value memref = buildMemrefDescriptor(builder, loc, gpuPtrRaw, shapePtr,
-                                           rank, ptrType, i64Type);
+        Value memref = buildMemrefDescriptor(builder, loc, gpuPtrRaw, shapePtr,
+                                             rank, ptrType, i64Type);
 
-      Value memrefPtr = LLVM::AllocaOp::create(builder, loc, ptrType,
-                                               memref.getType(), c1_i64, 0);
-      LLVM::StoreOp::create(builder, loc, memref, memrefPtr);
+        Value memrefPtr = LLVM::AllocaOp::create(builder, loc, ptrType,
+                                                 memref.getType(), c1_i64, 0);
+        LLVM::StoreOp::create(builder, loc, memref, memrefPtr);
 
-      Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
-                                                builder.getI64IntegerAttr(i));
-      Value arraySlot =
-          LLVM::GEPOp::create(builder, loc, ptrType, ptrType, outputMemrefArray,
-                              ArrayRef<LLVM::GEPArg>{indexVal});
-      LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
+        Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                                  builder.getI64IntegerAttr(i));
+        Value arraySlot = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                              outputMemrefArray,
+                                              ArrayRef<LLVM::GEPArg>{indexVal});
+        LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
+      }
     }
 
     // Reset kernel-side runtime error flag before graph execution.
@@ -903,11 +926,16 @@ protected:
     // Finalize output tensors (D2H, sync, cleanup)
     builder.setInsertionPointToStart(mainSuccessBlock);
 
-    for (auto i : llvm::seq<size_t>(0, numOutputs)) {
-      Value bufferPtr = outputBuffers[i];
-      emitErrorCheckedCall(builder, loc, finalizeOutputFunc,
-                           ValueRange{state, bufferPtr}, errorCodePtr,
-                           errorCleanupBlock, funcOp);
+    // classic out-param staging - delete when classic is removed. Allocator
+    // outputs are EP-owned (written in place by hip.alloc_output), so there is
+    // nothing to finalize back to a caller buffer here.
+    if (!allocatorMode) {
+      for (auto i : llvm::seq<size_t>(0, numOutputs)) {
+        Value bufferPtr = outputBuffers[i];
+        emitErrorCheckedCall(builder, loc, finalizeOutputFunc,
+                             ValueRange{state, bufferPtr}, errorCodePtr,
+                             errorCleanupBlock, funcOp);
+      }
     }
 
     // Synchronize GPU stream after all D2H copies are queued. Also prints
@@ -978,7 +1006,9 @@ protected:
   }
 };
 
-// Classic out-param interface generator: --generate-interface.
+// Interface generator: --generate-interface. Emits the four C-ABI wrappers; the
+// classic 3-arg vs 2-arg allocator ABI is selected from the module's
+// `hipdnn.output_allocator` attribute (read inside runImpl's callees).
 class GenerateInterfacePass
     : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>>,
       public GenerateInterfacePassBase {
@@ -1000,40 +1030,7 @@ public:
   }
 
   void runOnOperation() override {
-    if (failed(runImpl(getOperation(), /*allocatorMode=*/false)))
-      signalPassFailure();
-  }
-};
-
-// Allocator interface generator: --generate-allocator-interface. Emits the
-// 2-arg (state, inputs) inference_compute / @main_graph ABI; outputs are
-// allocated in-graph via hip.alloc_output. Pairs with the
-// hip-use-output-allocator ONNX-to-HIP pass and the allocator branch of
-// convert-hip-to-llvm's transformMainFunction.
-class GenerateAllocatorInterfacePass
-    : public PassWrapper<GenerateAllocatorInterfacePass,
-                         OperationPass<ModuleOp>>,
-      public GenerateInterfacePassBase {
-public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateAllocatorInterfacePass)
-
-  using GenerateInterfacePassBase::GenerateInterfacePassBase;
-
-  StringRef getArgument() const final { return "generate-allocator-interface"; }
-  StringRef getDescription() const final {
-    return "Generate the allocator-mode C interface (2-arg inference_compute / "
-           "@main_graph; graph outputs allocated in-graph via "
-           "hip.alloc_output)";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<LLVM::LLVMDialect>();
-    registry.insert<func::FuncDialect>();
-    registry.insert<arith::ArithDialect>();
-  }
-
-  void runOnOperation() override {
-    if (failed(runImpl(getOperation(), /*allocatorMode=*/true)))
+    if (failed(runImpl(getOperation())))
       signalPassFailure();
   }
 };
@@ -1046,11 +1043,6 @@ namespace hip {
 std::unique_ptr<mlir::Pass> createGenerateInterfacePass(
     const mlir::hip::CompilationOptionsT &compilationOptions) {
   return std::make_unique<GenerateInterfacePass>(compilationOptions);
-}
-
-std::unique_ptr<mlir::Pass> createGenerateAllocatorInterfacePass(
-    const mlir::hip::CompilationOptionsT &compilationOptions) {
-  return std::make_unique<GenerateAllocatorInterfacePass>(compilationOptions);
 }
 
 } // namespace hip
