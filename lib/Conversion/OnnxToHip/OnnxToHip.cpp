@@ -757,6 +757,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
+        populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         ChangeFlagListener listener;
         mlir::GreedyRewriteConfig preLoweringConfig;
         preLoweringConfig.setStrictness(
