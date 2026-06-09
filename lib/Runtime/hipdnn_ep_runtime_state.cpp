@@ -228,10 +228,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->workspace_size = 0;
   state->host_scratch_base = nullptr;
   state->host_scratch_size = 0;
-  // No allocator installed by default: self-describing size + null callback.
-  // The EP overwrites this via hipdnn_ep_set_output_allocator (Phase 5); the
-  // classic pipeline leaves it null and never calls hipdnn_ep_alloc_output.
-  state->output_allocator.struct_size = sizeof(hipdnn_output_allocator_t);
+  // No allocator installed by default (null context + callback). The EP
+  // overwrites this via hipdnn_ep_set_output_allocator (Phase 5); the classic
+  // pipeline leaves it null and never calls hipdnn_ep_alloc_output.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
   state->qmoe_scratch = nullptr;

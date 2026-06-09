@@ -10,8 +10,7 @@
 // types (no HIP), constructs a RuntimeState on the stack, and exercises the two
 // entry points directly:
 //   * forwarding of (self, out_idx, shape, rank, elem_size) + the returned ptr
-//   * null-guard when no allocator is installed
-//   * the struct_size min-copy forward/backward-compat logic
+//   * null-guard when no allocator is installed / cleared / null state
 //
 // The full end-to-end path (generated hip.alloc_output + EP-installed
 // allocator) only exists at Phase 4/5; this isolates the runtime contract.
@@ -20,7 +19,6 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
-#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 
@@ -65,7 +63,6 @@ void *stub_allocate(void *self, int64_t out_idx, const int64_t *shape,
 // initialize_state_handles leaves before the EP calls the setter).
 RuntimeState makeState() {
   RuntimeState st{};
-  st.output_allocator.struct_size = sizeof(hipdnn_output_allocator_t);
   st.output_allocator.self = nullptr;
   st.output_allocator.allocate = nullptr;
   return st;
@@ -81,7 +78,6 @@ void test_forwarding() {
 
   RuntimeState st = makeState();
   hipdnn_output_allocator_t alloc;
-  alloc.struct_size = sizeof(alloc);
   alloc.self = &sentinel_ctx;
   alloc.allocate = stub_allocate;
   hipdnn_ep_set_output_allocator(&st, &alloc);
@@ -114,7 +110,6 @@ void test_nullptr_setter_arg() {
   int ctx = 0;
   RuntimeState st = makeState();
   hipdnn_output_allocator_t alloc;
-  alloc.struct_size = sizeof(alloc);
   alloc.self = &ctx;
   alloc.allocate = stub_allocate;
   hipdnn_ep_set_output_allocator(&st, &alloc);
@@ -127,64 +122,17 @@ void test_nullptr_setter_arg() {
   CHECK(st.output_allocator.self == nullptr);
 }
 
-// 4. struct_size min-copy, NEWER caller: caller advertises a larger struct (as
-//    if it had extra trailing fields). The setter must clamp the copy to our
-//    sizeof, still install the callback we DO understand, and normalize
-//    struct_size to our layout.
-void test_struct_size_newer_caller() {
-  g_cap = StubCapture{};
-  int ctx = 0;
-  int buf = 0;
-  g_cap.ret = &buf;
-  RuntimeState st = makeState();
-  hipdnn_output_allocator_t alloc;
-  alloc.struct_size = sizeof(alloc) + 64; // pretend newer / larger
-  alloc.self = &ctx;
-  alloc.allocate = stub_allocate;
-  hipdnn_ep_set_output_allocator(&st, &alloc);
-  CHECK(st.output_allocator.allocate == stub_allocate);
-  CHECK(st.output_allocator.self == &ctx);
-  CHECK(st.output_allocator.struct_size == sizeof(hipdnn_output_allocator_t));
-  const int64_t shape[1] = {3};
-  void *p = hipdnn_ep_alloc_output(&st, 1, shape, 1, 2);
-  CHECK(p == &buf);
-  CHECK(g_cap.calls == 1);
-}
-
-// 5. struct_size min-copy, OLDER caller: caller advertises a struct that ends
-//    before `allocate` (only struct_size + self present). The setter must not
-//    read past the advertised prefix, so `allocate` stays null -> alloc_output
-//    null-guards.
-void test_struct_size_older_caller() {
-  g_cap = StubCapture{};
-  int ctx = 0;
-  RuntimeState st = makeState();
-  hipdnn_output_allocator_t alloc;
-  // Advertise only up to (not including) the allocate field.
-  alloc.struct_size = offsetof(hipdnn_output_allocator_t, allocate);
-  alloc.self = &ctx;
-  alloc.allocate = stub_allocate; // present in memory but OUTSIDE the prefix
-  hipdnn_ep_set_output_allocator(&st, &alloc);
-  CHECK(st.output_allocator.self == &ctx);        // self IS within the prefix
-  CHECK(st.output_allocator.allocate == nullptr); // allocate is NOT copied
-  const int64_t shape[1] = {1};
-  void *p = hipdnn_ep_alloc_output(&st, 0, shape, 1, 4);
-  CHECK(p == nullptr);
-  CHECK(g_cap.calls == 0);
-}
-
-// 6. Defensive: a null RuntimeState* into the setter is a silent no-op. The EP
+// 4. Defensive: a null RuntimeState* into the setter is a silent no-op. The EP
 //    resolves the symbol by name and must never crash the model.dll on a bad
 //    handle. Exercises the `!state` guard; passes if it does not dereference.
 void test_set_null_state() {
   hipdnn_output_allocator_t alloc;
-  alloc.struct_size = sizeof(alloc);
   alloc.self = nullptr;
   alloc.allocate = stub_allocate;
   hipdnn_ep_set_output_allocator(nullptr, &alloc); // must not touch state
 }
 
-// 7. Defensive: a null RuntimeState* into alloc_output null-guards (returns
+// 5. Defensive: a null RuntimeState* into alloc_output null-guards (returns
 //    null, no callback), exactly like an uninstalled allocator. Exercises the
 //    `!state` half of the guard (test 2 covers the `!allocate` half).
 void test_alloc_null_state() {
@@ -201,8 +149,6 @@ int main() {
   test_forwarding();
   test_null_guard();
   test_nullptr_setter_arg();
-  test_struct_size_newer_caller();
-  test_struct_size_older_caller();
   test_set_null_state();
   test_alloc_null_state();
   if (g_failures == 0) {

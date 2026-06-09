@@ -21,7 +21,6 @@
 #include "runtime_state_internal.h"
 
 #include <cstdio>
-#include <cstring>
 
 // EP -> model.dll. Exported so the EP can GetProcAddress it from the compiled
 // model.dll (the symbol is also added to export_symbols in
@@ -34,22 +33,15 @@ hipdnn_ep_set_output_allocator(RuntimeState *state,
                                const hipdnn_output_allocator_t *allocator) {
   if (!state)
     return;
-  // Reset to "none installed": self-describing size, null context + callback.
-  state->output_allocator.struct_size = sizeof(hipdnn_output_allocator_t);
-  state->output_allocator.self = nullptr;
-  state->output_allocator.allocate = nullptr;
-  if (!allocator)
+  // A null allocator clears the slot ("none installed"). The struct layout is a
+  // fixed ABI contract (see hipdnn_ep_runtime.h), so a plain copy is correct on
+  // both sides of the model.dll <-> EP boundary.
+  if (!allocator) {
+    state->output_allocator.self = nullptr;
+    state->output_allocator.allocate = nullptr;
     return;
-  // Forward/backward compatible copy: take only the prefix both sides agree
-  // on. A caller built against an older struct passes a smaller struct_size
-  // (new fields stay at the defaults above); a newer caller's unknown tail
-  // beyond our sizeof is ignored. struct_size is then normalized to OUR sizeof
-  // so the stored value always describes this build's layout.
-  size_t n = allocator->struct_size;
-  if (n > sizeof(hipdnn_output_allocator_t))
-    n = sizeof(hipdnn_output_allocator_t);
-  memcpy(&state->output_allocator, allocator, n);
-  state->output_allocator.struct_size = sizeof(hipdnn_output_allocator_t);
+  }
+  state->output_allocator = *allocator;
 }
 
 // generated main_graph -> runtime. Internal (not exported): resolved within the
