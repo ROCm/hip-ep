@@ -384,17 +384,23 @@ jobs:
           BIN="${{ runner.workspace }}/install/bin"
           LIB="${{ runner.workspace }}/install/lib"
           mkdir -p "$BIN" "$LIB"
-          # Driver + linker into bin/. cp -a keeps the clang->clang-NN /
-          # ld.lld->lld symlinks; the real binaries are copied by the same globs.
-          cp -a "$LLVM"/bin/clang* "$BIN/"
-          for t in lld ld.lld ld64.lld lld-link; do
-            [ -e "$LLVM/bin/$t" ] && cp -a "$LLVM/bin/$t" "$BIN/" || true
+          shopt -s nullglob
+          # Only the driver + ELF linker are used by the runtime per-model link
+          # (`clang++ -shared -fuse-ld=lld`, a pure host link). Skip the dev tools
+          # (clang-format/-repl/-tidy/-scan-deps/...), the offload helpers
+          # (clang-offload-*/-linker-wrapper -- we never compile device code via
+          # clang, comgr does), and the non-ELF linkers (lld-link/ld64.lld) to
+          # keep the package lean. cp -a keeps the clang++->clang->clang-NN and
+          # ld.lld->lld symlinks; the real binaries are copied by the globs.
+          for f in "$LLVM"/bin/clang "$LLVM"/bin/clang++ "$LLVM"/bin/clang-[0-9]* \
+                   "$LLVM"/bin/lld "$LLVM"/bin/ld.lld; do
+            cp -a "$f" "$BIN/"
           done
           # clang resource dir (builtins/crt the -shared link may reference).
           # clang resolves this as <bindir>/../lib/clang at runtime.
           [ -d "$LLVM/lib/clang" ] && cp -a "$LLVM/lib/clang" "$LIB/" || true
           # Copy only non-system shared-lib deps (static LLVM => normally none).
-          for b in "$BIN"/clang* "$BIN"/lld "$BIN"/ld.lld "$BIN"/ld64.lld "$BIN"/lld-link; do
+          for b in "$BIN"/clang "$BIN"/clang-[0-9]* "$BIN"/lld; do
             [ -f "$b" ] || continue
             ldd "$b" 2>/dev/null | awk '$3 ~ /^\// && $3 !~ /^\/(usr|lib|lib64)\// {print $3}'
           done | sort -u | while read -r src; do
