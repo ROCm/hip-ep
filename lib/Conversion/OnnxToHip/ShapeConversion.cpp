@@ -69,9 +69,14 @@ namespace {
 // normalization) emit a 0-element constant tensor per ONNX spec rather than
 // failing the match -- preserving op semantics is the priority over
 // surfacing a "shouldn't happen" error.
+//
+// Benefit 2 (onnx.Expand is 1): onnx.Shape must lower before onnx.Expand so
+// ExpandConversion sees a `tensor.from_elements` shape vector it can trace
+// back to `tensor.dim` (pure SSA sizing), rather than racing the Expand
+// rewrite and falling back to `tensor.extract`.
 struct ShapeToTensorDims : public mlir::RewritePattern {
   ShapeToTensorDims(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Shape", /*benefit=*/1, ctx) {}
+      : RewritePattern("onnx.Shape", /*benefit=*/2, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
