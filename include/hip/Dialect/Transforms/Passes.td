@@ -438,6 +438,40 @@ def ResolveTensorDimsPass
   ];
 }
 
+def UseOutputAllocatorPass
+    : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
+  let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";
+  let description = [{
+    Replaces each graph-output memref.alloc (a value returned by func.return)
+    with hip.alloc_output, reusing the alloc's dynamic-size operands and setting
+    out_idx to the return operand position.  Output buffers are then obtained
+    from the EP output allocator (EP/runtime-owned) instead of being deallocated
+    or pooled.
+
+    Scope: only public (graph-entry) functions are rewritten.  Private helpers
+    (e.g. outlined onnx.Loop bodies) carry a !hip.context arg 0 and return
+    memref.allocs too, but their results are DLL-internal, never EP outputs, so
+    they are left unchanged.  Functions lacking !hip.context as argument 0 are
+    likewise skipped.
+
+    The pass also unconditionally stamps the `hipdnn.use_output_allocator` unit
+    attribute on the parent module -- the allocator-mode marker that downstream
+    convert-hip-to-llvm and generate-interface read to select the allocator ABI.
+    It is stamped even when no alloc is rewritten, because the mode is decided by
+    the pass being run, not by the IR contents (a zero-output graph must still be
+    marked).
+
+    Standalone for now -- registered for hip-mlir-opt and LIT but NOT wired into
+    any pipeline (the allocator pipeline placement is a later phase; see
+    docs/design/output-allocator-design.md).  Leaves the function signature and
+    func.return untouched.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   let summary = "Refine dynamic dims in HIP DPS op result types via "
                 "`ReifyRankedShapedTypeOpInterface`";
