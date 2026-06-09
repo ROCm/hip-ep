@@ -267,6 +267,17 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
     run_subprocess(cmd)
 
 
+def _llvm_built_from_source(build_dir):
+    """True when cmake/deps.cmake built LLVM in-tree (embedded sub-build)."""
+    cache = Path(build_dir) / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    for line in cache.read_text(errors="ignore").splitlines():
+        if line.startswith("HIPDNN_LLVM_EMBEDDED:") and line.rstrip().endswith("ON"):
+            return True
+    return False
+
+
 def build_targets(args, build_dir):
     step("Build")
     run_subprocess(
@@ -280,6 +291,27 @@ def build_targets(args, build_dir):
             str(args.parallel),
         ]
     )
+    # The embedded LLVM sub-build marks lld EXCLUDE_FROM_ALL, so the main build
+    # never produces it. The runtime per-model link (`clang++ -fuse-ld=lld`)
+    # needs ld.lld next to the in-tree clang++, so build it explicitly by name.
+    # (We cannot pull lld into the CMake graph via add_dependencies -- that
+    # corrupts LLVM's install(EXPORT); see cmake/deps.cmake.) clang itself is
+    # already built as a dependency of lib/Runtime's bitcode step.
+    if _llvm_built_from_source(build_dir) and not IS_WINDOWS:
+        step("Build in-tree lld (runtime device-link toolchain)")
+        run_subprocess(
+            [
+                "cmake",
+                "--build",
+                str(build_dir),
+                "--config",
+                args.config,
+                "--parallel",
+                str(args.parallel),
+                "--target",
+                "lld",
+            ]
+        )
     step("Install")
     run_subprocess(["cmake", "--install", str(build_dir), "--config", args.config])
 
