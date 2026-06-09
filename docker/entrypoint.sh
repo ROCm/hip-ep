@@ -42,7 +42,10 @@ for dev in /dev/kfd /dev/dri/renderD*; do
     if [ -e "$dev" ]; then
         dev_gid=$(stat -c '%g' "$dev")
         if [ "$dev_gid" != "0" ] && ! id -G "$HOST_USER" | tr ' ' '\n' | grep -qx "$dev_gid"; then
-            grp_name=$(getent group "$dev_gid" | cut -d: -f1)
+            # getent exits non-zero when no group has this GID; under
+            # `set -e`/`pipefail` that would abort the entrypoint before the
+            # synthetic-group fallback below. Tolerate it -> empty grp_name.
+            grp_name=$(getent group "$dev_gid" | cut -d: -f1 || true)
             if [ -z "$grp_name" ]; then
                 grp_name="hostgid_${dev_gid}"
                 groupadd -g "$dev_gid" "$grp_name"

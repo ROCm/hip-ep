@@ -101,9 +101,9 @@ section once `install/bin/` is populated.
 A ready-to-run package is published for each green build. It contains every
 `.so` / binary the host needs (`libonnxruntime_morphizen_ep`,
 `hip-onnx-runner`, `onnxruntime_perf_test`, `model_benchmark`,
-`libonnxruntime`, `libonnxruntime-genai`) plus a `clang`/`lld` toolchain under
-`llvm/`. TheRock is **not** included — install ROCm on the host. Download it
-with `gh` (no compile needed):
+`libonnxruntime`, `libonnxruntime-genai`) plus a `clang`/`lld` toolchain in
+`bin/` (next to the other tools). TheRock is **not** included — install ROCm on
+the host. Download it with `gh` (no compile needed):
 
 ```bash
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
@@ -121,8 +121,8 @@ mkdir -p ../prebuilt/$RUN_ID
 ```
 
 After extraction, `<workspace>/prebuilt/$RUN_ID/` matches the
-build-from-source `install/` layout (`bin/`, `lib/`, `etc/`, and `llvm/`
-with the bundled clang/lld).
+build-from-source `install/` layout (`bin/` — which also carries the bundled
+clang/lld — `lib/`, and `etc/`).
 
 ## Open a container shell and set `$ROOT`
 
@@ -161,9 +161,9 @@ export ROOT="$WORKSPACE/install"            # built from source
 export THEROCK_DIST="$WORKSPACE/build/onnx-hipdnn-ep/_therock"
 export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
-# clang/lld for the per-model DLL link (the prebuilt package ships it under
-# $ROOT/llvm/bin).
-export PATH="$ROOT/llvm/bin:$PATH"
+# clang/lld for the per-model DLL link (the prebuilt package ships it in
+# $ROOT/bin, alongside the other tools).
+export PATH="$ROOT/bin:$PATH"
 
 # Sanity check
 ldd "$ROOT/lib/libonnxruntime_morphizen_ep.so" | grep "not found"   # expect empty
@@ -299,11 +299,11 @@ $ROOT/bin/model_benchmark \
 
 The `bin/hip-compiler` invokes `clang++` at runtime to link the per-model DLL
 (driver-mediated link via `ld.lld`). The prebuilt package **includes a
-`clang`/`lld` toolchain** under `$ROOT/llvm/bin/`, so the host needs no separate
-clang install — just put it on `$PATH`:
+`clang`/`lld` toolchain** in `$ROOT/bin/` (next to the other tools), so the host
+needs no separate clang install — just put `$ROOT/bin` on `$PATH`:
 
 ```bash
-export PATH="$ROOT/llvm/bin:$PATH"
+export PATH="$ROOT/bin:$PATH"
 ```
 
 No other LLVM/GCC tools are needed at runtime — the clang driver handles crt
@@ -361,5 +361,5 @@ build-time clang path no longer exists) **and** `clang++` is absent from
 PATH.
 
 Fix on the deploy host: put the bundled clang on PATH —
-`export PATH="$ROOT/llvm/bin:$PATH"` (the prebuilt package ships
-`clang++`/`ld.lld` under `$ROOT/llvm/bin`).
+`export PATH="$ROOT/bin:$PATH"` (the prebuilt package ships
+`clang++`/`ld.lld` in `$ROOT/bin`, alongside the other tools).
