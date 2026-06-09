@@ -396,6 +396,20 @@ jobs:
                    "$LLVM"/bin/lld "$LLVM"/bin/ld.lld; do
             cp -a "$f" "$BIN/"
           done
+          # clang/clang++ and ld.lld sometimes install as full copies of the real
+          # binary (clang-NN / lld) instead of symlinks, multiplying the driver
+          # size (~150 MB each). Re-link the aliases to the real binary.
+          clang_real=$(cd "$BIN" && ls clang-[0-9]* 2>/dev/null | head -1)
+          if [ -n "$clang_real" ]; then
+            for d in clang clang++; do
+              if [ -e "$BIN/$d" ] && [ ! -L "$BIN/$d" ]; then
+                ln -sf "$clang_real" "$BIN/$d"
+              fi
+            done
+          fi
+          if [ -e "$BIN/lld" ] && [ -e "$BIN/ld.lld" ] && [ ! -L "$BIN/ld.lld" ]; then
+            ln -sf lld "$BIN/ld.lld"
+          fi
           # clang resource dir (builtins/crt the -shared link may reference).
           # clang resolves this as <bindir>/../lib/clang at runtime.
           [ -d "$LLVM/lib/clang" ] && cp -a "$LLVM/lib/clang" "$LIB/" || true
