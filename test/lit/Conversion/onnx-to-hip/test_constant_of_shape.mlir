@@ -1,12 +1,14 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// Verify both ONNX ConstantOfShape lowering paths:
+// Verify the three ONNX ConstantOfShape lowering paths:
 //
-//   1. ConstantOfShapeFold (preferred): shape input is a compile-time
-//      constant AND result type is fully static -> single splat
-//      arith.constant; no runtime work.
-//   2. ConstantOfShapeDynamic (fallback): shape input is non-constant OR
+//   1. ConstantOfShapeAsScalar (highest benefit): result is consumed only by
+//      ops that broadcast a scalar (today onnx.Where) -> a rank-0 fill-value
+//      buffer (tensor.empty + linalg.fill), elide the full-size buffer.
+//   2. ConstantOfShapeFold: shape input is a compile-time constant AND result
+//      type is fully static -> single splat arith.constant; no runtime work.
+//   3. ConstantOfShapeDynamic (fallback): shape input is non-constant OR
 //      result has at least one dynamic dim -> tensor.splat whose dynamic
 //      dim sizes are read out of the shape tensor at runtime via
 //      tensor.extract + arith.index_cast.
@@ -103,5 +105,30 @@ module {
     // CHECK: tensor.splat %[[VAL]]{{\[}}%{{.*}}{{\]}} : tensor<3x?xi64>
 
     return %r : tensor<3x?xi64>
+  }
+
+  // Test 6: ConstantOfShapeAsScalar -- the result is consumed only by
+  // onnx.Where, so the fill-value buffer collapses to a rank-0
+  // tensor.empty + linalg.fill instead of a full-size tensor.splat (which
+  // would canonicalize to a host memref.global the GPU where-kernel cannot
+  // read). The dynamic result dims are supplied by Where's other operands,
+  // so no per-dim tensor.extract is emitted for the fill value.
+  func.func @test_constant_of_shape_as_scalar_where(
+      %mask: tensor<?x?xi1>, %ids: tensor<?x?xi64>, %shape: tensor<2xi64>)
+      -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_constant_of_shape_as_scalar_where
+    %c = "onnx.ConstantOfShape"(%shape) {
+      value = dense<-100> : tensor<1xi64>
+    } : (tensor<2xi64>) -> tensor<?x?xi64>
+    %o = "onnx.Where"(%mask, %c, %ids)
+      : (tensor<?x?xi1>, tensor<?x?xi64>, tensor<?x?xi64>) -> tensor<?x?xi64>
+
+    // CHECK-NOT: onnx.ConstantOfShape
+    // CHECK-NOT: tensor.splat
+    // CHECK-DAG: %[[V:.*]] = arith.constant -100 : i64
+    // CHECK-DAG: %[[E:.*]] = tensor.empty() : tensor<i64>
+    // CHECK: linalg.fill ins(%[[V]] : i64) outs(%[[E]] : tensor<i64>) -> tensor<i64>
+
+    return %o : tensor<?x?xi64>
   }
 }
