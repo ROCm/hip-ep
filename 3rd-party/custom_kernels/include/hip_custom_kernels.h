@@ -895,6 +895,54 @@ int hip_range(
     void* device_error_flag);
 
 /* =========================================================================
+ * NonZero (row-major indices of non-zero elements)
+ * =========================================================================
+ *
+ * Fills `output` (int64, shape [rank, capacity], row-major) with the
+ * coordinates of the non-zero elements of `input`, in increasing row-major
+ * flat-index order (ONNX NonZero semantics). For the p-th non-zero element
+ * at flat index f, writes output[axis * capacity + p] = coord(f, axis) for
+ * every axis, where coords are the row-major unravel of f using the strides
+ * derived from `input_shape`.
+ *
+ * The output buffer is over-allocated by the compiler to the worst case
+ * (capacity == num_elements). This launcher zero-fills the whole buffer
+ * (hipMemsetAsync) before writing, so the undefined tail [N, capacity) is
+ * deterministically zero. The actual non-zero count N is not reported back.
+ *
+ * Non-zero predicate: value != 0. For floats, NaN counts as non-zero and
+ * -0.0 counts as zero (ONNX semantics, which follow from IEEE `!= 0`).
+ *
+ * Compaction is a single cooperative block (prefix-sum stream compaction over
+ * the input in tiles, with a running base offset). Correct for any size; a
+ * multi-block global-scan is a future throughput optimization.
+ *
+ * Parameters:
+ *   stream             - hipStream_t cast to void*
+ *   input              - GPU pointer to input tensor (contiguous, row-major)
+ *   output             - GPU pointer to int64 output [rank, capacity]
+ *   input_shape        - host pointer to int64_t[rank] input dim extents
+ *   rank               - input rank R (must be in [1, 8])
+ *   num_elements       - total input elements (product of input_shape)
+ *   capacity           - allocated size of the output N dim (>= num_elements)
+ *   element_size_bytes - 1, 2, 4, or 8 (selects the typed read)
+ *   is_float           - 1 if input is float/half (NaN-aware predicate),
+ *                        0 if integer/bool
+ *
+ * Returns: 0 on success, non-zero hipError_t / -1 on failure.
+ */
+int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    const int64_t* input_shape,
+    int64_t rank,
+    int64_t num_elements,
+    int64_t capacity,
+    int element_size_bytes,
+    int is_float);
+
+/* =========================================================================
  * Transpose (Generic N-D Permutation)
  * =========================================================================
  *

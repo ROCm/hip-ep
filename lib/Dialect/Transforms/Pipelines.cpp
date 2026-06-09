@@ -10,6 +10,7 @@
 
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -272,6 +273,17 @@ void mlir::hip::buildHipToLLVMPipeline(
   // surviving affine.apply leaves builtin.unrealized_conversion_cast in the
   // final LLVM IR and "Failed to translate MLIR to LLVM IR" aborts compile.
   pm.addPass(createLowerAffinePass());
+
+  // Expand arith ops that the ArithToLLVM patterns (populated by
+  // ConvertHipToLLVM) cannot lower directly -- notably arith.ceildivsi /
+  // arith.floordivsi. These appear when a dynamic shape is computed at runtime,
+  // e.g. the element count of a dynamic-bound Range is ceildiv(limit-start,
+  // delta). A static (constant-folded) Range never produces a live ceildivsi,
+  // so this only matters once a shape op's extent is data-dependent. Without
+  // this pass the op survives to LLVM translation and aborts with
+  // "missing LLVMTranslationDialectInterface ... for op: arith.ceildivsi".
+  // Same survivor-breaks-translation class as the LowerAffine pass above.
+  pm.addPass(arith::createArithExpandOpsPass());
 
   pm.addPass(createConvertHipToLLVMPass());
 

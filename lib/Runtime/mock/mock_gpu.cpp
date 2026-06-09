@@ -1132,13 +1132,15 @@ int wrap_not(RuntimeState *state, void *input, void *output,
 
 int wrap_nonzero(RuntimeState *state, void *input, void *output,
                  int64_t input_num_elements, int64_t input_rank,
-                 int64_t output_capacity, int64_t input_data_type) {
+                 int64_t output_capacity, int64_t input_data_type,
+                 const int64_t *input_shape) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_nonzero\n");
     return -1;
   }
   (void)input;
   (void)output;
+  (void)input_shape;
   MOCK_PRINT("[MOCK] wrap_nonzero(input_num_elements=%lld, input_rank=%lld, "
              "output_capacity=%lld, input_data_type=%s(%lld))\n",
              (long long)input_num_elements, (long long)input_rank,

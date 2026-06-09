@@ -985,12 +985,20 @@ int wrap_not(RuntimeState *state, void *input, void *output,
 //
 // `input_data_type` is the HIPDNN_EP_DATATYPE_* value of the input tensor.
 // Bool (ONNX `tensor(bool)`) is marshalled as 1-byte uint8 by the EP and
-// reuses the INT8 slot here. Today this is a stub: it logs its parameters
-// and throws std::runtime_error so an inference path that actually
-// reaches NonZero fails loudly instead of producing uninitialised output.
+// reuses the INT8 slot here.
+// `input_shape` is a host-side `int64_t[input_rank]` array (built on the
+// stack by the HipToLLVM lowering) giving each input dim extent. The kernel
+// derives row-major strides from it to unravel each non-zero flat index into
+// its R coordinates.
+//
+// The output buffer is zero-filled before the indices are written, so the
+// undefined tail `[N, output_capacity)` is deterministically zero (ONNX
+// returns exactly `[R, N]`; the buffer is over-allocated to the worst-case
+// `[R, input_num_elements]` and N is not separately reported).
 int wrap_nonzero(RuntimeState *state, void *input, void *output,
                  int64_t input_num_elements, int64_t input_rank,
-                 int64_t output_capacity, int64_t input_data_type);
+                 int64_t output_capacity, int64_t input_data_type,
+                 const int64_t *input_shape);
 
 // ONNX Size wrapper (dynamic-shape path only).
 //

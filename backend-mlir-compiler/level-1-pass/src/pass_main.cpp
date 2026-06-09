@@ -282,7 +282,20 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
         // marshal_output_tensors ignores unresolved entries and falls back
         // to Output.shape regardless.
         auto *ds = output_proto->add_dim_sources();
-        if (dim_val == -1) {
+        if (dim_val == -1 && useOutputAllocator) {
+          // Output-allocator mode: the in-graph hip.alloc_output reports the
+          // real runtime shape to the EP via the output-allocator callback, so
+          // the EP never consults DimSource for outputs (marshal_output_tensors
+          // is not called on this path). Emit an unresolved sentinel and skip
+          // input-resolution entirely. This is the only way a data-dependent
+          // output dim can be expressed: e.g. NonZero's non-zero count maps to
+          // no input dim_param (and even its over-allocated upper bound is a
+          // product of input dims, which a single-source DimSource cannot
+          // encode). Such ops are therefore only legal in allocator mode.
+          ds->set_input_idx(-1);
+          ds->set_dim_idx(-1);
+          ds->set_resolved(false);
+        } else if (dim_val == -1) {
           // Fail at compile time rather than at runtime so the user sees a
           // clear error naming the output, dim index, and dim_param name
           // instead of a generic "dim still -1" CHECK from the EP.
@@ -298,7 +311,8 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
               << " has dim_param '" << param_name
               << "' but no graph input declares this symbolic name; cannot "
               << "resolve at runtime. Outputs can only carry symbolic dims "
-              << "that also appear on at least one input.";
+              << "that also appear on at least one input. (Data-dependent "
+              << "outputs require use_output_allocator=1.)";
           ds->set_input_idx(pit->second.first);
           ds->set_dim_idx(pit->second.second);
           ds->set_resolved(true);
