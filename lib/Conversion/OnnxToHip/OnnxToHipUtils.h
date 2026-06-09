@@ -23,6 +23,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -109,6 +110,46 @@ getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
     return rewriter.notifyMatchFailure(op,
                                        "first argument is not !hip.context");
   return ctx;
+}
+
+/// If \p v is an inline `onnx.Constant` holding a single scalar element,
+/// return its `DenseElementsAttr`; otherwise return std::nullopt.  Relies
+/// on the hybrid two-phase externalisation in `ConvertOnnxToHipPass`:
+/// Phase 1 keeps small constants as inline `onnx.Constant`, Phase 2
+/// (post-convert) externalises whatever survived.  Without that ordering,
+/// the converter would see `bufferization.to_tensor(memref.get_global)`
+/// instead of `onnx.Constant` and this helper would return std::nullopt.
+inline std::optional<mlir::DenseElementsAttr>
+getInlineScalarFromOnnxConstant(mlir::Value v) {
+  mlir::Operation *def = v.getDefiningOp();
+  if (!def || def->getName().getStringRef() != "onnx.Constant")
+    return std::nullopt;
+  auto attr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
+      def->getAttrOfType<mlir::ElementsAttr>("value"));
+  if (!attr || attr.getNumElements() != 1)
+    return std::nullopt;
+  return attr;
+}
+
+/// Materialize a scalar SSA value (integer or float) from a 1-element
+/// DenseElementsAttr.  Element type of the resulting `arith.constant`
+/// matches the attr's stored element type, NOT the surrounding tensor type
+/// (which the caller wraps separately if needed).  Returns null Value if
+/// the attr is not int / float (e.g. complex, opaque).  Mirrors the
+/// `buildScalarFillValue` idiom in `ConstantOfShapeConversion.cpp`.
+inline mlir::Value
+materializeScalarFromDenseAttr(mlir::OpBuilder &builder, mlir::Location loc,
+                               mlir::DenseElementsAttr attr) {
+  mlir::Type elemTy = attr.getElementType();
+  if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elemTy)) {
+    llvm::APInt v = *attr.getValues<llvm::APInt>().begin();
+    return mlir::arith::ConstantIntOp::create(builder, loc, intTy, v);
+  }
+  if (auto floatTy = mlir::dyn_cast<mlir::FloatType>(elemTy)) {
+    llvm::APFloat v = *attr.getValues<llvm::APFloat>().begin();
+    return mlir::arith::ConstantFloatOp::create(builder, loc, floatTy, v);
+  }
+  return {};
 }
 
 // Pattern population functions (one per operator file)

@@ -28,4 +28,18 @@ module {
   // CHECK: tensor.extract
   // CHECK: tensor.empty
   // CHECK: hip.expand({{.*}}) ins({{.*}}, {{.*}} : tensor<3x1xf32>, tensor<3xi64>) outs({{.*}} : tensor<?x3x?xf32>)
+
+  // Opaque shape operand with a possibly-> 1 input dim: honour ONNX Expand
+  // broadcast rule output_dim = max(input_dim, shape_value) so an
+  // identity-broadcast shape (e.g. [1, ...]) does not shrink the input.
+  func.func @expand_maxsi(%input: tensor<?x4xf32>, %shape: tensor<2xi64>) -> tensor<?x4xf32> {
+    %r = "onnx.Expand"(%input, %shape) : (tensor<?x4xf32>, tensor<2xi64>) -> tensor<?x4xf32>
+    return %r : tensor<?x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @expand_maxsi
+  // CHECK: tensor.extract
+  // CHECK: tensor.dim
+  // CHECK: arith.maxsi
+  // CHECK: hip.expand({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<2xi64>) outs({{.*}} : tensor<?x4xf32>)
 }

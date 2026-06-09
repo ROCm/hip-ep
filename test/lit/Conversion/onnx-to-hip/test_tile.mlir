@@ -23,6 +23,11 @@ module {
     return %r : tensor<?x?xf32>
   }
 
+  // Each dynamic output dim is sized as input.dim[i] * repeats[i] (NOT
+  // input.dim[i] alone), so the init alloc grows by the tile factor.
   // CHECK-LABEL: func.func @tile_dynamic
+  // CHECK: tensor.dim
+  // CHECK: tensor.extract
+  // CHECK: arith.muli
   // CHECK: hip.tile({{.*}}) ins({{.*}}, {{.*}} : tensor<?x?xf32>, tensor<2xi64>) outs({{.*}} : tensor<?x?xf32>)
 }
