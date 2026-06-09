@@ -5,13 +5,14 @@
 ## Dependency manifest read by cmake/deps.cmake.
 ##
 ## Format per line:  name;url;hash
-##   - hash is SHA256 for release archives (deps.cmake prepends "SHA256=").
+##   - hash is a version, git tag/commit, or SHA256 depending on the dep (see the
+##     per-row notes below); a SHA256 archive hash gets "SHA256=" prepended.
 ##   - an empty hash column means the download is not yet pinned (unverified).
 ##
 ## Versions are pinned in the url/hash columns. CI builds LLVM and ONNX Runtime
-## into cached prefixes, so keep .github/workflows/windows-build.yml's LLVM_TAG /
-## ONNXRUNTIME_VERSION in sync with the llvm/onnxruntime rows below; the other
-## deps are pinned here only.
+## into cached prefixes, so keep the CI workflows' LLVM_TAG / ONNXRUNTIME_VERSION
+## in sync with the llvm/onnxruntime rows below; the other deps are pinned here
+## only.
 ##
 ## ONNX Runtime: official release archive. url = release base host; hash column =
 ## version. cmake/deps.cmake derives the per-OS archive basename
