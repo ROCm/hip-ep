@@ -254,6 +254,65 @@ def MaterializeHostScalarsPass
   ];
 }
 
+def FixLoopAccumulatorOffsetPass
+    : Pass<"hip-fix-loop-accumulator-offset", "mlir::func::FuncOp"> {
+  let summary = "Replace frozen-dim Concat-accumulator offset in hip.loop "
+                "body funcs with iter-driven offset";
+  let description = [{
+    Outlined `hip.loop` body functions are emitted by OneShotBufferize +
+    BufferResultsToOutParams as in-place writers: the v_in (loop-carried in)
+    and v_out (bufferize.result) arg pairs alias the SAME memref descriptor,
+    so the body writes its per-iteration chunk into the in-place buffer.
+    The body's typical "Concat-grow accumulator" pattern computes the chunk's
+    byte offset as `arith.muli %v_in.dim(1), %stride` — i.e. it depends on
+    the descriptor's dim(1), which is FROZEN at the v_init's compile-time
+    value (MLIR memref descriptors are by-value SSA; the body cannot mutate
+    `sizes`). Result: every iteration writes the chunk to the same offset
+    and only the last iteration's contribution survives.
+
+    This pass rewrites the offset multiplier on each loop-body Concat-
+    accumulator write to use `iter * chunk_size` instead of
+    `v_in.dim(1) * stride` (with iter loaded from the body's `arg1` and
+    `chunk_size` taken from the chunk source memref's dim(1)). Assumes
+    chunks are equal-sized across iterations — true for windowed-attention
+    loops in transformer-style vision encoders (max_trip * chunk_size =
+    total sequence length captured from the source tensor).
+
+    For this to be safe, the v_init buffer must be sized large enough to
+    hold max_trip chunks. SliceConversion's upper-bound guard provides
+    exactly `data.dim(axis)` bytes per element, which equals
+    `max_trip * chunk_size` for the canonical Slice(x, k, k, axis)->Loop
+    pattern.
+
+    Before (loop body, after BufferResultsToOutParams):
+    ```
+      %dim_9 = memref.dim %arg3, %c1   ; FROZEN at v_init's dim(1)
+      %off = arith.muli %dim_9, %strides#1
+      %dst = memref.reinterpret_cast %base[%off] sizes=[1, %chunk_size, 1152]
+      memref.copy %chunk_src, %dst
+    ```
+
+    After:
+    ```
+      %iter_i64 = memref.load %arg1[]
+      %iter_idx = arith.index_cast %iter_i64 : i64 to index
+      %off_in_elems = arith.muli %iter_idx, %chunk_size
+      %off = arith.muli %off_in_elems, %strides#1
+      %dst = memref.reinterpret_cast %base[%off] sizes=[1, %chunk_size, 1152]
+      memref.copy %chunk_src, %dst
+    ```
+
+    Pipeline placement: after BufferResultsToOutParams (the in-place writer
+    pattern only exists post-conversion) and after the buffer-deallocation
+    cleanup; before PoolAllocs (so pool allocator sees the rewritten arith
+    chain in its hoist analysis).
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   let summary = "Lower memref.alloc to hip.alloc and insert hip.free";
   let description = [{

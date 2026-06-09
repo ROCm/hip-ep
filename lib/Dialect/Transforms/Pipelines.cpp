@@ -69,6 +69,15 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
 
+  // 5b. Fix Concat-grow loop-body accumulator offsets to be iter-driven
+  //     instead of v_in-dim-driven. See FixLoopAccumulatorOffset.cpp for
+  //     the full mechanism. Must run AFTER BufferResultsToOutParams (the
+  //     pattern we rewrite only exists post-conversion) and AFTER the
+  //     deallocation pipeline (so dealloc ops are stable), but BEFORE
+  //     OptimizeMemRefs / PoolAllocs (so the new iter-driven arith chain
+  //     is visible to subsequent optimisation).
+  pm.addNestedPass<func::FuncOp>(hip::createFixLoopAccumulatorOffsetPass());
+
   // 6. HIP-specific buffer optimizations
   pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
 
