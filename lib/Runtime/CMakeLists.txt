@@ -210,6 +210,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/real/conv1d.h
             ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
@@ -275,6 +276,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
+    compile_to_bitcode(real/conv1d.cpp runtime_conv1d.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
     compile_to_bitcode(real/where.cpp runtime_where.bc)
@@ -333,6 +335,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv1d.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_where.bc
