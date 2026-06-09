@@ -14,6 +14,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
+#include "hip/Dialect/IR/HipInferTypeUtils.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 using namespace mlir;
@@ -1452,21 +1453,19 @@ void NonZeroOp::getEffects(
 
 // Hand-written because NonZero is the only HIP DPS op with two outputs, and the
 // auto-generated inferReturnTypes (Hip_DpsOp autoInfer=1) pushes only the
-// single outsAccessor result. Push both `y` and `count_buf` in DPS-init order
-// so the SSA result order (result[0]=y, result[1]=count_buf) matches what
-// NonZeroConversion builds. Only ranked-tensor outs become SSA results; in
-// memref mode (post-bufferize) both are memrefs and nothing is pushed.
+// single outsAccessor result. The shared `inferDpsInitReturnTypes` helper
+// pushes both `y` and `count_buf` in DPS-init order, so the SSA result order
+// (result[0]=y, result[1]=count_buf) matches what NonZeroConversion builds.
+// Only the ranked-tensor inits become SSA results (memref mode pushes nothing).
+// The body lives in HipInferTypeUtils.cpp so future multi-output ops share it.
 LogicalResult
 NonZeroOp::inferReturnTypes(MLIRContext *, std::optional<Location>,
                             ValueRange operands, DictionaryAttr attrs,
                             OpaqueProperties props, RegionRange regions,
                             SmallVectorImpl<Type> &results) {
   NonZeroOp::Adaptor adaptor(operands, attrs, props, regions);
-  if (auto t = dyn_cast<RankedTensorType>(adaptor.getY().getType()))
-    results.push_back(t);
-  if (auto t = dyn_cast<RankedTensorType>(adaptor.getCountBuf().getType()))
-    results.push_back(t);
-  return success();
+  return inferDpsInitReturnTypes(
+      {adaptor.getY().getType(), adaptor.getCountBuf().getType()}, results);
 }
 
 //===----------------------------------------------------------------------===//
