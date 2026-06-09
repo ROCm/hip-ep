@@ -4,16 +4,23 @@ Licensed under the MIT License.
 -->
 # Quick Start Guide (Linux)
 
-Linux is **Docker-only**. Pick one entry path to populate `bin/` and `lib/`,
-point `$ROOT` at it, then follow the shared **Testing & Benchmarking**
-section — every tool runs the same way regardless of which entry path
-you chose.
+Pick one entry path to populate `bin/` and `lib/`, point `$ROOT` at it, then
+follow the shared **Testing & Benchmarking** section — every tool runs the same
+way regardless of which entry path you chose.
 
-- **Build from source** (developers). `./docker/run.sh build` produces
-  a self-contained `<workspace>/install/`.
-- **Use the prebuilt CI artifact** (testers). `gh run download
+- **Build from source, native** (developers). `python build.py` builds
+  directly on the host (no Docker) into `<workspace>/install/`.
+- **Build from source, Docker** (developers who prefer isolation).
+  `./docker/run.sh build` runs the same `build.py` inside a container.
+- **Use the prebuilt package** (testers). `gh run download
   linux-gpu-test-package` lands the binaries under
   `<workspace>/prebuilt/<run-id>/`; no rebuild needed.
+
+All C++ dependencies (LLVM/MLIR/LLD, protobuf, flatbuffers, ONNX Runtime) and
+the TheRock ROCm SDK are resolved automatically by `cmake/deps.cmake`: LLVM is
+built from source, so the host needs no system LLVM. The cold from-source LLVM
+build is the long pole (multi-hour); it lands under `<workspace>/build/` and is
+reused across rebuilds.
 
 See [quick_start.md](quick_start.md) for the Windows flow.
 
@@ -21,20 +28,22 @@ See [quick_start.md](quick_start.md) for the Windows flow.
 
 | Tool | Purpose |
 |------|---------|
-| **Docker** 26+ | Build + run environment |
+| **cmake ≥ 3.29, ninja, git, a C++ compiler, python3** | Native build path |
+| **Docker** 26+ | Docker build path (optional) |
 | **AMD gfx1151 GPU** + `/dev/kfd` + `/dev/dri/renderD*` | HIP runtime |
-| **`gh` CLI** (`gh auth login`) | Download CI artifacts (artifact path only) |
+| **`gh` CLI** (`gh auth login`) | Download the prebuilt package (that path only) |
 
-The current user must be in the host **`docker`** group. The user does
+For the Docker path, the current user must be in the host **`docker`** group. The user does
 **not** need to be in `render` / `video` — GPU passthrough is handled by
 docker's `--device=/dev/kfd`, and the container entrypoint
 ([`docker/entrypoint.sh`](../docker/entrypoint.sh)) detects the host GID
 on `/dev/kfd` and adds the in-container user to that group automatically.
 
 All commands below assume you are in `<workspace>/onnx-hipdnn-ep/` (the
-project root). Sibling directories (`onnxruntime/`, `onnxruntime-genai/`,
-`prebuilt-local/`, `therock-dist/`, `build/`, `install/`, `prebuilt/`)
-are auto-mounted into the container by `docker/run.sh`.
+project root). The build writes to sibling directories under `<workspace>/`
+(`build/`, `install/`); the Docker path auto-mounts the whole workspace. The
+TheRock ROCm SDK is auto-downloaded into the build tree at
+`build/onnx-hipdnn-ep/_therock/`.
 
 ## Build from source (developers)
 
@@ -42,48 +51,59 @@ are auto-mounted into the container by `docker/run.sh`.
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 cd onnx-hipdnn-ep
 git submodule update --init --recursive
-
-# Step 1 — Build the image (first time only;
-# hipdnn-ep-build:llvm22-noble, ~3 GB)
-./docker/run.sh image
-
-# Step 2 — Build everything (TheRock + ORT + protobuf + flatbuffers + this
-# project) inside the container. Idempotent: skipped steps print [skip].
-./docker/run.sh build
-#   BUILD_OGA=1            also build model_benchmark + libonnxruntime-genai.so
-#   HIP_ARCHITECTURES=...  override target GPU (default gfx1151)
-#   SKIP_LIT=1             skip in-build LIT tests
-#   FORCE_RECONFIGURE=1    re-run cmake after editing options
 ```
 
-The result tree under `<workspace>/install/` is self-contained:
+### Native (no Docker)
 
-- `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`,
-  `bin/hip-test-dll` (and `bin/model_benchmark` with `BUILD_OGA=1`)
-- `lib/libhip-compiler.so`, `lib/libonnxruntime_morphizen_ep.so`,
-  `lib/libonnxruntime.so*`, `lib/libamdhip64.so*` + TheRock transitive
-  (so `LD_LIBRARY_PATH=<workspace>/install/lib` is enough — see
-  [docker/build.sh](../docker/build.sh) A.7b stage step)
+`build.py` is a plain cross-platform driver: it ensures submodules,
+checks the toolchain, auto-detects the GPU arch (from `/sys/class/kfd`), then
+runs the cmake configure/build/install into `<workspace>/install/`. All
+dependencies (incl. from-source LLVM) are resolved by `cmake/deps.cmake`.
 
-> **ORT / OGA source layout**: if you already have a checkout of
-> [`onnxruntime`](https://github.com/Microsoft/onnxruntime) or
-> [`onnxruntime-genai`](https://github.com/AMDmoore/onnxruntime-genai) under
-> `<workspace>/onnxruntime/` or `<workspace>/onnxruntime-genai/`, the
-> build skips the clone step and uses your checkout as-is (no `fetch`,
-> no `checkout`, no `submodule update`).
+```bash
+python3 build.py
+#   --hip_arch gfx1151        override target GPU (else auto-detected; falls
+#                             back to --mock if no AMD GPU is present)
+#   --mock                    mock runtime (no GPU/HIP/TheRock)
+#   --config RelWithDebInfo   build type (default Release)
+#   --skip_tests              skip the LIT tests (run by default after install)
+#   --clean                   remove build/ and install/
+```
+
+### Docker (optional, same driver inside a container)
+
+```bash
+./docker/run.sh image        # build the image once (first time only)
+./docker/run.sh build        # runs build.py inside the container
+#   HIP_ARCHITECTURES=gfx942 ./docker/run.sh build   # override target GPU
+```
+
+The result tree under `<workspace>/install/`:
+
+- `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`, `bin/hip-test-dll`
+- `lib/libhip-compiler.so`, `lib/libonnxruntime_morphizen_ep.so`
+
+A locally-built `install/` is **not** fully self-contained: `libonnxruntime.so`
+lives in the ONNX Runtime prefix and the ROCm libs in TheRock, so run with
+`LD_LIBRARY_PATH=<workspace>/install/lib:<ort-prefix>/lib:$THEROCK_DIST/lib`.
+(The prebuilt package below already bundles these into `install/lib`, so
+`install/lib:$THEROCK_DIST/lib` is enough.)
+
+> **ONNX Runtime** is downloaded automatically (Microsoft's official prebuilt
+> release) — you don't fetch it yourself. `model_benchmark` (OGA) is not part
+> of the local build; use the prebuilt package below if you need it.
 
 Skip to the [Open a container shell](#open-a-container-shell-and-set-root)
 section once `install/bin/` is populated.
 
-## Use the prebuilt CI artifact (testers, no compile)
+## Use the prebuilt package (testers, no compile)
 
-The CI workflow
-[`.github/workflows/linux-build.yml`](../.github/workflows/linux-build.yml)
-builds and bundles every `.so` / binary the host needs (libamdhip64,
-libLLVM 22, libonnxruntime, libonnxruntime_morphizen_ep, hip-onnx-runner,
-onnxruntime_perf_test, model_benchmark, libonnxruntime-genai). The
-artifact path reuses the same Docker image as the build-from-source
-flow — no `./docker/run.sh build` needed:
+A ready-to-run package is published for each green build. It contains every
+`.so` / binary the host needs (`libonnxruntime_morphizen_ep`,
+`hip-onnx-runner`, `onnxruntime_perf_test`, `model_benchmark`,
+`libonnxruntime`, `libonnxruntime-genai`) plus a `clang`/`lld` toolchain in
+`bin/` (next to the other tools). TheRock is **not** included — install ROCm on
+the host. Download it with `gh` (no compile needed):
 
 ```bash
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
@@ -101,23 +121,28 @@ mkdir -p ../prebuilt/$RUN_ID
 ```
 
 After extraction, `<workspace>/prebuilt/$RUN_ID/` matches the
-build-from-source `install/` layout (`bin/`, `lib/`, `etc/`).
+build-from-source `install/` layout (`bin/` — which also carries the bundled
+clang/lld — `lib/`, and `etc/`).
 
 ## Open a container shell and set `$ROOT`
 
-Both paths converge here. `./docker/run.sh shell` opens a long-lived
-container with GPU passthrough and UID alignment:
+If you built/ran natively (no Docker), skip the container and just set
+`ROOT`/`THEROCK_DIST`/`LD_LIBRARY_PATH` in your own shell using the explicit
+paths below (replace `$WORKSPACE` with your `<workspace>` dir). Otherwise,
+`./docker/run.sh shell` opens a long-lived container with GPU passthrough and
+UID alignment:
 
 ```bash
 ./docker/run.sh shell
 
 # Inside the container — pick ONE depending on which entry path you used:
 export ROOT="$WORKSPACE/install"            # built from source
-# export ROOT="$WORKSPACE/prebuilt/$RUN_ID"  # downloaded CI artifact
+# export ROOT="$WORKSPACE/prebuilt/$RUN_ID"  # downloaded prebuilt package
 
 # THEROCK_DIST points the in-process tooling at the TheRock SDK that
-# `docker/build.sh` A.4 already downloaded into the workspace. It is
-# required at runtime even though the artifact bundles transitive .so
+# `cmake/deps.cmake` auto-downloaded into the build tree at
+# $WORKSPACE/build/onnx-hipdnn-ep/_therock during the build. It is
+# required at runtime even though the prebuilt package bundles transitive .so
 # files into $ROOT/lib, because:
 #   1. CompilerDriver::discoverLibraries() reads $THEROCK_DIST to
 #      construct `-L<therock>/lib` paths it passes to ld.lld when
@@ -133,9 +158,12 @@ export ROOT="$WORKSPACE/install"            # built from source
 # prepends every entry as `-L<dir>`, so the in-tree
 # `libhip_custom_kernels.a` resolves via the level-3 name-only
 # `-lhip_custom_kernels` fallback.
-export THEROCK_DIST="$WORKSPACE/therock-dist"
+export THEROCK_DIST="$WORKSPACE/build/onnx-hipdnn-ep/_therock"
 export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
+# clang/lld for the per-model DLL link (the prebuilt package ships it in
+# $ROOT/bin, alongside the other tools).
+export PATH="$ROOT/bin:$PATH"
 
 # Sanity check
 ldd "$ROOT/lib/libonnxruntime_morphizen_ep.so" | grep "not found"   # expect empty
@@ -151,15 +179,15 @@ exclusively, so the snippets are identical regardless of entry path.
 
 Same as the Windows guide — see
 [quick_start.md "Model Preparation"](quick_start.md#model-preparation).
-Run from the project root inside the container.
+Run from the project root (inside the container if you used the Docker path).
 
 ## Testing & Benchmarking
 
 ### Model Inference with hip-onnx-runner
 
 `hip-onnx-runner` runs a single ONNX model through MorphiZen EP and reports
-timing. It is built automatically when `BUILD_HIP_TOOLS=ON` (default) and
-also ships in the CI artifact.
+timing. It is built by `build.py` and also ships in the prebuilt
+package.
 
 > `hip-onnx-runner` runs with random inputs by default. LLM models need
 > in-range `input_ids` (< vocab size); use
@@ -197,9 +225,9 @@ $ROOT/bin/hip-onnx-runner -L ep_o_dump,cpu_o_dump
 
 ### Latency Benchmarking with onnxruntime_perf_test
 
-`onnxruntime_perf_test` benchmarks inference latency. Both entry paths
-ship it next to `hip-onnx-runner`. The examples below compare
-MorphiZen EP against the CPU EP baseline (DML is Windows-only).
+`onnxruntime_perf_test` benchmarks inference latency. It ships in the prebuilt
+package; a local build may not include it. The examples below compare MorphiZen
+EP against the CPU EP baseline (DML is Windows-only).
 
 ```bash
 # CPU baseline (no EP; useful to size the EP speedup)
@@ -229,8 +257,8 @@ $ROOT/bin/onnxruntime_perf_test \
 ### OGA End-to-End Benchmarking with model_benchmark
 
 `model_benchmark` benchmarks the full generative pipeline (prefill +
-decode token generation). The build-from-source path requires
-`BUILD_OGA=1` to produce it; the CI artifact bundles it automatically.
+decode token generation). It is not part of the local build, so use the
+prebuilt package to get it.
 
 ```bash
 # Auto-generated prompt (128 tokens, generate 32)
@@ -253,8 +281,7 @@ $ROOT/bin/model_benchmark \
 > Without it, model_benchmark overrides `genai_config.json`'s `search.max_length`
 > with `prompt_length + generation_length`, causing
 > `Got invalid dimensions for input: attention_mask  Got: <l+g>  Expected: <max_length>`
-> at decode time. Pass `-ml -1` to keep the config's value (mirrors what the
-> Windows CI does in [`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml)).
+> at decode time. Pass `-ml -1` to keep the config's value.
 
 **Key flags:**
 
@@ -268,38 +295,21 @@ $ROOT/bin/model_benchmark \
 | `-r <n>` | Number of benchmark repetitions |
 | `-w <n>` | Number of warmup runs |
 
-## Advanced: bare-metal source build (no Docker)
-
-If you need to build outside Docker (running CI locally on a custom
-kernel, etc.), the canonical sources of truth are:
-
-- [`.github/workflows/linux-build.yml`](../.github/workflows/linux-build.yml)
-  — the GitHub Actions pipeline (apt deps + cmake recipe per step)
-- [`docker/build.sh`](../docker/build.sh) — the same A.4–A.9 step
-  sequence the Docker path runs
-- [`docker/Dockerfile`](../docker/Dockerfile) — exact apt package list
-  (`llvm-22-dev`, `libpolly-22-dev`, `libmlir-22-dev`, `lld-22`,
-  `clang-22`, `python3-dev`, ...)
-
 ## Runtime requirements (deploy host)
 
-The artifact's `bin/hip-compiler` invokes `clang++` at runtime to link
-the per-model DLL (driver-mediated link via `ld.lld`). The path is
-baked at configure time and PATH-lookup is the fallback, so deploy
-hosts need **either** the same `/usr/lib/llvm-22/bin/clang++` baked
-path **or** `clang++` somewhere on `$PATH`. One apt invocation covers
-both:
+The `bin/hip-compiler` invokes `clang++` at runtime to link the per-model DLL
+(driver-mediated link via `ld.lld`). The prebuilt package **includes a
+`clang`/`lld` toolchain** in `$ROOT/bin/` (next to the other tools), so the host
+needs no separate clang install — just put `$ROOT/bin` on `$PATH`:
 
 ```bash
-sudo apt install clang-22
+export PATH="$ROOT/bin:$PATH"
 ```
 
-No other LLVM/GCC tools are needed at runtime — the clang driver
-handles crt selection, sysroot, multiarch -L paths, and the
-libstdc++ link line internally. (The container image installs
-`clang-22` in [`docker/Dockerfile`](../docker/Dockerfile) Layer 2 as
-part of the `apt.llvm.org` block, so users on the Docker path don't
-need any host-side install.)
+No other LLVM/GCC tools are needed at runtime — the clang driver handles crt
+selection, sysroot, multiarch -L paths, and the libstdc++ link line internally
+(the host's system libstdc++/gcc supplies crt). A local build instead uses the
+`clang++` it was configured against.
 
 ## Troubleshooting
 
@@ -346,10 +356,10 @@ The per-model DLL link calls `clang++ -shared` as a subprocess; the
 driver handles crt / sysroot / multiarch / libstdc++ for us. The path
 is baked at configure time (`HIPDNN_CLANG_PATH`) with `findProgramByName`
 as the runtime fallback, so this error only fires when **both** the
-baked path is invalid (e.g. CI artifact deployed to a host that doesn't
-have llvm-22 in the same location) **and** `clang++` is absent from
+baked path is invalid (e.g. the package deployed to a host where the
+build-time clang path no longer exists) **and** `clang++` is absent from
 PATH.
 
-Fix on the deploy host: `sudo apt install clang-22` (or the matching
-LLVM version package). The container image installs this in Layer 2 of
-[`docker/Dockerfile`](../docker/Dockerfile).
+Fix on the deploy host: put the bundled clang on PATH —
+`export PATH="$ROOT/bin:$PATH"` (the prebuilt package ships
+`clang++`/`ld.lld` in `$ROOT/bin`, alongside the other tools).
