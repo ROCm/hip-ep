@@ -44,7 +44,7 @@ Let `main_graph` allocate each output **at the point where its shape is computed
 - Mixed semantics: some outputs are out-params, some are allocated in-graph
 - Ambiguous intermediate states during compilation
 
-**Solution:** A **new pipeline** where outputs are never converted to out-params. The DLL allocates outputs in-graph, calls the allocator when shape is known. The mode is recorded once as a module attribute (`hipdnn.output_allocator`) that the shared `generate-interface` pass (and `convert-hip-to-llvm`) read to emit the allocator ABI.
+**Solution:** A **new pipeline** where outputs are never converted to out-params — the DLL allocates them in-graph and calls the allocator once the shape is known. The mode is recorded once as a module attribute (`hipdnn.output_allocator`) that `convert-hip-to-llvm` and `generate-interface` read to emit the allocator ABI.
 
 ### Two Pipelines
 
@@ -77,9 +77,9 @@ graph TD
     style O2 fill:#fff4e1,stroke-width:0px
 ```
 
-In the allocator branch `hip-use-output-allocator` does the IR rewrite. `convert-hip-to-llvm` and `generate-interface` are the SAME passes in both branches — they branch internally on the `hipdnn.output_allocator` module attribute, so there is no allocator-specific pass to keep in sync.
+Only `hip-use-output-allocator` is allocator-specific (it does the IR rewrite). `convert-hip-to-llvm` and `generate-interface` are the SAME passes in both branches — they switch on the `hipdnn.output_allocator` attribute, so there is no allocator-specific codegen pass to keep in sync.
 
-> The attribute is set by a one-line marker pass, `hip-set-output-allocator-attr`, run right after `hip-use-output-allocator` (omitted from the diagram — it is not a transformation, just the mode switch). Keeping it as its own trivial pass makes the switch a single deletable step once the allocator path is the only one.
+> The attribute is set by a one-line marker pass, `hip-set-output-allocator-attr`, run right after the rewrite (omitted from the diagram — it is just the mode switch, not a transformation). Keeping it separate makes the switch a single deletable step once allocator is the only path.
 
 **Pipeline A: Classic** (flag off, existing design)
 ```
@@ -110,9 +110,9 @@ generate-interface               ← SAME pass as classic; reads attr → alloca
 
 Each pipeline has single responsibility, no conditional logic, clear semantics. Changes to allocator model don't affect classic path.
 
-**Pipeline ordering is load-bearing.** `hip-use-output-allocator` MUST run *after* `buffer-deallocation`, not before. `hip.alloc_output` carries a Write effect but **no** Allocate effect, so if the rewrite ran first, the ownership-based deallocation pass would treat the returned buffer as unowned and clone it at the `return` (`%c = bufferization.clone %out; return %c`) — a per-inference alloc + full-output copy that defeats the zero-copy goal. Running the rewrite *after* deallocation lets the pass see a plain `memref.alloc` (Allocate effect ⇒ owned) and return it directly with no clone and no dealloc. It still runs *before* `hip-pool-allocs` so the EP-owned output never enters the GPU pool (pool-allocs only absorbs `memref.alloc`). This is the as-built "slot 4.5" placement in [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp); both orderings are pinned in the gate test [test/lit/Pipeline/output-allocator-dealloc.mlir](../../test/lit/Pipeline/output-allocator-dealloc.mlir).
+**Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *after* `buffer-deallocation` and *before* `hip-pool-allocs` (the "slot 4.5" placement). After dealloc, the output is still a plain `memref.alloc` (owned) and is returned with no clone; running before dealloc would make the deallocator clone the unowned `hip.alloc_output` result at the `return`, defeating zero-copy. Before pool-allocs keeps the EP-owned output out of the GPU pool. Pinned in [test/lit/Pipeline/output-allocator-dealloc.mlir](../../test/lit/Pipeline/output-allocator-dealloc.mlir).
 
-**Selection.** A pipeline option `use-output-allocator` (default off → Classic) selects the branch in the **ONNX-to-HIP half only** (`OnnxToHipPipelineOptions`): off → slot-3 `buffer-results-to-out-params`; on → the slot-4.5 pair `hip-use-output-allocator` (rewrite) + `hip-set-output-allocator-attr` (which sets the `hipdnn.output_allocator` module attribute). The HIP-to-LLVM half (`convert-hip-to-llvm`, `generate-interface`) has **no** allocator option — both passes read the module attribute, so the mode is carried by the IR itself (single source of truth) rather than threaded through a second option. The EP enables the flag for models with shape-derived dynamic outputs.
+**Selection.** The `use-output-allocator` option (default off → Classic) lives in the **ONNX-to-HIP half only** (`OnnxToHipPipelineOptions`): off → slot-3 `buffer-results-to-out-params`; on → the slot-4.5 pair `hip-use-output-allocator` + `hip-set-output-allocator-attr`. The HIP-to-LLVM half has no allocator option — `convert-hip-to-llvm` and `generate-interface` read the module attribute, so the mode rides on the IR itself rather than a second option. The EP enables the flag for models with shape-derived dynamic outputs.
 
 ---
 
@@ -135,7 +135,7 @@ Introduce `hip.alloc_output` — an operation that allocates output buffers via 
 
 **Key property:** Does not declare `Allocate` memory effect — the buffer is owned by the EP/runtime, not the graph, so buffer-deallocation never inserts a `hip.free` for it.
 
-**Placement in pipeline:** *After* `buffer-deallocation`, *before* `hip-pool-allocs` (so pooling skips the EP-owned buffer — pool-allocs only absorbs `memref.alloc`). `hip-use-output-allocator` is **FuncOp-scoped** (rewrites returned allocs per function, leaving each signature + `return` intact); the sibling **ModuleOp-scoped** `hip-set-output-allocator-attr` runs immediately after it and sets the `hipdnn.output_allocator` module attribute. The original sketch placed the rewrite *before* `buffer-deallocation`; the gate test showed that triggers a clone-at-return, so the as-built order is the reverse — see "Pipeline ordering is load-bearing" in [§2](#two-pipelines).
+**Placement in pipeline:** *after* `buffer-deallocation`, *before* `hip-pool-allocs` (so pooling skips the EP-owned buffer). `hip-use-output-allocator` is FuncOp-scoped (rewrites returned allocs, leaving each signature + `return` intact); the sibling ModuleOp-scoped `hip-set-output-allocator-attr` runs right after and sets the attribute. The after-dealloc order is load-bearing — see [§2](#two-pipelines).
 
 The `hip-use-output-allocator` pass replaces the returned `memref.alloc` for each graph output with `hip.alloc_output`, reusing the alloc's dynamic-size operands.
 
@@ -242,9 +242,9 @@ The setter is the only output-allocator symbol the EP resolves by name; a pre-al
 
 ### Phase 4: Allocator-Aware Code Generation
 
-A single `generate-interface` pass emits both ABIs, reading `hipdnn.output_allocator` to choose: no attribute → classic 3-arg `inference_compute`; attribute present → allocator 2-arg. The classic-only output staging is gated on the attribute so it is skipped in allocator mode.
+A single `generate-interface` pass emits both ABIs, reading `hipdnn.output_allocator`: no attribute → classic 3-arg `inference_compute`; attribute present → allocator 2-arg (classic output staging is gated on the attribute, so it is skipped).
 
-**`main_graph` mode + arity check.** `convert-hip-to-llvm` runs *before* interface generation; its `transformMainFunction` reads the **same** `hipdnn.output_allocator` attribute to pick the mode (it no longer guesses from the param count). It then computes the expected param count for that mode — each memref unpacks to `3 + 2*rank` LLVM params (allocatedPtr + alignedPtr + offset + sizes[rank] + strides[rank]); a returned memref lowers to a by-value struct result and adds no param; `expectedAllocator` = context + input memrefs, `expectedClassic` = `expectedAllocator` + output memrefs — and verifies `main_graph` matches, emitting a mode-specific `emitError` on mismatch. Because both `convert-hip-to-llvm` and `generate-interface` read the same attribute, the wrapper arity and the interface generator can never disagree (and a zero-output graph, where the two expected counts coincide, is disambiguated by the attribute rather than a classic-first tiebreak).
+**`main_graph` mode + arity check.** `convert-hip-to-llvm` runs *before* interface generation and reads the **same** attribute to pick the mode (it no longer guesses from the param count). It then verifies `main_graph`'s arity for that mode — each memref unpacks to `3 + 2*rank` LLVM params, a returned memref adds none, so classic = context + inputs + outputs and allocator = context + inputs — emitting a mode-specific error on mismatch. Sharing the attribute keeps the wrapper arity and the interface generator in agreement, and disambiguates a zero-output graph (where both counts coincide).
 
 Classic mode (no `hipdnn.output_allocator` attribute) emits:
 ```c
