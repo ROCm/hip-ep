@@ -137,19 +137,34 @@ target_link_libraries(HipTargetLLVM PUBLIC
 
 # Bake the clang++ path used by DLLLinker.cpp's Linux subprocess link.
 # DLLLinker has a PATH fallback if the baked path is stale (e.g. CI build
-# deployed to a host with clang elsewhere). HINTS scopes the search to
-# the LLVM tree we configure against so a stale `/usr/bin/clang-18`
-# doesn't shadow apt llvm-22. clang++ (not bare clang) — the driver
-# auto-pulls libstdc++ which the generated model object needs for
+# deployed to a host with clang elsewhere). clang++ (not bare clang) — the
+# driver auto-pulls libstdc++ which the generated model object needs for
 # __cxa_begin_catch / __cxa_rethrow.
 if(NOT WIN32)
-    find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
-        HINTS
-            ${LLVM_BINARY_DIR}/bin
-            ${LLVM_TOOLS_BINARY_DIR}
-    )
+    if(TARGET clang)
+        # In-tree (from-source) LLVM: the clang/lld .exe are not present at
+        # configure time, so find_program can't see them and would fall back to
+        # a system clang (defeating the self-contained from-source build). We
+        # know where the driver lands, so bake that path. clang itself is built
+        # because lib/Runtime's bitcode step depends on the in-tree clang target;
+        # lld is forced to build by deps.cmake (a standalone ALL target, kept out
+        # of any install/export set). Mirrors lib/Runtime's in-tree-target use.
+        set(HIPDNN_CLANG_EXECUTABLE "${LLVM_TOOLS_BINARY_DIR}/clang++")
+        message(STATUS "Using in-tree clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
+    else()
+        # Prebuilt / installed LLVM (find_package path, incl. CI's llvm-install):
+        # the clang++ binary already exists, so resolve it now. HINTS scope the
+        # search to the LLVM tree we configure against.
+        find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
+            HINTS
+                ${LLVM_BINARY_DIR}/bin
+                ${LLVM_TOOLS_BINARY_DIR}
+        )
+        if(HIPDNN_CLANG_EXECUTABLE)
+            message(STATUS "Found clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
+        endif()
+    endif()
     if(HIPDNN_CLANG_EXECUTABLE)
-        message(STATUS "Found clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
         target_compile_definitions(HipTargetLLVM PRIVATE
             HIPDNN_CLANG_PATH="${HIPDNN_CLANG_EXECUTABLE}"
             HIPDNN_LLVM_MAJOR=${LLVM_VERSION_MAJOR})

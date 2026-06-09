@@ -23,6 +23,35 @@ using namespace mlir;
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
 static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
+  // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
+  //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
+  //     refinements propagate through bufferize and into pool / alloc
+  //     sizing computations downstream, and run BEFORE the unrefined
+  //     `?` dims would otherwise materialise as `memref.dim` ops on the
+  //     pool buffer at the top of the function.
+  //
+  //     Idempotent and a no-op on functions whose ops either don't carry
+  //     the interface or expose no further refinable dims — safe to run
+  //     unconditionally regardless of how many HIP ops currently
+  //     implement the interface. See `docs/design/hip-shape-inference.md`
+  //     for the design and `test/lit/Dialect/hip-infer-shapes.mlir` for
+  //     the reference cases.
+  pm.addPass(hip::createInferShapesPass());
+
+  // 1c. Fold `tensor.dim` queries on `tensor.expand_shape` /
+  //     `tensor.collapse_shape` chains into arithmetic on the chain
+  //     root's dims, in the tensor domain, before one-shot-bufferize.
+  //     The reshape ops' shape SSA (`output_shape` and reassociation
+  //     maps) is opaque to the post-bufferize `memref.dim` patterns,
+  //     so this is the last useful position.  Without it, downstream
+  //     `--hip-pool-allocs` sees one scattered dim query per reshape
+  //     site and fragments them into many single-alloc dominance
+  //     domains -- a pooling-efficiency cost (one tiny pool each), not
+  //     a failure -- on graphs with per-layer same-rank dynamic
+  //     `onnx.Reshape` (typical: norm / projection chains).  See
+  //     `ResolveTensorDims.cpp`.
+  pm.addNestedPass<func::FuncOp>(hip::createResolveTensorDimsPass());
+
   // 2. Bufferize tensor IR to memref IR
   //
   // Use IdentityLayoutMap for function boundaries: all EP inputs/outputs come
@@ -87,6 +116,19 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     test/lit/Pipelines/ asserts this ordering does not regress.
   pm.addNestedPass<func::FuncOp>(hip::createMaterializeHostScalarsPass());
 
+  // 6c. Hoist speculatable size arithmetic feeding `memref.alloc` dynamic
+  //     operands above the earliest dynamic alloc in the entry block.
+  //     PoolAllocs's single-block dominator-emit phase requires every
+  //     dyn-operand SSA def to dominate the earliest pooled alloc; this
+  //     pass establishes that precondition for IR where canonicalize left
+  //     speculatable arith interleaved with allocs.  No-op for
+  //     already-feasible IR; PoolAllocs.cpp itself is unchanged.  Uses
+  //     `mlir::isSpeculatable` (the same predicate upstream LICM uses) so
+  //     traps (e.g. `arith.divsi` with a runtime-zero divisor) are not
+  //     speculated across the move.  See HoistAllocSizeArith.cpp for the
+  //     algorithm and rationale.
+  pm.addNestedPass<func::FuncOp>(hip::createHoistAllocSizeArithPass());
+
   pm.addNestedPass<func::FuncOp>(hip::createPoolAllocsPass());
 
   // 7. Lower remaining bufferization ops to memref
@@ -122,6 +164,27 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // get the same treatment as ops in main_graph (constant lowering, op
   // mapping, etc.) -- the conversion pass already iterates all func.func
   // ops in the module.
+  //
+  // ONNX-side shape refinement is intentionally NOT done here. The
+  // importer is responsible for emitting `tensor<*xT>` (unranked) for
+  // values whose shape it does not know, and `tensor<>` (rank-0) only
+  // for genuine scalars. Any unranked tensors that survive into the
+  // HIP dialect are refined post-conversion by `--hip-infer-shapes`
+  // via `ReifyRankedShapedTypeOpInterface`. See
+  // `docs/design/unranked-tensor-handling.md` for the full contract.
+  //
+  // TODO(unranked-import-contract): the unranked-import contract on
+  // the importer side ships in MorphiZen PR #228
+  // (https://github.com/ROCm/MorphiZen/pull/228). Until that PR is
+  // merged AND the `3rd-party/morphizen` submodule here is bumped
+  // past the merge, the importer still emits `tensor<>` (rank-0) for
+  // values it has no shape for, which `--convert-onnx-to-hip` will
+  // misinterpret as a genuine scalar on Loop-heavy models (any
+  // `onnx.Concat` / `onnx.Add` etc. inside an outlined body whose
+  // operand was unranked at import will fail rank-aware conversion).
+  // When this submodule is bumped: re-run the LIT suite here and
+  // every Python perf test under `test/python/` on a Loop-heavy
+  // model end-to-end, then delete this TODO.
   pm.addPass(createOnnxLoopOutlinePass());
 
   if (fs) {

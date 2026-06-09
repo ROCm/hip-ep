@@ -22,6 +22,7 @@
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -234,26 +235,64 @@ bool CompilerDriver::runMLIRPasses(
     // ORT can invoke the EP compiler multiple times per session (shape sub-
     // graphs, prefill specialization, decode specialization). A single sink
     // file gets overwritten on each call, masking divergence between
-    // invocations. Append a process-wide monotonic counter so each compile
-    // dumps to its own file (e.g. /tmp/ir.dump -> /tmp/ir.dump.0,
-    // /tmp/ir.dump.1, ...). When HIPDNN_EP_IR_DUMP_SINGLE=1 the legacy
-    // single-file behaviour is restored.
+    // invocations. Insert a process-wide monotonic counter so each compile
+    // dumps to its own file. The counter is inserted BEFORE the extension so
+    // editors / file viewers still recognize the result as MLIR:
+    //   /tmp/ir.mlir -> /tmp/ir.0.mlir, /tmp/ir.1.mlir, ...
+    //   /tmp/ir      -> /tmp/ir.0,      /tmp/ir.1,      ...    (extensionless)
+    // When HIPDNN_EP_IR_DUMP_SINGLE=1 the legacy single-file behaviour is
+    // restored (no counter, output overwritten across compiles).
     static std::atomic<unsigned> sCompileSeq{0};
     std::string finalPath = dumpPath;
-    if (hip_get_env("HIPDNN_EP_IR_DUMP_SINGLE").empty())
-      finalPath += "." + std::to_string(sCompileSeq.fetch_add(1));
-    std::error_code ec;
-    irDumpStream = std::make_unique<llvm::raw_fd_ostream>(finalPath, ec);
-    if (!ec) {
+    if (hip_get_env("HIPDNN_EP_IR_DUMP_SINGLE").empty()) {
+      // llvm::sys::path::extension/stem are path-separator aware, so
+      // dots inside parent directory names (e.g. ".cache/ir") don't get
+      // mistaken for an extension.
+      llvm::StringRef pathRef(dumpPath);
+      llvm::StringRef ext = llvm::sys::path::extension(pathRef);
+      llvm::StringRef stem = pathRef.drop_back(static_cast<size_t>(ext.size()));
+      std::string counter = "." + std::to_string(sCompileSeq.fetch_add(1));
+      finalPath = (llvm::Twine(stem) + counter + ext).str();
+    }
+    // HIPDNN_EP_IR_DUMP_AFTER_ONLY=1 suppresses the per-pass "before" dump.
+    // Combined with printAfterOnlyOnChange=true (always on), this leaves a
+    // dump that contains only the IR after passes that actually changed
+    // something -- typically halves the file size on a full pipeline run
+    // while keeping every meaningful transformation visible.
+    bool afterOnly = !hip_get_env("HIPDNN_EP_IR_DUMP_AFTER_ONLY").empty();
+    auto shouldPrintBefore = [afterOnly](mlir::Pass *, mlir::Operation *) {
+      return !afterOnly;
+    };
+    auto shouldPrintAfter = [](mlir::Pass *, mlir::Operation *) {
+      return true;
+    };
+    // HIPDNN_EP_IR_DUMP_TREE=1 splits the dump into one .mlir file per pass
+    // under finalPath as a DIRECTORY (vs. a single concatenated file). Per-
+    // pass files are typically <1 MB even on a full LLM pipeline -- editable
+    // in any editor, unlike the multi-MB monolithic dump. Files are named
+    // `<idx>_<pass-name>.mlir` under `<finalPath>/<op>_<symbol>/`. See MLIR's
+    // PassManager::enableIRPrintingToFileTree for the tree layout.
+    bool treeMode = !hip_get_env("HIPDNN_EP_IR_DUMP_TREE").empty();
+    if (treeMode) {
       module.getContext()->disableMultithreading();
-      pm.enableIRPrinting([](mlir::Pass *, mlir::Operation *) { return true; },
-                          [](mlir::Pass *, mlir::Operation *) { return true; },
-                          /*printModuleScope=*/true,
-                          /*printAfterOnlyOnChange=*/true,
-                          /*printAfterOnlyOnFailure=*/false, *irDumpStream);
+      pm.enableIRPrintingToFileTree(shouldPrintBefore, shouldPrintAfter,
+                                    /*printModuleScope=*/true,
+                                    /*printAfterOnlyOnChange=*/true,
+                                    /*printAfterOnlyOnFailure=*/false,
+                                    /*printTreeDir=*/finalPath);
     } else {
-      llvm::errs() << "[CompilerDriver] Failed to open IR dump file: "
-                   << dumpPath << ": " << ec.message() << "\n";
+      std::error_code ec;
+      irDumpStream = std::make_unique<llvm::raw_fd_ostream>(finalPath, ec);
+      if (!ec) {
+        module.getContext()->disableMultithreading();
+        pm.enableIRPrinting(shouldPrintBefore, shouldPrintAfter,
+                            /*printModuleScope=*/true,
+                            /*printAfterOnlyOnChange=*/true,
+                            /*printAfterOnlyOnFailure=*/false, *irDumpStream);
+      } else {
+        llvm::errs() << "[CompilerDriver] Failed to open IR dump file: "
+                     << dumpPath << ": " << ec.message() << "\n";
+      }
     }
   }
 
