@@ -228,7 +228,7 @@ jobs:
       # -----------------------------------------------------------------------
 
       # -----------------------------------------------------------------------
-      # Build (mock) via the cross-platform scripts/build.py. --mock sets
+      # Build (mock) via the cross-platform build.py. --mock sets
       # BUILD_MOCK_RUNTIME=ON (no ROCm/TheRock); ORT + LLVM come from the cached
       # prefixes and cmake/deps.cmake source-builds the rest. The LIT tests run
       # inside build.py after install.
@@ -236,7 +236,7 @@ jobs:
       - name: Build onnx-hipdnn-ep (mock)
         shell: bash
         run: |
-          python scripts/build.py \
+          python build.py \
             --mock \
             --config Release \
             --cmake_generator Ninja \

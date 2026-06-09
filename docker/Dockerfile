@@ -4,14 +4,14 @@
 ##
 
 # hipdnn-ep Linux build environment. A thin isolation wrapper around the native
-# driver scripts/build.py: it provides only the base toolchain. LLVM/MLIR/LLD,
+# driver build.py: it provides only the base toolchain. LLVM/MLIR/LLD,
 # protobuf, flatbuffers, ONNX Runtime and the TheRock ROCm SDK are all resolved
 # from source/download by cmake/deps.cmake at build time -- no system LLVM here.
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Base toolchain. LLVM is built from source by scripts/build.py (no apt LLVM).
+# Base toolchain. LLVM is built from source by build.py (no apt LLVM).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build pkg-config \
         git ca-certificates curl wget gnupg lsb-release \
