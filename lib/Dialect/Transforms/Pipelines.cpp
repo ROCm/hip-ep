@@ -26,12 +26,11 @@ using namespace mlir;
 /// \p useOutputAllocator selects the allocator pipeline. The classic pipeline
 /// runs `buffer-results-to-out-params` at slot 3 (each returned memref becomes
 /// a trailing out-param). The allocator pipeline SKIPS that pass and instead
-/// runs two passes at slot 4.5 -- AFTER buffer-deallocation: first
-/// `hip-use-output-allocator` rewrites each returned `memref.alloc` into
-/// `hip.alloc_output` (EP-owned, allocated in-graph via the output-allocator
-/// callback), then `hip-set-output-allocator-attr` stamps the
-/// `hipdnn.output_allocator` module attr that the HIP-to-LLVM half reads to
-/// select the allocator ABI.
+/// runs `hip-use-output-allocator` at slot 4.5 -- AFTER buffer-deallocation --
+/// which rewrites each returned `memref.alloc` into `hip.alloc_output`
+/// (EP-owned, allocated in-graph via the output-allocator callback) and stamps
+/// the `hipdnn.use_output_allocator` module BoolAttr that the HIP-to-LLVM half
+/// reads to select the allocator ABI.
 ///
 /// The slot-4.5 placement is load-bearing and was chosen empirically (see the
 /// slot 4.5 comment below and test/lit/Pipeline/output-allocator-dealloc.mlir):
@@ -108,16 +107,12 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   bufferization::BufferDeallocationPipelineOptions deallocOpts;
   bufferization::buildBufferDeallocationPipeline(pm, deallocOpts);
 
-  // 4.5. Allocator pipeline only, two collaborating passes:
-  //      (a) hip-use-output-allocator (FuncOp): rewrite each returned
-  //          `memref.alloc` into `hip.alloc_output` (EP-owned, allocated
-  //          in-graph at runtime via the output-allocator callback); leaves the
-  //          function signature + `return` intact.
-  //      (b) hip-set-output-allocator-attr (ModuleOp): stamp the
-  //          `hipdnn.output_allocator` module attr that convert-hip-to-llvm +
-  //          generate-interface read to select the allocator ABI. Kept as a
-  //          separate trivial pass so the mode marker can be deleted in one
-  //          step once classic out-params are removed -- (a) needs no change.
+  // 4.5. Allocator pipeline only: hip-use-output-allocator (FuncOp) rewrites
+  //      each returned `memref.alloc` into `hip.alloc_output` (EP-owned,
+  //      allocated in-graph at runtime via the output-allocator callback) and
+  //      stamps the `hipdnn.use_output_allocator` module BoolAttr that
+  //      convert-hip-to-llvm + generate-interface read to select the allocator
+  //      ABI. Leaves the function signature + `return` intact.
   //
   //      Ordering is load-bearing -- the rewrite MUST run AFTER buffer-
   //      deallocation: `hip.alloc_output` has a Write effect but NO Allocate
@@ -130,10 +125,8 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //      pool-allocs (slot 6) so the EP-owned output never enters the GPU pool,
   //      which only absorbs `memref.alloc`. Verified by test/lit/Pipeline/
   //      output-allocator-dealloc.mlir (both orderings).
-  if (useOutputAllocator) {
+  if (useOutputAllocator)
     pm.addNestedPass<func::FuncOp>(hip::createUseOutputAllocatorPass());
-    pm.addPass(hip::createSetOutputAllocatorAttrPass());
-  }
 
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
@@ -305,8 +298,8 @@ void mlir::hip::buildHipToLLVMPipeline(
   mlir::hip::CompilationOptionsT compOpts;
   compOpts.constants_file = options.constantsFile;
   // Both convert-hip-to-llvm (above) and generate-interface read the
-  // `hipdnn.output_allocator` module attribute (set by
-  // hip-set-output-allocator- attr in the ONNX-to-HIP half) to choose the 2-arg
+  // `hipdnn.use_output_allocator` module attribute (set by
+  // hip-use-output-allocator in the ONNX-to-HIP half) to choose the 2-arg
   // allocator vs 3-arg classic ABI. No pipeline option is needed here -- one
   // generator handles both modes.
   pm.addPass(createGenerateInterfacePass(compOpts));
@@ -318,10 +311,10 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
   onnxOpts.externalizeOutputDir = options.constantsDir;
   onnxOpts.externalizeMinNumElements = options.externalizeMinNumElements;
   // Only the ONNX-to-HIP half consumes the flag: it picks slot-3
-  // buffer-results-to-out-params (classic) vs the slot-4.5 allocator passes
-  // (hip-use-output-allocator + hip-set-output-allocator-attr), the latter of
-  // which stamps the `hipdnn.output_allocator` module attr. The HIP-to-LLVM
-  // half reads that attr, so it needs no option of its own.
+  // buffer-results-to-out-params (classic) vs the slot-4.5
+  // hip-use-output-allocator pass, which stamps the
+  // `hipdnn.use_output_allocator` module attr. The HIP-to-LLVM half reads that
+  // attr, so it needs no option of its own.
   onnxOpts.useOutputAllocator = options.useOutputAllocator;
   buildOnnxToHipPipeline(pm, onnxOpts);
 

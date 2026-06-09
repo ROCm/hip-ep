@@ -454,32 +454,19 @@ def UseOutputAllocatorPass
     they are left unchanged.  Functions lacking !hip.context as argument 0 are
     likewise skipped.
 
-    Does the IR rewrite only; the allocator-mode module attribute
-    (`hipdnn.output_allocator`) is set by the sibling hip-set-output-allocator-
-    attr pass, which the allocator pipeline schedules right after this one at
-    "slot 4.5" (see docs/design/output-allocator-design.md).  Leaves the
+    The pass also stamps the `hipdnn.use_output_allocator` BoolAttr (value =
+    true) on the parent module -- the allocator-mode marker that downstream
+    convert-hip-to-llvm and generate-interface read to select the allocator ABI.
+    It is a typed bool, not a presence-only UnitAttr, so readers test the VALUE
+    (absence and `= false` both mean classic mode).  It is stamped even when no
+    alloc is rewritten, because the mode is decided by the pass being run, not by
+    the IR contents (a zero-output graph must still be marked).  Leaves the
     function signature and func.return untouched.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::memref::MemRefDialect"
   ];
-}
-
-def SetOutputAllocatorAttrPass
-    : Pass<"hip-set-output-allocator-attr", "mlir::ModuleOp"> {
-  let summary = "Mark the module as output-allocator mode";
-  let description = [{
-    Sets the `hipdnn.output_allocator` unit attribute on the module -- the single
-    source of truth that downstream convert-hip-to-llvm and generate-interface
-    read to select the 2-arg allocator ABI (vs the classic 3-arg out-param ABI).
-
-    Deliberately separate from hip-use-output-allocator (which does the IR
-    rewrite): the allocator pipeline runs both at "slot 4.5", but isolating the
-    mode marker in its own trivial pass means it can be deleted in a single step
-    once the allocator path is the only path (classic out-params removed) -- the
-    rewrite pass needs no change.  See docs/design/output-allocator-design.md.
-  }];
 }
 
 def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
