@@ -21,17 +21,11 @@
 // `func.return` terminator are intentionally NOT modified -- `convert-hip-to-
 // llvm` synthesizes the `-> i32` entry wrapper in a later phase.
 //
-// The pass also stamps the `hipdnn.use_output_allocator` unit attribute on the
-// parent module (the allocator-mode marker that later phases'
-// `convert-hip-to-llvm` / `generate-interface` read to select the allocator
-// ABI). The stamp is UNCONDITIONAL -- it runs even when no alloc is rewritten,
-// because the mode is decided by this pass being invoked (in-pipeline it is
-// scheduled only in allocator mode), not by whether the IR happened to contain
-// a returned alloc (a zero-output graph must still be marked). A FuncOp pass
-// writing its parent module relaxes MLIR's pass-isolation contract; it is safe
-// here because the write is an idempotent set of the same UnitAttr, and it
-// follows the established precedent in PoolAllocs (which stamps
-// hipdnn.pool_size the same way).
+// The allocator-mode module attribute (`hipdnn.output_allocator`) is NOT set
+// here -- a separate trivial ModuleOp pass (`hip-set-output-allocator-attr`,
+// scheduled right after this one in the allocator pipeline) owns that mark, so
+// the mode switch stays a single deletable step and this pass keeps to the IR
+// rewrite. See SetOutputAllocatorAttr.cpp.
 //
 // Before:
 //   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
@@ -41,13 +35,11 @@
 //   }
 //
 // After:
-//   module attributes {hipdnn.use_output_allocator} {
-//     func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
-//       %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64}
-//            : memref<?x?xf16>                            // EP-owned output
-//       hip.sigmoid(%ctx) ins(%t) outs(%out)
-//       return %out : memref<?x?xf16>
-//     }
+//   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
+//     %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64}
+//          : memref<?x?xf16>                              // EP-owned output
+//     hip.sigmoid(%ctx) ins(%t) outs(%out)
+//     return %out : memref<?x?xf16>
 //   }
 //
 //===----------------------------------------------------------------------===//
@@ -57,8 +49,6 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -132,12 +122,6 @@ struct UseOutputAllocatorPass
     patterns.add<ReplaceOutputAllocPattern>(&getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
-
-    // Stamp the allocator-mode marker on the parent module. UNCONDITIONAL: see
-    // the file header for why this must run even when nothing was rewritten.
-    if (auto module = getOperation()->getParentOfType<ModuleOp>())
-      module->setAttr("hipdnn.use_output_allocator",
-                      UnitAttr::get(&getContext()));
   }
 };
 

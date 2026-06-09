@@ -8,16 +8,11 @@
 // returned by func.return) into hip.alloc_output, reusing the alloc's dynamic
 // sizes and setting out_idx to the return position, while leaving intermediates,
 // passthrough outputs, private helpers, and context-less functions untouched.
-// Also verifies the pass stamps the hipdnn.use_output_allocator module attr.
+// The allocator-mode module attribute is set by the sibling
+// hip-set-output-allocator-attr pass, not here -- see that pass's LIT test.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-use-output-allocator %s 2>&1 | FileCheck %s
-
-// --- The pass stamps the allocator-mode marker on the module (unconditional,
-//     once per module). This file also contains functions the pass does NOT
-//     rewrite (private / no-context / passthrough), so a successful match here
-//     also shows the stamp is independent of whether any alloc was rewritten. ---
-// CHECK: module attributes {hipdnn.use_output_allocator}
 
 // --- Dynamic-shape output: replaced, reusing the alloc's %M, %N. ---
 // CHECK-LABEL: func.func @dynamic_output

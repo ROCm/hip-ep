@@ -26,9 +26,12 @@ using namespace mlir;
 /// \p useOutputAllocator selects the allocator pipeline. The classic pipeline
 /// runs `buffer-results-to-out-params` at slot 3 (each returned memref becomes
 /// a trailing out-param). The allocator pipeline SKIPS that pass and instead
-/// runs `hip-use-output-allocator` at slot 4.5 -- AFTER buffer-deallocation --
-/// to rewrite each returned `memref.alloc` into `hip.alloc_output` (EP-owned,
-/// allocated in-graph via the output-allocator callback).
+/// runs two passes at slot 4.5 -- AFTER buffer-deallocation: first
+/// `hip-use-output-allocator` rewrites each returned `memref.alloc` into
+/// `hip.alloc_output` (EP-owned, allocated in-graph via the output-allocator
+/// callback), then `hip-set-output-allocator-attr` stamps the
+/// `hipdnn.output_allocator` module attr that the HIP-to-LLVM half reads to
+/// select the allocator ABI.
 ///
 /// The slot-4.5 placement is load-bearing and was chosen empirically (see the
 /// slot 4.5 comment below and test/lit/Pipeline/output-allocator-dealloc.mlir):
@@ -105,24 +108,32 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   bufferization::BufferDeallocationPipelineOptions deallocOpts;
   bufferization::buildBufferDeallocationPipeline(pm, deallocOpts);
 
-  // 4.5. Allocator pipeline only: rewrite each returned `memref.alloc` into
-  //      `hip.alloc_output` (EP-owned, allocated in-graph at runtime via the
-  //      output-allocator callback). FuncOp-scoped; leaves the function
-  //      signature + `return` intact.
+  // 4.5. Allocator pipeline only, two collaborating passes:
+  //      (a) hip-use-output-allocator (FuncOp): rewrite each returned
+  //          `memref.alloc` into `hip.alloc_output` (EP-owned, allocated
+  //          in-graph at runtime via the output-allocator callback); leaves the
+  //          function signature + `return` intact.
+  //      (b) hip-set-output-allocator-attr (ModuleOp): stamp the
+  //          `hipdnn.output_allocator` module attr that convert-hip-to-llvm +
+  //          generate-interface read to select the allocator ABI. Kept as a
+  //          separate trivial pass so the mode marker can be deleted in one
+  //          step once classic out-params are removed -- (a) needs no change.
   //
-  //      Ordering is load-bearing -- it MUST run AFTER buffer-deallocation:
-  //      `hip.alloc_output` has a Write effect but NO Allocate effect, so the
-  //      ownership-based deallocation pass would treat it as an unowned value
-  //      at the `func.return` and clone it (`%c = bufferization.clone %out;
-  //      return %c`), adding a per-inference alloc + full-output copy. By
-  //      running here the deallocation pass sees the output as a plain
-  //      `memref.alloc` (Allocate effect => owned), so it returns it directly
-  //      with no clone and no dealloc. Still runs BEFORE pool-allocs (slot 6)
-  //      so the EP-owned output never enters the GPU pool, which only absorbs
-  //      `memref.alloc`. Verified by test/lit/Pipeline/
+  //      Ordering is load-bearing -- the rewrite MUST run AFTER buffer-
+  //      deallocation: `hip.alloc_output` has a Write effect but NO Allocate
+  //      effect, so the ownership-based deallocation pass would treat it as an
+  //      unowned value at the `func.return` and clone it (`%c =
+  //      bufferization.clone %out; return %c`), adding a per-inference alloc +
+  //      full-output copy. By running here the deallocation pass sees the
+  //      output as a plain `memref.alloc` (Allocate effect => owned), so it
+  //      returns it directly with no clone and no dealloc. Still runs BEFORE
+  //      pool-allocs (slot 6) so the EP-owned output never enters the GPU pool,
+  //      which only absorbs `memref.alloc`. Verified by test/lit/Pipeline/
   //      output-allocator-dealloc.mlir (both orderings).
-  if (useOutputAllocator)
+  if (useOutputAllocator) {
     pm.addNestedPass<func::FuncOp>(hip::createUseOutputAllocatorPass());
+    pm.addPass(hip::createSetOutputAllocatorAttrPass());
+  }
 
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
@@ -293,15 +304,12 @@ void mlir::hip::buildHipToLLVMPipeline(
 
   mlir::hip::CompilationOptionsT compOpts;
   compOpts.constants_file = options.constantsFile;
-  // convert-hip-to-llvm (above) auto-detects whether it produced a 2-arg
-  // (allocator) or 3-arg (classic) main_graph by param count; this branch only
-  // selects the matching interface generator. The allocator generator emits a
-  // 2-arg inference_compute (no prepare_output/finalize_output/out-params);
-  // the classic generator emits the 3-arg interface.
-  if (options.useOutputAllocator)
-    pm.addPass(createGenerateAllocatorInterfacePass(compOpts));
-  else
-    pm.addPass(createGenerateInterfacePass(compOpts));
+  // Both convert-hip-to-llvm (above) and generate-interface read the
+  // `hipdnn.output_allocator` module attribute (set by
+  // hip-set-output-allocator- attr in the ONNX-to-HIP half) to choose the 2-arg
+  // allocator vs 3-arg classic ABI. No pipeline option is needed here -- one
+  // generator handles both modes.
+  pm.addPass(createGenerateInterfacePass(compOpts));
 }
 
 void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
@@ -309,15 +317,16 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
   OnnxToHipPipelineOptions onnxOpts;
   onnxOpts.externalizeOutputDir = options.constantsDir;
   onnxOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-  // Both halves must agree on the flag: an allocator-shaped main_graph fed to
-  // the classic interface generator (or vice versa) would emit a compute
-  // wrapper whose arity disagrees with main_graph.
+  // Only the ONNX-to-HIP half consumes the flag: it picks slot-3
+  // buffer-results-to-out-params (classic) vs the slot-4.5 allocator passes
+  // (hip-use-output-allocator + hip-set-output-allocator-attr), the latter of
+  // which stamps the `hipdnn.output_allocator` module attr. The HIP-to-LLVM
+  // half reads that attr, so it needs no option of its own.
   onnxOpts.useOutputAllocator = options.useOutputAllocator;
   buildOnnxToHipPipeline(pm, onnxOpts);
 
   HipToLLVMPipelineOptions llvmOpts;
   llvmOpts.constantsFile = options.constantsFile;
-  llvmOpts.useOutputAllocator = options.useOutputAllocator;
   buildHipToLLVMPipeline(pm, llvmOpts);
 }
 
