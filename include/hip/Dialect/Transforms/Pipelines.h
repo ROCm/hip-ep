@@ -52,7 +52,11 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc(
           "Allocator pipeline: replace buffer-results-to-out-params with "
           "hip-use-output-allocator so graph outputs are allocated in-graph "
-          "via hip.alloc_output (default: false = classic out-params)"),
+          "via "
+          "hip.alloc_output (and the hipdnn.output_allocator module attribute "
+          "is "
+          "set for the LLVM half to read) (default: false = classic "
+          "out-params)"),
       llvm::cl::init(false)};
 };
 
@@ -65,13 +69,11 @@ struct HipToLLVMPipelineOptions
       llvm::cl::desc(
           "Constants filename embedded in metadata (default: constants.bin)"),
       llvm::cl::init("constants.bin")};
-  Option<bool> useOutputAllocator{
-      *this, "use-output-allocator",
-      llvm::cl::desc(
-          "Allocator pipeline: emit generate-allocator-interface (2-arg "
-          "inference_compute / main_graph; outputs allocated in-graph) instead "
-          "of generate-interface (default: false = classic 3-arg)"),
-      llvm::cl::init(false)};
+  // No use-output-allocator option here: convert-hip-to-llvm and
+  // generate-interface read the `hipdnn.output_allocator` module attribute set
+  // by hip-use-output-allocator in the ONNX-to-HIP half. When this pipeline is
+  // invoked standalone in allocator mode, the input IR must already carry that
+  // attribute.
 };
 
 /// Build the ONNX-to-HIP compilation pipeline.
@@ -129,9 +131,11 @@ struct HipdnnPipelineOptions
   Option<bool> useOutputAllocator{
       *this, "use-output-allocator",
       llvm::cl::desc(
-          "Allocator pipeline: thread through to both the ONNX-to-HIP and "
-          "HIP-to-LLVM halves so outputs are allocated in-graph via "
-          "hip.alloc_output (default: false = classic out-params)"),
+          "Allocator pipeline: route the ONNX-to-HIP half through "
+          "hip-use-output-allocator, which sets the hipdnn.output_allocator "
+          "module attribute; convert-hip-to-llvm + generate-interface then "
+          "read "
+          "that attribute (default: false = classic out-params)"),
       llvm::cl::init(false)};
 };
 
