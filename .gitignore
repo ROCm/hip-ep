@@ -137,3 +137,7 @@ install/
 # ONNX model files (large, downloaded on demand)
 models/
 _local/
+
+# Whisper test audio (auto-downloaded at test setup, cached locally; README kept)
+test/python/data/whisper/*.wav
+test/python/data/whisper/librispeech/
