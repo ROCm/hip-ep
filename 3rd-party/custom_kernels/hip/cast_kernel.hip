@@ -131,6 +131,41 @@ __global__ void cast_f16_to_i32_kernel(
   }
 }
 
+// Generic integer<->integer cast (used for the uint8 paths that the per-pair
+// kernels above don't cover). static_cast handles narrowing/widening per C++
+// rules; the kernels above stay as-is so existing FP paths keep their bespoke
+// __float2half / __half2float intrinsics.
+template <typename Src, typename Dst>
+__global__ void cast_int_to_int_kernel(
+    const Src* __restrict__ input,
+    Dst* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<Dst>(input[idx]);
+  }
+}
+
+__global__ void cast_ui8_to_f16_kernel(
+    const uint8_t* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = __float2half(static_cast<float>(input[idx]));
+  }
+}
+
+__global__ void cast_f16_to_ui8_kernel(
+    const __half* __restrict__ input,
+    uint8_t* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<uint8_t>(__half2float(input[idx]));
+  }
+}
+
 extern "C" int hip_cast(
     void* stream,
     const void* input,
@@ -217,6 +252,36 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const __half*>(input),
                        static_cast<int32_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT64 && output_dtype == HIP_DTYPE_UINT8) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<int64_t, uint8_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int64_t*>(input),
+                       static_cast<uint8_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_UINT8 && output_dtype == HIP_DTYPE_INT64) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<uint8_t, int64_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const uint8_t*>(input),
+                       static_cast<int64_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT32 && output_dtype == HIP_DTYPE_UINT8) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<int32_t, uint8_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t*>(input),
+                       static_cast<uint8_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_UINT8 && output_dtype == HIP_DTYPE_INT32) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<uint8_t, int32_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const uint8_t*>(input),
+                       static_cast<int32_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_UINT8 && output_dtype == HIP_DTYPE_FLOAT16) {
+    hipLaunchKernelGGL(cast_ui8_to_f16_kernel,
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const uint8_t*>(input),
+                       static_cast<__half*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_FLOAT16 && output_dtype == HIP_DTYPE_UINT8) {
+    hipLaunchKernelGGL(cast_f16_to_ui8_kernel,
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half*>(input),
+                       static_cast<uint8_t*>(output), num_elements);
   } else {
     fprintf(stderr,
             "[custom_kernels] hip_cast: unsupported conversion "
