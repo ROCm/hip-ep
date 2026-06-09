@@ -33,6 +33,7 @@ target_link_libraries(hip-mlir-opt PRIVATE
   MLIRMemRefTransforms
   MLIRSCFDialect
   MLIRTensorDialect
+  MLIRTensorInferTypeOpInterfaceImpl
   MLIRDestinationStyleOpInterface
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
