@@ -502,8 +502,14 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 //                               attention, etc.)
 //
 // Overhead when disabled: ~0 (single branch on a cached bool).
-// Overhead when enabled:  ~25us/call (hipEventCreate+Record+Sync+Destroy +
-//   one hipDeviceSynchronize + one fprintf) - negligible vs decode cost.
+// Overhead when enabled:  small per-call cost dominated by the
+//   hipDeviceSynchronize fence at the end of the timing block and the
+//   per-Compute fprintf line. hipEventCreate/Destroy is now amortized
+//   (events are session-scoped, lazy-allocated on first perf-enabled
+//   Compute), and the events themselves are created with
+//   hipEventDisableSystemFence so record() does not issue a system-scope
+//   acquire/release fence -- both wasted work for events we only read
+//   after the device-wide sync.
 // ============================================================================
 namespace {
 
@@ -634,6 +640,22 @@ MlirCustomOp::MlirCustomOp(
       fs.get());
 }
 
+MlirCustomOp::~MlirCustomOp() {
+#ifndef BUILD_MOCK_RUNTIME
+  // Release the lazy-allocated HIPDNN_EP_PERF event pair. Created on first
+  // perf-enabled Compute() and reused for the session lifetime; nullptr
+  // here means perf was never enabled, so nothing to release.
+  if (ep_perf_ev_start_) {
+    (void)hipEventDestroy(static_cast<hipEvent_t>(ep_perf_ev_start_));
+    ep_perf_ev_start_ = nullptr;
+  }
+  if (ep_perf_ev_stop_) {
+    (void)hipEventDestroy(static_cast<hipEvent_t>(ep_perf_ev_stop_));
+    ep_perf_ev_stop_ = nullptr;
+  }
+#endif
+}
+
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   MY_LOG(2) << "MlirCustomOp::Compute() called";
 
@@ -686,9 +708,28 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   // HIP error codes are intentionally discarded below: any failure here only
   // corrupts diagnostic numbers, never the inference result.  Casting to void
   // also suppresses C4834 ([[nodiscard]] discarded) under MSVC /W4.
-  hipEvent_t ev_start = nullptr, ev_stop = nullptr;
-  (void)hipEventCreate(&ev_start);
-  (void)hipEventCreate(&ev_stop);
+  // Session-lifetime event pair, lazy-allocated on first perf-enabled
+  // Compute() and reused thereafter. Mirrors the event-pool design on
+  // the runtime side (lib/Runtime/op_profile.cpp): avoids the
+  // hipEventCreate / hipEventDestroy round-trip on every Compute() at
+  // the cost of holding two events for the session lifetime, released
+  // in ~MlirCustomOp().
+  //
+  // hipEventDisableSystemFence: same rationale + same "NEVER set on
+  // events read without a follow-up sync" guardrail as the op_profile
+  // event pool. We only read elapsed time AFTER the
+  // hipDeviceSynchronize() below, which is a stronger ordering
+  // guarantee than the per-record system fence would have provided.
+  if (!ep_perf_ev_start_) {
+    hipEvent_t ev = nullptr;
+    (void)hipEventCreateWithFlags(&ev, hipEventDisableSystemFence);
+    ep_perf_ev_start_ = static_cast<void *>(ev);
+    ev = nullptr;
+    (void)hipEventCreateWithFlags(&ev, hipEventDisableSystemFence);
+    ep_perf_ev_stop_ = static_cast<void *>(ev);
+  }
+  auto ev_start = static_cast<hipEvent_t>(ep_perf_ev_start_);
+  auto ev_stop = static_cast<hipEvent_t>(ep_perf_ev_stop_);
   (void)hipEventRecord(ev_start, stream);
 
   const int ret = inference_state_->compute(&inputs.span, &outputs.span);
@@ -704,8 +745,8 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   float gpu_ms_f = 0.0f;
   (void)hipEventSynchronize(ev_stop);
   (void)hipEventElapsedTime(&gpu_ms_f, ev_start, ev_stop);
-  (void)hipEventDestroy(ev_start);
-  (void)hipEventDestroy(ev_stop);
+  // Events are NOT destroyed here -- they are owned by MlirCustomOp and
+  // released in the destructor (see MlirCustomOp::~MlirCustomOp).
 
   if (ret != 0) {
     LOG(ERROR) << "inference_compute() failed with code: " << ret;
@@ -720,6 +761,16 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   s.gpu_ms = static_cast<double>(gpu_ms_f);
   s.fence_residual_ms = elapsed_ms(t_after_compute, t_after_fence);
   perf_collector().record(s);
+
+  // Flush per-op profile AFTER the timing window has closed. The resolve
+  // step (one hipEventElapsedTime per recorded op + std::map aggregation
+  // + per-row fprintf) scales with the number of profiled events per
+  // inference -- on a typical decoder graph (several hundred profiled
+  // ops) it costs roughly 1 ms / Compute, large enough that keeping it
+  // inside the timing window measurably inflated HIPDNN_EP_PERF=1 wall_ms.
+  // The cost still happens, but it's now charged to "between-Compute"
+  // time and never enters wall_ms / gpu_ms / fence_residual_ms.
+  inference_state_->flush_op_profile();
 
   MY_LOG(2) << "Compute completed successfully";
 #endif // BUILD_MOCK_RUNTIME

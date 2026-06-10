@@ -17,6 +17,14 @@
 #include <optional>
 #include <string>
 
+// hipEventDisableSystemFence (skips the per-event system-scope fence -- a perf
+// win for events that are only read after a stream sync) is a newer-HIP macro.
+// Older toolchains (e.g. the mock CI build) lack it; fall back to default event
+// flags there. Defined here so every consumer of op_profile.h gets the guard.
+#ifndef hipEventDisableSystemFence
+#define hipEventDisableSystemFence 0x0
+#endif
+
 struct OpProfileState;
 
 OpProfileState *op_profile_create();
