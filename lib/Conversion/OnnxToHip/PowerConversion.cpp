@@ -57,8 +57,8 @@ static std::optional<double> getScalarConstantValue(mlir::Value v) {
 
   mlir::DenseElementsAttr dense;
   if (def->getName().getStringRef() == "onnx.Constant") {
-    dense = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-        def->getAttr("value"));
+    dense =
+        mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(def->getAttr("value"));
   } else if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(def)) {
     dense = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
   }
