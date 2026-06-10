@@ -499,17 +499,14 @@ def UseOutputAllocatorPass
     they are left unchanged.  Functions lacking !hip.context as argument 0 are
     likewise skipped.
 
-    The pass also unconditionally stamps the `hipdnn.use_output_allocator` unit
-    attribute on the parent module -- the allocator-mode marker that downstream
+    The pass also stamps the `hipdnn.use_output_allocator` BoolAttr (value =
+    true) on the parent module -- the allocator-mode marker that downstream
     convert-hip-to-llvm and generate-interface read to select the allocator ABI.
-    It is stamped even when no alloc is rewritten, because the mode is decided by
-    the pass being run, not by the IR contents (a zero-output graph must still be
-    marked).
-
-    Standalone for now -- registered for hip-mlir-opt and LIT but NOT wired into
-    any pipeline (the allocator pipeline placement is a later phase; see
-    docs/design/output-allocator-design.md).  Leaves the function signature and
-    func.return untouched.
+    It is a typed bool, not a presence-only UnitAttr, so readers test the VALUE
+    (absence and `= false` both mean classic mode).  It is stamped even when no
+    alloc is rewritten, because the mode is decided by the pass being run, not by
+    the IR contents (a zero-output graph must still be marked).  Leaves the
+    function signature and func.return untouched.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",

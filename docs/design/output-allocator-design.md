@@ -44,7 +44,7 @@ Let `main_graph` allocate each output **at the point where its shape is computed
 - Mixed semantics: some outputs are out-params, some are allocated in-graph
 - Ambiguous intermediate states during compilation
 
-**Solution:** A **new pipeline** where outputs are never converted to out-params. The DLL allocates outputs in-graph, calls the allocator when shape is known. `GenerateInterface` is replaced with a new pass that understands this model.
+**Solution:** A **new pipeline** where outputs are never converted to out-params — the DLL allocates them in-graph and calls the allocator once the shape is known. The mode is recorded once as a module attribute (`hipdnn.use_output_allocator`, a `BoolAttr` set to `true`) that `convert-hip-to-llvm` and `generate-interface` read to emit the allocator ABI.
 
 ### Two Pipelines
 
@@ -52,19 +52,19 @@ Let `main_graph` allocate each output **at the point where its shape is computed
 graph TD
     A[one-shot-bufferize] --> B{"use-output-allocator?"}
     B -->|"Classic Pipeline (off)"| D1[buffer-results-to-out-params]
-    B -->|"Allocator Pipeline (on)"| D2[hip-use-output-allocator]
+    B -->|"Allocator Pipeline (on)"| E2[buffer-deallocation]
 
     D1 --> E1[buffer-deallocation]
-    D2 --> E2[buffer-deallocation]
+    E2 --> D2[hip-use-output-allocator]
 
     E1 --> F1[hip-pool-allocs]
-    E2 --> F2[hip-pool-allocs]
+    D2 --> F2[hip-pool-allocs]
 
-    F1 --> G1[convert-hip-to-llvm]
-    F2 --> G2[convert-hip-to-llvm]
+    F1 --> G1["convert-hip-to-llvm<br/>(reads attr → classic)"]
+    F2 --> G2["convert-hip-to-llvm<br/>(reads attr → allocator)"]
 
-    G1 --> H1[generate-interface]
-    G2 --> H2[generate-allocator-interface]
+    G1 --> H1["generate-interface<br/>(reads attr → classic)"]
+    G2 --> H2["generate-interface<br/>(reads attr → allocator)"]
 
     H1 --> O1["→ main_graph(state, inputs, outputs)"]
     H2 --> O2["→ main_graph(state, inputs)"]
@@ -76,6 +76,10 @@ graph TD
     style H2 fill:#fff4e1
     style O2 fill:#fff4e1,stroke-width:0px
 ```
+
+Only `hip-use-output-allocator` is allocator-specific. `convert-hip-to-llvm` and `generate-interface` are the SAME passes in both branches — they switch on the `hipdnn.use_output_allocator` attribute, so there is no allocator-specific codegen pass to keep in sync.
+
+> `hip-use-output-allocator` does two things in one pass: it rewrites returned `memref.alloc` → `hip.alloc_output`, and it stamps the `hipdnn.use_output_allocator` `BoolAttr` (= `true`) on the module. The stamp is the mode switch and is unconditional (it fires even for a zero-output graph, where no alloc is rewritten), because the mode is decided by the pass being scheduled — the allocator pipeline runs it, the classic pipeline does not.
 
 **Pipeline A: Classic** (flag off, existing design)
 ```
@@ -93,19 +97,21 @@ generate-interface               ← builds outputs_array, prepare/finalize
 ```
 one-shot-bufferize
 ~~buffer-results-to-out-params~~     ← REMOVED
-hip-use-output-allocator         ← NEW: memref.alloc → hip.alloc_output
-buffer-deallocation              ← skips hip.alloc_output (no Allocate effect)
-hip-pool-allocs                  ← pools only intermediates
-convert-hip-to-llvm
-~~generate-interface~~               ← REMOVED
-generate-allocator-interface     ← NEW: allocator-aware
+buffer-deallocation              ← output still memref.alloc (owned) → no clone
+hip-use-output-allocator         ← NEW: memref.alloc → hip.alloc_output (AFTER dealloc)
+                                   AND stamps hipdnn.use_output_allocator = true
+hip-pool-allocs                  ← pools only intermediates; skips hip.alloc_output
+convert-hip-to-llvm              ← reads attr → 2-arg main_graph wrapper
+generate-interface               ← SAME pass as classic; reads attr → allocator ABI
 ```
 - `main_graph(state, inputs_array) -> i32`
 - Outputs allocated in-graph via `hip.alloc_output`, no `outputs_array`
 
 Each pipeline has single responsibility, no conditional logic, clear semantics. Changes to allocator model don't affect classic path.
 
-**Selection.** A pipeline option `use-output-allocator` (default off → Classic) selects the branch, threaded through `OnnxToHipPipelineOptions` / `HipToLLVMPipelineOptions`. The EP enables it for models with shape-derived dynamic outputs.
+**Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *after* `buffer-deallocation` and *before* `hip-pool-allocs` (the "slot 4.5" placement). After dealloc, the output is still a plain `memref.alloc` (owned) and is returned with no clone; running before dealloc would make the deallocator clone the unowned `hip.alloc_output` result at the `return`, defeating zero-copy. Before pool-allocs keeps the EP-owned output out of the GPU pool. Pinned in [test/lit/Pipeline/output-allocator-dealloc.mlir](../../test/lit/Pipeline/output-allocator-dealloc.mlir).
+
+**Selection.** The `use-output-allocator` option (default off → Classic) lives in the **ONNX-to-HIP half only** (`OnnxToHipPipelineOptions`): off → slot-3 `buffer-results-to-out-params`; on → the slot-4.5 `hip-use-output-allocator`. The HIP-to-LLVM half has no allocator option — `convert-hip-to-llvm` and `generate-interface` read the module attribute, so the mode rides on the IR itself rather than a second option. The EP enables the flag for models with shape-derived dynamic outputs.
 
 ---
 
@@ -126,11 +132,11 @@ Introduce `hip.alloc_output` — an operation that allocates output buffers via 
 - Attribute: `out_idx` identifying which graph output
 - Result type: memref with static dims from type, dynamic dims from operands
 
-**Key property:** Does not declare `Allocate` memory effect.
+**Key property:** Does not declare `Allocate` memory effect — the buffer is owned by the EP/runtime, not the graph, so buffer-deallocation never inserts a `hip.free` for it.
 
-**Placement in pipeline:** After `one-shot-bufferize` (dynamic dims become live SSA values), before `buffer-deallocation` (so deallocator sees no Allocate effect and skips it), before `hip-pool-allocs` (so pooling skips EP-owned buffers).
+**Placement in pipeline:** *after* `buffer-deallocation`, *before* `hip-pool-allocs` (so pooling skips the EP-owned buffer). `hip-use-output-allocator` is FuncOp-scoped: it rewrites returned allocs (leaving each signature + `return` intact) and stamps the module-level mode attribute in the same pass. The after-dealloc order is load-bearing — see [§2](#two-pipelines).
 
-The `hip-use-output-allocator` pass replaces `memref.alloc` for graph outputs with `hip.alloc_output`, reusing the alloc's dynamic-size operands. It rewrites **only public (graph-entry) functions** — private helpers such as outlined `onnx.Loop` bodies also carry a `!hip.context` arg 0 and return `memref.alloc`s, but their results are DLL-internal and must not become EP outputs, so they are skipped. The pass also stamps the `hipdnn.use_output_allocator` unit attribute on the module (the allocator-mode marker that `convert-hip-to-llvm` and `generate-interface` read to select the allocator ABI); the stamp is unconditional, since the mode is decided by running the pass rather than by whether any alloc was rewritten.
+The `hip-use-output-allocator` pass replaces the returned `memref.alloc` for each graph output with `hip.alloc_output`, reusing the alloc's dynamic-size operands.
 
 **Example: Add → MatMul → Sigmoid**
 
@@ -235,7 +241,11 @@ The setter is the only output-allocator symbol the EP resolves by name; a pre-al
 
 ### Phase 4: Allocator-Aware Code Generation
 
-Classic pipeline uses `GenerateInterface` pass to emit:
+A single `generate-interface` pass emits both ABIs, reading the `hipdnn.use_output_allocator` `BoolAttr` by VALUE: attr absent or `= false` → classic 3-arg `inference_compute`; attr `= true` → allocator 2-arg (classic output staging is gated on the attribute, so it is skipped).
+
+**`main_graph` mode + arity check.** `convert-hip-to-llvm` runs *before* interface generation and reads the **same** attribute to pick the mode (it no longer guesses from the param count). It then verifies `main_graph`'s arity for that mode — each memref unpacks to `3 + 2*rank` LLVM params, a returned memref adds none, so classic = context + inputs + outputs and allocator = context + inputs — emitting a mode-specific error on mismatch. Sharing the attribute keeps the wrapper arity and the interface generator in agreement, and disambiguates a zero-output graph (where both counts coincide).
+
+Classic mode (`hipdnn.use_output_allocator` absent or `false`) emits:
 ```c
 int inference_compute(void *state, span_t *inputs, span_t *outputs) {
   // prepare inputs → inputs_array
@@ -244,7 +254,7 @@ int inference_compute(void *state, span_t *inputs, span_t *outputs) {
 }
 ```
 
-Allocator pipeline uses new `GenerateAllocatorInterface` pass to emit:
+Allocator mode (`hipdnn.use_output_allocator = true`) emits:
 ```c
 int inference_compute(void *state, span_t *inputs) {
   // prepare inputs → inputs_array
