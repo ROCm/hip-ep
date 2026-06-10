@@ -179,8 +179,9 @@ typedef struct RuntimeState RuntimeState;
 // declared identically. There is intentionally NO self-describing
 // size/version field: a layout change is an ABI break that requires rebuilding
 // the model.dll, and the model cache is invalidated the same way any other
-// runtime change is -- by deleting stale model.dlls (the cache key is the ONNX
-// hash, not the runtime version; see CLAUDE.md "Stale compiled-model DLLs").
+// runtime change is -- by deleting stale model.dlls (the compiled-model cache
+// key is the ONNX graph hash, not the runtime version, so a runtime ABI change
+// does not by itself invalidate cached DLLs).
 // Total absence of the contract is handled one level up by symbol resolution: a
 // pre-allocator model.dll simply lacks the exported setter, so GetProcAddress
 // returns null and the EP no-ops.
