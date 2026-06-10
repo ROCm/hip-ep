@@ -95,10 +95,8 @@ struct PoolOpLowering : public ConvertOpToLLVMPattern<PoolOp> {
     Value inputDesc = adaptor.getInput();
     Value outputDesc = adaptor.getOutputs()[0];
 
-    Value batchN =
-        getMemRefDimSize(inputType, 0, inputDesc, rewriter, loc);
-    Value channelC =
-        getMemRefDimSize(inputType, 1, inputDesc, rewriter, loc);
+    Value batchN = getMemRefDimSize(inputType, 0, inputDesc, rewriter, loc);
+    Value channelC = getMemRefDimSize(inputType, 1, inputDesc, rewriter, loc);
 
     SmallVector<Value, 3> inSpatial(3, createI64(1));
     SmallVector<Value, 3> outSpatial(3, createI64(1));

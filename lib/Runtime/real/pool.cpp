@@ -65,8 +65,8 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
                  "rank=%lld,N=%lld,C=%lld,in=[%lld,%lld,%lld],out=[%lld,%lld,"
                  "%lld]",
                  (long long)spatial_rank, (long long)N, (long long)C,
-                 (long long)in0, (long long)in1, (long long)in2, (long long)out0,
-                 (long long)out1, (long long)out2);
+                 (long long)in0, (long long)in1, (long long)in2,
+                 (long long)out0, (long long)out1, (long long)out2);
         return std::string(b);
       },
       state);
@@ -82,8 +82,8 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
                     "null\n");
     return -1;
   }
-  if (pool_mode != HIPDNN_EP_POOL_AVERAGE &&
-      pool_mode != HIPDNN_EP_POOL_MAX && pool_mode != HIPDNN_EP_POOL_LP) {
+  if (pool_mode != HIPDNN_EP_POOL_AVERAGE && pool_mode != HIPDNN_EP_POOL_MAX &&
+      pool_mode != HIPDNN_EP_POOL_LP) {
     fprintf(stderr, "[REAL] wrap_pool: unsupported pool_mode %lld\n",
             (long long)pool_mode);
     return -1;
@@ -106,7 +106,8 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
   void *stream = hipdnn_ep_state_get_stream(state);
 
   RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_pool: mode=%s dtype=%s(%lld) spatial_rank=%lld N=%lld C=%lld "
+      "[REAL] wrap_pool: mode=%s dtype=%s(%lld) spatial_rank=%lld N=%lld "
+      "C=%lld "
       "in=[%lld,%lld,%lld] out=[%lld,%lld,%lld] count_include_pad=%lld p=%lld "
       "indices=%s\n",
       hipdnn_ep_pool_mode_name(pool_mode), hipdnn_ep_datatype_name(data_type),
@@ -115,12 +116,11 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
       (long long)out1, (long long)out2, (long long)count_include_pad,
       (long long)p, want_indices ? "yes" : "null");
 
-  int rc = hip_pool(stream, input, output, want_indices ? indices : nullptr,
-                    hip_dtype, static_cast<int>(pool_mode),
-                    static_cast<int>(spatial_rank), N, C, in0, in1, in2, out0,
-                    out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0, dil1,
-                    dil2, static_cast<int>(count_include_pad),
-                    static_cast<int>(p));
+  int rc = hip_pool(
+      stream, input, output, want_indices ? indices : nullptr, hip_dtype,
+      static_cast<int>(pool_mode), static_cast<int>(spatial_rank), N, C, in0,
+      in1, in2, out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
+      dil1, dil2, static_cast<int>(count_include_pad), static_cast<int>(p));
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_pool: kernel launch failed (%d)\n", rc);
     return -1;

@@ -37,7 +37,8 @@ namespace {
 //     runtime emits row-major flat indices only.
 //
 // Before:
-//   %y = "onnx.AveragePool"(%x) {kernel_shape = [3, 3], auto_pad = "SAME_UPPER",
+//   %y = "onnx.AveragePool"(%x) {kernel_shape = [3, 3], auto_pad =
+//   "SAME_UPPER",
 //                                strides = [2, 2], count_include_pad = 1} :
 //          (tensor<1x3x32x32xf16>) -> tensor<1x3x16x16xf16>
 //
@@ -46,7 +47,8 @@ namespace {
 //   %init = tensor.empty(%dim0) : tensor<?x3x16x16xf16>
 //   %y = hip.pool(%ctx) ins(%x : tensor<?x3x32x32xf16>)
 //                       outs(%init : tensor<?x3x16x16xf16>)
-//                       {pool_mode = 0, kernel_shape = [3, 3], strides = [2, 2],
+//                       {pool_mode = 0, kernel_shape = [3, 3], strides = [2,
+//                       2],
 //                        pads = [0, 0, 1, 1], dilations = [1, 1],
 //                        ceil_mode = 0, storage_order = 0,
 //                        count_include_pad = 1, p = 2}
@@ -153,8 +155,7 @@ struct PoolToHip : public mlir::RewritePattern {
     // count_include_pad is an AveragePool-only divisor selector.
     int64_t countIncludePad = 0;
     if (poolMode == kPoolAverage) {
-      if (auto attr =
-              op->getAttrOfType<mlir::IntegerAttr>("count_include_pad"))
+      if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("count_include_pad"))
         countIncludePad = attr.getValue().getSExtValue();
     }
 

@@ -863,10 +863,18 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
     fprintf(stderr, "Invalid state in wrap_pool\n");
     return -1;
   }
-  (void)k0; (void)k1; (void)k2;
-  (void)s0; (void)s1; (void)s2;
-  (void)p0; (void)p1; (void)p2;
-  (void)dil0; (void)dil1; (void)dil2;
+  (void)k0;
+  (void)k1;
+  (void)k2;
+  (void)s0;
+  (void)s1;
+  (void)s2;
+  (void)p0;
+  (void)p1;
+  (void)p2;
+  (void)dil0;
+  (void)dil1;
+  (void)dil2;
   MOCK_PRINT("[MOCK] wrap_pool(mode=%s, dtype=%s(%lld), rank=%lld, N=%lld, "
              "C=%lld, in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], "
              "storage_order=%lld, ceil_mode=%lld, has_indices=%lld, "
@@ -874,12 +882,11 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
              hipdnn_ep_pool_mode_name(pool_mode),
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
              (long long)spatial_rank, (long long)N, (long long)C,
-             (long long)in0, (long long)in1, (long long)in2,
-             (long long)out0, (long long)out1, (long long)out2,
-             (long long)storage_order, (long long)ceil_mode,
-             (long long)has_indices, (long long)count_include_pad,
-             (long long)p, input ? "yes" : "null", output ? "yes" : "null",
-             indices ? "yes" : "null");
+             (long long)in0, (long long)in1, (long long)in2, (long long)out0,
+             (long long)out1, (long long)out2, (long long)storage_order,
+             (long long)ceil_mode, (long long)has_indices,
+             (long long)count_include_pad, (long long)p, input ? "yes" : "null",
+             output ? "yes" : "null", indices ? "yes" : "null");
   return 0;
 }
 
