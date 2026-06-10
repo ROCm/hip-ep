@@ -46,10 +46,20 @@ module {
     %output = "onnx.Sub"(%lhs, %rhs) : (tensor<?x?xf32>, tensor<?x?xf32>) -> tensor<?x?xf32>
     return %output : tensor<?x?xf32>
   }
-}
 
-// CHECK-LABEL: func.func @sub_dynamic
-// CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[LHS:.*]]: tensor<?x?xf32>, %[[RHS:.*]]: tensor<?x?xf32>) -> tensor<?x?xf32>
-// CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
-// CHECK: hip.sub(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf32>) : tensor<?x?xf32>
-// CHECK-NOT: hip.alloc
+  // CHECK-LABEL: func.func @sub_dynamic
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[LHS:.*]]: tensor<?x?xf32>, %[[RHS:.*]]: tensor<?x?xf32>) -> tensor<?x?xf32>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+  // CHECK: hip.sub(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf32>) : tensor<?x?xf32>
+  // CHECK-NOT: hip.alloc
+
+  // Broadcast: lhs [1] subtracted from rhs [32] -> output [32]
+  func.func @sub_broadcast_i64(%lhs: tensor<1xi64>, %rhs: tensor<32xi64>) -> tensor<32xi64> {
+    %output = "onnx.Sub"(%lhs, %rhs) : (tensor<1xi64>, tensor<32xi64>) -> tensor<32xi64>
+    return %output : tensor<32xi64>
+  }
+
+  // CHECK-LABEL: func.func @sub_broadcast_i64
+  // CHECK: tensor.empty() : tensor<32xi64>
+  // CHECK: hip.sub(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi64>)
+}
