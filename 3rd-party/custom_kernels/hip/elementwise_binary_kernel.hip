@@ -67,82 +67,101 @@ __global__ void elementwise_div_kernel<__half>(const __half *__restrict__ lhs,
 // ORT: BINARY_OP_NAME_EXPR2(Equal, (a == b)) / (Less, (a < b))
 // =====================================================================
 
+// `lhs_stride`/`rhs_stride` select scalar-broadcast (stride 0 -> every output
+// reads the single source element) vs full per-element read (stride 1). ONNX
+// Equal broadcasts; the launcher derives the strides from each operand's
+// element count. Larger NumPy-style broadcasts must be materialised upstream
+// via Expand (the runtime wrapper enforces this).
 template <typename T>
 __global__ void elementwise_equal_kernel(const T *__restrict__ lhs,
                                          const T *__restrict__ rhs,
                                          uint8_t *__restrict__ output,
-                                         int64_t num_elements) {
+                                         int64_t num_elements,
+                                         int64_t lhs_stride,
+                                         int64_t rhs_stride) {
   int64_t idx =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < num_elements) {
-    output[idx] = static_cast<uint8_t>(lhs[idx] == rhs[idx]);
+    output[idx] = static_cast<uint8_t>(lhs[idx * lhs_stride] ==
+                                       rhs[idx * rhs_stride]);
   }
 }
 
 // FP16 path: promote to float to avoid relying on half operator==.
 __global__ void elementwise_equal_f16_kernel(
     const __half *__restrict__ lhs, const __half *__restrict__ rhs,
-    uint8_t *__restrict__ output, int64_t num_elements) {
+    uint8_t *__restrict__ output, int64_t num_elements,
+    int64_t lhs_stride, int64_t rhs_stride) {
   int64_t idx =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < num_elements) {
-    float a = __half2float(lhs[idx]);
-    float b = __half2float(rhs[idx]);
+    float a = __half2float(lhs[idx * lhs_stride]);
+    float b = __half2float(rhs[idx * rhs_stride]);
     output[idx] = static_cast<uint8_t>(a == b);
   }
 }
 
 extern "C" int hip_elementwise_equal(void *stream, const void *lhs,
                                      const void *rhs, void *output,
-                                     int64_t num_elements, int hip_dtype) {
-  if (num_elements <= 0)
+                                     int64_t lhs_num_elements,
+                                     int64_t rhs_num_elements,
+                                     int64_t out_num_elements, int hip_dtype) {
+  if (out_num_elements <= 0)
     return 0;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
   int grid_size =
-      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+      static_cast<int>((out_num_elements + kBlockSize - 1) / kBlockSize);
+
+  // stride 0 = scalar broadcast (every idx reads element 0); stride 1 = full.
+  int64_t lhs_stride = (lhs_num_elements == 1) ? 0 : 1;
+  int64_t rhs_stride = (rhs_num_elements == 1) ? 0 : 1;
 
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_elementwise_equal: f16, num=%lld\n",
-        (long long)num_elements);
+        "[custom_kernels] hip_elementwise_equal: f16, out=%lld\n",
+        (long long)out_num_elements);
     hipLaunchKernelGGL(elementwise_equal_f16_kernel, dim3(grid_size),
                        dim3(kBlockSize), 0, hip_stream,
                        static_cast<const __half *>(lhs),
                        static_cast<const __half *>(rhs),
-                       static_cast<uint8_t *>(output), num_elements);
+                       static_cast<uint8_t *>(output), out_num_elements,
+                       lhs_stride, rhs_stride);
     break;
   case HIP_DTYPE_FLOAT32:
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_elementwise_equal: f32, num=%lld\n",
-        (long long)num_elements);
+        "[custom_kernels] hip_elementwise_equal: f32, out=%lld\n",
+        (long long)out_num_elements);
     hipLaunchKernelGGL(elementwise_equal_kernel<float>, dim3(grid_size),
                        dim3(kBlockSize), 0, hip_stream,
                        static_cast<const float *>(lhs),
                        static_cast<const float *>(rhs),
-                       static_cast<uint8_t *>(output), num_elements);
+                       static_cast<uint8_t *>(output), out_num_elements,
+                       lhs_stride, rhs_stride);
     break;
   case HIP_DTYPE_INT32:
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_elementwise_equal: i32, num=%lld\n",
-        (long long)num_elements);
+        "[custom_kernels] hip_elementwise_equal: i32, out=%lld\n",
+        (long long)out_num_elements);
     hipLaunchKernelGGL(elementwise_equal_kernel<int32_t>, dim3(grid_size),
                        dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int32_t *>(lhs),
                        static_cast<const int32_t *>(rhs),
-                       static_cast<uint8_t *>(output), num_elements);
+                       static_cast<uint8_t *>(output), out_num_elements,
+                       lhs_stride, rhs_stride);
     break;
   case HIP_DTYPE_INT64:
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_elementwise_equal: i64, num=%lld\n",
-        (long long)num_elements);
+        "[custom_kernels] hip_elementwise_equal: i64, out=%lld\n",
+        (long long)out_num_elements);
     hipLaunchKernelGGL(elementwise_equal_kernel<int64_t>, dim3(grid_size),
                        dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int64_t *>(lhs),
                        static_cast<const int64_t *>(rhs),
-                       static_cast<uint8_t *>(output), num_elements);
+                       static_cast<uint8_t *>(output), out_num_elements,
+                       lhs_stride, rhs_stride);
     break;
   default:
     fprintf(stderr,

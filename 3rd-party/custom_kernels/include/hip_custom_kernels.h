@@ -241,12 +241,17 @@ int hip_elementwise_mod(
     int hip_dtype,
     int fmod_flag);
 
+/* ONNX Equal with scalar-operand broadcast: lhs/rhs_num_elements == 1 reads
+ * that single element for every output (stride 0); otherwise full per-element.
+ * Larger NumPy-style broadcasts must be materialised upstream via Expand. */
 int hip_elementwise_equal(
     void* stream,
     const void* lhs,
     const void* rhs,
     void* output,
-    int64_t num_elements,
+    int64_t lhs_num_elements,
+    int64_t rhs_num_elements,
+    int64_t out_num_elements,
     int hip_dtype);
 
 int hip_elementwise_less(

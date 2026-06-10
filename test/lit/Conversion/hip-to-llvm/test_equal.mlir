@@ -22,7 +22,7 @@ module {
     hip.equal(%ctx) ins(%a, %b : memref<8xi64, 1>, memref<8xi64, 1>)
                     outs(%c : memref<8xi1, 1>)
 
-    // CHECK: llvm.call @wrap_equal({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_equal({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -38,7 +38,7 @@ module {
                     outs(%c : memref<?xi1, 1>)
 
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
-    // CHECK: llvm.call @wrap_equal({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_equal({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
     return
   }
 }

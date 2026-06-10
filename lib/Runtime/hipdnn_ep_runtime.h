@@ -1033,8 +1033,11 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
               int64_t cDim0, int64_t cDim1);
 
+// `a_num`/`b_num`/`out_num`: per-operand element counts; a scalar operand
+// (count==1) is broadcast against the full output. See wrap_equal in equal.cpp.
 int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t num_elements, int64_t data_type);
+               int64_t a_num_elements, int64_t b_num_elements,
+               int64_t out_num_elements, int64_t data_type);
 
 // Element-wise logical AND wrapper. Inputs / output share the same data_type
 // (HIPDNN_EP_DATATYPE_*); ONNX `And` is defined on bool tensors, which the

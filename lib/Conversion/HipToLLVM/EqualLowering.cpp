@@ -27,11 +27,21 @@ struct EqualOpLowering : public ConvertOpToLLVMPattern<EqualOp> {
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
+    auto lhsType = cast<MemRefType>(op.getLhs().getType());
+    auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
-    Value numElements =
+
+    // ONNX Equal supports broadcasting; the kernel handles same-shape and
+    // scalar (lhs/rhs num_elements == 1) operands. Larger NumPy-style
+    // broadcasts must be materialised upstream via Expand (the runtime
+    // wrapper rejects them).
+    Value lhsNumElements =
+        computeNumElements(lhsType, adaptor.getLhs(), rewriter, loc);
+    Value rhsNumElements =
+        computeNumElements(rhsType, adaptor.getRhs(), rewriter, loc);
+    Value outNumElements =
         computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
 
-    auto lhsType = cast<MemRefType>(op.getLhs().getType());
     int64_t dataType = getHipdnnDataType(lhsType.getElementType());
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported input element type");
@@ -41,17 +51,18 @@ struct EqualOpLowering : public ConvertOpToLLVMPattern<EqualOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
 
-    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
-                                       ptrType, i64Type, i64Type};
+    SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapEqual, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr,    lhsPtr,
-                                  rhsPtr,      outputPtr,
-                                  numElements, createI64Const(dataType)};
+    SmallVector<Value, 8> args = {statePtr,       lhsPtr,
+                                  rhsPtr,         outputPtr,
+                                  lhsNumElements, rhsNumElements,
+                                  outNumElements, createI64Const(dataType)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
