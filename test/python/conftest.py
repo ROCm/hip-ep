@@ -97,6 +97,29 @@ def fix_shapes(src: pathlib.Path, dst: pathlib.Path, dim_map: dict) -> None:
     print(f"  Fixed-shape model -> {dst.name}")
 
 
+def _prune_dead_nodes(graph) -> int:
+    """Erase nodes whose every output is neither consumed by another node nor a
+    graph output. Iterates to a fixed point so a dead chain (e.g.
+    Shape→Gather→Add→Unsqueeze) is removed end-to-end: deleting the tail
+    Unsqueeze makes the Add dead on the next pass, then the Gather, then the
+    Shape. Returns the number of nodes removed. Initializers/graph inputs are
+    never touched — only graph.node entries. Behavior-preserving: a node deleted
+    here is by definition unreachable from any graph output.
+    """
+    removed = 0
+    graph_out = {o.name for o in graph.output}
+    changed = True
+    while changed:
+        changed = False
+        consumed = {i for n in graph.node for i in n.input if i}
+        for node in list(graph.node):
+            if all(o not in consumed and o not in graph_out for o in node.output):
+                graph.node.remove(node)
+                removed += 1
+                changed = True
+    return removed
+
+
 def inject_seqlens_k(src: pathlib.Path, dst: pathlib.Path) -> None:
     """Inject the ``past_sequence_length`` input into all self-attention
     ``MultiHeadAttention`` nodes in a Whisper decoder ONNX. Cross-attention MHAs
@@ -220,9 +243,11 @@ def inject_seqlens_k(src: pathlib.Path, dst: pathlib.Path) -> None:
             name="surgery/pos_embed_gather",
             axis=0,
         )
-        # Remove the Slice (and its now-dead index-producer chain is left in the
-        # graph harmlessly — ONNX prunes unreferenced nodes at load, and the
-        # MorphiZen EP only claims nodes reachable from a graph output).
+        # Remove the Slice. Its now-dead index-producer chain (the
+        # Shape→Gather→Add→Unsqueeze that computed the old [offset, offset+S]
+        # bounds) becomes unreachable from any graph output; the _prune_dead_nodes
+        # sweep below erases it so the saved graph is clean. (ONNX/the EP would
+        # ignore the dead nodes at load anyway — this is purely for a tidy graph.)
         m.graph.node.remove(slice_node)
         m.graph.node.insert(0, gather_node)
         print(
@@ -258,6 +283,15 @@ def inject_seqlens_k(src: pathlib.Path, dst: pathlib.Path) -> None:
             gi.type.tensor_type.elem_type = TensorProto.INT64
             print("  Re-typed input_ids graph input int32 -> int64 (GPU Gather fix)")
             break
+
+    # Drop nodes orphaned by the surgery above (the position-embedding Slice's
+    # index-producer chain, plus any Shape(input_ids) left dangling once the
+    # offset arithmetic was removed). Purely cosmetic — these are already
+    # unreachable from a graph output, so behavior is unchanged; this just keeps
+    # the saved graph readable in a viewer.
+    n_pruned = _prune_dead_nodes(m.graph)
+    if n_pruned:
+        print(f"  Pruned {n_pruned} dead node(s) orphaned by surgery")
 
     onnx.save(m, str(dst), save_as_external_data=False)
     print(
