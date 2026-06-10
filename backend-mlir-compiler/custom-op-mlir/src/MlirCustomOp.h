@@ -18,6 +18,14 @@ class Model;
 
 namespace mlir_compilation {
 
+// One grow-on-demand GPU scratch buffer for a host (CPU) graph output in
+// output-allocator mode. Keeping the pointer and its capacity together (vs two
+// parallel vectors) means the two can never fall out of sync on resize.
+struct HostOutputScratch {
+  void *ptr = nullptr; // device buffer the DLL writes into (nullptr = unset)
+  size_t capacity = 0; // bytes currently allocated at ptr
+};
+
 // Custom Op implementation for MLIR-compiled models
 // Loads artifacts from EPContext and executes inference
 class MlirCustomOp : public morphizen::CustomOpImp {
@@ -82,8 +90,7 @@ private:
   // into the ORT host buffer. mutable: Compute() is const but this is a runtime
   // cache, not observable state. Left empty (no allocation) in classic mode and
   // in mock builds.
-  mutable std::vector<void *> host_out_scratch_ptr_;
-  mutable std::vector<size_t> host_out_scratch_cap_;
+  mutable std::vector<HostOutputScratch> host_out_scratch_;
 };
 
 } // namespace mlir_compilation
