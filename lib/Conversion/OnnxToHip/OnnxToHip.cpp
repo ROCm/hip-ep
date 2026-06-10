@@ -761,6 +761,19 @@ void ConvertOnnxToHipPass::runOnOperation() {
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
       return signalPassFailure();
+    // Phase 2: externalize any `onnx.Constant`s that conversion patterns
+    // SYNTHESIZED during convertComputeOps (the first lowerOnnxConstants above
+    // only saw the model's original constants). The canonical case is the
+    // 0-D zero ReluConversion emits for `Relu(x) = max(0, x)`: it feeds a GPU
+    // op (`hip.max` -> `wrap_miopenOpTensor`), so it must land in the GPU
+    // constants blob via externalization. Without this pass it would bufferize
+    // to a host-side `memref.global` and the GPU kernel would dereference a
+    // host pointer (an "unspecified launch failure" that corrupts the HIP
+    // context and crashes a later kernel launch). Same threshold/state as the
+    // first call so the externalized form is identical.
+    if (mlir::failed(
+            lowerOnnxConstants(module, funcOp, minElems, extState.get())))
+      return signalPassFailure();
   }
 
   if (timing && extState) {
