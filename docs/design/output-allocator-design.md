@@ -201,30 +201,37 @@ llvm.store %N, %shape[1]
 
 ### Phase 3: Runtime Allocator Contract
 
+Two runtime entry points bridge the EP and the generated `model.dll`, plus the struct that travels between them.
+
 **Allocator interface:**
 ```c
 typedef struct {
-  void *(*allocate)(void *self, int64_t out_idx,
-                    const int64_t *shape, int64_t rank, int64_t elem_size);
-  void *self;  // opaque context
+  void *self;          // opaque EP context (borrowed; runtime never owns/frees)
+  void *(*allocate)(void *self, int64_t out_idx, const int64_t *shape,
+                    int64_t rank, int64_t elem_size);
 } hipdnn_output_allocator_t;
 ```
 
-**Runtime exports:**
-```c
-// EP calls before inference_compute to install allocator
-void hipdnn_ep_set_output_allocator(void *state,
-                                     const hipdnn_output_allocator_t *allocator);
+The struct is a fixed-layout ABI contract across the `model.dll` ↔ EP boundary, mirrored by an identical EP-side copy — same convention as `tensor_t`. There is intentionally no size/version field: a layout change is an ABI break resolved by rebuilding the `model.dll`, exactly like any other runtime change.
 
-// DLL calls when output shape is known (emitted by lowering hip.alloc_output)
-void *hipdnn_ep_alloc_output(void *state, int64_t out_idx,
-                              const int64_t *shape, int64_t rank,
-                              int64_t elem_size);
+**Runtime entry points:**
+```c
+// EP → model.dll: installs the allocator before inference_compute.
+void hipdnn_ep_set_output_allocator(RuntimeState *state,
+                                    const hipdnn_output_allocator_t *allocator);
+
+// main_graph → runtime (emitted by lowering hip.alloc_output):
+// forwards to the installed callback; returns null if none is installed.
+void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
+                             const int64_t *shape, int64_t rank,
+                             int64_t elem_size);
 ```
 
-**Contract:** Allocator always returns device pointer (GPU buffer). The allocator implementation is responsible for:
+The setter is the only output-allocator symbol the EP resolves by name; a pre-allocator `model.dll` simply lacks it, so the EP no-ops. The classic pipeline never installs an allocator, leaving `hipdnn_ep_alloc_output` an unused null-guarded forwarder.
+
+**Allocator responsibility:** `allocate` always returns a device pointer. The implementation (Phase 5) maps each graph output to it:
 - GPU output: return ORT's GPU buffer pointer (zero-copy)
-- Host output: allocate GPU scratch, track D2H task, return scratch pointer
+- Host output: allocate GPU scratch, track a D2H task, return the scratch pointer
 
 ### Phase 4: Allocator-Aware Code Generation
 
