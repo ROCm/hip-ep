@@ -26,7 +26,10 @@ public:
                const std::shared_ptr<morphizen::MetaDefProto> &meta_def,
                onnxruntime::Model *model);
 
-  ~MlirCustomOp() override = default;
+  // Non-default destructor needed to release the lazy-allocated HIPDNN_EP_PERF
+  // event pair below (hipEventDestroy lives in the hip header, which we keep
+  // out of this header).
+  ~MlirCustomOp() override;
 
   // Execute inference using loaded artifact
   void Compute(const OrtApi *api, OrtKernelContext *context) const override;
@@ -60,6 +63,15 @@ private:
   // "past_key_values.N.{key,value}"; an upstream rename would silently break
   // the share-buffer override (KV cache corruption with no crash).
   std::vector<int> present_to_past_input_idx_;
+
+  // HIPDNN_EP_PERF wall-clock event pair. Created lazily on the first
+  // Compute() that observes perf_enabled(), then reused for the lifetime of
+  // this MlirCustomOp instance and destroyed in the destructor. Stored as
+  // void* to keep hip headers out of this header; the actual hipEvent_t type
+  // is just a pointer typedef on amdhip64, so the round-trip is safe.
+  // Mutable because Compute() is const but lazy-init writes these once.
+  mutable void *ep_perf_ev_start_ = nullptr;
+  mutable void *ep_perf_ev_stop_ = nullptr;
 };
 
 } // namespace mlir_compilation

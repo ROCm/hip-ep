@@ -43,7 +43,7 @@ InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<morphizen::Plugin> plugin,
                                const std::string &temp_dll_path)
     : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path),
-      begin_compute_fn_(nullptr) {
+      begin_compute_fn_(nullptr), flush_op_profile_fn_(nullptr) {
   // Cache the begin_compute symbol so the per-Compute() invocation is a
   // single indirect call. Older model.dlls do not export this symbol; in
   // that case we leave begin_compute_fn_ null and begin_compute() becomes
@@ -53,6 +53,10 @@ InferenceState::InferenceState(PrivateTag, void *state,
         plugin_->get_method<void, void *>("hipdnn_ep_runtime_begin_compute");
     MY_LOG(2) << "begin_compute symbol "
               << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
+    flush_op_profile_fn_ =
+        plugin_->get_method<void, void *>("hipdnn_ep_runtime_flush_op_profile");
+    MY_LOG(2) << "flush_op_profile symbol "
+              << (flush_op_profile_fn_ ? "resolved" : "not exported (no-op)");
   }
   // Safety net: warn loudly when the seqlens_k cache is effectively on
   // but the model.dll predates the begin_compute export. Without the
@@ -185,6 +189,12 @@ int InferenceState::compute(span_t *inputs, span_t *outputs) const {
 void InferenceState::begin_compute() const {
   if (begin_compute_fn_ && state_) {
     begin_compute_fn_(state_);
+  }
+}
+
+void InferenceState::flush_op_profile() const {
+  if (flush_op_profile_fn_ && state_) {
+    flush_op_profile_fn_(state_);
   }
 }
 
