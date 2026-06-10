@@ -24,6 +24,24 @@ Let `main_graph` allocate each output **at the point where its shape is computed
 
 **Scope.** Shape-derived dynamic outputs (extent from `memref.dim` of inputs). Data-dependent outputs (`NonZero`, `Range` — extent from kernel results) deferred.
 
+### Usage
+
+Allocator mode is an **opt-in, default-off** EP provider option named `use_output_allocator` (string `"1"` to enable, `"0"`/absent for the classic 3-arg ABI). There is no per-model auto-enable.
+
+Pure ORT (Python):
+```python
+so = ort.SessionOptions()
+so.add_provider_for_devices(devices, {"use_output_allocator": "1"})
+sess = ort.InferenceSession(model_path, sess_options=so)
+```
+
+OGA (`genai_config.json`):
+```json
+"provider_options": [ { "MorphiZenEP": { "use_output_allocator": "1" } } ]
+```
+
+The flag is read once in `pass_main.cpp` (`get_provider_option("use_output_allocator", "0") == "1"`), baked into the compiled DLL's pipeline + metadata, and the EP picks its runtime dispatch arity from that embedded metadata. **It is therefore a compile-time choice**: because the model.dll cache key is the ONNX graph hash (not the provider options), toggling the flag on an already-compiled model requires clearing the cache (`del %TEMP%\morphizen_mlir_*`) before it takes effect.
+
 ---
 
 ## 2. Design
