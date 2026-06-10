@@ -22,12 +22,9 @@
 
 #include <cstdio>
 
-// EP -> model.dll. Exported so the EP can GetProcAddress it from the compiled
-// model.dll (the symbol is also added to export_symbols in
-// lib/Compiler/CompilerDriver.cpp). HIPDNN_EP_RT_EXPORT is dllexport in the
-// bitcode build -- belt-and-suspenders with that list: it keeps the symbol
-// alive through LLVM optimization, which the linker-stage export list cannot --
-// and is empty in the unit-test build via HIPDNN_EP_RT_NO_EXPORT.
+// EP -> model.dll. Exported so the EP can GetProcAddress it (see
+// HIPDNN_EP_RT_EXPORT in hipdnn_ep_runtime.h for why the attribute is on both
+// the decl and this def, and why it is also listed in export_symbols).
 extern "C" HIPDNN_EP_RT_EXPORT void
 hipdnn_ep_set_output_allocator(RuntimeState *state,
                                const hipdnn_output_allocator_t *allocator) {
