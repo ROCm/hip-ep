@@ -39,12 +39,18 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// Build a 0-D `arith.constant` carrying a zero value of `elemType`.
+/// Build a 0-D `onnx.Constant` carrying a zero value of `elemType`.
 ///
-/// We emit `arith.constant` (not `onnx.Constant`) because `convert-onnx-to-hip`
-/// runs `lowerOnnxConstants` BEFORE `convertComputeOps`. Any `onnx.Constant` we
-/// synthesize from a compute-op pattern is therefore never lowered and trips
-/// "op was not bufferized" downstream.
+/// MUST be `onnx.Constant`, not `arith.constant`: this zero is consumed by a
+/// GPU op (`hip.max` -> `wrap_miopenOpTensor`). An `arith.constant` bufferizes
+/// to a host-side `memref.global` in the DLL data section, so the GPU kernel
+/// would dereference a host pointer (invalid GPU access -> "unspecified launch
+/// failure", surfacing as a crash on a later kernel launch). Emitting
+/// `onnx.Constant` routes the zero through `lowerOnnxConstants`, which
+/// externalizes it into the GPU constants blob (`hip.external_data`) like every
+/// other constant. The synthesized `onnx.Constant` is created during
+/// `convertComputeOps` and is externalized by the Phase-2 `lowerOnnxConstants`
+/// call that runs after `convertComputeOps` (see OnnxToHip.cpp).
 static mlir::Value buildZeroScalar(mlir::PatternRewriter &rewriter,
                                    mlir::Location loc, mlir::Type elemType) {
   auto scalarType = mlir::RankedTensorType::get({}, elemType);
@@ -57,7 +63,10 @@ static mlir::Value buildZeroScalar(mlir::PatternRewriter &rewriter,
     llvm::APInt zero(intType.getWidth(), 0, /*isSigned=*/true);
     valueAttr = mlir::DenseElementsAttr::get(scalarType, zero);
   }
-  return mlir::arith::ConstantOp::create(rewriter, loc, valueAttr).getResult();
+  mlir::OperationState state(loc, "onnx.Constant");
+  state.addTypes(scalarType);
+  state.addAttribute("value", valueAttr);
+  return rewriter.create(state)->getResult(0);
 }
 
 struct ReluToHipMax : public mlir::RewritePattern {
