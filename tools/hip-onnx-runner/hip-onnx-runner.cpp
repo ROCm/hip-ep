@@ -829,12 +829,11 @@ int main(int argc, char *argv[]) {
       "false", true);
   mo.add_option(
       "f", "free-dim",
-      "Override a free/symbolic input dimension by name to a concrete value: "
-      "'name:value' (repeatable or comma-separated), e.g. "
-      "-f sequence_length:128. Mirrors onnxruntime_perf_test's -f option; "
-      "applied via AddFreeDimensionOverrideByName so ORT resolves the symbolic "
-      "dim consistently across the graph. Any free dim left unoverridden is "
-      "treated as 1.",
+      "Resolve a symbolic input dimension by name to a concrete value at RUN "
+      "time: 'name:value' (repeatable or comma-separated), e.g. "
+      "-f sequence_length:128. The EP still compiles the DYNAMIC (symbolic) "
+      "graph; the value only sizes the input tensors. Symbolic dims without a "
+      "matching override default to 1.",
       "");
 
   try {
@@ -961,10 +960,14 @@ int main(int argc, char *argv[]) {
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 
-  // Free-dimension overrides (mirror onnxruntime_perf_test -f). Each entry is
-  // "name:value"; ORT substitutes the symbolic dim by name across the whole
-  // graph before shape inference, keeping shared dims consistent. Free dims
-  // left unoverridden are filled as 1 during input generation below.
+  // Free-dimension values for symbolic input dims. Each entry is "name:value".
+  // These are deliberately NOT applied via AddFreeDimensionOverrideByName: that
+  // would make ORT substitute the symbolic dims before the graph reaches the
+  // EP, so the EP would compile a *static* graph. We want the opposite -- the
+  // EP should compile the *dynamic* (symbolic) graph, and the concrete value is
+  // only used at run time to size the input tensors (see the input loop below).
+  // Symbolic input dims with no matching override fall back to 1.
+  std::unordered_map<std::string, int64_t> free_dim_values;
   for (const std::string &ov : mo.get_vector<std::string>("free-dim")) {
     const auto colon = ov.find(':');
     if (colon == std::string::npos || colon == 0 || colon + 1 >= ov.size()) {
@@ -984,9 +987,9 @@ int main(int argc, char *argv[]) {
       std::cerr << "Error: --free-dim value must be > 0, got: " << ov << "\n";
       return 1;
     }
-    session_opts.AddFreeDimensionOverrideByName(dim_name.c_str(), dim_value);
-    std::cout << "Overriding free dimension '" << dim_name << "' -> "
-              << dim_value << "\n";
+    free_dim_values[dim_name] = dim_value;
+    std::cout << "Free dimension '" << dim_name << "' -> " << dim_value
+              << " (runtime input shape; EP still compiles dynamic)\n";
   }
 
   // Create session
@@ -1019,6 +1022,7 @@ int main(int argc, char *argv[]) {
   std::vector<std::string> input_names_str;
   std::vector<const char *> input_names;
   std::vector<std::vector<int64_t>> input_shapes;
+  std::vector<std::vector<std::string>> input_symbolic_dims;
   std::vector<ONNXTensorElementDataType> input_types;
 
   for (size_t i = 0; i < input_count; ++i) {
@@ -1028,6 +1032,15 @@ int main(int argc, char *argv[]) {
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
     input_shapes.push_back(tensor_info.GetShape());
     input_types.push_back(tensor_info.GetElementType());
+    // GetSymbolicDimensions returns ORT-owned const char* (one per dim; empty
+    // string for static dims). Copy to std::string while tensor_info is alive
+    // so we can resolve symbolic dims by name when sizing inputs below.
+    std::vector<const char *> sym = tensor_info.GetSymbolicDimensions();
+    std::vector<std::string> sym_copy;
+    sym_copy.reserve(sym.size());
+    for (const char *s : sym)
+      sym_copy.emplace_back(s ? s : "");
+    input_symbolic_dims.push_back(std::move(sym_copy));
   }
   for (auto &s : input_names_str)
     input_names.push_back(s.c_str());
@@ -1063,13 +1076,22 @@ int main(int argc, char *argv[]) {
 
   for (size_t i = 0; i < input_count; ++i) {
     auto shape = input_shapes[i];
-    // Any free dimension still unresolved here (i.e. not pinned via --free-dim)
-    // is treated as 1, matching onnxruntime_perf_test's default behavior
-    // (free dimensions are treated as 1 if not overridden). This keeps the
-    // buffer-size computation below from overflowing on symbolic dims.
-    for (auto &dim : shape) {
-      if (dim < 0)
-        dim = 1;
+    // Resolve free/symbolic dims (-1) for the *runtime* input tensor only; the
+    // graph the EP compiled stays dynamic. A dim is resolved by its symbolic
+    // name via --free-dim (e.g. sequence_length:128); any symbolic dim without
+    // a matching override falls back to 1 so the buffer-size computation below
+    // does not overflow.
+    const auto &sym = input_symbolic_dims[i];
+    for (size_t j = 0; j < shape.size(); ++j) {
+      if (shape[j] >= 0)
+        continue;
+      int64_t resolved = 1;
+      if (j < sym.size() && !sym[j].empty()) {
+        auto it = free_dim_values.find(sym[j]);
+        if (it != free_dim_values.end())
+          resolved = it->second;
+      }
+      shape[j] = resolved;
     }
 
     size_t elem_size = element_byte_size(input_types[i]);
