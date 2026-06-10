@@ -23,6 +23,17 @@
 
 static constexpr size_t kScratchAlignment = 256;
 
+// ck_dsl-generated fused (Add + RMSNorm) kernel for f32, hidden_dim=4096
+// (Qwen3.5 residual-stream shape). Defined in
+// ck_dsl_skip_simplified_layer_norm.cpp.
+//
+// Returns 0 on launch, -2 (kRejectFallback) when shape doesn't match or
+// HSACO failed to load.
+extern "C" int ck_dsl_skip_simplified_layer_norm(
+    void *stream, const void *input, const void *skip, const void *gamma,
+    void *output, void *residual_sum_out, int64_t num_rows, int64_t hidden_dim,
+    float epsilon);
+
 //===----------------------------------------------------------------------===//
 // Descriptor cache: T5LayerNorm + OpTensor descriptors created once per unique
 // (num_rows, hidden_dim, data_type) triple, reused for process lifetime.
@@ -250,6 +261,30 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   void *rstd_buf = ws + skip_aligned;
 
   int result = 0;
+
+  //===--------------------------------------------------------------------===//
+  // Fast path: ck_dsl-generated fused (Add + RMSNorm * Gamma) kernel.
+  // Only fires for the exact shape the HSACO was compiled for (f32,
+  // hidden_dim=4096, no bias). Anything else falls through to the MIOpen
+  // baseline below.
+  //===--------------------------------------------------------------------===//
+  if (data_type == miopenFloat && !bias && hidden_dim == 4096) {
+    void *stream = hipdnn_ep_state_get_stream(state);
+    if (stream) {
+      int ck_rc = ck_dsl_skip_simplified_layer_norm(stream, input, skip, gamma,
+                                                    output, skip_buf, num_rows,
+                                                    hidden_dim, epsilon);
+      if (ck_rc == 0) {
+        RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: ck_dsl "
+                          "fused fast path used (M=%lld, N=%lld)\n",
+                          (long long)num_rows, (long long)hidden_dim);
+        return 0;
+      }
+      // ck_rc == -2 -> RejectFallback (shape mismatch or load failure);
+      // any other non-zero -> HIP launch error already logged. Either
+      // way fall through to the MIOpen baseline below.
+    }
+  }
 
   //===--------------------------------------------------------------------===//
   // Step 1: Element-wise add -- skip_buf = input + skip
