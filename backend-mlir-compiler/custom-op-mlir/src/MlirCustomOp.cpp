@@ -786,7 +786,6 @@ void MlirCustomOp::compute_with_output_allocator(
   octx.allocated.assign(metadata_.outputs().size(), false);
 
   output_allocator_t alloc;
-  alloc.struct_size = sizeof(output_allocator_t);
   alloc.self = &octx;
   alloc.allocate = &output_allocate_cb;
   inference_state_->set_output_allocator(&alloc);

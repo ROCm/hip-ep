@@ -86,22 +86,18 @@ struct span_t {
 // graph-output buffer at the point its shape is known. Re-declared here (not
 // shared) for the same decoupling reason as tensor_t.
 //
-// ABI / forward-compat: `struct_size` MUST stay first; the runtime setter
-// copies only min(caller_size, local_size) bytes, so the EP MUST set
-// `struct_size = sizeof(output_allocator_t)`. New callbacks are APPENDED after
-// `allocate`; existing fields never move. The runtime header explicitly
-// requires this EP-side copy to carry the same asserts.
+// ABI: layout MUST match `hipdnn_output_allocator_t` exactly -- the runtime
+// setter does a plain struct copy across the model.dll <-> EP boundary, so any
+// field add/reorder here without the same change in the runtime header shifts
+// `allocate` and turns the in-graph call into a jump through a garbage pointer.
 struct output_allocator_t {
-  size_t struct_size; // ABI size guard; MUST be first (offset 0)
-  void *self;         // opaque EP context (borrowed; runtime never owns/frees)
+  void *self; // opaque EP context (borrowed; runtime never owns/frees)
   void *(*allocate)(void *self, int64_t out_idx, const int64_t *shape,
                     int64_t rank, int64_t elem_size);
 };
 
-static_assert(offsetof(output_allocator_t, struct_size) == 0,
-              "output_allocator_t.struct_size must remain first (ABI guard)");
-static_assert(offsetof(output_allocator_t, self) == sizeof(size_t),
-              "output_allocator_t.self moved -- update all copies "
+static_assert(offsetof(output_allocator_t, self) == 0,
+              "output_allocator_t.self must remain first -- update all copies "
               "(lib/Runtime/hipdnn_ep_runtime.h)");
 
 // ============================================================================
