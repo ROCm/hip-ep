@@ -449,9 +449,15 @@ static void initialize_mlir_api() {
     auto* mlir_tensor =
         reinterpret_cast<const morphizen::mlir_impl::MLIRTensor*>(
             &tensor_proto);
+    // TensorProto always backs a concrete initializer with a known rank;
+    // unranked storage is only possible at the ORT NodeArg boundary.
+    auto shape = mlir_tensor->getShape();
+    CHECK(shape.has_value())
+        << "tensor_proto_get_shape_unsafe: tensor has no rank: "
+        << mlir_tensor->getName();
     // MLIR→ONNX boundary: translate kDynamic back to -1.
-    auto result = std::make_unique<std::vector<int64_t>>(
-        mlir_impl::to_onnx_dims(mlir_tensor->getShape()));
+    auto result =
+        std::make_unique<std::vector<int64_t>>(mlir_impl::to_onnx_dims(*shape));
     return morphizen::DllSafe<std::vector<int64_t>>(result.release());
   };
 
@@ -996,13 +1002,19 @@ static void initialize_mlir_api() {
   the_mlir_instance_of_morphizen_ort_api.node_arg_get_shape_i64_unsafe =
       [](const morphizen::NodeArg& node_arg)
       -> morphizen::DllSafe<std::vector<int64_t>> {
-    // Convert the morphizen::NodeArg reference to MLIRNodeArgIndex
     auto node_arg_index =
         mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
             &node_arg);
-
+    auto mlir_shape = node_arg_index.get_shape_i64();
+    // Unranked: a DllSafe with get()==nullptr is the cross-backend signal that
+    // morphizen-core's wrapper translates into a null shape, which is what
+    // node_arg_is_unknown_shape() checks. Matches the ONNX-IR backend's
+    // NodeArgIndex::get_shape_i64_unsafe() returning a nullptr vector.
+    if (!mlir_shape) {
+      return morphizen::DllSafe<std::vector<int64_t>>{};
+    }
     // MLIR→ONNX boundary: translate kDynamic back to -1.
-    auto vec_shape = mlir_impl::to_onnx_dims(node_arg_index.get_shape_i64());
+    auto vec_shape = mlir_impl::to_onnx_dims(*mlir_shape);
     return morphizen::DllSafe<std::vector<int64_t>>(vec_shape);
   };
 

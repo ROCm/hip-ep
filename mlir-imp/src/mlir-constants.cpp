@@ -11,46 +11,34 @@ namespace morphizen {
 namespace mlir_impl {
 // In onnx-mlir , all Tensor element type if is signed integer 8bit use `i8`
 // all attribute type if is signed Integer use `si64`
-mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
-                                     const llvm::SmallVector<int64_t>* shape) {
-  // First get the element type
-  mlir::Type elementType;
+mlir::Type onnxElementTypeToMlirElementType(int element_type,
+                                            mlir::OpBuilder& builder) {
   switch (element_type) {
   case 1: // TensorProto_DataType_FLOAT
-    elementType = builder.getF32Type();
-    break;
+    return builder.getF32Type();
   case 2: // TensorProto_DataType_UINT8
-    elementType = builder.getIntegerType(8, false);
-    break;
+    return builder.getIntegerType(8, false);
   case 3: // TensorProto_DataType_INT8
     // builder.getIntegerType(8, true) -> si8
     // builder.getIntegerType(8, false) -> ui8
     // builder.getIntegerType(8) -> i8
-    elementType = builder.getIntegerType(8);
-    break;
+    return builder.getIntegerType(8);
   case 4: // TensorProto_DataType_UINT16
-    elementType = builder.getIntegerType(16, false);
-    break;
+    return builder.getIntegerType(16, false);
   case 5: // TensorProto_DataType_INT16
-    elementType = builder.getIntegerType(16);
-    break;
+    return builder.getIntegerType(16);
   case 6: // TensorProto_DataType_INT32
-    elementType = builder.getI32Type();
-    break;
+    return builder.getI32Type();
   case 7: // TensorProto_DataType_INT64
-    elementType = builder.getI64Type();
-    break;
+    return builder.getI64Type();
   case 9: // TensorProto_DataType_BOOL
     // ONNX stores BOOL as 8-bit (1 byte): 0x00=False, 0x01=True
     // Use ui8 to match ONNX physical storage format
-    elementType = builder.getIntegerType(8, false);
-    break;
+    return builder.getIntegerType(8, false);
   case 10: // TensorProto_DataType_FLOAT16
-    elementType = builder.getF16Type();
-    break;
+    return builder.getF16Type();
   case 11: // TensorProto_DataType_DOUBLE
-    elementType = builder.getF64Type();
-    break;
+    return builder.getF64Type();
   default:
     // TensorProto_DataType_UNDEFINED = 0,
     // TensorProto_DataType_STRING = 8,
@@ -67,25 +55,20 @@ mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
     // TensorProto_DataType_INT4 = 22
     LOG(WARNING) << "Unsupported element type: " << element_type
                  << ", using F32";
-    elementType = builder.getF32Type();
-    break;
+    return builder.getF32Type();
   }
+}
 
-  // If no shape is provided, return just the element type
+mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
+                                     const llvm::SmallVector<int64_t>* shape) {
+  auto elementType = onnxElementTypeToMlirElementType(element_type, builder);
   if (!shape) {
-    return elementType;
+    return mlir::UnrankedTensorType::get(elementType);
   }
-
-  // Create tensor type with shape
-  // Empty shape = scalar (rank-0 tensor), e.g. tensor<i32>
-  // UnrankedTensorType (tensor<*xT>) cannot be lowered by dialect converters
-  // because the rank is unknown, so we always use RankedTensorType.
   if (shape->empty()) {
     return mlir::RankedTensorType::get({}, elementType);
-  } else {
-    // Shape must already be in MLIR-canonical form (see header note).
-    return mlir::RankedTensorType::get(*shape, elementType);
   }
+  return mlir::RankedTensorType::get(*shape, elementType);
 }
 
 } // namespace mlir_impl

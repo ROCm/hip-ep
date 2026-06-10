@@ -17,14 +17,16 @@ namespace morphizen {
 namespace mlir_impl {
 
 namespace {
-// Helper function to extract shape from MLIR value
-MLIRNodeArg::shape_t extractShapeFromValue(mlir::Value value) {
+// Helper function to extract shape from MLIR value. Returns nullopt for
+// UnrankedTensorType (tensor<*xT>) to keep the ranked vs unranked distinction
+// across the Stage1 (TensorDesc) / Stage2 (mlir::Value) variant.
+std::optional<MLIRNodeArg::shape_t> extractShapeFromValue(mlir::Value value) {
   if (auto tensorType =
           mlir::dyn_cast<mlir::RankedTensorType>(value.getType())) {
     auto mlirShape = tensorType.getShape();
     return MLIRNodeArg::shape_t(mlirShape.begin(), mlirShape.end());
   }
-  return MLIRNodeArg::shape_t{};
+  return std::nullopt;
 }
 
 // Helper function to extract element type from MLIR value
@@ -96,10 +98,13 @@ int extractElementTypeFromValue(mlir::Value value) {
 }
 } // anonymous namespace
 
-MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t& shape,
+MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t* shape,
                          int element_type)
     : name_{name},
-      value_{TensorDesc{{name, shape, element_type}, std::nullopt}} {
+      value_{TensorDesc{{name,
+                         shape ? std::optional<shape_t>{*shape} : std::nullopt,
+                         element_type},
+                        std::nullopt}} {
   validateElementType(element_type);
 }
 
@@ -133,7 +138,7 @@ MLIRNodeArg::MLIRNodeArg(const std::string& name, mlir::Value value)
 
 const std::string& MLIRNodeArg::getName() const { return name_; }
 
-MLIRNodeArg::shape_t MLIRNodeArg::getShape() const {
+std::optional<MLIRNodeArg::shape_t> MLIRNodeArg::getShape() const {
   if (auto* desc = std::get_if<TensorDesc>(&value_))
     return desc->meta.shape;
   return extractShapeFromValue(std::get<mlir::Value>(value_));
@@ -184,8 +189,11 @@ mlir::Type MLIRNodeArg::getType(mlir::OpBuilder& builder) const {
       return val->getType();
   }
 
+  // nullopt routes through onnxElementTypeToMlirType's nullptr branch, which
+  // emits mlir::UnrankedTensorType.
   auto shape = getShape();
-  return onnxElementTypeToMlirType(getElementType(), builder, &shape);
+  return onnxElementTypeToMlirType(getElementType(), builder,
+                                   shape ? &*shape : nullptr);
 }
 
 const void* MLIRNodeArg::getData() const {
@@ -273,9 +281,9 @@ bool MLIRNodeArg::isExternalData() const {
 
 int64_t MLIRNodeArg::getElementCount() const {
   auto shape = getShape();
-  if (shape.empty())
+  if (!shape || shape->empty())
     return 0;
-  return std::accumulate(shape.begin(), shape.end(), 1LL,
+  return std::accumulate(shape->begin(), shape->end(), 1LL,
                          std::multiplies<int64_t>());
 }
 

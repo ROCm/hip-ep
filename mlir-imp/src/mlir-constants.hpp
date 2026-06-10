@@ -132,17 +132,26 @@ inline bool isReturnOrYieldOp(mlir::Operation* op) {
 }
 } // namespace onnx_mlir
 
-// Utility function to convert ONNX element types to MLIR types
-// If shape is provided, creates a tensor type (ranked or unranked)
-// If shape is not provided, returns just the element type
+// Convert an ONNX TensorProto element type to a bare MLIR element type
+// (e.g. f16, i64, ui8). Caller-facing use is the Cast `to` attribute builder
+// and similar element-type-only spots; tensor-shaped values should go through
+// onnxElementTypeToMlirType below.
+mlir::Type onnxElementTypeToMlirElementType(int element_type,
+                                            mlir::OpBuilder& builder);
+
+// Convert an ONNX TensorProto element type + shape to an MLIR tensor type.
+//   shape == nullptr   -> mlir::UnrankedTensorType (tensor<*xT>); used for
+//                         tensors that crossed the ORT boundary with
+//                         HasShape() == false.
+//   shape->empty()     -> mlir::RankedTensorType with rank 0 (tensor<T>).
+//   shape with dims    -> mlir::RankedTensorType (tensor<DxT>).
 //
 // NOTE: when a shape is supplied it is expected to already be in MLIR-canonical
 // form (any dynamic dims represented as mlir::ShapedType::kDynamic). ONNX ↔
 // MLIR sentinel translation happens at the api boundary (see to_mlir_dims /
 // to_onnx_dims in morphizen-ort-api.cpp).
-mlir::Type
-onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
-                          const llvm::SmallVector<int64_t>* shape = nullptr);
+mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
+                                     const llvm::SmallVector<int64_t>* shape);
 
 } // namespace mlir_impl
 } // namespace morphizen

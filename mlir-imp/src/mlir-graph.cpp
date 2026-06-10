@@ -684,8 +684,9 @@ MLIRNodeArgIndex
 MLIRGraph::node_arg_new(const std::string& name,
                         const llvm::SmallVector<int64_t>* shape,
                         int element_type) {
-  CHECK(shape != nullptr);
-  // the name must not exists in `node_args_`
+  // shape == nullptr signals an unranked tensor at the ORT boundary (ORT's
+  // TensorTypeAndShapeInfo::HasShape() == false). Lowered to
+  // mlir::UnrankedTensorType by MLIRNodeArg::getType().
   if (node_args_map_.count(name) > 0) {
     auto node_arg_index = node_args_map_[name];
     // in onnxruntime implementation,
@@ -696,16 +697,16 @@ MLIRGraph::node_arg_new(const std::string& name,
     // so it is OK if we create a node arg more than once for constant
     // intializers.
     auto& node_arg = node_arg_index.get_node_arg();
-    if (node_arg.isConstantValue() && *shape == node_arg.getShape() &&
+    auto existing_shape = node_arg.getShape();
+    if (node_arg.isConstantValue() && shape != nullptr &&
+        existing_shape.has_value() && *shape == *existing_shape &&
         element_type == node_arg.getElementType()) {
       return node_arg_index;
     }
     LOG(FATAL) << "symbol \"" << name << "\" already exists.";
-    // Return a default-constructed MLIRNodeArgIndex (this won't be reached due
-    // to LOG(FATAL))
     return MLIRNodeArgIndex::invalid();
   }
-  auto nodeArg = std::make_unique<MLIRNodeArg>(name, *shape, element_type);
+  auto nodeArg = std::make_unique<MLIRNodeArg>(name, shape, element_type);
   all_node_args_.push_back(std::move(nodeArg));
   auto ret =
       MLIRNodeArgIndex::node_output((int32_t)all_node_args_.size() - 1,
@@ -906,7 +907,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
                   mlir::dyn_cast<mlir::IntegerAttr>(attr.getValue())) {
             int onnx_type = static_cast<int>(int_attr.getSInt());
             mlir::Type mlir_type =
-                onnxElementTypeToMlirType(onnx_type, builder);
+                onnxElementTypeToMlirElementType(onnx_type, builder);
             new_attrs.push_back(
                 builder.getNamedAttr("to", mlir::TypeAttr::get(mlir_type)));
             continue;

@@ -10,6 +10,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include <cstdint>
+#include <glog/logging.h>
 
 namespace morphizen {
 namespace mlir_impl {
@@ -111,15 +112,19 @@ MLIRNamedAttribute::create_tensor(const std::string& name,
                                   const MLIRNodeArg& tensor) {
   static std::map<std::string, std::unique_ptr<MLIRNodeArg>> tensor_map;
 
-  // Create a new MLIRNodeArg using the available constructor
+  // Tensor attributes always carry concrete weight data; unranked storage is
+  // only possible at the ORT NodeArg boundary, not for initializers.
+  auto shape = tensor.getShape();
+  CHECK(shape.has_value()) << "tensor attribute has no rank: "
+                           << tensor.getName();
   std::unique_ptr<MLIRNodeArg> tensor_copy;
   if (tensor.hasData()) {
     tensor_copy = std::make_unique<MLIRNodeArg>(
-        tensor.getName(), tensor.getShape(), tensor.getElementType(),
-        tensor.getData(), tensor.getDataSize());
+        tensor.getName(), *shape, tensor.getElementType(), tensor.getData(),
+        tensor.getDataSize());
   } else {
-    tensor_copy = std::make_unique<MLIRNodeArg>(
-        tensor.getName(), tensor.getShape(), tensor.getElementType());
+    tensor_copy = std::make_unique<MLIRNodeArg>(tensor.getName(), &*shape,
+                                                tensor.getElementType());
   }
 
   MLIRNodeArg* tensor_ptr = tensor_copy.get();
