@@ -132,7 +132,8 @@ struct HipdnnPipelineOptions
       *this, "use-output-allocator",
       llvm::cl::desc(
           "Allocator pipeline: route the ONNX-to-HIP half through "
-          "hip-use-output-allocator, which sets the hipdnn.use_output_allocator "
+          "hip-use-output-allocator, which sets the "
+          "hipdnn.use_output_allocator "
           "module attribute; convert-hip-to-llvm + generate-interface then "
           "read "
           "that attribute (default: false = classic out-params)"),
