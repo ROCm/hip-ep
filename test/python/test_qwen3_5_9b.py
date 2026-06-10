@@ -66,7 +66,9 @@ from conftest import (
 
 # Local model dir (vision.onnx + vision.onnx.data ~915 MB). Downloaded by
 # huggingface_hub from amd/Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu.
-QWEN35_MODEL_DIR = REPO_ROOT / "models" / "Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu-2"
+QWEN35_MODEL_DIR = (
+    REPO_ROOT / "models" / "Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu-2"
+)
 
 
 def test_qwen_vision_patch_merger_dynshape():
@@ -783,9 +785,9 @@ class TestQwen3_5_9BMultimodal:
             "step failed silently."
         )
         assert not all(t == 0 for t in tokens), (
-            f"CPU produced all-zero token sequence — likely NaN/zero "
-            f"logits. ORT setup is broken; gate the rest of the suite "
-            f"on this before debugging EP-side issues."
+            "CPU produced all-zero token sequence — likely NaN/zero "
+            "logits. ORT setup is broken; gate the rest of the suite "
+            "on this before debugging EP-side issues."
         )
         assert "eiffel" in decoded.lower(), (
             "CPU baseline did not identify the Eiffel Tower in tower.jpg. "
@@ -796,7 +798,13 @@ class TestQwen3_5_9BMultimodal:
         )
 
     def _run_oga_in_provider_mode(
-        self, workspace, provider, *, with_image, max_new, max_length=None,
+        self,
+        workspace,
+        provider,
+        *,
+        with_image,
+        max_new,
+        max_length=None,
     ):
         """Spawn an OGA worker patched to use either CPU EP or MorphiZenEP,
         with or without the test image, and return the generated token list.

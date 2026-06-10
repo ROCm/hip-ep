@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Smoke-test wrapper for benchmark_multimodal.py against the user's locally
 built OGA (0.13.0.dev0 / ORT 1.26.0 / MorphiZenEP plugin).
 
@@ -53,6 +57,7 @@ Then:
 not benchmark_multimodal.py's output -- so manual grep is the path for
 multimodal until/unless the formatter is extended.)
 """
+
 import ctypes
 import os
 import sys
@@ -73,14 +78,22 @@ BENCHMARK = r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\oga-source
 # Default benchmark args -- overridden by anything passed on the CLI
 # ---------------------------------------------------------------------------
 DEFAULT_ARGV = [
-    "-i", r"C:\Users\Administrator\Downloads\Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu",
-    "--image_path", r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\test\python\images\tower.jpg",
-    "-g", "64",
-    "-m", "2048",
-    "-r", "10",
-    "-w", "1",
-    "-k", "1",
-    "-p", "1.0",
+    "-i",
+    r"C:\Users\Administrator\Downloads\Qwen3.5-9B-rtn-int4-int8-128gs-fp16-onnx-gpu",
+    "--image_path",
+    r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\test\python\images\tower.jpg",
+    "-g",
+    "64",
+    "-m",
+    "2048",
+    "-r",
+    "10",
+    "-w",
+    "1",
+    "-k",
+    "1",
+    "-p",
+    "1.0",
     "-v",
     "-mo",
 ]
@@ -91,8 +104,11 @@ DEFAULT_ARGV = [
 os.environ.setdefault("THEROCK_DIST", THEROCK_DIST)
 os.environ.setdefault("HIP_CUSTOM_KERNELS_DIR", PREBUILT_LIB)
 os.environ.setdefault("HIPDNN_EP_PERF", "1")
-print(f"[wrap] HIPDNN_EP_PERF={os.environ['HIPDNN_EP_PERF']}  "
-      f"THEROCK_DIST={os.environ['THEROCK_DIST']}", flush=True)
+print(
+    f"[wrap] HIPDNN_EP_PERF={os.environ['HIPDNN_EP_PERF']}  "
+    f"THEROCK_DIST={os.environ['THEROCK_DIST']}",
+    flush=True,
+)
 
 # ---------------------------------------------------------------------------
 # DLL search-path setup (+ PATH for any indirect lookups)
@@ -108,7 +124,9 @@ for d in (THEROCK_BIN, PREBUILT_BIN, ORT_126_DIR, OGA_DIR, os.path.dirname(DML_D
 ctypes.CDLL(DML_DLL)
 ctypes.CDLL(os.path.join(ORT_126_DIR, "onnxruntime_providers_shared.dll"))
 ort = ctypes.CDLL(os.path.join(ORT_126_DIR, "onnxruntime.dll"))
-print(f"[wrap] Pre-loaded ORT 1.26 onnxruntime.dll handle: {ort._handle:#x}", flush=True)
+print(
+    f"[wrap] Pre-loaded ORT 1.26 onnxruntime.dll handle: {ort._handle:#x}", flush=True
+)
 
 os.chdir(PREBUILT_BIN)
 print(f"[wrap] cwd -> {os.getcwd()}", flush=True)
@@ -137,8 +155,7 @@ def _last_value(args, *flags):
 if not any(a in ("-o", "--output") for a in user_args):
     img = _last_value(argv, "--image_path", "-im") or "run"
     stem = os.path.splitext(os.path.basename(img))[0]
-    csv_out = os.path.join(
-        r"C:\Users\Administrator\workspace\build", f"{stem}_mm.csv")
+    csv_out = os.path.join(r"C:\Users\Administrator\workspace\build", f"{stem}_mm.csv")
     argv += ["-o", csv_out]
     print(f"[wrap] CSV output -> {csv_out}", flush=True)
 
@@ -150,9 +167,12 @@ with open(BENCHMARK) as f:
 exec(code, {"__name__": "__main__", "__file__": BENCHMARK})
 
 print("", flush=True)
-print("[wrap] DONE. With HIPDNN_EP_PERF=1, look in your captured log for:",
-      flush=True)
-print("[wrap]   [PERF SUMMARY]        -- per-Compute aggregates (process exit)",
-      flush=True)
-print("[wrap]   [PERF] === ... ===    -- per-op GPU/CPU table (one per Compute())",
-      flush=True)
+print("[wrap] DONE. With HIPDNN_EP_PERF=1, look in your captured log for:", flush=True)
+print(
+    "[wrap]   [PERF SUMMARY]        -- per-Compute aggregates (process exit)",
+    flush=True,
+)
+print(
+    "[wrap]   [PERF] === ... ===    -- per-op GPU/CPU table (one per Compute())",
+    flush=True,
+)

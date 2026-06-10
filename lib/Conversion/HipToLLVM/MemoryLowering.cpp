@@ -694,10 +694,10 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       // post-collapse inner extent; the two differ by the dropped dim's factor.
       // A single 2D copy with pitch = stride[splitDim-1] would then walk every
       // height row at that one (too-small) pitch and silently read the wrong
-      // source rows.  When we can STATICALLY PROVE the prefix does not collapse,
-      // bail so the generic strided @memrefCopy libcall (registered by the
-      // standard memref-to-llvm lowering at lower benefit) handles it correctly
-      // by walking the outer index space one row at a time.
+      // source rows.  When we can STATICALLY PROVE the prefix does not
+      // collapse, bail so the generic strided @memrefCopy libcall (registered
+      // by the standard memref-to-llvm lowering at lower benefit) handles it
+      // correctly by walking the outer index space one row at a time.
       //
       // Before:  memref.copy %sv, %tmp
       //   : memref<?x16x36xf16, strided<[3456, 72, 1], offset: ?>>
@@ -712,7 +712,8 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
         if (ShapedType::isDynamic(typeStrides[i]) ||
             ShapedType::isDynamic(typeStrides[i + 1]) ||
             ShapedType::isDynamic(shape[i + 1]))
-          continue; // cannot disprove collapse; keep the runtime-correct 2D path
+          continue; // cannot disprove collapse; keep the runtime-correct 2D
+                    // path
         if (typeStrides[i] != typeStrides[i + 1] * shape[i + 1])
           return rewriter.notifyMatchFailure(
               op, "non-collapsible outer strides; defer to generic memrefCopy");

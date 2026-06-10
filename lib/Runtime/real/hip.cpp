@@ -144,14 +144,12 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
   // chains) would otherwise stall the GPU and show up as inter-op idle in the
   // prefill profile. NULL (before the first begin_compute on this thread)
   // falls back to stream 0 = previous behavior.
-  hipStream_t stream =
-      static_cast<hipStream_t>(hipdnn_ep_get_current_stream());
+  hipStream_t stream = static_cast<hipStream_t>(hipdnn_ep_get_current_stream());
 
   // Rank-0: a single element. No strides to honour.
   if (rank == 0) {
-    hipError_t err =
-        hipMemcpyAsync(dstBase, srcBase, elemSize, hipMemcpyDeviceToDevice,
-                       stream);
+    hipError_t err = hipMemcpyAsync(dstBase, srcBase, elemSize,
+                                    hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
       fprintf(stderr, "memrefCopy(rank-0) failed: %s\n",
               hipGetErrorString(err));
@@ -190,9 +188,8 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
 
   // Tier 1: fully contiguous on both sides — one flat memcpy.
   if (rowStart == 0) {
-    hipError_t err =
-        hipMemcpyAsync(dstBase, srcBase, rowBytes, hipMemcpyDeviceToDevice,
-                       stream);
+    hipError_t err = hipMemcpyAsync(dstBase, srcBase, rowBytes,
+                                    hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
       fprintf(stderr, "memrefCopy(%lld bytes contig) failed: %s\n",
               static_cast<long long>(rowBytes), hipGetErrorString(err));

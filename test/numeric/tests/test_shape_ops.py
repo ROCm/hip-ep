@@ -125,10 +125,10 @@ class TestStridedCopyTier3:
         "dtype,shapes,axis",
         [
             # rank-3, last axis -> rowStart == 2 (outerRank == 2).
-            (np.float16, [[8, 16, 4], [8, 16, 4]], -1),   # 2-byte elems
-            (np.float32, [[8, 16, 5], [8, 16, 3]], -1),   # 4-byte elems
-            (np.int32, [[6, 9, 4], [6, 9, 7]], -1),       # 4-byte elems
-            (np.int64, [[5, 7, 3], [5, 7, 6]], -1),       # 8-byte elems
+            (np.float16, [[8, 16, 4], [8, 16, 4]], -1),  # 2-byte elems
+            (np.float32, [[8, 16, 5], [8, 16, 3]], -1),  # 4-byte elems
+            (np.int32, [[6, 9, 4], [6, 9, 7]], -1),  # 4-byte elems
+            (np.int64, [[5, 7, 3], [5, 7, 6]], -1),  # 8-byte elems
             # Large outer extent: 4096 rows forces grid clamp + grid-stride loop.
             (np.float16, [[64, 64, 2], [64, 64, 2]], -1),
             # rank-4, last axis -> rowStart == 3 (outerRank == 3).
