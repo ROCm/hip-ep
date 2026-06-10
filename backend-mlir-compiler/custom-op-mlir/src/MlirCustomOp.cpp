@@ -592,9 +592,8 @@ PerfSummaryPrinter g_perf_printer;
 // main_graph calls hipdnn_ep_alloc_output(out_idx, shape, rank, elem_size) for
 // each graph output once its runtime shape is known; the runtime forwards to
 // the callback the EP installed. The callback maps out_idx -> ORT output, asks
-// ORT for the buffer at the DLL's in-graph shape (used verbatim -- NO
-// share-buffer/present.* override; see output_allocate_cb for why none is
-// needed), and returns a pointer the DLL writes into:
+// ORT for the buffer at the DLL's in-graph shape, and returns a pointer the DLL
+// writes into:
 //   * GPU (aliased) output -> ORT's GPU-accessible pointer (zero-copy).
 //   * host (CPU) output    -> an EP-owned GPU scratch pointer; Compute()
 //                             D2H-copies it into ORT's host buffer afterwards.
@@ -616,9 +615,6 @@ struct OutputAllocatorCtx {
   const google::protobuf::RepeatedPtrField<mlir_metadata::Output> *outputs =
       nullptr;
   const std::vector<int> *output_index_map = nullptr;
-  // No input_index_map / present_to_past_input_idx here: unlike the classic
-  // marshal path, the allocator callback never reshapes outputs from inputs --
-  // it uses the DLL's in-graph shape verbatim (see output_allocate_cb).
   // Borrowed from the MlirCustomOp instance (grow-on-demand, reused across
   // Compute()): one GPU scratch buffer per output index for host outputs.
   std::vector<HostOutputScratch> *host_out_scratch = nullptr;
@@ -667,29 +663,11 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
       LOG(FATAL) << "output allocator: out_idx " << out_idx << " out of range ("
                  << octx->outputs->size() << " outputs)";
     }
-    // The DLL-provided runtime shape is used verbatim -- no EP-side override.
-    //
-    // This is the key advantage of the allocator path over the classic marshal
-    // path. The classic path must pre-compute every output shape itself (via
-    // DimSource, which resolves a present.*'s dynamic sequence dim from
-    // attention_mask -- the tight current length, e.g. 7), so for OGA's
-    // past_present_share_buffer it has to bump that dim up to the shared
-    // buffer's capacity before GetOutput or ORT would hand back a freshly
-    // allocated tensor (breaking the past==present pointer identity that
-    // in-place GQA append relies on). That bump is apply_present_share_buffer_
-    // override(), and it is needed ONLY because the classic path's shape source
-    // is wrong for shared buffers.
-    //
-    // Here the shape is computed in-graph by hip.alloc_output, whose dynamic
-    // dims come straight from the producing op's operands. For a present.*
-    // output that producer is hip.gqa, whose present init buffer is sized from
-    // `memref.dim %past_key` -- i.e. the past input buffer's ACTUAL extent. In
-    // shared-buffer mode past_key already IS the max_length capacity buffer, so
-    // `shape` here is already the capacity; GetOutput returns the pre-bound
-    // shared OrtValue and pointer identity is preserved with no special-casing.
-    // The override would be a provable no-op (out == past), so the allocator
-    // path stays model-agnostic: every output buffer comes from GetOutput with
-    // the graph's own shape, KV cache included.
+    // Use the DLL's in-graph shape verbatim -- no per-output special-casing,
+    // KV cache included. For a present.* output the shape already arrives at
+    // the shared-buffer capacity (hip.alloc_output sizes it from memref.dim
+    // %past_key), so GetOutput returns the pre-bound OrtValue and the
+    // past==present pointer identity is preserved with no override.
     std::vector<int64_t> out_shape(shape, shape + rank);
 
     int ort_idx = (*octx->output_index_map)[static_cast<int>(out_idx)];

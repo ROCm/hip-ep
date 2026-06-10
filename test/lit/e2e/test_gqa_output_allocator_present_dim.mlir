@@ -4,22 +4,16 @@
 //===----------------------------------------------------------------------===//
 // Regression guard for the output-allocator KV-cache invariant.
 //
-// In allocator mode the EP-side callback hands the DLL's in-graph output shape
-// straight to ORT's GetOutput with NO model-specific override (contrast the
-// classic marshal path, which must bump a present.* dynamic seq dim up to the
-// shared-buffer capacity via the inline present.* override in
-// marshal_output_tensors). That is only sound because the present.* output's
-// dynamic dim is materialized in-graph from the PAST input buffer's actual
-// extent (memref.dim %past_key), which under OGA past_present_share_buffer
-// already IS the max_length capacity buffer. So GetOutput(capacity) returns the
-// pre-bound shared OrtValue and the past==present pointer identity that in-place
-// GQA append relies on is preserved.
+// In allocator mode the EP callback hands the DLL's in-graph output shape to
+// GetOutput verbatim (no override). That is sound only because each dynamic-seq
+// present.* output is sized in-graph from its matching past input buffer's
+// actual extent -- under OGA past_present_share_buffer that is the max_length
+// capacity buffer, so GetOutput returns the pre-bound shared OrtValue and the
+// past==present pointer identity is preserved.
 //
-// This test pins that invariant: each dynamic-seq present output must lower to a
+// This test pins that invariant: each dynamic present.* output must lower to a
 // hip.alloc_output whose dynamic operand is a memref.dim of the matching
-// past_key_values input. If a future change resolves the present shape any other
-// way (e.g. from attention_mask / DimSource), this breaks -- and the allocator
-// path would silently start needing the override again.
+// past_key_values input.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --onnx-to-hip-pipeline=use-output-allocator=true 2>&1 | FileCheck %s
