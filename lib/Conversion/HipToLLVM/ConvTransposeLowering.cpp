@@ -150,12 +150,11 @@ struct ConvTransposeOpLowering
       return failure();
 
     SmallVector<Value, 27> args = {
-        statePtr,  inputPtr,  inputN,    inputC,     inputH,
-        inputW,    weightsPtr, biasPtr,  outputPtr,  outputC,
-        outputH,   outputW,   kernelH,   kernelW,    strideH,
-        strideW,   padTop,    padLeft,   padBottom,  padRight,
-        dilationH, dilationW, outPadH,   outPadW,    groupVal,
-        dataTypeVal};
+        statePtr,   inputPtr,   inputN,    inputC,    inputH,  inputW,
+        weightsPtr, biasPtr,    outputPtr, outputC,   outputH, outputW,
+        kernelH,    kernelW,    strideH,   strideW,   padTop,  padLeft,
+        padBottom,  padRight,   dilationH, dilationW, outPadH, outPadW,
+        groupVal,   dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
