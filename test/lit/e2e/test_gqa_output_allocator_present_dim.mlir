@@ -7,12 +7,13 @@
 // In allocator mode the EP-side callback hands the DLL's in-graph output shape
 // straight to ORT's GetOutput with NO model-specific override (contrast the
 // classic marshal path, which must bump a present.* dynamic seq dim up to the
-// shared-buffer capacity -- see apply_present_share_buffer_override). That is
-// only sound because the present.* output's dynamic dim is materialized in-graph
-// from the PAST input buffer's actual extent (memref.dim %past_key), which under
-// OGA past_present_share_buffer already IS the max_length capacity buffer. So
-// GetOutput(capacity) returns the pre-bound shared OrtValue and the past==present
-// pointer identity that in-place GQA append relies on is preserved.
+// shared-buffer capacity via the inline present.* override in
+// marshal_output_tensors). That is only sound because the present.* output's
+// dynamic dim is materialized in-graph from the PAST input buffer's actual
+// extent (memref.dim %past_key), which under OGA past_present_share_buffer
+// already IS the max_length capacity buffer. So GetOutput(capacity) returns the
+// pre-bound shared OrtValue and the past==present pointer identity that in-place
+// GQA append relies on is preserved.
 //
 // This test pins that invariant: each dynamic-seq present output must lower to a
 // hip.alloc_output whose dynamic operand is a memref.dim of the matching
