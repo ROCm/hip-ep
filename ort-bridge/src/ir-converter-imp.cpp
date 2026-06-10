@@ -413,13 +413,25 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
   auto name = value_info.GetName();
   int element_type = 0; // Placeholder for element type
   throw_if_error(convert_type_proto(type_info, &element_type, &shape));
+
+  // ORT's GetShape() returns an empty vector for both unranked tensors and
+  // rank-0 scalars; HasShape() is the only signal that disambiguates them.
+  // Feed nullptr to node_arg_new for unranked, per its contract that
+  // "nullptr shape = unknown rank" (mapped to UnrankedTensorType downstream).
+  const std::vector<int64_t>* shape_for_api = &shape;
+  if (type_info.GetONNXType() == ONNX_TYPE_TENSOR &&
+      !type_info.GetTensorTypeAndShapeInfo().HasShape()) {
+    shape_for_api = nullptr;
+  }
+
   auto existing_node_arg_opt =
       morphizen_cxx::GraphConstRef(graph).find_node_arg(name);
   if (existing_node_arg_opt.has_value()) {
     *node_arg =
         const_cast<morphizen::NodeArg*>(existing_node_arg_opt.value().ptr());
   } else {
-    *node_arg = &morphizen::node_arg_new(graph, name, &shape, element_type);
+    *node_arg =
+        &morphizen::node_arg_new(graph, name, shape_for_api, element_type);
   }
 
   // Collect ONNX symbolic dimension names (dim_param) for each tensor.

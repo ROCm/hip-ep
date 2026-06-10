@@ -116,7 +116,8 @@ bool MLIRNodeArgIndex::exists() const {
   return is_valid();
 }
 
-llvm::SmallVector<int64_t> MLIRNodeArgIndex::get_shape_i64() const {
+std::optional<llvm::SmallVector<int64_t>>
+MLIRNodeArgIndex::get_shape_i64() const {
   return get_node_arg().getShape();
 }
 

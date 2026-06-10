@@ -66,7 +66,9 @@ public:
 
   struct TensorMeta {
     std::string name;
-    shape_t shape;
+    // nullopt = unranked tensor (ORT HasShape() == false). Empty value =
+    // rank-0 scalar. Both lower to tensor<*xT> vs tensor<T> respectively.
+    std::optional<shape_t> shape;
     int element_type;
   };
 
@@ -91,8 +93,10 @@ public:
   MLIRNodeArg(MLIRNodeArg&&) = default;
   MLIRNodeArg& operator=(MLIRNodeArg&&) = default;
 
-  /// Constructor for tensor argument (no data)
-  MLIRNodeArg(const std::string& name, const shape_t& shape, int element_type);
+  /// Constructor for tensor argument (no data). nullptr shape signals an
+  /// unranked tensor (mapped to tensor<*xT>); non-null shape is taken as-is
+  /// (empty = rank-0 scalar, non-empty = ranked).
+  MLIRNodeArg(const std::string& name, const shape_t* shape, int element_type);
 
   /// Constructor for tensor argument (external data)
   MLIRNodeArg(const std::string& name, const shape_t& shape, int element_type,
@@ -108,8 +112,10 @@ public:
   /// Get the argument name
   const std::string& getName() const;
 
-  /// Get the shape
-  shape_t getShape() const;
+  /// Get the shape. Mirrors Ort::TensorTypeAndShapeInfo: nullopt for unranked
+  /// tensors (mapped to tensor<*xT> at the ORT boundary), Some({}) for
+  /// rank-0 scalars, Some({dims...}) for ranked tensors.
+  std::optional<shape_t> getShape() const;
 
   void setShape(const shape_t& shape);
 
