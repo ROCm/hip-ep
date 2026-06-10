@@ -190,7 +190,7 @@ int InferenceState::compute(span_t *inputs, span_t *outputs) const {
   return compute_fn(state_, inputs, outputs);
 }
 
-int InferenceState::compute_allocator(span_t *inputs) const {
+int InferenceState::compute_with_output_allocator(span_t *inputs) const {
   // Same symbol as compute(), resolved with the 2-arg ABI. The DLL exports
   // exactly one arity (fixed at compile time by use_output_allocator), so this
   // is only ever called against an allocator-mode DLL.

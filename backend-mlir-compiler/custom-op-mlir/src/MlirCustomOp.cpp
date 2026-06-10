@@ -609,39 +609,36 @@ struct OutputAllocatorCtx {
   const std::vector<int> *present_to_past_input_idx = nullptr;
   // Borrowed from the MlirCustomOp instance (grow-on-demand, reused across
   // Compute()): one GPU scratch buffer per output index for host outputs.
-  std::vector<void *> *host_out_scratch_ptr = nullptr;
-  std::vector<size_t> *host_out_scratch_cap = nullptr;
+  std::vector<HostOutputScratch> *host_out_scratch = nullptr;
   std::vector<PendingD2H> pending_d2h; // filled during compute, consumed after
   // Output-completeness guard: which metadata outputs received an alloc call.
   std::vector<bool> allocated;
 };
 
 #ifndef BUILD_MOCK_RUNTIME
-// Ensure host_out_scratch[idx] holds at least nbytes of device memory. Grows by
+// Ensure scratch[idx] holds at least nbytes of device memory. Grows by
 // hipFree + hipMalloc (never shrinks). Safe within a Compute(): each output
 // index is allocated exactly once, so a grow here cannot invalidate a pointer
 // the DLL is still about to write this pass (distinct indices = distinct
 // buffers). LOG(FATAL) on failure -- never returns null.
-static void *ensure_host_out_slot(std::vector<void *> &ptrs,
-                                  std::vector<size_t> &caps, size_t idx,
-                                  size_t nbytes) {
-  if (idx >= ptrs.size()) {
-    ptrs.resize(idx + 1, nullptr);
-    caps.resize(idx + 1, 0);
-  }
-  if (caps[idx] < nbytes) {
-    if (ptrs[idx])
-      (void)hipFree(ptrs[idx]);
+static void *ensure_host_out_slot(std::vector<HostOutputScratch> &scratch,
+                                  size_t idx, size_t nbytes) {
+  if (idx >= scratch.size())
+    scratch.resize(idx + 1);
+  HostOutputScratch &slot = scratch[idx];
+  if (slot.capacity < nbytes) {
+    if (slot.ptr)
+      (void)hipFree(slot.ptr);
     void *p = nullptr;
     hipError_t e = hipMalloc(&p, nbytes ? nbytes : 1);
     if (e != hipSuccess || !p)
       LOG(FATAL) << "hipMalloc(" << nbytes
                  << ") for output-allocator host scratch failed: "
                  << hipGetErrorString(e);
-    ptrs[idx] = p;
-    caps[idx] = nbytes;
+    slot.ptr = p;
+    slot.capacity = nbytes;
   }
-  return ptrs[idx];
+  return slot.ptr;
 }
 #endif // BUILD_MOCK_RUNTIME
 
@@ -701,8 +698,7 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
     for (int64_t d : out_shape)
       nelem *= static_cast<size_t>(d);
     size_t nbytes = nelem * static_cast<size_t>(elem_size);
-    void *gpu = ensure_host_out_slot(*octx->host_out_scratch_ptr,
-                                     *octx->host_out_scratch_cap,
+    void *gpu = ensure_host_out_slot(*octx->host_out_scratch,
                                      static_cast<size_t>(out_idx), nbytes);
     octx->pending_d2h.push_back({gpu, ort_ptr, nbytes});
     return gpu;
@@ -757,10 +753,10 @@ MlirCustomOp::MlirCustomOp(
 MlirCustomOp::~MlirCustomOp() {
 #ifndef BUILD_MOCK_RUNTIME
   // Free the allocator-mode host-output GPU scratch (one buffer per output
-  // index). No-op in classic mode (the vectors stay empty).
-  for (void *p : host_out_scratch_ptr_)
-    if (p)
-      (void)hipFree(p);
+  // index). No-op in classic mode (the vector stays empty).
+  for (const HostOutputScratch &slot : host_out_scratch_)
+    if (slot.ptr)
+      (void)hipFree(slot.ptr);
 #endif
 }
 
@@ -781,8 +777,7 @@ void MlirCustomOp::compute_with_output_allocator(
   octx.output_index_map = &output_index_map_;
   octx.input_index_map = &input_index_map_;
   octx.present_to_past_input_idx = &present_to_past_input_idx_;
-  octx.host_out_scratch_ptr = &host_out_scratch_ptr_;
-  octx.host_out_scratch_cap = &host_out_scratch_cap_;
+  octx.host_out_scratch = &host_out_scratch_;
   octx.allocated.assign(metadata_.outputs().size(), false);
 
   output_allocator_t alloc;
@@ -790,7 +785,7 @@ void MlirCustomOp::compute_with_output_allocator(
   alloc.allocate = &output_allocate_cb;
   inference_state_->set_output_allocator(&alloc);
 
-  int ret = inference_state_->compute_allocator(&inputs.span);
+  int ret = inference_state_->compute_with_output_allocator(&inputs.span);
 
   // Clear before octx leaves scope so a stale self pointer can never be used by
   // a later call (e.g. the next Compute() before it reinstalls its own ctx).

@@ -66,13 +66,13 @@ public:
   // previously installed by set_output_allocator(); there is no outputs span.
   // Resolves the same "inference_compute" symbol as compute() but with the
   // 2-arg ABI (the DLL exports exactly one arity, fixed at compile time).
-  int compute_allocator(span_t *inputs) const;
+  int compute_with_output_allocator(span_t *inputs) const;
 
   // Install (allocator != nullptr) or clear (nullptr) the output allocator on
-  // the model.dll's RuntimeState before compute_allocator(). Resolved once in
-  // the ctor (like begin_compute). Fatal if called with a non-null allocator
-  // but the DLL does not export the setter (a stale allocator-mode DLL would
-  // otherwise crash with a null output buffer).
+  // the model.dll's RuntimeState before compute_with_output_allocator().
+  // Resolved once in the ctor (like begin_compute). Fatal if called with a
+  // non-null allocator but the DLL does not export the setter (a stale
+  // allocator-mode DLL would otherwise crash with a null output buffer).
   void set_output_allocator(const output_allocator_t *allocator) const;
 
   // Mark the start of a new forward pass before inference_compute. If the
