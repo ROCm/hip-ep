@@ -199,6 +199,10 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         # Add custom_kernels include directory
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include")
 
+        # custom_kernels root, so the ck_dsl shims can include the embedded
+        # HSACO blobs as "ck_dsl/<name>.h".
+        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels")
+
         # Add ROCm includes
         if(THEROCK_DIST)
             message(STATUS "Adding TheRock includes for ${OUTPUT_BC}: ${THEROCK_DIST}/include")
@@ -274,7 +278,9 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
     compile_to_bitcode(real/layer_normalization.cpp runtime_layer_normalization.bc)
     compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
+    compile_to_bitcode(real/ck_dsl_simplified_layer_norm.cpp runtime_ck_dsl_simplified_layer_norm.bc)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
+    compile_to_bitcode(real/ck_dsl_skip_simplified_layer_norm.cpp runtime_ck_dsl_skip_simplified_layer_norm.bc)
     compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
     compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
@@ -335,7 +341,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_layer_normalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_simplified_layer_norm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ck_dsl_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_skip_simplified_layer_norm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ck_dsl_skip_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_rotary_embedding.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gqa.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cast.bc
