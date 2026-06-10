@@ -282,7 +282,8 @@ struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
         rewriter, loc, f64Type, rewriter.getF64FloatAttr(alphaVal));
 
     // int wrap_leaky_relu(RuntimeState* state, void* input, void* output,
-    //                     int64_t num_elements, int64_t data_type, double alpha)
+    //                     int64_t num_elements, int64_t data_type, double
+    //                     alpha)
     SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
                                        i64Type, i64Type, f64Type};
 
@@ -291,7 +292,7 @@ struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr,    inputPtr,  outputPtr,
+    SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
                                   numElements, dataTypeVal, alphaConst};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
@@ -379,8 +380,8 @@ struct MiopenSoftmaxOpLowering
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SigmoidOpLowering, SoftplusOpLowering, GeluOpLowering,
-               LeakyReluOpLowering, SiluOpLowering,
-               MiopenSoftmaxOpLowering>(converter);
+               LeakyReluOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
+      converter);
 }
 
 } // namespace hip

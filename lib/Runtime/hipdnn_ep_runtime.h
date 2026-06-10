@@ -1117,7 +1117,6 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
 int wrap_less(RuntimeState *state, void *a, void *b, void *output,
               int64_t num_elements, int64_t data_type);
 
-
 // GatherND operation wrapper. data_shape has rank `data_rank`; indices has
 // rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
 int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,

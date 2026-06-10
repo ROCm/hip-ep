@@ -62,8 +62,9 @@ inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kHipSilu = "hip_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward";                   // hip.sigmoid
-inline constexpr const char *kWrapGelu = "wrap_gelu";             // hip.gelu
-inline constexpr const char *kWrapLeakyRelu = "wrap_leaky_relu"; // hip.leaky_relu
+inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
+inline constexpr const char *kWrapLeakyRelu =
+    "wrap_leaky_relu"; // hip.leaky_relu
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
 inline constexpr const char *kWrapMiopenOpTensor =
