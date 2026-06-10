@@ -25,7 +25,7 @@ module {
     // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x3x1x1xf32>
     // CHECK: hip.global_pool(%[[CTX]]) ins(%[[ARG]] : tensor<1x3x5x5xf32>)
     // CHECK-SAME: outs(%[[INIT]] : tensor<1x3x1x1xf32>)
-    // CHECK-SAME: {mode = 0 : i64, p = 2 : i64}
+    // CHECK-SAME: {mode = 0 : i64}
 
     return %r : tensor<1x3x1x1xf32>
   }
@@ -39,7 +39,7 @@ module {
     // CHECK-NOT: onnx.GlobalAveragePool
     // CHECK: tensor.empty() : tensor<2x4x1xf16>
     // CHECK: hip.global_pool
-    // CHECK-SAME: {mode = 0 : i64, p = 2 : i64}
+    // CHECK-SAME: {mode = 0 : i64}
 
     return %r : tensor<2x4x1xf16>
   }
@@ -54,7 +54,7 @@ module {
     // CHECK-NOT: onnx.GlobalAveragePool
     // CHECK: tensor.empty() : tensor<1x2x1x1x1xf32>
     // CHECK: hip.global_pool
-    // CHECK-SAME: {mode = 0 : i64, p = 2 : i64}
+    // CHECK-SAME: {mode = 0 : i64}
 
     return %r : tensor<1x2x1x1x1xf32>
   }
@@ -77,7 +77,7 @@ module {
     // CHECK: %[[INIT:.*]] = tensor.empty(%[[DN]], %[[DC]]) : tensor<?x?x1x1xf16>
     // CHECK: hip.global_pool(%[[CTX]]) ins(%[[ARG]] : tensor<?x?x5x5xf16>)
     // CHECK-SAME: outs(%[[INIT]] : tensor<?x?x1x1xf16>)
-    // CHECK-SAME: {mode = 0 : i64, p = 2 : i64}
+    // CHECK-SAME: {mode = 0 : i64}
 
     return %r : tensor<?x?x1x1xf16>
   }
@@ -91,7 +91,7 @@ module {
     // CHECK-NOT: onnx.GlobalMaxPool
     // CHECK: tensor.empty() : tensor<1x3x1x1xf32>
     // CHECK: hip.global_pool
-    // CHECK-SAME: {mode = 1 : i64, p = 2 : i64}
+    // CHECK-SAME: {mode = 1 : i64}
 
     return %r : tensor<1x3x1x1xf32>
   }
@@ -105,7 +105,7 @@ module {
     // CHECK-NOT: onnx.GlobalMaxPool
     // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x1xf16>
     // CHECK: hip.global_pool
-    // CHECK-SAME: {mode = 1 : i64, p = 2 : i64}
+    // CHECK-SAME: {mode = 1 : i64}
 
     return %r : tensor<?x?x1xf16>
   }
@@ -119,7 +119,7 @@ module {
     // CHECK-NOT: onnx.GlobalLpPool
     // CHECK: tensor.empty() : tensor<1x3x1x1xf32>
     // CHECK: hip.global_pool
-    // CHECK-SAME: {mode = 2 : i64, p = 2 : i64}
+    // CHECK-SAME: {mode = 2 : i64}
 
     return %r : tensor<1x3x1x1xf32>
   }
