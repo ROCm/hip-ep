@@ -38,17 +38,17 @@ message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 #   gfx1100 / gfx1101 / gfx1102 / gfx1103  — RDNA 3 dGPU (7900 series etc.)
 #   gfx1150 / gfx1151                      — Strix Halo / Strix Point APU
 # Anything else (gfx12xx RDNA 4, MI series CDNA, older gfx10xx, ...) gets
-# HIPCK_NO_RDNA3_WMMA=1 propagated to every WMMA-using kernel + dispatcher
-# so the build skips the broken codegen and routes to non-WMMA fallbacks
-# at runtime. In a mixed multi-arch build (e.g. "gfx1151;gfx1201") even ONE
-# RDNA 3 entry keeps the macro undefined and the kernels compile for every
-# listed arch — gfx12 device code still wouldn't ISel-select the broken
-# intrinsic, so multi-arch builds that include any gfx12 entry will FAIL
-# at custom_kernels compile until Option B (true gfx12 WMMA port) lands.
-set(_hipck_has_rdna3_wmma 0)
+# HIPCK_RDNA4_WMMA=1 so matmul_nbits selects the half8 + `_gfx12` builtin
+# variant. gemm_wmma_fp16 and the GQA fused-prefill WMMA kernel remain
+# trap-stubs on non-RDNA-3 builds (no caller in lib/Runtime/ today).
+# In a mixed multi-arch build (e.g. "gfx1151;gfx1201") even ONE RDNA 3 entry
+# keeps HIPCK_RDNA3_WMMA — gfx12 device code still wouldn't ISel-select the
+# legacy intrinsic, so multi-arch builds that include any gfx12 entry will FAIL
+# at custom_kernels compile until per-arch object splitting lands.
+set(_hipck_wmma_arch "")
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     if(_arch MATCHES "^gfx110[0-3]$" OR _arch MATCHES "^gfx115[01]$")
-        set(_hipck_has_rdna3_wmma 1)
+        set(_hipck_wmma_arch "rdna3")
     endif()
 endforeach()
 
@@ -59,14 +59,18 @@ endforeach()
 # On Linux native HIP language support would honor target_compile_definitions
 # too, but we route everything through COMPILE_OPTIONS for parity.
 set(_hipck_kernel_compile_opts "")
-if(NOT _hipck_has_rdna3_wmma)
+if(_hipck_wmma_arch STREQUAL "rdna3")
+    message(STATUS
+        "[custom_kernels] RDNA 3 arch detected in HIP_ARCHITECTURES "
+        "(${HIP_ARCHITECTURES}) — HIPCK_RDNA3_WMMA=1.")
+    list(APPEND _hipck_kernel_compile_opts -DHIPCK_RDNA3_WMMA=1)
+else()
     message(STATUS
         "[custom_kernels] no RDNA 3 arch in HIP_ARCHITECTURES "
-        "(${HIP_ARCHITECTURES}) — switching matmul_nbits WMMA to the "
-        "RDNA 4 `_gfx12` builtin variant (HIPCK_NO_RDNA3_WMMA=1). "
-        "gemm_wmma_fp16 and the GQA fused prefill WMMA kernel remain "
-        "trap-stubs (no caller in lib/Runtime/).")
-    list(APPEND _hipck_kernel_compile_opts -DHIPCK_NO_RDNA3_WMMA=1)
+        "(${HIP_ARCHITECTURES}) — HIPCK_RDNA4_WMMA=1 (matmul_nbits WMMA "
+        "uses the `_gfx12` builtin; gemm_wmma_fp16 and GQA fused-prefill "
+        "WMMA remain trap-stubs).")
+    list(APPEND _hipck_kernel_compile_opts -DHIPCK_RDNA4_WMMA=1)
 endif()
 
 # Build the static library from HIP sources
@@ -106,12 +110,12 @@ hip_add_library(hip_custom_kernels STATIC
 
 # Belt-and-suspenders for downstream C++ consumers (runtime EP, model.dll
 # bitcode TUs) that #include hip_custom_kernels.h directly via the
-# in-tree path. The header itself doesn't branch on HIPCK_NO_RDNA3_WMMA
-# today, but a future host-side dispatcher in the EP could — pin the
-# macro PUBLIC on the cmake target so the kernel TU and the EP TUs
-# can never disagree.
-if(NOT _hipck_has_rdna3_wmma)
-    target_compile_definitions(hip_custom_kernels PUBLIC HIPCK_NO_RDNA3_WMMA=1)
+# in-tree path. Pin the arch macro PUBLIC on the cmake target so kernel
+# TUs and EP TUs can never disagree.
+if(_hipck_wmma_arch STREQUAL "rdna3")
+    target_compile_definitions(hip_custom_kernels PUBLIC HIPCK_RDNA3_WMMA=1)
+else()
+    target_compile_definitions(hip_custom_kernels PUBLIC HIPCK_RDNA4_WMMA=1)
 endif()
 
 # Export the library path for CompilerDriver to discover at model-compile time

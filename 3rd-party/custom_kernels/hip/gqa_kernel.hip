@@ -946,7 +946,7 @@ fused_gqa_decode_kernel(
 }
 
 // Fused decode launcher -- dispatches to the template matching d.
-// IMPORTANT: this launcher lives OUTSIDE the HIPCK_NO_RDNA3_WMMA guard
+// IMPORTANT: this launcher lives OUTSIDE the HIPCK_RDNA{3,4}_WMMA guard
 // below, because `fused_gqa_decode_kernel` is a per-thread shfl-reduction
 // kernel that does NOT use any WMMA intrinsic. Moving it inside the guard
 // (as an earlier revision accidentally did) drops the symbol on non-RDNA-3
@@ -991,15 +991,14 @@ extern "C" int hip_gqa_fused_decode(
 // Grid: (num_q_tiles * B, H). Block: 128 threads = 4 waves of 32.
 // WMMA 16x16x16 tile GEMMs, online softmax with exp2f, double-buffered KV.
 //
-// HIPCK_NO_RDNA3_WMMA gate: nothing in lib/Runtime/real/gqa.cpp dispatches
+// HIPCK_RDNA{3,4}_WMMA gate: nothing in lib/Runtime/real/gqa.cpp dispatches
 // to `hip_gqa_fused_prefill` today (the prefill path is decomposed
 // hipBLASLt + softmax, see the note around gqa.cpp:520). The fused
 // prefill kernel here is preserved only for an eventual port to GPU
 // families where the legacy 16x16x16 F16 WMMA builtin does not lower.
-// On builds without RDNA 3 WMMA support, the kernel + launcher are
-// dropped and a trap-stub launcher is provided so undefined references
-// don't break linking.
-#if !defined(HIPCK_NO_RDNA3_WMMA)
+// On HIPCK_RDNA4_WMMA builds, the kernel + launcher are dropped and a
+// trap-stub launcher is provided so undefined references don't break linking.
+#if defined(HIPCK_RDNA3_WMMA)
 
 static constexpr int PREFILL_BQ   = 32;
 static constexpr int PREFILL_D    = 128;
@@ -1256,7 +1255,7 @@ extern "C" int hip_gqa_fused_prefill(
   return hipGetLastError();
 }
 
-#else  // HIPCK_NO_RDNA3_WMMA
+#elif defined(HIPCK_RDNA4_WMMA)
 
 // Trap-stub: keeps the extern "C" symbol so the EP / model.dll link
 // closure stays satisfied. No caller in lib/Runtime/real/gqa.cpp
@@ -1269,14 +1268,16 @@ extern "C" int hip_gqa_fused_prefill(
     int /*sq*/, int /*skv*/, int /*max_seq*/, int /*past_len*/,
     float /*scale*/) {
   fprintf(stderr,
-          "[custom_kernels] hip_gqa_fused_prefill: built without RDNA 3 "
-          "WMMA support (HIPCK_NO_RDNA3_WMMA=1). lib/Runtime/real/gqa.cpp "
-          "uses the decomposed hipBLASLt path for prefill — if you hit "
-          "this, that dispatcher regressed.\n");
+          "[custom_kernels] hip_gqa_fused_prefill: built with HIPCK_RDNA4_WMMA "
+          "(RDNA 3 WMMA kernel not ported). lib/Runtime/real/gqa.cpp uses "
+          "the decomposed hipBLASLt path for prefill — if you hit this, "
+          "that dispatcher regressed.\n");
   return -1;
 }
 
-#endif  // HIPCK_NO_RDNA3_WMMA
+#else
+#error "Define exactly one of HIPCK_RDNA3_WMMA or HIPCK_RDNA4_WMMA"
+#endif
 
 //===----------------------------------------------------------------------===//
 // FA-2 Split-K GQA Decode Kernel (Phase 1)
