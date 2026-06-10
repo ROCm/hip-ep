@@ -663,11 +663,14 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
       LOG(FATAL) << "output allocator: out_idx " << out_idx << " out of range ("
                  << octx->outputs->size() << " outputs)";
     }
-    // Use the DLL's in-graph shape verbatim -- no per-output special-casing,
-    // KV cache included. For a present.* output the shape already arrives at
-    // the shared-buffer capacity (hip.alloc_output sizes it from memref.dim
-    // %past_key), so GetOutput returns the pre-bound OrtValue and the
-    // past==present pointer identity is preserved with no override.
+    // Use the DLL's in-graph shape verbatim -- the EP never reshapes an output
+    // here. The shape is computed in-graph by hip.alloc_output from its
+    // producer's operands; when a dynamic output dim is sized from a graph
+    // input's `memref.dim`, the requested shape already equals that input
+    // buffer's allocated extent. ORT's GetOutput then returns the pre-bound
+    // (IO-bound) buffer rather than allocating a fresh one, so when an input
+    // and output are bound to the same buffer that identity is preserved with
+    // no EP-side override.
     std::vector<int64_t> out_shape(shape, shape + rank);
 
     int ort_idx = (*octx->output_index_map)[static_cast<int>(out_idx)];
@@ -679,8 +682,9 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
     octx->allocated[static_cast<size_t>(out_idx)] = true;
 
     if (mem_type == TENSOR_MEMORY_GPU) {
-      // Zero-copy: ORT buffer is GPU-accessible (EP hipHostMalloc allocator or
-      // OGA device memory). The DLL writes into it directly.
+      // Zero-copy: ORT buffer is already GPU-accessible (e.g. the EP's
+      // host-mapped allocator, or caller-provided device memory). The DLL
+      // writes into it directly.
       return ort_ptr;
     }
 
