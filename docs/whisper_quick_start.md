@@ -328,21 +328,33 @@ pytest test/python/whisper/test_whisper.py::test_perf_decode_tps -v -s
 
 Prints a decode-throughput table across MorphiZen / CPU / DirectML for **both
 precisions**. The fp32 rows always run; the fp16 rows run only if the fp16 model
-is available (§3) and are skipped with a note otherwise. Reference numbers
-(gfx1151, jfk.wav ~11 s, 2026-06-08; numbers vary run-to-run):
+is available (§3) and are skipped with a note otherwise. The DirectML leg is
+skipped by default (it always fails on the Whisper decoder, below); opt in with
+`HIPDNN_WHISPER_PERF_DML=1`. Reference numbers (gfx1151, jfk.wav ~11 s,
+2026-06-10; numbers vary run-to-run):
 
 | Backend | precision | decode tok/s | encoder ms | transcription |
 |---|---|---|---|---|
-| MorphiZen EP | **fp16** | **28.4** | **451** | JFK quote ✅ |
-| MorphiZen EP | fp32 | 20.8 | 2243 | JFK quote ✅ |
-| CPU EP | fp32 | 21.8 | — | JFK quote ✅ |
-| CPU EP | fp16 | 18.1 | — | JFK quote ✅ (emulated fp16) |
+| MorphiZen EP | **fp16** | **~45** | **~460** | JFK quote ✅ |
+| MorphiZen EP | fp32 | ~24 | ~1300 | JFK quote ✅ |
+| CPU EP | fp32 | ~22 | — | JFK quote ✅ |
+| CPU EP | fp16 | ~18 | — | JFK quote ✅ (emulated fp16) |
 | DirectML EP | fp32 / fp16 | **fails** | — | cross-attn `MultiHeadAttention` unsupported on DML |
 
-**fp16 is both correct AND faster on MorphiZen here** — decode 20.8→28.4 tok/s and
-encoder 2243→451 ms vs MorphiZen fp32, while still emitting the verbatim JFK quote
-(argmax-lossless because the OGA build keeps `lm_head` fp32). MorphiZen-fp32 vs
-CPU-fp32 is the apples-to-apples pair (identical ONNX, same ORT API, same loop);
+The in-suite fp16 number (~45 tok/s) now matches the isolated
+`scripts/transcribe_whisper.py` run (~45–48). *(Historically the perf test
+under-reported fp16 at ~28: setting `HIPDNN_EP_DEBUG=1` to capture the dispatch
+tripwire latched a process-wide debug flag — `static const bool`, see
+`include/hip/debug_log.h` — that turned on per-op FD logging for the whole
+process and throttled decode; pytest's `capfd` capture compounded it. The test
+now never sets that env var and uses a bounded FD-redirect only around
+session-create. **General rule: never enable tracing/debug env vars in a process
+that will later measure throughput.**)*
+
+**fp16 is both correct AND faster on MorphiZen here** — decode ~24→~45 tok/s and
+encoder ~1300→~460 ms vs MorphiZen fp32, while still emitting the verbatim JFK
+quote (argmax-lossless because the OGA build keeps `lm_head` fp32). MorphiZen-fp32
+vs CPU-fp32 is the apples-to-apples pair (identical ONNX, same ORT API, same loop);
 note run-to-run variance. CPU fp16 is *slower* than CPU fp32 (ORT CPU has no native
 fp16 compute — it's emulated). DirectML **cannot run the Whisper decoder** in
 either precision — `com.microsoft.MultiHeadAttention` rejects the cross-attention
@@ -377,7 +389,8 @@ install/whisper-vulkan/bin/whisper-cli.exe \
 Expected: the JFK quote, with a `ggml_vulkan: 0 = AMD Radeon ...` line in the log
 confirming GPU dispatch. Its ~77 tok/s reflects f16 + a fully-fused native loop
 with no Python/ORT per-step overhead — treat it as *"what a mature f16 Vulkan
-stack achieves on the same GPU"*, not *"Vulkan is 4× faster than our EP."*
+stack achieves on the same GPU"* (~1.7× our fp16's ~45 tok/s), not a like-for-like
+EP comparison.
 
 ---
 
