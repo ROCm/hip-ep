@@ -26,23 +26,9 @@ using namespace mlir;
 /// \p useOutputAllocator selects the allocator pipeline. The classic pipeline
 /// runs `buffer-results-to-out-params` at slot 3 (each returned memref becomes
 /// a trailing out-param). The allocator pipeline SKIPS that pass and instead
-/// runs `hip-use-output-allocator` at slot 4.5 -- AFTER buffer-deallocation --
-/// which rewrites each returned `memref.alloc` into `hip.alloc_output`
-/// (EP-owned, allocated in-graph via the output-allocator callback) and stamps
-/// the `hipdnn.use_output_allocator` module BoolAttr that the HIP-to-LLVM half
-/// reads to select the allocator ABI.
-///
-/// The slot-4.5 placement is load-bearing and was chosen empirically (see the
-/// slot 4.5 comment below and test/lit/Pipeline/output-allocator-dealloc.mlir):
-/// `hip.alloc_output` carries a Write effect but NO Allocate effect, so if it
-/// were created BEFORE buffer-deallocation, the deallocation pass would treat
-/// the returned value as unowned and insert a `bufferization.clone` at the
-/// return -- an extra per-inference alloc + full-output copy that defeats the
-/// allocator's zero-copy goal. Running it AFTER buffer-deallocation, when the
-/// output is still a `memref.alloc` (Allocate effect => owned, returned
-/// directly with no clone), avoids that. It still runs BEFORE pool-allocs, so
-/// the EP-owned output never enters the GPU pool (pool-allocs only absorbs
-/// `memref.alloc`). See docs/design/output-allocator-design.md.
+/// runs `hip-use-output-allocator` at slot 4.5, whose load-bearing placement
+/// (after buffer-deallocation, before pool-allocs) is explained at that slot.
+/// See docs/design/output-allocator-design.md.
 static void buildOnnxToHipPipelineTail(OpPassManager &pm,
                                        bool useOutputAllocator) {
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each

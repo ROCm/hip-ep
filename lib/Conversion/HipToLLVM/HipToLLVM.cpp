@@ -67,66 +67,44 @@ private:
   // Rewrite @main_graph from the convert-hip-to-llvm internal ABI into the
   // runtime calling convention by splitting it into two functions:
   //
-  //   main_graph_internal  the original graph body. Keeps the MLIR memref
-  //     calling convention: every memref arg is passed as a FLAT list of
-  //     scalars, not as one aggregate.
-  //   main_graph  a thin wrapper with the runtime's narrow ABI -- the EP only
-  //     knows how to call (ctx, inputs[, outputs]) where inputs/outputs are C
-  //     arrays of pointers to memref descriptor structs. It rebuilds the flat
-  //     argument list and calls main_graph_internal.
+  //   main_graph_internal  the original graph body, keeping the MLIR memref
+  //     calling convention: a ranked-memref arg is NOT one struct parameter --
+  //     it is EXPLODED into its 3 + 2*rank descriptor fields
+  //     {allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank]} as that
+  //     many separate scalar params. This flat form is what "unpacked memref
+  //     params" means throughout this file.
+  //   main_graph  a thin wrapper with the runtime's narrow ABI: the EP only
+  //     hands it (ctx, inputs[, outputs]) where inputs/outputs are C arrays of
+  //     pointers to memref descriptor structs. For each memref the wrapper
+  //     loads the descriptor and re-explodes it into scalars
+  //     (unpackMemRefStructWithAddrCast, which also addrspace-casts the two
+  //     ptrs back to addrspace(0)), then calls main_graph_internal with the
+  //     concatenated flat list. That re-explode is the "unpack" bridging the
+  //     two ABIs.
   //
-  // The core idea is the "unpack" that bridges those two ABIs.
+  // Mode is read from the `hipdnn.use_output_allocator` module attribute (set
+  // by hip-use-output-allocator); the expected param count is then used only to
+  // verify @main_graph matches it. Classic main_graph has input AND output
+  // params; allocator main_graph has input params only and returns the
+  // in-graph-allocated output as a by-value memref result (which adds no
+  // param).
   //
-  // A ranked memref lowers (MLIR's standard memref-to-LLVM convention) to a
-  // descriptor STRUCT with 3 + 2*rank fields:
-  //   { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
-  //      idx 0          idx 1       idx 2   idx 3        idx 4
-  // But MLIR does NOT pass that struct by value as one parameter: a memref
-  // parameter is EXPLODED into its 3 + 2*rank fields, i.e. that many separate
-  // scalar parameters (2 ptrs, the i64 offset, then rank i64 sizes and rank
-  // i64 strides). So for one rank-R input main_graph_internal's signature is
-  // literally (%alloc:ptr, %aligned:ptr, %off:i64, <rank sizes:i64>,
-  // <rank strides:i64>), NOT (%desc: struct<...>). That flat form is what
-  // "unpacked memref params" means throughout this file.
-  //
-  // The runtime can't produce that flat list -- it only hands the EP a single
-  // `inputs` pointer. So the wrapper, for each input i, does:
-  //   1. GEP inputs[i]   -> ptr to the i-th descriptor pointer
-  //   2. load it         -> ptr to the descriptor struct
-  //   3. load that       -> the {ptr,ptr,i64,[..],[..]} struct value
-  //   4. extractvalue field-by-field -> the 3 + 2*rank flat scalars
-  // Step 4 is the "unpack" (see unpackMemRefStructWithAddrCast, which also
-  // addrspace-casts the two ptrs back to addrspace(0)). Push those scalars in
-  // order into the internal call's arg list; do it for the context + every
-  // input (+ every output in classic mode) and the flat list exactly matches
-  // main_graph_internal's exploded signature.
-  //
-  // Allocator vs classic mode is read from the `hipdnn.use_output_allocator`
-  // module attribute (set by hip-use-output-allocator); the expected param count
-  // is then used only to verify @main_graph matches that mode. The classic
-  // main_graph has input AND output params; the allocator main_graph has input
-  // params only and returns the in-graph-allocated output as a by-value memref
-  // struct result (which adds no parameter).
-  //
-  // Allocator mode, rank-1 input + in-graph-allocated output.
-  // Before (outputs are NOT params; the input is already exploded into
-  // 5 = 3 + 2*1 scalars; main_graph returns the output descriptor):
+  // Allocator mode, rank-1 input + in-graph-allocated output:
+  // Before (no output params; input already exploded into 5 = 3 + 2*1 scalars;
+  // main_graph returns the output descriptor):
   //   llvm.func @main_graph(%ctx, %inAlloc, %inAligned, %inOff, %inSz, %inSt)
   //       -> !llvm.struct<(ptr,ptr,i64,array<1xi64>,array<1xi64>)> { ... }
   // After (wrapper drops the outputs ptr and ignores the returned descriptor --
   // the output reaches the EP via the hipdnn_ep_alloc_output callback):
   //   llvm.func @main_graph_internal(<same 5 scalars>) -> !llvm.struct<...>
   //   llvm.func @main_graph(%ctx: ptr, %inputs: ptr) -> i32 {
-  //     %p  = llvm.getelementptr %inputs[0]   ; &inputs[0]
-  //     %sp = llvm.load %p                     ; ptr to the descriptor
+  //     %sp = llvm.load (gep %inputs[0])       ; ptr to the descriptor
   //     %m  = llvm.load %sp                     ; the descriptor struct value
-  //     ; ---- unpack %m into 5 scalars ----
-  //     %a  = llvm.extractvalue %m[0]          ; allocatedPtr
-  //     %al = llvm.extractvalue %m[1]          ; alignedPtr
-  //     %o  = llvm.extractvalue %m[2]          ; offset
-  //     %s0 = llvm.extractvalue %m[3, 0]       ; sizes[0]
-  //     %t0 = llvm.extractvalue %m[4, 0]       ; strides[0]
-  //     ; -----------------------------------
+  //     %a  = llvm.extractvalue %m[0]          ; allocatedPtr  \  unpack into
+  //     %al = llvm.extractvalue %m[1]          ; alignedPtr     > the 5 scalars
+  //     %o  = llvm.extractvalue %m[2]          ; offset        /  the internal
+  //     %s0 = llvm.extractvalue %m[3, 0]       ; sizes[0]      \  signature
+  //     %t0 = llvm.extractvalue %m[4, 0]       ; strides[0]    /  expects
   //     %_  = llvm.call @main_graph_internal(%ctx, %a, %al, %o, %s0, %t0)
   //     llvm.return %c0_i32
   //   }
@@ -162,10 +140,8 @@ private:
         (int64_t)outputShapesAttr.size() != outputCount)
       return module.emitError("Metadata mismatch: shapes array size != count");
 
-    // Mode is decided by the `hipdnn.use_output_allocator` module attribute (set
-    // by hip-use-output-allocator), NOT by param count. The attr is a typed
-    // bool: read its VALUE (a module may carry it set to false), so absence and
-    // `= false` both mean classic mode.
+    // Mode comes from the attribute's VALUE, not its presence (see header):
+    // absent or `= false` => classic.
     auto allocatorAttr =
         module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
     bool allocatorMode = allocatorAttr && allocatorAttr.getValue();

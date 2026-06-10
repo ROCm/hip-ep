@@ -739,11 +739,10 @@ private:
     Value outputsSpanPtr = allocatorMode ? Value() : entryBlock->getArgument(2);
 
     size_t numInputs = inputShapes ? inputShapes.size() : 0;
-    // Honest output count. In allocator mode the classic output staging below
-    // (buffer allocas, prepare_output, output-memref build, finalize_output) is
-    // skipped via `if (!allocatorMode)` scopes rather than by zeroing this
-    // count -- the only output op the EP owns is the in-graph hip.alloc_output
-    // emitted earlier in the pipeline.
+    // True output count in both modes. Allocator mode skips the classic output
+    // staging below (prepare_output, output-memref build, finalize_output) via
+    // `if (!allocatorMode)` scopes, not by zeroing this count -- those outputs
+    // are instead allocated in-graph by the hip.alloc_output emitted earlier.
     size_t numOutputs = outputShapes ? outputShapes.size() : 0;
 
     Value c0_i32 = LLVM::ConstantOp::create(builder, loc, i32Type,

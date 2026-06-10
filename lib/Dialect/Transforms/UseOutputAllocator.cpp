@@ -21,19 +21,16 @@
 // `func.return` terminator are intentionally NOT modified -- `convert-hip-to-
 // llvm` synthesizes the `-> i32` entry wrapper in a later phase.
 //
-// The pass also stamps the `hipdnn.use_output_allocator` BoolAttr (value =
-// true) on the parent module -- the allocator-mode marker that later phases'
-// `convert-hip-to-llvm` / `generate-interface` read to select the allocator
-// ABI. It is a typed bool (not a presence-only UnitAttr) so readers test the
-// VALUE: a module may carry the attr set to false (classic) -- absence and
-// `= false` both mean classic mode. The stamp is UNCONDITIONAL: it runs even
-// when no alloc is rewritten, because the mode is decided by this pass being
-// invoked (in-pipeline it is scheduled only in allocator mode), not by whether
-// the IR happened to contain a returned alloc (a zero-output graph must still
-// be marked). A FuncOp pass writing its parent module relaxes MLIR's pass-
-// isolation contract; it is safe here because the write is an idempotent set of
-// the same value, following the established PoolAllocs precedent (which stamps
-// hipdnn.pool_size the same way).
+// The pass also stamps `hipdnn.use_output_allocator = true` on the parent
+// module -- the marker that later phases (`convert-hip-to-llvm`,
+// `generate-interface`) read to select the allocator ABI. It is a typed bool,
+// not a presence-only UnitAttr, so readers test the VALUE (absence and
+// `= false` both mean classic). The stamp is UNCONDITIONAL -- mode is decided
+// by this pass running (it is scheduled only in allocator mode), not by whether
+// a returned alloc was found, so a zero-output graph is still marked. A FuncOp
+// pass writing its parent module relaxes MLIR's pass-isolation contract; safe
+// here because it is an idempotent set of the same value (same precedent as
+// PoolAllocs stamping hipdnn.pool_size).
 //
 // Before:
 //   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
