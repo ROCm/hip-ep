@@ -53,6 +53,7 @@ prepends the bin dirs to PATH; THEROCK_DIST must be exported by the caller's
 shell (the test does it defensively too).
 """
 
+import gc
 import os
 import sys
 import pathlib
@@ -1045,31 +1046,111 @@ def _bench_backend(run_one):
     return tokens, enc_ms, prefill_ms, decode_tps, n_steps
 
 
-def _perf_one_precision(audio, capfd, precision, model_dir, dtype, results):
+class _CaptureFD:
+    """Capture FD-level stderr+stdout into a temp file for a bounded `with` block.
+
+    Used ONLY around MorphiZen session creation + one warmup decode, to grab the
+    EP's compile-failure / [REAL] wrap_* signal for the silent-CPU-fallback
+    tripwire — then it is torn down so the TIMED decode loop runs at full FD
+    speed.
+
+    Why not pytest's ``capfd`` fixture: merely DECLARING ``capfd`` on a test
+    installs FD-level capture for the test's entire lifetime, and even
+    ``capfd.disabled()`` (suspend/resume) leaves residual overhead — measured
+    ~41 tok/s for fp16 vs ~48 when the test never touches capfd at all (verified
+    by an isolated in-pytest bench). This helper instead does the FD redirect
+    ourselves, scoped to exactly the compile window, so the timed region is
+    byte-for-byte the same FD state as scripts/transcribe_whisper.py → the
+    in-suite number matches the isolated ~48 tok/s.
+    """
+
+    def __init__(self):
+        self._tmp = None
+        self._saved_out = None
+        self._saved_err = None
+        self.text = ""
+
+    def __enter__(self):
+        import tempfile
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._tmp = tempfile.TemporaryFile(mode="w+b")
+        self._saved_out = os.dup(1)
+        self._saved_err = os.dup(2)
+        os.dup2(self._tmp.fileno(), 1)
+        os.dup2(self._tmp.fileno(), 2)
+        return self
+
+    def __exit__(self, *exc):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(self._saved_out, 1)
+        os.dup2(self._saved_err, 2)
+        os.close(self._saved_out)
+        os.close(self._saved_err)
+        self._tmp.seek(0)
+        self.text = self._tmp.read().decode("utf-8", errors="replace")
+        self._tmp.close()
+        return False  # do not suppress exceptions
+
+
+def _perf_one_precision(audio, precision, model_dir, dtype, results):
     """Bench MorphiZen / DirectML / CPU for ONE precision; fill ``results``.
 
     ``results`` is keyed by ``(backend_label, precision)`` →
     ``(enc_ms, prefill_ms, decode_tps, text, n_steps)``. Each backend is
     best-effort: a failure (EP missing, DML op gap, fp16 build absent) is logged
     and skipped, never aborts the other rows.
+
+    **The compile + silent-fallback tripwire is captured via a bounded
+    ``_CaptureFD`` block; the TIMED decode loop runs with ZERO capture.** This is
+    load-bearing for the numbers, not cosmetic. FD-level output from the model
+    DLL + ORT during decode, if routed through a capture pipe, nearly HALVES the
+    measured decode tok/s (fp16 ~28 under pytest capfd vs ~48 uncaptured). Even
+    pytest's ``capfd.disabled()`` leaves residual overhead (~41 vs ~48). So this
+    test deliberately does NOT take the ``capfd`` fixture at all — it self-scopes
+    a tiny FD redirect around session-create only (see ``_CaptureFD``), leaving
+    the timed region at full speed so the in-suite number matches the isolated
+    scripts/transcribe_whisper.py measurement. Same spirit as the CLAUDE.md
+    HIPDNN_EP_PERF rule: never time a hot loop with tracing/capture active.
+
+    Sessions are also freed (None + ``gc.collect()``) between legs so a finished
+    backend's GPU resources don't linger into the next one.
     """
     # ── MorphiZen EP (GPU, fixed-shape) ──────────────────────────────────────
+    mz_enc = mz_pref = mz_dec = None
     try:
-        os.environ["HIPDNN_EP_DEBUG"] = "1"
-        capfd.readouterr()
-        mz_enc = _morphizen_session("encoder_fixed.onnx", model_dir)
-        mz_pref = _morphizen_session("decoder_fixed_prefill.onnx", model_dir)
-        mz_dec = _morphizen_session("decoder_fixed_decode.onnx", model_dir)
-        # OGA-style zero-copy decode: self-KV aliased GPU buffers (past==present),
-        # cross-KV bound once, per-step tiny inputs + a single logits D2H — this
-        # row measures GPU kernels, not Python plumbing.
+        # Compile (at session creation) captured via a bounded _CaptureFD block
+        # so we can read the EP host's stderr and assert the graph compiled on
+        # GPU (no silent CPU fallback). The tripwire checks for "Compilation
+        # failed", which the EP HOST prints regardless of HIPDNN_EP_DEBUG — so we
+        # do NOT set that env var. CRITICAL: HIPDNN_EP_DEBUG is latched into a
+        # process-wide `static const bool` (hipdnn_ep_debug_enabled() in
+        # debug_log.h) the FIRST time any model DLL reads it; setting it =1 even
+        # briefly around session-create permanently turns on per-op [REAL]
+        # llvm::errs() FD writes for the WHOLE process, which throttle every
+        # subsequent decode step (~48 -> ~41 tok/s for fp16) — and it cannot be
+        # undone by popping the env. So this leg never sets it.
+        with _CaptureFD() as cap:
+            mz_enc = _morphizen_session("encoder_fixed.onnx", model_dir)
+            mz_pref = _morphizen_session("decoder_fixed_prefill.onnx", model_dir)
+            mz_dec = _morphizen_session("decoder_fixed_decode.onnx", model_dir)
+            # One warmup decode (pays the one-time autotune so timed reps are
+            # steady-state); also exercises the dispatch so a compile failure has
+            # surfaced by now.
+            _greedy_decode_morphizen_iobinding(
+                mz_enc, mz_pref, mz_dec, audio, return_timing=True, dtype=dtype
+            )
+        _assert_compiled_on_gpu(cap.text)  # no silent CPU fallback
+        # Timed bench with NO capture active and debug OFF — see the docstring.
+        # OGA-style zero-copy decode (self-KV aliased past==present, cross-KV
+        # bound once, tiny per-step inputs + one logits D2H): GPU kernels.
         mz_tokens, mz_enc_ms, mz_pref_ms, mz_tps, mz_n = _bench_backend(
             lambda: _greedy_decode_morphizen_iobinding(
                 mz_enc, mz_pref, mz_dec, audio, return_timing=True, dtype=dtype
             )
         )
-        stderr_text = "".join(capfd.readouterr())
-        _assert_compiled_on_gpu(stderr_text)  # no silent CPU fallback
         results[("MorphiZen EP", precision)] = (
             mz_enc_ms,
             mz_pref_ms,
@@ -1080,13 +1161,25 @@ def _perf_one_precision(audio, capfd, precision, model_dir, dtype, results):
     except Exception as e:  # noqa: BLE001
         print(f"[perf] MorphiZen EP {precision} FAILED: {e!r}")
     finally:
-        os.environ.pop("HIPDNN_EP_DEBUG", None)
+        # Free the GPU sessions before the next leg. Rebind to None (not `del`)
+        # so the lambda closures above stay valid for ruff's flow analysis.
+        mz_enc = mz_pref = mz_dec = None
+        gc.collect()
 
     # ── DirectML EP (GPU, dynamic) ───────────────────────────────────────────
-    dml_providers = get_amd_dml_providers()
+    # Whisper's decoder cross-attn MHA is rejected by the DML EP in BOTH
+    # precisions (a DML op-coverage gap — see CLAUDE.md), so this leg never
+    # produces a usable row today. Opt-in via HIPDNN_WHISPER_PERF_DML=1 to avoid
+    # the noise of a guaranteed failure on every run; skip by default.
+    dml_providers = (
+        get_amd_dml_providers()
+        if os.environ.get("HIPDNN_WHISPER_PERF_DML") == "1"
+        else None
+    )
     if dml_providers is None:
-        print(f"[perf] DirectML EP unavailable — skipping DML {precision} row")
+        print("[perf] DirectML EP skipped (set HIPDNN_WHISPER_PERF_DML=1 to run)")
     else:
+        dml_enc = dml_dec = None
         try:
             dml_enc = ort.InferenceSession(
                 str(model_dir / "encoder.onnx"), providers=dml_providers
@@ -1094,6 +1187,7 @@ def _perf_one_precision(audio, capfd, precision, model_dir, dtype, results):
             dml_dec = ort.InferenceSession(
                 str(model_dir / "decoder.onnx"), providers=dml_providers
             )
+            # No capture active in this test (see the docstring) — time directly.
             dml_tokens, dml_enc_ms, dml_pref_ms, dml_tps, dml_n = _bench_backend(
                 lambda: _greedy_decode_dynamic_timed(
                     dml_enc, dml_dec, audio, dtype=dtype
@@ -1108,11 +1202,16 @@ def _perf_one_precision(audio, capfd, precision, model_dir, dtype, results):
             )
         except Exception as e:  # DML com.microsoft op coverage varies — report it
             print(f"[perf] DirectML EP {precision} FAILED: {e!r}")
+        finally:
+            dml_enc = dml_dec = None  # free DML context before the next leg
+            gc.collect()
 
     # ── CPU EP (dynamic) ─────────────────────────────────────────────────────
+    cpu_enc = cpu_dec = None
     try:
         cpu_enc = _cpu_session("encoder.onnx", model_dir)
         cpu_dec = _cpu_session("decoder.onnx", model_dir)
+        # No capture active in this test (see the docstring) — time directly.
         cpu_tokens, cpu_enc_ms, cpu_pref_ms, cpu_tps, cpu_n = _bench_backend(
             lambda: _greedy_decode_dynamic_timed(cpu_enc, cpu_dec, audio, dtype=dtype)
         )
@@ -1125,9 +1224,12 @@ def _perf_one_precision(audio, capfd, precision, model_dir, dtype, results):
         )
     except Exception as e:  # noqa: BLE001
         print(f"[perf] CPU EP {precision} FAILED: {e!r}")
+    finally:
+        cpu_enc = cpu_dec = None  # free before the next precision leg
+        gc.collect()
 
 
-def test_perf_decode_tps(capfd):
+def test_perf_decode_tps():
     """Cross-backend, cross-precision decode tok/s + accuracy.
 
     Runs the SAME greedy decode-loop on MorphiZen / DirectML / CPU for BOTH
@@ -1137,17 +1239,24 @@ def test_perf_decode_tps(capfd):
     module docstring). The fp32 rows are unconditional; the fp16 rows are
     best-effort (skipped with a note if the fp16 build is unavailable) so a machine
     without the OGA builder still gets the full fp32 table.
+
+    Deliberately does NOT take pytest's ``capfd`` fixture: merely declaring it
+    installs FD-level capture for the whole test and depresses the measured
+    decode tok/s (see ``_perf_one_precision`` / ``_CaptureFD``). The
+    compile-failure tripwire is captured via a bounded ``_CaptureFD`` block
+    around session-create instead, leaving the timed loop uncaptured so the
+    numbers match the isolated scripts/transcribe_whisper.py measurement.
     """
     audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(np.float32)
     results = {}  # (label, precision) -> (enc_ms, prefill_ms, decode_tps, text, n)
 
     # fp32 — always run (locally-built model is set up by the autouse fixture).
-    _perf_one_precision(audio, capfd, "fp32", _MODEL_DIR, np.float32, results)
+    _perf_one_precision(audio, "fp32", _MODEL_DIR, np.float32, results)
 
     # fp16 — best-effort: build on demand; skip the precision entirely on failure.
     try:
         setup_whisper_fp16_model_dir(_MODEL_DIR_FP16)
-        _perf_one_precision(audio, capfd, "fp16", _MODEL_DIR_FP16, np.float16, results)
+        _perf_one_precision(audio, "fp16", _MODEL_DIR_FP16, np.float16, results)
     except Exception as e:  # noqa: BLE001
         print(f"[perf] fp16 unavailable (build failed) — fp32-only table: {e!r}")
 
