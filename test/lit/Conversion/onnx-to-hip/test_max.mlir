@@ -34,8 +34,11 @@ module {
 
   // CHECK-LABEL: func.func @max_3_inputs
   // CHECK-NOT: onnx.Max
-  // CHECK: hip.max(%[[CTX:.*]])
-  // CHECK: hip.max(%[[CTX]])
+  // The trailing ` ins` anchors the CTX capture so the greedy `.*` binds only
+  // the context SSA value (not the rest of the line), letting the second
+  // CHECK verify the chained hip.max reuses the same context.
+  // CHECK: hip.max(%[[CTX:.*]]) ins
+  // CHECK: hip.max(%[[CTX]]) ins
 
   // --- Case 3: 1-input max (identity) ---
   func.func @max_1_input(%a: tensor<3xf32>) -> tensor<3xf32> {
