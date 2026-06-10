@@ -249,7 +249,9 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
     compile_to_bitcode(real/layer_normalization.cpp runtime_layer_normalization.bc)
     compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
+    compile_to_bitcode(real/ck_dsl_simplified_layer_norm.cpp runtime_ck_dsl_simplified_layer_norm.bc)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
+    compile_to_bitcode(real/ck_dsl_skip_simplified_layer_norm.cpp runtime_ck_dsl_skip_simplified_layer_norm.bc)
     compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
     compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
@@ -302,7 +304,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_layer_normalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_simplified_layer_norm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ck_dsl_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_skip_simplified_layer_norm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ck_dsl_skip_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_rotary_embedding.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gqa.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cast.bc
