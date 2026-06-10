@@ -16,7 +16,6 @@
 
 // Component headers
 #include "InferenceState.h"
-#include "output_shape_override.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
 #ifndef BUILD_MOCK_RUNTIME
@@ -328,17 +327,28 @@ TensorData marshal_output_tensors(
                   << past_shape.size() << " vs out=" << data.shapes[i].size()
                   << ")";
       } else {
-        // Shared helper (output_shape_override.h) so the classic 3-arg path
-        // and the 2-arg allocator callback apply byte-identical override rules.
-        // Only dynamic (-1) compiled dims where the past input is strictly
-        // larger are bumped; static dims (architecture constants) are never
-        // touched.
-        bool overridden = apply_present_share_buffer_override(
-            output_meta.shape().data(), past_shape.data(),
-            data.shapes[i].data(), data.shapes[i].size(), past_shape.size());
+        // Only override dimensions that were dynamic (-1) in the compiled
+        // metadata.  Static dims are architecture constants (batch=1,
+        // num_heads, head_dim) and must never change — restricting the
+        // override to dynamic dims prevents accidental corruption.
+        bool overridden = false;
+        bool any_dynamic = false;
+        for (int d = 0; d < static_cast<int>(past_shape.size()); ++d) {
+          if (output_meta.shape(d) != -1)
+            continue;
+          any_dynamic = true;
+          if (past_shape[d] > data.shapes[i][d]) {
+            data.shapes[i][d] = past_shape[d];
+            overridden = true;
+          }
+        }
         if (overridden) {
           MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
                     << "': overrode dynamic dims from past input shape";
+        } else if (any_dynamic) {
+          MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
+                    << "': share-buffer override skipped (past not larger "
+                       "than DimSource — non-shared-buffer mode or pre-grow)";
         }
       }
     }
