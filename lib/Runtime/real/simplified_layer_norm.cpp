@@ -17,6 +17,9 @@
 #include <functional>
 #include <unordered_map>
 
+// ck_dsl_simplified_layer_norm() (the f32/N=4096 fast path) is declared in
+// hipdnn_ep_runtime.h alongside the other runtime ops.
+
 // Use the shared macros from error_check_macros.h with goto cleanup pattern
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
@@ -207,6 +210,22 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
     return -1;
   }
   void *rstd_buf = hipdnn_ep_state_get_workspace(state);
+
+  // Fast path: ck_dsl-generated RMSNorm kernel. The shim itself decides
+  // whether the (dtype, hidden_dim) tuple matches its compiled HSACO
+  // (f32/N=4096); anything else returns -2 and we fall through to MIOpen.
+  // Sibling of the SkipSimplifiedLayerNorm fast path.
+  {
+    void *stream = hipdnn_ep_state_get_stream(state);
+    if (stream) {
+      int ck_rc =
+          ck_dsl_simplified_layer_norm(stream, input, scale, output, num_rows,
+                                       hidden_dim, epsilon, element_size_bytes);
+      if (ck_rc == 0) {
+        return 0;
+      }
+    }
+  }
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenT5LayerNormForward: calling miopenT5LayerNormForward"
