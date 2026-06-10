@@ -4,6 +4,7 @@
  */
 
 #include "MlirCompiler.h"
+#include "dim_source_resolver.h"
 
 // Morphizen headers
 #include "hip/timing.h"
@@ -283,25 +284,46 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
         // to Output.shape regardless.
         auto *ds = output_proto->add_dim_sources();
         if (dim_val == -1) {
-          // Fail at compile time rather than at runtime so the user sees a
-          // clear error naming the output, dim index, and dim_param name
-          // instead of a generic "dim still -1" CHECK from the EP.
-          CHECK(dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty())
-              << "Output '" << output.name() << "' dim " << d
-              << " is dynamic but has no symbolic name in dim_params_map; "
-              << "cannot emit DimSource. Either fix the model to expose a "
-              << "dim_param for this dimension, or freeze it to a constant.";
-          const auto &param_name = (*dp)[d];
-          auto pit = dim_param_map.find(param_name);
-          CHECK(pit != dim_param_map.end())
-              << "Output '" << output.name() << "' dim " << d
-              << " has dim_param '" << param_name
-              << "' but no graph input declares this symbolic name; cannot "
-              << "resolve at runtime. Outputs can only carry symbolic dims "
-              << "that also appear on at least one input.";
-          ds->set_input_idx(pit->second.first);
-          ds->set_dim_idx(pit->second.second);
-          ds->set_resolved(true);
+          // Resolve the dynamic output dim to a graph-input dim via its
+          // symbolic name. resolveDynamicOutputDim decides among the three
+          // outcomes below (see dim_source_resolver.h for the rationale).
+          const std::string *param_name =
+              (dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty())
+                  ? &(*dp)[d]
+                  : nullptr;
+          auto res = resolveDynamicOutputDim(param_name, dim_param_map,
+                                             useOutputAllocator);
+          switch (res.kind) {
+          case DimSourceKind::ResolvedToInput:
+            ds->set_input_idx(res.input_idx);
+            ds->set_dim_idx(res.dim_idx);
+            ds->set_resolved(true);
+            break;
+          case DimSourceKind::UnresolvedSentinel:
+            // Output-allocator ABI: the DLL sizes this output in-graph, so the
+            // EP never consults this entry. Emit the same -1/-1/false sentinel
+            // as a static dim (it is unambiguous on the wire).
+            ds->set_input_idx(-1);
+            ds->set_dim_idx(-1);
+            ds->set_resolved(false);
+            break;
+          case DimSourceKind::Unresolvable:
+            // Classic ABI: fail at compile time rather than at runtime so the
+            // user sees a clear error naming the output, dim index, and
+            // dim_param instead of a generic "dim still -1" CHECK from the EP.
+            CHECK(param_name)
+                << "Output '" << output.name() << "' dim " << d
+                << " is dynamic but has no symbolic name in dim_params_map; "
+                << "cannot emit DimSource. Either fix the model to expose a "
+                << "dim_param for this dimension, or freeze it to a constant.";
+            CHECK(false)
+                << "Output '" << output.name() << "' dim " << d
+                << " has dim_param '" << *param_name
+                << "' but no graph input declares this symbolic name; cannot "
+                << "resolve at runtime. Outputs can only carry symbolic dims "
+                << "that also appear on at least one input.";
+            break;
+          }
         } else {
           // Static dim: emit explicit sentinels so the wire format
           // unambiguously distinguishes "not populated" from

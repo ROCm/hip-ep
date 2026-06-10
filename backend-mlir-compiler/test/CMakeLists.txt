@@ -64,3 +64,19 @@ endif()
 add_test(NAME MlirE2ETest COMMAND test-e2e-mlir)
 
 set_target_properties(test-e2e-mlir PROPERTIES FOLDER "mlir-tests")
+
+# ----------------------------------------------------------------------------
+# Pure-logic unit test for the DimSource emission policy. No ORT / GPU / EP
+# dependency -- just the header under test and GTest -- so it builds and runs
+# anywhere the backend builds.
+# ----------------------------------------------------------------------------
+add_executable(test-dim-source-resolver test_dim_source_resolver.cpp)
+target_compile_features(test-dim-source-resolver PRIVATE cxx_std_17)
+target_include_directories(test-dim-source-resolver PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../level-1-pass/src")
+target_link_libraries(test-dim-source-resolver PRIVATE
+  GTest::gtest
+  GTest::gtest_main
+)
+add_test(NAME DimSourceResolverTest COMMAND test-dim-source-resolver)
+set_target_properties(test-dim-source-resolver PROPERTIES FOLDER "mlir-tests")
