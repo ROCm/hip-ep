@@ -483,6 +483,36 @@ def ResolveTensorDimsPass
   ];
 }
 
+def LoopBodyToOutParamsPass
+    : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
+  let summary = "Promote outlined hip.loop body returns to out-param ABI";
+  let description = [{
+    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation` in
+    both classic and allocator pipelines.
+
+    `onnx-loop-outline` emits each `hip.loop` body as a private
+    `func.func` named `*_loop_body_*`. After bufferization those helpers
+    still return loop-carried memrefs, while `convert-hip-to-llvm`
+    LoopLowering expects the out-param ABI (`v_in` + `v_out` per
+    loop-carried value, with `{bufferize.result}` on each out-param).
+
+    Module-level `buffer-results-to-out-params` promotes `@main_graph` in
+    the classic pipeline but skips private functions; the allocator
+    pipeline skips module-level out-params on `@main_graph` entirely.
+    This pass closes the gap by calling MLIR's
+    `promoteBufferResultsToOutParams` with `modifyPublicFunctions = false`
+    and a filter on `*_loop_body_*` only.
+
+    Example (one loop-carried memref):
+      Before:  private @body(..., %v_in) -> memref<16xf32> { return %out }
+      After:   private @body(..., %v_in, %v_out {bufferize.result}) { return }
+  }];
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def UseOutputAllocatorPass
     : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
   let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";

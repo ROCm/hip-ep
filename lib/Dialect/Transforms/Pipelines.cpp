@@ -89,6 +89,12 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
         bufferization::createBufferResultsToOutParamsPass(outParamsOpts));
   }
 
+  // 3b. Promote outlined `*_loop_body_*` helpers to the out-param ABI
+  //     LoopLowering expects. Slot 3 above covers @main_graph only (classic);
+  //     allocator mode defers @main_graph to slot 4.5. Both pipelines need
+  //     this pass for private loop bodies before buffer-deallocation.
+  pm.addPass(hip::createLoopBodyToOutParamsPass());
+
   // 4. Insert ownership-based buffer deallocation
   bufferization::BufferDeallocationPipelineOptions deallocOpts;
   bufferization::buildBufferDeallocationPipeline(pm, deallocOpts);
