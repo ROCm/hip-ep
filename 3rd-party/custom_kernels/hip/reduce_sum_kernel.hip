@@ -19,23 +19,31 @@
 
 // Parallel sum reduction for i64. Each block reduces one output element
 // by summing reduce_size consecutive input elements using shared memory.
+// `inner` is the product of the input dims AFTER the reduced axis (1 for a
+// trailing/contiguous reduce). The reduced elements for output `out_idx`
+// (= oo*inner + ii) live at data[oo*reduce_size*inner + r*inner + ii], i.e.
+// strided by `inner`. inner==1 collapses to the contiguous slice
+// data[out_idx*reduce_size + r] (original behavior).
 __global__ void reduce_sum_i64_kernel(
     const int64_t* __restrict__ data,
     int64_t* __restrict__ output,
     int64_t reduce_size,
+    int64_t inner,
     int64_t num_output_elements) {
   extern __shared__ int64_t sdata[];
 
   int64_t out_idx = blockIdx.x;
   if (out_idx >= num_output_elements) return;
 
-  const int64_t* slice = data + out_idx * reduce_size;
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const int64_t* slice = data + oo * reduce_size * inner + ii;
   int tid = threadIdx.x;
 
   // Each thread accumulates a partial sum over its strided portion
   int64_t sum = 0;
   for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
-    sum += slice[i];
+    sum += slice[i * inner];
   }
   sdata[tid] = sum;
   __syncthreads();
@@ -68,13 +76,16 @@ __global__ void reduce_sum_i64_shfl_kernel(
     const int64_t* __restrict__ data,
     int64_t* __restrict__ output,
     int64_t reduce_size,
+    int64_t inner,
     int64_t num_output_elements) {
   extern __shared__ int64_t sdata[];
 
   int64_t out_idx = blockIdx.x;
   if (out_idx >= num_output_elements) return;
 
-  const int64_t* slice = data + out_idx * reduce_size;
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const int64_t* slice = data + oo * reduce_size * inner + ii;
   const int tid = static_cast<int>(threadIdx.x);
   const int lane = tid % warpSize;
   const int warp_id = tid / warpSize;
@@ -82,10 +93,12 @@ __global__ void reduce_sum_i64_shfl_kernel(
   const int64_t stride = static_cast<int64_t>(blockDim.x);
 
   // Each thread accumulates a partial sum over its strided portion. When the
-  // slice is 16-byte aligned we read two i64 values at a time, otherwise we
-  // fall back to an unrolled scalar loop.
+  // reduce axis is contiguous (inner==1) and the slice is 16-byte aligned we
+  // read two i64 values at a time; otherwise (non-contiguous axis, inner>1, or
+  // misaligned) we fall back to an unrolled scalar loop with `inner` stride.
   int64_t sum = 0;
   const bool use_vectorized =
+      (inner == 1) &&
       (reinterpret_cast<std::uintptr_t>(slice) & (alignof(longlong2) - 1)) == 0;
 
   if (use_vectorized) {
@@ -111,11 +124,11 @@ __global__ void reduce_sum_i64_shfl_kernel(
   } else {
     int64_t i = tid;
     for (; i + stride < reduce_size; i += stride * 2) {
-      sum += slice[i];
-      sum += slice[i + stride];
+      sum += slice[i * inner];
+      sum += slice[(i + stride) * inner];
     }
     for (; i < reduce_size; i += stride) {
-      sum += slice[i];
+      sum += slice[i * inner];
     }
   }
 
@@ -148,18 +161,21 @@ __global__ void reduce_sum_i32_kernel(
     const int32_t* __restrict__ data,
     int32_t* __restrict__ output,
     int64_t reduce_size,
+    int64_t inner,
     int64_t num_output_elements) {
   extern __shared__ int64_t sdata_i32[];
 
   int64_t out_idx = blockIdx.x;
   if (out_idx >= num_output_elements) return;
 
-  const int32_t* slice = data + out_idx * reduce_size;
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const int32_t* slice = data + oo * reduce_size * inner + ii;
   int tid = threadIdx.x;
 
   int64_t sum = 0;
   for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
-    sum += static_cast<int64_t>(slice[i]);
+    sum += static_cast<int64_t>(slice[i * inner]);
   }
   sdata_i32[tid] = sum;
   __syncthreads();
@@ -188,18 +204,21 @@ __global__ void reduce_sum_f16_kernel(
     const __half* __restrict__ data,
     __half* __restrict__ output,
     int64_t reduce_size,
+    int64_t inner,
     int64_t num_output_elements) {
   extern __shared__ float sdata_f16[];
 
   int64_t out_idx = blockIdx.x;
   if (out_idx >= num_output_elements) return;
 
-  const __half* slice = data + out_idx * reduce_size;
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const __half* slice = data + oo * reduce_size * inner + ii;
   int tid = threadIdx.x;
 
   float sum = 0.0f;
   for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
-    sum += __half2float(slice[i]);
+    sum += __half2float(slice[i * inner]);
   }
   sdata_f16[tid] = sum;
   __syncthreads();
@@ -226,8 +245,10 @@ extern "C" int hip_reduce_sum(
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
+    int64_t inner_size,
     int hip_dtype) {
   if (num_output_elements <= 0) return 0;
+  if (inner_size <= 0) inner_size = 1;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
@@ -266,14 +287,15 @@ extern "C" int hip_reduce_sum(
               (long long)reduce_size, (long long)num_output_elements,
               block_size, shared_mem);
 
-      if(reduce_size >= 2048){
+      // Vectorized shfl path is only valid for a contiguous reduce (inner==1).
+      if(reduce_size >= 2048 && inner_size == 1){
         hipLaunchKernelGGL(reduce_sum_i64_shfl_kernel,
                          dim3(static_cast<unsigned>(num_output_elements)),
                          dim3(block_size),
                          shared_mem, hip_stream,
                          static_cast<const int64_t*>(data),
                          static_cast<int64_t*>(output),
-                         reduce_size, num_output_elements);
+                         reduce_size, inner_size, num_output_elements);
       }
       else{
         hipLaunchKernelGGL(reduce_sum_i64_kernel,
@@ -282,7 +304,7 @@ extern "C" int hip_reduce_sum(
                          shared_mem, hip_stream,
                          static_cast<const int64_t*>(data),
                          static_cast<int64_t*>(output),
-                         reduce_size, num_output_elements);
+                         reduce_size, inner_size, num_output_elements);
       }
       break;
     }
@@ -305,7 +327,7 @@ extern "C" int hip_reduce_sum(
                        shared_mem, hip_stream,
                        static_cast<const int32_t*>(data),
                        static_cast<int32_t*>(output),
-                       reduce_size, num_output_elements);
+                       reduce_size, inner_size, num_output_elements);
       break;
     }
     case HIP_DTYPE_FLOAT16: {
@@ -327,7 +349,7 @@ extern "C" int hip_reduce_sum(
                        shared_mem, hip_stream,
                        static_cast<const __half*>(data),
                        static_cast<__half*>(output),
-                       reduce_size, num_output_elements);
+                       reduce_size, inner_size, num_output_elements);
       break;
     }
     default:
@@ -426,7 +448,8 @@ __device__ inline ACC init_val() {
 template <typename T, BlockReduceOp OP>
 __global__ void
 reduce_int_kernel(const T *__restrict__ data, T *__restrict__ output,
-                  int64_t reduce_size, int64_t num_output_elements) {
+                  int64_t reduce_size, int64_t inner,
+                  int64_t num_output_elements) {
   extern __shared__ unsigned char sdata_raw[];
   T *sdata = reinterpret_cast<T *>(sdata_raw);
 
@@ -434,12 +457,14 @@ reduce_int_kernel(const T *__restrict__ data, T *__restrict__ output,
   if (out_idx >= num_output_elements)
     return;
 
-  const T *slice = data + out_idx * reduce_size;
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const T *slice = data + oo * reduce_size * inner + ii;
   int tid = threadIdx.x;
 
   T acc = init_val<T, T, OP>();
   for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
-    acc = do_op<T, T, OP>(acc, slice[i]);
+    acc = do_op<T, T, OP>(acc, slice[i * inner]);
   }
   sdata[tid] = acc;
   __syncthreads();
@@ -460,6 +485,7 @@ template <BlockReduceOp OP>
 __global__ void reduce_f16_kernel(const __half *__restrict__ data,
                                   __half *__restrict__ output,
                                   int64_t reduce_size,
+                                  int64_t inner,
                                   int64_t num_output_elements) {
   extern __shared__ float sdata_f[];
 
@@ -467,12 +493,14 @@ __global__ void reduce_f16_kernel(const __half *__restrict__ data,
   if (out_idx >= num_output_elements)
     return;
 
-  const __half *slice = data + out_idx * reduce_size;
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const __half *slice = data + oo * reduce_size * inner + ii;
   int tid = threadIdx.x;
 
   float acc = init_val<float, float, OP>();
   for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
-    acc = do_op<float, float, OP>(acc, __half2float(slice[i]));
+    acc = do_op<float, float, OP>(acc, __half2float(slice[i * inner]));
   }
   sdata_f[tid] = acc;
   __syncthreads();
@@ -492,9 +520,11 @@ template <BlockReduceOp OP>
 static int hip_block_reduce_launch(void *stream, const void *data,
                                    void *output, int64_t num_input_elements,
                                    int64_t num_output_elements,
+                                   int64_t inner_size,
                                    int hip_dtype, const char *op_name) {
   if (num_output_elements <= 0)
     return 0;
+  if (inner_size <= 0) inner_size = 1;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
@@ -535,7 +565,7 @@ static int hip_block_reduce_launch(void *stream, const void *data,
                        dim3(block_size), shared_mem, hip_stream,
                        static_cast<const int64_t *>(data),
                        static_cast<int64_t *>(output), reduce_size,
-                       num_output_elements);
+                       inner_size, num_output_elements);
     break;
   }
   case HIP_DTYPE_INT32: {
@@ -551,7 +581,7 @@ static int hip_block_reduce_launch(void *stream, const void *data,
                        dim3(block_size), shared_mem, hip_stream,
                        static_cast<const int32_t *>(data),
                        static_cast<int32_t *>(output), reduce_size,
-                       num_output_elements);
+                       inner_size, num_output_elements);
     break;
   }
   case HIP_DTYPE_FLOAT16: {
@@ -567,7 +597,7 @@ static int hip_block_reduce_launch(void *stream, const void *data,
                        dim3(block_size), shared_mem, hip_stream,
                        static_cast<const __half *>(data),
                        static_cast<__half *>(output), reduce_size,
-                       num_output_elements);
+                       inner_size, num_output_elements);
     break;
   }
   default:
@@ -586,18 +616,20 @@ static int hip_block_reduce_launch(void *stream, const void *data,
 
 extern "C" int hip_reduce_max(void *stream, const void *data, void *output,
                               int64_t num_input_elements,
-                              int64_t num_output_elements, int hip_dtype) {
+                              int64_t num_output_elements, int64_t inner_size,
+                              int hip_dtype) {
   return hip_block_reduce_launch<OP_MAX>(stream, data, output,
                                          num_input_elements,
-                                         num_output_elements, hip_dtype,
-                                         "reduce_max");
+                                         num_output_elements, inner_size,
+                                         hip_dtype, "reduce_max");
 }
 
 extern "C" int hip_reduce_prod(void *stream, const void *data, void *output,
                                int64_t num_input_elements,
-                               int64_t num_output_elements, int hip_dtype) {
+                               int64_t num_output_elements, int64_t inner_size,
+                               int hip_dtype) {
   return hip_block_reduce_launch<OP_PROD>(stream, data, output,
                                           num_input_elements,
-                                          num_output_elements, hip_dtype,
-                                          "reduce_prod");
+                                          num_output_elements, inner_size,
+                                          hip_dtype, "reduce_prod");
 }

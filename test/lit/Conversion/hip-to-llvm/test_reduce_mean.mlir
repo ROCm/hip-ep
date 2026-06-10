@@ -13,7 +13,7 @@ module {
     hip.reduce_mean(%ctx) ins(%input, %axes : memref<8x128x512xf32, 1>, memref<1xi64, 1>)
                           outs(%output : memref<8x128xf32, 1>)
                           {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
-    // CHECK: llvm.call @wrap_reduce_mean({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_mean({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 

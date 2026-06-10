@@ -767,17 +767,22 @@ int wrap_transpose(RuntimeState *state, const void *input, void *output,
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
 // Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_INT32,
 //                  HIPDNN_EP_DATATYPE_INT64.
+// `inner_size` = product of input dims AFTER the reduced axis (1 for a
+// trailing/contiguous reduce); enables strided reduction over a non-trailing
+// axis (e.g. NCHW channel-axis LayerNorm2d).
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
-                    int64_t keepdims, int64_t noop_with_empty_axes);
+                    int64_t keepdims, int64_t noop_with_empty_axes,
+                    int64_t inner_size);
 
 // ReduceMax operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
 int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
-                    int64_t keepdims, int64_t noop_with_empty_axes);
+                    int64_t keepdims, int64_t noop_with_empty_axes,
+                    int64_t inner_size);
 
 // Cast operation wrapper (element type conversion)
 // src_data_type and dst_data_type are HIPDNN_EP_DATATYPE_* enum values.
@@ -1130,7 +1135,8 @@ int wrap_expand(RuntimeState *state, void *input, void *shape, void *output,
 int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,
                      int64_t axes_num_elements, int64_t data_type,
-                     int64_t keepdims, int64_t noop_with_empty_axes);
+                     int64_t keepdims, int64_t noop_with_empty_axes,
+                     int64_t inner_size);
 
 // Less operation wrapper (element-wise C = A < B). Output is bool (1 byte).
 int wrap_less(RuntimeState *state, void *a, void *b, void *output,
@@ -1140,7 +1146,8 @@ int wrap_less(RuntimeState *state, void *a, void *b, void *output,
 int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,
                      int64_t axes_num_elements, int64_t data_type,
-                     int64_t keepdims, int64_t noop_with_empty_axes);
+                     int64_t keepdims, int64_t noop_with_empty_axes,
+                     int64_t inner_size);
 
 // GatherND operation wrapper. data_shape has rank `data_rank`; indices has
 // rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
