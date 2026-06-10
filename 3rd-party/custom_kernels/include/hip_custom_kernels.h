@@ -74,28 +74,6 @@ int hip_elementwise_sub(
     int hip_dtype);
 
 /* =========================================================================
- * Elementwise Multiplication (no broadcasting)
- * =========================================================================
- *
- * Computes output[i] = lhs[i] * rhs[i] for num_elements elements.
- * Caller must ensure lhs/rhs/output have identical layout (no broadcasting).
- *
- * Provided so wrap_miopenOpTensor (Add/Mul) can fall back to a custom kernel
- * for dtypes MIOpen does not support (currently: INT64). Float dtypes still
- * go through MIOpen for performance + autotuning.
- *
- * Currently supported types: HIP_DTYPE_INT64
- * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
- */
-int hip_elementwise_mul(
-    void* stream,
-    const void* lhs,
-    const void* rhs,
-    void* output,
-    int64_t num_elements,
-    int hip_dtype);
-
-/* =========================================================================
  * Elementwise Where (NumPy-style multidirectional broadcasting, arbitrary rank)
  * =========================================================================
  *
@@ -190,18 +168,24 @@ int hip_elementwise_not(
     int64_t num_elements);
 
 /* =========================================================================
- * Elementwise Binary (Div / Mod / Equal / Less)
+ * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
  * =========================================================================
  *
- * Same-shape binary elementwise ops added for the Qwen3.5 vision model.
- * All four share a single .hip TU (elementwise_binary_kernel.hip).
+ * Same-shape binary elementwise ops. All eight share one translation unit:
+ * 3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip.
  *
- * Important: broadcasting is NOT performed in these kernels. lhs and rhs
- * must already have identical shape (broadcasting is materialised
- * upstream via Expand).
+ * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
+ * miopenOpTensor rejects the element type (notably INT32/INT64). Float
+ * dtypes still use MIOpen for performance and autotuning.
  *
- * Output dtype for Equal/Less is bool (1 byte); their hip_dtype refers to
- * the INPUT type. For Div/Mod, output dtype matches input dtype.
+ * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
+ * Less write bool (1 byte); their hip_dtype refers to the input element type.
+ * Div and Mod preserve the input dtype.
+ *
+ * Broadcasting is not performed in these kernels. lhs and rhs must already
+ * match in shape; upstream Expand / broadcast materialization is required.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
 int hip_elementwise_div(
     void* stream,
@@ -211,11 +195,6 @@ int hip_elementwise_div(
     int64_t num_elements,
     int hip_dtype);
 
-// Element-wise Mul / Add / Min / Max, same-shape only (caller materialises
-// broadcast). Reached from wrap_miopenOpTensor for integer element types
-// that MIOpen rejects (e.g. INT64 scalar shape arithmetic like the
-// seqlens_k = Min(total_seq_len, max_seq_len) clamp in GQA). Supports
-// FP16, FP32, INT32, INT64.
 int hip_elementwise_mul(
     void* stream,
     const void* lhs,

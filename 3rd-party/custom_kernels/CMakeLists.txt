@@ -32,13 +32,12 @@ hip_add_library(hip_custom_kernels STATIC
     hip/gqa_kernel.hip
     hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
-    hip/elementwise_mul_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/elementwise_unary_kernel.hip
-    hip/elementwise_binary_kernel.hip
+    hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
     hip/tile_kernel.hip
     hip/expand_kernel.hip
     hip/gather_nd_kernel.hip
