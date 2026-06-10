@@ -827,6 +827,15 @@ int main(int argc, char *argv[]) {
       "p", "positive-only",
       "Generate positive-only random inputs (for Sqrt/Reciprocal testing)",
       "false", true);
+  mo.add_option(
+      "f", "free-dim",
+      "Override a free/symbolic input dimension by name to a concrete value: "
+      "'name:value' (repeatable or comma-separated), e.g. "
+      "-f sequence_length:128. Mirrors onnxruntime_perf_test's -f option; "
+      "applied via AddFreeDimensionOverrideByName so ORT resolves the symbolic "
+      "dim consistently across the graph. Any free dim left unoverridden is "
+      "treated as 1.",
+      "");
 
   try {
     mo.parse(argc, argv);
@@ -952,6 +961,34 @@ int main(int argc, char *argv[]) {
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 
+  // Free-dimension overrides (mirror onnxruntime_perf_test -f). Each entry is
+  // "name:value"; ORT substitutes the symbolic dim by name across the whole
+  // graph before shape inference, keeping shared dims consistent. Free dims
+  // left unoverridden are filled as 1 during input generation below.
+  for (const std::string &ov : mo.get_vector<std::string>("free-dim")) {
+    const auto colon = ov.find(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= ov.size()) {
+      std::cerr << "Error: --free-dim expects 'name:value', got: " << ov
+                << "\n";
+      return 1;
+    }
+    const std::string dim_name = trim_string(ov.substr(0, colon));
+    int64_t dim_value = 0;
+    try {
+      dim_value = std::stoll(trim_string(ov.substr(colon + 1)));
+    } catch (const std::exception &) {
+      std::cerr << "Error: --free-dim value is not an integer: " << ov << "\n";
+      return 1;
+    }
+    if (dim_value <= 0) {
+      std::cerr << "Error: --free-dim value must be > 0, got: " << ov << "\n";
+      return 1;
+    }
+    session_opts.AddFreeDimensionOverrideByName(dim_name.c_str(), dim_value);
+    std::cout << "Overriding free dimension '" << dim_name << "' -> "
+              << dim_value << "\n";
+  }
+
   // Create session
   auto model_path = std::filesystem::path(model_path_str);
   std::cout << "Loading model: " << model_path.string() << "\n";
@@ -1026,8 +1063,14 @@ int main(int argc, char *argv[]) {
 
   for (size_t i = 0; i < input_count; ++i) {
     auto shape = input_shapes[i];
-    if (!shape.empty() && shape[0] == -1)
-      shape[0] = 1;
+    // Any free dimension still unresolved here (i.e. not pinned via --free-dim)
+    // is treated as 1, matching onnxruntime_perf_test's default behavior
+    // (free dimensions are treated as 1 if not overridden). This keeps the
+    // buffer-size computation below from overflowing on symbolic dims.
+    for (auto &dim : shape) {
+      if (dim < 0)
+        dim = 1;
+    }
 
     size_t elem_size = element_byte_size(input_types[i]);
     int64_t n_elems = calculate_product(shape);
