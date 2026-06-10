@@ -173,18 +173,13 @@ typedef struct RuntimeState RuntimeState;
 // main_graph obtains each graph-output buffer from it at the point the output
 // shape is known (lowered from hip.alloc_output -> hipdnn_ep_alloc_output).
 //
-// ABI: this struct crosses the model.dll <-> EP boundary, so its layout is a
-// contract -- treated exactly like tensor_t below (the other cross-component
-// wire struct): a fixed layout locked by static_asserts, with the EP-side copy
-// declared identically. There is intentionally NO self-describing
-// size/version field: a layout change is an ABI break that requires rebuilding
-// the model.dll, and the model cache is invalidated the same way any other
-// runtime change is -- by deleting stale model.dlls (the compiled-model cache
-// key is the ONNX graph hash, not the runtime version, so a runtime ABI change
-// does not by itself invalidate cached DLLs).
-// Total absence of the contract is handled one level up by symbol resolution: a
-// pre-allocator model.dll simply lacks the exported setter, so GetProcAddress
-// returns null and the EP no-ops.
+// ABI: this struct crosses the model.dll <-> EP boundary. Its layout is a fixed
+// contract, locked by static_asserts and mirrored by an identical EP-side copy
+// -- same convention as tensor_t below. There is intentionally no size/version
+// field: a layout change is an ABI break, handled by rebuilding the model.dll
+// (deleting the stale cached DLLs), the same as any other runtime change.
+// A model.dll built before this contract simply lacks the exported setter, so
+// the EP's GetProcAddress returns null and it no-ops.
 typedef struct {
   void *self; // opaque EP context (borrowed; runtime never owns/frees)
   void *(*allocate)(void *self, int64_t out_idx, const int64_t *shape,
@@ -197,13 +192,13 @@ static_assert(offsetof(hipdnn_output_allocator_t, self) == 0,
               "self must remain first -- update all "
               "hipdnn_output_allocator_t copies");
 
-// dllexport so the setter survives LLVM optimization in the bitcode build (the
-// export_symbols list in CompilerDriver.cpp only adds linker-stage /EXPORT,
-// which runs AFTER opt and cannot keep an otherwise-uncalled symbol alive).
-// Applied to BOTH the declaration and the definition: MSVC -- which compiles
-// the same output_allocator.cpp natively for the GPU-free unit test -- treats a
-// decl/def dllexport mismatch as a hard error (C2375); clang only warns. The
-// unit test defines HIPDNN_EP_RT_NO_EXPORT so its exe does not export it.
+// Export attribute for runtime entry points the EP resolves by name. dllexport
+// keeps the symbol alive through LLVM optimization in the bitcode build (the
+// export_symbols /EXPORT list in CompilerDriver.cpp runs after opt and cannot
+// resurrect an uncalled symbol). Must be applied to BOTH the declaration and
+// the definition: output_allocator.cpp is also compiled natively by MSVC for
+// the GPU-free unit test, and MSVC rejects a decl/def mismatch (C2375). The
+// unit-test build defines HIPDNN_EP_RT_NO_EXPORT to drop the attribute.
 #if defined(_WIN32) && !defined(HIPDNN_EP_RT_NO_EXPORT)
 #define HIPDNN_EP_RT_EXPORT __declspec(dllexport)
 #else
