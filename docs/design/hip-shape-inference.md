@@ -432,6 +432,43 @@ HIP DPS ops (GQA, RmsNorm, SkipRmsNorm, Attention, RotaryEmbedding,
 …) gain reify impls, the wiring lets each new op participate without
 any change to `Pipelines.cpp`.
 
+### Pre-conversion sibling: `--hip-infer-loop-body-shapes`
+
+`--hip-infer-shapes` only *narrows* `?` dims within a known rank on
+HIP-dialect ops; it cannot *establish* rank on a `tensor<*xT>`, and it
+runs after conversion. That leaves a gap for outlined `hip.loop` body
+functions: the importer emits `tensor<*xT>` for values whose shape it
+cannot infer (canonically a loop-carried `onnx.Concat` accumulating
+along the sequence axis), and `convert-onnx-to-hip`'s converters require
+ranked results (`ConcatConversion` bails on unranked). An unranked body
+output therefore blocks conversion *and* leaves the body `func.return`
+operand type-incompatible with the func signature.
+
+`--hip-infer-loop-body-shapes`
+(`lib/Dialect/Transforms/InferLoopBodyShapesPass.cpp`) closes that gap
+**before** conversion, modeled on onnx-mlir's `ONNXLoopOp::inferShapes`
++ `inferFunctionReturnShapes`:
+
+```text
+simplify-onnx -> hip-add-context-arg -> onnx-loop-outline
+              -> hip-infer-loop-body-shapes      <-- pre-conversion
+              -> convert-onnx-to-hip
+              -> hip-infer-shapes                 <-- post-conversion (?-narrowing)
+              -> one-shot-bufferize -> ...
+```
+
+For each `hip.loop` body func it (1) seeds the loop-carried block args
+from `$v_init`, (2) forward-infers unranked `onnx.*` results from
+operand types (currently `onnx.Concat`; extensible dispatch), (3)
+applies a loop-contract backstop (any still-unranked loop-carried output
+is set to its `$v_init` type — the ONNX Loop spec guarantees
+body-output type == loop-carried-input type), and (4) reconciles the
+body func signature from the now-ranked terminator operands. Rank is
+only *established* here; all `?`-dim narrowing remains the job of the
+post-conversion `--hip-infer-shapes`. Wired into both
+`buildOnnxToHipPipeline` overloads. LIT:
+`test/lit/Dialect/hip-infer-loop-body-shapes.mlir`.
+
 ## How to add a new op
 
 For most new HIP DPS ops the recipe collapses to **two** edits:
