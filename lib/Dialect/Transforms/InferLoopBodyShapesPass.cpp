@@ -176,10 +176,11 @@ static Type inferConcatResult(Operation *op) {
 /// API rather than depending on onnx-mlir's registered op classes, so there is
 /// no op class and no `ShapeInferenceOpInterface` to dispatch on. A name
 /// switch is therefore the only handle available, and it mirrors how the
-/// converter layer itself is organized (`RewritePattern("onnx.Concat", ...)`). The
-/// op-agnostic loop-contract backstop in `inferLoopBodyShapes` is the general
-/// safety net for the failure mode (the loop-carried output); these forward
-/// rules are the enhancement tier that also ranks *interior* unranked values.
+/// converter layer itself is organized (`RewritePattern("onnx.Concat", ...)`).
+/// The op-agnostic loop-contract backstop in `inferLoopBodyShapes` is the
+/// general safety net for the failure mode (the loop-carried output); these
+/// forward rules are the enhancement tier that also ranks *interior* unranked
+/// values.
 ///
 /// How to make this generic. Once the build takes a proper dependency on a
 /// registered ONNX dialect (onnx-mlir), every op implements
