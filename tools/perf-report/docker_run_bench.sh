@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # Wrapper that runs a bench script inside the hipdnn-ep build container
 # without needing an interactive shell. Use this from any host terminal that
 # doesn't deliver a clean TTY to `docker exec -it` -- e.g. Cursor's embedded

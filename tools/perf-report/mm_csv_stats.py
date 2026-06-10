@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Compute TTFT / TPS (and profiling overhead) from benchmark_multimodal.py CSVs.
 
 The Python OGA multimodal bench writes a one-row CSV of averaged metrics.
@@ -14,6 +18,7 @@ Prefill TPS is derived (prompt_tokens / TTFT_seconds); everything else is read
 straight from the CSV columns. When two CSVs are given, the LAST is treated as
 the baseline and the deltas are reported relative to it.
 """
+
 import csv
 import sys
 from pathlib import Path
@@ -51,11 +56,19 @@ def load(path: Path) -> dict:
 def fmt(label: str, m: dict) -> None:
     print(f"== {label} ==")
     print(f"  prompt / gen tokens : {m['prompt_tokens']} / {m['gen_tokens']}")
-    print(f"  TTFT                : {m['ttft_ms']:.1f} ms  ({m['ttft_ms']/1000:.2f} s)")
-    print(f"  Prefill TPS         : {m['prefill_tps']:.2f} tok/s  (derived prompt/TTFT)")
-    print(f"  Decode  TPS         : {m['decode_tps']:.2f} tok/s  ({m['decode_ms']:.2f} ms/tok)")
+    print(
+        f"  TTFT                : {m['ttft_ms']:.1f} ms  ({m['ttft_ms'] / 1000:.2f} s)"
+    )
+    print(
+        f"  Prefill TPS         : {m['prefill_tps']:.2f} tok/s  (derived prompt/TTFT)"
+    )
+    print(
+        f"  Decode  TPS         : {m['decode_tps']:.2f} tok/s  ({m['decode_ms']:.2f} ms/tok)"
+    )
     print(f"  Sampling            : {m['sampling_ms']:.3f} ms/tok")
-    print(f"  Wall-clock TPS      : {m['wall_tps']:.2f} tok/s  (E2E {m['wall_s']:.2f} s)")
+    print(
+        f"  Wall-clock TPS      : {m['wall_tps']:.2f} tok/s  (E2E {m['wall_s']:.2f} s)"
+    )
     print(f"  Peak working set    : {m['peak_gib']:.2f} GiB")
 
 
@@ -68,11 +81,21 @@ def pct(new: float, base: float) -> str:
 def compare(prof_lbl, prof, base_lbl, base) -> None:
     print(f"== overhead: {prof_lbl} vs {base_lbl} (baseline) ==")
     rows = [
-        ("Decode latency (ms/tok)", prof["decode_ms"], base["decode_ms"], "lower=better"),
-        ("Decode TPS (tok/s)",      prof["decode_tps"], base["decode_tps"], "higher=better"),
-        ("TTFT (ms)",               prof["ttft_ms"],    base["ttft_ms"],    "lower=better"),
-        ("Prefill TPS (tok/s)",     prof["prefill_tps"],base["prefill_tps"],"higher=better"),
-        ("E2E wall (s)",            prof["wall_s"],     base["wall_s"],     "lower=better"),
+        (
+            "Decode latency (ms/tok)",
+            prof["decode_ms"],
+            base["decode_ms"],
+            "lower=better",
+        ),
+        ("Decode TPS (tok/s)", prof["decode_tps"], base["decode_tps"], "higher=better"),
+        ("TTFT (ms)", prof["ttft_ms"], base["ttft_ms"], "lower=better"),
+        (
+            "Prefill TPS (tok/s)",
+            prof["prefill_tps"],
+            base["prefill_tps"],
+            "higher=better",
+        ),
+        ("E2E wall (s)", prof["wall_s"], base["wall_s"], "lower=better"),
     ]
     w = max(len(r[0]) for r in rows)
     print(f"  {'metric':<{w}}  {prof_lbl:>12}  {base_lbl:>12}  {'delta':>10}  {'%':>8}")
