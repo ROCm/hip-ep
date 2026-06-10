@@ -10,6 +10,7 @@ add_library(HipDialectTransforms STATIC
   HoistAllocSizeArith.cpp
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
+  LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
