@@ -579,6 +579,63 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   ];
 }
 
+def InferLoopBodyShapesPass
+    : Pass<"hip-infer-loop-body-shapes", "mlir::ModuleOp"> {
+  let summary = "Rank-establish unranked tensors inside outlined hip.loop "
+                "body functions before `convert-onnx-to-hip`";
+  let description = [{
+    Runs AFTER `onnx-loop-outline` and BEFORE `convert-onnx-to-hip`. The
+    importer (MorphiZen) emits `tensor<*xT>` (unranked) for values whose
+    shape it cannot infer -- most commonly an outlined `hip.loop` body's
+    loop-carried output (e.g. an `onnx.Concat` that accumulates along the
+    sequence axis). `convert-onnx-to-hip`'s op converters require ranked
+    result types (`ConcatConversion` bails on unranked), so an unranked
+    body output blocks conversion AND leaves the body `func.return`
+    operand type-incompatible with the func signature.
+
+    This pass closes that gap by, for every `hip.loop` body func:
+      1. Seeding the body's loop-carried block args from the loop op's
+         `$v_init` operand types (already ranked post-outline; done for
+         robustness / parity with onnx-mlir `ONNXLoopOp::inferShapes`).
+      2. Forward-inferring unranked `onnx.*` result types from operand
+         types (currently: `onnx.Concat`), iterated to a fixed point.
+      3. Loop-contract backstop: any loop-carried body output still
+         unranked is set to the matching `$v_init` type -- the ONNX Loop
+         spec guarantees body-output type == loop-carried-input type.
+      4. Reconciling the body func's declared result types from the (now
+         ranked) terminator operand types.
+
+    Post-conversion `--hip-infer-shapes` still handles all `?`-dim
+    narrowing on HIP-dialect ops; this pass only establishes rank so
+    conversion can proceed.
+
+    Example (one body func):
+    ```mlir
+    // before
+    func.func private @loop_body(%ctx, %i, %c, %acc: tensor<1x?x1152xf16>, ...)
+        -> tensor<*xf16> {
+      %a = hip.multi_head_attention ... : tensor<?x?x?xf16>
+      %r = "onnx.Concat"(%acc, %a) {axis = 1} :
+             (tensor<1x?x1152xf16>, tensor<?x?x?xf16>) -> tensor<*xf16>
+      return %r : tensor<*xf16>
+    }
+
+    // after
+    func.func private @loop_body(%ctx, %i, %c, %acc: tensor<1x?x1152xf16>, ...)
+        -> tensor<1x?x1152xf16> {
+      %a = hip.multi_head_attention ... : tensor<?x?x?xf16>
+      %r = "onnx.Concat"(%acc, %a) {axis = 1} :
+             (tensor<1x?x1152xf16>, tensor<?x?x?xf16>) -> tensor<1x?x1152xf16>
+      return %r : tensor<1x?x1152xf16>
+    }
+    ```
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
   let summary = "Replace extern memref.global constants with "
