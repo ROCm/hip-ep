@@ -494,19 +494,21 @@ int wrap_miopenConvolutionTranspose(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
       conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
 
-  // Bias is [M]; broadcast-add over the [N, M, H', W'] output via the dedicated
-  // MIOpen bias-forward op (descriptor [1, M, 1, 1]). beta=1.0 so the bias is
-  // ADDED to the existing deconv output rather than overwriting it
-  // (y = alpha*bias + beta*y).
+  // Bias is [M]; broadcast-add over the [N, M, H', W'] output. Use
+  // miopenOpTensor (the same op the forward conv uses) rather than
+  // miopenConvolutionForwardBias: the latter is observed to double the
+  // deconvolution result here (output came out ~2x). miopenOpTensor with
+  // beta=0, alpha1=alpha2=1 computes C = A + B in-place (A == C), adding the
+  // [1,M,1,1] bias broadcast over [N,M,H',W'] without re-touching the conv.
   if (bias) {
-    float beta_add = 1.0f;
     int b_dims[] = {1, (int)output_c, 1, 1};
     MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
         bias_desc, miopen_dt, miopenTensorNCHW, b_dims, 4));
-    MIOPEN_CHECK(miopenConvolutionForwardBias(miopen_handle, &alpha, bias_desc,
-                                              bias, &beta_add, output_desc,
-                                              output));
+    float a1 = 1.0f, a2 = 1.0f, bz = 0.0f;
+    MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &a1,
+                                output_desc, output, &a2, bias_desc, bias, &bz,
+                                output_desc, output));
   }
 
 cleanup:
