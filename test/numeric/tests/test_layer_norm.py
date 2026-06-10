@@ -25,18 +25,27 @@ from framework.onnx_utils import make_model_from_nodes
 SEQ_LENS = [1, 128]
 HIDDEN = 4096
 
+_NP_TO_TP = {
+    np.float16: TensorProto.FLOAT16,
+    np.float32: TensorProto.FLOAT,
+}
 
-def _make_simplified_layer_norm_model(input_shape: list[int]):
-    """Build a SimplifiedLayerNormalization ONNX model (f16).
+
+def _make_simplified_layer_norm_model(
+    input_shape: list[int], dtype: np.dtype = np.float16
+):
+    """Build a SimplifiedLayerNormalization ONNX model.
 
     ORT registers this op in the default ONNX domain (not com.microsoft).
+    `dtype` defaults to f16; pass np.float32 to exercise the f32 path.
     """
     hidden = input_shape[-1]
-    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
-    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
+    tp = _NP_TO_TP[dtype]
+    X = helper.make_tensor_value_info("X", tp, input_shape)
+    Y = helper.make_tensor_value_info("Y", tp, input_shape)
 
     rng = np.random.default_rng(77)
-    scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
+    scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(dtype)
     scale_init = numpy_helper.from_array(scale_data, name="scale")
 
     node = helper.make_node(
@@ -53,19 +62,23 @@ def _make_simplified_layer_norm_model(input_shape: list[int]):
     return model
 
 
-def _make_skip_simplified_layer_norm_model(input_shape: list[int]):
-    """Build a SkipSimplifiedLayerNormalization ONNX model (f16).
+def _make_skip_simplified_layer_norm_model(
+    input_shape: list[int], dtype: np.dtype = np.float16
+):
+    """Build a SkipSimplifiedLayerNormalization ONNX model.
 
     This op is in the com.microsoft domain. ORT CPU provider supports it.
+    `dtype` defaults to f16; pass np.float32 to exercise the f32 path.
     """
     hidden = input_shape[-1]
-    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
-    skip = helper.make_tensor_value_info("skip", TensorProto.FLOAT16, input_shape)
-    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
-    Y3 = helper.make_tensor_value_info("Y3", TensorProto.FLOAT16, input_shape)
+    tp = _NP_TO_TP[dtype]
+    X = helper.make_tensor_value_info("X", tp, input_shape)
+    skip = helper.make_tensor_value_info("skip", tp, input_shape)
+    Y = helper.make_tensor_value_info("Y", tp, input_shape)
+    Y3 = helper.make_tensor_value_info("Y3", tp, input_shape)
 
     rng = np.random.default_rng(88)
-    scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
+    scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(dtype)
     scale_init = numpy_helper.from_array(scale_data, name="scale")
 
     node = helper.make_node(
@@ -193,6 +206,24 @@ class TestSimplifiedLayerNorm:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-4)
 
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_simplified_layer_norm_ckdsl_f32(self, model_runner, seq_len):
+        """f32 / hidden=4096 RMSNorm -- the shape the ck_dsl fast path targets.
+
+        num_rows = seq_len, so seq_len=1 is decode (M=1) and seq_len=128 is
+        prefill (M>1). On a true gfx1151 device this drives the ck_dsl
+        kernel; on any other arch the shim returns -2 and this validates the
+        MIOpen f32 fallback instead.
+        """
+        input_shape = [1, seq_len, HIDDEN]
+        model = _make_simplified_layer_norm_model(input_shape, dtype=np.float32)
+
+        rng = np.random.default_rng(43)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
 
 class TestSkipSimplifiedLayerNorm:
     @pytest.mark.parametrize(
@@ -224,6 +255,25 @@ class TestSkipSimplifiedLayerNorm:
 
         actual, expected = model_runner.run_sample(model, [x, skip_input])
         compare_outputs(actual, expected, atol=2e-3)
+
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_skip_simplified_layer_norm_ckdsl_f32(self, model_runner, seq_len):
+        """f32 / hidden=4096 fused Add+RMSNorm -- the ck_dsl skip fast path.
+
+        num_rows = seq_len, so seq_len=1 is decode (M=1) and seq_len=128 is
+        prefill (M>1). On a true gfx1151 device this drives the ck_dsl fused
+        kernel; on any other arch the shim returns -2 and this validates the
+        MIOpen f32 fallback instead.
+        """
+        input_shape = [1, seq_len, HIDDEN]
+        model = _make_skip_simplified_layer_norm_model(input_shape, dtype=np.float32)
+
+        rng = np.random.default_rng(56)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
 
 
 # ---------------------------------------------------------------------------

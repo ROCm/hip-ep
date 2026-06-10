@@ -1123,6 +1123,21 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon);
 
+// ck_dsl-generated fast paths for the two RMSNorm wrappers above (defined in
+// real/ck_dsl_*.cpp). Gated on (f32, hidden_dim=4096) + a gfx1151 device;
+// return 0 on launch and -2 when the shape/device doesn't match, so the
+// caller falls back to the MIOpen path.
+int ck_dsl_simplified_layer_norm(void *stream, const void *input,
+                                 const void *gamma, void *output,
+                                 int64_t num_rows, int64_t hidden_dim,
+                                 float epsilon, int64_t element_size_bytes);
+
+int ck_dsl_skip_simplified_layer_norm(void *stream, const void *input,
+                                      const void *skip, const void *gamma,
+                                      void *output, void *residual_sum_out,
+                                      int64_t num_rows, int64_t hidden_dim,
+                                      float epsilon);
+
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
 // A: [batch_count x M x K], B: [N x k_blocks x blob_size] (packed uint8)
