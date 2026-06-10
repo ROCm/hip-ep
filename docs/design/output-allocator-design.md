@@ -323,6 +323,45 @@ sequenceDiagram
     Note over EP: clear allocator on RuntimeState (self must not dangle)<br/>then blocking hipMemcpy(host, scratch) per host output<br/>(GPU outputs: nothing — zero-copy)
 ```
 
+**Call tree (same flow, code-trace view).** The sequence diagram above shows the cross-component handshake; the tree below is the full nesting of actual functions for readers tracing the code. Function names only (no line numbers, which drift). Every output buffer comes from `GetOutput` with the graph's own in-graph shape — the callback never reshapes (KV cache included).
+
+```text
+MlirCustomOp::Compute(context)
+├─ inference_state_->begin_compute()            per-Compute cache reset (e.g. GQA seqlens_k)
+├─ if (use_output_allocator_)                   cached in ctor from metadata_.use_output_allocator()
+└─ compute_with_output_allocator(context)
+   ├─ marshal_input_tensors(context, ...)       EP-side: OrtValue -> inputs.span
+   ├─ build OutputAllocatorCtx octx{ctx, outputs, output_index_map, host_out_scratch, allocated[]}
+   ├─ output_allocator_t alloc{ self=&octx, allocate=&output_allocate_cb }
+   ├─ inference_state_->set_output_allocator(&alloc)
+   │     └─ hipdnn_ep_set_output_allocator(state, &alloc)   FATAL if the DLL lacks the export
+   ├─ inference_state_->compute_with_output_allocator(&inputs.span)
+   │  └─ inference_compute(state, inputs)        2-arg ABI, NO outputs span
+   │     ├─ hipdnn_ep_tensor_prepare_input(...) x N   -> input memref descriptors
+   │     ├─ hipdnn_ep_state_reset_error_flag(state)
+   │     ├─ main_graph(state, inputs)            thin wrapper: unpacks input descriptors,
+   │     │  └─ main_graph_internal(...)          calls body, DISCARDS its returned descriptor
+   │     │     ├─ hipdnn_ep_get_pool_base(state, domain_id, size)   grow-on-demand GPU pool
+   │     │     ├─ <compute ops> (e.g. wrap_hipblasLtMatmul, wrap_miopen*) -> pool slots
+   │     │     ├─ hipdnn_ep_alloc_output(state, out_idx, shape, rank, elem)   <-- OUTPUT ALLOC
+   │     │     │  └─ output_allocator.cpp: forwards to alloc.allocate(self, ...)
+   │     │     │     └─ output_allocate_cb(...)   noexcept
+   │     │     │        ├─ shape used verbatim (no override; present dim already = past capacity)
+   │     │     │        ├─ ctx.GetOutput(ort_idx, shape)   ORT returns pre-bound / fresh OrtValue
+   │     │     │        ├─ octx.allocated[out_idx] = true
+   │     │     │        └─ GPU output  -> return ORT ptr (zero-copy)
+   │     │     │           host output -> EP GPU scratch + queue pending_d2h
+   │     │     └─ <final op writes into that ptr>; returns output by-value memref (wrapper ignores it)
+   │     ├─ hipdnn_ep_stream_sync(state)         all GPU writes complete on return
+   │     ├─ hipdnn_ep_state_read_and_clear_error_flag(state)
+   │     └─ hipdnn_ep_tensor_free_input(state, ...) x N
+   ├─ inference_state_->set_output_allocator(nullptr)   clear before octx leaves scope
+   ├─ output-completeness guard: every allocated[i] true else LOG(FATAL)
+   └─ #ifndef BUILD_MOCK_RUNTIME: pending_d2h -> blocking hipMemcpy(host <- GPU scratch)
+```
+
+Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`): `main_graph` is a thin wrapper that bridges the runtime's `(ctx, inputs)` ABI to the exploded-descriptor ABI of the body, then **discards** the body's by-value return — the real output reaches the EP through the `hipdnn_ep_alloc_output` callback, not the return value.
+
 **Status: implemented.** The illustrative pseudocode above is realized by these files (the per-model auto-enable heuristic is deferred — allocator mode is an explicit, default-off `use_output_allocator` provider option):
 
 | Concern | Where |
