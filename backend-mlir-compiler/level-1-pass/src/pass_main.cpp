@@ -64,6 +64,12 @@ static CompilationConfig load_config(PassContext *ctx) {
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
 
+    // Output-allocator mode: explicit opt-in (default off). Threaded to both
+    // the compile pipeline and the metadata flag the EP reads at runtime, so
+    // the DLL ABI and the EP's dispatch arity can never disagree.
+    config.useOutputAllocator =
+        ctx->get_provider_option("use_output_allocator", "0") == "1";
+
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";
@@ -203,9 +209,12 @@ parse_dim_params_map(const std::string &encoded) {
 // value. Uses dim_params_map model metadata (populated by IR converter from
 // ORT's GetSymbolicDimensions) to match dimensions across tensors.
 static std::string build_metadata_json(const CompilationArtifact &artifact,
-                                       Graph &graph) {
+                                       Graph &graph, bool useOutputAllocator) {
   mlir_metadata::Metadata metadata;
   metadata.set_artifact_filename(artifact.filename);
+  // Same value as the compile flag (CompilationConfig::useOutputAllocator), so
+  // the DLL ABI and the EP's runtime dispatch arity can never disagree.
+  metadata.set_use_output_allocator(useOutputAllocator);
 
   GraphRef graphRef(graph);
 
@@ -417,7 +426,8 @@ struct Level1MlirPass {
                record_elapsed(t_prev));
 
     // Step 5: Build metadata JSON from graph outputs
-    auto metadata_json = build_metadata_json(artifact, graph);
+    auto metadata_json =
+        build_metadata_json(artifact, graph, config.useOutputAllocator);
 
     TIMING_LOG("[Session] Build metadata JSON: %.3fs\n",
                record_elapsed(t_prev));
