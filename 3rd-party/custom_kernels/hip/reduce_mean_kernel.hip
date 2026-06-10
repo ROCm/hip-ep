@@ -53,7 +53,8 @@ __global__ void scale_inplace_int_kernel(T *__restrict__ data,
 
 extern "C" int hip_reduce_mean(void *stream, const void *data, void *output,
                                int64_t num_input_elements,
-                               int64_t num_output_elements, int hip_dtype) {
+                               int64_t num_output_elements, int64_t inner_size,
+                               int hip_dtype) {
   if (num_output_elements <= 0)
     return 0;
   if (num_input_elements % num_output_elements != 0) {
@@ -64,8 +65,10 @@ extern "C" int hip_reduce_mean(void *stream, const void *data, void *output,
     return -1;
   }
 
+  // The sum pass honors `inner_size` (strided reduce for non-trailing axes);
+  // the trailing scale pass below is over the contiguous output, unaffected.
   int rc = hip_reduce_sum(stream, data, output, num_input_elements,
-                          num_output_elements, hip_dtype);
+                          num_output_elements, inner_size, hip_dtype);
   if (rc != 0)
     return rc;
 
