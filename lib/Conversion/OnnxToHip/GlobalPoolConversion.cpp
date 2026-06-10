@@ -35,8 +35,8 @@ namespace {
 //   %y = "onnx.GlobalLpPool"(%x) {p = 3 : i64} : (...) -> (...)
 //
 // After:
-//   %init = tensor.empty(...) : tensor<NxCx1x...x1xT>      // dyn dims via tensor.dim
-//   %y    = hip.global_pool(%ctx)
+//   %init = tensor.empty(...) : tensor<NxCx1x...x1xT>      // dyn dims via
+//   tensor.dim %y    = hip.global_pool(%ctx)
 //             ins(%x   : tensor<NxCxD_1x...xD_kxT>)
 //             outs(%init : tensor<NxCx1x...x1xT>)
 //             {mode = 0|1|2 : i64, p = 2|<p> : i64}
@@ -50,12 +50,13 @@ constexpr int64_t kGlobalPoolModeLp = 2;
 /// Common rank / element-type checks plus DPS rewrite. Returns failure with
 /// a notification on any rejection; otherwise replaces \p op with a fresh
 /// `hip.global_pool` carrying the supplied mode and p.
-static mlir::LogicalResult
-buildHipGlobalPool(mlir::Operation *op, mlir::PatternRewriter &rewriter,
-                   int64_t mode, int64_t p, llvm::StringRef opLabel) {
+static mlir::LogicalResult buildHipGlobalPool(mlir::Operation *op,
+                                              mlir::PatternRewriter &rewriter,
+                                              int64_t mode, int64_t p,
+                                              llvm::StringRef opLabel) {
   if (op->getNumOperands() != 1 || op->getNumResults() != 1)
-    return rewriter.notifyMatchFailure(
-        op, llvm::Twine(opLabel) + " expects 1 input and 1 output");
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opLabel) +
+                                               " expects 1 input and 1 output");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
@@ -77,8 +78,7 @@ buildHipGlobalPool(mlir::Operation *op, mlir::PatternRewriter &rewriter,
   if (!mlir::isa<mlir::FloatType>(inputType.getElementType()) ||
       inputType.getElementType() != resultType.getElementType())
     return rewriter.notifyMatchFailure(
-        op,
-        llvm::Twine(opLabel) + " expects matching float element types (T)");
+        op, llvm::Twine(opLabel) + " expects matching float element types (T)");
 
   mlir::Location loc = op->getLoc();
 
