@@ -10,19 +10,23 @@
 namespace mlir_compilation {
 
 // Pure, dependency-free helper for the OGA `past_present_share_buffer` output
-// shape override. Shared by BOTH output-staging paths so they can never
-// diverge:
-//   * classic marshal_output_tensors (3-arg ABI) -- applied before GetOutput
-//   * the output-allocator callback (2-arg ABI)   -- applied before GetOutput
+// shape override. Used ONLY by the classic marshal_output_tensors path (3-arg
+// ABI) -- applied before GetOutput.
 //
 // Why this exists: OGA binds the SAME OrtValue to past_key_values.N.{key,value}
-// (input) and present.N.{key,value} (output). The compiler/DimSource resolves
-// the present tensor's sequence dim from the tight current length (e.g. 7),
-// but ORT only returns the pre-allocated shared buffer (preserving the
-// past==present pointer identity that in-place GQA append relies on) if we ask
-// for the buffer's real, larger shape. So before GetOutput we bump each
-// DYNAMIC present dim up to the matching past input's dim when the past is
-// strictly larger.
+// (input) and present.N.{key,value} (output). The classic path pre-computes the
+// present tensor's shape from DimSource, which resolves its sequence dim from
+// the tight current length (e.g. 7), but ORT only returns the pre-allocated
+// shared buffer (preserving the past==present pointer identity that in-place
+// GQA append relies on) if we ask for the buffer's real, larger shape. So
+// before GetOutput we bump each DYNAMIC present dim up to the matching past
+// input's dim when the past is strictly larger.
+//
+// The output-allocator path (2-arg ABI) does NOT need this: there the present
+// shape is computed in-graph by hip.alloc_output from `memref.dim %past_key`
+// (the past buffer's actual extent = the shared capacity in share-buffer mode),
+// so GetOutput already returns the pre-bound buffer. This override would be a
+// no-op there. See output_allocate_cb in MlirCustomOp.cpp.
 //
 // Contract:
 //   compiled_dims[0..rank)  -- the compiled metadata shape; -1 marks a dim that

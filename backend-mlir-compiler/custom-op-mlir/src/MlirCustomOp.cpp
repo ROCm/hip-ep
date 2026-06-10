@@ -581,9 +581,10 @@ PerfSummaryPrinter g_perf_printer;
 // In allocator mode the DLL receives no pre-filled outputs span. Instead
 // main_graph calls hipdnn_ep_alloc_output(out_idx, shape, rank, elem_size) for
 // each graph output once its runtime shape is known; the runtime forwards to
-// the callback the EP installed. The callback maps out_idx -> ORT output,
-// applies the OGA share-buffer shape override, asks ORT for the buffer, and
-// returns a pointer the DLL writes into:
+// the callback the EP installed. The callback maps out_idx -> ORT output, asks
+// ORT for the buffer at the DLL's in-graph shape (used verbatim -- NO
+// share-buffer/present.* override; see output_allocate_cb for why none is
+// needed), and returns a pointer the DLL writes into:
 //   * GPU (aliased) output -> ORT's GPU-accessible pointer (zero-copy).
 //   * host (CPU) output    -> an EP-owned GPU scratch pointer; Compute()
 //                             D2H-copies it into ORT's host buffer afterwards.
@@ -605,8 +606,9 @@ struct OutputAllocatorCtx {
   const google::protobuf::RepeatedPtrField<mlir_metadata::Output> *outputs =
       nullptr;
   const std::vector<int> *output_index_map = nullptr;
-  const std::vector<int> *input_index_map = nullptr;
-  const std::vector<int> *present_to_past_input_idx = nullptr;
+  // No input_index_map / present_to_past_input_idx here: unlike the classic
+  // marshal path, the allocator callback never reshapes outputs from inputs --
+  // it uses the DLL's in-graph shape verbatim (see output_allocate_cb).
   // Borrowed from the MlirCustomOp instance (grow-on-demand, reused across
   // Compute()): one GPU scratch buffer per output index for host outputs.
   std::vector<HostOutputScratch> *host_out_scratch = nullptr;
@@ -655,26 +657,30 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
       LOG(FATAL) << "output allocator: out_idx " << out_idx << " out of range ("
                  << octx->outputs->size() << " outputs)";
     }
-    const auto &output_meta = (*octx->outputs)[static_cast<int>(out_idx)];
-
-    // Working shape = the DLL-provided runtime shape.
+    // The DLL-provided runtime shape is used verbatim -- no EP-side override.
+    //
+    // This is the key advantage of the allocator path over the classic marshal
+    // path. The classic path must pre-compute every output shape itself (via
+    // DimSource, which resolves a present.*'s dynamic sequence dim from
+    // attention_mask -- the tight current length, e.g. 7), so for OGA's
+    // past_present_share_buffer it has to bump that dim up to the shared
+    // buffer's capacity before GetOutput or ORT would hand back a freshly
+    // allocated tensor (breaking the past==present pointer identity that
+    // in-place GQA append relies on). That bump is apply_present_share_buffer_
+    // override(), and it is needed ONLY because the classic path's shape source
+    // is wrong for shared buffers.
+    //
+    // Here the shape is computed in-graph by hip.alloc_output, whose dynamic
+    // dims come straight from the producing op's operands. For a present.*
+    // output that producer is hip.gqa, whose present init buffer is sized from
+    // `memref.dim %past_key` -- i.e. the past input buffer's ACTUAL extent. In
+    // shared-buffer mode past_key already IS the max_length capacity buffer, so
+    // `shape` here is already the capacity; GetOutput returns the pre-bound
+    // shared OrtValue and pointer identity is preserved with no special-casing.
+    // The override would be a provable no-op (out == past), so the allocator
+    // path stays model-agnostic: every output buffer comes from GetOutput with
+    // the graph's own shape, KV cache included.
     std::vector<int64_t> out_shape(shape, shape + rank);
-
-    // OGA past_present_share_buffer override (identical rules to the classic
-    // marshal path; see output_shape_override.h).
-    int past_idx =
-        (static_cast<size_t>(out_idx) < octx->present_to_past_input_idx->size())
-            ? (*octx->present_to_past_input_idx)[static_cast<int>(out_idx)]
-            : -1;
-    if (past_idx >= 0 &&
-        past_idx < static_cast<int>(octx->input_index_map->size())) {
-      int ort_past_idx = (*octx->input_index_map)[past_idx];
-      auto past_tensor = octx->ctx->GetInput(ort_past_idx);
-      auto past_shape = past_tensor.GetTensorTypeAndShapeInfo().GetShape();
-      apply_present_share_buffer_override(output_meta.shape().data(),
-                                          past_shape.data(), out_shape.data(),
-                                          out_shape.size(), past_shape.size());
-    }
 
     int ort_idx = (*octx->output_index_map)[static_cast<int>(out_idx)];
     auto out_tensor = octx->ctx->GetOutput(ort_idx, out_shape);
@@ -775,8 +781,6 @@ void MlirCustomOp::compute_with_output_allocator(
   octx.ctx = &ort_ctx;
   octx.outputs = &metadata_.outputs();
   octx.output_index_map = &output_index_map_;
-  octx.input_index_map = &input_index_map_;
-  octx.present_to_past_input_idx = &present_to_past_input_idx_;
   octx.host_out_scratch = &host_out_scratch_;
   octx.allocated.assign(metadata_.outputs().size(), false);
 

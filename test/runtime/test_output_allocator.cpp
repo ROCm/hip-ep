@@ -19,9 +19,10 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
-// EP-side pure helper (GPU-free, header-only) shared by the allocator callback
-// and the classic marshal path. Tested here so the OGA share-buffer override
-// rules have direct coverage without a GPU / ORT session.
+// EP-side pure helper (GPU-free, header-only) used by the classic marshal path
+// (the allocator callback does NOT need it -- see output_shape_override.h).
+// Tested here so the OGA share-buffer override rules have direct coverage
+// without a GPU / ORT session.
 #include "output_shape_override.h"
 
 #include <cstddef>
@@ -152,9 +153,11 @@ void test_alloc_null_state() {
 // ---------------------------------------------------------------------------
 // EP-side pure helper: apply_present_share_buffer_override. GPU-free, so it is
 // exercised in this same binary. These mirror the OGA past_present_share_buffer
-// rules that BOTH the allocator callback and the classic marshal path rely on;
-// the "multiple shapes" case stands in for a single dynamic-shape EP session
-// seeing several shapes back to back without recompilation.
+// rules the classic marshal path relies on (the allocator path needs no
+// override -- its present shape already arrives at capacity from the in-graph
+// memref.dim %past_key); the "multiple shapes" case stands in for a single
+// dynamic-shape EP session seeing several shapes back to back without
+// recompilation.
 // ---------------------------------------------------------------------------
 using mlir_compilation::apply_present_share_buffer_override;
 

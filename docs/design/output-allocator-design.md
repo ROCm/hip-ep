@@ -293,6 +293,7 @@ sequenceDiagram
     Note over DLL_MG: %M = memref.dim %input, 0
     DLL_MG->>RT: hipdnn_ep_alloc_output(state, out_idx, shape)
     RT->>CB: allocator->allocate(self, out_idx, shape, ...)
+    Note over CB: shape used verbatim — no present.*/share-buffer override<br/>(present dim already = past capacity via memref.dim %past_key)
     CB->>ORT: ctx.GetOutput(idx, shape)
     ORT-->>CB: OrtValue
     CB-->>RT: device_ptr (always GPU)
@@ -315,7 +316,8 @@ sequenceDiagram
 | EP-local ABI mirror | `output_allocator_t` in [custom_op_mlir.hpp](../../backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp) (same `static_assert`s as the runtime struct) |
 | 2-arg dispatch + setter | [InferenceState.cpp](../../backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp) (`compute_with_output_allocator`, `set_output_allocator`) |
 | Callback + per-Compute ctx + host D2H | [MlirCustomOp.cpp](../../backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp) (`output_allocate_cb`, `OutputAllocatorCtx`, `compute_with_output_allocator`) |
-| Shared present.* override helper | [output_shape_override.h](../../backend-mlir-compiler/custom-op-mlir/src/output_shape_override.h) |
+| Classic-path present.* override helper (allocator path needs none) | [output_shape_override.h](../../backend-mlir-compiler/custom-op-mlir/src/output_shape_override.h) |
+| Allocator KV-cache invariant guard (present dim ← `memref.dim %past_key`) | [test/lit/e2e/test_gqa_output_allocator_present_dim.mlir](../../test/lit/e2e/test_gqa_output_allocator_present_dim.mlir) |
 
 **Key design points (as built):**
 
@@ -327,7 +329,11 @@ sequenceDiagram
 
 4. **Host-output D2H is EP-side and real-build-only.** The GPU scratch (one buffer per output index, grow-on-demand, reused across `Compute()`, freed in the dtor) and the `hipMemcpy` are under `#ifndef BUILD_MOCK_RUNTIME` (the EP only links `hip::host` in non-mock builds; mock writes host memory directly). The generated 2-arg `inference_compute` already ends in `hipdnn_ep_stream_sync`, so writes are complete on return and a plain **blocking** `hipMemcpy` D2H suffices — no extra stream sync.
 
-5. **KV cache share-buffer override lives in the callback.** In allocator mode `marshal_output_tensors` is not called, so the present.*→past `max_length` override is replicated inside `output_allocate_cb`: for a `present.*` output it reads the matching `past_key_values.*` input's runtime shape and bumps each *dynamic* present dim up to the past capacity before `GetOutput`, so ORT returns the pre-bound shared `OrtValue` (pointer identity preserved for in-place GQA append). The override math is factored into the pure, GPU-free `apply_present_share_buffer_override` helper shared with the classic marshal path (so the two paths cannot drift) and unit-tested across several dynamic shapes.
+5. **KV cache share-buffer needs no override in the callback — the in-graph shape is already correct.** This is the cleanest property of the allocator design and the reason it is more general than the classic path. `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` *verbatim*, with **no** `present.*`-specific special-casing — every output buffer, KV cache included, is acquired the same way.
+
+   Why this is sound: the classic `marshal_output_tensors` path must pre-compute each output shape *itself* via `DimSource`, which resolves a `present.*`'s dynamic sequence dim from `attention_mask` — the **tight** current length (e.g. 7). ORT's single `KernelContext_GetOutput(idx, dims)` call only returns the pre-bound IO-bound `OrtValue` when the requested shape matches the bound buffer's capacity; ask for the tight shape and ORT allocates a *fresh* tensor, breaking the `past == present` pointer identity that in-place GQA append relies on. So the classic path has to bump that dim up to capacity — that bump is `apply_present_share_buffer_override`, needed **only** because the classic path's shape source is wrong for shared buffers.
+
+   The allocator path's shape source is right by construction. `hip.alloc_output`'s dynamic dims are the producing op's operands; for a `present.*` output the producer is `hip.gqa`, whose present init buffer is sized from `memref.dim %past_key` (the past input buffer's *actual* extent — see `createEmptyTensor` in `OnnxToHipUtils.h` and `GqaConversion.cpp`). Under OGA `past_present_share_buffer` the past buffer already **is** the `max_length` capacity buffer, so `shape` arrives at capacity; `GetOutput` returns the pre-bound shared `OrtValue` and pointer identity is preserved. The override would be a provable no-op (`out == past`), so it is intentionally absent from the allocator path. This is verified end-to-end by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`, which pins each dynamic `present.*` `hip.alloc_output` to a `memref.dim` of its matching `past_key_values.*` input. `apply_present_share_buffer_override` (pure, GPU-free, unit-tested) remains, but is now used **only** by the classic marshal path.
 
 6. **Output-completeness guard.** Allocator mode requires every declared output to be produced in-graph (one `hip.alloc_output` → one callback). After `compute_with_output_allocator` returns, the EP asserts every metadata output index was served, else `LOG(FATAL)` naming the missing one. This turns the two unsupported graph shapes (passthrough output that returns a graph input; deduped aliased output) into a clear error instead of an unfilled ORT output. None of the target models have them.
 
