@@ -70,21 +70,20 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  RUNTIME_DEBUG_LOG("[REAL] wrap_resize: dtype=%s(%lld) rank=%lld N=%lld C=%lld "
-                    "in=[%lld,%lld,%lld] out=[%lld,%lld,%lld] mode=%lld "
-                    "ct=%lld nm=%lld\n",
-                    hipdnn_ep_datatype_name(data_type), (long long)data_type,
-                    (long long)spatial_rank, (long long)N, (long long)C,
-                    (long long)in0, (long long)in1, (long long)in2,
-                    (long long)out0, (long long)out1, (long long)out2,
-                    (long long)mode, (long long)coord_transform,
-                    (long long)nearest_mode);
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_resize: dtype=%s(%lld) rank=%lld N=%lld C=%lld "
+      "in=[%lld,%lld,%lld] out=[%lld,%lld,%lld] mode=%lld "
+      "ct=%lld nm=%lld\n",
+      hipdnn_ep_datatype_name(data_type), (long long)data_type,
+      (long long)spatial_rank, (long long)N, (long long)C, (long long)in0,
+      (long long)in1, (long long)in2, (long long)out0, (long long)out1,
+      (long long)out2, (long long)mode, (long long)coord_transform,
+      (long long)nearest_mode);
 
-  int rc = hip_resize(stream, input, output, hip_dtype,
-                      static_cast<int>(spatial_rank), N, C, in0, in1, in2,
-                      out0, out1, out2, static_cast<int>(mode),
-                      static_cast<int>(coord_transform),
-                      static_cast<int>(nearest_mode));
+  int rc = hip_resize(
+      stream, input, output, hip_dtype, static_cast<int>(spatial_rank), N, C,
+      in0, in1, in2, out0, out1, out2, static_cast<int>(mode),
+      static_cast<int>(coord_transform), static_cast<int>(nearest_mode));
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_resize: kernel launch failed (%d)\n", rc);
     return -1;
