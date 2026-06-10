@@ -222,6 +222,13 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // model end-to-end, then delete this TODO.
   pm.addPass(createOnnxLoopOutlinePass());
 
+  // Rank-establish unranked tensors inside outlined loop bodies (e.g. a
+  // loop-carried `onnx.Concat` output the importer left as `tensor<*xT>`)
+  // BEFORE conversion: `convert-onnx-to-hip` converters require ranked
+  // results and otherwise leave the op unconverted, breaking the body
+  // func signature and later bufferization.
+  pm.addPass(createInferLoopBodyShapesPass());
+
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
         fs, options.externalizeMinNumElements, options.skipConstantData));
@@ -244,6 +251,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createInferLoopBodyShapesPass());
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());
