@@ -173,6 +173,17 @@ typedef struct RuntimeState RuntimeState;
 // main_graph obtains each graph-output buffer from it at the point the output
 // shape is known (lowered from hip.alloc_output -> hipdnn_ep_alloc_output).
 //
+// Call flow (allocator mode):
+//   MlirCustomOp::Compute
+//     -> hipdnn_ep_set_output_allocator(state, &alloc)   (EP installs)
+//     -> inference_compute(state, inputs)                (2-arg, no out span)
+//        -> main_graph -> main_graph_internal -> ...
+//           -> hipdnn_ep_alloc_output(state, out_idx, shape, rank, elem)
+//                -> alloc.allocate(self, ...)            (= EP callback)
+//                     -> GetOutput(shape)               (GPU zero-copy /
+//                                                         host scratch + D2H)
+//     -> set_output_allocator(nullptr); completeness check; host D2H
+//
 // ABI: this struct crosses the model.dll <-> EP boundary. Its layout is a fixed
 // contract, locked by static_asserts and mirrored by an identical EP-side copy
 // -- same convention as tensor_t below. There is intentionally no size/version
