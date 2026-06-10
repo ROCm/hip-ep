@@ -16,9 +16,9 @@
 //     %y = "onnx.Relu"(%x) : (tensor<...xT>) -> tensor<...xT>
 //
 //   After:
-//     %zero = "onnx.Constant"() {value = dense<0> : tensor<T>} : () -> tensor<T>
-//     %init = tensor.empty(...) : tensor<...xT>
-//     %y    = hip.max(%ctx) ins(%x, %zero : ..., tensor<T>) outs(%init : ...)
+//     %zero = "onnx.Constant"() {value = dense<0> : tensor<T>} : () ->
+//     tensor<T> %init = tensor.empty(...) : tensor<...xT> %y    = hip.max(%ctx)
+//     ins(%x, %zero : ..., tensor<T>) outs(%init : ...)
 //
 // `onnx.Constant` is intentionally retained — it is folded / handled by the
 // generic constant-handling path and is the canonical way for an ONNX
@@ -88,8 +88,8 @@ struct ReluToHipMax : public mlir::RewritePattern {
     // zero has rank 0 and carries no dim info).
     mlir::Value init = createEmptyTensor(rewriter, loc, resultType, x);
 
-    auto maxOp = mlir::hip::MaxOp::create(rewriter, loc, resultType, context,
-                                          x, zero, init);
+    auto maxOp = mlir::hip::MaxOp::create(rewriter, loc, resultType, context, x,
+                                          zero, init);
     rewriter.replaceOp(op, maxOp->getResult(0));
     return mlir::success();
   }

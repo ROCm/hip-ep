@@ -62,7 +62,7 @@ struct LeakyReluToHip : public mlir::RewritePattern {
 
     auto alphaAttr = rewriter.getF64FloatAttr(alphaVal);
     auto hipOp = mlir::hip::LeakyReluOp::create(rewriter, loc, resultType,
-                                                 context, x, init, alphaAttr);
+                                                context, x, init, alphaAttr);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }
