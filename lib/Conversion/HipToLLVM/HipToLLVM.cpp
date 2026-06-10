@@ -344,6 +344,15 @@ void ConvertHipToLLVMPass::runOnOperation() {
   // stages would require a reconcile-unrealized-casts cleanup pass.
   populateFuncToLLVMConversionPatterns(typeConverter, patterns);
   populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
+  // ArithToLLVM has no direct lowering for arith.{ceil,floor}div{s,u}i; these
+  // must first be expanded into primitive arith ops (cmp/sub/add/div/select),
+  // so the expand patterns and the ToLLVM patterns form a pair that must be
+  // populated together. Upstream's -convert-arith-to-llvm pass does exactly
+  // this; because we hand-roll the pattern set, we replicate the pairing.
+  // Omitting the expand patterns lets a stray ceildivsi (e.g. from
+  // dynamic-shape index arithmetic) survive applyPartialConversion and abort
+  // MLIR->LLVM translation with "missing LLVMTranslationDialectInterface".
+  arith::populateCeilFloorDivExpandOpsPatterns(patterns);
   arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
   cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
 
