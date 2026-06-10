@@ -213,6 +213,17 @@ void populateConcatConversionPatterns(RewritePatternSet &patterns,
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
+/// Pre-lowering pattern set: rewrite the `Reshape(data, Shape(src))` idiom
+/// so the shape operand becomes an explicit
+/// `tensor.from_elements(tensor.dim(src, *))`. This lets ReshapeConversion's
+/// `tensor.reshape` fallback recover per-output-dim sizes when the result has
+/// >1 dynamic dim in one reassociation group (otherwise ReshapeConversion
+/// ignores its second operand and emits the same SSA dim twice — the [N, N]
+/// bug). Sibling of GatherShapeFold; must run BEFORE lowerOnnxConstants.
+/// See ReshapeShapeFold.cpp.
+void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
