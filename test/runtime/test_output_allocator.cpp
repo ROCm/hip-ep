@@ -19,7 +19,6 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
-#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 
