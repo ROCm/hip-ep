@@ -4,8 +4,11 @@
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
 // Verify that hip.scatter_nd lowers to wrap_scatter_nd with the full
-// 15-parameter signature: 5 pointers + 4 shape pointers + 4 ranks +
-// reduction_id + data_type, regardless of the `reduction` attribute value.
+// 16-parameter signature: 5 buffer pointers + count_ptr (nullable, the 6th
+// pointer) + 4 shape pointers + 4 ranks + reduction_id + data_type, regardless
+// of the `reduction` attribute value. The count_ptr slot matters: dropping it
+// shifts every later argument by one and the runtime derefs a
+// shape-pointer-as-rank (SIGSEGV) -- see ScatterNDLowering.cpp header.
 
 module {
   func.func @test_scatter_nd_default(%ctx: !hip.context,
@@ -36,7 +39,7 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @test_scatter_nd_default
-// CHECK: llvm.call @wrap_scatter_nd({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_scatter_nd({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_scatter_nd_add
-// CHECK: llvm.call @wrap_scatter_nd({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_scatter_nd({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
