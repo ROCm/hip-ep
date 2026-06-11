@@ -143,15 +143,15 @@ func.func @free_after_all_direct_users(
 func.func @view_alias_chain_free_placement(
     %ctx: !hip.context,
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
-    %out: memref<2x64x64xf32>) -> memref<2x64x64xf32> {
+    %out: memref<1x64x64xf32>) -> memref<1x64x64xf32> {
   %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
   %sv = memref.subview %alloc0[0, 0, 0][1, 64, 64][1, 1, 1]
       : memref<2x64x64xf32> to memref<1x64x64xf32, strided<[4096, 64, 1]>>
   %cast = memref.cast %sv
       : memref<1x64x64xf32, strided<[4096, 64, 1]>>
         to memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>
-  hip.matmul(%ctx) ins(%cast, %b : memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%out : memref<2x64x64xf32>)
-  return %out : memref<2x64x64xf32>
+  hip.matmul(%ctx) ins(%cast, %b : memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%out : memref<1x64x64xf32>)
+  return %out : memref<1x64x64xf32>
 }
 
 // Pool pattern: after hip-pool-allocs, the function has a single memref.alloc

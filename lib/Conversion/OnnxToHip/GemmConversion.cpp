@@ -62,8 +62,9 @@ struct GemmToHip : public mlir::RewritePattern {
       operands.push_back(inputC);
     }
     operands.push_back(init);
-    auto hipOp = mlir::hip::GemmOp::create(
-        rewriter, loc, mlir::TypeRange{resultType}, operands, attrs);
+    // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
+    // result type == outs operand type.
+    auto hipOp = mlir::hip::GemmOp::create(rewriter, loc, operands, attrs);
     rewriter.replaceOp(op, hipOp.getResult(0));
     return mlir::success();
   }

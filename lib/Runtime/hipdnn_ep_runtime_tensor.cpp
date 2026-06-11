@@ -120,8 +120,28 @@ static void check_gcnarch(const char *location) {
   }
 }
 
-// Helper: Calculate total size in bytes for a tensor
-// Returns 0 on error (overflow or invalid dimensions)
+// Helper: Calculate total size in bytes for a tensor.
+//
+// Return value semantics:
+//   * size_bytes > 0  -- regular non-empty tensor.
+//   * size_bytes == 0 -- legitimate zero-element tensor (any shape[i] == 0),
+//                        OR genuinely invalid input (rank>0 with null shape,
+//                        any shape[i] < 0, or overflow). Callers that need
+//                        to distinguish must inspect shape themselves.
+//
+// Zero-sized dims are legal under the ONNX spec and are produced routinely
+// in practice (e.g. KV-cache `past_key_values.*.key/value` with shape
+// [B, H, 0, D] on the first prefill step when past_sequence_length==0;
+// OGA VLM decode supplies image_features as [0, hidden_size] every step
+// after the prompt has been processed). The prepare_input / prepare_output
+// path treats size_bytes==0 as a successful empty pass-through; this helper
+// therefore must return 0 silently for zero-sized dims rather than logging
+// "Invalid dimension" to stderr, which (a) is misleading because the input
+// is correct, and (b) used to spam once per zero-dim tensor per inference
+// step on every VLM model.
+//
+// Strictly-negative dims still indicate corrupt metadata and remain a
+// reported error.
 static size_t calculateTensorSize(const int64_t *shape, size_t rank,
                                   size_t element_size) {
   if (rank == 0) {
@@ -131,23 +151,28 @@ static size_t calculateTensorSize(const int64_t *shape, size_t rank,
     return 0;
   }
 
-  // Validate all dimensions are positive
+  // Reject strictly-negative dims (corrupt metadata). Zero is allowed.
   for (size_t i = 0; i < rank; i++) {
-    if (shape[i] <= 0) {
+    if (shape[i] < 0) {
       fprintf(stderr, "Invalid dimension at index %zu: %lld\n", i,
               (long long)shape[i]);
       return 0;
     }
   }
 
-  // Calculate total number of elements with overflow check
+  // Multiply with overflow check. Skip the division guard when the current
+  // dim is zero -- a zero factor cannot overflow, and SIZE_MAX/0 would be
+  // undefined behavior. Once total_elements hits zero it stays there, which
+  // is the correct answer for any zero-element tensor regardless of the
+  // remaining dims.
   size_t total_elements = 1;
   for (size_t i = 0; i < rank; i++) {
-    if (total_elements > SIZE_MAX / static_cast<size_t>(shape[i])) {
+    size_t dim = static_cast<size_t>(shape[i]);
+    if (dim != 0 && total_elements > SIZE_MAX / dim) {
       fprintf(stderr, "Tensor size overflow at dimension %zu\n", i);
       return 0;
     }
-    total_elements *= static_cast<size_t>(shape[i]);
+    total_elements *= dim;
   }
 
   if (total_elements > SIZE_MAX / element_size) {
@@ -255,13 +280,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     return HIPDNN_EP_ERR_NULL_POINTER; // Use generic error code
   }
 
-  // Validate tensor pointers
-  if (!tensor->data) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_input: tensor[%zu].data is null\n",
-            index);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
+  // Shape must be present (or rank==0 for scalars).
   if (!tensor->shape && tensor->rank != 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_input: tensor[%zu].shape is null\n",
@@ -291,8 +310,34 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // Calculate buffer size
   size_t size_bytes =
       calculateTensorSize(tensor->shape, tensor->rank, element_size);
+
+  // Empty tensors (any dim == 0 -> size_bytes == 0) are legitimate inputs --
+  // e.g. KV cache `past_key_values.*.key/value` with shape [B, H, 0, D] on
+  // the prefill step (past_sequence_length == 0).  ORT supplies these with
+  // `data == nullptr` because there is nothing to copy; we must accept that
+  // and let downstream compiled kernels see an empty dim and iterate zero
+  // times.  Skip the null-data check, skip pool_alloc + H2D, and return
+  // SUCCESS with a zero-size buffer (gpu_ptr=nullptr is fine because
+  // compiled MLIR kernels never dereference it when the corresponding dim
+  // is zero).
   if (size_bytes == 0) {
-    return HIPDNN_EP_ERR_INVALID_DIMENSION;
+    out_buffer->gpu_ptr = nullptr;
+    out_buffer->host_ptr = tensor->data;
+    out_buffer->shape_ptr = tensor->shape;
+    out_buffer->rank = tensor->rank;
+    out_buffer->size_bytes = 0;
+    out_buffer->is_pooled = false;
+    out_buffer->is_aliased = false;
+    return HIPDNN_EP_SUCCESS;
+  }
+
+  // Non-empty: data must be non-null now.
+  if (!tensor->data) {
+    fprintf(stderr,
+            "hipdnn_ep_tensor_prepare_input: tensor[%zu].data is null but "
+            "size_bytes=%zu (rank=%zu)\n",
+            index, size_bytes, tensor->rank);
+    return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
   RUNTIME_DEBUG_LOG(
@@ -440,13 +485,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   // Extract tensor from span
   tensor_t *tensor = &outputs->data[index];
 
-  // Validate tensor pointers
-  if (!tensor->data) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: tensor[%zu].data is null\n",
-            index);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
+  // Shape must be present (or rank==0 for scalars).
   if (!tensor->shape && tensor->rank != 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_output: tensor[%zu].shape is null\n",
@@ -476,8 +515,30 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   // Calculate buffer size
   size_t size_bytes =
       calculateTensorSize(tensor->shape, tensor->rank, element_size);
+
+  // Empty output tensors (any dim == 0) are legitimate -- e.g. an op
+  // producing a slice with a zero-length dim.  Skip allocation and return
+  // success with a zero-size buffer.  Compiled kernels never dereference
+  // gpu_ptr when the corresponding dim is zero (the iteration range is
+  // empty).
   if (size_bytes == 0) {
-    return HIPDNN_EP_ERR_INVALID_DIMENSION;
+    out_buffer->gpu_ptr = nullptr;
+    out_buffer->host_ptr = tensor->data;
+    out_buffer->shape_ptr = tensor->shape;
+    out_buffer->rank = tensor->rank;
+    out_buffer->size_bytes = 0;
+    out_buffer->is_pooled = false;
+    out_buffer->is_aliased = false;
+    return HIPDNN_EP_SUCCESS;
+  }
+
+  // Non-empty: data must be non-null now.
+  if (!tensor->data) {
+    fprintf(stderr,
+            "hipdnn_ep_tensor_prepare_output: tensor[%zu].data is null but "
+            "size_bytes=%zu (rank=%zu)\n",
+            index, size_bytes, tensor->rank);
+    return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
   RUNTIME_DEBUG_LOG(
@@ -535,6 +596,12 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
     return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
+  // Empty output (zero-sized dim): nothing to copy, nothing to release.
+  // prepare_output set gpu_ptr=nullptr and size_bytes=0 in this case.
+  if (buffer->size_bytes == 0) {
+    return HIPDNN_EP_SUCCESS;
+  }
+
   int result = HIPDNN_EP_SUCCESS;
 
   // PERF: record D2H start on first output finalize (after all compute).
@@ -590,6 +657,10 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
 // Synchronize GPU stream once (called after all finalize_output calls).
 int hipdnn_ep_stream_sync(RuntimeState *state) {
+  // Per-Compute entry trace; gated on HIPDNN_EP_DEBUG to keep the hot path
+  // silent (fires once per Compute -> tens of thousands of lines on a
+  // multi-token decode).
+  RUNTIME_DEBUG_LOG("[stream_sync] enter state=%p\n", (void *)state);
   if (!state) {
     fprintf(stderr, "hipdnn_ep_stream_sync: null state\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
@@ -641,6 +712,13 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
   (void)state;
   if (!buffer) {
     fprintf(stderr, "hipdnn_ep_tensor_free_input: null buffer\n");
+    return;
+  }
+
+  // Empty input (size_bytes == 0, e.g. KV cache with past_sequence_length==0
+  // on prefill): no pool allocation was made; nothing to release.
+  if (buffer->size_bytes == 0) {
+    buffer->gpu_ptr = nullptr;
     return;
   }
 

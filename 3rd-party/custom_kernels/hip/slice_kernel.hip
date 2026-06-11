@@ -43,6 +43,18 @@ static constexpr int kSliceMaxRank = 8;
 struct SliceParams {
   int64_t input_strides[kSliceMaxRank];
   int64_t output_strides[kSliceMaxRank];
+  // logical_extent[d] = the actual per-axis slice output extent. For
+  // axes not touched by `axes`, equals the data dim. For touched axes,
+  // equals `(end-start) / step` (positive step) clamped to >= 0. When
+  // logical_extent[d] < the physical output dim (i.e. the IR-supplied
+  // output_shape's d-th dim), the host has OVER-ALLOCATED the output
+  // buffer because `SliceToHip` could not constant-fold the per-axis
+  // extent at compile time (typical for slices whose starts/ends are
+  // runtime Gather outputs inside an outlined loop body). The kernel
+  // iterates physical positions and fills the over-allocated tail with
+  // zeros so downstream consumers operating on the full physical extent
+  // see clean deterministic data instead of pool garbage.
+  int64_t logical_extent[kSliceMaxRank];
   // start[d] and step[d] are signed; step may be negative when slicing
   // with a reverse stride.
   int64_t start_per_axis[kSliceMaxRank];
@@ -59,13 +71,31 @@ __global__ void hip_slice_kernel(const T *__restrict__ input,
   if (out_idx >= num_output_elements)
     return;
 
+  // Decode physical coord, then check whether every axis is within its
+  // logical extent. Any over-allocated tail position writes zero.
   int64_t remaining = out_idx;
-  int64_t in_offset = 0;
+  int64_t coord[kSliceMaxRank];
   for (int d = 0; d < p.rank; ++d) {
     int64_t out_stride = p.output_strides[d];
-    int64_t out_coord = remaining / out_stride;
-    remaining -= out_coord * out_stride;
-    int64_t in_coord = p.start_per_axis[d] + out_coord * p.step_per_axis[d];
+    coord[d] = remaining / out_stride;
+    remaining -= coord[d] * out_stride;
+  }
+
+  bool in_logical = true;
+  for (int d = 0; d < p.rank; ++d) {
+    if (coord[d] >= p.logical_extent[d]) {
+      in_logical = false;
+      break;
+    }
+  }
+  if (!in_logical) {
+    output[out_idx] = T(0);
+    return;
+  }
+
+  int64_t in_offset = 0;
+  for (int d = 0; d < p.rank; ++d) {
+    int64_t in_coord = p.start_per_axis[d] + coord[d] * p.step_per_axis[d];
     in_offset += in_coord * p.input_strides[d];
   }
 
@@ -84,6 +114,7 @@ static void compute_row_major_strides(const int64_t *shape, int rank,
 extern "C" int hip_slice(void *stream, const void *input, void *output,
                          const int64_t *input_shape_host,
                          const int64_t *output_shape_host,
+                         const int64_t *logical_extent_host,
                          const int64_t *starts_per_axis_host,
                          const int64_t *steps_per_axis_host, int rank,
                          int hip_dtype) {
@@ -101,6 +132,8 @@ extern "C" int hip_slice(void *stream, const void *input, void *output,
   for (int d = 0; d < rank; ++d) {
     p.start_per_axis[d] = starts_per_axis_host[d];
     p.step_per_axis[d] = steps_per_axis_host[d];
+    p.logical_extent[d] =
+        logical_extent_host ? logical_extent_host[d] : output_shape_host[d];
   }
 
   int64_t num_output_elements = 1;

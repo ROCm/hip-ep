@@ -3,8 +3,14 @@
 # ** Licensed under the MIT License.
 ##
 
-find_package(onnxruntime CONFIG QUIET)
-if(NOT onnxruntime_FOUND)
+# onnxruntime::onnxruntime may already be provided by cmake/deps.cmake (either
+# find_package against an installed prefix or the release-zip fallback). Only
+# run find_package here when the target is absent, and gate on the target -- not
+# the onnxruntime_FOUND variable -- so the synthesized fallback target counts.
+if(NOT TARGET onnxruntime::onnxruntime)
+  find_package(onnxruntime CONFIG QUIET)
+endif()
+if(NOT TARGET onnxruntime::onnxruntime)
   message(STATUS "hip-onnx-runner: onnxruntime not found, skipping")
   return()
 endif()

@@ -17,8 +17,11 @@
 #ifndef HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
-#include "mm/mm_types.h"
 #include "runtime_types.h"
+// For hipdnn_output_allocator_t (the output_allocator field below). Acyclic:
+// hipdnn_ep_runtime.h only forward-declares RuntimeState; it does not include
+// this internal header.
+#include "hipdnn_ep_runtime.h"
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
@@ -34,7 +37,6 @@ struct RuntimeState {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
-  mm::handle_t gpu_constants_handle;
 
   // OGA pipeline shared constants cache: prefill and decode models share
   // the same constants blob via process-wide named shared memory + atomic
@@ -45,17 +47,54 @@ struct RuntimeState {
   void *shared_constants_mapping; // Win32 file mapping HANDLE
   void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
 
-  // Memory pooling support
-  void *pool_base;        // Single large memory pool
-  size_t pool_size;       // Total pool size in bytes
-  size_t *buffer_offsets; // Offset for each buffer in the pool
-  size_t num_buffers;     // Number of buffers in the pool
+  // Memory pooling support — multi-domain.
+  //
+  // hip-pool-allocs partitions a function's pooled allocs into independent
+  // dominance domains; each domain owns one contiguous GPU pool that grows on
+  // demand. Domain 0 carries the legacy single-pool semantics (eagerly sized
+  // by hipdnn_ep_pool_init using static offsets) so single-domain models are
+  // bit-identical to the pre-multi-domain runtime. Domains 1..N start empty
+  // and grow lazily on the first hipdnn_ep_get_pool_base(state, domain_id, ...)
+  // call.
+  //
+  // The per-domain pool arrays are themselves grown on demand: there is no
+  // compile-time cap on the domain count. pool_base/pool_size are heap arrays
+  // of num_pool_domains entries, reallocated (zero-filling new slots) the first
+  // time a higher domain_id is observed — by hipdnn_ep_get_pool_base for the
+  // lazy domains and by hipdnn_ep_pool_init for domain 0. Every domain_id is
+  // first seen on the cold first inference, so num_pool_domains stabilises
+  // after that and no further array realloc happens at steady state — mirroring
+  // the grow-on-demand contract of the individual pools. realloc-move is safe
+  // because nothing caches &pool_base[i] across calls; pool_base[domain_id] is
+  // re-derived from state on every access.
+  int num_pool_domains;   // Number of slots currently allocated in the arrays
+  void **pool_base;       // [num_pool_domains] per-domain GPU pool base ptrs
+  size_t *pool_size;      // [num_pool_domains] per-domain pool size in bytes
+  size_t *buffer_offsets; // Offsets for static buffers in domain 0
+  size_t num_buffers;     // Static buffer count in domain 0
 
   // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
   void *workspace;
   size_t workspace_size;
-  mm::handle_t workspace_handle;
+
+  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
+  // GPU pool by hip-materialize-host-scalars.
+  // hipHostMalloc(hipHostMallocMapped): host-writable AND GPU-readable.
+  // Grow-on-demand via hipdnn_ep_get_host_scratch_base(); never shrinks.
+  // hipHostFree'd in cleanup. Why: on some targets the regular GPU pool is
+  // real device memory; host stores into it SEGV. Other targets silently
+  // worked because hipMalloc returned UMA-mapped host memory there, masking
+  // the bug.
+  void *host_scratch_base;
+  size_t host_scratch_size;
+
+  // Output allocator installed by the EP before inference_compute via
+  // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
+  // allocate(self, ...). Borrowed: `self` is EP-owned, never freed here.
+  // allocate == nullptr means no allocator is installed (the classic pipeline
+  // never calls alloc_output); zero-initialized in initialize_state_handles.
+  hipdnn_output_allocator_t output_allocator;
 
   // Per-state scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
@@ -65,7 +104,7 @@ struct RuntimeState {
   // call, every layer, every inference. On 24-layer gpt-oss-20b that's 192
   // mallocs + 192 frees per token; HIP's hipMalloc takes ~50 us each on
   // Windows, so the storm cost ~10-12 ms/token and bottlenecked decode TPS to
-  // ~40 tok/s versus a Vulkan baseline of ~70 on the same gfx1151.
+  // roughly half the Vulkan baseline on the same hardware.
   //
   // Layout policy: one contiguous buffer sized to fit ALL sub-buffers for the
   // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
@@ -78,7 +117,6 @@ struct RuntimeState {
   // Malloc'd once with hipHostMallocDefault; reused across calls without sync.
   void *qmoe_scratch;
   size_t qmoe_scratch_size;
-  mm::handle_t qmoe_scratch_handle;
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
