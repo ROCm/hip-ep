@@ -237,6 +237,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
+  state->nonzero_count_scratch = nullptr;
   state->gqa_gemm_cache = nullptr;
   state->mha_gemm_cache = nullptr;
   state->causal_conv_cache = nullptr;
@@ -985,6 +986,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
   }
+  if (state->nonzero_count_scratch) {
+    HIP_CLEANUP(hipFree(state->nonzero_count_scratch));
+  }
 
   // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
   // allocated). The stream sync at the top of cleanup has already drained
@@ -1480,6 +1484,23 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
 // the old buffer when growing -- we sync the stream before hipFree+hipMalloc.
 void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state) {
   return state ? state->qmoe_scratch : nullptr;
+}
+
+int32_t *hipdnn_ep_state_get_nonzero_count_scratch(RuntimeState *state) {
+  if (!state)
+    return nullptr;
+  // Lazily allocate the single-int32 count buffer on first NonZero. Fixed size,
+  // never grows -- the count is always one scalar regardless of input shape.
+  if (!state->nonzero_count_scratch) {
+    if (hipMalloc(&state->nonzero_count_scratch, sizeof(int32_t)) !=
+        hipSuccess) {
+      fprintf(stderr, "hipdnn_ep_state_get_nonzero_count_scratch: hipMalloc "
+                      "failed for 4 bytes\n");
+      state->nonzero_count_scratch = nullptr;
+      return nullptr;
+    }
+  }
+  return static_cast<int32_t *>(state->nonzero_count_scratch);
 }
 
 int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,

@@ -4,11 +4,12 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.nonzero lowers to a single llvm.call into the wrap_nonzero
-// runtime stub, with the expected (state, in, out, num_elems, rank,
-// output_capacity, input_data_type) signature. Covers both fully static
-// inputs (num_elems computed at compile time) and partially dynamic
-// inputs (num_elems built from llvm.extractvalue + llvm.mul over the
-// MemRef descriptor sizes array).
+// runtime function, with the (state, in, out, count_ptr, num_elems, rank,
+// dims_ptr, output_capacity, input_data_type) signature. count_ptr is a null
+// pointer (the runtime owns the count scratch) and dims_ptr is a host alloca.
+// Covers both fully static inputs (num_elems computed at compile time) and
+// partially dynamic inputs (num_elems built from llvm.extractvalue + llvm.mul
+// over the MemRef descriptor sizes array).
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -25,7 +26,7 @@ module {
                       outs(%output : memref<2x?xi64, 1>)
                       {input_data_type = 5 : i64}
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 
@@ -40,7 +41,7 @@ module {
                       outs(%output : memref<3x?xi64, 1>)
                       {input_data_type = 0 : i64}
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 
@@ -62,7 +63,7 @@ module {
     // CHECK-DAG: llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
 
-    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_nonzero({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 }

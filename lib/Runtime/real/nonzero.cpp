@@ -44,9 +44,21 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
       },
       state);
 
-  if (!state || !input || !output || !count_ptr || !input_dims) {
+  if (!state || !input || !output || !input_dims) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_nonzero: null required argument\n");
     return -1;
+  }
+
+  // The in-graph lowering passes count_ptr == nullptr: the count is consumed
+  // GPU-side and never needs to be an explicit IR value, so the runtime owns a
+  // per-state single-int32 scratch for it. A non-null count_ptr (e.g. a future
+  // caller that wires the count to a downstream op) is used as-is.
+  if (!count_ptr) {
+    count_ptr = hipdnn_ep_state_get_nonzero_count_scratch(state);
+    if (!count_ptr) {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_nonzero: count scratch alloc failed\n");
+      return -1;
+    }
   }
   if (input_num_elements <= 0 || input_rank <= 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_nonzero: invalid dimensions "

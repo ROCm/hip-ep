@@ -322,6 +322,11 @@ void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
                                              size_t needed_size);
 
+// Per-state single-int32 device buffer for the data-dependent NonZero count.
+// Lazily allocated on first call; never grows; freed in cleanup. wrap_nonzero
+// uses this when called with count_ptr == nullptr (the in-graph lowering path).
+int32_t *hipdnn_ep_state_get_nonzero_count_scratch(RuntimeState *state);
+
 // Device-side runtime error flag (set by kernels, observed by wrappers).
 // Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
 // delta==0) and need to propagate an error code back through main_graph.
