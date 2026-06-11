@@ -42,6 +42,7 @@ add_library(HipToLLVM STATIC
   SliceLowering.cpp
   ScatterNDLowering.cpp
   NonZeroLowering.cpp
+  ReadbackDimLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
   PoolLowering.cpp
