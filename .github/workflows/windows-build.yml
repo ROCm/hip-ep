@@ -459,34 +459,23 @@ jobs:
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
 
           # ---------------------------------------------------------------
-          # Python wheels (ORT + OGA + MorphiZen EP) — bundled into the same
-          # artifact under staging/wheels/ so downstream consumers download a
-          # single zip. The ORT/OGA wheels are cached inside ort-install /
-          # oga-artifacts (cache hits restore them without rebuilding); the EP
-          # wheel is built fresh by build.py above (default target).
+          # Python wheels (ORT + OGA cp314) bundled into the artifact under
+          # staging/wheels/. Both are cached inside ort-install / oga-artifacts,
+          # so cache hits restore them without rebuilding ORT / OGA.
           # ---------------------------------------------------------------
           mkdir -p staging/wheels
           ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
             -name "onnxruntime_directml-*.whl" -type f | head -1)
           OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
             -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
-          EP_WHEEL=$(find "../build/$(basename "$PWD")/python/dist" \
-            -name "onnxruntime_morphizen_ep-*.whl" -type f | head -1)
-          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ]; then
-            echo "ERROR: wheel(s) missing from build tree"
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: cp314 wheel(s) missing from cache"
             echo "  ORT: $ORT_WHEEL"
             echo "  OGA: $OGA_WHEEL"
-            echo "  EP:  $EP_WHEEL"
             exit 1
           fi
           cp "$ORT_WHEEL" staging/wheels/
           cp "$OGA_WHEEL" staging/wheels/
-          cp "$EP_WHEEL" staging/wheels/
-
-          # OGA Python e2e benchmark scripts (benchmark_e2e.py + metrics.py) for
-          # the gpu-test wheel smoke.
-          mkdir -p staging/benchmark
-          cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py staging/benchmark/
 
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
@@ -496,6 +485,45 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
+          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
+
+      # -----------------------------------------------------------------------
+      # Standalone, offline Python wheel package: the three project wheels + the
+      # full ROCm wheel closure (pip-downloaded from repo.amd.com) + run_onnx.py
+      # + OGA's benchmark scripts. Self-contained for ROCm (install offline via
+      # --find-links); only rocm-sdk init expands the devel libs afterwards.
+      # Uploaded as a separate artifact from gpu-test-package.
+      # -----------------------------------------------------------------------
+      - name: Stage Python wheel package
+        shell: bash
+        run: |
+          mkdir -p wheelpkg/wheels wheelpkg/benchmark
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          EP_WHEEL=$(find "../build/$(basename "$PWD")/python/dist" \
+            -name "onnxruntime_morphizen_ep-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ]; then
+            echo "ERROR: wheel(s) missing"
+            echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL EP=$EP_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
+          cp python/examples/run_onnx.py wheelpkg/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/benchmark/
+          # Download the EP wheel's dependency closure (ROCm) for offline install.
+          python -m pip download "$EP_WHEEL" \
+            --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ \
+            -d wheelpkg/wheels
+          echo "=== Python wheel package layout ==="
+          find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
+
+      - name: Upload Python wheel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: morphizen-python-package
+          path: wheelpkg/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
 
   # ---------------------------------------------------------------------------
@@ -533,12 +561,19 @@ jobs:
           if exist oga-results rd /s /q oga-results
           if exist oga-smoke-venv rd /s /q oga-smoke-venv
           if exist oga-smoke-results rd /s /q oga-smoke-results
+          if exist wheelpkg rd /s /q wheelpkg
 
       - name: Download GPU test package
         uses: actions/download-artifact@v4
         with:
           name: gpu-test-package
           path: gpu-test-package
+
+      - name: Download Python wheel package
+        uses: actions/download-artifact@v4
+        with:
+          name: morphizen-python-package
+          path: wheelpkg
 
       # TheRock DLLs are required at runtime on the GPU machine.
       # Download is fast enough that caching is not needed on the self-hosted runner.
@@ -744,12 +779,10 @@ jobs:
           exit $failed
 
       # -----------------------------------------------------------------------
-      # OGA wheel smoke: install the packaged ORT + OGA + MorphiZen EP wheels and
-      # run OGA's own benchmark_e2e.py (packaged into gpu-test-package/benchmark)
-      # against a real model, following docs/quick_start.md "Install Python
-      # Wheels" verbatim (pip + rocm --extra-index-url, `rocm-sdk init`,
-      # THEROCK_DIST=_rocm_sdk_devel, LIB=capi, PATH=capi + rocm bins). Validates
-      # the documented end-user wheel flow end to end.
+      # OGA wheel smoke: install the wheels from the offline morphizen-python-
+      # package and run OGA's benchmark_e2e.py against a real model. ROCm comes
+      # from the package's bundled TheRock (THEROCK_DIST), so no pip ROCm /
+      # rocm-sdk init is needed. Validates the self-contained wheel package.
       # -----------------------------------------------------------------------
       # The cp314 ORT/OGA wheels need Python 3.14 to create the smoke venv (the
       # runner's default python may be a different version).
@@ -770,20 +803,22 @@ jobs:
           $model = "${{ runner.workspace }}\oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
-          # Fresh venv; install per quick_start (ROCm via --extra-index-url).
+          $pkg = "$PWD\wheelpkg"
           $venv = "$PWD\oga-smoke-venv"
           if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
           python -m venv $venv
           $py = "$venv\Scripts\python.exe"
-          $w = "$PWD\gpu-test-package\wheels"
-          $whls = (Get-ChildItem "$w\onnxruntime_directml-*.whl", "$w\onnxruntime_morphizen_ep-*.whl", "$w\onnxruntime_genai_directml-*.whl").FullName
-          & $py -m pip install --quiet $whls --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/
+
+          # Install fully offline from the bundled wheel closure (ROCm + ORT/OGA
+          # deps + benchmark deps all present), then expand rocm[devel] libs.
+          $whls = (Get-ChildItem "$pkg\wheels\onnxruntime_directml-*.whl", "$pkg\wheels\onnxruntime_morphizen_ep-*.whl", "$pkg\wheels\onnxruntime_genai_directml-*.whl").FullName
+          & $py -m pip install --quiet --no-index --find-links "$pkg\wheels" $whls psutil tqdm pandas
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
           & "$venv\Scripts\rocm-sdk.exe" init   # expand rocm[devel] import libs
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] rocm-sdk init failed"; exit 1 }
 
-          # THEROCK_DIST -> ROCm import libs; LIB -> capi (CRT + custom kernels);
-          # PATH -> capi (EP + hip-compiler) + rocm bins (runtime DLLs).
+          # THEROCK_DIST -> rocm[devel]; LIB -> capi (CRT + custom kernels);
+          # PATH -> capi (EP + hip-compiler) + rocm runtime bins.
           $sp = "$venv\Lib\site-packages"
           $capi = "$sp\onnxruntime\capi"
           $env:THEROCK_DIST = "$sp\_rocm_sdk_devel"
@@ -792,13 +827,11 @@ jobs:
             ForEach-Object { "$($_.FullName)\bin" } | Where-Object { Test-Path $_ }) -join ";"
           $env:PATH = "$capi;$rocmBins;$env:PATH"
 
-          & $py -m pip install --quiet psutil tqdm pandas   # benchmark_e2e.py deps
-
           # -e follow_config reads the provider from genai_config.json (populated
           # by the OGA benchmark step above from genai_config_128.json). Tee the
           # output so the publish step can extract throughput.
           New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
-          & $py "$PWD\gpu-test-package\benchmark\benchmark_e2e.py" `
+          & $py "$pkg\benchmark\benchmark_e2e.py" `
             -i $model -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v `
             2>&1 | Tee-Object -FilePath "oga-smoke-results\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml.txt"
           exit $LASTEXITCODE
@@ -1027,21 +1060,19 @@ jobs:
             $content = Get-Content $f.FullName -Raw
             $ppMatch = [regex]::Match($content, 'Average Prompt Processing Throughput \(per token\):\s+([\d.]+)')
             $tgMatch = [regex]::Match($content, 'Average Token Generation Throughput \(per token\):\s+([\d.]+)')
-            $wcMatch = [regex]::Match($content, 'Average Wall Clock Throughput:\s+([\d.]+)')
-            $pp = if ($ppMatch.Success) { "{0:F1}" -f [double]$ppMatch.Groups[1].Value } else { "-" }
-            $tg = if ($tgMatch.Success) { "{0:F1}" -f [double]$tgMatch.Groups[1].Value } else { "-" }
-            $wc = if ($wcMatch.Success) { "{0:F1}" -f [double]$wcMatch.Groups[1].Value } else { "-" }
+            $ttft = if ($ppMatch.Success) { "{0:F0}" -f (128.0 / [double]$ppMatch.Groups[1].Value * 1000) } else { "-" }
+            $tps  = if ($tgMatch.Success) { "{0:F1}" -f [double]$tgMatch.Groups[1].Value } else { "-" }
             if ($tgMatch.Success) {
-              $smokeRows += "| $model | $pp | $tg | $wc |`n"
+              $smokeRows += "| $model | $ttft | $tps |`n"
             } else {
-              $smokeRows += "| $model | failed | - | - |`n"
+              $smokeRows += "| $model | failed | - |`n"
             }
           }
           $smokeSection = ""
           if ($smokeRows) {
             $smokeSection = "`n## OGA Wheel Smoke (Python benchmark_e2e.py)`n`n" +
-                            "| Model | Prompt Proc (tps) | Token Gen (tps) | Wall Clock (tps) |`n" +
-                            "|-------|----:|----:|----:|`n" +
+                            "| Model | TTFT (ms) | TPS |`n" +
+                            "|-------|----:|----:|`n" +
                             $smokeRows
           }
 
