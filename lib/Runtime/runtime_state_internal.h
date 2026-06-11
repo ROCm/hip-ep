@@ -109,11 +109,12 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
-  // Per-state scratch buffer for wrap_conv1d MIOpen workspace.
+  // Per-state scratch buffer for the MIOpen convolution workspace
+  // (wrap_miopenConvolutionForward, both 2D and the H=1 1D conv path).
   //
   // The MIOpen forward-convolution Find API selects an algorithm whose
   // workspace requirement is shape-dependent (winograd/gemm/etc). Whisper's
-  // encoder front-end runs the same two Conv1d shapes every inference
+  // encoder front-end runs the same two Conv shapes every inference
   // (Cin=128/Cout=1280 K=3 s=1, Cin=1280/Cout=1280 K=3 s=2), so a per-call
   // hipMalloc/hipFree of the workspace would be wasted work after the
   // first call. Same grow-on-demand policy as qmoe_scratch above: lazily

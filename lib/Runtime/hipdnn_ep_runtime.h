@@ -256,10 +256,11 @@ void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
                                              size_t needed_size);
 
-// Per-state MIOpen workspace pool for wrap_conv1d. Lazily grown via
-// hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch above:
-// never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer reused
-// across all conv1d calls in the session -- safe because the stream is
+// Per-state MIOpen convolution workspace pool (used by
+// wrap_miopenConvolutionForward for both 2D and the H=1 1D conv path). Lazily
+// grown via hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch
+// above: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
+// reused across all conv calls in the session -- safe because the stream is
 // serialised. See runtime_state_internal.h for design rationale.
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
@@ -549,22 +550,8 @@ int wrap_miopenConvolutionForward(
     int64_t pad_right,   // Padding right
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
-    int64_t group);      // Number of groups
-
-// 1D convolution forward (NCL layout) via MIOpen.
-//
-// Reinterprets NCL as NC[H=1]L and dispatches to the same MIOpen 4D
-// convolution path the 2D wrapper uses. Workspace is drawn from the
-// per-state conv_scratch pool (see hipdnn_ep_state_ensure_conv_scratch
-// above). Bias (when non-null) is added via miopenConvolutionForwardBias.
-// Used by the Whisper encoder's two front-end Conv layers.
-//
-// element_size_bytes is reserved for future fp32 / bf16 support; today
-// only fp16 (== 2) is implemented.
-int wrap_conv1d(RuntimeState *state, const void *input, const void *weights,
-                const void *bias, void *output, int64_t N, int64_t Cin,
-                int64_t Lin, int64_t Cout, int64_t K, int64_t stride,
-                int64_t pad, int64_t element_size_bytes);
+    int64_t group,       // Number of groups
+    int64_t element_size_bytes); // 2 = fp16, 4 = fp32
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations

@@ -3,15 +3,19 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify rank-3 onnx.Conv (1D conv) is lowered to hip.conv1d. Whisper-large-v3
-// encoder uses two such convs in its mel-spectrogram front-end:
+// Verify rank-3 onnx.Conv (1D conv) is lowered to the shared 2D hip.conv via a
+// unit-H reshape: tensor.expand_shape (NCL -> NC1L) -> hip.conv ->
+// tensor.collapse_shape (NC1L' -> NCL'). Whisper-large-v3 encoder uses two such
+// convs in its mel-spectrogram front-end:
 //   layer 0: [1, 128, 3000] @ k=3, s=1, pad=1 -> [1, 1280, 3000]
 //   layer 1: [1, 1280, 3000] @ k=3, s=2, pad=1 -> [1, 1280, 1500]
 //
 // Asserts:
-// - hip.conv1d (NOT hip.conv) is emitted for rank-3 input
-// - kernel_shape / strides / pads attributes are forwarded (single-element
-//   for kernel_shape + strides; two-element [begin, end] for pads)
+// - input + weights are expanded to rank-4 with a unit H dim
+// - hip.conv (the shared 2D op, NOT a dedicated hip.conv1d) is emitted
+// - 1D attrs are promoted to 2D H=1 form: kernel_shape [1,K], strides [1,s],
+//   pads [0,begin,0,end], dilations [1,1], group 1
+// - the rank-4 result is collapsed back to rank-3
 // - The context arg is prepended
 // ============================================================================
 
@@ -41,10 +45,13 @@ module {
 
   // CHECK-LABEL: func.func @whisper_conv_layer0
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x128x3000xf16>, %[[W:.*]]: tensor<1280x128x3xf16>, %[[B:.*]]: tensor<1280xf16>) -> tensor<1x1280x3000xf16>
-  // CHECK: tensor.empty() : tensor<1x1280x3000xf16>
-  // CHECK: hip.conv1d(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x128x3000xf16>, tensor<1280x128x3xf16>, tensor<1280xf16>) outs({{.*}} : tensor<1x1280x3000xf16>) {kernel_shape = [3], pads = [1, 1], strides = [1]}
-  // CHECK-NOT: hip.conv(
-  // CHECK-NOT: hip.alloc
+  // CHECK: %[[INX:.*]] = tensor.expand_shape %[[IN]] {{\[\[}}0], [1], [2, 3]] output_shape [1, 128, 1, 3000] : tensor<1x128x3000xf16> into tensor<1x128x1x3000xf16>
+  // CHECK: %[[WX:.*]] = tensor.expand_shape %[[W]] {{\[\[}}0], [1], [2, 3]] output_shape [1280, 128, 1, 3] : tensor<1280x128x3xf16> into tensor<1280x128x1x3xf16>
+  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x1280x3000xf16>
+  // CHECK: %[[INITX:.*]] = tensor.expand_shape %[[INIT]] {{\[\[}}0], [1], [2, 3]] output_shape [1, 1280, 1, 3000] : tensor<1x1280x3000xf16> into tensor<1x1280x1x3000xf16>
+  // CHECK: %[[CONV:.*]] = hip.conv(%[[CTX]]) ins(%[[INX]], %[[WX]], %[[B]] : tensor<1x128x1x3000xf16>, tensor<1280x128x1x3xf16>, tensor<1280xf16>) outs(%[[INITX]] : tensor<1x1280x1x3000xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 3], pads = [0, 1, 0, 1], strides = [1, 1]}
+  // CHECK: tensor.collapse_shape %[[CONV]] {{\[\[}}0], [1], [2, 3]] : tensor<1x1280x1x3000xf16> into tensor<1x1280x3000xf16>
+  // CHECK-NOT: hip.conv1d
 
   // --------------------------------------------------------------------------
   // Whisper encoder Conv layer 1: stride 2 (downsamples Lin from 3000 -> 1500)
@@ -64,8 +71,11 @@ module {
 
   // CHECK-LABEL: func.func @whisper_conv_layer1
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x1280x3000xf16>, %[[W:.*]]: tensor<1280x1280x3xf16>, %[[B:.*]]: tensor<1280xf16>) -> tensor<1x1280x1500xf16>
-  // CHECK: tensor.empty() : tensor<1x1280x1500xf16>
-  // CHECK: hip.conv1d(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x1280x3000xf16>, tensor<1280x1280x3xf16>, tensor<1280xf16>) outs({{.*}} : tensor<1x1280x1500xf16>) {kernel_shape = [3], pads = [1, 1], strides = [2]}
-  // CHECK-NOT: hip.conv(
-  // CHECK-NOT: hip.alloc
+  // CHECK: %[[INX:.*]] = tensor.expand_shape %[[IN]] {{\[\[}}0], [1], [2, 3]] output_shape [1, 1280, 1, 3000] : tensor<1x1280x3000xf16> into tensor<1x1280x1x3000xf16>
+  // CHECK: %[[WX:.*]] = tensor.expand_shape %[[W]] {{\[\[}}0], [1], [2, 3]] output_shape [1280, 1280, 1, 3] : tensor<1280x1280x3xf16> into tensor<1280x1280x1x3xf16>
+  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x1280x1500xf16>
+  // CHECK: %[[INITX:.*]] = tensor.expand_shape %[[INIT]] {{\[\[}}0], [1], [2, 3]] output_shape [1, 1280, 1, 1500] : tensor<1x1280x1500xf16> into tensor<1x1280x1x1500xf16>
+  // CHECK: %[[CONV:.*]] = hip.conv(%[[CTX]]) ins(%[[INX]], %[[WX]], %[[B]] : tensor<1x1280x1x3000xf16>, tensor<1280x1280x1x3xf16>, tensor<1280xf16>) outs(%[[INITX]] : tensor<1x1280x1x1500xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 3], pads = [0, 1, 0, 1], strides = [1, 2]}
+  // CHECK: tensor.collapse_shape %[[CONV]] {{\[\[}}0], [1], [2, 3]] : tensor<1x1280x1x1500xf16> into tensor<1x1280x1500xf16>
+  // CHECK-NOT: hip.conv1d
 }

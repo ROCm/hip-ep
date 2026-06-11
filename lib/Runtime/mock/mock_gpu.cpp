@@ -448,7 +448,8 @@ int wrap_miopenConvolutionForward(
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t element_size_bytes) {
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
@@ -468,39 +469,13 @@ int wrap_miopenConvolutionForward(
              (long long)dilation_h, (long long)dilation_w, (long long)group);
 
   // Mock: Fill output with dummy data (zeros in this case)
-  // In a real implementation, this would call MIOpen
-  size_t output_size =
-      input_n * weights_k * output_h * output_w * sizeof(float);
+  // In a real implementation, this would call MIOpen. Use the actual element
+  // size so fp16 buffers aren't overrun.
+  size_t elem = (element_size_bytes > 0) ? (size_t)element_size_bytes
+                                         : sizeof(float);
+  size_t output_size = (size_t)input_n * weights_k * output_h * output_w * elem;
   memset(output, 0, output_size);
 
-  return 0;
-}
-
-int wrap_conv1d(RuntimeState *state, const void *input, const void *weights,
-                const void *bias, void *output, int64_t N, int64_t Cin,
-                int64_t Lin, int64_t Cout, int64_t K, int64_t stride,
-                int64_t pad, int64_t element_size_bytes) {
-  if (!state || !input || !weights || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_conv1d\n");
-    return -1;
-  }
-
-  const int64_t Lout = (Lin + 2 * pad - K) / stride + 1;
-  MOCK_PRINT("[MOCK] wrap_conv1d(\n");
-  MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld],\n", (long long)N, (long long)Cin,
-             (long long)Lin);
-  MOCK_PRINT("[MOCK]   weights=[%lld,%lld,%lld],\n", (long long)Cout,
-             (long long)Cin, (long long)K);
-  MOCK_PRINT("[MOCK]   output=[%lld,%lld,%lld],\n", (long long)N,
-             (long long)Cout, (long long)Lout);
-  MOCK_PRINT("[MOCK]   stride=%lld, pad=%lld, bias=%s, elem=%lld)\n",
-             (long long)stride, (long long)pad, bias ? "yes" : "null",
-             (long long)element_size_bytes);
-
-  // Mock: fill output with zeros (real impl dispatches to MIOpen 4D conv).
-  size_t output_bytes =
-      (size_t)N * (size_t)Cout * (size_t)Lout * (size_t)element_size_bytes;
-  memset(output, 0, output_bytes);
   return 0;
 }
 

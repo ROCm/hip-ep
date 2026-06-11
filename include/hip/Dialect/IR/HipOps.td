@@ -537,56 +537,6 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
   }];
 }
 
-def Hip_Conv1dOp : Hip_DpsOp<"conv1d"> {
-  let summary = "1D convolution via MIOpen (NCL layout)";
-  let description = [{
-    Performs 1D convolution by reinterpreting the NCL input as NCHW with H=1
-    and dispatching to MIOpen's 4D forward-convolution path through the
-    runtime helper `wrap_conv1d`.
-
-    Used by the Whisper encoder's two front-end Conv layers (k=3, stride 1
-    and stride 2 on 128/1280 channels). Symmetric padding only — ONNX
-    `pads = [pad_begin, pad_end]` must satisfy pad_begin == pad_end (verified
-    in the lowering).
-
-    Uses destination-passing style: output buffer is provided as argument,
-    operation writes result in-place.
-
-    Attributes:
-    - kernel_shape: Array with one element [K]
-    - strides:      Array with one element [stride]
-    - pads:         Array with two elements [pad_begin, pad_end] (must be equal)
-
-    Example:
-    ```mlir
-    hip.conv1d(%ctx) ins(%input, %weights, %bias :
-                          memref<1x128x3000xf16, 1>,
-                          memref<1280x128x3xf16, 1>,
-                          memref<1280xf16, 1>)
-                     outs(%output : memref<1x1280x3000xf16, 1>)
-                     {kernel_shape = [3], strides = [1], pads = [1, 1]}
-    ```
-  }];
-
-  let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$weights,
-    Optional<Hip_TensorOrMemRef>:$bias,
-    Hip_TensorOrMemRef:$output,
-    I64ArrayAttr:$kernel_shape,
-    I64ArrayAttr:$strides,
-    I64ArrayAttr:$pads
-  );
-
-  let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
-    type($input) `,` type($weights) (`,` type($bias)^)? `)`
-    `outs` `(` $output `:` type($output) `)`
-    attr-dict (`:` type($result_tensors)^ )?
-  }];
-}
-
 // ===== hipBLASLt ops =========================================================
 
 // `autoReify=0` opts out of the shared default reify body: matmul

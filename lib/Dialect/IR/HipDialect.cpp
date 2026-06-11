@@ -436,20 +436,6 @@ void ConvOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// Conv1dOp: ins(input, weights, bias), outs(output) — same DPS shape as ConvOp
-//===----------------------------------------------------------------------===//
-
-MutableOperandRange Conv1dOp::getDpsInitsMutable() {
-  return getOutputMutable();
-}
-
-void Conv1dOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-//===----------------------------------------------------------------------===//
 // HipblasltMatmulOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 

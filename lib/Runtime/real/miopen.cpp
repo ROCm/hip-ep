@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "error_check_macros.h"
@@ -106,7 +107,8 @@ int wrap_miopenConvolutionForward(
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t element_size_bytes) {
   OP_PROFILE(
       "conv",
       [&] {
@@ -122,6 +124,28 @@ int wrap_miopenConvolutionForward(
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
   }
+  // Dtype: fp16 (element_size_bytes=2) and fp32 (element_size_bytes=4) are
+  // wired through. The selected MIOpen dtype enum is threaded into every
+  // tensor descriptor (input/weights/output/bias). alpha/beta and the
+  // miopenOpTensor bias-add are fp32 scalars and dtype-agnostic -- MIOpen
+  // reads the element type from the descriptors. bf16 not yet covered.
+  if (element_size_bytes != 2 && element_size_bytes != 4) {
+    fprintf(stderr,
+            "wrap_miopenConvolutionForward: only fp16 (element_size_bytes=2) "
+            "and fp32 (element_size_bytes=4) are implemented, got %lld\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+  const miopenDataType_t mio_dt =
+      (element_size_bytes == 2) ? miopenHalf : miopenFloat;
+
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_miopenConvolutionForward N=%lld Cin=%lld H=%lld W=%lld "
+      "Cout=%lld kHxkW=%lldx%lld s=%lldx%lld bias=%s elem=%lld\n",
+      (long long)input_n, (long long)input_c, (long long)input_h,
+      (long long)input_w, (long long)weights_k, (long long)kernel_h,
+      (long long)kernel_w, (long long)stride_h, (long long)stride_w,
+      bias ? "yes" : "null", (long long)element_size_bytes);
 
   // Extract handle and stream from opaque RuntimeState via accessor functions
   // (Maintains abstraction barrier - no direct field access)
@@ -134,15 +158,16 @@ int wrap_miopenConvolutionForward(
   miopenTensorDescriptor_t input_desc = nullptr;
   miopenTensorDescriptor_t weights_desc = nullptr;
   miopenTensorDescriptor_t output_desc = nullptr;
+  miopenTensorDescriptor_t bias_desc = nullptr;
   miopenConvolutionDescriptor_t conv_desc = nullptr;
-  void *find_workspace = nullptr;
+  // Workspace is owned by RuntimeState->conv_scratch (grow-on-demand pool);
+  // do NOT hipFree it here.
   void *workspace = nullptr;
   int result = 0;
   miopenConvAlgoPerf_t perf_results[1];
   int returned_algo_count = 0;
   miopenConvFwdAlgorithm_t algo;
   size_t workspace_size = 0;
-  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
   float alpha = 1.0f;
   float beta = 0.0f;
 
@@ -151,22 +176,22 @@ int wrap_miopenConvolutionForward(
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
 
-  // Set tensor descriptors with explicit NCHW layout (float32).
+  // Set tensor descriptors with explicit NCHW layout (dtype = mio_dt).
   // miopenSet4dTensorDescriptor leaves layout as UNKNOWN which triggers
   // warnings in MIOpen 7.12+.
   {
     int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        input_desc, miopenFloat, miopenTensorNCHW, in_dims, 4));
+        input_desc, mio_dt, miopenTensorNCHW, in_dims, 4));
 
     int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h, (int)kernel_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        weights_desc, miopenFloat, miopenTensorNCHW, w_dims, 4));
+        weights_desc, mio_dt, miopenTensorNCHW, w_dims, 4));
 
     int out_dims[] = {(int)input_n, (int)weights_k, (int)output_h,
                       (int)output_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        output_desc, miopenFloat, miopenTensorNCHW, out_dims, 4));
+        output_desc, mio_dt, miopenTensorNCHW, out_dims, 4));
   }
 
   // Create convolution descriptor
@@ -183,9 +208,26 @@ int wrap_miopenConvolutionForward(
     MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
   }
 
-  // Allocate workspace for algorithm search
-  // MIOpen's Find API needs workspace to test algorithms
-  HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
+  // Workspace: query the worst-case size MIOpen needs for this conv config,
+  // then grow the per-RuntimeState conv_scratch pool to fit. The same buffer
+  // serves both the Find API and the forward call. This replaces the old
+  // per-call hipMalloc(10MB)/hipFree pattern -- the pool is reused across all
+  // conv calls in the session (encoder front-end runs it once per prefill).
+  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
+      miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
+      &workspace_size));
+
+  if (workspace_size > 0) {
+    if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
+      fprintf(stderr,
+              "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
+              "%zu bytes\n",
+              workspace_size);
+      result = -1;
+      goto cleanup;
+    }
+    workspace = hipdnn_ep_state_get_conv_scratch(state);
+  }
 
   // Find best algorithm
   // MIOpen 3.x API: returns array of performance results instead of single
@@ -196,49 +238,47 @@ int wrap_miopenConvolutionForward(
       1,                    // requestAlgoCount - ask for 1 algorithm
       &returned_algo_count, // returnedAlgoCount - how many actually returned
       perf_results,         // perfResults - array to receive results
-      find_workspace,       // workspace for algorithm testing
-      find_workspace_size,  // workspaceSize
+      workspace,            // workspace for algorithm testing
+      workspace_size,       // workspaceSize
       false));
+  if (returned_algo_count < 1) {
+    fprintf(stderr, "wrap_miopenConvolutionForward: MIOpen Find returned no "
+                    "algorithms\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Extract algorithm from performance results
   algo = perf_results[0].fwd_algo;
-
-  // Get actual workspace size needed for this algorithm
-  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
-      miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
-      &workspace_size));
-
-  // Reuse find_workspace if it's large enough, otherwise reallocate
-  workspace = find_workspace;
-  if (workspace_size > find_workspace_size) {
-    hipError_t err = hipFree(find_workspace);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
-    }
-    find_workspace = nullptr; // Mark as freed to avoid double-free
-    HIP_CHECK(hipMalloc(&workspace, workspace_size));
-  }
 
   // Perform convolution
   MIOPEN_CHECK(miopenConvolutionForward(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
       conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
 
-cleanup:
-  // Best-effort cleanup: free all allocated resources
-  // Continue cleanup even if individual operations fail
-  if (workspace) {
-    hipError_t err = hipFree(workspace);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for workspace: %d\n", err);
-    }
+  // Add per-channel bias via miopenOpTensor (TensorOpAdd):
+  //   C = alpha1*A + alpha2*B + beta*C  with A=C=output, B=bias, beta=0
+  //   -> output = output + bias  (broadcast from [1, weights_k, 1, 1])
+  //
+  // We do NOT use miopenConvolutionForwardBias: the MIOpen header states its
+  // alpha/beta are "only supported for alpha = 1 and beta = 0", so it cannot
+  // fuse y = conv + bias (it would compute y = bias). miopenOpTensor with
+  // alpha1=alpha2=1, beta=0 computes y = conv + bias as ONNX Conv requires.
+  if (bias) {
+    const float alpha_bias = 1.0f, beta_zero = 0.0f;
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
+    int b_dims[] = {1, (int)weights_k, 1, 1};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        bias_desc, mio_dt, miopenTensorNCHW, b_dims, 4));
+    MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &alpha_bias,
+                                output_desc, output, &alpha_bias, bias_desc,
+                                bias, &beta_zero, output_desc, output));
   }
-  // Free find_workspace only if it wasn't already freed during reallocation
-  if (find_workspace && find_workspace != workspace) {
-    hipError_t err = hipFree(find_workspace);
-    if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
-    }
+
+cleanup:
+  // Workspace is owned by RuntimeState->conv_scratch; do NOT hipFree here.
+  if (bias_desc) {
+    miopenDestroyTensorDescriptor(bias_desc);
   }
   if (input_desc) {
     miopenDestroyTensorDescriptor(input_desc);
