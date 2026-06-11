@@ -1,0 +1,85 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+//===- LoopBodyToOutParams.cpp - Out-param ABI for outlined loop bodies ---===//
+//
+// Module pass that runs AFTER `one-shot-bufferize` and BEFORE
+// `buffer-deallocation`.
+//
+// Problem. `onnx-loop-outline` emits each `hip.loop` body as a private
+// `func.func` named `*_loop_body_*`. After bufferization those helpers still
+// return loop-carried memrefs via `func.return`, while `convert-hip-to-llvm`
+// LoopLowering expects the out-param ABI: one extra memref argument per
+// loop-carried value (`v_in` + `v_out`, tagged `{bufferize.result}`).
+//
+// The module-level `buffer-results-to-out-params` pass closes this gap for
+// `@main_graph` in the classic pipeline (`modifyPublicFunctions = true`) but
+// skips private helpers. The allocator pipeline skips module-level out-params
+// on `@main_graph` entirely (outputs are handled later by
+// `hip-use-output-allocator`). Neither path promotes outlined loop bodies.
+//
+// Fix. Invoke MLIR's `promoteBufferResultsToOutParams` with
+// `modifyPublicFunctions = false` and a name filter that selects only
+// `*_loop_body_*` functions. Runs in both classic and allocator pipelines.
+//
+// Before:
+//   func.func private @main_loop_body_n0(..., %v_in: memref<...>)
+//       -> memref<...> {
+//     %out = memref.alloc() : memref<...>
+//     hip.add ... outs(%out)
+//     return %out : memref<...>
+//   }
+// After:
+//   func.func private @main_loop_body_n0(..., %v_in: memref<...>,
+//                                        %v_out: memref<...>
+//                                        {bufferize.result}) {
+//     hip.add ... outs(%v_out)
+//     return
+//   }
+//
+//===----------------------------------------------------------------------===//
+
+#include "hip/Dialect/Transforms/Passes.h"
+
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinOps.h"
+
+#define DEBUG_TYPE "hip-loop-body-to-out-params"
+
+namespace mlir {
+namespace hip {
+
+#define GEN_PASS_DEF_LOOPBODYTOOUTPARAMSPASS
+#include "hip/Dialect/Transforms/Passes.h.inc"
+
+namespace {
+
+static bool isOutlinedLoopBody(func::FuncOp *func) {
+  return func && func->getName().contains("_loop_body_");
+}
+
+struct LoopBodyToOutParamsPass
+    : public impl::LoopBodyToOutParamsPassBase<LoopBodyToOutParamsPass> {
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<func::FuncDialect>();
+  }
+
+  void runOnOperation() override {
+    bufferization::BufferResultsToOutParamsOpts opts;
+    opts.hoistStaticAllocs = true;
+    opts.hoistDynamicAllocs = true;
+    opts.addResultAttribute = true;
+    opts.modifyPublicFunctions = false;
+    opts.filterFn = isOutlinedLoopBody;
+
+    if (failed(bufferization::promoteBufferResultsToOutParams(getOperation(),
+                                                              opts)))
+      signalPassFailure();
+  }
+};
+
+} // namespace
+} // namespace hip
+} // namespace mlir

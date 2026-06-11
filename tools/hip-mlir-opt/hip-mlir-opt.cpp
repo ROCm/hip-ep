@@ -129,6 +129,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::GeluOp>>(*ctx);
     mlir::hip::ResizeOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ResizeOp>>(*ctx);
+    mlir::hip::GlobalPoolOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GlobalPoolOp>>(*ctx);
     mlir::hip::ReciprocalOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ReciprocalOp>>(*ctx);
     mlir::hip::SqrtOp::attachInterface<
