@@ -816,6 +816,20 @@ void GeluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ResizeOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ResizeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ResizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GlobalPoolOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

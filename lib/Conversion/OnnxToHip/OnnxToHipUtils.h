@@ -262,6 +262,8 @@ void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateResizeConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
@@ -305,6 +307,17 @@ void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
 /// See FastGeluFusion.cpp.
 void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+
+/// Pre-lowering pattern set: collapse the inlined erf-form `Gelu` primitive
+/// chain (Div / Erf / Sum / Mul, optionally wrapped in CastLike scalars and
+/// `Sqrt(2.0)`) back into a single `onnx.Gelu(approximate="none")`. Some
+/// exports (e.g. ConvNeXt) inline the exact erf-based Gelu definition
+/// `0.5 * x * (1 + erf(x / sqrt(2)))` as primitives that have no MorphiZen
+/// converters. Must run BEFORE `lowerOnnxConstants` so the literal float
+/// values (1.0, 2.0, 0.5) of the wrapped constants are still inline.
+/// See ErfGeluFusion.cpp.
+void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives — patch-embed
