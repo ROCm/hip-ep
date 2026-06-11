@@ -352,3 +352,186 @@ cleanup:
 
   return result;
 }
+
+//===----------------------------------------------------------------------===//
+// MIOpen Transposed Convolution (Deconvolution)
+//===----------------------------------------------------------------------===//
+//
+// Implements ONNX ConvTranspose via MIOpen's miopenTranspose convolution mode.
+// In transpose mode, miopenConvolutionForward computes the deconvolution: the
+// descriptors mirror the "equivalent forward conv" whose forward output is our
+// input. That makes the weight descriptor [C_in, M/group, kH, kW] match the
+// ONNX ConvTranspose weight layout directly (input channels first, unlike the
+// forward Conv layout [M, C/group, ...]).
+//
+// output_padding (ONNX "adjs") disambiguates the output size when a stride > 1
+// maps multiple input sizes to overlapping output ranges; it is applied via
+// miopenSetTransposeConvOutputPadding. The final output dims are already fixed
+// by the caller (output_h/output_w from compile-time shape inference); the
+// output padding only affects which computed cells MIOpen fills.
+int wrap_miopenConvolutionTranspose(
+    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, const void *weights, const void *bias,
+    void *output, int64_t output_c, int64_t output_h, int64_t output_w,
+    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
+    int64_t dilation_h, int64_t dilation_w, int64_t output_padding_h,
+    int64_t output_padding_w, int64_t group, int64_t data_type) {
+  OP_PROFILE(
+      "conv_transpose",
+      [&] {
+        char b[80];
+        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld,m=%lld,k=%lldx%lld,s=%lld",
+                 (long long)input_n, (long long)input_c, (long long)input_h,
+                 (long long)input_w, (long long)output_c, (long long)kernel_h,
+                 (long long)kernel_w, (long long)stride_h);
+        return std::string(b);
+      },
+      state);
+  (void)pad_bottom;
+  (void)pad_right;
+  if (!state || !input || !weights || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionTranspose\n");
+    return -1;
+  }
+
+  miopenDataType_t miopen_dt;
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    miopen_dt = miopenFloat;
+    break;
+  case HIPDNN_EP_DATATYPE_HALF:
+    miopen_dt = miopenHalf;
+    break;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    miopen_dt = miopenBFloat16;
+    break;
+  default:
+    fprintf(stderr,
+            "wrap_miopenConvolutionTranspose: unsupported data_type=%lld\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  miopenHandle_t miopen_handle =
+      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
+
+  // All releasable resources declared at function scope for goto cleanup.
+  miopenTensorDescriptor_t input_desc = nullptr;
+  miopenTensorDescriptor_t weights_desc = nullptr;
+  miopenTensorDescriptor_t output_desc = nullptr;
+  miopenTensorDescriptor_t bias_desc = nullptr;
+  miopenConvolutionDescriptor_t conv_desc = nullptr;
+  void *find_workspace = nullptr;
+  void *workspace = nullptr;
+  int result = 0;
+  miopenConvAlgoPerf_t perf_results[1];
+  int returned_algo_count = 0;
+  miopenConvFwdAlgorithm_t algo;
+  size_t workspace_size = 0;
+  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
+  float alpha = 1.0f;
+  float beta = 0.0f;
+
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
+
+  {
+    int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        input_desc, miopen_dt, miopenTensorNCHW, in_dims, 4));
+
+    // Transpose-mode weights: [C_in, M/group, kH, kW] (ONNX ConvTranspose W).
+    int w_dims[] = {(int)input_c, (int)(output_c / group), (int)kernel_h,
+                    (int)kernel_w};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        weights_desc, miopen_dt, miopenTensorNCHW, w_dims, 4));
+
+    int out_dims[] = {(int)input_n, (int)output_c, (int)output_h,
+                      (int)output_w};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        output_desc, miopen_dt, miopenTensorNCHW, out_dims, 4));
+  }
+
+  MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
+  MIOPEN_CHECK(miopenInitConvolutionDescriptor(
+      conv_desc, miopenTranspose, pad_top, pad_left, stride_h, stride_w,
+      dilation_h, dilation_w));
+
+  // Output padding is optional in MIOpen; only set it when non-zero so the
+  // common case takes the default (zero adjustment) path.
+  if (output_padding_h > 0 || output_padding_w > 0) {
+    MIOPEN_CHECK(miopenSetTransposeConvOutputPadding(
+        conv_desc, (int)output_padding_h, (int)output_padding_w));
+  }
+
+  if (group > 1) {
+    MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
+  }
+
+  HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
+
+  MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
+      miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
+      output_desc, output, 1, &returned_algo_count, perf_results,
+      find_workspace, find_workspace_size, false));
+
+  algo = perf_results[0].fwd_algo;
+
+  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
+      miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
+      &workspace_size));
+
+  workspace = find_workspace;
+  if (workspace_size > find_workspace_size) {
+    hipError_t err = hipFree(find_workspace);
+    if (err != hipSuccess)
+      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
+    find_workspace = nullptr;
+    HIP_CHECK(hipMalloc(&workspace, workspace_size));
+  }
+
+  MIOPEN_CHECK(miopenConvolutionForward(
+      miopen_handle, &alpha, input_desc, input, weights_desc, weights,
+      conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
+
+  // Bias is [M]; broadcast-add over the [N, M, H', W'] output via the dedicated
+  // MIOpen bias-forward op (descriptor [1, M, 1, 1]). beta=1.0 so the bias is
+  // ADDED to the existing deconv output rather than overwriting it
+  // (y = alpha*bias + beta*y).
+  if (bias) {
+    float beta_add = 1.0f;
+    int b_dims[] = {1, (int)output_c, 1, 1};
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        bias_desc, miopen_dt, miopenTensorNCHW, b_dims, 4));
+    MIOPEN_CHECK(miopenConvolutionForwardBias(miopen_handle, &alpha, bias_desc,
+                                              bias, &beta_add, output_desc,
+                                              output));
+  }
+
+cleanup:
+  if (workspace) {
+    hipError_t err = hipFree(workspace);
+    if (err != hipSuccess)
+      fprintf(stderr, "Warning: hipFree failed for workspace: %d\n", err);
+  }
+  if (find_workspace && find_workspace != workspace) {
+    hipError_t err = hipFree(find_workspace);
+    if (err != hipSuccess)
+      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
+  }
+  if (input_desc)
+    miopenDestroyTensorDescriptor(input_desc);
+  if (weights_desc)
+    miopenDestroyTensorDescriptor(weights_desc);
+  if (output_desc)
+    miopenDestroyTensorDescriptor(output_desc);
+  if (bias_desc)
+    miopenDestroyTensorDescriptor(bias_desc);
+  if (conv_desc)
+    miopenDestroyConvolutionDescriptor(conv_desc);
+
+  return result;
+}
