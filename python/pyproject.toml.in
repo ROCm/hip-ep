@@ -1,0 +1,45 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
+# Template consumed by python/CMakeLists.txt via configure_file: @PROJECT_VERSION@
+# is substituted at configure time. Do not edit the generated pyproject.toml.
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onnxruntime_morphizen_ep"
+version = "@PROJECT_VERSION@"
+description = "MorphiZen Execution Provider for ONNX Runtime (AMD GPU via HIP/ROCm)"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Advanced Micro Devices, Inc." }]
+dependencies = [
+    # ROCm runtime (TheRock). Not on PyPI -- supply at install time via
+    # `--extra-index-url https://repo.amd.com/rocm/whl/@MORPHIZEN_HIP_ARCH@/`
+    # (@MORPHIZEN_HIP_ARCH@ = the GPU arch this wheel was built for). Pinned to
+    # the exact TheRock version the EP is built against to avoid runtime/JIT
+    # import ABI skew.
+    "rocm[libraries,devel]==7.11.0",
+]
+# NOTE: a custom ONNX Runtime build (the plugin-EP-patched onnxruntime-directml)
+# is required at runtime, but it is NOT declared as a dependency: this wheel
+# ships its native files into onnxruntime/capi (platlib), so onnxruntime must
+# already be installed (install this wheel AFTER it). Declaring it would also
+# risk pip pulling the stock PyPI build over the custom one.
+
+[tool.setuptools]
+# The EP's native artifacts ship directly under onnxruntime/capi/ (platlib),
+# the same layout ONNX Runtime itself uses -- so they install next to
+# onnxruntime.dll cross-platform (pip resolves platlib per OS, unlike a
+# hardcoded lib/site-packages data_files path). onnxruntime.capi is treated as
+# a PEP 420 namespace package (we ship NO __init__.py for onnxruntime/ or
+# onnxruntime/capi/, so we never clobber ONNX Runtime's own files).
+
+[tool.setuptools.packages.find]
+include = ["onnxruntime_morphizen_ep", "onnxruntime.capi"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"onnxruntime.capi" = ["*.dll", "*.lib", "*.dll.a", "*.so"]
