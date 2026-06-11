@@ -43,6 +43,7 @@ add_library(HipToLLVM STATIC
   NonZeroLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
+  GlobalPoolLowering.cpp
 )
 
 add_dependencies(HipToLLVM

@@ -679,6 +679,42 @@ int hip_reduce_sum(
     int hip_dtype);
 
 /* =========================================================================
+ * Global pool (avg / max / lp)
+ * =========================================================================
+ *
+ * Reduces each contiguous `reduce_size`-element slice into a single value.
+ * Data is viewed as `[outer, reduce_size]` where
+ *   outer       = N * C
+ *   reduce_size = D_1 * D_2 * ... * D_k   (product of all spatial dims)
+ *
+ * `mode` selects the reduction (must match HIPDNN_EP_GLOBAL_POOL_* in
+ * lib/Runtime/hipdnn_ep_runtime.h):
+ *   0 (AVERAGE): Y = mean(slice)
+ *   1 (MAX)    : Y = max(slice)
+ *   2 (LP)     : Y = pow(sum(pow(|slice|, p)), 1/p)
+ *
+ * `p` is the LP-norm exponent; ignored for AVG / MAX. Caller must guarantee
+ * `p >= 1` for LP (the runtime wrapper rejects values below that).
+ *
+ * One reduction block per output element (per (n, c) slice). Accumulation
+ * happens in float (regardless of input dtype) to keep precision on long
+ * spatial reductions of fp16 / bf16 inputs.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_global_pool(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t outer,
+    int64_t reduce_size,
+    int hip_dtype,
+    int mode,
+    int p);
+
+/* =========================================================================
  * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
  * =========================================================================
  *
