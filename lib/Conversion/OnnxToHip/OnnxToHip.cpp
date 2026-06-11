@@ -711,12 +711,16 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // Both patterns are value-based and require the literal constants to
     // still be inline in `onnx.Constant` `value` attributes — once the
     // constants are externalized to memref.get_global the matchers break.
-    // ExistingOps strictness is sufficient: neither pattern produces an
-    // op the other root-matches on (Gather rewrites to tensor.*; FastGelu
-    // rewrites to onnx.Gelu, never producing a fresh onnx.Tanh).
+    // ExistingOps strictness is sufficient: no pattern produces an
+    // op another root-matches on (Gather rewrites to tensor.*; FastGelu
+    // rewrites to onnx.Gelu, never producing a fresh onnx.Tanh;
+    // ReshapeShapeFold roots on onnx.Reshape and only swaps its shape
+    // operand in place — the re-visit fails the "operand1 is onnx.Shape"
+    // guard, so it converges without looping).
     {
       mlir::RewritePatternSet preLoweringPatterns(ctx);
       populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
+      populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
       populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
       mlir::GreedyRewriteConfig preLoweringConfig;
       preLoweringConfig.setStrictness(
