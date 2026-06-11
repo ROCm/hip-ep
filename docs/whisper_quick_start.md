@@ -386,12 +386,6 @@ This is a **loose reference, not a like-for-like comparison**: whisper.cpp uses 
 **f16 GGUF** model with its own hand-tuned C++ graph and KV management — a
 different precision *and* a different computational graph from our fp32 ONNX.
 
-> **Note:** `scripts/build_whisper_vulkan.py` reuses helpers from `build.py`
-> (`fetch_vulkan_sdk`, `INSTALL`, `VULKAN_SDK`, …). A recent `build.py` rewrite
-> removed those module-level symbols, so this script needs a small re-port before
-> it will run again — the Vulkan baseline is an optional reference, not on the
-> critical path. Tracked separately.
-
 One-time build (~10–20 min: fetches the Vulkan SDK + whisper.cpp + a ~3 GB f16
 GGUF):
 
