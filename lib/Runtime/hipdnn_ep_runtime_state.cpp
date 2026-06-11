@@ -959,6 +959,14 @@ static int per_entry_load_constants(RuntimeState *state,
   return 0;
 }
 
+// Set per Compute in hipdnn_ep_runtime_begin_compute; read by memrefCopy and
+// any other ABI-fixed helper that lacks a `state` arg so it can run on the
+// session stream rather than the default/null stream. thread_local mirrors
+// g_pool_depth's rationale: one inference per thread, but parallel sessions on
+// separate threads each keep their own stream. Defined here (ahead of cleanup)
+// so cleanup can null it out when the owning stream is destroyed.
+static thread_local void *g_hipdnn_ep_current_stream = nullptr;
+
 int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (!state) {
     fprintf(stderr, "Invalid runtime state in cleanup\n");
@@ -1097,6 +1105,13 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Destroy HIP stream
   if (state->stream) {
+    // Stop ABI-fixed helpers (memrefCopy) from reading this stream after it is
+    // destroyed. begin_compute re-publishes the stream each forward pass, so
+    // this only matters for a stray call after teardown -- but it keeps the
+    // thread-local from dangling on a freed hipStream_t.
+    if (g_hipdnn_ep_current_stream == static_cast<void *>(state->stream)) {
+      g_hipdnn_ep_current_stream = nullptr;
+    }
     HIP_CLEANUP(hipStreamDestroy(state->stream));
   }
 
@@ -1118,6 +1133,8 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
 void *hipdnn_ep_state_get_stream(RuntimeState *state) {
   return state ? static_cast<void *>(state->stream) : nullptr;
 }
+
+void *hipdnn_ep_get_current_stream(void) { return g_hipdnn_ep_current_stream; }
 
 void *hipdnn_ep_state_get_miopen_handle(RuntimeState *state) {
   return state ? static_cast<void *>(state->miopen_handle) : nullptr;
@@ -1149,6 +1166,9 @@ extern "C"
   }
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_ptr = nullptr;
+  // Publish the session stream for ABI-fixed helpers (memrefCopy) that run
+  // before/within main_graph and otherwise default to stream 0.
+  g_hipdnn_ep_current_stream = static_cast<void *>(state->stream);
 }
 
 //===----------------------------------------------------------------------===//

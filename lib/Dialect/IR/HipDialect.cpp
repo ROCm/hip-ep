@@ -830,6 +830,46 @@ void LeakyReluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// PoolOp: ins(input), outs([output] or [output, indices])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PoolOp::getDpsInitsMutable() { return getOutputsMutable(); }
+
+void PoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ResizeOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ResizeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ResizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GlobalPoolOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GlobalPoolOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GlobalPoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ReciprocalOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
@@ -1312,6 +1352,18 @@ void CosOp::getEffects(
 MutableOperandRange SinOp::getDpsInitsMutable() { return getYMutable(); }
 
 void SinOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ExpOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ExpOp::getDpsInitsMutable() { return getYMutable(); }
+
+void ExpOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
