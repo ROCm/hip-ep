@@ -318,13 +318,19 @@ __global__ void hip_scatter_nd_kernel(const int64_t *__restrict__ indices,
                                       T *__restrict__ output,
                                       ScatterNDParams p,
                                       int64_t total_threads,
-                                      int reduction_id) {
+                                      int reduction_id,
+                                      const int32_t *valid_count) {
   int64_t tid =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= total_threads)
     return;
 
   int64_t slice_id = tid / p.slice_size;
+
+  // When valid_count is set (NonZero upstream), skip padded rows
+  if (valid_count && slice_id >= *valid_count)
+    return;
+
   int64_t inner = tid % p.slice_size;
 
   // Walk the K-element index tuple for this slice.
@@ -363,7 +369,8 @@ __global__ void hip_scatter_nd_kernel(const int64_t *__restrict__ indices,
 
 extern "C" int hip_scatter_nd(void *stream, const void *data,
                               const void *indices, const void *updates,
-                              void *output, const int64_t *data_shape_host,
+                              void *output, const int32_t *count_ptr,
+                              const int64_t *data_shape_host,
                               int data_rank, const int64_t *indices_shape_host,
                               int indices_rank, int reduction_id,
                               int hip_dtype) {
@@ -482,7 +489,7 @@ extern "C" int hip_scatter_nd(void *stream, const void *data,
                        static_cast<const int64_t *>(indices),
                        static_cast<const __half *>(updates),
                        static_cast<__half *>(output), p, total_threads,
-                       reduction_id);
+                       reduction_id, count_ptr);
     break;
   case HIP_DTYPE_FLOAT32:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_scatter_nd_kernel<float>),
@@ -490,7 +497,7 @@ extern "C" int hip_scatter_nd(void *stream, const void *data,
                        static_cast<const int64_t *>(indices),
                        static_cast<const float *>(updates),
                        static_cast<float *>(output), p, total_threads,
-                       reduction_id);
+                       reduction_id, count_ptr);
     break;
   case HIP_DTYPE_INT32:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_scatter_nd_kernel<int32_t>),
@@ -498,7 +505,7 @@ extern "C" int hip_scatter_nd(void *stream, const void *data,
                        static_cast<const int64_t *>(indices),
                        static_cast<const int32_t *>(updates),
                        static_cast<int32_t *>(output), p, total_threads,
-                       reduction_id);
+                       reduction_id, count_ptr);
     break;
   case HIP_DTYPE_INT64:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_scatter_nd_kernel<int64_t>),
@@ -506,7 +513,7 @@ extern "C" int hip_scatter_nd(void *stream, const void *data,
                        static_cast<const int64_t *>(indices),
                        static_cast<const int64_t *>(updates),
                        static_cast<int64_t *>(output), p, total_threads,
-                       reduction_id);
+                       reduction_id, count_ptr);
     break;
   default:
     fprintf(stderr, "[custom_kernels] hip_scatter_nd: unsupported dtype=%d\n",

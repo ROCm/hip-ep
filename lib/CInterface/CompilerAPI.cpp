@@ -32,6 +32,8 @@ static const char *COMPILER_VERSION = "1.0.0";
 //   constants_file     — externalized weights filename (default
 //   "constants.bin") skip_constant_data — skip writing constant bytes (default
 //   false)
+//   use_output_allocator — compile in output-allocator mode: 2-arg
+//   inference_compute + in-graph hip.alloc_output (default false)
 static bool parseOptions(const char *options_json,
                          mlir::hip::CompilationOptionsT &opts,
                          std::string &error_message) {

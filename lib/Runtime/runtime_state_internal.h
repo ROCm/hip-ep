@@ -18,6 +18,10 @@
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
 #include "runtime_types.h"
+// For hipdnn_output_allocator_t (the output_allocator field below). Acyclic:
+// hipdnn_ep_runtime.h only forward-declares RuntimeState; it does not include
+// this internal header.
+#include "hipdnn_ep_runtime.h"
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
@@ -84,6 +88,13 @@ struct RuntimeState {
   // the bug.
   void *host_scratch_base;
   size_t host_scratch_size;
+
+  // Output allocator installed by the EP before inference_compute via
+  // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
+  // allocate(self, ...). Borrowed: `self` is EP-owned, never freed here.
+  // allocate == nullptr means no allocator is installed (the classic pipeline
+  // never calls alloc_output); zero-initialized in initialize_state_handles.
+  hipdnn_output_allocator_t output_allocator;
 
   // Per-state scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,

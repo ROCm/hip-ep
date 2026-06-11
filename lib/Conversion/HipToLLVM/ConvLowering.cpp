@@ -17,7 +17,27 @@ namespace {
 //                                     output, output_h, output_w, kernel_h,
 //                                     kernel_w, stride_h, stride_w, pad_top,
 //                                     pad_left, pad_bottom, pad_right,
-//                                     dilation_h, dilation_w, group)
+//                                     dilation_h, dilation_w, group, data_type)
+//
+// Before:
+//   %out = hip.conv(%ctx) ins(%in, %w, %b :
+//                              memref<1x3x896x896xf16, 1>,
+//                              memref<1152x3x14x14xf16, 1>,
+//                              memref<1152xf16, 1>)
+//                          outs(%o : memref<1x1152x64x64xf16, 1>)
+//                          {kernel_shape=[14,14], strides=[14,14], ...}
+// After:
+//   llvm.call @wrap_miopenConvolutionForward(%ctx, %in, 1, 3, 896, 896,
+//                                              %w, 1152, %b, %o, 64, 64,
+//                                              14, 14, 14, 14, 0, 0, 0, 0,
+//                                              1, 1, 1,
+//                                              /*data_type=*/1 /* f16 */)
+//
+// The `data_type` value is derived from the OUTPUT memref's element type and
+// applied uniformly to all three MIOpen tensor descriptors. MIOpen requires
+// input / weights / output to share the same dtype; this is enforced by the
+// host-side typing rule in OnnxToHip (`init` tensor allocated with
+// `resultType.getElementType()`).
 struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -59,7 +79,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     //     int64_t pad_right,      // Padding right
     //     int64_t dilation_h,     // Dilation height
     //     int64_t dilation_w,     // Dilation width
-    //     int64_t group           // Number of groups
+    //     int64_t group,          // Number of groups
+    //     int64_t data_type       // HIPDNN_EP_DATATYPE_* for I/O+weights
     // );
     //
     // Returns: 0 on success, non-zero on error
@@ -149,15 +170,19 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     Value dilationW = createI64Const(getI64(dilations[1]));
     Value groupVal = createI64Const(group);
 
-    // element_size_bytes — fp16 (2) or fp32 (4); the runtime threads this into
-    // the MIOpen tensor descriptor dtype.
-    int64_t elemSize = static_cast<int64_t>(
-                           inputType.getElementType().getIntOrFloatBitWidth()) /
-                       8;
-    Value elemSizeVal = createI64Const(elemSize);
+    // dtype: derive from the output memref's element type. All three buffers
+    // (input, weights, output) must share this dtype — see the typing rule
+    // in OnnxToHip::ConvConversion which uses resultType.getElementType()
+    // for the allocated output. The runtime fails fast if the dtype is
+    // unsupported.
+    int64_t dataTypeEnum = getHipdnnDataType(outputType.getElementType());
+    if (dataTypeEnum < 0)
+      return op.emitError("hip.conv: unsupported output element type ")
+             << outputType.getElementType();
+    Value dataType = createI64Const(dataTypeEnum);
 
     // Build function signature
-    SmallVector<Type, 24> paramTypes = {
+    SmallVector<Type, 25> paramTypes = {
         ptrType, // state
         ptrType, // input
         i64Type, // input_n
@@ -181,7 +206,7 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
         i64Type, // dilation_h
         i64Type, // dilation_w
         i64Type, // group
-        i64Type  // element_size_bytes
+        i64Type  // data_type
     };
 
     // Lookup or create the runtime function
@@ -191,11 +216,11 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       return failure();
 
     // Build argument list matching the signature
-    SmallVector<Value, 24> args = {
+    SmallVector<Value, 25> args = {
         statePtr,   inputPtr, inputN,    inputC,    inputH,   inputW,
         weightsPtr, weightsK, biasPtr,   outputPtr, outputH,  outputW,
         kernelH,    kernelW,  strideH,   strideW,   padTop,   padLeft,
-        padBottom,  padRight, dilationH, dilationW, groupVal, elemSizeVal};
+        padBottom,  padRight, dilationH, dilationW, groupVal, dataType};
 
     // Call the runtime function
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
