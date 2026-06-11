@@ -491,6 +491,9 @@ void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
+/// Pre-lowering: fold Mul(x, Sigmoid(x)) into hip.silu. See SiluFusion.cpp.
+void populateSiluFusionPatterns(RewritePatternSet &patterns, MLIRContext *ctx);
+
 } // namespace hip
 } // namespace mlir
 

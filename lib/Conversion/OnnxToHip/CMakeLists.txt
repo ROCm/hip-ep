@@ -41,6 +41,7 @@ add_library(OnnxToHip STATIC
   ErfGeluFusion.cpp
   ProjectorOpsRewrites.cpp
   LpNormalizationConversion.cpp
+  SiluFusion.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp
