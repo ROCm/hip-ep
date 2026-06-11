@@ -129,6 +129,12 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::GeluOp>>(*ctx);
     mlir::hip::LeakyReluOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::LeakyReluOp>>(*ctx);
+    mlir::hip::PoolOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::PoolOp>>(*ctx);
+    mlir::hip::ResizeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ResizeOp>>(*ctx);
+    mlir::hip::GlobalPoolOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GlobalPoolOp>>(*ctx);
     mlir::hip::ReciprocalOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ReciprocalOp>>(*ctx);
     mlir::hip::SqrtOp::attachInterface<
@@ -169,6 +175,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::CosOp>>(*ctx);
     mlir::hip::SinOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SinOp>>(*ctx);
+    mlir::hip::ExpOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ExpOp>>(*ctx);
     mlir::hip::CumSumOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::CumSumOp>>(*ctx);
     mlir::hip::PadOp::attachInterface<

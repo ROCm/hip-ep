@@ -74,28 +74,6 @@ int hip_elementwise_sub(
     int hip_dtype);
 
 /* =========================================================================
- * Elementwise Multiplication (no broadcasting)
- * =========================================================================
- *
- * Computes output[i] = lhs[i] * rhs[i] for num_elements elements.
- * Caller must ensure lhs/rhs/output have identical layout (no broadcasting).
- *
- * Provided so wrap_miopenOpTensor (Add/Mul) can fall back to a custom kernel
- * for dtypes MIOpen does not support (currently: INT64). Float dtypes still
- * go through MIOpen for performance + autotuning.
- *
- * Currently supported types: HIP_DTYPE_INT64
- * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
- */
-int hip_elementwise_mul(
-    void* stream,
-    const void* lhs,
-    const void* rhs,
-    void* output,
-    int64_t num_elements,
-    int hip_dtype);
-
-/* =========================================================================
  * Elementwise Where (NumPy-style multidirectional broadcasting, arbitrary rank)
  * =========================================================================
  *
@@ -183,6 +161,13 @@ int hip_elementwise_sin(
     int64_t num_elements,
     int hip_dtype);
 
+int hip_elementwise_exp(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 int hip_elementwise_not(
     void* stream,
     const void* input,
@@ -190,18 +175,24 @@ int hip_elementwise_not(
     int64_t num_elements);
 
 /* =========================================================================
- * Elementwise Binary (Div / Mod / Equal / Less)
+ * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
  * =========================================================================
  *
- * Same-shape binary elementwise ops added for the Qwen3.5 vision model.
- * All four share a single .hip TU (elementwise_binary_kernel.hip).
+ * Same-shape binary elementwise ops. All eight share one translation unit:
+ * 3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip.
  *
- * Important: broadcasting is NOT performed in these kernels. lhs and rhs
- * must already have identical shape (broadcasting is materialised
- * upstream via Expand).
+ * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
+ * miopenOpTensor rejects the element type (notably INT32/INT64). Float
+ * dtypes still use MIOpen for performance and autotuning.
  *
- * Output dtype for Equal/Less is bool (1 byte); their hip_dtype refers to
- * the INPUT type. For Div/Mod, output dtype matches input dtype.
+ * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
+ * Less write bool (1 byte); their hip_dtype refers to the input element type.
+ * Div and Mod preserve the input dtype.
+ *
+ * Broadcasting is not performed in these kernels. lhs and rhs must already
+ * match in shape; upstream Expand / broadcast materialization is required.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
 int hip_elementwise_div(
     void* stream,
@@ -211,11 +202,6 @@ int hip_elementwise_div(
     int64_t num_elements,
     int hip_dtype);
 
-// Element-wise Mul / Add / Min / Max, same-shape only (caller materialises
-// broadcast). Reached from wrap_miopenOpTensor for integer element types
-// that MIOpen rejects (e.g. INT64 scalar shape arithmetic like the
-// seqlens_k = Min(total_seq_len, max_seq_len) clamp in GQA). Supports
-// FP16, FP32, INT32, INT64.
 int hip_elementwise_mul(
     void* stream,
     const void* lhs,
@@ -723,6 +709,125 @@ int hip_reduce_sum(
     int64_t num_input_elements,
     int64_t num_output_elements,
     int hip_dtype);
+
+/* =========================================================================
+ * Pool — MaxPool / AveragePool / LpPool (1D / 2D / 3D)
+ * =========================================================================
+ *
+ * Generic ONNX window pooling over an `(N, C, D_1[, D_2[, D_3]])` input.
+ * Lays the output `(N, C, O_1[, O_2[, O_3]])` out in row-major order matching
+ * the input layout.
+ *
+ * `mode` selects the per-window reduction (must match HIPDNN_EP_POOL_* in
+ * lib/Runtime/hipdnn_ep_runtime.h):
+ *   0 (AVERAGE): Y = sum(window) / divisor
+ *   1 (MAX)    : Y = max(window)
+ *   2 (LP)     : Y = pow(sum(pow(|window|, p)), 1/p)
+ *
+ * Pad positions are never read (they fall outside the input bounds). For
+ * AVERAGE, `count_include_pad` picks the divisor: 0 = number of in-bounds
+ * window elements, 1 = full kernel volume (pad cells contribute 0 to the
+ * sum). `p` is the LP norm exponent (>= 1); both are ignored for the modes
+ * that don't use them.
+ *
+ * Optional `indices` (i64 buffer the same shape as the output) records the
+ * row-major flat index in the *unpadded* input that each max came from —
+ * MAX mode only; matches ONNX MaxPool spec for storage_order = 0. Pass NULL
+ * for AVERAGE / LP.
+ *
+ * `spatial_rank` selects how many of the per-axis arrays are read; for
+ * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `kernel`,
+ * `strides`, `pads_begin`, `dilations` must be set to 1 / 0 by the caller
+ * (the lowering does this).
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+int hip_pool(
+    void* stream,
+    const void* input,
+    void* output,
+    void* indices,            /* int64_t* — nullable, MAX only */
+    int hip_dtype,
+    int mode,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int count_include_pad,
+    int p);
+
+
+ /* =========================================================================
+ * Resize (1D / 2D / 3D spatial)
+ * =========================================================================
+ *
+ * Resamples the trailing spatial axes of an `(N, C, D_1, ..., D_k)` input
+ * onto an `(N, C, O_1, ..., O_k)` output grid.  Per-axis scale is computed
+ * inside the kernel as `scale = in_dim / out_dim`.  The (N, C) prefix is
+ * pass-through.
+ *
+ *  mode:               0 = nearest, 1 = linear (N-linear)
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+int hip_resize(
+    void* stream,
+    const void* input,
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int mode,
+    int coord_transform,
+    int nearest_mode);
+
+/* =========================================================================
+ * Global pool (avg / max / lp)
+ * =========================================================================
+ *
+ * Reduces each contiguous `reduce_size`-element slice into a single value.
+ * Data is viewed as `[outer, reduce_size]` where
+ *   outer       = N * C
+ *   reduce_size = D_1 * D_2 * ... * D_k   (product of all spatial dims)
+ *
+ * `mode` selects the reduction (must match HIPDNN_EP_GLOBAL_POOL_* in
+ * lib/Runtime/hipdnn_ep_runtime.h):
+ *   0 (AVERAGE): Y = mean(slice)
+ *   1 (MAX)    : Y = max(slice)
+ *   2 (LP)     : Y = pow(sum(pow(|slice|, p)), 1/p)
+ *
+ * `p` is the LP-norm exponent; ignored for AVG / MAX. Caller must guarantee
+ * `p >= 1` for LP (the runtime wrapper rejects values below that).
+ *
+ * One reduction block per output element (per (n, c) slice). Accumulation
+ * happens in float (regardless of input dtype) to keep precision on long
+ * spatial reductions of fp16 / bf16 inputs.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_global_pool(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t outer,
+    int64_t reduce_size,
+    int hip_dtype,
+    int mode,
+    int p);
 
 /* =========================================================================
  * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
@@ -1419,6 +1524,24 @@ int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
+// Max memref rank honoured by the strided memref.copy fast path
+// (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined
+// once here so the kernel and the runtime helper cannot drift out of sync.
+#define HIPDNN_MAX_MEMREF_RANK 12
+
+// Parallel strided device-to-device copy (one launch) for MLIR memref.copy
+// where neither side is contiguous and the copy spans multiple outer dims.
+// Replaces the host per-row hipMemcpyAsync loop in memrefCopy. Pointers are
+// element-aligned bases; outer_sizes/strides cover the outer dims, row_elems
+// is the contiguous inner suffix. Returns 0 on success, -2 if elem_size is
+// unsupported (caller falls back to the host per-row path).
+int hip_strided_copy(void *stream, void *dst, const void *src,
+                     int64_t elem_size, int outer_rank,
+                     const int64_t *outer_sizes,
+                     const int64_t *src_outer_strides,
+                     const int64_t *dst_outer_strides, int64_t row_elems,
+                     int64_t outer_total);
+
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
  * =========================================================================
@@ -1467,6 +1590,27 @@ int hip_causal_conv_step_decode(
     void* present_state,
     int64_t batch_size,
     int64_t channels,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes);
+
+// Prefill (seq_len > 1) fused causal depthwise 1D conv + bias + SiLU. One
+// launch replaces the MIOpen path (Find + 3 pitched memcpys + conv + bias +
+// activation + mul). fp32 accumulate; numerically matches the decode-step
+// kernel at seq_len==1. Same layout/contract as hip_causal_conv_step_decode
+// plus a seq_len argument. Supports kernel_size in [1,8], activation 0/1,
+// element_size 2/4; caller falls back to MIOpen for anything else.
+int hip_causal_conv_prefill(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
     int64_t kernel_size,
     int64_t activation,
     int64_t element_size_bytes);

@@ -18,6 +18,7 @@
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
@@ -92,12 +93,16 @@ inline constexpr const char *kWrapNeg = "wrap_neg";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapSin = "wrap_sin";
+inline constexpr const char *kWrapExp = "wrap_exp";
 inline constexpr const char *kWrapDiv = "wrap_div";
 inline constexpr const char *kWrapCumSum = "wrap_cumsum";
 inline constexpr const char *kWrapPad = "wrap_pad";
 inline constexpr const char *kWrapTile = "wrap_tile";
 inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
+inline constexpr const char *kWrapPool = "wrap_pool";
+inline constexpr const char *kWrapResize = "wrap_resize";
+inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
 inline constexpr const char *kWrapLess = "wrap_less";
 inline constexpr const char *kWrapGatherND = "wrap_gather_nd";
 inline constexpr const char *kWrapSign = "wrap_sign";
@@ -121,6 +126,19 @@ inline constexpr int64_t kActivationSigmoid = 0;
 inline constexpr int64_t kActivationRelu = 1;
 inline constexpr int64_t kActivationTanh = 2;
 inline constexpr int64_t kActivationSoftplus = 3;
+
+// Window-pool reduction mode constants (hip.pool / wrap_pool).
+// Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
+// and the `pool_mode` constants used in OnnxToHip/PoolConversion.cpp.
+inline constexpr int64_t kPoolAverage = 0;
+inline constexpr int64_t kPoolMax = 1;
+inline constexpr int64_t kPoolLp = 2;
+// Global-pool reduction mode constants.
+// Values must match HIPDNN_EP_GLOBAL_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
+// and the `mode` constants used in OnnxToHip/GlobalPoolConversion.cpp.
+inline constexpr int64_t kGlobalPoolAverage = 0;
+inline constexpr int64_t kGlobalPoolMax = 1;
+inline constexpr int64_t kGlobalPoolLp = 2;
 
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
 // Values must match the #defines in hipdnn_ep_runtime.h.
@@ -400,6 +418,12 @@ void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

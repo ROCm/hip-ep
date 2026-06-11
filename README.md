@@ -73,6 +73,13 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Relu | Decomposed → Max (MIOpen) |
 | LeakyRelu | Custom HIP Kernel |
 | Clip | Decomposed → Max + Min (MIOpen) |
+| MaxPool | Custom HIP Kernel |
+| AveragePool | Custom HIP Kernel |
+| LpPool | Custom HIP Kernel |
+| Resize | Custom HIP Kernel |
+| GlobalAveragePool | Custom HIP Kernel |
+| GlobalMaxPool | Custom HIP Kernel |
+| GlobalLpPool | Custom HIP Kernel |
 
 ### Compiler-Optimized Operations
 
@@ -90,6 +97,7 @@ These operations are handled through standard MLIR transformations without requi
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 | ConstantOfShape | arith.constant (compile-time fold) | Folds to a splat constant when the shape input is itself constant; honours optional `value` attribute |
 | Identity | SSA value forwarding | Pass-through op; the input value is wired directly to every user (equivalent to a full-range `memref.subview` view, but cheaper — no view op is materialised in the IR) |
+| Flatten | tensor.collapse_shape (+ tensor.expand_shape for axis = 0 / axis = r) | Reshapes rank-r input to rank-2; pure metadata reinterpretation. Dynamic dims supported. |
 
 ---
 
