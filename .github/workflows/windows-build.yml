@@ -17,7 +17,11 @@ permissions:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # windows-latest now serves the VS 2026 (VS 18) image, under which the
+    # pinned onnxruntime-genai / onnxruntime_extensions fails to build
+    # (gsl/util C2220 warning-as-error). Pin to the VS 2022 image per
+    # actions/runner-images#14017.
+    runs-on: windows-2022
     # Cancel the build job when a newer commit lands on the same PR ref to
     # save runner minutes. gpu-test deliberately does NOT inherit this rule
     # (see its own concurrency block below) so an in-progress GPU run keeps
