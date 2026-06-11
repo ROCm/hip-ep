@@ -26,21 +26,16 @@ Let `main_graph` allocate each output **at the point where its shape is computed
 
 ### Usage
 
-Allocator mode is an **opt-in, default-off** EP provider option named `use_output_allocator` (string `"1"` to enable, `"0"`/absent for the classic 3-arg ABI). There is no per-model auto-enable.
+Allocator mode is the **only** ABI at the EP front-end — there is no provider option and no classic out-param fallback. Every model compiles with the 2-arg in-graph `hip.alloc_output` ABI; nothing needs to be passed:
 
 Pure ORT (Python):
 ```python
 so = ort.SessionOptions()
-so.add_provider_for_devices(devices, {"use_output_allocator": "1"})
+so.add_provider_for_devices(devices, {})
 sess = ort.InferenceSession(model_path, sess_options=so)
 ```
 
-OGA (`genai_config.json`):
-```json
-"provider_options": [ { "MorphiZenEP": { "use_output_allocator": "1" } } ]
-```
-
-The flag is read once in `pass_main.cpp` (`get_provider_option("use_output_allocator", "0") == "1"`), baked into the compiled DLL's pipeline + metadata, and the EP picks its runtime dispatch arity from that embedded metadata. **It is therefore a compile-time choice**: because the model.dll cache key is the ONNX graph hash (not the provider options), toggling the flag on an already-compiled model requires clearing the cache (`del %TEMP%\morphizen_mlir_*`) before it takes effect.
+`pass_main.cpp::load_config` sets `config.useOutputAllocator = true` unconditionally and writes the same value into the compiled DLL's metadata, from which the EP picks its runtime dispatch arity. (The compiler-internal `use-output-allocator` *pipeline* option still exists in `lib/` for the dual-pipeline machinery, but the EP front-end always drives it on — the classic pipeline is unreachable from a session.)
 
 ---
 
@@ -129,7 +124,7 @@ Each pipeline has single responsibility, no conditional logic, clear semantics. 
 
 **Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *after* `buffer-deallocation` and *before* `hip-pool-allocs` (the "slot 4.5" placement). After dealloc, the output is still a plain `memref.alloc` (owned) and is returned with no clone; running before dealloc would make the deallocator clone the unowned `hip.alloc_output` result at the `return`, defeating zero-copy. Before pool-allocs keeps the EP-owned output out of the GPU pool. Pinned in [test/lit/Pipeline/output-allocator-dealloc.mlir](../../test/lit/Pipeline/output-allocator-dealloc.mlir).
 
-**Selection.** The `use-output-allocator` option (default off → Classic) lives in the **ONNX-to-HIP half only** (`OnnxToHipPipelineOptions`): off → slot-3 `buffer-results-to-out-params`; on → the slot-4.5 `hip-use-output-allocator`. The HIP-to-LLVM half has no allocator option — `convert-hip-to-llvm` and `generate-interface` read the module attribute, so the mode rides on the IR itself rather than a second option. The EP enables the flag for models with shape-derived dynamic outputs.
+**Selection.** The `use-output-allocator` pipeline option (the compiler-internal knob; its `cl::init` default is off → Classic) lives in the **ONNX-to-HIP half only** (`OnnxToHipPipelineOptions`): off → slot-3 `buffer-results-to-out-params`; on → the slot-4.5 `hip-use-output-allocator`. The HIP-to-LLVM half has no allocator option — `convert-hip-to-llvm` and `generate-interface` read the module attribute, so the mode rides on the IR itself rather than a second option. The EP front-end (`pass_main.cpp::load_config`) drives this knob **always on** (`config.useOutputAllocator = true`, unconditional) — there is no provider option; the classic pipeline is reachable only from the `hip-compiler` CLI / LIT tests, never from a live EP session.
 
 ---
 
@@ -362,13 +357,13 @@ MlirCustomOp::Compute(context)
 
 Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`): `main_graph` is a thin wrapper that bridges the runtime's `(ctx, inputs)` ABI to the exploded-descriptor ABI of the body, then **discards** the body's by-value return — the real output reaches the EP through the `hipdnn_ep_alloc_output` callback, not the return value.
 
-**Status: implemented.** The illustrative pseudocode above is realized by these files (the per-model auto-enable heuristic is deferred — allocator mode is an explicit, default-off `use_output_allocator` provider option):
+**Status: implemented.** The illustrative pseudocode above is realized by these files (allocator mode is the only EP ABI — `pass_main.cpp::load_config` sets `config.useOutputAllocator = true` unconditionally; there is no provider option):
 
 | Concern | Where |
 |---|---|
 | Compile flag (`use_output_allocator`) | [schemas/compilation_options.fbs](../../schemas/compilation_options.fbs) → [lib/Compiler/CompilerDriver.cpp](../../lib/Compiler/CompilerDriver.cpp) sets `onnxToHipOpts.useOutputAllocator` only; the slot-4.5 pass stamps `hipdnn.output_allocator` and the HipToLLVM half reads it off the IR |
 | Pipeline gating | [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp): classic `buffer-results-to-out-params` vs the slot-4.5 `hip-use-output-allocator` + `hip-set-output-allocator-attr`; one `generate-interface` reads the attribute to pick the 3-arg vs 2-arg ABI |
-| EP front-end (provider option → compile JSON + metadata) | [backend-mlir-compiler/level-1-pass/src/pass_main.cpp](../../backend-mlir-compiler/level-1-pass/src/pass_main.cpp), [MlirCompiler.cpp](../../backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp) |
+| EP front-end (always-on flag → compile JSON + metadata) | [backend-mlir-compiler/level-1-pass/src/pass_main.cpp](../../backend-mlir-compiler/level-1-pass/src/pass_main.cpp), [MlirCompiler.cpp](../../backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp) |
 | Mode-detection metadata | [backend-mlir-compiler/proto/metadata.proto](../../backend-mlir-compiler/proto/metadata.proto) (`use_output_allocator`) |
 | EP-local ABI mirror | `output_allocator_t` in [custom_op_mlir.hpp](../../backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp) (same `static_assert`s as the runtime struct) |
 | 2-arg dispatch + setter | [InferenceState.cpp](../../backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp) (`compute_with_output_allocator`, `set_output_allocator`) |
@@ -377,7 +372,7 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 **Key design points (as built):**
 
-1. **Single source of truth = compile flag → module attribute + embedded metadata bit.** The `use_output_allocator` provider option is set once on the OnnxToHip half, where the slot-4.5 `hip-set-output-allocator-attr` pass stamps the `hipdnn.output_allocator` module attribute. The HipToLLVM half (`convert-hip-to-llvm` + `generate-interface`) reads that attribute off the IR — so `main_graph` arity and the `inference_compute` wrapper agree without threading a second flag. The same compile flag is also written into the model `Metadata`. The EP reads its dispatch arity from the *embedded* metadata (`metadata_.use_output_allocator()` in the `MlirCustomOp` ctor), not from the live provider option — so a reused ORT EPContext always reports the mode matching its own cached DLL's ABI, and arity can never disagree.
+1. **Single source of truth = compile flag → module attribute + embedded metadata bit.** The `useOutputAllocator` compile flag (always `true` from the EP) is set once on the OnnxToHip half, where the slot-4.5 `hip-set-output-allocator-attr` pass stamps the `hipdnn.output_allocator` module attribute. The HipToLLVM half (`convert-hip-to-llvm` + `generate-interface`) reads that attribute off the IR — so `main_graph` arity and the `inference_compute` wrapper agree without threading a second flag. The same compile flag is also written into the model `Metadata`. The EP reads its dispatch arity from the *embedded* metadata (`metadata_.use_output_allocator()` in the `MlirCustomOp` ctor), not from the live provider option — so a reused ORT EPContext always reports the mode matching its own cached DLL's ABI, and arity can never disagree.
 
 2. **The callback is `noexcept` across the C ABI.** `output_allocate_cb` is invoked from the model.dll's C runtime; a C++ exception unwinding through those frames is UB. The body is wrapped in `try/catch` and any failure (out-of-range `out_idx`, ORT throw, scratch `hipMalloc` failure) ends in `LOG(FATAL)` — it never returns null, because the lowering builds a memref from the returned pointer and a null write would segfault with no diagnostic.
 
@@ -385,7 +380,9 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 4. **Host-output D2H is EP-side and real-build-only.** The GPU scratch (one buffer per output index, grow-on-demand, reused across `Compute()`, freed in the dtor) and the `hipMemcpy` are under `#ifndef BUILD_MOCK_RUNTIME` (the EP only links `hip::host` in non-mock builds; mock writes host memory directly). The generated 2-arg `inference_compute` already ends in `hipdnn_ep_stream_sync`, so writes are complete on return and a plain **blocking** `hipMemcpy` D2H suffices — no extra stream sync.
 
-5. **KV cache share-buffer needs no override in the callback.** `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` *verbatim*, with no `present.*` special-casing — every output is acquired the same way. The shape is already correct because `hip.alloc_output`'s dynamic dims are its producer's operands: a `present.*` output is sized from `memref.dim %past_key` (the past input buffer's actual extent), which under OGA `past_present_share_buffer` already **is** the `max_length` capacity buffer. So `GetOutput` returns the pre-bound shared `OrtValue` and the `past == present` pointer identity is preserved. Pinned by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`. (The classic `marshal_output_tensors` path keeps its own inline `present.*` override because it pre-computes shapes from `DimSource` instead — that is a property of the classic path, not the allocator feature.)
+5. **KV cache share-buffer needs no override in the callback.** `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` *verbatim*, with no `present.*` special-casing — every output is acquired the same way. The shape is already correct because `hip.alloc_output`'s dynamic dims are its producer's operands: a `present.*` output is sized from `memref.dim %past_key` (the past input buffer's actual extent), which under OGA `past_present_share_buffer` already **is** the `max_length` capacity buffer. So `GetOutput` returns the pre-bound shared `OrtValue` and the `past == present` pointer identity is preserved. Pinned by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`.
+
+6. **Classic ABI is static-output-only.** The classic 3-arg path (`use_output_allocator=0`) pre-allocates outputs from the static metadata shapes before calling `inference_compute`. The runtime DimSource resolution + `present.*` shared-buffer override that classic mode once used to size dynamic output dims were **removed** when allocator mode became the default — `build_metadata_json` now emits each output shape verbatim and rejects a dynamic (`-1`) output dim in classic mode at compile time, and `marshal_output_tensors` simply uses the static metadata shape. Any model with a dynamic output dim (every LLM/KV-cache graph) must use the allocator ABI (the default); classic remains only for fully-static graphs. The `DimSource` proto message and `Output.dim_sources` field were retired (field number 5 reserved).
 
 6. **Output-completeness guard.** Allocator mode requires every declared output to be produced in-graph (one `hip.alloc_output` → one callback). After `compute_with_output_allocator` returns, the EP asserts every metadata output index was served, else `LOG(FATAL)` naming the missing one. This turns the two unsupported graph shapes (passthrough output that returns a graph input; deduped aliased output) into a clear error instead of an unfilled ORT output. None of the target models have them.
 
