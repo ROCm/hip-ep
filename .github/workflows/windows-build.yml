@@ -751,6 +751,14 @@ jobs:
       # THEROCK_DIST=_rocm_sdk_devel, LIB=capi, PATH=capi + rocm bins). Validates
       # the documented end-user wheel flow end to end.
       # -----------------------------------------------------------------------
+      # The cp314 ORT/OGA wheels need Python 3.14 to create the smoke venv (the
+      # runner's default python may be a different version).
+      - name: Setup Python 3.14 (wheel smoke)
+        if: always()
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
       - name: Run OGA wheel smoke (Python)
         if: always()
         timeout-minutes: 40
