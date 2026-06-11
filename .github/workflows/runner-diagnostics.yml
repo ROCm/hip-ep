@@ -32,8 +32,6 @@ jobs:
           - shark-strixhalo-4
           - shark-strixhalo-5
           - shark-strixhalo-11
-          - shark-strixhalo-14
-          - shark-strixhalo-15
           - shark-strixhalo-16
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
