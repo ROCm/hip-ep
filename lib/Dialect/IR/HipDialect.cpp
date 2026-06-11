@@ -826,6 +826,20 @@ void PoolOp::getEffects(
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
+  
+//===----------------------------------------------------------------------===//
+// GlobalPoolOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GlobalPoolOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GlobalPoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
 
 //===----------------------------------------------------------------------===//
 // ReciprocalOp: ins(x), outs(y)

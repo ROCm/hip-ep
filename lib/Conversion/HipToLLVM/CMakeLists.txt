@@ -44,6 +44,7 @@ add_library(HipToLLVM STATIC
   SizeLowering.cpp
   LoopLowering.cpp
   PoolLowering.cpp
+  GlobalPoolLowering.cpp
 )
 
 add_dependencies(HipToLLVM
@@ -60,4 +61,5 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRLLVMCommonConversion
   MLIRMemRefDialect
   MLIRTransforms
+  MLIRArithTransforms
 )
