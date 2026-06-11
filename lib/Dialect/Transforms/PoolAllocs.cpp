@@ -618,13 +618,20 @@ void PoolAllocsPass::runOnOperation() {
     allInfos.push_back(info);
   }
 
-  if (allInfos.size() < 2) {
-    // Nothing to pool: a single alloc would just be replaced by a
-    // single-view-into-pool, which is strictly worse than leaving the
-    // alloc in place. Still emit zeroed pool metadata so downstream
-    // consumers (GenerateInterface) see the attributes regardless of
-    // input shape — a missing attribute would crash the metadata
-    // reader, while a zeroed one is a well-defined "no pool".
+  // Bail only when there is nothing to pool. A SINGLE surviving alloc must
+  // still be pooled: it lowers to hip.alloc -> hip_device_malloc, which has no
+  // runtime definition (the pipeline assumes every transient is either pooled
+  // or written through to an out-param). The canonical single-alloc trigger is
+  // a one-op graph whose op needs a destination temp it can't write through,
+  // e.g. a lone rank-3 Conv (the collapse_shape before the return blocks
+  // write-through). Pooling a single alloc is cheap (pool_size == that alloc's
+  // size) and keeps it on the RuntimeState-managed pool instead of an
+  // undefined per-call malloc.
+  if (allInfos.empty()) {
+    // Still emit zeroed pool metadata so downstream consumers
+    // (GenerateInterface) see the attributes regardless of input shape — a
+    // missing attribute would crash the metadata reader, while a zeroed one
+    // is a well-defined "no pool".
     ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
     OpBuilder zeroBuilder(funcOp.getContext());
     moduleOp->setAttr("hipdnn.pool_size", zeroBuilder.getI64IntegerAttr(0));

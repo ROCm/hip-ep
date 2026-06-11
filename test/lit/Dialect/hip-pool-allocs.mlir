@@ -92,13 +92,15 @@ func.func @mixed_element_types(
   return %alloc1 : memref<8x8xf16>
 }
 
-// ===== Single alloc: pass is a no-op (need >=2 allocs to pool) =====
+// ===== Single alloc: still pooled (a lone hip.alloc would otherwise lower to
+// the undefined hip_device_malloc — every transient must be pooled or written
+// through to an out-param) =====
 //
-// CHECK-LABEL: func.func @single_alloc_noop
-// CHECK-NOT:     hip.get_pool
-// CHECK:         memref.alloc() : memref<8x8xf32>
+// CHECK-LABEL: func.func @single_alloc_pooled
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<8x8xf32>
 // CHECK:         return
-func.func @single_alloc_noop(
+func.func @single_alloc_pooled(
     %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {

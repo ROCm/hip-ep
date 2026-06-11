@@ -449,7 +449,6 @@ int wrap_miopenConvolutionForward(
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
     int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
-  (void)data_type;
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
@@ -470,9 +469,11 @@ int wrap_miopenConvolutionForward(
              (long long)dilation_h, (long long)dilation_w, (long long)group);
 
   // Mock: Fill output with dummy data (zeros in this case)
-  // In a real implementation, this would call MIOpen
-  size_t output_size =
-      input_n * weights_k * output_h * output_w * sizeof(float);
+  // In a real implementation, this would call MIOpen. Use the actual element
+  // size so fp16 buffers aren't overrun.
+  int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+  size_t elem = (elem_bytes > 0) ? (size_t)elem_bytes : sizeof(float);
+  size_t output_size = (size_t)input_n * weights_k * output_h * output_w * elem;
   memset(output, 0, output_size);
 
   return 0;
