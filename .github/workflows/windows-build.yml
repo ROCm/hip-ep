@@ -513,9 +513,11 @@ jobs:
           cp python/examples/run_onnx.py wheelpkg/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/benchmark/
           # Download dependency closures for offline install: EP (-> ROCm),
-          # plus ORT/OGA third-party deps (flatbuffers etc.) and benchmark deps.
+          # plus ORT/OGA third-party deps and benchmark deps. setuptools is
+          # needed as a build dep for the rocm sdist.
           python -m pip download "$EP_WHEEL" \
-            flatbuffers numpy packaging protobuf coloredlogs psutil tqdm pandas \
+            flatbuffers numpy packaging protobuf coloredlogs \
+            psutil tqdm pandas setuptools \
             --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ \
             -d wheelpkg/wheels
           echo "=== Python wheel package layout ==="
