@@ -101,10 +101,25 @@ jobs:
 
           Add-Line "### GPU"
           Add-Line '```'
+          # Win32_VideoController.AdapterRAM is a 32-bit field capped at 4 GB,
+          # so it cannot report the real dedicated VRAM on large/iGPU parts.
+          # The registry HardwareInformation.qwMemorySize (64-bit) is what Task
+          # Manager shows as "Dedicated GPU memory"; prefer it when present.
           try {
+            $classKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
             Get-CimInstance Win32_VideoController | ForEach-Object {
-              $vramGB = if ($_.AdapterRAM) { [math]::Round($_.AdapterRAM / 1GB, 1) } else { "?" }
-              Add-Line "$($_.Name) (driver $($_.DriverVersion), VRAM ${vramGB} GB)"
+              $name = $_.Name
+              $driver = $_.DriverVersion
+              $qwGB = "?"
+              foreach ($sub in (Get-ChildItem $classKey -ErrorAction SilentlyContinue)) {
+                $p = Get-ItemProperty $sub.PSPath -ErrorAction SilentlyContinue
+                if ($p.DriverDesc -eq $name -and $p.'HardwareInformation.qwMemorySize') {
+                  $qwGB = [math]::Round([int64]$p.'HardwareInformation.qwMemorySize' / 1GB, 1)
+                  break
+                }
+              }
+              $ramGB = if ($_.AdapterRAM) { [math]::Round($_.AdapterRAM / 1GB, 1) } else { "?" }
+              Add-Line "$name (driver $driver, dedicated VRAM ${qwGB} GB, AdapterRAM(32-bit) ${ramGB} GB)"
             }
           } catch { Add-Line "GPU query failed: $_" }
           foreach ($tool in @('rocm-smi', 'hipInfo')) {
