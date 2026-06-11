@@ -12,16 +12,22 @@ Whisper runs **fp16 by default** — it is both faster on GPU and bit-faithful: 
 fp16 build keeps the `lm_head` in fp32 while the body is fp16, so greedy decoding
 is argmax-lossless (verbatim transcription, prefill logit cosine 1.0 vs the
 fp16 CPU reference). An **fp32** variant is also available (`--fp32`). **Both
-precisions are built locally by one command** — `python build.py
---build-whisper-models` (via a pinned OGA DirectML model builder in an isolated
-venv) — so there is no separate opt-in build step. fp32 is selected at run time
-with `--fp32`; see §6 for fp16-vs-fp32 numbers.
+precisions are built locally by one command** — `python scripts/build_whisper_models.py`
+(a pinned OGA DirectML model builder in an isolated venv) — so there is no separate
+opt-in build step. fp32 is selected at run time with `--fp32`; see §6 for
+fp16-vs-fp32 numbers.
 
 > **Shell:** commands in this guide are written for **Git Bash** (the repo's
 > convention, same as the main [Quick Start](quick_start.md) — launch it from an
 > "x64 Native Tools Command Prompt for VS"). The only commands that differ by
 > shell are the environment exports in §2, which give a PowerShell equivalent.
 > `pytest` / `git` / `python` commands work the same in either shell.
+
+> **Paths in this guide** follow the main [Quick Start](quick_start.md) workspace
+> layout: the build tree lives at `../build/onnx-hipdnn-ep/` and the install prefix
+> at `../local/` (both siblings of the repo root). The EP DLL + `morphizen_config.json`
+> land in `../local/bin/`; the auto-downloaded TheRock SDK lives at
+> `../build/onnx-hipdnn-ep/_therock/`. Adjust if you passed a different `--install_dir`.
 
 ---
 
@@ -70,23 +76,29 @@ conda activate hipdnn-ep
 
 Whisper needs **no extra pip installs** — the test audio is fetched from public
 URLs at runtime (no `datasets` / `jiwer` dependency), and the model build
-(`python build.py --build-whisper-models`, §3) installs its pinned builder deps
+(`python scripts/build_whisper_models.py`, §3) installs its pinned builder deps
 into a **dedicated isolated venv** (`install/whisper-builder-venv/`), so it never
 touches the `hipdnn-ep` env or shadows the OGA fork.
 
 ---
 
-## 1. Build the EP (one-time, ~minutes with prebuilt deps)
+## 1. Build the EP (one-time)
+
+From the repo root (mirrors the main [Quick Start](quick_start.md) — install
+prefix `../local`, build tree `../build/onnx-hipdnn-ep/`):
 
 ```bash
-python build.py
+mkdir -p ../local
+LOCAL_DIR=$(cd ../local && pwd)
+python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 ```
 
-This downloads the prebuilt LLVM/MLIR/Protobuf/FlatBuffers + TheRock ROCm SDK,
-detects your GPU, and builds the compiler + MorphiZen EP into `install/`. See the
+This resolves the LLVM/MLIR/Protobuf/FlatBuffers + ONNX Runtime deps (auto-downloaded
+unless `--cmake_prefix_path` points at prebuilt ones) + the TheRock ROCm SDK,
+detects your GPU, and builds the compiler + MorphiZen EP into `../local/`. See the
 main [Quick Start](quick_start.md) for details and troubleshooting.
 
-After it finishes you should have `install/dist/bin/onnxruntime_morphizen_ep.dll`.
+After it finishes you should have `../local/bin/onnxruntime_morphizen_ep.dll`.
 
 ---
 
@@ -96,13 +108,16 @@ The EP **compiles and links the model into a GPU DLL at session init**, so the
 ROCm runtime libraries must be on `PATH` and `THEROCK_DIST` must point at the SDK.
 Run this in every shell before any Whisper command.
 
-**Git Bash** (the convention for the rest of this guide):
+**Git Bash** (the convention for the rest of this guide). The auto-downloaded
+TheRock SDK lives under the build dir (`_therock`); if you passed your own
+`-DTHEROCK_DIST`, point at that instead:
 
 ```bash
 cd <repo-root>
 conda activate hipdnn-ep
-export THEROCK_DIST="$(pwd)/install/therock"
-export PATH="$(pwd)/install/therock/bin:$(pwd)/install/dist/bin:$PATH"
+export LOCAL_DIR=$(cd ../local && pwd)
+export THEROCK_DIST=$(cd ../build/$(basename $PWD)/_therock && pwd)
+export PATH="$THEROCK_DIST/bin:$LOCAL_DIR/bin:$PATH"
 ```
 
 **PowerShell** (equivalent — note `$env:` syntax and `;`-separated `Path`):
@@ -110,8 +125,8 @@ export PATH="$(pwd)/install/therock/bin:$(pwd)/install/dist/bin:$PATH"
 ```powershell
 cd <repo-root>
 conda activate hipdnn-ep
-$env:THEROCK_DIST = "$PWD\install\therock"
-$env:Path = "$PWD\install\therock\bin;$PWD\install\dist\bin;$env:Path"
+$env:THEROCK_DIST = (Resolve-Path "..\build\$(Split-Path -Leaf $PWD)\_therock").Path
+$env:Path = "$env:THEROCK_DIST\bin;$(Resolve-Path '..\local').Path\bin;$env:Path"
 ```
 
 > **Why this matters:** without `THEROCK_DIST` / `PATH`, the EP fails to link the
@@ -122,8 +137,8 @@ $env:Path = "$PWD\install\therock\bin;$PWD\install\dist\bin;$env:Path"
 
 ## 3. Build + compile the model
 
-Acquisition is **two steps**. First, **build the raw models** — `python build.py
---build-whisper-models` builds BOTH the fp32 (`models/whisper-large-v3-onnx/`)
+Acquisition is **two steps**. First, **build the raw models** — `python
+scripts/build_whisper_models.py` builds BOTH the fp32 (`models/whisper-large-v3-onnx/`)
 and fp16 (`models/whisper-large-v3-onnx-fp16/`) bundles from
 `openai/whisper-large-v3` (pinned HF revision) via a pinned OGA DirectML model
 builder running in an isolated venv. No manual stock-OGA install is needed — the
@@ -131,7 +146,7 @@ builder venv is self-contained. First run downloads HF weights + builds (~10 min
 idempotent after.
 
 ```
-python build.py --build-whisper-models
+python scripts/build_whisper_models.py
 ```
 
 Then **prepare the model for the EP** — `setup_whisper_model.py` is consume-only:
@@ -170,16 +185,16 @@ models/whisper-large-v3-onnx-fp16/   (default; fp32 dir mirrors this layout)
 
 fp16 is the **default** precision — faster on GPU and bit-faithful (fp32 `lm_head`
 keeps greedy argmax-lossless). Both bundles are produced **together** by the same
-`python build.py --build-whisper-models` in §3 — the pinned OGA DirectML model
+`python scripts/build_whisper_models.py` in §3 — the pinned OGA DirectML model
 builder emits an fp16 body with an fp32 `lm_head` for the default model and an
 all-fp32 model for `--fp32`. `python scripts/setup_whisper_model.py` (default) and
 `--fp32` apply the SAME surgery + `fix_shapes`, writing
 `models/whisper-large-v3-onnx-fp16/` and `models/whisper-large-v3-onnx/`.
 
-No manual `onnxruntime-genai-directml` install is needed and the OGA fork
-installed by `build.py --build-oga` is never shadowed — the builder runs in its own
-isolated venv (see §0). The default transcribe / test commands run fp16; add
-`--fp32` to use the fp32 model instead (§5, §6).
+No manual `onnxruntime-genai-directml` install is needed and the OGA fork is never
+shadowed — the builder runs in its own isolated venv (see §0). The default
+transcribe / test commands run fp16; add `--fp32` to use the fp32 model instead
+(§5, §6).
 
 ---
 
@@ -230,13 +245,13 @@ pytest test/python/whisper/test_whisper.py -k "encoder_correctness or decoder_pr
 Conv1d, attention, and LayerNorm, both fp16 and fp32 (one line):
 
 ```
-pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name MorphiZenExecutionProvider --ep-dll install/dist/bin/onnxruntime_morphizen_ep.dll --ep-option config_file=install/dist/bin/morphizen_config.json -v
+pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name MorphiZenExecutionProvider --ep-dll ../local/bin/onnxruntime_morphizen_ep.dll --ep-option config_file=../local/bin/morphizen_config.json -v
 ```
 
 ### 4e. MLIR conversion (LIT)
 
 ```
-ctest --test-dir install/build -C RelWithDebInfo -R MorphizenMLIRLitTests
+ctest --test-dir ../build/onnx-hipdnn-ep -C RelWithDebInfo -R MorphizenMLIRLitTests
 ```
 
 ### Run everything at once
@@ -283,7 +298,7 @@ python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --compare
 ```
 
 The default run uses the fp16 model. Add `--fp32` to run the fp32 model instead
-(build both precisions first with `python build.py --build-whisper-models`, §3).
+(build both precisions first with `python scripts/build_whisper_models.py`, §3).
 The metrics label shows the precision:
 
 ```
@@ -371,6 +386,12 @@ This is a **loose reference, not a like-for-like comparison**: whisper.cpp uses 
 **f16 GGUF** model with its own hand-tuned C++ graph and KV management — a
 different precision *and* a different computational graph from our fp32 ONNX.
 
+> **Note:** `scripts/build_whisper_vulkan.py` reuses helpers from `build.py`
+> (`fetch_vulkan_sdk`, `INSTALL`, `VULKAN_SDK`, …). A recent `build.py` rewrite
+> removed those module-level symbols, so this script needs a small re-port before
+> it will run again — the Vulkan baseline is an optional reference, not on the
+> critical path. Tracked separately.
+
 One-time build (~10–20 min: fetches the Vulkan SDK + whisper.cpp + a ~3 GB f16
 GGUF):
 
@@ -402,7 +423,7 @@ EP comparison.
 | Transcription is garbage / a "GPU" run is suspiciously slow | Silent CPU fallback. Set the env (§2), clear the model cache (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`), and re-run. Confirm GPU dispatch with `HIPDNN_EP_DEBUG=1` (look for `[REAL] wrap_*` lines on stderr). |
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
-| `pytest` can't find the EP / wrong ORT API | The EP DLL must match the pip `onnxruntime-directml` API version (see CLAUDE.md "ORT version must match pip"). Rebuild via `python build.py`. |
+| `pytest` can't find the EP / wrong ORT API | The EP DLL must match the pip `onnxruntime-directml` API version (see CLAUDE.md "ORT version must match pip"). Rebuild via `python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"`. |
 
 For internals (how the ONNX surgery works, the `no_causal` GQA path, the fp32
 GQA enabling, known limitations), see the **Whisper gotchas** in
