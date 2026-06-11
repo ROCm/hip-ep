@@ -492,6 +492,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateDivConversionPatterns(patterns, ctx);
   populateReduceMaxConversionPatterns(patterns, ctx);
   populateMinConversionPatterns(patterns, ctx);
+  populateMaxConversionPatterns(patterns, ctx);
   populateNotConversionPatterns(patterns, ctx);
   populateCosConversionPatterns(patterns, ctx);
   populateSinConversionPatterns(patterns, ctx);
@@ -513,6 +514,9 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateSizeConversionPatterns(patterns, ctx);
   populateNonZeroConversionPatterns(patterns, ctx);
   populateConcatConversionPatterns(patterns, ctx);
+  populateReluConversionPatterns(patterns, ctx);
+  populateLeakyReluConversionPatterns(patterns, ctx);
+  populateClipConversionPatterns(patterns, ctx);
   populatePoolConversionPatterns(patterns, ctx);
   populateResizeConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);

@@ -220,6 +220,8 @@ void populateDivConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateMaxConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
@@ -264,6 +266,12 @@ void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateReluConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+void populateClipConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
 void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
