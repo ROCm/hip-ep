@@ -337,6 +337,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateScatterNDLoweringPatterns(typeConverter, patterns);
   populateNonZeroLoweringPatterns(typeConverter, patterns);
   populateSizeLoweringPatterns(typeConverter, patterns);
+  populateResizeLoweringPatterns(typeConverter, patterns);
   populateGlobalPoolLoweringPatterns(typeConverter, patterns);
 
   // Standard dialect lowerings
