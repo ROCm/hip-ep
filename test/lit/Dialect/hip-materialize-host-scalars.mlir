@@ -123,6 +123,48 @@ func.func @host_store_then_hip_consumer(%ctx: !hip.context,
   return
 }
 
+// --- Host scalar reached through memref.reinterpret_cast: CSE fuses two
+//     from_elements shape-arith buffers into one alloc and reinterpret_casts
+//     it for the second (smaller) use, so the host store reaches its hip
+//     consumer through a view. The pass MUST peek through the view and still
+//     redirect the backing alloc to host scratch (otherwise the host store
+//     lands in the GPU pool and SEGVs on real-device-memory targets). This is
+//     the VLM-embedding regression pattern. ---
+// CHECK-LABEL: func.func @host_scalar_via_reinterpret_cast
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context
+// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch(%[[CTX]],
+// CHECK-NOT:     memref.alloc() : memref<3xi64>
+// CHECK:         %[[V:.*]] = memref.view %[[SCRATCH]]{{.*}} : memref<?xi8> to memref<3xi64>
+// CHECK:         memref.reinterpret_cast %[[V]]
+func.func @host_scalar_via_reinterpret_cast(%ctx: !hip.context, %x: i64,
+                                            %o0: memref<3xi32>,
+                                            %o1: memref<1xi32>) {
+  %c0 = arith.constant 0 : index
+  %a = memref.alloc() : memref<3xi64>
+  memref.store %x, %a[%c0] : memref<3xi64>
+  hip.cast(%ctx) ins(%a : memref<3xi64>) outs(%o0 : memref<3xi32>) {to = 6 : i64}
+  %rc = memref.reinterpret_cast %a to offset: [0], sizes: [1], strides: [1] : memref<3xi64> to memref<1xi64>
+  memref.store %x, %rc[%c0] : memref<1xi64>
+  hip.cast(%ctx) ins(%rc : memref<1xi64>) outs(%o1 : memref<1xi32>) {to = 6 : i64}
+  memref.dealloc %a : memref<3xi64>
+  return
+}
+
+// --- Host scalar whose view escapes to a consumer we can't vouch for (here:
+//     returned from the function): the recursion must still REJECT it, since
+//     we can't reason about the escaped view's memory expectations. ---
+// CHECK-LABEL: func.func @host_scalar_view_escapes_left_alone
+// CHECK-NOT:   hip.get_host_scratch
+// CHECK:       memref.alloc() : memref<3xi64>
+func.func @host_scalar_view_escapes_left_alone(%ctx: !hip.context,
+                                               %x: i64) -> memref<1xi64> {
+  %c0 = arith.constant 0 : index
+  %a = memref.alloc() : memref<3xi64>
+  memref.store %x, %a[%c0] : memref<3xi64>
+  %rc = memref.reinterpret_cast %a to offset: [0], sizes: [1], strides: [1] : memref<3xi64> to memref<1xi64>
+  return %rc : memref<1xi64>
+}
+
 // --- Function whose arg 0 is NOT a !hip.context: the pass silently leaves
 //     it alone (best-effort mitigation; utility funcs without runtime
 //     access don't have a context to call hip.get_host_scratch on). The
