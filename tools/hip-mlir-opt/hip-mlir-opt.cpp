@@ -10,6 +10,7 @@
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -218,6 +219,7 @@ int main(int argc, char **argv) {
   registry.insert<hip::compiler::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
