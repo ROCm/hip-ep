@@ -207,7 +207,14 @@ int wrap_miopenConvolutionForward(
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
         input_desc, miopen_dt, miopenTensorNCHW, in_dims, 4));
 
-    int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h, (int)kernel_w};
+    // For grouped/depthwise convolution the weight tensor's input-channel dim
+    // is input_c / group (e.g. depthwise conv: weights [C,1,kh,kw], group=C).
+    // Using input_c here would describe the wrong filter shape to MIOpen and
+    // produce silently incorrect results. group=1 reduces to input_c. The
+    // `group ? group : 1` guard only defends against a malformed group==0
+    // (ONNX requires group>=1) so we never divide by zero.
+    int w_dims[] = {(int)weights_k, (int)(input_c / (group ? group : 1)),
+                    (int)kernel_h, (int)kernel_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
         weights_desc, miopen_dt, miopenTensorNCHW, w_dims, 4));
 
