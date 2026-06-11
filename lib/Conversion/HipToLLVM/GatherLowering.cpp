@@ -71,15 +71,24 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
       innerSizeVal = LLVM::MulOp::create(rewriter, loc, innerSizeVal, ds);
     }
 
+    // ONNX indices may be int32 or int64; pass the byte width so the runtime
+    // kernel reads them with the correct stride (reading int32 as int64
+    // otherwise fuses adjacent indices into out-of-range values).
+    unsigned indicesElemBytes =
+        indicesType.getElementType().getIntOrFloatBitWidth() / 8;
+    Value indicesElemSizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(indicesElemBytes));
+
     // int wrap_gather(RuntimeState* state, void* data, void* indices,
     //                 void* output, int64_t axis, int64_t data_num_elements,
     //                 int64_t indices_num_elements,
     //                 int64_t output_num_elements,
     //                 int64_t axis_size, int64_t inner_size,
-    //                 int64_t element_size_bytes)
-    SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+    //                 int64_t element_size_bytes,
+    //                 int64_t indices_element_size_bytes)
+    SmallVector<Type, 12> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         i64Type, i64Type, i64Type, i64Type,
-                                        i64Type, i64Type, i64Type};
+                                        i64Type, i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapGather, paramTypes, i32Type);
@@ -96,7 +105,8 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
                                outputNumElementsVal,
                                axisSizeVal,
                                innerSizeVal,
-                               elemSizeVal};
+                               elemSizeVal,
+                               indicesElemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
