@@ -7,6 +7,7 @@ add_library(HipToLLVM STATIC
   HipToLLVM.cpp
   MemoryLowering.cpp
   ConvLowering.cpp
+  ConvTransposeLowering.cpp
   MatmulLowering.cpp
   ElementwiseLowering.cpp
   PowerLowering.cpp
