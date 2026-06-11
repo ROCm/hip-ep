@@ -1439,6 +1439,24 @@ int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
+// Max memref rank honoured by the strided memref.copy fast path
+// (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined
+// once here so the kernel and the runtime helper cannot drift out of sync.
+#define HIPDNN_MAX_MEMREF_RANK 12
+
+// Parallel strided device-to-device copy (one launch) for MLIR memref.copy
+// where neither side is contiguous and the copy spans multiple outer dims.
+// Replaces the host per-row hipMemcpyAsync loop in memrefCopy. Pointers are
+// element-aligned bases; outer_sizes/strides cover the outer dims, row_elems
+// is the contiguous inner suffix. Returns 0 on success, -2 if elem_size is
+// unsupported (caller falls back to the host per-row path).
+int hip_strided_copy(void *stream, void *dst, const void *src,
+                     int64_t elem_size, int outer_rank,
+                     const int64_t *outer_sizes,
+                     const int64_t *src_outer_strides,
+                     const int64_t *dst_outer_strides, int64_t row_elems,
+                     int64_t outer_total);
+
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
  * =========================================================================
