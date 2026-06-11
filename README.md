@@ -37,6 +37,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Gelu | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |
 | Sqrt | Custom HIP kernel |
+| Pow | Decomposed → Mul / Sqrt / Reciprocal (constant scalar exponent) |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | CastLike | Decomposed → Cast |
