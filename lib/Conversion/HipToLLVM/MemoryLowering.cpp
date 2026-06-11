@@ -622,16 +622,34 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       return success();
     }
 
-    // Pitched 2D copy: last dim contiguous (stride 1), collapse leading dims.
-    // Destination must be dense row-major (typical output buffer); source may
-    // be a strided view into a parent allocation.
+    // Pitched 2D copy: last dim contiguous (stride 1) on BOTH sides, and a
+    // common contiguous suffix exists (computed below as splitDim). Either
+    // side may be a strided subview into a parent allocation -- the canonical
+    // case is Concat / insert_slice, which bufferizes to a memref.subview on
+    // the destination side: the slice's outer strides inherit the parent's
+    // (larger) pitch, while the inner suffix [axis..rank-1] is still
+    // contiguous. The splitDim finder + outer-collapse loop below cover both
+    // src-strided and dst-strided shapes, so we do NOT require either side to
+    // be dense row-major here.
+    //
+    // Before (a Concat axis=1 of two halves bufferizes to a strided-dst copy):
+    //   %parent = memref.alloc() : memref<1x256x64x64xf16>
+    //   %slice  = memref.subview %parent[0,0,0,0] [1,128,64,64] [1,1,1,1]
+    //       : memref<1x256x64x64xf16>
+    //         to memref<1x128x64x64xf16, strided<[1048576,4096,64,1]>>
+    //   memref.copy %in, %slice
+    //       : memref<1x128x64x64xf16>
+    //         to memref<1x128x64x64xf16, strided<[1048576,4096,64,1]>>
+    //   // dst is NOT dense row-major (outer stride 1048576 keeps the parent
+    //   // pitch, dense would be 524288) -> old code rejected this copy.
+    //
+    // After (splitDim=1: row = contiguous suffix [1..3] = 128*64*64 elems,
+    // height = dim 0 = 1, dst pitch = dstStrides[0] = 1048576 elems):
+    //   llvm.call @wrap_hipMemcpy2DAsync(%state, %dstPtr, %dstPitchBytes,
+    //       %srcPtr, %srcPitchBytes, %widthBytes, %height) : ...
     if (rank < 2)
       return rewriter.notifyMatchFailure(
           op, "rank-1 non-uniform stride needs different lowering");
-
-    if (!strideVectorsEqual(dstStrides, ArrayRef<int64_t>(*denseStridesOr)))
-      return rewriter.notifyMatchFailure(
-          op, "expect dense row-major destination for pitched copy");
 
     if (srcStrides[static_cast<unsigned>(rank - 1)] != 1 ||
         dstStrides[static_cast<unsigned>(rank - 1)] != 1)

@@ -677,7 +677,8 @@ int hip_gather(
     int64_t output_num_elements,
     int64_t axis_size,
     int64_t inner_size,
-    int element_size_bytes);
+    int element_size_bytes,
+    int indices_element_size_bytes);
 
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
