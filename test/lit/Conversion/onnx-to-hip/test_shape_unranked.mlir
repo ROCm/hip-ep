@@ -6,8 +6,8 @@
 // produce a hard error, not silent acceptance.  The first pipeline pass
 // (--hip-add-context-arg) rejects unranked tensors before --convert-onnx-to-hip
 // even runs, which is the desired behaviour: the dynseqlen pipeline requires
-// ranked tensors with at most one dynamic dim per output (resolvable via
-// DimSource).  Silently accepting unranked input would let onnx.Shape, onnx.Dim,
+// ranked tensors (dynamic output dims are sized in-graph by the output
+// allocator).  Silently accepting unranked input would let onnx.Shape, onnx.Dim,
 // or any other shape-dependent op fall through to a CPU-fallback no-op.
 //
 // If a future change relaxes --hip-add-context-arg to accept unranked types,

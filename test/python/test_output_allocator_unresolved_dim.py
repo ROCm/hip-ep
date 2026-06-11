@@ -3,22 +3,21 @@
 # Licensed under the MIT License.
 #
 
-"""Repro for PR #340: output-allocator compile must not hard-CHECK on a dynamic
-output dim whose symbolic name appears on no input.
+"""The compile must not hard-CHECK on a dynamic output dim whose symbolic name
+appears on no input.
 
 `build_metadata_json` (backend-mlir-compiler/level-1-pass/src/pass_main.cpp)
-builds a DimSource for every dynamic output dim by matching the dim's symbolic
-name to whichever *input* first declares it. For a data-dependent output extent
-computed *inside* the graph (e.g. a vision model's feature count), the symbol is
-correctly on no input, and the classic path aborts the whole compile. The
-output-allocator ABI never reads a DimSource (the DLL sizes outputs in-graph),
-so the fix skips DimSource emission in that ABI -- making such graphs compile.
+emits each output's shape verbatim. The output-allocator ABI (the only ABI at
+the EP front-end) sizes dynamic outputs in-graph at runtime, so a data-dependent
+output extent computed *inside* the graph (e.g. a vision model's feature count,
+whose symbol is on no input) compiles fine -- no per-output-dim resolution and
+no compile-time CHECK on the dynamic dim.
 
-The fix surface is the compile-time metadata build, which runs during session
-creation. The worker only creates the session; it does NOT run inference --
-NonZero's GPU kernel has a separate, pre-existing execution segfault, so folding
-it in would conflate two bugs. Session creation is driven in a child process so
-a pre-fix glog CHECK abort doesn't take down the pytest runner.
+The surface under test is the compile-time metadata build, which runs during
+session creation. The worker only creates the session; it does NOT run inference
+-- NonZero's GPU kernel has a separate, pre-existing execution segfault, so
+folding it in would conflate two bugs. Session creation is driven in a child
+process so a glog CHECK abort (a regression) doesn't take down the pytest runner.
 """
 
 import os
@@ -38,10 +37,11 @@ EP_DLL = REPO_ROOT / "install" / "dist" / "bin" / "onnxruntime_morphizen_ep.dll"
 # input -- that is the whole point of the repro.
 OUTPUT_SYMBOL = "num_logical_patches"
 
-# Signature of the spurious abort the fix removes.
-_UNRESOLVED_SIGNATURE = (
+# Signature of a regression that reintroduced a per-output-dim compile-time
+# CHECK (the allocator ABI must size dynamic outputs in-graph instead).
+_REGRESSION_SIGNATURE = (
+    "static output shapes",
     "no graph input declares this symbolic name",
-    "pit != dim_param_map.end()",
 )
 
 
@@ -64,15 +64,15 @@ def _build_model(path: Path) -> None:
     onnx.save(model, str(path))
 
 
-# Child-process worker: register the EP, open a session in the requested ABI.
-# Session creation triggers the level-1 pass (build_metadata_json); reaching
-# "SESSION_CREATED_OK" proves the metadata build did not abort on the symbol.
+# Child-process worker: register the EP, open a session. Session creation
+# triggers the level-1 pass (build_metadata_json); reaching "SESSION_CREATED_OK"
+# proves the metadata build did not abort on the data-dependent output symbol.
 _WORKER = textwrap.dedent(
     """
     import sys
     import onnxruntime as ort
 
-    model_path, use_alloc, ep_dll = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
+    model_path, ep_dll = sys.argv[1], sys.argv[2]
 
     ort.register_execution_provider_library("MorphiZenExecutionProvider", ep_dll)
     from onnxruntime.capi._pybind_state import get_ep_devices
@@ -83,32 +83,24 @@ _WORKER = textwrap.dedent(
         sys.exit(3)
 
     so = ort.SessionOptions()
-    so.add_provider_for_devices(
-        devices, {"use_output_allocator": "1"} if use_alloc else {})
+    so.add_provider_for_devices(devices, {})
     sess = ort.InferenceSession(model_path, sess_options=so)
     print("SESSION_CREATED_OK")
     """
 )
 
 
-def _run_worker(model_path: Path, use_alloc: bool):
+def _run_worker(model_path: Path):
     env = dict(os.environ)
-    # Leave strict off so a pre-fix soft CPU fallback is not turned into an
-    # abort -- the pass_main CHECK (if any) should be the only abort source.
+    # Leave strict off so a soft CPU fallback is not turned into an abort --
+    # the only abort source we test for is a (regressed) compile-time CHECK.
     env["HIPDNN_EP_STRICT"] = "0"
     dist_bin = REPO_ROOT / "install" / "dist" / "bin"
     therock_bin = REPO_ROOT / "install" / "therock" / "bin"
     env["THEROCK_DIST"] = str(REPO_ROOT / "install" / "therock")
     env["PATH"] = f"{dist_bin};{therock_bin};" + env.get("PATH", "")
     return subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _WORKER,
-            str(model_path),
-            "1" if use_alloc else "0",
-            str(EP_DLL),
-        ],
+        [sys.executable, "-c", _WORKER, str(model_path), str(EP_DLL)],
         capture_output=True,
         text=True,
         env=env,
@@ -124,37 +116,22 @@ def model_path(tmp_path_factory):
 
 
 @pytest.mark.skipif(not EP_DLL.exists(), reason="EP DLL not built — run build.py")
-def test_output_allocator_compiles_unresolved_symbol(model_path):
-    """Allocator ABI must compile a graph whose output symbol is on no input.
+def test_compiles_unresolved_output_symbol(model_path):
+    """The compile must succeed for a graph whose output symbol is on no input.
 
-    The PR #340 fix target. On pre-fix `main` the child aborts with the
-    pass_main.cpp CHECK and this test fails (reproducing the bug); post-fix
-    session creation completes cleanly.
+    The output-allocator ABI sizes dynamic outputs in-graph, so
+    build_metadata_json emits the -1 shape verbatim with no compile-time CHECK;
+    session creation completes cleanly. A regression that reintroduced a
+    per-output-dim resolution CHECK would abort here and fail this test.
     """
-    proc = _run_worker(model_path, use_alloc=True)
+    proc = _run_worker(model_path)
     combined = proc.stdout + "\n" + proc.stderr
 
-    if any(sig in combined for sig in _UNRESOLVED_SIGNATURE):
+    if any(sig in combined for sig in _REGRESSION_SIGNATURE):
         pytest.fail(
-            "PR #340 bug reproduced: output-allocator compile aborted on an "
-            f"output symbol that is on no input.\nrc={proc.returncode}\n{combined}"
+            "regression: compile aborted on a data-dependent output symbol that "
+            f"is on no input.\nrc={proc.returncode}\n{combined}"
         )
     assert "SESSION_CREATED_OK" in proc.stdout, (
-        "allocator-mode session creation did not complete (and not via the "
-        f"known unresolved-dim CHECK):\nrc={proc.returncode}\n{combined}"
+        f"session creation did not complete:\nrc={proc.returncode}\n{combined}"
     )
-
-
-@pytest.mark.skipif(not EP_DLL.exists(), reason="EP DLL not built — run build.py")
-def test_classic_abi_still_errors_on_unresolved_symbol(model_path):
-    """Classic ABI: aborting on an unresolvable output symbol is correct (it
-    pre-allocates outputs and cannot size a symbol that is on no input). Asserts
-    the classic run does not silently succeed with a wrong shape.
-    """
-    proc = _run_worker(model_path, use_alloc=False)
-    combined = proc.stdout + "\n" + proc.stderr
-    if "SESSION_CREATED_OK" in proc.stdout and proc.returncode == 0:
-        return  # a future classic generalization handled it -- acceptable
-    assert (
-        any(sig in combined for sig in _UNRESOLVED_SIGNATURE) or proc.returncode != 0
-    ), f"classic ABI neither succeeded nor failed as expected:\n{combined}"

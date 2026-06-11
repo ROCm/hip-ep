@@ -418,10 +418,9 @@ def create_cpu_session(model_path):
 def create_ep_session(model_path, repo_root, provider_options=None):
     """Create a MorphiZen-EP InferenceSession.
 
-    provider_options: optional dict forwarded to the EP (e.g.
-    {"use_output_allocator": "1"} to compile in output-allocator mode). Defaults
-    to {} for the classic 3-arg ABI, preserving every existing caller's
-    behaviour.
+    provider_options: optional dict forwarded to the EP. Defaults to {}. The EP
+    compiles every model in output-allocator mode (the 2-arg in-graph
+    hip.alloc_output ABI) -- there is no provider option to select a mode.
     """
     devices = register_morphizen_ep(repo_root)
     if not devices:
@@ -1363,22 +1362,20 @@ class BaseORTTests:
         """Output-allocator mode (2-arg ABI) on dynamic shapes, one session.
 
         Opt-in per spec (output_allocator_e2e; enabled on Llama-1B). Drives
-        SEVERAL distinct shapes through a SINGLE allocator-mode EP session (no
-        recompilation between shapes) and checks each against the CPU golden,
-        exercising both the host-output D2H path (use_device_memory=False, all
-        outputs land in CPU memory) and the GPU zero-copy path
-        (use_device_memory=True). Reuses the existing prefill/decode goldens so
-        the CPU references are shared with the classic tests.
+        SEVERAL distinct shapes through a SINGLE EP session (no recompilation
+        between shapes) and checks each against the CPU golden, exercising both
+        the host-output D2H path (use_device_memory=False, all outputs land in
+        CPU memory) and the GPU zero-copy path (use_device_memory=True). Reuses
+        the existing prefill/decode goldens so the CPU references are shared with
+        the other accuracy tests.
         """
         spec = self.spec
         if not spec.output_allocator_e2e:
             pytest.skip("output_allocator_e2e not enabled for this spec")
 
-        # One allocator-mode session reused for every shape below — proves a
-        # single compiled DLL handles dynamic shapes in allocator mode.
-        sess = create_ep_session(
-            dynamic_model_path, repo_root, {"use_output_allocator": "1"}
-        )
+        # One EP session reused for every shape below — proves a single compiled
+        # DLL handles dynamic shapes (the output allocator is the only ABI).
+        sess = create_ep_session(dynamic_model_path, repo_root)
         try:
             # 1) Dynamic-shape stress: two prefill lengths, host D2H path.
             #    sq=128 reuses the classic golden key; sq=64 is a distinct shape
@@ -1467,52 +1464,6 @@ class BaseORTTests:
                 assert ok, "Allocator-mode GPU zero-copy prefill failed"
         finally:
             cleanup(sess)
-
-    def test_ort_output_allocator_vs_classic(self, dynamic_model_path, repo_root):
-        """Allocator (2-arg) vs classic (3-arg) staging: byte-identical output.
-
-        The strongest WS6 correctness proof. Both modes drive the SAME compiled
-        kernels on the SAME inputs; only the output-staging path differs (classic
-        out-param marshal vs in-graph hip.alloc_output + EP callback, including
-        the present.* share-buffer override which the allocator path replicates
-        inside the callback). So every output -- logits AND present KV -- must be
-        bit-identical (cosine == 1.0). Pure EP-vs-EP, no CPU baseline. Tears down
-        the classic session before opening the allocator one to keep peak memory
-        at a single session (matches test_ort_dynamic_vs_fixed).
-        """
-        spec = self.spec
-        if not spec.output_allocator_e2e:
-            pytest.skip("output_allocator_e2e not enabled for this spec")
-        cfg = spec.make_cfg(spec.max_seq_len)
-        position = spec.decode_position
-        inputs = spec.build_decode_inputs(
-            cfg, position, make_zero_kv_cache(cfg, spec.max_seq_len), spec.max_seq_len
-        )
-        dim_map = make_dim_map(1, spec.max_seq_len)
-
-        classic_sess = create_ep_session(dynamic_model_path, repo_root)
-        classic_out = run_iobinding_once(
-            classic_sess, inputs, cfg, use_device_memory=False, dim_map=dim_map
-        )
-        output_names = [o.name for o in classic_sess.get_outputs()]
-        cleanup(classic_sess)
-
-        alloc_sess = create_ep_session(
-            dynamic_model_path, repo_root, {"use_output_allocator": "1"}
-        )
-        alloc_out = run_iobinding_once(
-            alloc_sess, inputs, cfg, use_device_memory=False, dim_map=dim_map
-        )
-        cleanup(alloc_sess)
-
-        ok, _ = compare_outputs(
-            classic_out,
-            alloc_out,
-            output_names,
-            "classic vs allocator decode (bit-identity)",
-            valid_seq=position + 1,
-        )
-        assert ok, "Allocator-mode output diverged from classic mode"
 
     # ── Latency tests (opt-in via `pytest -m latency` or `--latency`) ──────
 
