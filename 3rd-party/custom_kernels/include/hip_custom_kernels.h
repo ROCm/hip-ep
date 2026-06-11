@@ -1017,13 +1017,17 @@ int hip_scatter_nd(
  * NonZero
  * =========================================================================
  *
- * Single-pass atomic kernel: each thread checks one element. If nonzero,
- * atomicAdd on count_ptr gives the write position, then coordinates are
- * written into output[rank, capacity] at stride = capacity.
+ * Single-block cooperative ordered scan: each thread counts the non-zeros in
+ * its chunk, thread 0 exclusive-scans the per-chunk counts, then each thread
+ * re-walks its chunk and writes coordinates into output[rank, capacity] at
+ * stride = capacity, in row-major (ONNX-spec) order. Columns beyond the true
+ * count are left undefined (the launcher zero-fills them defensively).
  *
- * count_ptr is zeroed by the launcher before the kernel. After completion,
- * *count_ptr holds the actual number of nonzero elements (on GPU — no D2H
- * needed; downstream ops read it directly).
+ * After completion, *count_ptr (device i32) holds the actual number of
+ * non-zero elements. The host reads it back via hipdnn_ep_readback_i32
+ * (lowered from hip.readback_dim) and slices the output to its true extent, so
+ * downstream ops and the ORT-reported shape use the count rather than the
+ * worst-case capacity.
  *
  * input_dims_host: host pointer to int64_t[rank] holding the input
  * shape (copied to device internally before the kernel launch).

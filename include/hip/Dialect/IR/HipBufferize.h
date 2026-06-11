@@ -61,9 +61,50 @@ struct HipDstBufferizableModel
   }
 };
 
+// Bufferization model for the non-DPS hip.readback_dim op. It reads the
+// `scalar` tensor operand (device i32 buffer) and produces a host `index`
+// result; it does not allocate, write, or alias any tensor value (the result
+// is not a tensor). Bufferization just rewrites the tensor operand to its
+// memref buffer; the index result passes through unchanged.
+struct HipReadbackDimBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackDimBufferizableModel, ReadbackDimOp> {
+  bool bufferizesToMemoryRead(Operation *, OpOperand &,
+                              const bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &,
+                    const bufferization::AnalysisState &) const {
+    // The only result is an `index`, not a tensor, so no value aliases the
+    // (scalar) operand buffer.
+    return {};
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    auto readback = cast<ReadbackDimOp>(op);
+    FailureOr<Value> scalarBuf =
+        getBuffer(rewriter, readback.getScalar(), options, state);
+    if (failed(scalarBuf))
+      return failure();
+    auto newOp =
+        ReadbackDimOp::create(rewriter, op->getLoc(), rewriter.getIndexType(),
+                              readback.getCtx(), *scalarBuf);
+    bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                 newOp.getResult());
+    return success();
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
+    ReadbackDimOp::attachInterface<HipReadbackDimBufferizableModel>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);
