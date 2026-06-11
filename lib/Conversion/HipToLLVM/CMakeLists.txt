@@ -60,4 +60,5 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRLLVMCommonConversion
   MLIRMemRefDialect
   MLIRTransforms
+  MLIRArithTransforms
 )
