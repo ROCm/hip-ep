@@ -792,7 +792,7 @@ jobs:
             ForEach-Object { "$($_.FullName)\bin" } | Where-Object { Test-Path $_ }) -join ";"
           $env:PATH = "$capi;$rocmBins;$env:PATH"
 
-          & $py -m pip install --quiet psutil tqdm   # benchmark_e2e.py deps
+          & $py -m pip install --quiet psutil tqdm pandas   # benchmark_e2e.py deps
 
           # -e follow_config reads the provider from genai_config.json (populated
           # by the OGA benchmark step above from genai_config_128.json). Tee the

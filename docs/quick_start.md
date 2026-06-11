@@ -318,26 +318,32 @@ places, supplied via env vars before running:
 - `LIB` (Windows) -> append `<onnxruntime/capi>`; supplies the colocated CRT and
   `hip_custom_kernels` import libs.
 
-**Use** -- there is no Python API to import. For OGA, just set the decoder's
-provider to `MorphiZenEP` in `genai_config.json` (or `config.append_provider("MorphiZenEP")`)
-and run OGA's own scripts unchanged -- OGA discovers the colocated EP
+**Use** -- there is no Python API to import; the native files are found by
+location. Set the env vars and run a model whose `genai_config.json` names the
+provider `MorphiZenEP`. This is exactly what the CI wheel smoke does (`Run OGA
+wheel smoke (Python)` in `.github/workflows/windows-build.yml`):
+
+```bash
+# site-packages root + the colocated capi dir
+SP=$(python -c "import onnxruntime, os; print(os.path.dirname(os.path.dirname(onnxruntime.__file__)))")
+CAPI="$SP/onnxruntime/capi"
+
+# JIT link: ROCm import libs from rocm[devel]; CRT + custom kernels from capi
+export THEROCK_DIST="$SP/_rocm_sdk_devel"
+export LIB="$CAPI"                      # Windows; ';'-separated if appending
+# Runtime DLLs: EP + hip-compiler (capi) and ROCm (rocm wheel bins) on PATH
+# (replace gfx1151 with your GPU arch)
+export PATH="$CAPI:$SP/_rocm_sdk_core/bin:$SP/_rocm_sdk_libraries_gfx1151/bin:$PATH"
+
+# Run OGA's own end-to-end benchmark from the OGA source cloned in step 3
+python onnxruntime-genai/benchmark/python/benchmark_e2e.py \
+  -i /path/to/model_dir -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v
+```
+
+`benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
+`genai_config.json` must list `MorphiZenEP`; OGA then discovers the colocated EP
 automatically. For plain ORT, register the colocated plugin via
-`ort.register_execution_provider_library("MorphiZenEP", <onnxruntime/capi>/onnxruntime_morphizen_ep.dll)`.
-
-**PATH** -- the ROCm runtime DLLs are not auto-loaded; add the EP dir and the
-ROCm bin dirs to `PATH` before running (rocm dirs come from the `rocm` wheels):
-
-```bash
-python -c "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi'))"
-# add that capi dir + the rocm-sdk bin dirs to PATH
-```
-
-Verify:
-
-```bash
-python -c "import onnxruntime as ort; print(ort.__version__)"
-python -c "import onnxruntime_genai as og; print(og.__version__)"
-```
+`ort.register_execution_provider_library("MorphiZenEP", "$CAPI/onnxruntime_morphizen_ep.dll")`.
 
 ## Model Preparation
 
