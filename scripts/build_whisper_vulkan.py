@@ -9,13 +9,14 @@ This is intentionally a SEPARATE script from build.py so the core build stays
 lean — the Whisper Vulkan baseline is a benchmarking reference point, not part
 of the MorphiZen EP build.
 
-It REUSES build.py's already-working Vulkan SDK infrastructure (the LunarG
-download-URL gotcha + browser-UA handling, pinned SDK version, shared
-install/_cache/) by importing build.py as a module. build.py's argparse is
-guarded by `if __name__ == "__main__"`, so importing it has no side effects.
+It is fully self-contained: the small Vulkan-SDK-fetch / download / MSVC-env
+helpers it needs are inlined below (the LunarG download-URL gotcha + browser-UA
+handling, pinned SDK version, repo-local install/_cache/). It used to import
+these from build.py, but build.py was rewritten to a different layout/CLI that
+no longer exposes them, so coupling here was removed.
 
-What this does (idempotent, .ok sentinels per stage, shared install/_cache/):
-  1. fetch_vulkan_sdk()         — reused verbatim from build.py
+What this does (idempotent, .ok sentinels per stage, repo-local install/_cache/):
+  1. fetch_vulkan_sdk()         — inlined LunarG silent install
   2. fetch whisper.cpp source   — pinned to release tag v1.8.5
   3. build with GGML_VULKAN=ON  — same ggml-vulkan backend as the llama baseline
   4. download Whisper-large-v3 GGUF (f16) from HF ggerganov/whisper.cpp
@@ -26,7 +27,7 @@ Run:
     python scripts/build_whisper_vulkan.py --run      # build + run jfk.wav bench
 
 Outputs:
-    install/vulkan-sdk/          — LunarG SDK (shared with build.py)
+    install/vulkan-sdk/          — LunarG SDK (repo-local)
     install/whisper.cpp/         — pinned whisper.cpp source (tag v1.8.5)
     C:\\wcpp_vk_build\\           — Ninja build dir (SHORT path; see WHISPER_BUILD;
                                    override with the WHISPER_VK_BUILD env var)
@@ -39,23 +40,179 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
-# build.py lives at the repo root; this script lives in scripts/. Make the repo
-# root importable so we can reuse build.py's Vulkan SDK fetch + helpers.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
 
-# Importing build.py is safe: its CLI is guarded by `if __name__ == "__main__"`.
-import build  # noqa: E402
-from build import (  # noqa: E402
-    CACHE,
-    INSTALL,
-    VULKAN_SDK,
-    _download_with_browser_ua,
-    fetch_vulkan_sdk,
-    log,
+# ---------------------------------------------------------------------------
+# Self-contained build helpers.
+#
+# This script used to import these from build.py, but build.py was rewritten to
+# a different layout/CLI and no longer exposes them. Rather than couple this
+# optional Vulkan-baseline script to build.py's internals, the small pieces it
+# needs (a logger, a downloader, the Vulkan SDK fetch, MSVC env detection) are
+# inlined here. Outputs still live under the repo-local `install/` tree, shared
+# with any cached Vulkan SDK download.
+# ---------------------------------------------------------------------------
+
+INSTALL = REPO_ROOT / "install"
+CACHE = INSTALL / "_cache"
+VULKAN_SDK = INSTALL / "vulkan-sdk"
+
+# Pinned Vulkan SDK version for reproducible Vulkan baselines.
+VULKAN_VERSION = "1.4.341.1"
+VULKAN_INSTALLER_NAME = f"vulkansdk-windows-X64-{VULKAN_VERSION}.exe"
+VULKAN_INSTALLER_URL = (
+    f"https://sdk.lunarg.com/sdk/download/{VULKAN_VERSION}/windows/"
+    f"{VULKAN_INSTALLER_NAME}?Human=true"
 )
+
+
+def log(msg):
+    print(f"[whisper-vulkan] {msg}")
+
+
+def download(url, dest):
+    """Download *url* to *dest* with a progress indicator. Skips if cached."""
+    if dest.exists():
+        log(f"  Cached: {dest.name}")
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    log(f"  Downloading {dest.name} ...")
+
+    def _progress(block, block_size, total):
+        done = block * block_size
+        if total > 0:
+            pct = min(100.0, done * 100.0 / total)
+            print(
+                f"\r  {done / 1048576:.1f} / {total / 1048576:.1f} MB ({pct:.0f}%)",
+                end="",
+                flush=True,
+            )
+
+    try:
+        urllib.request.urlretrieve(url, str(tmp), reporthook=_progress)
+        print()
+        tmp.rename(dest)
+    except Exception as exc:
+        print()
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"Download failed: {url}") from exc
+
+
+def _download_with_browser_ua(url, dest):
+    """Wrap download() with a Mozilla UA opener. LunarG's CDN returns 403/404
+    to the default Python urllib User-Agent."""
+    prev_opener = urllib.request._opener
+    opener = urllib.request.build_opener()
+    opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+    urllib.request.install_opener(opener)
+    try:
+        download(url, dest)
+    finally:
+        urllib.request.install_opener(prev_opener)
+
+
+def fetch_vulkan_sdk():
+    log("Setting up Vulkan SDK ...")
+    sentinel = VULKAN_SDK / ".ok"
+    if sentinel.exists():
+        log("  Already installed.")
+        return
+
+    installer = CACHE / VULKAN_INSTALLER_NAME
+    _download_with_browser_ua(VULKAN_INSTALLER_URL, installer)
+
+    if VULKAN_SDK.exists():
+        shutil.rmtree(VULKAN_SDK)
+    VULKAN_SDK.mkdir(parents=True, exist_ok=True)
+
+    # Qt Installer Framework based; --root makes it install user-writable
+    # (no admin/UAC) and the silent flags suppress the GUI. Default component
+    # set covers what whisper.cpp needs (Headers, Loader, glslc, validation).
+    log(f"  Running installer (silent) -> {VULKAN_SDK}")
+    r = subprocess.run(
+        [
+            str(installer),
+            "--root",
+            str(VULKAN_SDK),
+            "--accept-licenses",
+            "--default-answer",
+            "--confirm-command",
+            "install",
+        ]
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Vulkan SDK installer exited with code {r.returncode}. "
+            "If a UAC prompt was dismissed, re-run from an elevated shell."
+        )
+
+    must_exist = [
+        VULKAN_SDK / "Include" / "vulkan" / "vulkan.h",
+        VULKAN_SDK / "Lib" / "vulkan-1.lib",
+        VULKAN_SDK / "Bin" / "glslc.exe",
+    ]
+    missing = [p for p in must_exist if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "Vulkan SDK install looks incomplete. Missing:\n  "
+            + "\n  ".join(str(p) for p in missing)
+        )
+
+    sentinel.touch()
+    log(f"  Vulkan SDK {VULKAN_VERSION} ready.")
+
+
+def _ensure_msvc_env():
+    """Detect VS2022 and inject its x64 environment into this process."""
+    if shutil.which("cl"):
+        return
+    log("  cl.exe not on PATH — locating Visual Studio ...")
+    vswhere = (
+        Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
+    if not vswhere.exists():
+        log("  ERROR: vswhere.exe not found. Install Visual Studio 2022.")
+        sys.exit(1)
+    r = subprocess.run(
+        [str(vswhere), "-latest", "-property", "installationPath"],
+        capture_output=True,
+        text=True,
+    )
+    vs_path = r.stdout.strip()
+    if not vs_path:
+        log("  ERROR: No Visual Studio installation found.")
+        sys.exit(1)
+    vcvarsall = Path(vs_path) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
+    if not vcvarsall.exists():
+        log(f"  ERROR: vcvarsall.bat not found at {vcvarsall}")
+        sys.exit(1)
+    log(f"  Sourcing MSVC environment from {vs_path} ...")
+    r = subprocess.run(
+        ["cmd", "/C", "call", str(vcvarsall), "x64", "&&", "set"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        log("  ERROR: vcvarsall.bat failed.")
+        sys.exit(1)
+    for line in r.stdout.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            os.environ[key] = value
+    if not shutil.which("cl"):
+        log("  ERROR: cl.exe still not found after sourcing vcvarsall.bat.")
+        sys.exit(1)
+    if shutil.which("sccache"):
+        subprocess.run(["sccache", "--stop-server"], capture_output=True)
+    log("  MSVC environment ready.")
+
 
 # ---------------------------------------------------------------------------
 # Pinned versions for reproducibility
@@ -153,7 +310,7 @@ def build_whispercpp():
     fetch_vulkan_sdk()
     fetch_whispercpp()
 
-    build._ensure_msvc_env()
+    _ensure_msvc_env()
     for tool in ("cmake", "ninja"):
         if not shutil.which(tool):
             log(f"  ERROR: {tool} not found. Run: conda activate hipdnn-ep")
