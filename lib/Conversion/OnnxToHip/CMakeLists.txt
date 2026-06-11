@@ -23,6 +23,7 @@ add_library(OnnxToHip STATIC
   MultiHeadAttentionConversion.cpp
   GatherConversion.cpp
   GatherShapeFold.cpp
+  ReshapeShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
@@ -32,6 +33,7 @@ add_library(OnnxToHip STATIC
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
+  ProjectorOpsRewrites.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp
@@ -56,6 +58,8 @@ add_library(OnnxToHip STATIC
   SizeConversion.cpp
   NonZeroConversion.cpp
   ConcatConversion.cpp
+  GlobalPoolConversion.cpp
+  FlattenConversion.cpp
   LoopOutline.cpp
 )
 
