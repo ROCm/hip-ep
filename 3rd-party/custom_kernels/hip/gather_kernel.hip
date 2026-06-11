@@ -17,11 +17,10 @@
 // Each thread copies one element of the output tensor.
 //
 // IdxT is the element type of the ONNX `indices` tensor. ONNX permits both
-// int32 and int64 index tensors (e.g. transformer text models often feed an
-// int32 `input_ids` straight into the word-embedding Gather); reading an int32
-// buffer as int64 fuses adjacent indices into huge out-of-range values, which
-// the bounds check then maps to 0 -> the whole gather silently returns zeros.
-// Templating on IdxT and widening to int64 in-kernel handles both layouts.
+// int32 and int64 index tensors; reading an int32 buffer as int64 fuses
+// adjacent indices into huge out-of-range values, which the bounds check then
+// maps to 0 -> the whole gather silently returns zeros. Templating on IdxT and
+// widening to int64 in-kernel handles both layouts.
 template <typename T, typename IdxT>
 __global__ void gather_kernel(
     const T* __restrict__ data,
