@@ -966,6 +966,39 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type, double alpha) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_leaky_relu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_leaky_relu(num_elements=%lld, data_type=%s(%lld), "
+             "alpha=%f)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, alpha);
+
+  return 0;
+}
+
+// Mock impl of the runtime symbol referenced by the hip.miopen.softmax
+// lowering. Signature must match lib/Runtime/real/miopen.cpp.
+extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
+                                  void *output, int64_t rows, int64_t cols,
+                                  int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in hip_miopen_softmax\n");
+    return -1;
+  }
+  (void)input;
+  (void)output;
+  MOCK_PRINT("[MOCK] hip_miopen_softmax(rows=%lld, cols=%lld, "
+             "data_type=%s(%lld))\n",
+             (long long)rows, (long long)cols,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type);
+  return 0;
+}
+
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t batch_size,
