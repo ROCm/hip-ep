@@ -142,8 +142,9 @@ module {
     return %y : tensor<?x3x8x8xf16>
   }
 
-  // Test 7: 2D AveragePool with count_include_pad. Lowers to pool_mode = 0
-  // and carries count_include_pad through; single output (no Indices).
+  // Test 7: non-overlapping 2D AveragePool (kernel == stride, no pad).
+  // Pre-lowering decomposes to expand_shape + transpose + reduce_sum + mul
+  // instead of hip.pool — the fast path for projector-style patch pooling.
   func.func @test_averagepool_2d(%arg0: tensor<1x3x32x32xf32>)
       -> tensor<1x3x16x16xf32> {
     // CHECK-LABEL: func.func @test_averagepool_2d
@@ -153,12 +154,36 @@ module {
         : (tensor<1x3x32x32xf32>) -> tensor<1x3x16x16xf32>
 
     // CHECK-NOT: onnx.AveragePool
+    // CHECK-NOT: hip.pool
+    // CHECK: tensor.expand_shape
+    // CHECK-SAME: output_shape [1, 3, 16, 2, 16, 2]
+    // CHECK: hip.transpose
+    // CHECK-SAME: perm = [0, 1, 2, 4, 3, 5]
+    // CHECK: hip.reduce_sum
+    // CHECK-SAME: keepdims = 0
+    // CHECK: hip.mul
+
+    return %y : tensor<1x3x16x16xf32>
+  }
+
+  // Test 7b: overlapping 2D AveragePool (stride < kernel). Outside the
+  // decomposition preconditions — falls back to hip.pool (pool_mode = 0).
+  func.func @test_averagepool_overlap(%arg0: tensor<1x3x32x32xf32>)
+      -> tensor<1x3x31x31xf32> {
+    // CHECK-LABEL: func.func @test_averagepool_overlap
+    %y = "onnx.AveragePool"(%arg0)
+        {kernel_shape = [2, 2], strides = [1, 1], pads = [0, 0, 0, 0],
+         count_include_pad = 1 : si64}
+        : (tensor<1x3x32x32xf32>) -> tensor<1x3x31x31xf32>
+
+    // CHECK-NOT: onnx.AveragePool
     // CHECK: hip.pool
     // CHECK-SAME: count_include_pad = 1
     // CHECK-SAME: kernel_shape = [2, 2]
     // CHECK-SAME: pool_mode = 0
+    // CHECK-SAME: strides = [1, 1]
 
-    return %y : tensor<1x3x16x16xf32>
+    return %y : tensor<1x3x31x31xf32>
   }
 
   // Test 8: 2D LpPool with p = 3. Lowers to pool_mode = 2 and carries p.
