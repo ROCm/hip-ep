@@ -204,10 +204,8 @@ parse_dim_params_map(const std::string &encoded) {
 }
 
 // Step 5: Build metadata JSON from graph inputs and outputs.
-// For dynamic shapes, records DimSource entries that map each dynamic output
-// dimension to the input tensor + dimension index that provides its runtime
-// value. Uses dim_params_map model metadata (populated by IR converter from
-// ORT's GetSymbolicDimensions) to match dimensions across tensors.
+// Classic ABI emits DimSource per dynamic output dim; allocator ABI skips it
+// (the DLL sizes outputs in-graph). See the useOutputAllocator branch below.
 static std::string build_metadata_json(const CompilationArtifact &artifact,
                                        Graph &graph, bool useOutputAllocator) {
   mlir_metadata::Metadata metadata;
@@ -265,53 +263,62 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
     if (shape_ptr && !output.is_unknown_shape()) {
       output_proto->set_rank(static_cast<int32_t>(shape_ptr->size()));
 
-      auto it = all_dim_params.find(output.name());
-      const std::vector<std::string> *dp =
-          (it != all_dim_params.end()) ? &it->second : nullptr;
+      if (useOutputAllocator) {
+        // DLL sizes outputs in-graph; emit shape only, no DimSource.
+        for (int d = 0; d < static_cast<int>(shape_ptr->size()); ++d) {
+          output_proto->add_shape(normalizeDim((*shape_ptr)[d]));
+        }
+      } else {
+        // TODO(output-allocator): delete this else branch once allocator mode
+        // is default-on (also drop the consumer in marshal_output_tensors).
+        auto it = all_dim_params.find(output.name());
+        const std::vector<std::string> *dp =
+            (it != all_dim_params.end()) ? &it->second : nullptr;
 
-      for (int d = 0; d < static_cast<int>(shape_ptr->size()); ++d) {
-        int64_t dim_val = normalizeDim((*shape_ptr)[d]);
-        output_proto->add_shape(dim_val);
+        for (int d = 0; d < static_cast<int>(shape_ptr->size()); ++d) {
+          int64_t dim_val = normalizeDim((*shape_ptr)[d]);
+          output_proto->add_shape(dim_val);
 
-        // For dynamic dims, look up the symbolic name and resolve to the
-        // input tensor that defines it.  Static dims emit explicit sentinel
-        // values (input_idx=-1, dim_idx=-1, resolved=false) so the wire
-        // format is unambiguous: a `resolved=false` DimSource that carries
-        // -1 sentinels can never be confused with a real (input 0, dim 0)
-        // source by a future consumer that bug-skips the `resolved` check.
-        // marshal_output_tensors ignores unresolved entries and falls back
-        // to Output.shape regardless.
-        auto *ds = output_proto->add_dim_sources();
-        if (dim_val == -1) {
-          // Fail at compile time rather than at runtime so the user sees a
-          // clear error naming the output, dim index, and dim_param name
-          // instead of a generic "dim still -1" CHECK from the EP.
-          CHECK(dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty())
-              << "Output '" << output.name() << "' dim " << d
-              << " is dynamic but has no symbolic name in dim_params_map; "
-              << "cannot emit DimSource. Either fix the model to expose a "
-              << "dim_param for this dimension, or freeze it to a constant.";
-          const auto &param_name = (*dp)[d];
-          auto pit = dim_param_map.find(param_name);
-          CHECK(pit != dim_param_map.end())
-              << "Output '" << output.name() << "' dim " << d
-              << " has dim_param '" << param_name
-              << "' but no graph input declares this symbolic name; cannot "
-              << "resolve at runtime. Outputs can only carry symbolic dims "
-              << "that also appear on at least one input.";
-          ds->set_input_idx(pit->second.first);
-          ds->set_dim_idx(pit->second.second);
-          ds->set_resolved(true);
-        } else {
-          // Static dim: emit explicit sentinels so the wire format
-          // unambiguously distinguishes "not populated" from
-          // "intentionally references (input 0, dim 0)" without relying
-          // on the proto-default-zero convention.  Consumers that read
-          // `resolved` first see the same behavior as before; consumers
-          // that don't see -1 instead of a misleading 0.
-          ds->set_input_idx(-1);
-          ds->set_dim_idx(-1);
-          ds->set_resolved(false);
+          // For dynamic dims, look up the symbolic name and resolve to the
+          // input tensor that defines it.  Static dims emit explicit sentinel
+          // values (input_idx=-1, dim_idx=-1, resolved=false) so the wire
+          // format is unambiguous: a `resolved=false` DimSource that carries
+          // -1 sentinels can never be confused with a real (input 0, dim 0)
+          // source by a future consumer that bug-skips the `resolved` check.
+          // marshal_output_tensors ignores unresolved entries and falls back
+          // to Output.shape regardless.
+          auto *ds = output_proto->add_dim_sources();
+          if (dim_val == -1) {
+            // Fail at compile time rather than at runtime so the user sees a
+            // clear error naming the output, dim index, and dim_param name
+            // instead of a generic "dim still -1" CHECK from the EP.
+            CHECK(dp && d < static_cast<int>(dp->size()) && !(*dp)[d].empty())
+                << "Output '" << output.name() << "' dim " << d
+                << " is dynamic but has no symbolic name in dim_params_map; "
+                << "cannot emit DimSource. Either fix the model to expose a "
+                << "dim_param for this dimension, or freeze it to a constant.";
+            const auto &param_name = (*dp)[d];
+            auto pit = dim_param_map.find(param_name);
+            CHECK(pit != dim_param_map.end())
+                << "Output '" << output.name() << "' dim " << d
+                << " has dim_param '" << param_name
+                << "' but no graph input declares this symbolic name; cannot "
+                << "resolve at runtime. Outputs can only carry symbolic dims "
+                << "that also appear on at least one input.";
+            ds->set_input_idx(pit->second.first);
+            ds->set_dim_idx(pit->second.second);
+            ds->set_resolved(true);
+          } else {
+            // Static dim: emit explicit sentinels so the wire format
+            // unambiguously distinguishes "not populated" from
+            // "intentionally references (input 0, dim 0)" without relying
+            // on the proto-default-zero convention.  Consumers that read
+            // `resolved` first see the same behavior as before; consumers
+            // that don't see -1 instead of a misleading 0.
+            ds->set_input_idx(-1);
+            ds->set_dim_idx(-1);
+            ds->set_resolved(false);
+          }
         }
       }
     } else {
