@@ -459,7 +459,8 @@ int wrap_miopenConvolutionForward(
   MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
              (long long)input_c, (long long)input_h, (long long)input_w);
   MOCK_PRINT("[MOCK]   weights=[%lld,%lld,%lld,%lld],\n", (long long)weights_k,
-             (long long)input_c, (long long)kernel_h, (long long)kernel_w);
+             (long long)(input_c / (group ? group : 1)), (long long)kernel_h,
+             (long long)kernel_w);
   MOCK_PRINT("[MOCK]   output=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
              (long long)weights_k, (long long)output_h, (long long)output_w);
   MOCK_PRINT("[MOCK]   stride=[%lld,%lld], pad=[%lld,%lld,%lld,%lld], "
