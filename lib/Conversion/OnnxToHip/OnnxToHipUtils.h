@@ -190,6 +190,8 @@ void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
@@ -220,6 +222,8 @@ void populateDivConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateMaxConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
@@ -227,6 +231,8 @@ void populateNotConversionPatterns(RewritePatternSet &patterns,
 void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateExpConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCumSumConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
@@ -262,6 +268,20 @@ void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateReluConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+void populateClipConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populatePoolConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateResizeConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
+void populateFlattenConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
@@ -303,6 +323,38 @@ void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
 /// longer recoverable from IR. See PowerConversion.cpp.
 void populatePowDecompositionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+/// Pre-lowering pattern set: collapse the inlined erf-form `Gelu` primitive
+/// chain (Div / Erf / Sum / Mul, optionally wrapped in CastLike scalars and
+/// `Sqrt(2.0)`) back into a single `onnx.Gelu(approximate="none")`. Some
+/// exports (e.g. ConvNeXt) inline the exact erf-based Gelu definition
+/// `0.5 * x * (1 + erf(x / sqrt(2)))` as primitives that have no MorphiZen
+/// converters. Must run BEFORE `lowerOnnxConstants` so the literal float
+/// values (1.0, 2.0, 0.5) of the wrapped constants are still inline.
+/// See ErfGeluFusion.cpp.
+void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose vision/projector ops that have no
+/// direct MorphiZen converter into supported primitives — patch-embed
+/// Conv-ND → Reshape/Gemm/Reshape, AveragePool(kernel==stride) →
+/// Reshape/Transpose/ReduceMean, Pow(x, c) → repeated Mul, ReduceMean →
+/// ReduceSum·(1/N), and broadcasting Div → Mul(x, Reciprocal). Emits
+/// `onnx.*` ops with result types built explicitly from the dims the
+/// rewriter already knows (no separate shape pass needed at emission;
+/// `--hip-infer-shapes` resolves any residual dynamic dims post-conversion).
+/// Runs in the same ExistingOps pre-lowering set as FastGeluFusion. See
+/// ProjectorOpsRewrites.cpp.
+void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose `onnx.LpNormalization` into a small
+/// chain of already-supported ONNX primitives (Mul / Sqrt / ReduceSum /
+/// Div). Lives in the pre-lowering loop next to FastGeluFusion /
+/// ProjectorOpsRewrites so the freshly-emitted onnx.* primitives become
+/// "existing" ops by the next round and reach `convertComputeOps`'s
+/// converters as ordinary onnx.* ops. See LpNormalizationConversion.cpp.
+void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

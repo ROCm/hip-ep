@@ -36,6 +36,121 @@ from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
 
 
 # ---------------------------------------------------------------------------
+# Concat
+# ---------------------------------------------------------------------------
+#
+# Concat doesn't have a runtime kernel of its own -- ConcatConversion.cpp
+# decomposes it into `tensor.empty + tensor.insert_slice`, which bufferize to
+# `memref.subview + memref.copy`. For non-leading axes the destination
+# `memref.subview` is STRIDED relative to the contiguous source, and the
+# runtime `memrefCopy` helper in lib/Runtime/real/hip.cpp must honour those
+# strides. A previous flat-memcpy implementation silently corrupted the
+# output whenever axis != 0 (the second insert_slice's contiguous source
+# overran the first one's slot, producing values that look like a
+# stride-shifted version of the last input). Symptom on Qwen 3.5 vision:
+# a `Reshape -> Unsqueeze -> Concat(axis=-1) -> Expand -> Tile` chain
+# returning only the second input's data shifted by one element.
+def _make_concat_model(dtype, input_shapes: list[list[int]], axis: int):
+    """Build a model with a single onnx.Concat across N graph inputs."""
+    tp = np_to_onnx_type(dtype)
+    inputs = [
+        helper.make_tensor_value_info(f"X{i}", tp, list(s))
+        for i, s in enumerate(input_shapes)
+    ]
+    rank = len(input_shapes[0])
+    norm_axis = axis if axis >= 0 else axis + rank
+    out_shape = list(input_shapes[0])
+    out_shape[norm_axis] = sum(s[norm_axis] for s in input_shapes)
+    Y = helper.make_tensor_value_info("Y", tp, out_shape)
+    node = helper.make_node(
+        "Concat", [f"X{i}" for i in range(len(input_shapes))], ["Y"], axis=axis
+    )
+    return make_model_from_nodes([node], inputs, [Y])
+
+
+class TestConcat:
+    @pytest.mark.parametrize(
+        "dtype,shapes,axis",
+        [
+            # Leading-axis concat -- destination subview is contiguous,
+            # exercises the flat memcpy fast path.
+            (np.float16, [[2, 4], [3, 4]], 0),
+            (np.float32, [[1, 8], [2, 8], [3, 8]], 0),
+            # Non-leading axes -- destination subview is STRIDED, exercises
+            # the hipMemcpy2DAsync tier (rowStart == 1 in memrefCopy).
+            (np.float32, [[2, 3], [2, 4], [2, 5]], 1),
+            (np.float16, [[2, 3], [2, 4], [2, 5]], -1),
+            # The Qwen 3.5 vision reproducer: int64 indices, two rank-2
+            # singleton-trailing-dim inputs concatenated along the last
+            # axis. Before the strided-memrefCopy fix this returned the
+            # second input's values shifted by one element.
+            (np.int64, [[1024, 1], [1024, 1]], -1),
+            # Higher rank: rank-3 concat on the middle axis. After the
+            # contiguous-suffix detection this is also rowStart == 1
+            # (the entire last dim plus the per-input middle dim form one
+            # contiguous "row" against the outer dim 0).
+            (np.float32, [[2, 3, 5], [2, 4, 5]], 1),
+            # Higher rank, last-axis concat -- rowStart == 2 in
+            # memrefCopy, exercises the generic per-row tier.
+            (np.float16, [[2, 3, 4], [2, 3, 5]], -1),
+        ],
+    )
+    def test_concat(self, model_runner, dtype, shapes, axis):
+        model = _make_concat_model(dtype, shapes, axis)
+        rng = np.random.default_rng(700 + len(shapes))
+        feeds = []
+        for i, s in enumerate(shapes):
+            if np.issubdtype(dtype, np.integer):
+                feeds.append(rng.integers(-100, 100, s, dtype=dtype))
+            else:
+                feeds.append(rng.uniform(-2.0, 2.0, s).astype(dtype))
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# Tier-3 strided memref.copy kernel (hip_strided_copy)
+# ---------------------------------------------------------------------------
+#
+# A last-axis Concat on rank >= 3 produces a destination `memref.subview`
+# whose contiguous suffix is only the innermost dim, so two or more outer
+# dims remain strided (rowStart >= 2 in memrefCopy). That is the generic
+# "Tier 3" regime, which the parallel `hip_strided_copy` kernel now handles
+# in a single launch instead of one hipMemcpyAsync per row. These cases pin
+# that path numerically against the ORT CPU reference, across the element
+# widths the kernel templates on (2/4/8 bytes) and with outer extents large
+# enough to span multiple thread blocks plus the grid-stride remainder.
+class TestStridedCopyTier3:
+    @pytest.mark.parametrize(
+        "dtype,shapes,axis",
+        [
+            # rank-3, last axis -> rowStart == 2 (outerRank == 2).
+            (np.float16, [[8, 16, 4], [8, 16, 4]], -1),  # 2-byte elems
+            (np.float32, [[8, 16, 5], [8, 16, 3]], -1),  # 4-byte elems
+            (np.int32, [[6, 9, 4], [6, 9, 7]], -1),  # 4-byte elems
+            (np.int64, [[5, 7, 3], [5, 7, 6]], -1),  # 8-byte elems
+            # Large outer extent: 4096 rows forces grid clamp + grid-stride loop.
+            (np.float16, [[64, 64, 2], [64, 64, 2]], -1),
+            # rank-4, last axis -> rowStart == 3 (outerRank == 3).
+            (np.float32, [[2, 3, 4, 5], [2, 3, 4, 6]], -1),
+            (np.int64, [[2, 2, 3, 4], [2, 2, 3, 4]], -1),
+        ],
+    )
+    def test_concat_last_axis_strided(self, model_runner, dtype, shapes, axis):
+        model = _make_concat_model(dtype, shapes, axis)
+        rng = np.random.default_rng(800 + sum(shapes[0]))
+        feeds = []
+        for s in shapes:
+            if np.issubdtype(dtype, np.integer):
+                feeds.append(rng.integers(-100, 100, s, dtype=dtype))
+            else:
+                feeds.append(rng.uniform(-2.0, 2.0, s).astype(dtype))
+        actual, expected = model_runner.run_sample(model, feeds)
+        # Pure data movement -- must be bit-exact, no tolerance.
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
 # Tile
 # ---------------------------------------------------------------------------
 def _make_tile_model(dtype, input_shape: list[int], repeats: list[int]):

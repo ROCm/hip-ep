@@ -8,7 +8,9 @@ add_library(HipDialectTransforms STATIC
   BufferUtils.cpp
   GenerateInterface.cpp
   HoistAllocSizeArith.cpp
+  InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
+  LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp

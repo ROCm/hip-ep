@@ -89,6 +89,12 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
         bufferization::createBufferResultsToOutParamsPass(outParamsOpts));
   }
 
+  // 3b. Promote outlined `*_loop_body_*` helpers to the out-param ABI
+  //     LoopLowering expects. Slot 3 above covers @main_graph only (classic);
+  //     allocator mode defers @main_graph to slot 4.5. Both pipelines need
+  //     this pass for private loop bodies before buffer-deallocation.
+  pm.addPass(hip::createLoopBodyToOutParamsPass());
+
   // 4. Insert ownership-based buffer deallocation
   bufferization::BufferDeallocationPipelineOptions deallocOpts;
   bufferization::buildBufferDeallocationPipeline(pm, deallocOpts);
@@ -222,6 +228,13 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // model end-to-end, then delete this TODO.
   pm.addPass(createOnnxLoopOutlinePass());
 
+  // Rank-establish unranked tensors inside outlined loop bodies (e.g. a
+  // loop-carried `onnx.Concat` output the importer left as `tensor<*xT>`)
+  // BEFORE conversion: `convert-onnx-to-hip` converters require ranked
+  // results and otherwise leave the op unconverted, breaking the body
+  // func signature and later bufferization.
+  pm.addPass(createInferLoopBodyShapesPass());
+
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
         fs, options.externalizeMinNumElements, options.skipConstantData));
@@ -244,6 +257,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   pm.addPass(createSimplifyOnnxPass());
   pm.addPass(createHipAddContextArgPass());
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createInferLoopBodyShapesPass());
 
   if (handle) {
     pm.addPass(createOutlineOnnxToHipDNNPass());
