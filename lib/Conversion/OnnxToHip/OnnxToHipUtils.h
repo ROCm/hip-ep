@@ -491,6 +491,12 @@ void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
+/// Pre-lowering: collapse the q/k L2-normalization decomposition
+/// (Mul(x,x)->ReduceSum->Add(eps)->Sqrt->Reciprocal->Mul) into hip.l2_norm.
+/// See L2NormFusion.cpp.
+void populateL2NormFusionPatterns(RewritePatternSet &patterns,
+                                  MLIRContext *ctx);
+
 } // namespace hip
 } // namespace mlir
 

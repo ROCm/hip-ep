@@ -1111,6 +1111,12 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
                              int64_t element_size_bytes, int64_t axis,
                              float epsilon, int64_t stash_type);
 
+// L2 normalization wrapper (q/k norm in linear attention).
+// output = input * rsqrt(sum(input^2, last_axis) + epsilon)
+int wrap_l2_normalize(RuntimeState *state, void *input, void *output,
+                      int64_t input_num_elements, int64_t norm_size,
+                      int64_t element_size_bytes, float epsilon);
+
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma

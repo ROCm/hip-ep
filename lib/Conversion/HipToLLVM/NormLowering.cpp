@@ -303,12 +303,73 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
   }
 };
 
+// hip.l2_norm(%ctx) ins(%input) outs(%output)
+//   -> wrap_l2_normalize(state, input, output,
+//        input_num_elements, norm_size, element_size_bytes, epsilon)
+struct L2NormOpLowering : public ConvertOpToLLVMPattern<L2NormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(L2NormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
+
+    int64_t rank = inputType.getRank();
+    if (rank == 0)
+      return rewriter.notifyMatchFailure(op, "l2_norm.scalar_input");
+    int64_t lastDim = inputType.getShape()[rank - 1];
+    if (ShapedType::isDynamic(lastDim))
+      return rewriter.notifyMatchFailure(op, "l2_norm.dynamic_last_dim");
+    Value normSize = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(lastDim));
+
+    Type elementType = inputType.getElementType();
+    unsigned elementSizeBytes = elementType.getIntOrFloatBitWidth() / 8;
+    Value elementSizeBytesVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elementSizeBytes));
+
+    Value epsilonVal =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                    i64Type, i64Type, f32Type};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapL2Normalize, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {statePtr,  inputPtr,
+                               outputPtr, inputNumElements,
+                               normSize,  elementSizeBytesVal,
+                               epsilonVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering>(
-      converter);
+  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
+               L2NormOpLowering>(converter);
 }
 
 } // namespace hip
