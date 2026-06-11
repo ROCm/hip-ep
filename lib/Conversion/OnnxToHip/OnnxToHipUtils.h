@@ -228,6 +228,8 @@ void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateExpConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateCumSumConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populatePadConversionPatterns(RewritePatternSet &patterns,

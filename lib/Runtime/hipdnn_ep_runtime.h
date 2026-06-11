@@ -1165,6 +1165,8 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+int wrap_exp(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
 
 // Element-wise division with 4D ONNX broadcast (rank <= 4, left-padded).
 // Computes output = lhs / rhs; materialises broadcast via hip_expand when
