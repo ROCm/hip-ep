@@ -29,8 +29,15 @@
 //      cascade into NaN downstream. This is mathematically equivalent to
 //      non-overlapping AveragePool with `K == stride`. Coverage is
 //      intentionally narrow — typical site is a Gemma-3-style projector
-//      (`kernel=4, stride=4` on a `[B, 1152, 64, 64]` tensor); overlap /
-//      padding cases would need a real pool kernel.
+//      (`kernel=4, stride=4` on a `[B, 1152, 64, 64]` tensor).
+//
+//      Overlap, padding, dynamic spatial dims, and other shapes outside
+//      this narrow case are NOT handled here — `notifyMatchFailure` leaves
+//      the original `onnx.AveragePool` alive for `PoolConversion.cpp`
+//      (`hip.pool`, pool_mode = AVERAGE) in the subsequent compute-op
+//      conversion round. Benefit = 2 here vs benefit = 1 on `PoolToHip`
+//      ensures the fast decomposition wins only when its preconditions
+//      are satisfied.
 //
 // All three rewrites run in the pre-lowering block of `ConvertOnnxToHipPass`,
 // alongside `FastGeluFusionPatterns` in a fixed-point round loop (an emitted
@@ -39,12 +46,10 @@
 // inline (lowerOnnxConstants has not run yet) so the scalar exponent of
 // Pow and the axes value of ReduceMean are readable.
 //
-// Failure to rewrite is silent (returns notifyMatchFailure); the original
-// onnx.* op will then survive to OneShotBufferize and surface the canonical
-// "op was not bufferized" error. That is the right behavior — if the
-// projector morphology changes (e.g. K != stride, with padding, non-NCHW),
-// we want a loud failure with a clear pointer to the IR rather than a silent
-// wrong-answer.
+// Failure to rewrite returns `notifyMatchFailure` (silent at this layer).
+// For Pow / ReduceMean that leaves a dead-end `onnx.*` op. For AveragePool
+// the surviving op is converted to `hip.pool` by `PoolConversion.cpp` unless
+// it falls outside both the decomposition and the pool runtime's coverage.
 //
 //===----------------------------------------------------------------------===//
 
