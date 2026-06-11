@@ -374,6 +374,16 @@ void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
                                              size_t needed_size);
 
+// Per-state MIOpen convolution workspace pool (used by
+// wrap_miopenConvolutionForward for both 2D and the H=1 1D conv path). Lazily
+// grown via hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch
+// above: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
+// reused across all conv calls in the session -- safe because the stream is
+// serialised. See runtime_state_internal.h for design rationale.
+void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
+                                        size_t needed_size);
+
 // Device-side runtime error flag (set by kernels, observed by wrappers).
 // Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
 // delta==0) and need to propagate an error code back through main_graph.
