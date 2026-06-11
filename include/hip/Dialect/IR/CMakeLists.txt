@@ -13,6 +13,17 @@ mlir_tablegen(HipTypes.h.inc -gen-typedef-decls -typedefs-dialect=hip)
 mlir_tablegen(HipTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=hip)
 add_public_tablegen_target(HipTypesIncGen)
 
+# HipDpsOpInterface: shared reify default for HIP DPS ops. Generated
+# before HipOps so ops can reference the interface in their TableGen
+# trait list. The `.h.inc` carries the interface class declaration and
+# the `.cpp.inc` carries the trait/concept method bindings; this file
+# pairs with `lib/Dialect/IR/HipDpsOpInterface.cpp` which includes the
+# `.cpp.inc` and provides the default `reifyResultShapes` body.
+set(LLVM_TARGET_DEFINITIONS HipDpsOpInterface.td)
+mlir_tablegen(HipDpsOpInterface.h.inc -gen-op-interface-decls)
+mlir_tablegen(HipDpsOpInterface.cpp.inc -gen-op-interface-defs)
+add_public_tablegen_target(HipDpsOpInterfaceIncGen)
+
 set(LLVM_TARGET_DEFINITIONS HipOps.td)
 mlir_tablegen(HipOps.h.inc -gen-op-decls)
 mlir_tablegen(HipOps.cpp.inc -gen-op-defs)

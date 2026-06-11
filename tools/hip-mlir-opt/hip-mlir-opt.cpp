@@ -22,9 +22,11 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
@@ -125,6 +127,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SoftplusOp>>(*ctx);
     mlir::hip::GeluOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::GeluOp>>(*ctx);
+    mlir::hip::GlobalPoolOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GlobalPoolOp>>(*ctx);
     mlir::hip::ReciprocalOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ReciprocalOp>>(*ctx);
     mlir::hip::SqrtOp::attachInterface<
@@ -220,6 +224,7 @@ int main(int argc, char **argv) {
       registry);
   mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   registerHipBufferizableOpInterfaceModels(registry);
 
@@ -240,6 +245,10 @@ int main(int argc, char **argv) {
   mlir::registerSCFToControlFlowPass();
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerReconcileUnrealizedCastsPass();
+  // Registered so that LIT tests and end-to-end pipelines can fold
+  // `tensor.dim` / `memref.dim` of HIP op results through the reify
+  // implementation. Used in `hip-matmul-reify-shapes.mlir`.
+  mlir::memref::registerResolveShapedTypeResultDimsPass();
   mlir::registerPass(
       []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {

@@ -100,8 +100,14 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
   }
 };
 
-// --- GetPoolOp: hip.get_pool(%ctx, %pool_size) : memref<?xi8>
-//     -> llvm.call @hipdnn_ep_get_pool_base(state, size) + memref descriptor
+// --- GetPoolOp:
+//     hip.get_pool(%ctx, %pool_size) {domain_id = N} : memref<?xi8>
+//       -> llvm.call @hipdnn_ep_get_pool_base(state, N, size) + memref desc.
+//
+// The domain_id attribute (default 0) is materialized as an i32 constant
+// argument so the runtime can select the right per-domain pool slot.
+// Single-domain models emit `domain_id = 0` and round-trip identically to
+// the pre-multi-domain IR (printer elides the default).
 struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -111,17 +117,25 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     MemRefType memRefType = cast<MemRefType>(op.getPool().getType());
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipGetPoolBase, {ptrType, i64Type}, ptrType);
+    // Runtime ABI: hipdnn_ep_get_pool_base(state: ptr, domain_id: i32,
+    // needed_size: i64) -> ptr.
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kHipGetPoolBase,
+                               {ptrType, i32Type, i64Type}, ptrType);
     if (failed(funcOp))
       return failure();
 
     Value poolSize = adaptor.getPoolSize();
-    Value rawPtr = LLVM::CallOp::create(rewriter, loc, *funcOp,
-                                        ValueRange{adaptor.getCtx(), poolSize})
+    Value domainIdVal = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type,
+        rewriter.getI32IntegerAttr(static_cast<int32_t>(op.getDomainId())));
+    Value rawPtr = LLVM::CallOp::create(
+                       rewriter, loc, *funcOp,
+                       ValueRange{adaptor.getCtx(), domainIdVal, poolSize})
                        .getResult();
 
     FailureOr<unsigned> addrSpace =
@@ -196,6 +210,127 @@ struct GetHostScratchOpLowering
 
     MemRefDescriptor desc = createMemRefDescriptor(
         loc, memRefType, hostPtr, hostPtr, {scratchSize}, {stride1}, rewriter);
+    rewriter.replaceOp(op, {desc});
+    return success();
+  }
+};
+
+// --- AllocOutputOp: hip.alloc_output(%ctx, %dyn...) {out_idx} : memref<...>
+//     -> llvm.call @hipdnn_ep_alloc_output(state, out_idx, shape, rank,
+//        elem_size) + a memref descriptor over the returned device pointer.
+//
+// The op obtains a graph-output buffer from the EP output allocator at the
+// point where the output shape is known. The shape is handed to the runtime as
+// a stack-allocated i64[rank] array (static dims become constants, dynamic dims
+// come from the op's operands, in type order); the runtime returns the device
+// pointer, which the lowering wraps in a standard memref descriptor with
+// row-major strides. Unlike AllocOp this issues no hipMalloc/hipFree -- the
+// buffer is EP-owned (a graph output), matching AllocOutputOp::getEffects
+// (no Allocate effect). Works uniformly for static, dynamic, and mixed shapes
+// because getMemRefDescriptorSizes interleaves type constants with operands.
+//
+// Before:
+//   %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64} : memref<?x?xf16>
+//
+// After:
+//   %shape = llvm.alloca %c1 x !llvm.array<2 x i64>
+//   llvm.store %M, %shape[0]            // gep elem i64, index 0
+//   llvm.store %N, %shape[1]            // gep elem i64, index 1
+//   %p = llvm.call @hipdnn_ep_alloc_output(%state, %c0_outidx, %shape,
+//                                          %c2_rank, %c2_elem)
+//          : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
+//   // descriptor { alloc=%p, aligned=%p, offset=0, sizes=[%M,%N],
+//   //              strides=[%N,1] }
+struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(AllocOutputOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    MemRefType memRefType = cast<MemRefType>(op.getMemref().getType());
+
+    if (!isConvertibleAndHasIdentityMaps(memRefType))
+      return rewriter.notifyMatchFailure(op, "incompatible memref type");
+
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type i32Type = rewriter.getI32Type();
+
+    Type elemType = memRefType.getElementType();
+    if (!elemType.isIntOrFloat())
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    int64_t elemSizeBytes = elemType.getIntOrFloatBitWidth() / 8;
+    if (elemSizeBytes <= 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element bit width");
+
+    int64_t rank = memRefType.getRank();
+
+    // sizes[] interleaves static dims (type constants) with the dynamic-size
+    // operands (in type order); strides[] are row-major. Same helper AllocOp
+    // uses, so static / dynamic / mixed shapes all flow through one path. The
+    // returned sizeBytes is unused here (the runtime computes bytes itself).
+    SmallVector<Value, 4> sizes;
+    SmallVector<Value, 4> strides;
+    Value sizeBytes;
+    getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
+                             rewriter, sizes, strides, sizeBytes, true);
+
+    // Stack-allocate the i64[rank] shape array and populate it from sizes[].
+    Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                            rewriter.getI64IntegerAttr(1));
+    auto shapeArrayType =
+        LLVM::LLVMArrayType::get(i64Type, rank > 0 ? rank : 1);
+    Value shapeAlloca = LLVM::AllocaOp::create(
+        rewriter, loc, ptrType, shapeArrayType, oneI64, /*alignment=*/8);
+    for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+      Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                           rewriter.getI32IntegerAttr(i));
+      Value gep = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
+                                      shapeAlloca, idx);
+      LLVM::StoreOp::create(rewriter, loc, sizes[i], gep);
+    }
+
+    Value outIdxVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getOutIdx()));
+    Value rankVal = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(rank));
+    Value elemSizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemSizeBytes));
+
+    // void* hipdnn_ep_alloc_output(void* state, int64_t out_idx,
+    //                              const int64_t* shape, int64_t rank,
+    //                              int64_t elem_size)
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipAllocOutput,
+        {ptrType, i64Type, ptrType, i64Type, i64Type}, ptrType);
+    if (failed(funcOp))
+      return failure();
+
+    Value rawPtr =
+        LLVM::CallOp::create(rewriter, loc, *funcOp,
+                             ValueRange{adaptor.getCtx(), outIdxVal,
+                                        shapeAlloca, rankVal, elemSizeVal})
+            .getResult();
+
+    // The runtime returns a generic (AS 0) pointer; cast to the memref's
+    // address space if it differs (mirrors GetConstant / AllocOp).
+    FailureOr<unsigned> addrSpace =
+        getTypeConverter()->getMemRefAddressSpace(memRefType);
+    if (failed(addrSpace))
+      return failure();
+
+    Value dataPtr = rawPtr;
+    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
+        *addrSpace)
+      dataPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+          rawPtr);
+
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, memRefType, dataPtr, dataPtr, sizes, strides, rewriter);
     rewriter.replaceOp(op, {desc});
     return success();
   }
@@ -587,8 +722,9 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
-               GetHostScratchOpLowering, GetConstantOpLowering,
-               MemRefAllocOpLowering, MemRefDeallocOpLowering>(converter);
+               GetHostScratchOpLowering, AllocOutputOpLowering,
+               GetConstantOpLowering, MemRefAllocOpLowering,
+               MemRefDeallocOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 

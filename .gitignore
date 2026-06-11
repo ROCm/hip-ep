@@ -137,7 +137,3 @@ install/
 # ONNX model files (large, downloaded on demand)
 models/
 _local/
-.venv_mmtests/
-Testing/
-build_ep/
-3rd-party/mm_spec/
