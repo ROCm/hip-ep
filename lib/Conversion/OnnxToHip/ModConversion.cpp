@@ -28,16 +28,19 @@ struct ModToHip : public mlir::RewritePattern {
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-    auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-    mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+    mlir::FailureOr<mlir::Value> initOrFailure =
+        createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+    if (mlir::failed(initOrFailure))
+      return rewriter.notifyMatchFailure(
+          op, "Mod: no ranked operand spans dynamic result dim");
 
     int64_t fmod = 0;
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("fmod"))
       fmod = attr.getValue().getSExtValue();
 
-    auto hipOp = mlir::hip::ModOp::create(rewriter, loc, context, a, b, init,
-                                          rewriter.getI64IntegerAttr(fmod));
+    auto hipOp =
+        mlir::hip::ModOp::create(rewriter, loc, context, a, b, *initOrFailure,
+                                 rewriter.getI64IntegerAttr(fmod));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

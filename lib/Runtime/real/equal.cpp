@@ -33,12 +33,15 @@ static int equal_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
 }
 
 int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t num_elements, int64_t data_type) {
+               int64_t a_num_elements, int64_t b_num_elements,
+               int64_t out_num_elements, int64_t data_type) {
   OP_PROFILE(
       "equal",
       [&] {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%lld:%s", (long long)num_elements,
+        char buf[80];
+        snprintf(buf, sizeof(buf), "a=%lld:b=%lld:out=%lld:%s",
+                 (long long)a_num_elements, (long long)b_num_elements,
+                 (long long)out_num_elements,
                  hipdnn_ep_datatype_name(data_type));
         return std::string(buf);
       },
@@ -48,7 +51,7 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
     RUNTIME_DEBUG_LOG("[REAL] wrap_equal: null argument\n");
     return -1;
   }
-  if (num_elements <= 0) {
+  if (out_num_elements <= 0) {
     return 0;
   }
 
@@ -61,9 +64,33 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
     return -1;
   }
 
+  // Supported broadcast modes:
+  //   * same-shape: a_n == b_n == out_n
+  //   * scalar-rhs broadcast: b_n == 1, a_n == out_n
+  //   * scalar-lhs broadcast: a_n == 1, b_n == out_n
+  // Anything more general (rank-aware NumPy broadcast) must be materialised
+  // upstream via Expand and is rejected here so the kernel never reads OOB.
+  if (a_num_elements != out_num_elements && a_num_elements != 1) {
+    fprintf(stderr,
+            "[REAL] wrap_equal: unsupported broadcast: a_num=%lld out=%lld "
+            "(only scalar a (1) or full a (out) are supported)\n",
+            (long long)a_num_elements, (long long)out_num_elements);
+    return -1;
+  }
+  if (b_num_elements != out_num_elements && b_num_elements != 1) {
+    fprintf(stderr,
+            "[REAL] wrap_equal: unsupported broadcast: b_num=%lld out=%lld "
+            "(only scalar b (1) or full b (out) are supported)\n",
+            (long long)b_num_elements, (long long)out_num_elements);
+    return -1;
+  }
+
   void *stream = hipdnn_ep_state_get_stream(state);
   RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_equal: num=%lld, input_type=%s -> hip_elementwise_equal\n",
-      (long long)num_elements, hipdnn_ep_datatype_name(data_type));
-  return hip_elementwise_equal(stream, a, b, output, num_elements, hip_dtype);
+      "[REAL] wrap_equal: a_num=%lld, b_num=%lld, out=%lld, input_type=%s "
+      "-> hip_elementwise_equal\n",
+      (long long)a_num_elements, (long long)b_num_elements,
+      (long long)out_num_elements, hipdnn_ep_datatype_name(data_type));
+  return hip_elementwise_equal(stream, a, b, output, a_num_elements,
+                               b_num_elements, out_num_elements, hip_dtype);
 }

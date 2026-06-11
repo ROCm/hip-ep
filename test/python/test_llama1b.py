@@ -100,6 +100,9 @@ LLAMA1B = ModelSpec(
     hf_root_for_tokenizer=(
         "https://huggingface.co/onnx-community/Llama-3.2-1B-Instruct-ONNX/resolve/main"
     ),
+    # Run the output-allocator (2-arg ABI) e2e accuracy test on this fast model;
+    # allocator mode is model-agnostic EP plumbing so 1B is representative.
+    output_allocator_e2e=True,
 )
 
 
