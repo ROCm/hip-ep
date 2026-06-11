@@ -295,6 +295,31 @@ int wrap_causal_conv_with_state(
     return 0;
   }
 
+  // ---- Fast path: prefill (seq_len>1) via a single fused custom kernel ----
+  // Replaces the MIOpen path (Find + 3 pitched D2D memcpys to build the
+  // virtual buffer + conv + bias optensor + activation + mul) -- the single
+  // largest text-prefill op -- with one launch. Same supported envelope as
+  // the decode fast path (k in [1,8], activation none/SiLU, fp16/fp32);
+  // anything else falls through to MIOpen below.
+  if (seq_len > 1 && kernel_size >= 1 && kernel_size <= 8 &&
+      (activation == 0 || activation == 1) &&
+      (element_size_bytes == 2 || element_size_bytes == 4)) {
+    int rc =
+        hip_causal_conv_prefill(stream, input, weight, bias, past_state, output,
+                                present_state, batch_size, channels, seq_len,
+                                kernel_size, activation, element_size_bytes);
+    if (rc != 0) {
+      fprintf(stderr,
+              "wrap_causal_conv_with_state: hip_causal_conv_prefill failed "
+              "(%d)\n",
+              rc);
+      return -1;
+    }
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_causal_conv_with_state: completed via fast prefill\n");
+    return 0;
+  }
+
   const int64_t state_len = kernel_size - 1; // k-1
   const int64_t virtual_len = state_len + seq_len;
   const int64_t bc_rows = batch_size * channels;

@@ -10,6 +10,12 @@ message Metadata {
   string artifact_filename = 1;
   repeated Output outputs = 2;
   repeated Input inputs = 3;
+  // True when the artifact was compiled in output-allocator mode: the DLL's
+  // inference_compute takes (state, inputs) only and allocates graph outputs
+  // in-graph via the EP's output-allocator callback. The EP reads this to
+  // choose its dispatch arity. Travels with the artifact, so a reused
+  // EPContext always reports the mode matching its own DLL ABI.
+  bool use_output_allocator = 4;
 }
 
 // Tracks which input tensor dimension provides a dynamic output dimension's

@@ -94,11 +94,16 @@ if(_HIPDNN_NEED_TOOLCHAIN)
         file(MAKE_DIRECTORY "${_therock_root}")
         message(STATUS "Extracting TheRock SDK into ${_therock_root} ...")
         # tar (ships with Windows 10+/Linux) flattens the single top-level dir;
-        # file(ARCHIVE_EXTRACT) has no --strip-components. --force-local stops GNU
-        # tar from treating the Windows "D:\..." archive path as a remote host.
+        # file(ARCHIVE_EXTRACT) has no --strip-components. Pass the archive as a
+        # relative basename with WORKING_DIRECTORY so the path carries no
+        # drive-letter colon: GNU tar would otherwise read "D:\..." as a remote
+        # "host:path" (the reason --force-local was here), and Windows bsdtar
+        # rejects --force-local outright. The basename form needs neither and
+        # works for both. -C takes an absolute path unaffected by this parsing.
         execute_process(
-          COMMAND ${CMAKE_COMMAND} -E env tar --force-local -xzf "${_therock_tgz}"
+          COMMAND tar -xzf "${_therock_base}.tar.gz"
                   -C "${_therock_root}" --strip-components=1
+          WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
           RESULT_VARIABLE _therock_tar_rc)
         if(NOT _therock_tar_rc EQUAL 0)
           message(FATAL_ERROR "TheRock extraction failed (tar rc=${_therock_tar_rc}).")

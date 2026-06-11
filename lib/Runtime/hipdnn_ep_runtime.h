@@ -147,6 +147,49 @@ static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// Global pool reduction modes (must match kGlobalPool* in HipToLLVMUtils.h).
+//===----------------------------------------------------------------------===//
+
+#define HIPDNN_EP_GLOBAL_POOL_AVERAGE 0
+#define HIPDNN_EP_GLOBAL_POOL_MAX 1
+#define HIPDNN_EP_GLOBAL_POOL_LP 2
+
+static inline const char *hipdnn_ep_global_pool_mode_name(int64_t mode) {
+  switch (mode) {
+  case HIPDNN_EP_GLOBAL_POOL_AVERAGE:
+    return "global_avg_pool";
+  case HIPDNN_EP_GLOBAL_POOL_MAX:
+    return "global_max_pool";
+  case HIPDNN_EP_GLOBAL_POOL_LP:
+    return "global_lp_pool";
+  default:
+    return "global_pool_unknown";
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Window-pool reduction modes (must match kPool* in HipToLLVMUtils.h and the
+// pool_mode constants used in OnnxToHip/PoolConversion.cpp).
+//===----------------------------------------------------------------------===//
+
+#define HIPDNN_EP_POOL_AVERAGE 0
+#define HIPDNN_EP_POOL_MAX 1
+#define HIPDNN_EP_POOL_LP 2
+
+static inline const char *hipdnn_ep_pool_mode_name(int64_t mode) {
+  switch (mode) {
+  case HIPDNN_EP_POOL_AVERAGE:
+    return "avg_pool";
+  case HIPDNN_EP_POOL_MAX:
+    return "max_pool";
+  case HIPDNN_EP_POOL_LP:
+    return "lp_pool";
+  default:
+    return "pool_unknown";
+  }
+}
+
 // Opaque handle for runtime state
 typedef struct RuntimeState RuntimeState;
 
@@ -172,6 +215,17 @@ typedef struct RuntimeState RuntimeState;
 // The EP installs an output allocator before inference_compute; the generated
 // main_graph obtains each graph-output buffer from it at the point the output
 // shape is known (lowered from hip.alloc_output -> hipdnn_ep_alloc_output).
+//
+// Call flow (allocator mode):
+//   MlirCustomOp::Compute
+//     -> hipdnn_ep_set_output_allocator(state, &alloc)   (EP installs)
+//     -> inference_compute(state, inputs)                (2-arg, no out span)
+//        -> main_graph -> main_graph_internal -> ...
+//           -> hipdnn_ep_alloc_output(state, out_idx, shape, rank, elem)
+//                -> alloc.allocate(self, ...)            (= EP callback)
+//                     -> GetOutput(shape)               (GPU zero-copy /
+//                                                         host scratch + D2H)
+//     -> set_output_allocator(nullptr); completeness check; host D2H
 //
 // ABI: this struct crosses the model.dll <-> EP boundary. Its layout is a fixed
 // contract, locked by static_asserts and mirrored by an identical EP-side copy
@@ -242,6 +296,15 @@ int hipdnn_ep_state_cleanup(RuntimeState *state);
 // Returns: hipStream_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own stream (destroyed in cleanup)
 void *hipdnn_ep_state_get_stream(RuntimeState *state);
+
+// Current inference session stream (hipStream_t as void*), set per Compute by
+// hipdnn_ep_runtime_begin_compute. Lets ABI-fixed runtime helpers that don't
+// receive `state` -- notably memrefCopy (MLIR memref.copy lowering) -- issue
+// their work on the session stream instead of the default/null stream (0).
+// Default-stream work serializes with the session stream (legacy implicit
+// sync) and shows up as GPU idle in the prefill profile. Returns NULL before
+// the first begin_compute on this thread (callers fall back to stream 0).
+void *hipdnn_ep_get_current_stream(void);
 
 // Get MIOpen handle from state (for MIOpen operations)
 // Returns: miopenHandle_t cast to void* (NULL on error)
@@ -603,6 +666,39 @@ int wrap_miopenConvolutionForward(
     int64_t group,       // Number of groups
     int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
 
+// MIOpen transposed convolution (deconvolution) wrapper
+// Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
+// RuntimeState pattern - extracts handle/stream internally.
+// Weight layout is ONNX ConvTranspose's [C, M/group, kH, kW] (input channels
+// first); M/group is derived from output_c and group inside the wrapper.
+int wrap_miopenConvolutionTranspose(
+    RuntimeState *state, // RuntimeState (opaque)
+    const void *input,   // Input tensor GPU pointer [N, C, H, W]
+    int64_t input_n,     // Input batch size
+    int64_t input_c,     // Input channels (C)
+    int64_t input_h,     // Input height
+    int64_t input_w,     // Input width
+    const void *weights, // Weights GPU pointer [C, M/group, kH, kW]
+    const void *bias,    // Bias GPU pointer (nullable) [M]
+    void *output,        // Output tensor GPU pointer (in-place) [N, M, H', W']
+    int64_t output_c,    // Output channels (M)
+    int64_t output_h,    // Output height
+    int64_t output_w,    // Output width
+    int64_t kernel_h,    // Kernel height
+    int64_t kernel_w,    // Kernel width
+    int64_t stride_h,    // Stride height
+    int64_t stride_w,    // Stride width
+    int64_t pad_top,     // Padding top
+    int64_t pad_left,    // Padding left
+    int64_t pad_bottom,  // Padding bottom
+    int64_t pad_right,   // Padding right
+    int64_t dilation_h,  // Dilation height
+    int64_t dilation_w,  // Dilation width
+    int64_t output_padding_h, // Output padding height (ONNX "adjs")
+    int64_t output_padding_w, // Output padding width
+    int64_t group,            // Number of groups
+    int64_t data_type);       // HIPDNN_EP_DATATYPE_* element type
+
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations
 int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
@@ -824,6 +920,61 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 // approximate: 0 = exact (erf), 1 = tanh approximation
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
+
+// LeakyRelu activation wrapper (uses custom HIP kernel).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, DOUBLE)
+// alpha: slope for negative values (default 0.01 per ONNX spec)
+int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type, double alpha);
+
+// Window-pool wrapper (uses custom HIP kernel).
+// Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
+// input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
+// the per-window reduction: AVERAGE / MAX / LP.  When `has_indices=1` (MAX
+// only), also writes per-output flat int64 indices into the unpadded input.
+// `spatial_rank` selects how many of the three trailing axes
+// (in_*, out_*, k*, s*, p*, dil*) are read; unused slots must be 1
+// (kernel/dim) or 0 (pad).  `storage_order` and `ceil_mode` are pre-resolved
+// at compile time and accepted only for ABI completeness.  `count_include_pad`
+// is the AveragePool divisor selector; `p` is the LpPool norm exponent — both
+// are ignored for the modes that don't use them.
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
+              int64_t data_type, int64_t pool_mode, int64_t spatial_rank,
+              int64_t N, int64_t C, int64_t in0, int64_t in1, int64_t in2,
+              int64_t out0, int64_t out1, int64_t out2, int64_t k0, int64_t k1,
+              int64_t k2, int64_t s0, int64_t s1, int64_t s2, int64_t p0,
+              int64_t p1, int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+              int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
+              int64_t count_include_pad, int64_t p);
+// Resize wrapper (uses custom HIP kernel).
+// Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
+// pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
+// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
+// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
+// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// BFLOAT16, DOUBLE).
+
+int wrap_resize(RuntimeState *state, void *input, void *output,
+                int64_t data_type, int64_t spatial_rank, int64_t N, int64_t C,
+                int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+                int64_t out1, int64_t out2, int64_t mode,
+                int64_t coord_transform, int64_t nearest_mode);
+
+// Global pool wrapper (uses custom HIP kernel).
+// Treats the data as a flat [outer, reduce_size] matrix and writes one
+// reduced value per row into output. Covers ONNX GlobalAveragePool /
+// GlobalMaxPool / GlobalLpPool of any input rank >= 3:
+//   outer       = N * C                       (leading two input dims)
+//   reduce_size = D_1 * D_2 * ... * D_k       (product of spatial dims)
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
+// mode      : HIPDNN_EP_GLOBAL_POOL_* (AVERAGE / MAX / LP)
+// p         : LP-norm exponent; only consumed when mode == LP, otherwise
+//             ignored. ONNX spec requires `p >= 1`; values below that are
+//             rejected upstream during ONNX→HIP conversion.
+int wrap_global_pool(RuntimeState *state, void *input, void *output,
+                     int64_t outer, int64_t reduce_size, int64_t data_type,
+                     int64_t mode, int64_t p);
 
 // Rotary embedding operation wrapper.
 //
@@ -1052,6 +1203,8 @@ int wrap_size(RuntimeState *state, void *output, int64_t num_elements);
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
+int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
 // Element-wise division with 4D ONNX broadcast (rank <= 4, left-padded).

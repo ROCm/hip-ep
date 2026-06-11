@@ -13,7 +13,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 ## Features
 
 - **MLIR Compiler Pipeline**: ONNX dialect → HIP dialect → LLVM IR → native DLL
-- **MIOpen Integration**: Conv, Softmax, RMS Norm, Mul, Sigmoid, Softplus, CausalConvWithState via MIOpen library
+- **MIOpen Integration**: Conv, ConvTranspose, Softmax, RMS Norm, Mul, Sigmoid, Softplus, CausalConvWithState via MIOpen library
 - **hipBLASLt MatMul**: High-performance matrix multiplication
 - **Custom HIP Kernels**: GQA, RoPE, Cast, Sub, Gather, ReduceSum, Reciprocal, Sqrt, GELU, Range, LinearAttention
 - **Memory Pool Optimization**: `hip-pool-allocs` pass packs allocations into a single grow-on-demand buffer
@@ -28,6 +28,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Operation | Backend |
 |-----------|---------|
 | Conv | MIOpen |
+| ConvTranspose | MIOpen |
 | MatMul | hipBLASLt |
 | Mul | MIOpen |
 | Add | MIOpen |
@@ -71,6 +72,16 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | QMoE (com.microsoft) | Custom HIP Kernel |
 | LinearAttention (com.microsoft) | Custom HIP Kernel |
 | CausalConvWithState (com.microsoft) | MIOpen |
+| Relu | Decomposed → Max (MIOpen) |
+| LeakyRelu | Custom HIP Kernel |
+| Clip | Decomposed → Max + Min (MIOpen) |
+| MaxPool | Custom HIP Kernel |
+| AveragePool | Custom HIP Kernel |
+| LpPool | Custom HIP Kernel |
+| Resize | Custom HIP Kernel |
+| GlobalAveragePool | Custom HIP Kernel |
+| GlobalMaxPool | Custom HIP Kernel |
+| GlobalLpPool | Custom HIP Kernel |
 
 ### Compiler-Optimized Operations
 
@@ -88,6 +99,7 @@ These operations are handled through standard MLIR transformations without requi
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 | ConstantOfShape | arith.constant (compile-time fold) | Folds to a splat constant when the shape input is itself constant; honours optional `value` attribute |
 | Identity | SSA value forwarding | Pass-through op; the input value is wired directly to every user (equivalent to a full-range `memref.subview` view, but cheaper — no view op is materialised in the IR) |
+| Flatten | tensor.collapse_shape (+ tensor.expand_shape for axis = 0 / axis = r) | Reshapes rank-r input to rank-2; pure metadata reinterpretation. Dynamic dims supported. |
 
 ---
 

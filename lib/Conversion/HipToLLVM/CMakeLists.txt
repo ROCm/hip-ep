@@ -7,6 +7,7 @@ add_library(HipToLLVM STATIC
   HipToLLVM.cpp
   MemoryLowering.cpp
   ConvLowering.cpp
+  ConvTransposeLowering.cpp
   MatmulLowering.cpp
   ElementwiseLowering.cpp
   PowerLowering.cpp
@@ -43,6 +44,9 @@ add_library(HipToLLVM STATIC
   NonZeroLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
+  PoolLowering.cpp
+  ResizeLowering.cpp
+  GlobalPoolLowering.cpp
 )
 
 add_dependencies(HipToLLVM
@@ -59,4 +63,5 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRLLVMCommonConversion
   MLIRMemRefDialect
   MLIRTransforms
+  MLIRArithTransforms
 )
