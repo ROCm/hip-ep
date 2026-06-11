@@ -754,47 +754,46 @@ jobs:
       - name: Run OGA wheel smoke (Python)
         if: always()
         timeout-minutes: 40
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
 
-          MODEL_W='${{ runner.workspace }}\oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml'
-          if [ ! -d "$(cygpath -u "$MODEL_W")" ]; then echo "[SKIP] model not found: $MODEL_W"; exit 0; fi
+          $model = "${{ runner.workspace }}\oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+          if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
           # Fresh venv; install per quick_start (ROCm via --extra-index-url).
-          VENV="$PWD/oga-smoke-venv"
-          rm -rf "$VENV"
-          python -m venv "$VENV"
-          PY="$VENV/Scripts/python.exe"
-          cd "$PWD/gpu-test-package/wheels"
-          "$PY" -m pip install --quiet \
-            onnxruntime_directml-*.whl onnxruntime_morphizen_ep-*.whl onnxruntime_genai_directml-*.whl \
-            --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/
-          cd -
-          "$VENV/Scripts/rocm-sdk.exe" init   # expand rocm[devel] import libs
+          $venv = "$PWD\oga-smoke-venv"
+          if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
+          python -m venv $venv
+          $py = "$venv\Scripts\python.exe"
+          $w = "$PWD\gpu-test-package\wheels"
+          $whls = (Get-ChildItem "$w\onnxruntime_directml-*.whl", "$w\onnxruntime_morphizen_ep-*.whl", "$w\onnxruntime_genai_directml-*.whl").FullName
+          & $py -m pip install --quiet $whls --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
+          & "$venv\Scripts\rocm-sdk.exe" init   # expand rocm[devel] import libs
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] rocm-sdk init failed"; exit 1 }
 
-          # LIB/THEROCK_DIST feed the native JIT linker (MSYS does not convert
-          # them) -> Windows paths; PATH stays POSIX (MSYS converts it).
-          SP="$VENV/Lib/site-packages"
-          CAPI="$SP/onnxruntime/capi"
-          export THEROCK_DIST="$(cygpath -w "$SP/_rocm_sdk_devel")"
-          export LIB="$(cygpath -w "$CAPI")"
-          PATH="$CAPI:$PATH"
-          for d in "$SP"/_rocm_sdk_*/bin; do
-            [ -d "$d" ] && PATH="$d:$PATH"
-          done
-          export PATH
+          # THEROCK_DIST -> ROCm import libs; LIB -> capi (CRT + custom kernels);
+          # PATH -> capi (EP + hip-compiler) + rocm bins (runtime DLLs).
+          $sp = "$venv\Lib\site-packages"
+          $capi = "$sp\onnxruntime\capi"
+          $env:THEROCK_DIST = "$sp\_rocm_sdk_devel"
+          $env:LIB = $capi
+          $rocmBins = (Get-ChildItem $sp -Directory -Filter "_rocm_sdk_*" |
+            ForEach-Object { "$($_.FullName)\bin" } | Where-Object { Test-Path $_ }) -join ";"
+          $env:PATH = "$capi;$rocmBins;$env:PATH"
 
-          "$PY" -m pip install --quiet psutil tqdm   # benchmark_e2e.py deps
+          & $py -m pip install --quiet psutil tqdm   # benchmark_e2e.py deps
 
           # -e follow_config reads the provider from genai_config.json (populated
-          # by the OGA benchmark step above from genai_config_128.json). tee the
-          # output so the publish step can extract throughput (pipefail keeps the
-          # benchmark's exit status).
-          mkdir -p oga-smoke-results
-          "$PY" "$PWD/gpu-test-package/benchmark/benchmark_e2e.py" \
-            -i "$MODEL_W" -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v \
-            2>&1 | tee "oga-smoke-results/Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml.txt"
+          # by the OGA benchmark step above from genai_config_128.json). Tee the
+          # output so the publish step can extract throughput.
+          New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
+          & $py "$PWD\gpu-test-package\benchmark\benchmark_e2e.py" `
+            -i $model -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v `
+            2>&1 | Tee-Object -FilePath "oga-smoke-results\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml.txt"
+          exit $LASTEXITCODE
 
       # -----------------------------------------------------------------------
       # L2 accuracy test: compare MorphiZen EP vs CPU output for each model
