@@ -39,4 +39,13 @@ module {
   // CHECK: tensor.dim
   // CHECK: tensor.empty({{.*}}) : tensor<?x?xf32>
   // CHECK: hip.div(%[[CTX3]]) ins(%[[A3]], %[[B3]] : tensor<?x?xf32>, tensor<?x?xf32>) outs({{.*}} : tensor<?x?xf32>)
+
+  func.func @div_broadcast_i64(%a: tensor<1xi64>, %b: tensor<32xi64>) -> tensor<32xi64> {
+    %result = "onnx.Div"(%a, %b) : (tensor<1xi64>, tensor<32xi64>) -> tensor<32xi64>
+    return %result : tensor<32xi64>
+  }
+
+  // CHECK-LABEL: func.func @div_broadcast_i64
+  // CHECK: tensor.empty() : tensor<32xi64>
+  // CHECK: hip.div(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1xi64>, tensor<32xi64>) outs({{.*}} : tensor<32xi64>)
 }

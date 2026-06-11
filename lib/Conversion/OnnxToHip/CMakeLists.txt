@@ -23,6 +23,7 @@ add_library(OnnxToHip STATIC
   MultiHeadAttentionConversion.cpp
   GatherConversion.cpp
   GatherShapeFold.cpp
+  ReshapeShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
