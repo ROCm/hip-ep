@@ -49,6 +49,8 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
   json << ", \"output_mode\": \"DLL\"";
   json << ", \"skip_constant_data\": "
        << (config.skipConstantData ? "true" : "false");
+  json << ", \"use_output_allocator\": "
+       << (config.useOutputAllocator ? "true" : "false");
   json << "}";
   return json.str();
 }
