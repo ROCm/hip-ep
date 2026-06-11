@@ -868,6 +868,26 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_global_pool(RuntimeState *state, void *input, void *output,
+                     int64_t outer, int64_t reduce_size, int64_t data_type,
+                     int64_t mode, int64_t p) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_global_pool\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_global_pool(mode=%s(%lld), p=%lld, outer=%lld, "
+             "reduce_size=%lld, data_type=%s(%lld), elem_size=%lld, in=%s, "
+             "out=%s)\n",
+             hipdnn_ep_global_pool_mode_name(mode), (long long)mode,
+             (long long)p, (long long)outer, (long long)reduce_size,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)hipdnn_ep_datatype_size(data_type),
+             input ? "yes" : "null", output ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
