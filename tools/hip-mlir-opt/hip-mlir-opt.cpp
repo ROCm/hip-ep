@@ -90,8 +90,49 @@ struct HipDstBufferizableModel
   }
 };
 
+// Bufferization model for the non-DPS hip.readback_dim op (mirror of the
+// canonical one in HipBufferize.h). Reads the scalar tensor operand to its
+// memref buffer; the `index` result passes through unchanged.
+struct HipReadbackDimBufferizableModel
+    : public mlir::bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackDimBufferizableModel, mlir::hip::ReadbackDimOp> {
+  bool
+  bufferizesToMemoryRead(mlir::Operation *, mlir::OpOperand &,
+                         const mlir::bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool
+  bufferizesToMemoryWrite(mlir::Operation *, mlir::OpOperand &,
+                          const mlir::bufferization::AnalysisState &) const {
+    return false;
+  }
+  mlir::bufferization::AliasingValueList
+  getAliasingValues(mlir::Operation *, mlir::OpOperand &,
+                    const mlir::bufferization::AnalysisState &) const {
+    return {};
+  }
+  mlir::LogicalResult
+  bufferize(mlir::Operation *op, mlir::RewriterBase &rewriter,
+            const mlir::bufferization::BufferizationOptions &options,
+            mlir::bufferization::BufferizationState &state) const {
+    auto readback = mlir::cast<mlir::hip::ReadbackDimOp>(op);
+    mlir::FailureOr<mlir::Value> scalarBuf =
+        getBuffer(rewriter, readback.getScalar(), options, state);
+    if (mlir::failed(scalarBuf))
+      return mlir::failure();
+    auto newOp = mlir::hip::ReadbackDimOp::create(
+        rewriter, op->getLoc(), rewriter.getIndexType(), readback.getCtx(),
+        *scalarBuf);
+    mlir::bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                       newOp.getResult());
+    return mlir::success();
+  }
+};
+
 void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
   registry.addExtension(+[](mlir::MLIRContext *ctx, mlir::hip::HipDialect *) {
+    mlir::hip::ReadbackDimOp::attachInterface<HipReadbackDimBufferizableModel>(
+        *ctx);
     mlir::hip::ConvOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ConvOp>>(*ctx);
     mlir::hip::ConvTransposeOp::attachInterface<
