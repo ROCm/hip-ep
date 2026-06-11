@@ -44,6 +44,7 @@ add_library(HipToLLVM STATIC
   SizeLowering.cpp
   LoopLowering.cpp
   PoolLowering.cpp
+  ResizeLowering.cpp
   GlobalPoolLowering.cpp
 )
 
