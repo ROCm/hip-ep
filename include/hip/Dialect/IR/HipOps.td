@@ -1149,6 +1149,38 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
+def Hip_MaxOp : Hip_DpsOp<"max"> {
+  let summary = "Elementwise maximum";
+  let description = [{
+    Performs elementwise maximum: output = max(lhs, rhs)
+
+    Supports multidirectional (NumPy-style) broadcasting via MIOpen's
+    miopenOpTensor with miopenTensorOpMax.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.max(%ctx) ins(%lhs, %rhs : memref<3xf32, 1>,
+                                   memref<3xf32, 1>)
+                  outs(%output : memref<3xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax",
                                     /*traits=*/[],
                                     /*outsAccessor=*/"Output",
@@ -1382,6 +1414,38 @@ def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<StrAttr, "\"none\"">:$approximate
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
+  let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
+  let description = [{
+    Applies LeakyRelu activation element-wise.
+    Implements the ONNX LeakyRelu operator.
+
+    Formula: Y = X if X >= 0, else alpha * X
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.leaky_relu(%ctx) ins(%x : memref<3x4xf32, 1>)
+                         outs(%y : memref<3x4xf32, 1>)
+                         {alpha = 0.01 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F64Attr, "0.01">:$alpha
   );
 
   let assemblyFormat = [{

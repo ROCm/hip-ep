@@ -358,6 +358,31 @@ int hip_elementwise_gelu(
     int64_t approximate);
 
 /* =========================================================================
+ * LeakyRelu Activation
+ * =========================================================================
+ *
+ * Applies LeakyRelu element-wise: y = x >= 0 ? x : alpha * x
+ *
+ * Parameters:
+ *   stream       - HIP stream (cast to hipStream_t internally)
+ *   input        - Device pointer to input tensor
+ *   output       - Device pointer to output tensor
+ *   num_elements - Total number of elements
+ *   hip_dtype    - Data type enum (HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ *                  HIP_DTYPE_FLOAT64)
+ *   alpha        - Slope for negative values (default 0.01 per ONNX spec)
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_leaky_relu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype,
+    double alpha);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *
