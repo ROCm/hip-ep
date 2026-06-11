@@ -120,6 +120,13 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
+  // Per-state device scratch holding the data-dependent NonZero count (a single
+  // int32). wrap_nonzero uses this when the caller passes count_ptr == nullptr
+  // (the in-graph lowering does, since the count is consumed GPU-side and never
+  // needs to be an explicit IR value). Allocated lazily on first NonZero call
+  // (fixed 4 bytes; never grows); hipFree'd in cleanup.
+  void *nonzero_count_scratch;
+
   // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
   // Caches hipBLASLt descriptors + algorithms by GEMM shape.
   void *gqa_gemm_cache;
