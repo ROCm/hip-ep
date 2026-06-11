@@ -2645,6 +2645,52 @@ def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
   }];
 }
 
+def Hip_GlobalPoolOp : Hip_DpsOp<"global_pool"> {
+  let summary = "Global pooling over spatial dimensions (average / max / lp)";
+  let description = [{
+    Unified lowering for ONNX GlobalAveragePool / GlobalMaxPool / GlobalLpPool.
+    For an input of shape `(N, C, D_1, D_2, ..., D_k)`, produces an output of
+    shape `(N, C, 1, 1, ..., 1)` (same rank as input). Each output element is
+    a per-`(n, c)` reduction across all spatial elements; `mode` selects the
+    reduction:
+
+      * mode=0 (AVERAGE): Y = mean(X[n, c, *...])
+      * mode=1 (MAX)    : Y = max(X[n, c, *...])
+      * mode=2 (LP)     : Y = pow(sum(pow(|X[n, c, *...]|, p)), 1/p)
+                          (LP norm; `p` defaults to 2)
+
+    Both input and output rank must be >= 3 (i.e. at least one spatial dim);
+    the dimensions at positions 0 (N) and 1 (C) are passthrough, and every
+    spatial dimension in the output is 1.
+
+    The `p` attribute is only meaningful when `mode == 2` (LP); for AVERAGE
+    and MAX it is ignored by the runtime.
+
+    Uses destination-passing style: the output buffer is provided.
+
+    Example:
+    ```mlir
+    hip.global_pool(%ctx) ins(%x : memref<1x3x5x5xf32, 1>)
+                          outs(%y : memref<1x3x1x1xf32, 1>)
+                          {mode = 0 : i64, p = 2 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    DefaultValuedAttr<I64Attr, "2">:$p
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
   let summary = "Reduce tensor by multiplying elements along axes";
   let description = [{
