@@ -63,8 +63,9 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   // The ownership-based buffer-deallocation pass walks arith ops (e.g.
   // arith.select on buffers, present in hybrid/MoE graphs). Without this
-  // external model the pass fatal-errors: "interface BufferDeallocationOpInterface
-  // promised by dialect 'arith' but never implemented".
+  // external model the pass fatal-errors: "interface
+  // BufferDeallocationOpInterface promised by dialect 'arith' but never
+  // implemented".
   mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
