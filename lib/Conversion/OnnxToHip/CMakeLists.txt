@@ -33,6 +33,7 @@ add_library(OnnxToHip STATIC
   RangeConversion.cpp
   FastGeluFusion.cpp
   ProjectorOpsRewrites.cpp
+  LpNormalizationConversion.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp
