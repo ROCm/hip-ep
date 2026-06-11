@@ -32,6 +32,7 @@ add_library(OnnxToHip STATIC
   LinearAttentionConversion.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
+  ErfGeluFusion.cpp
   ProjectorOpsRewrites.cpp
   EqualConversion.cpp
   DivConversion.cpp
