@@ -313,6 +313,16 @@ void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
 void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 
+/// Pre-lowering pattern set: decompose `onnx.Pow(x, c)` (constant scalar
+/// exponent c, optionally wrapped in `onnx.Cast`/`onnx.CastLike`) into ONNX
+/// primitives (`onnx.Mul` / `onnx.Sqrt` / `onnx.Reciprocal`), which then flow
+/// through their own ONNX→HIP converters in `convertComputeOps`. Must run
+/// BEFORE `lowerOnnxConstants` because production builds externalize every
+/// `onnx.Constant` (incl. 1-element scalars) into a memref.global with the
+/// value moved to the constants sidecar — at that point the exponent is no
+/// longer recoverable from IR. See PowerConversion.cpp.
+void populatePowDecompositionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 /// Pre-lowering pattern set: collapse the inlined erf-form `Gelu` primitive
 /// chain (Div / Erf / Sum / Mul, optionally wrapped in CastLike scalars and
 /// `Sqrt(2.0)`) back into a single `onnx.Gelu(approximate="none")`. Some
