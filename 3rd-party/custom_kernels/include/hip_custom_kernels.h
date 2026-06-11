@@ -44,6 +44,8 @@ typedef enum {
     HIP_DTYPE_FLOAT64  = 4,
     HIP_DTYPE_BFLOAT16 = 5,
     HIP_DTYPE_INT16    = 6,
+    HIP_DTYPE_UINT8    = 7,
+    HIP_DTYPE_INT8     = 8,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -166,20 +168,58 @@ int hip_elementwise_not(
     int64_t num_elements);
 
 /* =========================================================================
- * Elementwise Binary (Div / Mod / Equal / Less)
+ * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
  * =========================================================================
  *
- * Same-shape binary elementwise ops added for the Qwen3.5 vision model.
- * All four share a single .hip TU (elementwise_binary_kernel.hip).
+ * Same-shape binary elementwise ops. All eight share one translation unit:
+ * 3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip.
  *
- * Important: broadcasting is NOT performed in these kernels. lhs and rhs
- * must already have identical shape (broadcasting is materialised
- * upstream via Expand).
+ * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
+ * miopenOpTensor rejects the element type (notably INT32/INT64). Float
+ * dtypes still use MIOpen for performance and autotuning.
  *
- * Output dtype for Equal/Less is bool (1 byte); their hip_dtype refers to
- * the INPUT type. For Div/Mod, output dtype matches input dtype.
+ * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
+ * Less write bool (1 byte); their hip_dtype refers to the input element type.
+ * Div and Mod preserve the input dtype.
+ *
+ * Broadcasting is not performed in these kernels. lhs and rhs must already
+ * match in shape; upstream Expand / broadcast materialization is required.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
 int hip_elementwise_div(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_mul(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_add(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_min(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_max(
     void* stream,
     const void* lhs,
     const void* rhs,
@@ -196,12 +236,23 @@ int hip_elementwise_mod(
     int hip_dtype,
     int fmod_flag);
 
+/*
+ * Element-wise Equal with optional scalar broadcast.
+ *
+ * `lhs_num_elements` / `rhs_num_elements` may each be 1 (scalar broadcast)
+ * or equal to `out_num_elements` (no broadcast). Other mismatches are
+ * rejected by the host wrapper.
+ *
+ * Output type is always uint8 (1-byte bool).
+ */
 int hip_elementwise_equal(
     void* stream,
     const void* lhs,
     const void* rhs,
     void* output,
-    int64_t num_elements,
+    int64_t lhs_num_elements,
+    int64_t rhs_num_elements,
+    int64_t out_num_elements,
     int hip_dtype);
 
 int hip_elementwise_less(
@@ -453,6 +504,13 @@ int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
+/* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer.
+ * One block per row, softmaxes the `cols` elements of each row in-place
+ * (data is overwritten with normalized probabilities). Matches ONNX
+ * Softmax semantics for axis = -1 on the flattened input. Used by the
+ * standalone `hip_miopen_softmax` runtime entry point. */
+int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
@@ -569,7 +627,10 @@ int hip_cast(
  *   output_num_elements  - total elements in output tensor
  *   element_size_bytes   - byte size per element (used for raw copy)
  *
- * Currently supports: axis=0
+ * Generic axis support. data has logical shape [outer, axis_size, inner];
+ * output has logical shape [outer, indices_num, inner]. The caller computes
+ * axis_size = data.shape[axis] and inner_size = product(data.shape[axis+1:]);
+ * outer_size is derived as data_num / (axis_size * inner_size).
  * Supported element sizes: 2 (f16/bf16), 4 (f32/i32), 8 (i64/f64)
  * Returns: 0 on success, non-zero on failure
  */
@@ -582,6 +643,8 @@ int hip_gather(
     int64_t data_num_elements,
     int64_t indices_num_elements,
     int64_t output_num_elements,
+    int64_t axis_size,
+    int64_t inner_size,
     int element_size_bytes);
 
 /* =========================================================================
@@ -772,7 +835,19 @@ int hip_slice(
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,
+    const int64_t* output_shape_host,     /* physical alloc shape       */
+    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
+                                             may be NULL, in which case the
+                                             kernel treats it as identical to
+                                             output_shape_host (i.e. no
+                                             over-alloc; entire physical
+                                             buffer is filled by the slice).
+                                             When set and logical[d] <
+                                             output_shape[d] for some d,
+                                             positions in the over-allocated
+                                             tail are filled with zero — the
+                                             host wrapper does not need to
+                                             pre-memset the buffer.        */
     const int64_t* starts_per_axis_host,  /* length = rank */
     const int64_t* steps_per_axis_host,   /* length = rank */
     int rank,
@@ -814,11 +889,41 @@ int hip_scatter_nd(
     const void* indices,
     const void* updates,
     void* output,
+    const int32_t* count_ptr,
     const int64_t* data_shape_host,
     int data_rank,
     const int64_t* indices_shape_host,
     int indices_rank,
     int reduction_id,
+    int hip_dtype);
+
+/* =========================================================================
+ * NonZero
+ * =========================================================================
+ *
+ * Single-pass atomic kernel: each thread checks one element. If nonzero,
+ * atomicAdd on count_ptr gives the write position, then coordinates are
+ * written into output[rank, capacity] at stride = capacity.
+ *
+ * count_ptr is zeroed by the launcher before the kernel. After completion,
+ * *count_ptr holds the actual number of nonzero elements (on GPU — no D2H
+ * needed; downstream ops read it directly).
+ *
+ * input_dims_host: host pointer to int64_t[rank] holding the input
+ * shape (copied to device internally before the kernel launch).
+ *
+ * Supported dtypes: f16, f32, i32, i64, i8, u8.
+ * Bounded to rank <= 8.
+ */
+int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    int* count_ptr,
+    int64_t input_num_elements,
+    int64_t input_rank,
+    const int64_t* input_dims_host,
+    int64_t output_capacity,
     int hip_dtype);
 
 /* =========================================================================

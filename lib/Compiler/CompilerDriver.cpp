@@ -217,6 +217,13 @@ bool CompilerDriver::runMLIRPasses(
   onnxToHipOpts.externalizeMinNumElements =
       mlir::hip::kDefaultExternalizeMinNumElements;
   onnxToHipOpts.skipConstantData = options.skip_constant_data;
+  // Allocator mode is selected once, here, on the OnnxToHip half: when set, the
+  // slot-4.5 pair (hip-use-output-allocator + hip-set-output-allocator-attr)
+  // runs in the OnnxToHip tail and stamps the `hipdnn.output_allocator` module
+  // attribute. The HipToLLVM half (convert-hip-to-llvm + generate-interface)
+  // reads that attribute off the IR, so it needs no separate flag -- the mode
+  // rides on the module, keeping the two halves from ever disagreeing.
+  onnxToHipOpts.useOutputAllocator = options.use_output_allocator;
 
   if (hipdnnHandle_) {
     compiledGraphs_ =
