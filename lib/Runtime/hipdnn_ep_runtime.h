@@ -893,7 +893,7 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
 // alpha: slope for negative values (default 0.01 per ONNX spec)
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha);
-  
+
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
 // input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
