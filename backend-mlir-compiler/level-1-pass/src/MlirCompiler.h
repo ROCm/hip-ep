@@ -32,6 +32,11 @@ struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
   bool skipConstantData = true;
+  // When true, compile in output-allocator mode (2-arg inference_compute +
+  // in-graph hip.alloc_output). Sourced from the `use_output_allocator`
+  // provider option; the SAME value is written into the model metadata so the
+  // EP's dispatch arity always agrees with the compiled DLL's ABI.
+  bool useOutputAllocator = false;
 };
 
 // Compiled artifact (bytes + metadata)

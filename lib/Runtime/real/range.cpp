@@ -11,7 +11,11 @@
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype) {
   if (!state || !start || !limit || !delta || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_range: null argument\n");
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_range: null argument (state=%p start=%p limit=%p "
+        "delta=%p output=%p output_num_elements=%lld hip_dtype=%lld)\n",
+        (void *)state, start, limit, delta, output,
+        (long long)output_num_elements, (long long)hip_dtype);
     return -1;
   }
 
