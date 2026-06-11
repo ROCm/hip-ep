@@ -869,7 +869,7 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
                 int64_t axis_size, int64_t inner_size,
-                int64_t element_size_bytes);
+                int64_t element_size_bytes, int64_t indices_element_size_bytes);
 
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
