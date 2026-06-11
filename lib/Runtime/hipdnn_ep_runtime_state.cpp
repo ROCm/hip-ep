@@ -983,7 +983,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
   }
 
-  // Free wrap_conv1d MIOpen workspace pool (if allocated). The stream
+  // Free the MIOpen convolution workspace pool (if allocated). The stream
   // sync above has drained any in-flight conv that may still be reading it.
   if (state->conv_scratch) {
     HIP_CLEANUP(hipFree(state->conv_scratch));
@@ -1571,7 +1571,7 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
   return 0;
 }
 
-// wrap_conv1d MIOpen workspace pool. Same grow-on-demand policy as qmoe_scratch
+// MIOpen convolution workspace pool. Same grow-on-demand policy as qmoe_scratch
 // above. Single-buffer reuse is safe because the stream is serialised: the
 // next conv only launches after the previous miopenConvolutionForward (+ bias
 // add) has consumed the workspace.

@@ -9,15 +9,10 @@ front-end shapes:
   Conv layer 0: Cin=128,  Cout=1280, K=3, stride=1, pad=1 -> [1, 1280, 3000]
   Conv layer 1: Cin=1280, Cout=1280, K=3, stride=2, pad=1 -> [1, 1280, 1500]
 
-Both layers carry per-channel bias. The MorphiZen path reinterprets NCL as
-NCHW with H=1 and dispatches to MIOpen's 4D convolution (wrap_conv1d, Task
-3 in the whisper plan).
-
-Until Task 4 wires the ONNX->HIP conversion that lowers rank-3 onnx.Conv
-to hip.conv1d, these tests are expected to FAIL (no ConvConversion
-pattern -> the model lands on the CPU fallback or fails to compile). They
-are committed in Task 3 so the test surface is in place when Task 4
-lands.
+Both layers carry per-channel bias. The MorphiZen path lowers rank-3
+onnx.Conv to the shared 2D hip.conv via a unit-H reshape (NCL -> NC1L ->
+hip.conv -> NCL'), dispatching to MIOpen's 4D convolution
+(wrap_miopenConvolutionForward, now dtype + bias + scratch-pool aware).
 """
 
 import numpy as np
@@ -95,11 +90,10 @@ class TestWhisperConv1d:
 class TestWhisperConv1dFp32:
     """fp32 variants of the whisper encoder Conv shapes.
 
-    The fully-fp32 GPU path is needed because all-fp16 greedy transcription is
-    argmax-lossy (see CLAUDE.md "Whisper fp16 pipeline is argmax-lossy"). conv1d
-    is one of the two remaining fp16-only ops; this exercises the fp32 MIOpen
-    descriptor path (element_size_bytes=4 -> miopenFloat). fp32 accumulation is
-    tighter than fp16, so tolerances are much smaller and cosine should be ~1.0.
+    Exercises the fp32 MIOpen descriptor path of the shared 2D conv kernel
+    (element_size_bytes=4 -> miopenFloat) via the rank-3 reshape lowering.
+    fp32 accumulation is tighter than fp16, so tolerances are much smaller and
+    cosine should be ~1.0.
     """
 
     def test_layer0_cin128_cout1280_k3_s1_fp32(self, model_runner):
