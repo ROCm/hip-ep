@@ -899,7 +899,7 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
               int64_t p1, int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
               int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
               int64_t count_include_pad, int64_t p);
-  
+
 // Global pool wrapper (uses custom HIP kernel).
 // Treats the data as a flat [outer, reduce_size] matrix and writes one
 // reduced value per row into output. Covers ONNX GlobalAveragePool /
