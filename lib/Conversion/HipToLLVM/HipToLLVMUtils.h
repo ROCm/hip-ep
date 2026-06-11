@@ -97,6 +97,7 @@ inline constexpr const char *kWrapPad = "wrap_pad";
 inline constexpr const char *kWrapTile = "wrap_tile";
 inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
+inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapResize = "wrap_resize";
 inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
 inline constexpr const char *kWrapLess = "wrap_less";
@@ -123,6 +124,12 @@ inline constexpr int64_t kActivationRelu = 1;
 inline constexpr int64_t kActivationTanh = 2;
 inline constexpr int64_t kActivationSoftplus = 3;
 
+// Window-pool reduction mode constants (hip.pool / wrap_pool).
+// Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
+// and the `pool_mode` constants used in OnnxToHip/PoolConversion.cpp.
+inline constexpr int64_t kPoolAverage = 0;
+inline constexpr int64_t kPoolMax = 1;
+inline constexpr int64_t kPoolLp = 2;
 // Global-pool reduction mode constants.
 // Values must match HIPDNN_EP_GLOBAL_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
 // and the `mode` constants used in OnnxToHip/GlobalPoolConversion.cpp.
@@ -407,6 +414,8 @@ void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
