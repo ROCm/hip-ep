@@ -904,7 +904,7 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
              (long long)ceil_mode, (long long)has_indices,
              (long long)count_include_pad, (long long)p, input ? "yes" : "null",
              output ? "yes" : "null", indices ? "yes" : "null");
-    return 0;
+  return 0;
 }
 
 int wrap_resize(RuntimeState *state, void *input, void *output,

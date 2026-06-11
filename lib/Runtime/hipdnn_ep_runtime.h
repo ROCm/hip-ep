@@ -906,7 +906,7 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
 // (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
 // string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
 // BFLOAT16, DOUBLE).
-  
+
 int wrap_resize(RuntimeState *state, void *input, void *output,
                 int64_t data_type, int64_t spatial_rank, int64_t N, int64_t C,
                 int64_t in0, int64_t in1, int64_t in2, int64_t out0,
