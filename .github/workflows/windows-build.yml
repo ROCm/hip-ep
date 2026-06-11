@@ -809,10 +809,11 @@ jobs:
           python -m venv $venv
           $py = "$venv\Scripts\python.exe"
 
-          # Install fully offline from the bundled wheel closure (ROCm + ORT/OGA
-          # deps + benchmark deps all present), then expand rocm[devel] libs.
+          # Install project + ROCm wheels offline, then benchmark deps from PyPI.
           $whls = (Get-ChildItem "$pkg\wheels\onnxruntime_directml-*.whl", "$pkg\wheels\onnxruntime_morphizen_ep-*.whl", "$pkg\wheels\onnxruntime_genai_directml-*.whl").FullName
-          & $py -m pip install --quiet --no-index --find-links "$pkg\wheels" $whls psutil tqdm pandas
+          & $py -m pip install --quiet --no-index --find-links "$pkg\wheels" $whls
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
+          & $py -m pip install --quiet psutil tqdm pandas
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
           & "$venv\Scripts\rocm-sdk.exe" init   # expand rocm[devel] import libs
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] rocm-sdk init failed"; exit 1 }
