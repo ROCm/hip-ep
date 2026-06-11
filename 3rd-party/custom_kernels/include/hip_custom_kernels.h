@@ -1217,6 +1217,14 @@ HIP_KERNEL_API int hip_layer_norm(
     int hip_dtype,
     int mean_dtype);
 
+/* SiLU / swish: y = x * sigmoid(x). fp32 math; hip_dtype FLOAT16 or FLOAT32. */
+int hip_silu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 /* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================

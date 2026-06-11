@@ -318,7 +318,10 @@ struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
   }
 };
 
-// hip.silu(handle, input, output)
+// hip.silu(ctx) ins(input) outs(output)
+//   -> wrap_silu(state, input, output, num_elements, element_size_bytes)
+// (Previously called a 3-arg "hip_silu" with no size/dtype -- never linkable;
+// hip.silu had no kernel until SiluFusion started emitting it.)
 struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -327,20 +330,44 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
     Type ptrType = getPtrType();
 
-    SmallVector<Type> paramTypes(3, ptrType);
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipSilu, paramTypes, voidType);
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    Value numElements = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
+      Value dimSize =
+          outputType.isDynamicDim(dimIdx)
+              ? outputDesc.size(rewriter, loc, dimIdx)
+              : LLVM::ConstantOp::create(
+                    rewriter, loc, i64Type,
+                    rewriter.getI64IntegerAttr(outputType.getDimSize(dimIdx)));
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
+    }
+
+    unsigned elemBytes =
+        outputType.getElementType().getIntOrFloatBitWidth() / 8;
+    Value elemSizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
+
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                    i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapSilu, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        adaptor.getCtx(),
-        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};
-
+    SmallVector<Value> args = {statePtr, inputPtr, outputPtr, numElements,
+                               elemSizeVal};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

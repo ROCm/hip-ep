@@ -1111,6 +1111,10 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
                              int64_t element_size_bytes, int64_t axis,
                              float epsilon, int64_t stash_type);
 
+// SiLU / swish activation wrapper: output = input * sigmoid(input)
+int wrap_silu(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t element_size_bytes);
+
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma

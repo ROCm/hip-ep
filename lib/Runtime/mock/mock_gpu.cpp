@@ -1098,6 +1098,17 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
   return 0;
 }
 
+int wrap_silu(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t element_size_bytes) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_silu\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_silu(num_elements=%lld, element_size=%lld)\n",
+             (long long)num_elements, (long long)element_size_bytes);
+  return 0;
+}
+
 int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
                                   void *input, void *scale, void *output,
                                   int64_t input_num_elements,

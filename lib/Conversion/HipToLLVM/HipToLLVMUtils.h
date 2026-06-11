@@ -64,6 +64,7 @@ inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kHipSilu = "hip_silu";
+inline constexpr const char *kWrapSilu = "wrap_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward";                   // hip.sigmoid
 inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
