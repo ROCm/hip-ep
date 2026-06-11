@@ -3071,6 +3071,84 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
   }];
 }
 
+def Hip_PoolOp : Hip_DpsOp<"pool"> {
+  let summary = "Spatial pooling (ONNX MaxPool / AveragePool / LpPool)";
+  let description = [{
+    Unified window pooling for ONNX MaxPool / AveragePool / LpPool. For an
+    input of shape `(N, C, D_1, D_2, ..., D_k)` (rank = 2 + spatial_rank,
+    with spatial_rank in {1, 2, 3}) reduces each sliding window described by
+    `kernel_shape`, `strides`, `pads`, and `dilations` into a single output
+    element. Output shape is `(N, C, O_1, ..., O_k)`.
+
+    `pool_mode` selects the per-window reduction (values mirror
+    HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h):
+
+      * pool_mode=0 (AVERAGE): Y = mean over the window
+      * pool_mode=1 (MAX)    : Y = max over the window
+      * pool_mode=2 (LP)     : Y = pow(sum(pow(|x|, p)), 1/p)
+
+    Pad positions are never read (they fall outside the input bounds). For
+    AVERAGE, `count_include_pad` selects the divisor: 0 = number of in-bounds
+    window elements, 1 = full kernel volume (pad cells contribute 0 to the
+    sum). For LP, `p` is the norm exponent (>= 1). For MAX, both attributes
+    are ignored.
+
+    Only MAX may produce a second output `Indices` of element type i64
+    holding the flattened input index of each selected element (per the ONNX
+    spec, indices are a flat 1-D tensor of size `N * C * D_1 * ... * D_k`,
+    ignoring padding). AVERAGE / LP always have exactly one output.
+
+    Attributes:
+    - pool_mode:    0 = AVERAGE, 1 = MAX, 2 = LP
+    - kernel_shape: spatial kernel dims (length = spatial_rank)
+    - strides:      spatial strides (length = spatial_rank)
+    - pads:         [x1_begin, ..., xk_begin, x1_end, ..., xk_end]
+    - dilations:    spatial dilations (length = spatial_rank)
+    - ceil_mode:    0 = floor (default), 1 = ceil  (already absorbed into
+                    output shape at compile time; passed through for
+                    runtime debugging)
+    - storage_order: 0 = row-major (default). 1 (column-major) is not
+                    supported and rejected at conversion time. MAX only.
+    - count_include_pad: AVERAGE divisor selector (default 0). AVERAGE only.
+    - p:            LP norm exponent (default 2). LP only.
+
+    Uses destination-passing style: the output buffer (and optional indices
+    buffer) are provided as Variadic `outputs`.
+
+    Example (2D MaxPool, with indices):
+    ```mlir
+    hip.pool(%ctx) ins(%x : memref<1x3x32x32xf16, 1>)
+                   outs(%y, %idx : memref<1x3x16x16xf16, 1>,
+                                   memref<1x3x16x16xi64, 1>)
+                   {pool_mode = 1, kernel_shape = [2, 2], strides = [2, 2],
+                    pads = [0, 0, 0, 0], dilations = [1, 1],
+                    ceil_mode = 0, storage_order = 0,
+                    count_include_pad = 0, p = 2}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I64Attr:$pool_mode,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$ceil_mode,
+    I64Attr:$storage_order,
+    DefaultValuedAttr<I64Attr, "0">:$count_include_pad,
+    DefaultValuedAttr<I64Attr, "2">:$p
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{

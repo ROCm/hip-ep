@@ -58,6 +58,7 @@ add_library(OnnxToHip STATIC
   SizeConversion.cpp
   NonZeroConversion.cpp
   ConcatConversion.cpp
+  PoolConversion.cpp
   ResizeConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
