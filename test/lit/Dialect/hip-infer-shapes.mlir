@@ -856,19 +856,21 @@ func.func @refine_layer_norm_variadic_three_outs(
 // dependent shapes.
 // CHECK-LABEL: func.func @refine_nonzero_data_dependent_dim1
 // CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xi64>
-// CHECK:         %[[Y:.*]] = hip.nonzero
-// CHECK-SAME:      outs(%[[E]] : tensor<?x?xi64>){{.*}}: tensor<?x?xi64>
-// CHECK:         return %[[Y]] : tensor<?x?xi64>
+// CHECK:         %[[C:.*]] = tensor.empty() : tensor<i32>
+// CHECK:         %[[Y:.*]]:2 = hip.nonzero
+// CHECK-SAME:      outs(%[[E]], %[[C]] : tensor<?x?xi64>, tensor<i32>){{.*}}: tensor<?x?xi64>, tensor<i32>
+// CHECK:         return %[[Y]]#0 : tensor<?x?xi64>
 func.func @refine_nonzero_data_dependent_dim1(
     %ctx: !hip.context,
     %x: tensor<3x4xf16>,
     %d0: index, %d1: index)
     -> tensor<?x?xi64> {
   %e = tensor.empty(%d0, %d1) : tensor<?x?xi64>
-  %y = hip.nonzero(%ctx) ins(%x : tensor<3x4xf16>)
-                          outs(%e : tensor<?x?xi64>)
+  %c = tensor.empty() : tensor<i32>
+  %y, %cnt = hip.nonzero(%ctx) ins(%x : tensor<3x4xf16>)
+                          outs(%e, %c : tensor<?x?xi64>, tensor<i32>)
                           {input_data_type = 1 : i64}
-                          : tensor<?x?xi64>
+                          : tensor<?x?xi64>, tensor<i32>
   return %y : tensor<?x?xi64>
 }
 

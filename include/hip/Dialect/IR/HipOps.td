@@ -3189,7 +3189,7 @@ def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
 
 def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
                               /*autoReify=*/1,
-                              /*autoInfer=*/1, /*declareInfer=*/1> {
+                              /*autoInfer=*/0, /*declareInfer=*/0> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
   let description = [{
     Implements the standard ONNX NonZero operator (opset 13+):
@@ -3200,16 +3200,26 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
     `y` has shape `[R, N]` of element type `i64`, where `R` is the input
     rank and `N` is the (data-dependent) number of non-zero elements.
     The `N` dimension is represented as `?` in MLIR; the compiler
-    over-allocates using `numel(x)` as the upper bound (since the input
-    has fully static shape).
+    over-allocates `y` using `numel(x)` as the upper-bound *capacity*
+    (`N` columns beyond the true count are left undefined).
 
-    Uses destination-passing style: the output buffer is provided as
-    argument.
+    The true count `N` is data-dependent and only known once the kernel
+    has scanned the input, so the op also takes a second destination
+    `count` (a device `i32` scalar buffer) that the kernel writes with
+    the actual number of non-zero elements. Downstream code reads it back
+    to the host via `hip.readback_dim` and slices `y` to `[R, N]` so the
+    real extent (not the capacity) flows to consumers and to the
+    ORT-reported output shape. Two destinations means the op is
+    multi-result (`y`, `count`); like the other multi-output DPS ops it
+    keeps `autoInfer=0` (converters pass explicit result types).
+
+    Uses destination-passing style: both output buffers are provided as
+    arguments.
 
     Example:
     ```mlir
     hip.nonzero(%ctx) ins(%x : memref<3x4xf16, 1>)
-                      outs(%y : memref<2x?xi64, 1>)
+                      outs(%y, %count : memref<2x?xi64, 1>, memref<i32, 1>)
                       {input_data_type = 1 : i64}
     ```
   }];
@@ -3218,12 +3228,13 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$x,
     Hip_TensorOrMemRef:$y,
+    Hip_TensorOrMemRef:$count,
     I64Attr:$input_data_type
   );
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
-    `outs` `(` $y `:` type($y) `)`
+    `outs` `(` $y `,` $count `:` type($y) `,` type($count) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
@@ -3355,4 +3366,47 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   }];
 }
 
+// hip.readback_dim : materialize a kernel-computed runtime extent as a host
+// `index`. It synchronizes the stream so the producing kernel has finished,
+// then reads back a single device-resident integer `scalar`.
+//
+// This is the host-side half of the data-dependent dynamic-shape lowering: a
+// kernel writes a runtime extent (a count, valid-length, selected-element
+// tally, ...) into a small device buffer, and `readback_dim` turns it into a
+// host `index` that can size a `tensor.extract_slice`, `tensor.empty`, or
+// `hip.alloc_output`.
+//
+// It is deliberately not `Pure` and not speculatable: it performs a
+// device->host copy plus a stream synchronization, and must remain below the
+// producing kernel in program order. Non-speculatability is also what stops
+// `hip-hoist-alloc-size-arith` from lifting an extent-sized allocation above
+// that kernel into the function entry block.
+//
+// Before (tensor form, after convert-onnx-to-hip):
+//   %n = hip.readback_dim(%ctx, %count : tensor<i32>) -> index
+// After bufferize:
+//   %n = hip.readback_dim(%ctx, %count : memref<i32, 1>) -> index
+def Hip_ReadbackDimOp : Hip_Op<"readback_dim",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize and read a device i32 scalar into a host index";
+  let description = [{
+    Reads the single integer stored in the device-resident `scalar` buffer
+    back to the host as an `index`, after synchronizing the GPU stream so the
+    kernel that wrote `scalar` is guaranteed to have completed.
+
+    Has device->host copy + stream-synchronization side effects; it is not
+    speculative and must not be hoisted across the kernel that produces
+    `scalar`.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$scalar
+  );
+  let results = (outs Index:$dim);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($dim)
+  }];
+}
 #endif // HIP_OPS
