@@ -869,7 +869,7 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
                 int64_t in0, int64_t in1, int64_t in2, int64_t out0,
                 int64_t out1, int64_t out2, int64_t mode,
                 int64_t coord_transform, int64_t nearest_mode);
-  
+
 // Global pool wrapper (uses custom HIP kernel).
 // Treats the data as a flat [outer, reduce_size] matrix and writes one
 // reduced value per row into output. Covers ONNX GlobalAveragePool /
