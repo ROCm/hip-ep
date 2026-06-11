@@ -161,6 +161,13 @@ int hip_elementwise_sin(
     int64_t num_elements,
     int hip_dtype);
 
+int hip_elementwise_exp(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 int hip_elementwise_not(
     void* stream,
     const void* input,

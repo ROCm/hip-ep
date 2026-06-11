@@ -1288,6 +1288,18 @@ int wrap_sin(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_exp(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_exp\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_exp(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
                 const int64_t *data_shape, int64_t data_rank,
                 int64_t num_elements, int64_t data_type, int64_t axis_dtype,
