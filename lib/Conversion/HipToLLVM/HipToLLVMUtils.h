@@ -58,6 +58,7 @@ inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
 inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
+inline constexpr const char *kWrapL2Normalize = "wrap_l2_normalize";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";

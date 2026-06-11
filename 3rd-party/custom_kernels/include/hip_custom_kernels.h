@@ -1217,6 +1217,18 @@ HIP_KERNEL_API int hip_layer_norm(
     int hip_dtype,
     int mean_dtype);
 
+/* L2 normalization over the last axis:
+ *   y = x * rsqrt(sum(x^2, last_axis) + epsilon)
+ * One block per row; FP32 accumulation. hip_dtype: FLOAT16 or FLOAT32. */
+int hip_l2_normalize(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int hip_dtype);
+
 /* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================

@@ -994,6 +994,43 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
   let hasVerifier = 1;
 }
 
+def Hip_L2NormOp : Hip_DpsOp<"l2_norm"> {
+  let summary = "L2 normalization over the last axis (q/k norm in linear attention)";
+  let description = [{
+    L2-normalizes `input` along its last axis:
+
+      output = input * rsqrt(sum(input^2, last_axis) + epsilon)
+
+    Fused form of the exporter-emitted decomposition
+    `Mul(x, Reciprocal(Sqrt(Add(ReduceSum(Mul(x,x)), eps))))` from the
+    Qwen3.5 linear-attention q/k normalization (24 layers x {q,k} = 48 sites).
+    Reduction is always over the LAST dimension; fp32 accumulation.
+
+    Example:
+    ```mlir
+    hip.l2_norm(%ctx)
+        ins(%input : memref<?x128xf16, 1>)
+        outs(%output : memref<?x128xf16, 1>)
+        {axis = -1 : i64, epsilon = 1.01327896e-06 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";

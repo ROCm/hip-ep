@@ -526,6 +526,25 @@ LogicalResult RmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// L2NormOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange L2NormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void L2NormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult L2NormOp::verify() {
+  return verifyDpsComputeOp(*this, {getInput(), getOutput()},
+                            /*numInits=*/1);
+}
+
+//===----------------------------------------------------------------------===//
 // SkipRmsNormOp: ins(input, skip, gamma, [bias])  outs(...variadic...)
 //===----------------------------------------------------------------------===//
 
