@@ -301,6 +301,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/multi_head_attention.cpp runtime_multi_head_attention.bc)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
+    compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
 
     set(RUNTIME_BC_MODULES
@@ -356,6 +357,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
     )
 else()
