@@ -512,6 +512,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateSizeConversionPatterns(patterns, ctx);
   populateNonZeroConversionPatterns(patterns, ctx);
   populateConcatConversionPatterns(patterns, ctx);
+  populatePoolConversionPatterns(patterns, ctx);
   populateResizeConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);
   populateFlattenConversionPatterns(patterns, ctx);
@@ -708,7 +709,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
     //     onnx.Gelu(approximate="tanh"), restoring the MorphiZen-supported
     //     form for ORT paths that inline the Gelu function body.
     //   * Projector/vision decompositions (patch-embed Conv-ND -> Gemm,
-    //     AveragePool(kernel==stride) -> Reshape/Transpose/ReduceMean,
+    //     AveragePool(kernel==stride, no pad) -> Reshape/Transpose/ReduceMean
+    //     (overlap / pad cases fall through to hip.pool in PoolConversion),
     //     Pow(x,c) -> Mul chain, broadcasting Div -> Mul(Reciprocal)).
     //     ProjectorOpsRewrites emits NEW `onnx.*` ops (Reshape, Gemm,
     //     ReduceMean, ...) that a subsequent round must visit (e.g. the
