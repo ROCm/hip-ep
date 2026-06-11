@@ -73,3 +73,32 @@ int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
 
   return 0;
 }
+
+// Synchronize the stream, then read back a device-resident i32 scalar (e.g.
+// NonZero's non-zero count). The copy is enqueued after the producing kernel
+// on the same stream; the synchronize guarantees both have completed before
+// the host value is read. Returns 0 on any failure (a zero extent is a safe,
+// inert dynamic dim).
+int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
+  if (!state || !device_scalar) {
+    fprintf(stderr, "hipdnn_ep_readback_i32: null argument\n");
+    return 0;
+  }
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  int32_t host_val = 0;
+  hipError_t err = hipMemcpyAsync(&host_val, device_scalar, sizeof(int32_t),
+                                  hipMemcpyDeviceToHost, stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_i32: D2H copy failed: %s\n",
+            hipGetErrorString(err));
+    return 0;
+  }
+  err = hipStreamSynchronize(stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_i32: stream sync failed: %s\n",
+            hipGetErrorString(err));
+    return 0;
+  }
+  return host_val;
+}

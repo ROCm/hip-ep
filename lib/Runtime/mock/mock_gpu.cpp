@@ -1316,6 +1316,19 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+// Mock memory is plain host memory, so we can compute the true non-zero count
+// directly from `input`. This makes the host-readback path (hip.readback_dim
+// -> hipdnn_ep_readback_i32) return a meaningful dynamic dim under mock builds.
+template <typename T>
+static int32_t mock_count_nonzero(const void *data, int64_t n) {
+  const T *p = static_cast<const T *>(data);
+  int32_t count = 0;
+  for (int64_t i = 0; i < n; ++i)
+    if (p[i] != static_cast<T>(0))
+      ++count;
+  return count;
+}
+
 int wrap_nonzero(RuntimeState *state, void *input, void *output,
                  int32_t *count_ptr, int64_t input_num_elements,
                  int64_t input_rank, const int64_t *input_dims,
@@ -1324,19 +1337,48 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
     fprintf(stderr, "Invalid state in wrap_nonzero\n");
     return -1;
   }
-  (void)input;
   (void)output;
   (void)input_dims;
-  // Mock: set count to 0 (no nonzero elements)
+
+  int32_t count = 0;
+  if (input && count_ptr) {
+    switch (input_data_type) {
+    case HIPDNN_EP_DATATYPE_FLOAT:
+      count = mock_count_nonzero<float>(input, input_num_elements);
+      break;
+    case HIPDNN_EP_DATATYPE_INT32:
+      count = mock_count_nonzero<int32_t>(input, input_num_elements);
+      break;
+    case HIPDNN_EP_DATATYPE_INT64:
+      count = mock_count_nonzero<int64_t>(input, input_num_elements);
+      break;
+    case HIPDNN_EP_DATATYPE_INT8:
+    case HIPDNN_EP_DATATYPE_UINT8:
+      count = mock_count_nonzero<int8_t>(input, input_num_elements);
+      break;
+    default:
+      // f16 and any other types: leave count at 0 (mock has no fp16 type).
+      break;
+    }
+  }
   if (count_ptr)
-    *count_ptr = 0;
+    *count_ptr = count;
+
   MOCK_PRINT("[MOCK] wrap_nonzero(input_num_elements=%lld, input_rank=%lld, "
-             "output_capacity=%lld, input_data_type=%s(%lld))\n",
+             "output_capacity=%lld, input_data_type=%s(%lld)) -> count=%d\n",
              (long long)input_num_elements, (long long)input_rank,
              (long long)output_capacity,
              hipdnn_ep_datatype_name(input_data_type),
-             (long long)input_data_type);
+             (long long)input_data_type, count);
   return 0;
+}
+
+int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
+  (void)state;
+  // Mock "device" memory is host memory: read the scalar directly.
+  if (!device_scalar)
+    return 0;
+  return *static_cast<const int32_t *>(device_scalar);
 }
 
 int wrap_cos(RuntimeState *state, void *input, void *output,

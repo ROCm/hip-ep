@@ -1525,15 +1525,38 @@ void ScatterNDOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// NonZeroOp: ins(x), outs(y)
+// NonZeroOp: ins(x), outs(y, count)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange NonZeroOp::getDpsInitsMutable() { return getYMutable(); }
+// Operand order is (ctx, x, y, count); the two DPS inits (y, count) are the
+// trailing contiguous range, as required by DestinationStyleOpInterface.
+MutableOperandRange NonZeroOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/2, /*length=*/2);
+}
 
 void NonZeroOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReadbackDimOp: ins(scalar) -> index
+//===----------------------------------------------------------------------===//
+
+// Reads the device `scalar` buffer (a Read effect on the operand) plus a
+// stream synchronization. Declaring the effect gives the ownership-based
+// buffer-deallocation pass a known (non-allocating) effect for this op, and
+// the Read-after-Write against the producing kernel's write to the same buffer
+// keeps it correctly ordered (and, with no speculatable trait, un-hoistable).
+void ReadbackDimOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Operand order is (ctx, scalar); attach the Read to the scalar operand.
+  if (isa<MemRefType>(getScalar().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         &getOperation()->getOpOperand(1),
+                         SideEffects::DefaultResource::get());
 }
 
 //===----------------------------------------------------------------------===//

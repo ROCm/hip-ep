@@ -1179,17 +1179,29 @@ int wrap_not(RuntimeState *state, void *input, void *output,
 // input rank and N is the (data-dependent) number of non-zero entries.
 // The caller pre-allocates the output buffer with capacity `output_capacity`
 // elements along the N dim (the OnnxToHip pass uses `input_num_elements`
-// as the upper bound).
+// as the upper bound); columns beyond the true count are left undefined.
+//
+// The kernel writes the true count N into the device i32 scalar `count_ptr`.
+// The generated code reads it back to the host via `hipdnn_ep_readback_i32`
+// (lowered from hip.readback_dim) and slices `output` to [R, N] so consumers
+// and the ORT-reported output shape see the real extent, not the capacity.
+//
+// `input_dims` is the host array of the R input extents (the runtime copies it
+// to the device so the kernel can decompose flat indices into coordinates).
 //
 // `input_data_type` is the HIPDNN_EP_DATATYPE_* value of the input tensor.
 // Bool (ONNX `tensor(bool)`) is marshalled as 1-byte uint8 by the EP and
-// reuses the INT8 slot here. Today this is a stub: it logs its parameters
-// and throws std::runtime_error so an inference path that actually
-// reaches NonZero fails loudly instead of producing uninitialised output.
+// reuses the INT8 slot here.
 int wrap_nonzero(RuntimeState *state, void *input, void *output,
                  int32_t *count_ptr, int64_t input_num_elements,
                  int64_t input_rank, const int64_t *input_dims,
                  int64_t output_capacity, int64_t input_data_type);
+
+// Synchronize the GPU stream (so the producing kernel has completed), then
+// copy a single device-resident i32 scalar back to the host and return it.
+// Used by hip.readback_dim to turn a kernel-computed runtime extent (e.g.
+// NonZero's non-zero count) into a host value that can size dynamic shapes.
+int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar);
 
 // ONNX Size wrapper (dynamic-shape path only).
 //
