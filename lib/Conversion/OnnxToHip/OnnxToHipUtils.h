@@ -327,6 +327,15 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 
+/// Pre-lowering pattern set: decompose `onnx.LpNormalization` into a small
+/// chain of already-supported ONNX primitives (Mul / Sqrt / ReduceSum /
+/// Div). Lives in the pre-lowering loop next to FastGeluFusion /
+/// ProjectorOpsRewrites so the freshly-emitted onnx.* primitives become
+/// "existing" ops by the next round and reach `convertComputeOps`'s
+/// converters as ordinary onnx.* ops. See LpNormalizationConversion.cpp.
+void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+
 } // namespace hip
 } // namespace mlir
 
