@@ -1,0 +1,175 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Runner Diagnostics
+
+# Temporary diagnostic workflow: probes each org-shared self-hosted runner
+# for build tooling, memory, CPU, disk and GPU info. Manual dispatch only;
+# delete once the survey is done.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    # One job lands on exactly one runner, so fan out over the per-machine
+    # unique labels to hit every physical box. fail-fast off keeps an offline
+    # runner from cancelling the rest; the timeout bounds the wait if a label
+    # never gets a host.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - shark-strixhalo-1
+          - shark-strixhalo-2
+          - shark-strixhalo-3
+          - shark-strixhalo-4
+          - shark-strixhalo-5
+          - shark-strixhalo-11
+          - shark-strixhalo-14
+          - shark-strixhalo-15
+          - shark-strixhalo-16
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+
+    steps:
+      - name: Probe runner
+        shell: pwsh
+        run: |
+          # Goal is "what is present", not "everything must be present":
+          # never let a missing tool fail the step.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $lines = New-Object System.Collections.Generic.List[string]
+          function Add-Line([string]$s) { $lines.Add($s); Write-Host $s }
+
+          Add-Line "## Runner: ${{ matrix.runner }}"
+          Add-Line ""
+
+          Add-Line "### Host"
+          Add-Line '```'
+          Add-Line "runner.name : ${{ runner.name }}"
+          Add-Line "hostname    : $([System.Net.Dns]::GetHostName())"
+          Add-Line "os          : $([Environment]::OSVersion.VersionString)"
+          Add-Line '```'
+          Add-Line ""
+
+          Add-Line "### CPU"
+          Add-Line '```'
+          try {
+            $cpu = Get-CimInstance Win32_Processor
+            foreach ($c in $cpu) {
+              Add-Line "name         : $($c.Name)"
+              Add-Line "phys cores   : $($c.NumberOfCores)"
+              Add-Line "logical cpus : $($c.NumberOfLogicalProcessors)"
+            }
+          } catch { Add-Line "CPU query failed: $_" }
+          Add-Line '```'
+          Add-Line ""
+
+          Add-Line "### Memory"
+          Add-Line '```'
+          try {
+            $cs = Get-CimInstance Win32_ComputerSystem
+            $os = Get-CimInstance Win32_OperatingSystem
+            $totalGB = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
+            $freeGB  = [math]::Round($os.FreePhysicalMemory * 1KB / 1GB, 1)
+            Add-Line "total : $totalGB GB"
+            Add-Line "free  : $freeGB GB"
+          } catch { Add-Line "Memory query failed: $_" }
+          Add-Line '```'
+          Add-Line ""
+
+          Add-Line "### Disk"
+          Add-Line '```'
+          try {
+            Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object {
+              $sizeGB = [math]::Round($_.Size / 1GB, 1)
+              $freeGB = [math]::Round($_.SizeRemaining / 1GB, 1)
+              Add-Line "$($_.DriveLetter): free $freeGB GB / $sizeGB GB"
+            }
+          } catch { Add-Line "Disk query failed: $_" }
+          Add-Line '```'
+          Add-Line ""
+
+          Add-Line "### GPU"
+          Add-Line '```'
+          try {
+            Get-CimInstance Win32_VideoController | ForEach-Object {
+              $vramGB = if ($_.AdapterRAM) { [math]::Round($_.AdapterRAM / 1GB, 1) } else { "?" }
+              Add-Line "$($_.Name) (driver $($_.DriverVersion), VRAM ${vramGB} GB)"
+            }
+          } catch { Add-Line "GPU query failed: $_" }
+          foreach ($tool in @('rocm-smi', 'hipInfo')) {
+            $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+            if ($cmd) {
+              Add-Line "--- $tool ---"
+              try { (& $tool 2>&1 | Select-Object -First 40) | ForEach-Object { Add-Line "$_" } }
+              catch { Add-Line "$tool failed: $_" }
+            }
+          }
+          Add-Line '```'
+          Add-Line ""
+
+          Add-Line "### Build tooling"
+          Add-Line '```'
+          foreach ($tool in @('cl', 'cmake', 'ninja', 'python', 'sccache', 'git')) {
+            $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+            if ($cmd) {
+              $ver = ""
+              try {
+                switch ($tool) {
+                  'cl'      { $ver = (& cl 2>&1 | Select-Object -First 1) }
+                  'cmake'   { $ver = (& cmake --version 2>&1 | Select-Object -First 1) }
+                  'ninja'   { $ver = (& ninja --version 2>&1 | Select-Object -First 1) }
+                  'python'  { $ver = (& python --version 2>&1 | Select-Object -First 1) }
+                  'sccache' { $ver = (& sccache --version 2>&1 | Select-Object -First 1) }
+                  'git'     { $ver = (& git --version 2>&1 | Select-Object -First 1) }
+                }
+              } catch { $ver = "version query failed" }
+              Add-Line ("{0,-8}: {1}  [{2}]" -f $tool, $ver, $cmd.Source)
+            } else {
+              Add-Line ("{0,-8}: NOT FOUND" -f $tool)
+            }
+          }
+          Add-Line '```'
+          Add-Line ""
+
+          Add-Line "### Visual Studio (vswhere)"
+          Add-Line '```'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (Test-Path $vswhere) {
+            try {
+              & $vswhere -all -products * -format json `
+                | ConvertFrom-Json `
+                | ForEach-Object { Add-Line "$($_.displayName) -> $($_.installationPath)" }
+            } catch { Add-Line "vswhere failed: $_" }
+            $msvcRoot = 'C:\Program Files\Microsoft Visual Studio\2022'
+            Get-ChildItem -Path "$msvcRoot\*\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue `
+              | ForEach-Object { Add-Line "MSVC toolset: $($_.Name)" }
+            Get-ChildItem -Path 'C:\Program Files (x86)\Windows Kits\10\Lib' -Directory -ErrorAction SilentlyContinue `
+              | ForEach-Object { Add-Line "WinSDK lib  : $($_.Name)" }
+          } else {
+            Add-Line "vswhere not found at $vswhere"
+          }
+          Add-Line '```'
+          Add-Line ""
+
+          Add-Line "### Key environment variables"
+          Add-Line '```'
+          foreach ($name in @('SCCACHE_DIR', 'THEROCK_DIST', 'LIB')) {
+            $val = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrEmpty($val)) { $val = "(unset)" }
+            Add-Line "$name = $val"
+          }
+          $pathVal = $env:PATH
+          if ($pathVal.Length -gt 2000) { $pathVal = $pathVal.Substring(0, 2000) + " ...(truncated)" }
+          Add-Line "PATH = $pathVal"
+          Add-Line '```'
+
+          ($lines -join "`n") | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
