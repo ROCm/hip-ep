@@ -477,6 +477,44 @@ int wrap_miopenConvolutionForward(
   return 0;
 }
 
+int wrap_miopenConvolutionTranspose(
+    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, const void *weights, const void *bias,
+    void *output, int64_t output_c, int64_t output_h, int64_t output_w,
+    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
+    int64_t dilation_h, int64_t dilation_w, int64_t output_padding_h,
+    int64_t output_padding_w, int64_t group, int64_t data_type) {
+  if (!state || !input || !weights || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionTranspose\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_miopenConvolutionTranspose(\n");
+  MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
+             (long long)input_c, (long long)input_h, (long long)input_w);
+  MOCK_PRINT("[MOCK]   weights=[%lld,%lld,%lld,%lld],\n", (long long)input_c,
+             (long long)(output_c / (group ? group : 1)), (long long)kernel_h,
+             (long long)kernel_w);
+  MOCK_PRINT("[MOCK]   output=[%lld,%lld,%lld,%lld], bias=%s,\n",
+             (long long)input_n, (long long)output_c, (long long)output_h,
+             (long long)output_w, bias ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   stride=[%lld,%lld], pad=[%lld,%lld,%lld,%lld], "
+             "dilation=[%lld,%lld], output_padding=[%lld,%lld], group=%lld, "
+             "dtype=%s)\n",
+             (long long)stride_h, (long long)stride_w, (long long)pad_top,
+             (long long)pad_left, (long long)pad_bottom, (long long)pad_right,
+             (long long)dilation_h, (long long)dilation_w,
+             (long long)output_padding_h, (long long)output_padding_w,
+             (long long)group, hipdnn_ep_datatype_name(data_type));
+
+  // Mock: zero the output (real implementation calls MIOpen transpose conv).
+  size_t output_size = input_n * output_c * output_h * output_w * sizeof(float);
+  memset(output, 0, output_size);
+
+  return 0;
+}
+
 int wrap_causal_conv_with_state(
     RuntimeState *state, const void *input, const void *weight,
     const void *bias, const void *past_state, void *output, void *present_state,

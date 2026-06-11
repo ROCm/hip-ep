@@ -190,6 +190,8 @@ void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
