@@ -78,25 +78,13 @@ static std::optional<IntTy> readOnnxConstantScalar(Value v, unsigned bitWidth) {
   return static_cast<IntTy>((*attr.getValues<APInt>().begin()).getZExtValue());
 }
 
-/// Materialize an `index` scalar from a 0-D `tensor<i64>` operand. When
-/// `mTensor` is an `onnx.Constant`, the value is folded directly into an
-/// `arith.constant` -- a pure host value, no device traffic.
-///
-/// Otherwise the trip count is computed at runtime (canonical case: a
-/// windowed-attention loop whose iteration count = number of windows is
-/// derived from a graph input on the GPU, e.g. via `onnx.Sub` over shape
-/// arithmetic). We MUST NOT `tensor.extract` it: that bufferizes to a bare
-/// host `memref.load` of a device buffer with no stream synchronization,
-/// reading stale memory on targets where the pool is true device memory (it
-/// only accidentally works where the pool is UMA-mapped host-accessible
-/// memory). A garbage trip count then runs the loop the wrong number of times
-/// -- e.g. a too-small/zero count leaves the loop-carried accumulator
-/// uninitialized, so a per-window attention output reads back as all-zero
-/// (cosine 0 against the reference) and the error compounds across blocks.
-/// Instead emit `hip.readback_scalar` (D2H + stream sync) so the host sees the
-/// value the producing kernel actually wrote. Mirrors
-/// RangeConversion::readScalarOperand and the Expand/Reshape shape-readback
-/// fixes.
+/// Materialize an `index` scalar from a 0-D `tensor<i64>` trip count. An
+/// `onnx.Constant` folds to an `arith.constant` (pure host value). A runtime
+/// trip count (e.g. a window count derived from a graph input via `onnx.Sub`)
+/// MUST go through `hip.readback_scalar` (D2H + stream sync), never a bare
+/// `tensor.extract`: that bufferizes to an unsynchronized host `memref.load` of
+/// device memory and reads stale bytes on true-device pools, running the loop
+/// the wrong number of times. Mirrors RangeConversion::readScalarOperand.
 ///
 /// Before (runtime trip count, incorrect):
 ///   %m = tensor.extract %mTensor[] : tensor<i64>   // host load of device mem

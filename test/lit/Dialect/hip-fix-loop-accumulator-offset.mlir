@@ -2,19 +2,10 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// FileCheck tests for --hip-fix-loop-accumulator-offset.
-//
-// The pass runs on outlined hip.loop body func.func ops AFTER bufferization +
-// out-param promotion. In that form the loop-carried `v_in` arg and its
-// `{bufferize.result}` `v_out` out-param alias one immutable memref descriptor,
-// so `memref.dim %v_in, %cN` is FROZEN at the v_init dim for every iteration.
-// The growing-Concat accumulator bufferizes to:
-//   - a self-copy subview (frozen dim only in SIZES, offset all-static-0), and
-//   - a chunk-append subview (frozen dim in the OFFSET).
-// Because the append offset is frozen, every iteration overwrites the same byte
-// range and only the last chunk survives. This pass rewrites the chunk-append
-// OFFSET to the real per-iter chunk start (seqlens_k[iter] via a synchronized
-// hip.readback_scalar of the start gather, or iter*chunk_size as a fallback).
+// FileCheck tests for --hip-fix-loop-accumulator-offset. The pass rewrites a
+// frozen chunk-append `memref.subview` OFFSET (`memref.dim %v_in, %cN`) in an
+// outlined hip.loop body to the real per-iter chunk start: seqlens_k[iter] via
+// a synchronized hip.readback_scalar of the start gather, or iter*chunk_size.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-fix-loop-accumulator-offset --split-input-file %s 2>&1 | FileCheck %s
