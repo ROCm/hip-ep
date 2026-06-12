@@ -483,21 +483,23 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
        &trasverse_out_of_bound](morphizen_cxx::NodeConstRef node1) {
         if (!hit_ceiling) {
           body_nodes.push_back(node1.ptr());
-          auto node_args = node_get_input_node_args(*node1.ptr());
-          for (auto node_arg : node_args) {
-            if (node_arg == nullptr) {
-              // node_arg == nullptr mean optionsl argument.
+          // all_inputs() = explicit operands ++ implicit Loop/If/Scan captures,
+          // so captures join both the self-containment (hit_ceiling) check and
+          // the constant-initializer collection below.
+          for (auto& opt_arg : node1.all_inputs()) {
+            if (!opt_arg.has_value()) {
+              // node_arg no value mean optionsl argument.
               continue;
             }
+            auto node_arg_ref = opt_arg.value();
             // add node_arg_is_exists
             // test case 18,  Resize_496, The second input to resize is
             // optional
-            hit_ceiling = hit_ceiling || trasverse_out_of_bound(node_arg);
-            if (node_arg_exists(*node_arg)) {
-              auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(
-                  graph, *node_arg);
+            hit_ceiling =
+                hit_ceiling || trasverse_out_of_bound(node_arg_ref.ptr());
+            if (node_arg_exists(*node_arg_ref.ptr())) {
               if (node_arg_ref.is_constant()) {
-                constant_initializers.insert(node_arg_get_name(*node_arg));
+                constant_initializers.insert(node_arg_ref.name());
               }
             }
           }
