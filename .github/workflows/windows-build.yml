@@ -512,10 +512,8 @@ jobs:
           cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
           cp python/examples/run_onnx.py wheelpkg/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/benchmark/
-          # Download EP dependency closure (ROCm) + ORT third-party deps for
-          # offline install. setuptools is a build dep for the rocm sdist.
+          # Download EP dependency closure (ROCm) for the wheel package.
           python -m pip download "$EP_WHEEL" \
-            flatbuffers numpy packaging protobuf coloredlogs setuptools \
             --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ \
             -d wheelpkg/wheels
           echo "=== Python wheel package layout ==="
@@ -811,11 +809,18 @@ jobs:
           python -m venv $venv
           $py = "$venv\Scripts\python.exe"
 
-          # Install project + ROCm wheels offline; benchmark deps from PyPI.
-          $whls = (Get-ChildItem "$pkg\wheels\onnxruntime_directml-*.whl", "$pkg\wheels\onnxruntime_morphizen_ep-*.whl", "$pkg\wheels\onnxruntime_genai_directml-*.whl").FullName
-          & $py -m pip install --quiet --no-index --find-links "$pkg\wheels" $whls
-          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
-          & $py -m pip install --quiet psutil tqdm pandas
+          # Install project + ROCm wheels from local dir; ORT deps from PyPI.
+          Push-Location "$pkg\wheels"
+          & $py -m pip install --quiet `
+            (Get-Item onnxruntime_directml-*.whl).Name `
+            (Get-Item onnxruntime_morphizen_ep-*.whl).Name `
+            (Get-Item onnxruntime_genai_directml-*.whl).Name `
+            (Get-Item rocm-*.tar.gz).Name `
+            (Get-Item rocm_sdk_core-*.whl).Name `
+            (Get-Item rocm_sdk_devel-*.whl).Name `
+            (Get-Item rocm_sdk_libraries_*.whl).Name `
+            psutil tqdm pandas
+          Pop-Location
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
           & "$venv\Scripts\rocm-sdk.exe" init   # expand rocm[devel] import libs
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] rocm-sdk init failed"; exit 1 }
