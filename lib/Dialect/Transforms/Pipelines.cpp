@@ -120,6 +120,25 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   if (useOutputAllocator)
     pm.addNestedPass<func::FuncOp>(hip::createUseOutputAllocatorPass());
 
+  // 4.6. Fix frozen Concat-accumulator offsets in outlined hip.loop bodies.
+  //      The loop trampoline aliases each loop-carried v_in arg and its
+  //      {bufferize.result} v_out out-param onto one immutable memref
+  //      descriptor, so the body's `memref.dim %v_in, %cN` is frozen at the
+  //      v_init dim every iteration -- the bufferized growing-Concat
+  //      accumulator then writes every chunk to the same offset and only the
+  //      last survives. This pass rewrites the chunk-append subview's OFFSET
+  //      to the real per-iter start (seqlens_k[iter] via a synchronized
+  //      hip.readback_scalar, or iter*chunk fallback).
+  //
+  //      Placement is load-bearing: AFTER buffer-deallocation (the in-place
+  //      writer pattern only exists post-out-param-promotion) and BEFORE
+  //      OptimizeMemRefs / MaterializeHostScalars / PoolAllocs (so the
+  //      synthesized readback + index_cast flow through CSE/canonicalize and
+  //      the pool/hoist analyses). No-op on funcs that are not outlined loop
+  //      bodies or carry no frozen-dim chunk-append subview. See
+  //      FixLoopAccumulatorOffset.cpp.
+  pm.addNestedPass<func::FuncOp>(hip::createFixLoopAccumulatorOffsetPass());
+
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
