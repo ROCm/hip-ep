@@ -280,24 +280,70 @@ below. `onnxruntime_perf_test.exe` is staged separately in
 ### 4. Install Python Wheels (Optional)
 
 If you also want to drive ORT / OGA from Python (e.g. to write your own
-generation script instead of using `model_benchmark.exe`), install the two
-wheels produced by steps 1 and 3:
+generation script instead of using `model_benchmark.exe`), install the wheels.
+The MorphiZen EP wheel is built by default by `build.py` (pass `--skip_wheel` to
+opt out, or build just it with `cmake --build <build> --target wheel`) at
+`../build/onnx-hipdnn-ep/python/dist/`.
+
+**Install** -- give ORT / EP / OGA as local `.whl` files (so pip uses your custom
+builds, not the stock PyPI ones), and let `--extra-index-url` resolve ROCm:
 
 ```bash
 cd ../onnx-hipdnn-ep  # Back to the project root
 pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
-  ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
+  ../build/onnx-hipdnn-ep/python/dist/onnxruntime_morphizen_ep-*.whl \
+  ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl \
+  --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/
 ```
-> **Note**: the first whl file may be in  ../build/onnxruntime/Release/Release/dist/
->  Try this path if you meet error "the file does not exist"
+> **Note**: the ORT whl may be under `../build/onnxruntime/Release/Release/dist/`.
+> Replace `gfx1151` with your GPU arch. Install the EP wheel AFTER onnxruntime:
+> it ships its own native files (EP plugin, hip-compiler, custom kernels, CRT
+> import libs) straight into `onnxruntime/capi/` next to `onnxruntime.dll`. The
+> ROCm JIT import libs (amdhip64/MIOpen/hipBLASLt) come from the `rocm[devel]`
+> wheel (expanded next).
 
-Verify:
+**Expand ROCm devel** -- the EP's JIT linker needs the ROCm import libs, which
+`rocm[devel]` ships compressed. Expand them once:
 
 ```bash
-python -c "import onnxruntime as ort; print(ort.__version__)"
-python -c "import onnxruntime_genai as og; print(og.__version__)"
+rocm-sdk init   # populates site-packages/_rocm_sdk_devel/lib
 ```
+
+**Lib search paths** -- the per-model JIT link step resolves import libs from two
+places, supplied via env vars before running:
+
+- `THEROCK_DIST` -> the ROCm lib root (`<site-packages>/_rocm_sdk_devel`, or a
+  TheRock SDK for dev builds); supplies `amdhip64`/`MIOpen`/`hipBLASLt`.
+- `LIB` (Windows) -> append `<onnxruntime/capi>`; supplies the colocated CRT and
+  `hip_custom_kernels` import libs.
+
+**Use** -- there is no Python API to import; the native files are found by
+location. Set the env vars and run a model whose `genai_config.json` names the
+provider `MorphiZenEP`. This is exactly what the CI wheel smoke does (`Run OGA
+wheel smoke (Python)` in `.github/workflows/windows-build.yml`):
+
+```bash
+# site-packages root + the colocated capi dir
+SP=$(python -c "import onnxruntime, os; print(os.path.dirname(os.path.dirname(onnxruntime.__file__)))")
+CAPI="$SP/onnxruntime/capi"
+
+# JIT link: ROCm import libs from rocm[devel]; CRT + custom kernels from capi
+export THEROCK_DIST="$SP/_rocm_sdk_devel"
+export LIB="$CAPI"                      # Windows; ';'-separated if appending
+# Runtime DLLs: EP + hip-compiler (capi) and ROCm (rocm wheel bins) on PATH
+# (replace gfx1151 with your GPU arch)
+export PATH="$CAPI:$SP/_rocm_sdk_core/bin:$SP/_rocm_sdk_libraries_gfx1151/bin:$PATH"
+
+# Run OGA's own end-to-end benchmark from the OGA source cloned in step 3
+python onnxruntime-genai/benchmark/python/benchmark_e2e.py \
+  -i /path/to/model_dir -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v
+```
+
+`benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
+`genai_config.json` must list `MorphiZenEP`; OGA then discovers the colocated EP
+automatically. For plain ORT, register the colocated plugin via
+`ort.register_execution_provider_library("MorphiZenEP", "$CAPI/onnxruntime_morphizen_ep.dll")`.
 
 ## Model Preparation
 
