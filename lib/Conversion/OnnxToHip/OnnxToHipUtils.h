@@ -94,6 +94,64 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
+/// Create a tensor.empty for a DPS init whose shape is the NumPy-style
+/// broadcast of \p operands. Operand shapes are right-aligned with the
+/// result. For each dynamic dimension of \p resultType, the size is taken
+/// from the first operand that truly contributes at that axis -- i.e. whose
+/// corresponding dim is not statically 1. Shorter-rank operands (left-padded
+/// with 1) and statically-1 dims are skipped. If every spanning operand is
+/// statically 1 at the axis, fall back to the first operand that spans it.
+///
+/// Use this for binary/multinary broadcast elementwise ops (Add, Mul, Where,
+/// ...). Do NOT use `createEmptyTensor(resultType, source)` when operands can
+/// disagree on which side supplies a dynamic extent (e.g. `[?x1] + [1x?] ->
+/// [?x?]` -- dim 0 from lhs, dim 1 from rhs).
+inline mlir::FailureOr<mlir::Value>
+createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                           mlir::RankedTensorType resultType,
+                           mlir::ValueRange operands) {
+  int64_t resultRank = resultType.getRank();
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+
+    mlir::Value chosen;
+    int64_t chosenDim = -1;
+    mlir::Value fallback;
+    int64_t fallbackDim = -1;
+    for (mlir::Value operand : operands) {
+      auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
+      if (!t)
+        continue;
+      int64_t offset = resultRank - t.getRank();
+      if (dimIdx < offset)
+        continue;
+      int64_t operandDim = dimIdx - offset;
+      if (!fallback) {
+        fallback = operand;
+        fallbackDim = operandDim;
+      }
+      if (!t.isDynamicDim(operandDim) && t.getDimSize(operandDim) == 1)
+        continue;
+      chosen = operand;
+      chosenDim = operandDim;
+      break;
+    }
+    if (!chosen) {
+      chosen = fallback;
+      chosenDim = fallbackDim;
+    }
+    if (!chosen)
+      return mlir::failure();
+    dynSizes.push_back(
+        mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
+  }
+  return mlir::Value(
+      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynSizes));
+}
+
 /// Get !hip.context from function argument 0. Returns failure if the
 /// function has no arguments or the first argument is not !hip.context.
 inline mlir::FailureOr<mlir::Value>
@@ -110,6 +168,40 @@ getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
                                        "first argument is not !hip.context");
   return ctx;
 }
+
+/// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
+///
+/// Emits one `hip.gqa` op with the 19-slot AttrSizedOperandSegments layout
+/// and replaces \p op's results positionally with the hip.gqa's results
+/// (callers with fewer than 3 results — e.g. cross-attn or fused-QKV
+/// Attention — simply drop the trailing present_* outputs on the floor).
+///
+/// Defined in HipGqaBuilder.cpp.  Shared between
+/// MultiHeadAttentionConversion.cpp and AttentionConversion.cpp.
+///
+/// \param numHeads        N (== kv_num_heads; HPG=1, multi-head, not GQA)
+/// \param scale           ONNX `scale` attr, or 0.0 sentinel for "auto-compute
+///                        1/sqrt(head_size) at runtime"
+/// \param noCausal        true for bidirectional (encoder / cross-attn);
+///                        false for causal (decoder self-attn)
+/// \param pastKey/pastValue  Past KV-cache buffers; nullptr when absent
+///                        (encoder / cross-attn).  When null the corresponding
+///                        operand_segment_size is 0.
+/// \param seqlensK        1-D [B] i32 (must already be in scope; either a
+///                        runtime arg or an arith.constant)
+/// \param totalSeqLen     scalar i32 (must already be in scope)
+/// \param outputType      hip.gqa output[0] type (== query type)
+/// \param presentKeyType  hip.gqa present_key type (BNSH); for cross-attn or
+///                        encoder paths an unused-but-required DPS init buffer
+/// \param presentValueType ditto for present_value
+mlir::LogicalResult
+buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
+                mlir::Value context, mlir::Value query, mlir::Value key,
+                mlir::Value value, mlir::Value pastKey, mlir::Value pastValue,
+                mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
+                float scale, bool noCausal, mlir::RankedTensorType outputType,
+                mlir::RankedTensorType presentKeyType,
+                mlir::RankedTensorType presentValueType);
 
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
@@ -132,6 +224,8 @@ void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
@@ -140,8 +234,12 @@ void populateGqaConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx);
+void populateAttentionConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateShapeConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
@@ -160,6 +258,8 @@ void populateDivConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateMaxConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
@@ -167,6 +267,8 @@ void populateNotConversionPatterns(RewritePatternSet &patterns,
 void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateExpConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCumSumConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
@@ -202,6 +304,93 @@ void populateNonZeroConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateReluConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+void populateClipConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populatePoolConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateResizeConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
+void populateFlattenConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
+
+/// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
+/// idiom into tensor.from_elements over a tensor.dim of x. Must run
+/// BEFORE lowerOnnxConstants so the index value is still inline in the
+/// onnx.Constant `value` attribute. See GatherShapeFold.cpp for the
+/// dynseqlen-regression rationale.
+void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+
+/// Pre-lowering pattern set: rewrite the `Reshape(data, Shape(src))` idiom
+/// so the shape operand becomes an explicit
+/// `tensor.from_elements(tensor.dim(src, *))`. This lets ReshapeConversion's
+/// `tensor.reshape` fallback recover per-output-dim sizes when the result has
+/// >1 dynamic dim in one reassociation group (otherwise ReshapeConversion
+/// ignores its second operand and emits the same SSA dim twice — the [N, N]
+/// bug). Sibling of GatherShapeFold; must run BEFORE lowerOnnxConstants.
+/// See ReshapeShapeFold.cpp.
+void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+
+/// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
+/// chain (Pow / Mul / Sum / Tanh) back into a single
+/// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
+/// for some loading paths (notably dynamic-shape models) and the inlined
+/// primitives have no MorphiZen converters. Must run BEFORE
+/// `lowerOnnxConstants` so the literal float values of the embedded
+/// constants (3.0, 0.044715, sqrt(2/π), 1.0, 0.5) are still inline.
+/// See FastGeluFusion.cpp.
+void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose `onnx.Pow(x, c)` (constant scalar
+/// exponent c, optionally wrapped in `onnx.Cast`/`onnx.CastLike`) into ONNX
+/// primitives (`onnx.Mul` / `onnx.Sqrt` / `onnx.Reciprocal`), which then flow
+/// through their own ONNX→HIP converters in `convertComputeOps`. Must run
+/// BEFORE `lowerOnnxConstants` because production builds externalize every
+/// `onnx.Constant` (incl. 1-element scalars) into a memref.global with the
+/// value moved to the constants sidecar — at that point the exponent is no
+/// longer recoverable from IR. See PowerConversion.cpp.
+void populatePowDecompositionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+/// Pre-lowering pattern set: collapse the inlined erf-form `Gelu` primitive
+/// chain (Div / Erf / Sum / Mul, optionally wrapped in CastLike scalars and
+/// `Sqrt(2.0)`) back into a single `onnx.Gelu(approximate="none")`. Some
+/// exports (e.g. ConvNeXt) inline the exact erf-based Gelu definition
+/// `0.5 * x * (1 + erf(x / sqrt(2)))` as primitives that have no MorphiZen
+/// converters. Must run BEFORE `lowerOnnxConstants` so the literal float
+/// values (1.0, 2.0, 0.5) of the wrapped constants are still inline.
+/// See ErfGeluFusion.cpp.
+void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose vision/projector ops that have no
+/// direct MorphiZen converter into supported primitives — patch-embed
+/// Conv-ND → Reshape/Gemm/Reshape, AveragePool(kernel==stride) →
+/// Reshape/Transpose/ReduceMean, Pow(x, c) → repeated Mul, ReduceMean →
+/// ReduceSum·(1/N), and broadcasting Div → Mul(x, Reciprocal). Emits
+/// `onnx.*` ops with result types built explicitly from the dims the
+/// rewriter already knows (no separate shape pass needed at emission;
+/// `--hip-infer-shapes` resolves any residual dynamic dims post-conversion).
+/// Runs in the same ExistingOps pre-lowering set as FastGeluFusion. See
+/// ProjectorOpsRewrites.cpp.
+void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose `onnx.LpNormalization` into a small
+/// chain of already-supported ONNX primitives (Mul / Sqrt / ReduceSum /
+/// Div). Lives in the pre-lowering loop next to FastGeluFusion /
+/// ProjectorOpsRewrites so the freshly-emitted onnx.* primitives become
+/// "existing" ops by the next round and reach `convertComputeOps`'s
+/// converters as ordinary onnx.* ops. See LpNormalizationConversion.cpp.
+void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

@@ -29,6 +29,10 @@ static int expand_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:
     return HIP_DTYPE_INT64;
+  // Equal→Expand on embedding masks uses ui8; broadcast is bitwise-identical
+  // to i8 (no arithmetic), so reuse the int8 kernel instantiation.
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return HIP_DTYPE_INT8;
   default:
     return -1;
   }

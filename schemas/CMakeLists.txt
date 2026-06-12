@@ -3,11 +3,18 @@
 # ** Licensed under the MIT License.
 ##
 
-# Find flatc executable from the prebuilt package
-find_program(FLATC_EXECUTABLE flatc
-    HINTS "${THEROCK_DIST}/bin"
-    REQUIRED
-)
+# Use the flatc that matches the resolved flatbuffers (source-built or imported
+# via find_package), so the generator version stays in lock-step with the
+# library. Only fall back to a standalone flatc on disk when no target exists.
+# (TheRock bundles an older flatc that rejects the string-default schemas, so
+# its bin/ must NOT be preferred when a matching flatc target is available.)
+if(TARGET flatbuffers::flatc)
+    set(FLATC_EXECUTABLE flatbuffers::flatc)
+elseif(TARGET flatc)
+    set(FLATC_EXECUTABLE flatc)
+else()
+    find_program(FLATC_EXECUTABLE flatc HINTS "${THEROCK_DIST}/bin" REQUIRED)
+endif()
 message(STATUS "Using flatc: ${FLATC_EXECUTABLE}")
 
 # Generate C++ headers from .fbs schemas

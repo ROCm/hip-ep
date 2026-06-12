@@ -44,6 +44,8 @@ typedef enum {
     HIP_DTYPE_FLOAT64  = 4,
     HIP_DTYPE_BFLOAT16 = 5,
     HIP_DTYPE_INT16    = 6,
+    HIP_DTYPE_UINT8    = 7,
+    HIP_DTYPE_INT8     = 8,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -159,6 +161,13 @@ int hip_elementwise_sin(
     int64_t num_elements,
     int hip_dtype);
 
+int hip_elementwise_exp(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 int hip_elementwise_not(
     void* stream,
     const void* input,
@@ -166,20 +175,58 @@ int hip_elementwise_not(
     int64_t num_elements);
 
 /* =========================================================================
- * Elementwise Binary (Div / Mod / Equal / Less)
+ * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
  * =========================================================================
  *
- * Same-shape binary elementwise ops added for the Qwen3.5 vision model.
- * All four share a single .hip TU (elementwise_binary_kernel.hip).
+ * Same-shape binary elementwise ops. All eight share one translation unit:
+ * 3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip.
  *
- * Important: broadcasting is NOT performed in these kernels. lhs and rhs
- * must already have identical shape (broadcasting is materialised
- * upstream via Expand).
+ * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
+ * miopenOpTensor rejects the element type (notably INT32/INT64). Float
+ * dtypes still use MIOpen for performance and autotuning.
  *
- * Output dtype for Equal/Less is bool (1 byte); their hip_dtype refers to
- * the INPUT type. For Div/Mod, output dtype matches input dtype.
+ * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
+ * Less write bool (1 byte); their hip_dtype refers to the input element type.
+ * Div and Mod preserve the input dtype.
+ *
+ * Broadcasting is not performed in these kernels. lhs and rhs must already
+ * match in shape; upstream Expand / broadcast materialization is required.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
 int hip_elementwise_div(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_mul(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_add(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_min(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+int hip_elementwise_max(
     void* stream,
     const void* lhs,
     const void* rhs,
@@ -196,12 +243,23 @@ int hip_elementwise_mod(
     int hip_dtype,
     int fmod_flag);
 
+/*
+ * Element-wise Equal with optional scalar broadcast.
+ *
+ * `lhs_num_elements` / `rhs_num_elements` may each be 1 (scalar broadcast)
+ * or equal to `out_num_elements` (no broadcast). Other mismatches are
+ * rejected by the host wrapper.
+ *
+ * Output type is always uint8 (1-byte bool).
+ */
 int hip_elementwise_equal(
     void* stream,
     const void* lhs,
     const void* rhs,
     void* output,
-    int64_t num_elements,
+    int64_t lhs_num_elements,
+    int64_t rhs_num_elements,
+    int64_t out_num_elements,
     int hip_dtype);
 
 int hip_elementwise_less(
@@ -300,6 +358,31 @@ int hip_elementwise_gelu(
     int64_t approximate);
 
 /* =========================================================================
+ * LeakyRelu Activation
+ * =========================================================================
+ *
+ * Applies LeakyRelu element-wise: y = x >= 0 ? x : alpha * x
+ *
+ * Parameters:
+ *   stream       - HIP stream (cast to hipStream_t internally)
+ *   input        - Device pointer to input tensor
+ *   output       - Device pointer to output tensor
+ *   num_elements - Total number of elements
+ *   hip_dtype    - Data type enum (HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ *                  HIP_DTYPE_FLOAT64)
+ *   alpha        - Slope for negative values (default 0.01 per ONNX spec)
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_leaky_relu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype,
+    double alpha);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *
@@ -367,7 +450,11 @@ int hip_rope_forward(
  * =========================================================================
  *
  * Individual kernel launchers for the 12-step GQA pipeline (Step 0 + Steps 1-11).
- * All FP16 only. The orchestration (hipBLASLt GEMMs, workspace, temp
+ * The pure data-movement kernels (append / concat / rope / transpose / expand /
+ * split) take element_size_bytes (2 = fp16, 4 = fp32) and dispatch to the
+ * matching typed kernel -- this fp32-enables the decomposed GQA pipeline used
+ * by the Whisper no_causal path. The fused / flash decode kernels remain FP16
+ * only (Llama / gpt-oss). The orchestration (hipBLASLt GEMMs, workspace, temp
  * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
 
@@ -378,11 +465,12 @@ int hip_rope_forward(
  * Use when past and present share the same buffer (aliased / in-place).
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
  * derived from seqlens_k[b]+1-sq (per-batch) and the host past_len is ignored.
- * Pass NULL for host-side past_len. */
+ * Pass NULL for host-side past_len.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_kv_cache_append(
     void* stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
-    const void* seqlens_k);
+    const void* seqlens_k, int element_size_bytes);
 
 /* KV cache concat: concatenate past data and new tokens into a fresh present
  * buffer.  Fills present [B,G,present_seq,d] by copying past data from
@@ -390,42 +478,48 @@ int hip_gqa_kv_cache_append(
  * from current BSHD [B,sq,G,d] at [past_len,past_len+sq).
  * past_seq and present_seq are the actual sequence dimensions (strides) of the
  * respective buffers.  Handles the stride mismatch (past_seq != present_seq)
- * in a single kernel launch. */
+ * in a single kernel launch.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_kv_cache_concat(
     void* stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq);
+    int past_seq, int present_seq, int element_size_bytes);
 
-/* Internal GQA RoPE (half-rotated, FP16):
+/* Internal GQA RoPE (half-rotated):
  * out[d] = in[d]*cos - in[d+half]*sin
  * out[d+half] = in[d+half]*cos + in[d]*sin
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
- * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored. */
+ * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_rope(
     void* stream, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
-    const void* seqlens_k);
+    const void* seqlens_k, int element_size_bytes);
 
 /* Transpose middle two dims of 4D tensor:
- * [B, dim1, dim2, D] -> [B, dim2, dim1, D] */
+ * [B, dim1, dim2, D] -> [B, dim2, dim1, D]
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_transpose_mid_dims(
     void* stream, const void* src, void* dst,
-    int batch_size, int dim1, int dim2, int D);
+    int batch_size, int dim1, int dim2, int D, int element_size_bytes);
 
 /* KV group expansion: replicate G groups -> H heads.
- * For head h, copies from group g = h / heads_per_group. */
+ * For head h, copies from group g = h / heads_per_group.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_expand_kv(
     void* stream, const void* src, void* dst,
     int total_heads, int heads_per_group,
-    int src_stride, int dst_stride, int copy_elems);
+    int src_stride, int dst_stride, int copy_elems, int element_size_bytes);
 
 /* Split packed QKV [B*S, (H+2*G)*d] into separate Q, K, V buffers.
- * Q: [B*S, H*d], K: [B*S, G*d], V: [B*S, G*d] */
+ * Q: [B*S, H*d], K: [B*S, G*d], V: [B*S, G*d]
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
 int hip_gqa_split_qkv(
     void* stream, const void* packed, void* Q, void* K, void* V,
-    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim);
+    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim,
+    int element_size_bytes);
 
 /* Causal mask (prefill only): S[k,q] = -inf where k > past_len + q.
  * When local_window_size > 0, also masks k < past_len + q - local_window_size + 1. */
@@ -453,11 +547,28 @@ int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
+/* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer.
+ * One block per row, softmaxes the `cols` elements of each row in-place
+ * (data is overwritten with normalized probabilities). Matches ONNX
+ * Softmax semantics for axis = -1 on the flattened input. Used by the
+ * standalone `hip_miopen_softmax` runtime entry point. */
+int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
 int hip_gqa_softmax_f32_to_f16(
     void* stream, const void* input_f32, void* output_f16,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax);
+
+/* Column-wise softmax: fp32 input -> fp32 output.
+ * Same as hip_gqa_softmax_f32_to_f16 but writes fp32 probabilities, feeding
+ * the fp32 Value GEMM on the Whisper no_causal fp32 decomposed path.
+ * input_batch_stride and output_batch_stride are both in float elements. */
+int hip_gqa_softmax_f32_to_f32(
+    void* stream, const void* input_f32, void* output_f32,
     int total_head_queries, int rows, int cols,
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
@@ -569,7 +680,10 @@ int hip_cast(
  *   output_num_elements  - total elements in output tensor
  *   element_size_bytes   - byte size per element (used for raw copy)
  *
- * Currently supports: axis=0
+ * Generic axis support. data has logical shape [outer, axis_size, inner];
+ * output has logical shape [outer, indices_num, inner]. The caller computes
+ * axis_size = data.shape[axis] and inner_size = product(data.shape[axis+1:]);
+ * outer_size is derived as data_num / (axis_size * inner_size).
  * Supported element sizes: 2 (f16/bf16), 4 (f32/i32), 8 (i64/f64)
  * Returns: 0 on success, non-zero on failure
  */
@@ -582,7 +696,10 @@ int hip_gather(
     int64_t data_num_elements,
     int64_t indices_num_elements,
     int64_t output_num_elements,
-    int element_size_bytes);
+    int64_t axis_size,
+    int64_t inner_size,
+    int element_size_bytes,
+    int indices_element_size_bytes);
 
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
@@ -614,6 +731,125 @@ int hip_reduce_sum(
     int64_t num_input_elements,
     int64_t num_output_elements,
     int hip_dtype);
+
+/* =========================================================================
+ * Pool — MaxPool / AveragePool / LpPool (1D / 2D / 3D)
+ * =========================================================================
+ *
+ * Generic ONNX window pooling over an `(N, C, D_1[, D_2[, D_3]])` input.
+ * Lays the output `(N, C, O_1[, O_2[, O_3]])` out in row-major order matching
+ * the input layout.
+ *
+ * `mode` selects the per-window reduction (must match HIPDNN_EP_POOL_* in
+ * lib/Runtime/hipdnn_ep_runtime.h):
+ *   0 (AVERAGE): Y = sum(window) / divisor
+ *   1 (MAX)    : Y = max(window)
+ *   2 (LP)     : Y = pow(sum(pow(|window|, p)), 1/p)
+ *
+ * Pad positions are never read (they fall outside the input bounds). For
+ * AVERAGE, `count_include_pad` picks the divisor: 0 = number of in-bounds
+ * window elements, 1 = full kernel volume (pad cells contribute 0 to the
+ * sum). `p` is the LP norm exponent (>= 1); both are ignored for the modes
+ * that don't use them.
+ *
+ * Optional `indices` (i64 buffer the same shape as the output) records the
+ * row-major flat index in the *unpadded* input that each max came from —
+ * MAX mode only; matches ONNX MaxPool spec for storage_order = 0. Pass NULL
+ * for AVERAGE / LP.
+ *
+ * `spatial_rank` selects how many of the per-axis arrays are read; for
+ * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `kernel`,
+ * `strides`, `pads_begin`, `dilations` must be set to 1 / 0 by the caller
+ * (the lowering does this).
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+int hip_pool(
+    void* stream,
+    const void* input,
+    void* output,
+    void* indices,            /* int64_t* — nullable, MAX only */
+    int hip_dtype,
+    int mode,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int count_include_pad,
+    int p);
+
+
+ /* =========================================================================
+ * Resize (1D / 2D / 3D spatial)
+ * =========================================================================
+ *
+ * Resamples the trailing spatial axes of an `(N, C, D_1, ..., D_k)` input
+ * onto an `(N, C, O_1, ..., O_k)` output grid.  Per-axis scale is computed
+ * inside the kernel as `scale = in_dim / out_dim`.  The (N, C) prefix is
+ * pass-through.
+ *
+ *  mode:               0 = nearest, 1 = linear (N-linear)
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+int hip_resize(
+    void* stream,
+    const void* input,
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int mode,
+    int coord_transform,
+    int nearest_mode);
+
+/* =========================================================================
+ * Global pool (avg / max / lp)
+ * =========================================================================
+ *
+ * Reduces each contiguous `reduce_size`-element slice into a single value.
+ * Data is viewed as `[outer, reduce_size]` where
+ *   outer       = N * C
+ *   reduce_size = D_1 * D_2 * ... * D_k   (product of all spatial dims)
+ *
+ * `mode` selects the reduction (must match HIPDNN_EP_GLOBAL_POOL_* in
+ * lib/Runtime/hipdnn_ep_runtime.h):
+ *   0 (AVERAGE): Y = mean(slice)
+ *   1 (MAX)    : Y = max(slice)
+ *   2 (LP)     : Y = pow(sum(pow(|slice|, p)), 1/p)
+ *
+ * `p` is the LP-norm exponent; ignored for AVG / MAX. Caller must guarantee
+ * `p >= 1` for LP (the runtime wrapper rejects values below that).
+ *
+ * One reduction block per output element (per (n, c) slice). Accumulation
+ * happens in float (regardless of input dtype) to keep precision on long
+ * spatial reductions of fp16 / bf16 inputs.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_global_pool(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t outer,
+    int64_t reduce_size,
+    int hip_dtype,
+    int mode,
+    int p);
 
 /* =========================================================================
  * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
@@ -736,7 +972,19 @@ int hip_slice(
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,
+    const int64_t* output_shape_host,     /* physical alloc shape       */
+    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
+                                             may be NULL, in which case the
+                                             kernel treats it as identical to
+                                             output_shape_host (i.e. no
+                                             over-alloc; entire physical
+                                             buffer is filled by the slice).
+                                             When set and logical[d] <
+                                             output_shape[d] for some d,
+                                             positions in the over-allocated
+                                             tail are filled with zero — the
+                                             host wrapper does not need to
+                                             pre-memset the buffer.        */
     const int64_t* starts_per_axis_host,  /* length = rank */
     const int64_t* steps_per_axis_host,   /* length = rank */
     int rank,
@@ -778,11 +1026,45 @@ int hip_scatter_nd(
     const void* indices,
     const void* updates,
     void* output,
+    const int32_t* count_ptr,
     const int64_t* data_shape_host,
     int data_rank,
     const int64_t* indices_shape_host,
     int indices_rank,
     int reduction_id,
+    int hip_dtype);
+
+/* =========================================================================
+ * NonZero
+ * =========================================================================
+ *
+ * Single-block cooperative ordered scan: each thread counts the non-zeros in
+ * its chunk, thread 0 exclusive-scans the per-chunk counts, then each thread
+ * re-walks its chunk and writes coordinates into output[rank, capacity] at
+ * stride = capacity, in row-major (ONNX-spec) order. Columns beyond the true
+ * count are left undefined (the launcher zero-fills them defensively).
+ *
+ * After completion, *count_ptr (device i32) holds the actual number of
+ * non-zero elements. The host reads it back via hipdnn_ep_readback_i32
+ * (lowered from hip.readback_dim) and slices the output to its true extent, so
+ * downstream ops and the ORT-reported shape use the count rather than the
+ * worst-case capacity.
+ *
+ * input_dims_host: host pointer to int64_t[rank] holding the input
+ * shape (copied to device internally before the kernel launch).
+ *
+ * Supported dtypes: f16, f32, i32, i64, i8, u8.
+ * Bounded to rank <= 8.
+ */
+int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    int* count_ptr,
+    int64_t input_num_elements,
+    int64_t input_rank,
+    const int64_t* input_dims_host,
+    int64_t output_capacity,
     int hip_dtype);
 
 /* =========================================================================
@@ -1268,6 +1550,24 @@ int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
+// Max memref rank honoured by the strided memref.copy fast path
+// (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined
+// once here so the kernel and the runtime helper cannot drift out of sync.
+#define HIPDNN_MAX_MEMREF_RANK 12
+
+// Parallel strided device-to-device copy (one launch) for MLIR memref.copy
+// where neither side is contiguous and the copy spans multiple outer dims.
+// Replaces the host per-row hipMemcpyAsync loop in memrefCopy. Pointers are
+// element-aligned bases; outer_sizes/strides cover the outer dims, row_elems
+// is the contiguous inner suffix. Returns 0 on success, -2 if elem_size is
+// unsupported (caller falls back to the host per-row path).
+int hip_strided_copy(void *stream, void *dst, const void *src,
+                     int64_t elem_size, int outer_rank,
+                     const int64_t *outer_sizes,
+                     const int64_t *src_outer_strides,
+                     const int64_t *dst_outer_strides, int64_t row_elems,
+                     int64_t outer_total);
+
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
  * =========================================================================
@@ -1316,6 +1616,27 @@ int hip_causal_conv_step_decode(
     void* present_state,
     int64_t batch_size,
     int64_t channels,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes);
+
+// Prefill (seq_len > 1) fused causal depthwise 1D conv + bias + SiLU. One
+// launch replaces the MIOpen path (Find + 3 pitched memcpys + conv + bias +
+// activation + mul). fp32 accumulate; numerically matches the decode-step
+// kernel at seq_len==1. Same layout/contract as hip_causal_conv_step_decode
+// plus a seq_len argument. Supports kernel_size in [1,8], activation 0/1,
+// element_size 2/4; caller falls back to MIOpen for anything else.
+int hip_causal_conv_prefill(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
     int64_t kernel_size,
     int64_t activation,
     int64_t element_size_bytes);

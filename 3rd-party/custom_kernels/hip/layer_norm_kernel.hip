@@ -152,6 +152,12 @@ extern "C" int hip_layer_norm(void *stream, const void *input,
   dim3 grid(static_cast<unsigned int>(outer));
   dim3 block(kLayerNormBlockSize);
 
+  // Clear any error left sticky by a prior kernel whose launcher didn't check
+  // its own status, so the hipGetLastError() below attributes a failure to THIS
+  // launch only (otherwise an upstream error is misreported as
+  // "hip_layer_norm launch failed").
+  (void)hipGetLastError();
+
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_layer_norm: dtype=%d, mean_dtype=%d, "
       "outer=%lld, norm_size=%lld, epsilon=%f, "
