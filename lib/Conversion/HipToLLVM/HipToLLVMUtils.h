@@ -117,6 +117,11 @@ inline constexpr const char *kWrapSize = "wrap_size";
 // (used by hip.readback_dim to materialise a data-dependent dynamic dim).
 inline constexpr const char *kHipReadbackI32 = "hipdnn_ep_readback_i32";
 
+// Synchronize the stream and copy a small device scalar of arbitrary byte
+// width into a host buffer (used by hip.readback_scalar for non-i32 scalars
+// such as the i64/f32/f16 operands of a data-dependent onnx.Range).
+inline constexpr const char *kHipReadbackScalar = "hipdnn_ep_readback_scalar";
+
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
 inline constexpr int64_t kAllocPtrIdx = 0;
@@ -426,6 +431,10 @@ void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
 // i32 scalar can be sliced/sized via this.
 void populateReadbackDimLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
+// hip.readback_scalar: generic synchronized host-readback of a single device
+// scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
+void populateReadbackScalarLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
