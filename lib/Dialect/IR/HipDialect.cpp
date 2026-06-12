@@ -1559,6 +1559,16 @@ void ReadbackDimOp::getEffects(
                          SideEffects::DefaultResource::get());
 }
 
+void ReadbackScalarOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Operand order is (ctx, scalar); attach the Read to the scalar operand.
+  if (isa<MemRefType>(getScalar().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         &getOperation()->getOpOperand(1),
+                         SideEffects::DefaultResource::get());
+}
+
 //===----------------------------------------------------------------------===//
 // SizeOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
