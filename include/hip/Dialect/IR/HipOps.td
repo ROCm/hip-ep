@@ -2191,7 +2191,12 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
     // Quantization related attributes
     DefaultValuedAttr<StrAttr, "\"NONE\"">:$k_quant_type,  // "NONE"/"PER_TENSOR"/"PER_CHANNEL"
     DefaultValuedAttr<StrAttr, "\"NONE\"">:$v_quant_type,
-    DefaultValuedAttr<I64Attr, "8">:$kv_cache_bit_width  // 8 or 4
+    DefaultValuedAttr<I64Attr, "8">:$kv_cache_bit_width,  // 8 or 4
+
+    // Whisper / bidirectional-attention enabler: when true, the causal mask
+    // step in the runtime is skipped. Default false preserves all existing
+    // Llama / gpt-oss callers' behaviour.
+    DefaultValuedAttr<BoolAttr, "false">:$no_causal
   );
 
   let assemblyFormat = [{

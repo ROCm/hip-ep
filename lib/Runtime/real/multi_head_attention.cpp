@@ -536,17 +536,18 @@ extern "C" int wrap_multi_head_attention(
   // as [batch_size, dim1, dim2, D]. For Q with dim1=Sq, dim2=N this produces
   // [B, N, Sq, H]; same shape with Skv for K and V.
   if (need_q_trans) {
+    // MHA path is fp16-only; element_size_bytes=2.
     HIP_CHECK(hip_gqa_transpose_mid_dims(
         stream, query, d_Qbnsh, static_cast<int>(B), static_cast<int>(Sq),
-        static_cast<int>(N), static_cast<int>(H)));
+        static_cast<int>(N), static_cast<int>(H), /*element_size_bytes=*/2));
   }
   if (need_kv_trans) {
     HIP_CHECK(hip_gqa_transpose_mid_dims(
         stream, key, d_Kbnsh, static_cast<int>(B), static_cast<int>(Skv),
-        static_cast<int>(N), static_cast<int>(H)));
+        static_cast<int>(N), static_cast<int>(H), /*element_size_bytes=*/2));
     HIP_CHECK(hip_gqa_transpose_mid_dims(
         stream, value, d_Vbnsh, static_cast<int>(B), static_cast<int>(Skv),
-        static_cast<int>(N), static_cast<int>(H)));
+        static_cast<int>(N), static_cast<int>(H), /*element_size_bytes=*/2));
   }
 
   // ---- Step 4: Score GEMM: S = Q @ K^T * scale, fp16->fp32 ---------------
@@ -647,7 +648,7 @@ extern "C" int wrap_multi_head_attention(
   if (need_o_trans) {
     HIP_CHECK(hip_gqa_transpose_mid_dims(
         stream, d_O_bnsh, output, static_cast<int>(B), static_cast<int>(N),
-        static_cast<int>(Sq), static_cast<int>(H)));
+        static_cast<int>(Sq), static_cast<int>(H), /*element_size_bytes=*/2));
   }
 
   RUNTIME_DEBUG_LOG(
