@@ -84,11 +84,42 @@ conda env create -f environment.yml     # one-time
 conda activate hipdnn-ep
 ```
 
-Whisper needs **no extra pip installs** — the test audio is fetched from public
-URLs at runtime (no `datasets` / `jiwer` dependency), and the model build
-(`python scripts/build_whisper_models.py`, §3) installs its pinned builder deps
-into a **dedicated isolated venv** (`install/whisper-builder-venv/`), so it never
-touches the `hipdnn-ep` env or shadows the OGA fork.
+Whisper needs **no extra pip installs** for the tests themselves — the test audio
+is fetched from public URLs at runtime (no `datasets` / `jiwer` dependency), and
+the model build (`python scripts/build_whisper_models.py`, §3) installs its pinned
+builder deps into a **dedicated isolated venv** (`install/whisper-builder-venv/`),
+so it never touches the `hipdnn-ep` env or shadows the OGA fork.
+
+> **The pip `onnxruntime` version MUST match the ORT the EP was built against.**
+> The EP DLL links the ORT version pinned in `cmake/deps.txt` (currently
+> **1.25.1**) and requests that exact ORT C-API version at registration. The
+> Python tests `import onnxruntime`, so the pip package must expose the same API
+> — a mismatch makes EP registration fail (`The requested API version [N] is not
+> available...`) and then segfault (Windows access violation). PyPI's
+> `onnxruntime-directml` often **lags** the pinned tag (e.g. PyPI tops out at
+> 1.24.x while the repo pins 1.25.1), so a plain `pip install onnxruntime-directml`
+> is not enough. When they diverge, build a matching ORT wheel from source and
+> install it (mirrors what CI does):
+>
+> ```bash
+> # ROOT = your short workspace root (see §1). Match v<ORT_VERSION> to cmake/deps.txt.
+> git clone --depth 1 --branch v1.25.1 --recurse-submodules --shallow-submodules \
+>   https://github.com/Microsoft/onnxruntime.git "$ROOT/source-onnxruntime"
+> cd "$ROOT/source-onnxruntime"
+> # Apply any ONNXRUNTIME_PR_PATCHES listed in .github/workflows/windows-build.yml, e.g.:
+> curl -L -o /tmp/ort.patch https://github.com/microsoft/onnxruntime/pull/28608.patch
+> git apply --whitespace=nowarn /tmp/ort.patch
+> # Build (run build.bat from cmd / an x64 Native Tools prompt; Ninja + MSVC required):
+> build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error \
+>   --skip_submodule_sync --build_dir "$ROOT\build-onnxruntime" --skip_tests \
+>   --disable_memleak_checker --use_dml --cmake_generator Ninja --build_wheel
+> pip install --force-reinstall "$ROOT/build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-*.whl"
+> python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.25.1
+> ```
+>
+> The wheel is Python-version-specific (`cp314` for Python 3.14). If PyPI ever
+> catches up to the pinned version, a plain `pip install onnxruntime-directml==<ver>`
+> suffices instead.
 
 ---
 
@@ -128,7 +159,10 @@ Run this in every shell before any Whisper command.
 
 Use the same `$ROOT` you built with in §1. The auto-downloaded TheRock SDK lives
 under the build dir (`$ROOT/build/_therock`); if you passed your own
-`-DTHEROCK_DIST`, point at that instead.
+`-DTHEROCK_DIST`, point at that instead. `MORPHIZEN_EP_BIN` tells the Python
+tests where the EP DLL is — **required when you installed out-of-tree** (the
+`$ROOT/local` layout here); the tests otherwise look in the legacy in-repo
+`install/dist/bin` and `skip` with "MorphiZen EP not found".
 
 **Git Bash** (the convention for the rest of this guide):
 
@@ -137,6 +171,7 @@ cd <repo-root>
 conda activate hipdnn-ep
 export ROOT=/c/Users/$USER/work/rocm-ep-workspace   # same short path as §1
 export THEROCK_DIST="$ROOT/build/_therock"
+export MORPHIZEN_EP_BIN="$ROOT/local/bin"
 export PATH="$THEROCK_DIST/bin:$ROOT/local/bin:$PATH"
 ```
 
@@ -147,12 +182,15 @@ cd <repo-root>
 conda activate hipdnn-ep
 $ROOT = "C:\Users\$env:USERNAME\work\rocm-ep-workspace"   # same short path as §1
 $env:THEROCK_DIST = "$ROOT\build\_therock"
+$env:MORPHIZEN_EP_BIN = "$ROOT\local\bin"
 $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 ```
 
 > **Why this matters:** without `THEROCK_DIST` / `PATH`, the EP fails to link the
 > model DLL (`amdhip64_7.dll missing` / `Failed to link DLL`) and silently falls
 > back to CPU. If a "GPU" run is suspiciously slow or wrong, check this first.
+> Without `MORPHIZEN_EP_BIN` (out-of-tree install), the tests can't find the EP
+> DLL and `skip` instead of running.
 
 ---
 
@@ -438,7 +476,8 @@ EP comparison.
 | Transcription is garbage / a "GPU" run is suspiciously slow | Silent CPU fallback. Set the env (§2), clear the model cache (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`), and re-run. Confirm GPU dispatch with `HIPDNN_EP_DEBUG=1` (look for `[REAL] wrap_*` lines on stderr). |
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
-| `pytest` can't find the EP / wrong ORT API | The EP DLL must match the pip `onnxruntime-directml` API version (see CLAUDE.md "ORT version must match pip"). Rebuild via `python build.py --build_dir "$ROOT/build" --install_dir "$ROOT/local" --cmake_prefix_path "$ROOT/local"`. |
+| Every test `skip`s with "MorphiZen EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `MORPHIZEN_EP_BIN` (§2). Verify the DLL exists at `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`. |
+| EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §0). |
 
 For internals (how the ONNX surgery works, the `no_causal` GQA path, the fp32
 GQA enabling, known limitations), see the **Whisper gotchas** in
