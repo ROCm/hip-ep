@@ -136,22 +136,39 @@ PyPI's `onnxruntime-directml` frequently **lags** the pinned tag (e.g. PyPI tops
 out at 1.24.x while the repo pins 1.25.1), so `pip install onnxruntime-directml`
 alone is usually **not** enough — you build a matching wheel from source (this is
 exactly what CI does). Run from an **x64 Native Tools Command Prompt for VS**
-(Ninja + MSVC required); `$ROOT` is the same short path as §1, and the
-`v1.25.1` / PR-patch values come from `cmake/deps.txt` +
-`.github/workflows/windows-build.yml` (`ONNXRUNTIME_VERSION` / `ONNXRUNTIME_PR_PATCHES`):
+(Ninja + MSVC required; `build.bat` is a Windows batch script). `$ROOT` is the
+same short path as §1, and the `v1.25.1` / PR-patch values come from
+`cmake/deps.txt` + `.github/workflows/windows-build.yml`
+(`ONNXRUNTIME_VERSION` / `ONNXRUNTIME_PR_PATCHES`).
+
+**PowerShell:**
+
+```powershell
+git clone --depth 1 --branch v1.25.1 --recurse-submodules --shallow-submodules `
+  https://github.com/Microsoft/onnxruntime.git "$ROOT\source-onnxruntime"
+cd "$ROOT\source-onnxruntime"
+# Apply each PR listed in ONNXRUNTIME_PR_PATCHES (currently just 28608):
+Invoke-WebRequest https://github.com/microsoft/onnxruntime/pull/28608.patch -OutFile "$env:TEMP\ort.patch"
+git apply --whitespace=nowarn "$env:TEMP\ort.patch"
+# Build the shared lib + wheel:
+.\build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error `
+  --skip_submodule_sync --build_dir "$ROOT\build-onnxruntime" --skip_tests `
+  --disable_memleak_checker --use_dml --cmake_generator Ninja --build_wheel
+$wheel = (Get-ChildItem "$ROOT\build-onnxruntime\Release\dist\onnxruntime_directml-1.25.1-*.whl" | Select-Object -First 1).FullName
+pip install --force-reinstall "$wheel"
+python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.25.1
+```
+
+**Git Bash** (run `build.bat` from a Native Tools prompt, or `cmd //c build.bat ...`):
 
 ```bash
 git clone --depth 1 --branch v1.25.1 --recurse-submodules --shallow-submodules \
   https://github.com/Microsoft/onnxruntime.git "$ROOT/source-onnxruntime"
 cd "$ROOT/source-onnxruntime"
-# Apply each PR listed in ONNXRUNTIME_PR_PATCHES (currently just 28608):
 curl -L -o /tmp/ort.patch https://github.com/microsoft/onnxruntime/pull/28608.patch
 git apply --whitespace=nowarn /tmp/ort.patch
-# Build the shared lib + wheel (run build.bat from cmd / Native Tools prompt):
-build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error \
-  --skip_submodule_sync --build_dir "$ROOT\build-onnxruntime" --skip_tests \
-  --disable_memleak_checker --use_dml --cmake_generator Ninja --build_wheel
-pip install --force-reinstall "$ROOT/build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-*.whl"
+cmd //c "build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir \"$ROOT\\build-onnxruntime\" --skip_tests --disable_memleak_checker --use_dml --cmake_generator Ninja --build_wheel"
+pip install --force-reinstall "$ROOT"/build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-*.whl
 python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.25.1
 ```
 
