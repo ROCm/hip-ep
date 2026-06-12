@@ -84,42 +84,14 @@ conda env create -f environment.yml     # one-time
 conda activate hipdnn-ep
 ```
 
-Whisper needs **no extra pip installs** for the tests themselves — the test audio
-is fetched from public URLs at runtime (no `datasets` / `jiwer` dependency), and
-the model build (`python scripts/build_whisper_models.py`, §3) installs its pinned
-builder deps into a **dedicated isolated venv** (`install/whisper-builder-venv/`),
-so it never touches the `hipdnn-ep` env or shadows the OGA fork.
+The test audio is fetched from public URLs at runtime (no `datasets` / `jiwer`
+dependency), and the model build (`python scripts/build_whisper_models.py`, §3)
+installs its pinned builder deps into a **dedicated isolated venv**
+(`install/whisper-builder-venv/`), so it never touches the `hipdnn-ep` env or
+shadows the OGA fork.
 
-> **The pip `onnxruntime` version MUST match the ORT the EP was built against.**
-> The EP DLL links the ORT version pinned in `cmake/deps.txt` (currently
-> **1.25.1**) and requests that exact ORT C-API version at registration. The
-> Python tests `import onnxruntime`, so the pip package must expose the same API
-> — a mismatch makes EP registration fail (`The requested API version [N] is not
-> available...`) and then segfault (Windows access violation). PyPI's
-> `onnxruntime-directml` often **lags** the pinned tag (e.g. PyPI tops out at
-> 1.24.x while the repo pins 1.25.1), so a plain `pip install onnxruntime-directml`
-> is not enough. When they diverge, build a matching ORT wheel from source and
-> install it (mirrors what CI does):
->
-> ```bash
-> # ROOT = your short workspace root (see §1). Match v<ORT_VERSION> to cmake/deps.txt.
-> git clone --depth 1 --branch v1.25.1 --recurse-submodules --shallow-submodules \
->   https://github.com/Microsoft/onnxruntime.git "$ROOT/source-onnxruntime"
-> cd "$ROOT/source-onnxruntime"
-> # Apply any ONNXRUNTIME_PR_PATCHES listed in .github/workflows/windows-build.yml, e.g.:
-> curl -L -o /tmp/ort.patch https://github.com/microsoft/onnxruntime/pull/28608.patch
-> git apply --whitespace=nowarn /tmp/ort.patch
-> # Build (run build.bat from cmd / an x64 Native Tools prompt; Ninja + MSVC required):
-> build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error \
->   --skip_submodule_sync --build_dir "$ROOT\build-onnxruntime" --skip_tests \
->   --disable_memleak_checker --use_dml --cmake_generator Ninja --build_wheel
-> pip install --force-reinstall "$ROOT/build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-*.whl"
-> python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.25.1
-> ```
->
-> The wheel is Python-version-specific (`cp314` for Python 3.14). If PyPI ever
-> catches up to the pinned version, a plain `pip install onnxruntime-directml==<ver>`
-> suffices instead.
+The one pip package you **do** need at a specific version is `onnxruntime` —
+see §1b, which is mandatory before the EP will load.
 
 ---
 
@@ -148,6 +120,44 @@ detects your GPU, and builds the compiler + MorphiZen EP into `$ROOT/local/`. Se
 main [Quick Start](quick_start.md) for details and troubleshooting.
 
 After it finishes you should have `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`.
+
+---
+
+## 1b. Install a matching ONNX Runtime wheel (mandatory)
+
+**You must do this, or the EP will not load.** The EP DLL links the ORT version
+pinned in `cmake/deps.txt` (currently **1.25.1**) and requests that exact ORT
+C-API version when it registers. The Python tests `import onnxruntime`, so the
+pip package must expose the **same** API version. A mismatch fails registration
+(`The requested API version [N] is not available...`) and then segfaults
+(Windows access violation on session create).
+
+PyPI's `onnxruntime-directml` frequently **lags** the pinned tag (e.g. PyPI tops
+out at 1.24.x while the repo pins 1.25.1), so `pip install onnxruntime-directml`
+alone is usually **not** enough — you build a matching wheel from source (this is
+exactly what CI does). Run from an **x64 Native Tools Command Prompt for VS**
+(Ninja + MSVC required); `$ROOT` is the same short path as §1, and the
+`v1.25.1` / PR-patch values come from `cmake/deps.txt` +
+`.github/workflows/windows-build.yml` (`ONNXRUNTIME_VERSION` / `ONNXRUNTIME_PR_PATCHES`):
+
+```bash
+git clone --depth 1 --branch v1.25.1 --recurse-submodules --shallow-submodules \
+  https://github.com/Microsoft/onnxruntime.git "$ROOT/source-onnxruntime"
+cd "$ROOT/source-onnxruntime"
+# Apply each PR listed in ONNXRUNTIME_PR_PATCHES (currently just 28608):
+curl -L -o /tmp/ort.patch https://github.com/microsoft/onnxruntime/pull/28608.patch
+git apply --whitespace=nowarn /tmp/ort.patch
+# Build the shared lib + wheel (run build.bat from cmd / Native Tools prompt):
+build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error \
+  --skip_submodule_sync --build_dir "$ROOT\build-onnxruntime" --skip_tests \
+  --disable_memleak_checker --use_dml --cmake_generator Ninja --build_wheel
+pip install --force-reinstall "$ROOT/build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-*.whl"
+python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.25.1
+```
+
+The wheel is Python-version-specific (`cp314` for Python 3.14). **If PyPI has
+caught up** to the pinned version, skip the source build and just
+`pip install --force-reinstall onnxruntime-directml==1.25.1`.
 
 ---
 
@@ -477,7 +487,7 @@ EP comparison.
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
 | Every test `skip`s with "MorphiZen EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `MORPHIZEN_EP_BIN` (§2). Verify the DLL exists at `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`. |
-| EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §0). |
+| EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §1b). |
 
 For internals (how the ONNX surgery works, the `no_causal` GQA path, the fp32
 GQA enabling, known limitations), see the **Whisper gotchas** in
