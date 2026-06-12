@@ -108,7 +108,7 @@ module {
 // A runtime (non-constant) scalar must be read to the host with a synchronized
 // hip.readback_scalar, NOT a bare tensor.extract: the latter lowers to an
 // unsynchronized host load of a device buffer and reads stale memory on
-// true-device-memory targets (see ReshapeConversion::readRank0ScalarToHost).
+// true-device-memory targets (see ReadbackScalar.h).
 // CHECK-LABEL: func.func @test_reshape_scalar_to_1d
 // CHECK: hip.readback_scalar
 // CHECK: tensor.from_elements
