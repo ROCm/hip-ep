@@ -105,3 +105,37 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   }
   return host_val;
 }
+
+// Synchronize the stream, then copy a small device-resident scalar of arbitrary
+// byte width (1/2/4/8) back into the caller-provided host buffer. Generalises
+// hipdnn_ep_readback_i32 for scalars whose element type is not i32 — e.g. the
+// i64 limit/start/delta and f32/f16 operands of a data-dependent `onnx.Range`,
+// whose trip count must be computed on the host. The copy is enqueued after the
+// producing kernel on the same stream; the synchronize guarantees the producing
+// kernel has finished before the host reads. Without this, generated code that
+// does a bare `memref.load` of a GPU-written scalar reads stale memory on
+// targets where the pool is true device memory (it accidentally works where the
+// pool is UMA-mapped host-accessible memory) — yielding a zero trip count and a
+// collapsed dynamic dimension.
+void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
+                               const void *device_scalar, int64_t num_bytes) {
+  if (!state || !host_dst || !device_scalar || num_bytes <= 0) {
+    fprintf(stderr, "hipdnn_ep_readback_scalar: invalid argument\n");
+    return;
+  }
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  hipError_t err =
+      hipMemcpyAsync(host_dst, device_scalar, static_cast<size_t>(num_bytes),
+                     hipMemcpyDeviceToHost, stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_scalar: D2H copy failed: %s\n",
+            hipGetErrorString(err));
+    return;
+  }
+  err = hipStreamSynchronize(stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_scalar: stream sync failed: %s\n",
+            hipGetErrorString(err));
+  }
+}

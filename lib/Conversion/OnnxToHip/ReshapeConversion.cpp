@@ -13,6 +13,56 @@ namespace {
 // Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
 //===----------------------------------------------------------------------===//
 
+/// Read a rank-0 scalar tensor to a host SSA value without racing the GPU.
+///
+/// A rank-0 -> rank-N (single-element) Reshape must re-emit the scalar through
+/// `tensor.from_elements`, which needs the value on the host. A plain
+/// `tensor.extract` of a runtime, GPU-produced scalar lowers to a bare host
+/// `memref.load` of a device buffer with NO stream synchronization: the host
+/// reads stale/garbage memory on targets where the pool is true device memory
+/// (it only accidentally works where the pool is UMA-mapped host-accessible
+/// memory). The canonical victim is the dynamic-shape vision-encoder grid
+/// arithmetic `ReduceMax -> Reshape(i64 -> 1xi64) -> Gather -> Cast -> Range`:
+/// the unsynced extract of the ReduceMax result feeds a corrupt limit into the
+/// downstream `onnx.Range`, collapsing the rope sequence dimension.
+///
+/// For a compile-time constant scalar there is no device dependency, so we keep
+/// the cheap `tensor.extract` (it folds, no D2H sync). For a runtime value we
+/// emit `hip.readback_scalar` (D2H + stream sync) so the host observes the
+/// value the producing kernel actually wrote.
+///
+/// Before (runtime scalar, incorrect):
+///   %v = tensor.extract %s[] : tensor<i64>          // host load of device mem
+/// After:
+///   %v = hip.readback_scalar(%ctx, %s : tensor<i64>) -> i64
+static mlir::Value readRank0ScalarToHost(mlir::PatternRewriter &rewriter,
+                                         mlir::Location loc,
+                                         mlir::Operation *op,
+                                         mlir::Value scalarTensor,
+                                         mlir::Type elemTy) {
+  // Compile-time constant (arith.constant or inline onnx.Constant): the value
+  // is host-known, so a tensor.extract folds with no device traffic.
+  bool isConst = false;
+  if (mlir::Operation *def = scalarTensor.getDefiningOp())
+    isConst = mlir::isa<mlir::arith::ConstantOp>(def) || def->hasAttr("value");
+  if (isConst)
+    return mlir::tensor::ExtractOp::create(rewriter, loc, scalarTensor,
+                                           mlir::ValueRange{})
+        .getResult();
+
+  // Runtime value (possibly GPU-computed): synchronized host readback. Falls
+  // back to tensor.extract if the function has no !hip.context arg to call
+  // readback_scalar with (utility funcs / pre-context-arg conversions).
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::tensor::ExtractOp::create(rewriter, loc, scalarTensor,
+                                           mlir::ValueRange{})
+        .getResult();
+  return ReadbackScalarOp::create(rewriter, loc, elemTy, *ctxOrFailure,
+                                  scalarTensor)
+      .getResult();
+}
+
 /// True when the defining op of the axes value is compile-time known.
 ///
 /// After constant externalization, small onnx.Constant / arith.constant tensors
@@ -172,16 +222,20 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     // produces a `tensor<i64>` scalar that the model then `Reshape`s to
     // `tensor<1xi64>` so it can be `Concat`-ed into a larger shape vector.
     //
+    // The scalar must reach the host to re-emit via tensor.from_elements. For a
+    // runtime, GPU-produced scalar a plain tensor.extract races the kernel (see
+    // readRank0ScalarToHost); we read it back through hip.readback_scalar
+    // (D2H + stream sync) instead. Compile-time constants keep tensor.extract.
+    //
     // Before:
     //   %r = onnx.Reshape %s : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
-    // After:
-    //   %v = tensor.extract %s[] : tensor<i64>
+    // After (runtime scalar):
+    //   %v = hip.readback_scalar(%ctx, %s : tensor<i64>) -> i64
     //   %r = tensor.from_elements %v : tensor<1xi64>
     if (inputRank == 0 && outputRank > 0 && outputType.hasStaticShape() &&
         outputType.getNumElements() == 1) {
-      mlir::Value scalar = mlir::tensor::ExtractOp::create(rewriter, loc, data,
-                                                           mlir::ValueRange{})
-                               .getResult();
+      mlir::Value scalar = readRank0ScalarToHost(rewriter, loc, op, data,
+                                                 inputType.getElementType());
       mlir::Value flat = mlir::tensor::FromElementsOp::create(
           rewriter, loc,
           mlir::RankedTensorType::get({1}, inputType.getElementType()),
