@@ -770,7 +770,6 @@ jobs:
             exit 0
           }
 
-          $epDll = Join-Path $pkgBin "onnxruntime_morphizen_ep.dll"
           New-Item -ItemType Directory -Force -Path "oga-results" | Out-Null
 
           $failed = 0
@@ -780,12 +779,6 @@ jobs:
               Write-Host "[SKIP] No genai_config.json in $($modelDir.Name)"
               continue
             }
-            $cfgJson = Get-Content $genaiCfgPath -Raw | ConvertFrom-Json
-            $epName = try {
-              $opts = $cfgJson.model.decoder.session_options.provider_options[0]
-              ($opts.PSObject.Properties | Select-Object -First 1).Name
-            } catch { $null }
-            if (-not $epName) { $epName = "MorphiZenExecutionProvider" }
             $promptFile = Join-Path $modelDir.FullName "prompt.txt"
             $promptArgs = if (Test-Path $promptFile) {
               @("--prompt_file", $promptFile)
@@ -793,12 +786,15 @@ jobs:
               @("-l", "128")
             }
             $outFile = "oga-results\$($modelDir.Name).txt"
-            Write-Host "=== OGA Benchmark: $($modelDir.Name) (EP=$epName) ==="
+            # MorphiZenEP is selected via genai_config.json provider_options and
+            # the EP DLL is auto-discovered next to onnxruntime-genai.dll. Do NOT
+            # pass --ep_library: upstream model_benchmark rejects it, and where
+            # supported it double-registers the EP and crashes on shutdown.
+            Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
             & $benchmark `
               -i $modelDir.FullName `
               -g 128 -r 5 -w 1 -b 1 -ml -1 `
               @promptArgs `
-              --ep_library $epName $epDll `
               -v 2>&1 | Tee-Object -FilePath $outFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
           }
