@@ -319,7 +319,7 @@ jobs:
           path: ${{ runner.workspace }}/oga-artifacts
           # Bump the v<N> token to invalidate the OGA cache when its output
           # set changes shape (e.g. a new artifact) without an OGA_REF/ORT bump.
-          key: oga-dml-v1-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          key: oga-dml-v2-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -375,6 +375,14 @@ jobs:
           fi
           cp "$OGA_WHEEL" "${{ runner.workspace }}/oga-artifacts/"
           echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
+
+          # Cache the Python e2e benchmark scripts (benchmark_e2e.py + its metrics
+          # helper) so the gpu-test wheel smoke can run them without an OGA source
+          # checkout (which only happens on a cache miss).
+          mkdir -p "${{ runner.workspace }}/oga-artifacts/benchmark-python"
+          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_e2e.py" \
+             "${{ github.workspace }}/source-oga/benchmark/python/metrics.py" \
+             "${{ runner.workspace }}/oga-artifacts/benchmark-python/"
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -451,11 +459,9 @@ jobs:
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
 
           # ---------------------------------------------------------------
-          # Python wheels (ORT + OGA cp314) — bundled into the same artifact
-          # under staging/wheels/ so downstream consumers download a single
-          # zip. Both wheels are cached inside ort-install / oga-artifacts
-          # respectively, so cache hits restore them without re-running ORT
-          # or OGA from source.
+          # Python wheels (ORT + OGA cp314) bundled into the artifact under
+          # staging/wheels/. Both are cached inside ort-install / oga-artifacts,
+          # so cache hits restore them without rebuilding ORT / OGA.
           # ---------------------------------------------------------------
           mkdir -p staging/wheels
           ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
@@ -479,6 +485,40 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
+          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
+
+      # -----------------------------------------------------------------------
+      # Python wheel package: the three project wheels + run_onnx.py + OGA
+      # benchmark scripts. ROCm wheels are NOT bundled — they are installed
+      # from repo.amd.com at runtime (CI smoke) or downloaded by the local
+      # package_release.ps1 script when building the offline distribution.
+      # -----------------------------------------------------------------------
+      - name: Stage Python wheel package
+        shell: bash
+        run: |
+          mkdir -p wheelpkg/wheels
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          EP_WHEEL=$(find "../build/$(basename "$PWD")/python/dist" \
+            -name "onnxruntime_morphizen_ep-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ]; then
+            echo "ERROR: wheel(s) missing"
+            echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL EP=$EP_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
+          cp python/examples/run_onnx.py wheelpkg/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
+          echo "=== Python wheel package layout ==="
+          find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
+
+      - name: Upload Python wheel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: morphizen-python-package
+          path: wheelpkg/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
 
   # ---------------------------------------------------------------------------
@@ -514,12 +554,21 @@ jobs:
           if exist gpu-test-package rd /s /q gpu-test-package
           if exist l2-results rd /s /q l2-results
           if exist oga-results rd /s /q oga-results
+          if exist oga-smoke-venv rd /s /q oga-smoke-venv
+          if exist oga-smoke-results rd /s /q oga-smoke-results
+          if exist wheelpkg rd /s /q wheelpkg
 
       - name: Download GPU test package
         uses: actions/download-artifact@v4
         with:
           name: gpu-test-package
           path: gpu-test-package
+
+      - name: Download Python wheel package
+        uses: actions/download-artifact@v4
+        with:
+          name: morphizen-python-package
+          path: wheelpkg
 
       # TheRock DLLs are required at runtime on the GPU machine.
       # Download is fast enough that caching is not needed on the self-hosted runner.
@@ -723,6 +772,57 @@ jobs:
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
           }
           exit $failed
+
+      # -----------------------------------------------------------------------
+      # OGA wheel smoke: install the project wheels from the morphizen-python-
+      # package artifact + ROCm wheels from repo.amd.com, then run OGA's
+      # benchmark_e2e.py against a real model.
+      # -----------------------------------------------------------------------
+      # The cp314 ORT/OGA wheels need Python 3.14 to create the smoke venv (the
+      # runner's default python may be a different version).
+      - name: Setup Python 3.14 (wheel smoke)
+        if: always()
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Run OGA wheel smoke (Python)
+        if: always()
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $model = "${{ runner.workspace }}\oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+          if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
+
+          $pkg = "$PWD\wheelpkg"
+          $venv = "$PWD\oga-smoke-venv"
+          if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
+          python -m venv $venv
+          $py = "$venv\Scripts\python.exe"
+
+          # Install project wheels from local dir + ROCm wheels from repo.amd.com.
+          Push-Location "$pkg\wheels"
+          & $py -m pip install --quiet `
+            (Get-Item onnxruntime_directml-*.whl).Name `
+            (Get-Item onnxruntime_morphizen_ep-*.whl).Name `
+            (Get-Item onnxruntime_genai_directml-*.whl).Name `
+            --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ `
+            psutil tqdm pandas
+          Pop-Location
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
+          & "$venv\Scripts\rocm-sdk.exe" init   # expand rocm[devel] import libs
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] rocm-sdk init failed"; exit 1 }
+
+          # run_onnx.py --benchmark sets up env (THEROCK_DIST/LIB/PATH) from the
+          # installed wheels, then delegates to benchmark_e2e.py.
+          New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
+          & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `
+            -i $model -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v `
+            2>&1 | Tee-Object -FilePath "oga-smoke-results\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml.txt"
+          exit $LASTEXITCODE
 
       # -----------------------------------------------------------------------
       # L2 accuracy test: compare MorphiZen EP vs CPU output for each model
@@ -941,8 +1041,31 @@ jobs:
                           $ogaRows
           }
 
+          # --- OGA Python wheel smoke (benchmark_e2e.py) results ---
+          $smokeRows = ""
+          foreach ($f in (Get-ChildItem "oga-smoke-results/*.txt" -ErrorAction SilentlyContinue)) {
+            $model = $f.BaseName
+            $content = Get-Content $f.FullName -Raw
+            $ppMatch = [regex]::Match($content, 'Average Prompt Processing Throughput \(per token\):\s+([\d.]+)')
+            $tgMatch = [regex]::Match($content, 'Average Token Generation Throughput \(per token\):\s+([\d.]+)')
+            $ttft = if ($ppMatch.Success) { "{0:F0}" -f (128.0 / [double]$ppMatch.Groups[1].Value * 1000) } else { "-" }
+            $tps  = if ($tgMatch.Success) { "{0:F1}" -f [double]$tgMatch.Groups[1].Value } else { "-" }
+            if ($tgMatch.Success) {
+              $smokeRows += "| $model | $ttft | $tps |`n"
+            } else {
+              $smokeRows += "| $model | failed | - |`n"
+            }
+          }
+          $smokeSection = ""
+          if ($smokeRows) {
+            $smokeSection = "`n## OGA Wheel Smoke (Python benchmark_e2e.py)`n`n" +
+                            "| Model | TTFT (ms) | TPS |`n" +
+                            "|-------|----:|----:|`n" +
+                            $smokeRows
+          }
+
           $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
-          $summary = $header + $tableRows + $epctxSection + $ogaSection + $footer
+          $summary = $header + $tableRows + $epctxSection + $ogaSection + $smokeSection + $footer
 
           # Always write to step summary and log
           Write-Host $summary
