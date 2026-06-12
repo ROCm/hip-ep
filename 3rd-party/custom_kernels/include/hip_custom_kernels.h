@@ -724,12 +724,17 @@ int hip_gather(
  *     final result is narrowed back to half.
  * Returns: 0 on success, non-zero on failure
  */
+/* `inner_size` = product of input dims AFTER the reduced axis (1 for a
+ * trailing/contiguous reduce). Enables reducing a non-trailing axis (e.g.
+ * channel-axis LayerNorm2d over NCHW): reduced elements are strided by
+ * `inner_size`. inner_size==1 preserves the contiguous fast path. */
 int hip_reduce_sum(
     void* stream,
     const void* data,
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
+    int64_t inner_size,
     int hip_dtype);
 
 /* =========================================================================
@@ -867,12 +872,14 @@ int hip_global_pool(
  * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
  * (FP16 accumulates in float, narrows on write).
  */
+/* `inner_size`: see hip_reduce_sum (strided non-trailing-axis support). */
 int hip_reduce_max(
     void* stream,
     const void* data,
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
+    int64_t inner_size,
     int hip_dtype);
 
 int hip_reduce_prod(
@@ -881,6 +888,7 @@ int hip_reduce_prod(
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
+    int64_t inner_size,
     int hip_dtype);
 
 /* =========================================================================
