@@ -13,112 +13,6 @@ namespace {
 // Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
 //===----------------------------------------------------------------------===//
 
-/// Read a rank-0 scalar tensor to a host SSA value without racing the GPU.
-///
-/// A rank-0 -> rank-N (single-element) Reshape must re-emit the scalar through
-/// `tensor.from_elements`, which needs the value on the host. A plain
-/// `tensor.extract` of a runtime, GPU-produced scalar lowers to a bare host
-/// `memref.load` of a device buffer with NO stream synchronization: the host
-/// reads stale/garbage memory on targets where the pool is true device memory
-/// (it only accidentally works where the pool is UMA-mapped host-accessible
-/// memory). The canonical victim is the dynamic-shape vision-encoder grid
-/// arithmetic `ReduceMax -> Reshape(i64 -> 1xi64) -> Gather -> Cast -> Range`:
-/// the unsynced extract of the ReduceMax result feeds a corrupt limit into the
-/// downstream `onnx.Range`, collapsing the rope sequence dimension.
-///
-/// For a compile-time constant scalar there is no device dependency, so we keep
-/// the cheap `tensor.extract` (it folds, no D2H sync). For a runtime value we
-/// emit `hip.readback_scalar` (D2H + stream sync) so the host observes the
-/// value the producing kernel actually wrote.
-///
-/// Before (runtime scalar, incorrect):
-///   %v = tensor.extract %s[] : tensor<i64>          // host load of device mem
-/// After:
-///   %v = hip.readback_scalar(%ctx, %s : tensor<i64>) -> i64
-static mlir::Value readRank0ScalarToHost(mlir::PatternRewriter &rewriter,
-                                         mlir::Location loc,
-                                         mlir::Operation *op,
-                                         mlir::Value scalarTensor,
-                                         mlir::Type elemTy) {
-  // Compile-time constant (arith.constant or inline onnx.Constant): the value
-  // is host-known, so a tensor.extract folds with no device traffic.
-  bool isConst = false;
-  if (mlir::Operation *def = scalarTensor.getDefiningOp())
-    isConst = mlir::isa<mlir::arith::ConstantOp>(def) || def->hasAttr("value");
-  if (isConst)
-    return mlir::tensor::ExtractOp::create(rewriter, loc, scalarTensor,
-                                           mlir::ValueRange{})
-        .getResult();
-
-  // Runtime value (possibly GPU-computed): synchronized host readback. Falls
-  // back to tensor.extract if the function has no !hip.context arg to call
-  // readback_scalar with (utility funcs / pre-context-arg conversions).
-  auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return mlir::tensor::ExtractOp::create(rewriter, loc, scalarTensor,
-                                           mlir::ValueRange{})
-        .getResult();
-  return ReadbackScalarOp::create(rewriter, loc, elemTy, *ctxOrFailure,
-                                  scalarTensor)
-      .getResult();
-}
-
-/// Read element \p idx of a 1-D shape tensor to a host SSA value without racing
-/// the GPU.
-///
-/// The dynamic-reshape `-1` resolution needs each entry of the shape operand on
-/// the host. That operand is frequently GPU-computed (the canonical case: a
-/// dynamic-shape vision-encoder reshape whose target shape is packed via
-/// `tensor.from_elements` + `tensor.insert_slice` from values read back out of
-/// `image_grid_thw`). A bare `tensor.extract %shape[idx]` lowers to a host
-/// `memref.load` of that device buffer with no stream synchronization, reading
-/// stale/garbage on targets where the pool is true device memory (it only
-/// accidentally works where the pool is UMA-mapped host-accessible memory). A
-/// wrong entry then resolves the wrong inferred dim and the reshape collapses
-/// the result (e.g. the rope cos/sin sequence dimension shrinks to a couple of
-/// elements). Mirrors readRank0ScalarToHost / RangeConversion /
-/// ExpandConversion.
-///
-/// Before (runtime shape, incorrect):
-///   %v = tensor.extract %shape[%idx] : tensor<Nxi64>   // host load of dev mem
-/// After:
-///   %s   = tensor.extract_slice %shape[%idx] [1] [1] : tensor<Nxi64> to
-///   tensor<1xi64> %s0  = tensor.collapse_shape %s [] : tensor<1xi64> into
-///   tensor<i64> %v   = hip.readback_scalar(%ctx, %s0 : tensor<i64>) -> i64
-static mlir::Value readShapeEntryToHost(mlir::PatternRewriter &rewriter,
-                                        mlir::Location loc, mlir::Operation *op,
-                                        mlir::Value shapeOperand, int64_t idx,
-                                        mlir::Type elemTy) {
-  // Compile-time constant shape: a tensor.extract folds with no device traffic.
-  bool isConst = false;
-  if (mlir::Operation *def = shapeOperand.getDefiningOp())
-    isConst = mlir::isa<mlir::arith::ConstantOp>(def) || def->hasAttr("value");
-  auto extractAt = [&]() -> mlir::Value {
-    mlir::Value cidx = mlir::arith::ConstantIndexOp::create(rewriter, loc, idx);
-    return mlir::tensor::ExtractOp::create(rewriter, loc, shapeOperand,
-                                           mlir::ValueRange{cidx})
-        .getResult();
-  };
-  if (isConst)
-    return extractAt();
-
-  // Runtime value (possibly GPU-computed): slice to rank-0, synchronized
-  // readback. Falls back to tensor.extract if there's no !hip.context arg.
-  auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return extractAt();
-  llvm::SmallVector<mlir::OpFoldResult> offsets{rewriter.getIndexAttr(idx)};
-  llvm::SmallVector<mlir::OpFoldResult> sizes{rewriter.getIndexAttr(1)};
-  llvm::SmallVector<mlir::OpFoldResult> strides{rewriter.getIndexAttr(1)};
-  mlir::Value entry1d = mlir::tensor::ExtractSliceOp::create(
-      rewriter, loc, shapeOperand, offsets, sizes, strides);
-  mlir::Value entry0d = mlir::tensor::CollapseShapeOp::create(
-      rewriter, loc, mlir::RankedTensorType::get({}, elemTy), entry1d,
-      llvm::ArrayRef<mlir::ReassociationIndices>{});
-  return ReadbackScalarOp::create(rewriter, loc, elemTy, *ctxOrFailure, entry0d)
-      .getResult();
-}
-
 /// True when the defining op of the axes value is compile-time known.
 ///
 /// After constant externalization, small onnx.Constant / arith.constant tensors
@@ -280,8 +174,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     //
     // The scalar must reach the host to re-emit via tensor.from_elements. For a
     // runtime, GPU-produced scalar a plain tensor.extract races the kernel (see
-    // readRank0ScalarToHost); we read it back through hip.readback_scalar
-    // (D2H + stream sync) instead. Compile-time constants keep tensor.extract.
+    // ReadbackScalar.h); we read it back through hip.readback_scalar
+    // (D2H + stream sync) instead. Compile-time constants fold.
     //
     // Before:
     //   %r = onnx.Reshape %s : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
@@ -290,8 +184,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     //   %r = tensor.from_elements %v : tensor<1xi64>
     if (inputRank == 0 && outputRank > 0 && outputType.hasStaticShape() &&
         outputType.getNumElements() == 1) {
-      mlir::Value scalar = readRank0ScalarToHost(rewriter, loc, op, data,
-                                                 inputType.getElementType());
+      mlir::Value scalar =
+          readbackScalarToHostOrExtract(rewriter, loc, op, data);
       mlir::Value flat = mlir::tensor::FromElementsOp::create(
           rewriter, loc,
           mlir::RankedTensorType::get({1}, inputType.getElementType()),
@@ -592,9 +486,9 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
           // Read each shape entry to the host with a stream sync (constants
           // fold) instead of a bare host load of device memory. A bare
           // tensor.extract here races a GPU-computed shape tensor and yields a
-          // garbage dim that collapses the reshape. See readShapeEntryToHost.
-          mlir::Value v =
-              readShapeEntryToHost(rewriter, loc, op, shapeOperand, i, elemTy);
+          // garbage dim that collapses the reshape. See ReadbackScalar.h.
+          mlir::Value v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
+                                                            shapeOperand, i);
           dims.push_back(v);
           mlir::Value isPositive = mlir::arith::CmpIOp::create(
               rewriter, loc, mlir::arith::CmpIPredicate::sgt, v, cOne);

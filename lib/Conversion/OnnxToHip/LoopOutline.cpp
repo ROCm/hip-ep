@@ -36,6 +36,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ReadbackScalar.h"
+
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
@@ -61,54 +63,29 @@ namespace {
 // Helpers
 //===----------------------------------------------------------------------===//
 
-/// Try to read the single scalar value from a 0-D `onnx.Constant`. Returns
-/// `nullopt` for any value not produced by an `onnx.Constant` with a dense
-/// 0-D attribute of the requested integer width.
-template <typename IntTy>
-static std::optional<IntTy> readOnnxConstantScalar(Value v, unsigned bitWidth) {
-  Operation *defOp = v.getDefiningOp();
-  if (!defOp || defOp->getName().getStringRef() != "onnx.Constant")
-    return std::nullopt;
-  auto attr = defOp->getAttrOfType<DenseElementsAttr>("value");
-  if (!attr)
-    return std::nullopt;
-  auto t = dyn_cast<RankedTensorType>(attr.getType());
-  if (!t || t.getRank() != 0 || !t.getElementType().isInteger(bitWidth))
-    return std::nullopt;
-  return static_cast<IntTy>((*attr.getValues<APInt>().begin()).getZExtValue());
-}
-
-/// Materialize an `index` scalar from a 0-D `tensor<i64>` trip count. An
-/// `onnx.Constant` folds to an `arith.constant` (pure host value). A runtime
+/// Materialize an `index` scalar from a 0-D `tensor<i64>` trip count. A runtime
 /// trip count (e.g. a window count derived from a graph input via `onnx.Sub`)
-/// MUST go through `hip.readback_scalar` (D2H + stream sync), never a bare
-/// `tensor.extract`: that bufferizes to an unsynchronized host `memref.load` of
-/// device memory and reads stale bytes on true-device pools, running the loop
-/// the wrong number of times. Mirrors RangeConversion::readScalarOperand.
-///
-/// Before (runtime trip count, incorrect):
-///   %m = tensor.extract %mTensor[] : tensor<i64>   // host load of device mem
-///   %i = arith.index_cast %m : i64 to index
-/// After:
-///   %m = hip.readback_scalar(%ctx, %mTensor : tensor<i64>) -> i64
-///   %i = arith.index_cast %m : i64 to index
+/// goes through `hip.readback_scalar` (D2H + stream sync) -- a bare
+/// `tensor.extract` would read stale bytes on true-device pools and run the
+/// loop the wrong number of times. See ReadbackScalar.h.
 static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
                                        Value ctx, Value mTensor) {
   auto t = dyn_cast<RankedTensorType>(mTensor.getType());
   if (!t || t.getRank() != 0 || !t.getElementType().isInteger(64))
     return failure();
-  if (auto folded = readOnnxConstantScalar<int64_t>(mTensor, 64)) {
-    Value indexVal = arith::ConstantIndexOp::create(builder, loc, *folded);
-    return indexVal;
-  }
-  // Runtime (possibly GPU-computed) trip count: synchronized host readback,
-  // never a bare tensor.extract (see rationale above).
-  Value i64Val =
-      ReadbackScalarOp::create(builder, loc, t.getElementType(), ctx, mTensor)
+  // A constant trip count folds straight to an index (no readback, no cast).
+  if (DenseElementsAttr dense = getConstantDense(mTensor))
+    if (dense.getNumElements() == 1)
+      return arith::ConstantIndexOp::create(
+                 builder, loc,
+                 (*dense.getValues<APInt>().begin()).getSExtValue())
           .getResult();
-  Value indexVal =
-      arith::IndexCastOp::create(builder, loc, builder.getIndexType(), i64Val);
-  return indexVal;
+  // Runtime (possibly GPU-computed) trip count: synchronized readback then
+  // cast.
+  Value i64Val = readbackScalarToHost(builder, loc, ctx, mTensor);
+  return arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                    i64Val)
+      .getResult();
 }
 
 /// Materialize an `i1` scalar from a 0-D BOOL-like tensor operand.
