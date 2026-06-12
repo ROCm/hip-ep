@@ -63,6 +63,62 @@ static mlir::Value readRank0ScalarToHost(mlir::PatternRewriter &rewriter,
       .getResult();
 }
 
+/// Read element \p idx of a 1-D shape tensor to a host SSA value without racing
+/// the GPU.
+///
+/// The dynamic-reshape `-1` resolution needs each entry of the shape operand on
+/// the host. That operand is frequently GPU-computed (the canonical case: a
+/// dynamic-shape vision-encoder reshape whose target shape is packed via
+/// `tensor.from_elements` + `tensor.insert_slice` from values read back out of
+/// `image_grid_thw`). A bare `tensor.extract %shape[idx]` lowers to a host
+/// `memref.load` of that device buffer with no stream synchronization, reading
+/// stale/garbage on targets where the pool is true device memory (it only
+/// accidentally works where the pool is UMA-mapped host-accessible memory). A
+/// wrong entry then resolves the wrong inferred dim and the reshape collapses
+/// the result (e.g. the rope cos/sin sequence dimension shrinks to a couple of
+/// elements). Mirrors readRank0ScalarToHost / RangeConversion /
+/// ExpandConversion.
+///
+/// Before (runtime shape, incorrect):
+///   %v = tensor.extract %shape[%idx] : tensor<Nxi64>   // host load of dev mem
+/// After:
+///   %s   = tensor.extract_slice %shape[%idx] [1] [1] : tensor<Nxi64> to
+///   tensor<1xi64> %s0  = tensor.collapse_shape %s [] : tensor<1xi64> into
+///   tensor<i64> %v   = hip.readback_scalar(%ctx, %s0 : tensor<i64>) -> i64
+static mlir::Value readShapeEntryToHost(mlir::PatternRewriter &rewriter,
+                                        mlir::Location loc, mlir::Operation *op,
+                                        mlir::Value shapeOperand, int64_t idx,
+                                        mlir::Type elemTy) {
+  // Compile-time constant shape: a tensor.extract folds with no device traffic.
+  bool isConst = false;
+  if (mlir::Operation *def = shapeOperand.getDefiningOp())
+    isConst = mlir::isa<mlir::arith::ConstantOp>(def) || def->hasAttr("value");
+  auto extractAt = [&]() -> mlir::Value {
+    mlir::Value cidx = mlir::arith::ConstantIndexOp::create(rewriter, loc, idx);
+    return mlir::tensor::ExtractOp::create(rewriter, loc, shapeOperand,
+                                           mlir::ValueRange{cidx})
+        .getResult();
+  };
+  if (isConst)
+    return extractAt();
+
+  // Runtime value (possibly GPU-computed): slice to rank-0, synchronized
+  // readback. Falls back to tensor.extract if there's no !hip.context arg.
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return extractAt();
+  llvm::SmallVector<mlir::OpFoldResult> offsets{rewriter.getIndexAttr(idx)};
+  llvm::SmallVector<mlir::OpFoldResult> sizes{rewriter.getIndexAttr(1)};
+  llvm::SmallVector<mlir::OpFoldResult> strides{rewriter.getIndexAttr(1)};
+  mlir::Value entry1d = mlir::tensor::ExtractSliceOp::create(
+      rewriter, loc, shapeOperand, offsets, sizes, strides);
+  mlir::Value entry0d = mlir::tensor::CollapseShapeOp::create(
+      rewriter, loc, mlir::RankedTensorType::get({}, elemTy), entry1d,
+      llvm::ArrayRef<mlir::ReassociationIndices>{});
+  return ReadbackScalarOp::create(rewriter, loc, elemTy, *ctxOrFailure, entry0d)
+      .getResult();
+}
+
 /// True when the defining op of the axes value is compile-time known.
 ///
 /// After constant externalization, small onnx.Constant / arith.constant tensors
@@ -533,10 +589,12 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         dims.reserve(outputRank);
         mlir::Value posProduct = cOne;
         for (int64_t i : llvm::seq<int64_t>(outputRank)) {
-          mlir::Value idx =
-              mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
-          mlir::Value v = mlir::tensor::ExtractOp::create(
-              rewriter, loc, shapeOperand, mlir::ValueRange{idx});
+          // Read each shape entry to the host with a stream sync (constants
+          // fold) instead of a bare host load of device memory. A bare
+          // tensor.extract here races a GPU-computed shape tensor and yields a
+          // garbage dim that collapses the reshape. See readShapeEntryToHost.
+          mlir::Value v =
+              readShapeEntryToHost(rewriter, loc, op, shapeOperand, i, elemTy);
           dims.push_back(v);
           mlir::Value isPositive = mlir::arith::CmpIOp::create(
               rewriter, loc, mlir::arith::CmpIPredicate::sgt, v, cOne);
