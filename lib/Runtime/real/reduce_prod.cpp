@@ -37,7 +37,8 @@ static int reduce_prod_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
 int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t data_num_elements, int64_t output_num_elements,
                      int64_t axes_num_elements, int64_t data_type,
-                     int64_t keepdims, int64_t noop_with_empty_axes) {
+                     int64_t keepdims, int64_t noop_with_empty_axes,
+                     int64_t inner_size) {
   OP_PROFILE(
       "reduce_prod",
       [&] {
@@ -99,5 +100,5 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
                     hipdnn_ep_datatype_name(data_type), hip_dtype);
 
   return hip_reduce_prod(stream, data, output, data_num_elements,
-                         output_num_elements, hip_dtype);
+                         output_num_elements, inner_size, hip_dtype);
 }

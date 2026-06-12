@@ -41,7 +41,8 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t data_type,
-                    int64_t keepdims, int64_t noop_with_empty_axes) {
+                    int64_t keepdims, int64_t noop_with_empty_axes,
+                    int64_t inner_size) {
   OP_PROFILE(
       "reduce_sum",
       [&] {
@@ -99,5 +100,5 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
       (long long)noop_with_empty_axes, hip_dtype);
 
   return hip_reduce_sum(stream, data, output, data_num_elements,
-                        output_num_elements, hip_dtype);
+                        output_num_elements, inner_size, hip_dtype);
 }
