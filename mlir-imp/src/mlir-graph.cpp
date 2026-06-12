@@ -1235,19 +1235,36 @@ MLIRGraph::get_node_arg(MLIRNodeArgIndex node_arg_index) const {
 std::vector<const mlir::Operation*>
 MLIRGraph::get_consumer_nodes(const std::string& node_arg_name) const {
   std::vector<const mlir::Operation*> consumers;
+  llvm::SmallPtrSet<const mlir::Operation*, 8> seen;
   auto node_arg = get_node_arg(get_node_arg_index(node_arg_name));
+
+  // Helper: lift op from nested region to entry_block_ level
+  // Works for arbitrarily nested structures (e.g., Loop inside Loop body)
+  auto liftToEntryBlock = [this](mlir::Operation* op) -> mlir::Operation* {
+    mlir::Operation* topOp = op;
+    while (topOp != nullptr && topOp->getBlock() != entry_block_) {
+      topOp = topOp->getParentOp();
+    }
+    return topOp; // nullptr if outside this graph
+  };
+
   for (mlir::Operation* userOp : node_arg->getValue().getUsers()) {
-    // Skip return operations (onnx.Return or func.return) to avoid treating
-    // function outputs as regular consumers. Bug scenario: When a node's output
-    // (e.g., "linear_img_add_DequantizeLinear") is directly returned by the
-    // function, including return ops as a consumer causes incorrect dependency
-    // analysis in graph partitioning, leading to wrong subgraph boundaries or
-    // the Partitioner incorrectly treating graph outputs as having real
-    // successors.
-    if (onnx_mlir::isReturnOp(userOp)) {
+    // Skip main graph terminator (return in entry_block_)
+    if (onnx_mlir::isReturnOp(userOp) && userOp->getBlock() == entry_block_) {
       continue;
     }
-    consumers.push_back(userOp);
+
+    // Lift nested region ops (Loop/If/Scan body) to top-level parent
+    // Example: Gather in InnerLoop body -> InnerLoop -> OuterLoop
+    // (entry_block_)
+    mlir::Operation* topOp = liftToEntryBlock(userOp);
+    if (topOp == nullptr) {
+      continue; // used only outside this graph
+    }
+
+    if (seen.insert(topOp).second) {
+      consumers.push_back(topOp);
+    }
   }
   MY_LOG(1) << "Found " << consumers.size()
             << " consumer nodes for: " << node_arg_name;
