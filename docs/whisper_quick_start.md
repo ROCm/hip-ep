@@ -23,11 +23,21 @@ fp16-vs-fp32 numbers.
 > shell are the environment exports in §2, which give a PowerShell equivalent.
 > `pytest` / `git` / `python` commands work the same in either shell.
 
-> **Paths in this guide** follow the main [Quick Start](quick_start.md) workspace
-> layout: the build tree lives at `../build/onnx-hipdnn-ep/` and the install prefix
-> at `../local/` (both siblings of the repo root). The EP DLL + `morphizen_config.json`
-> land in `../local/bin/`; the auto-downloaded TheRock SDK lives at
-> `../build/onnx-hipdnn-ep/_therock/`. Adjust if you passed a different `--install_dir`.
+> **Paths in this guide** route the build tree and the install prefix through a
+> single `$ROOT` you choose: the build tree at `$ROOT/build`, the install prefix
+> at `$ROOT/local`. The EP DLL + `morphizen_config.json` land in `$ROOT/local/bin/`;
+> the auto-downloaded TheRock SDK lives at `$ROOT/build/_therock/`. Set `$ROOT`
+> once per shell (§1 / §2) and every later command reuses it.
+>
+> **Pick a SHORT `$ROOT` on Windows.** MSBuild's file tracker and the from-source
+> LLVM build generate paths deep under `$ROOT/build/_deps/llvm-project-build/...`
+> that bust the 260-char `MAX_PATH` limit if `$ROOT` is long — the failure is a
+> cryptic `FileTracker : error FTK1011: could not create ... .tlog` mid-build, not
+> a code error. A root like `C:\Users\you\work\rocm-ep-workspace` (≈38 chars) is
+> safe; building inside a deeply-nested worktree path is not. (Alternatively,
+> enable Windows long-path support once as admin: `New-ItemProperty -Path
+> "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled
+> -Value 1 -PropertyType DWORD -Force`, then restart the shell.)
 
 ---
 
@@ -84,31 +94,29 @@ touches the `hipdnn-ep` env or shadows the OGA fork.
 
 ## 1. Build the EP (one-time)
 
-From the repo root (mirrors the main [Quick Start](quick_start.md) — install
-prefix `../local`, build tree `../build/onnx-hipdnn-ep/`):
+From the repo root. Choose a **short** `$ROOT` (see the MAX_PATH note above) and
+route both the build tree and the install prefix through it.
 
 **Git Bash:**
 
 ```bash
-mkdir -p ../local
-LOCAL_DIR=$(cd ../local && pwd)
-python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
+ROOT=/c/Users/$USER/work/rocm-ep-workspace   # pick a SHORT path; see note above
+python build.py --build_dir "$ROOT/build" --install_dir "$ROOT/local" --cmake_prefix_path "$ROOT/local"
 ```
 
 **PowerShell:**
 
 ```powershell
-New-Item -ItemType Directory -Force ..\local | Out-Null
-$LOCAL_DIR = (Resolve-Path ..\local).Path
-python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
+$ROOT = "C:\Users\$env:USERNAME\work\rocm-ep-workspace"   # pick a SHORT path; see note above
+python build.py --build_dir "$ROOT\build" --install_dir "$ROOT\local" --cmake_prefix_path "$ROOT\local"
 ```
 
 This resolves the LLVM/MLIR/Protobuf/FlatBuffers + ONNX Runtime deps (auto-downloaded
 unless `--cmake_prefix_path` points at prebuilt ones) + the TheRock ROCm SDK,
-detects your GPU, and builds the compiler + MorphiZen EP into `../local/`. See the
+detects your GPU, and builds the compiler + MorphiZen EP into `$ROOT/local/`. See the
 main [Quick Start](quick_start.md) for details and troubleshooting.
 
-After it finishes you should have `../local/bin/onnxruntime_morphizen_ep.dll`.
+After it finishes you should have `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`.
 
 ---
 
@@ -118,16 +126,18 @@ The EP **compiles and links the model into a GPU DLL at session init**, so the
 ROCm runtime libraries must be on `PATH` and `THEROCK_DIST` must point at the SDK.
 Run this in every shell before any Whisper command.
 
-**Git Bash** (the convention for the rest of this guide). The auto-downloaded
-TheRock SDK lives under the build dir (`_therock`); if you passed your own
-`-DTHEROCK_DIST`, point at that instead:
+Use the same `$ROOT` you built with in §1. The auto-downloaded TheRock SDK lives
+under the build dir (`$ROOT/build/_therock`); if you passed your own
+`-DTHEROCK_DIST`, point at that instead.
+
+**Git Bash** (the convention for the rest of this guide):
 
 ```bash
 cd <repo-root>
 conda activate hipdnn-ep
-export LOCAL_DIR=$(cd ../local && pwd)
-export THEROCK_DIST=$(cd ../build/$(basename $PWD)/_therock && pwd)
-export PATH="$THEROCK_DIST/bin:$LOCAL_DIR/bin:$PATH"
+export ROOT=/c/Users/$USER/work/rocm-ep-workspace   # same short path as §1
+export THEROCK_DIST="$ROOT/build/_therock"
+export PATH="$THEROCK_DIST/bin:$ROOT/local/bin:$PATH"
 ```
 
 **PowerShell** (equivalent — note `$env:` syntax and `;`-separated `Path`):
@@ -135,8 +145,9 @@ export PATH="$THEROCK_DIST/bin:$LOCAL_DIR/bin:$PATH"
 ```powershell
 cd <repo-root>
 conda activate hipdnn-ep
-$env:THEROCK_DIST = (Resolve-Path "..\build\$(Split-Path -Leaf $PWD)\_therock").Path
-$env:Path = "$env:THEROCK_DIST\bin;$(Resolve-Path '..\local').Path\bin;$env:Path"
+$ROOT = "C:\Users\$env:USERNAME\work\rocm-ep-workspace"   # same short path as §1
+$env:THEROCK_DIST = "$ROOT\build\_therock"
+$env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 ```
 
 > **Why this matters:** without `THEROCK_DIST` / `PATH`, the EP fails to link the
@@ -255,13 +266,13 @@ pytest test/python/whisper/test_whisper.py -k "encoder_correctness or decoder_pr
 Conv1d, attention, and LayerNorm, both fp16 and fp32 (one line):
 
 ```
-pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name MorphiZenExecutionProvider --ep-dll ../local/bin/onnxruntime_morphizen_ep.dll --ep-option config_file=../local/bin/morphizen_config.json -v
+pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name MorphiZenExecutionProvider --ep-dll $ROOT/local/bin/onnxruntime_morphizen_ep.dll --ep-option config_file=$ROOT/local/bin/morphizen_config.json -v
 ```
 
 ### 4e. MLIR conversion (LIT)
 
 ```
-ctest --test-dir ../build/onnx-hipdnn-ep -C RelWithDebInfo -R MorphizenMLIRLitTests
+ctest --test-dir $ROOT/build -C Release -R MorphizenMLIRLitTests
 ```
 
 ### Run everything at once
@@ -427,7 +438,7 @@ EP comparison.
 | Transcription is garbage / a "GPU" run is suspiciously slow | Silent CPU fallback. Set the env (§2), clear the model cache (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`), and re-run. Confirm GPU dispatch with `HIPDNN_EP_DEBUG=1` (look for `[REAL] wrap_*` lines on stderr). |
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
-| `pytest` can't find the EP / wrong ORT API | The EP DLL must match the pip `onnxruntime-directml` API version (see CLAUDE.md "ORT version must match pip"). Rebuild via `python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"`. |
+| `pytest` can't find the EP / wrong ORT API | The EP DLL must match the pip `onnxruntime-directml` API version (see CLAUDE.md "ORT version must match pip"). Rebuild via `python build.py --build_dir "$ROOT/build" --install_dir "$ROOT/local" --cmake_prefix_path "$ROOT/local"`. |
 
 For internals (how the ONNX surgery works, the `no_causal` GQA path, the fp32
 GQA enabling, known limitations), see the **Whisper gotchas** in
