@@ -497,7 +497,7 @@ jobs:
       - name: Stage Python wheel package
         shell: bash
         run: |
-          mkdir -p wheelpkg/wheels wheelpkg/benchmark
+          mkdir -p wheelpkg/wheels
           ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
             -name "onnxruntime_directml-*.whl" -type f | head -1)
           OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
@@ -511,7 +511,7 @@ jobs:
           fi
           cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
           cp python/examples/run_onnx.py wheelpkg/
-          cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/benchmark/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
           # Download EP dependency closure (ROCm) for the wheel package.
           python -m pip download "$EP_WHEEL" \
             --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ \
@@ -825,21 +825,10 @@ jobs:
           & "$venv\Scripts\rocm-sdk.exe" init   # expand rocm[devel] import libs
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] rocm-sdk init failed"; exit 1 }
 
-          # THEROCK_DIST -> rocm[devel]; LIB -> capi (CRT + custom kernels);
-          # PATH -> capi (EP + hip-compiler) + rocm runtime bins.
-          $sp = "$venv\Lib\site-packages"
-          $capi = "$sp\onnxruntime\capi"
-          $env:THEROCK_DIST = "$sp\_rocm_sdk_devel"
-          $env:LIB = $capi
-          $rocmBins = (Get-ChildItem $sp -Directory -Filter "_rocm_sdk_*" |
-            ForEach-Object { "$($_.FullName)\bin" } | Where-Object { Test-Path $_ }) -join ";"
-          $env:PATH = "$capi;$rocmBins;$env:PATH"
-
-          # -e follow_config reads the provider from genai_config.json (populated
-          # by the OGA benchmark step above from genai_config_128.json). Tee the
-          # output so the publish step can extract throughput.
+          # run_onnx.py --benchmark sets up env (THEROCK_DIST/LIB/PATH) from the
+          # installed wheels, then delegates to benchmark_e2e.py.
           New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
-          & $py "$pkg\benchmark\benchmark_e2e.py" `
+          & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `
             -i $model -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v `
             2>&1 | Tee-Object -FilePath "oga-smoke-results\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml.txt"
           exit $LASTEXITCODE

@@ -2,12 +2,12 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Minimal standalone example: run an ONNX model on the MorphiZen EP.
+"""Run an ONNX model or OGA benchmark on the MorphiZen EP.
 
-Registers the wheel-colocated MorphiZen EP plugin, builds a session over the
-discovered AMD device, feeds random inputs, and prints the output shapes. All
-the JIT-link / runtime-DLL environment (THEROCK_DIST / LIB / DLL dirs) is wired
-up from the installed wheels by this script -- no manual env setup needed.
+Sets up the JIT-link / runtime-DLL environment (THEROCK_DIST / LIB / DLL dirs)
+from the installed wheels, then either:
+  - Runs a plain ONNX model with random inputs (default), or
+  - Delegates to benchmark_e2e.py for OGA benchmarks (--benchmark).
 
 Prerequisites (see docs/python_package_guide.md):
   - pip install the onnxruntime + onnxruntime_morphizen_ep wheels
@@ -15,10 +15,12 @@ Prerequisites (see docs/python_package_guide.md):
 
 Usage:
   python run_onnx.py path/to/model.onnx
+  python run_onnx.py --benchmark benchmark_e2e.py -i model_dir [args...]
 """
 
 import glob
 import os
+import subprocess
 import sys
 
 import numpy as np
@@ -26,7 +28,6 @@ import onnxruntime as ort
 
 EP_NAME = "MorphiZenEP"
 
-# ORT tensor type string -> numpy dtype (common cases).
 _NP_DTYPE = {
     "tensor(float)": np.float32,
     "tensor(float16)": np.float16,
@@ -40,19 +41,12 @@ _NP_DTYPE = {
 
 
 def _setup_env():
-    # Everything is derived from the installed onnxruntime location; no external
-    # env vars required. site-packages = .../onnxruntime/.. ; the EP native files
-    # live in onnxruntime/capi and pip rocm in _rocm_sdk_* siblings.
     sp = os.path.dirname(os.path.dirname(ort.__file__))
     capi = os.path.join(sp, "onnxruntime", "capi")
 
-    # JIT link inputs: ROCm import libs (rocm[devel]) + CRT/custom kernels (capi).
     os.environ["THEROCK_DIST"] = os.path.join(sp, "_rocm_sdk_devel")
     os.environ["LIB"] = os.pathsep.join(filter(None, [capi, os.environ.get("LIB", "")]))
 
-    # Runtime DLLs: EP + hip-compiler (capi) + ROCm runtime (rocm wheel bins).
-    # The EP loads hip-compiler.dll by name via PATH, so prepend these dirs to
-    # PATH (and register them as DLL dirs for ORT's own loader).
     dll_dirs = [
         d
         for d in [capi, *glob.glob(os.path.join(sp, "_rocm_sdk_*", "bin"))]
@@ -66,7 +60,6 @@ def _setup_env():
 
 def _random_input(spec):
     dtype = _NP_DTYPE.get(spec.type, np.float32)
-    # Replace dynamic / symbolic dims (None or str) with 1.
     shape = [d if isinstance(d, int) and d > 0 else 1 for d in spec.shape]
     if np.issubdtype(dtype, np.floating):
         return np.random.rand(*shape).astype(dtype)
@@ -75,14 +68,7 @@ def _random_input(spec):
     return np.random.randint(0, 2, size=shape).astype(dtype)
 
 
-def main():
-    if len(sys.argv) != 2:
-        print(f"usage: python {os.path.basename(__file__)} model.onnx", file=sys.stderr)
-        return 2
-    model_path = sys.argv[1]
-
-    capi = _setup_env()
-
+def _run_onnx(model_path, capi):
     ort.register_execution_provider_library(
         EP_NAME, os.path.join(capi, "onnxruntime_morphizen_ep.dll")
     )
@@ -106,6 +92,23 @@ def main():
     for spec, value in zip(sess.get_outputs(), outputs):
         print(f"output {spec.name}: shape={value.shape} dtype={value.dtype}")
     return 0
+
+
+def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--benchmark":
+        _setup_env()
+        return subprocess.call([sys.executable, *sys.argv[2:]])
+
+    if len(sys.argv) != 2:
+        print(f"usage: python {os.path.basename(__file__)} model.onnx", file=sys.stderr)
+        print(
+            f"       python {os.path.basename(__file__)} --benchmark benchmark_e2e.py [args...]",
+            file=sys.stderr,
+        )
+        return 2
+
+    capi = _setup_env()
+    return _run_onnx(sys.argv[1], capi)
 
 
 if __name__ == "__main__":
