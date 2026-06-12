@@ -87,9 +87,19 @@ touches the `hipdnn-ep` env or shadows the OGA fork.
 From the repo root (mirrors the main [Quick Start](quick_start.md) — install
 prefix `../local`, build tree `../build/onnx-hipdnn-ep/`):
 
+**Git Bash:**
+
 ```bash
 mkdir -p ../local
 LOCAL_DIR=$(cd ../local && pwd)
+python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
+```
+
+**PowerShell:**
+
+```powershell
+New-Item -ItemType Directory -Force ..\local | Out-Null
+$LOCAL_DIR = (Resolve-Path ..\local).Path
 python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 ```
 
