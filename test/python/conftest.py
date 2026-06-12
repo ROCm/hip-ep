@@ -42,6 +42,28 @@ EP_REGISTRATION_NAME = "MorphiZenExecutionProvider"
 _morphizen_registered = False
 
 
+def _ep_runtime_dirs(repo_root):
+    """Return (ep_bin, therock_bin) for locating the EP DLL + ROCm runtime DLLs.
+
+    Honours an out-of-tree install layout via env vars (set them when you build
+    with a custom --install_dir / --build_dir, e.g. the quick-start $ROOT layout):
+      MORPHIZEN_EP_BIN  -- dir holding onnxruntime_morphizen_ep.dll
+                           (default <repo>/install/dist/bin)
+      THEROCK_DIST      -- TheRock SDK root; its bin/ holds amdhip64*.dll etc.
+                           (default <repo>/install/therock)
+    Falls back to the legacy in-repo layout so existing setups keep working.
+    """
+    ep_env = os.environ.get("MORPHIZEN_EP_BIN")
+    ep_bin = pathlib.Path(ep_env) if ep_env else repo_root / "install" / "dist" / "bin"
+    therock_env = os.environ.get("THEROCK_DIST")
+    therock_bin = (
+        pathlib.Path(therock_env) / "bin"
+        if therock_env
+        else repo_root / "install" / "therock" / "bin"
+    )
+    return ep_bin, therock_bin
+
+
 # ── Model download / shape fixing ────────────────────────────────────────────
 
 
@@ -448,8 +470,7 @@ def register_morphizen_ep(repo_root):
     """Register the MorphiZen EP library with ONNX Runtime (once per process)."""
     global _morphizen_registered
 
-    dist_bin = repo_root / "install" / "dist" / "bin"
-    therock_bin = repo_root / "install" / "therock" / "bin"
+    dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
     ep_dll = dist_bin / EP_DLL_NAME
 
     if not ep_dll.exists():
@@ -1166,9 +1187,8 @@ def setup_oga_ep(repo_root):
     if not hasattr(og, "register_execution_provider_library"):
         pytest.skip("OGA version does not support custom EP registration")
 
-    dist_bin = repo_root / "install" / "dist" / "bin"
-    therock_bin = repo_root / "install" / "therock" / "bin"
-    ep_dll = dist_bin / "onnxruntime_morphizen_ep.dll"
+    dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
+    ep_dll = dist_bin / EP_DLL_NAME
     if not ep_dll.exists():
         pytest.skip("MorphiZen EP DLL not found — run build.py first")
 
