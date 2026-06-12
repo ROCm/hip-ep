@@ -80,16 +80,32 @@ static std::optional<IntTy> readOnnxConstantScalar(Value v, unsigned bitWidth) {
 
 /// Materialize an `index` scalar from a 0-D `tensor<i64>` operand. When
 /// `mTensor` is an `onnx.Constant`, the value is folded directly into an
-/// `arith.constant` -- avoiding a `tensor.extract` that would later
-/// bufferize to a host-side `memref.load` from an externalized
-/// GPU-resident constant (which crashes at runtime; same family of bug
-/// as PR #212's "host-scalar memory placement" issue). For non-constant
-/// `mTensor` (e.g. `Squeeze(Dim(input))`), we fall back to
-/// `tensor.extract` + `arith.index_cast`; if that path is ever wired up,
-/// the source memref must be made host-resident (e.g. via
-/// `hip-materialize-host-scalars`) before bufferization.
+/// `arith.constant` -- a pure host value, no device traffic.
+///
+/// Otherwise the trip count is computed at runtime (canonical case: a
+/// windowed-attention loop whose iteration count = number of windows is
+/// derived from a graph input on the GPU, e.g. via `onnx.Sub` over shape
+/// arithmetic). We MUST NOT `tensor.extract` it: that bufferizes to a bare
+/// host `memref.load` of a device buffer with no stream synchronization,
+/// reading stale memory on targets where the pool is true device memory (it
+/// only accidentally works where the pool is UMA-mapped host-accessible
+/// memory). A garbage trip count then runs the loop the wrong number of times
+/// -- e.g. a too-small/zero count leaves the loop-carried accumulator
+/// uninitialized, so a per-window attention output reads back as all-zero
+/// (cosine 0 against the reference) and the error compounds across blocks.
+/// Instead emit `hip.readback_scalar` (D2H + stream sync) so the host sees the
+/// value the producing kernel actually wrote. Mirrors
+/// RangeConversion::readScalarOperand and the Expand/Reshape shape-readback
+/// fixes.
+///
+/// Before (runtime trip count, incorrect):
+///   %m = tensor.extract %mTensor[] : tensor<i64>   // host load of device mem
+///   %i = arith.index_cast %m : i64 to index
+/// After:
+///   %m = hip.readback_scalar(%ctx, %mTensor : tensor<i64>) -> i64
+///   %i = arith.index_cast %m : i64 to index
 static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
-                                       Value mTensor) {
+                                       Value ctx, Value mTensor) {
   auto t = dyn_cast<RankedTensorType>(mTensor.getType());
   if (!t || t.getRank() != 0 || !t.getElementType().isInteger(64))
     return failure();
@@ -97,7 +113,11 @@ static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
     Value indexVal = arith::ConstantIndexOp::create(builder, loc, *folded);
     return indexVal;
   }
-  Value i64Val = tensor::ExtractOp::create(builder, loc, mTensor, ValueRange{});
+  // Runtime (possibly GPU-computed) trip count: synchronized host readback,
+  // never a bare tensor.extract (see rationale above).
+  Value i64Val =
+      ReadbackScalarOp::create(builder, loc, t.getElementType(), ctx, mTensor)
+          .getResult();
   Value indexVal =
       arith::IndexCastOp::create(builder, loc, builder.getIndexType(), i64Val);
   return indexVal;
@@ -463,7 +483,7 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   Value ctxVal = parentFn.getArgument(0);
 
   // Unbox M (tensor<i64>) -> index, and cond_init (tensor<i1>) -> i1.
-  FailureOr<Value> mIdx = unboxTripCount(outerBuilder, loc, mTensor);
+  FailureOr<Value> mIdx = unboxTripCount(outerBuilder, loc, ctxVal, mTensor);
   if (failed(mIdx))
     return loopOp->emitOpError("could not unbox M to index (expected "
                                "tensor<i64>, got ")
