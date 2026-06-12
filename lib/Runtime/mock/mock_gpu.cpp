@@ -1406,6 +1406,15 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   return *static_cast<const int32_t *>(device_scalar);
 }
 
+void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
+                               const void *device_scalar, int64_t num_bytes) {
+  (void)state;
+  // Mock "device" memory is host memory: copy the scalar directly.
+  if (!host_dst || !device_scalar || num_bytes <= 0)
+    return;
+  memcpy(host_dst, device_scalar, static_cast<size_t>(num_bytes));
+}
+
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {

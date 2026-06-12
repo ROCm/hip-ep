@@ -101,10 +101,50 @@ struct HipReadbackDimBufferizableModel
   }
 };
 
+// Bufferization model for the non-DPS hip.readback_scalar op. Like
+// HipReadbackDimBufferizableModel it reads the `scalar` tensor operand and
+// produces a non-tensor (scalar) result; bufferization rewrites the operand to
+// its memref buffer and the result type is preserved unchanged.
+struct HipReadbackScalarBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackScalarBufferizableModel, ReadbackScalarOp> {
+  bool bufferizesToMemoryRead(Operation *, OpOperand &,
+                              const bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &,
+                    const bufferization::AnalysisState &) const {
+    // The only result is a scalar (int/float/index), not a tensor, so nothing
+    // aliases the operand buffer.
+    return {};
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    auto readback = cast<ReadbackScalarOp>(op);
+    FailureOr<Value> scalarBuf =
+        getBuffer(rewriter, readback.getScalar(), options, state);
+    if (failed(scalarBuf))
+      return failure();
+    auto newOp = ReadbackScalarOp::create(rewriter, op->getLoc(),
+                                          readback.getValue().getType(),
+                                          readback.getCtx(), *scalarBuf);
+    bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                 newOp.getResult());
+    return success();
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
     ReadbackDimOp::attachInterface<HipReadbackDimBufferizableModel>(*ctx);
+    ReadbackScalarOp::attachInterface<HipReadbackScalarBufferizableModel>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);

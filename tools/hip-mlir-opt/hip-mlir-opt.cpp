@@ -129,10 +129,55 @@ struct HipReadbackDimBufferizableModel
   }
 };
 
+// Bufferization model for the non-DPS hip.readback_scalar op (mirror of the
+// canonical one in HipBufferize.h). Reads the scalar tensor operand to its
+// memref buffer; the scalar (int/float/index) result type is preserved.
+// Without this, a Range/Reshape whose operand is read back via
+// hip.readback_scalar on a tensor that is itself a function argument (no
+// upstream hip op to bufferize first) trips one-shot-bufferize with
+// "op was not bufferized".
+struct HipReadbackScalarBufferizableModel
+    : public mlir::bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackScalarBufferizableModel, mlir::hip::ReadbackScalarOp> {
+  bool
+  bufferizesToMemoryRead(mlir::Operation *, mlir::OpOperand &,
+                         const mlir::bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool
+  bufferizesToMemoryWrite(mlir::Operation *, mlir::OpOperand &,
+                          const mlir::bufferization::AnalysisState &) const {
+    return false;
+  }
+  mlir::bufferization::AliasingValueList
+  getAliasingValues(mlir::Operation *, mlir::OpOperand &,
+                    const mlir::bufferization::AnalysisState &) const {
+    return {};
+  }
+  mlir::LogicalResult
+  bufferize(mlir::Operation *op, mlir::RewriterBase &rewriter,
+            const mlir::bufferization::BufferizationOptions &options,
+            mlir::bufferization::BufferizationState &state) const {
+    auto readback = mlir::cast<mlir::hip::ReadbackScalarOp>(op);
+    mlir::FailureOr<mlir::Value> scalarBuf =
+        getBuffer(rewriter, readback.getScalar(), options, state);
+    if (mlir::failed(scalarBuf))
+      return mlir::failure();
+    auto newOp = mlir::hip::ReadbackScalarOp::create(
+        rewriter, op->getLoc(), readback.getValue().getType(),
+        readback.getCtx(), *scalarBuf);
+    mlir::bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                       newOp.getResult());
+    return mlir::success();
+  }
+};
+
 void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
   registry.addExtension(+[](mlir::MLIRContext *ctx, mlir::hip::HipDialect *) {
     mlir::hip::ReadbackDimOp::attachInterface<HipReadbackDimBufferizableModel>(
         *ctx);
+    mlir::hip::ReadbackScalarOp::attachInterface<
+        HipReadbackScalarBufferizableModel>(*ctx);
     mlir::hip::ConvOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ConvOp>>(*ctx);
     mlir::hip::ConvTransposeOp::attachInterface<

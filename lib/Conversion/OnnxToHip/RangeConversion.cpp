@@ -18,6 +18,52 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// Read a rank-0 scalar operand to a host SSA value for the trip-count
+/// arithmetic.
+///
+/// onnx.Range's start/limit/delta are 0-D tensors. When an operand is a
+/// compile-time constant (the common case for start=0 / delta=1) we fold it to
+/// an `arith.constant` — a pure host value, no device traffic. When it is a
+/// runtime value computed on the GPU (the canonical case: limit derived from
+/// `image_grid_thw` via Gather/Cast/...), we MUST NOT `tensor.extract` it: that
+/// lowers to a bare host `memref.load` of a device buffer with no stream
+/// synchronization, which reads stale memory on targets where the pool is true
+/// device memory (it accidentally works where the pool is UMA-mapped
+/// host-accessible memory) and yields a zero trip count → collapsed output dim.
+/// Instead we emit `hip.readback_scalar` (D2H + stream sync) so the host sees
+/// the value the producing kernel actually wrote.
+///
+/// Before (runtime limit, incorrect):
+///   %l = tensor.extract %limit[] : tensor<i64>   // host load of device mem
+/// After:
+///   %l = hip.readback_scalar(%ctx, %limit : tensor<i64>) -> i64
+static Value readScalarOperand(PatternRewriter &rewriter, Location loc,
+                               Value ctx, Value operand, Type elemTy) {
+  // Compile-time constant: fold to a host constant, no readback needed. Cover
+  // both `arith.constant` (already lowered) and the inline `onnx.Constant`
+  // `value` attribute (before constant externalization). start=0 / delta=1 are
+  // the common constant operands; folding them avoids a needless D2H sync.
+  DenseElementsAttr dense;
+  if (auto cst = operand.getDefiningOp<arith::ConstantOp>())
+    dense = dyn_cast<DenseElementsAttr>(cst.getValue());
+  else if (Operation *def = operand.getDefiningOp())
+    if (def->getName().getStringRef() == "onnx.Constant")
+      dense = def->getAttrOfType<DenseElementsAttr>("value");
+  if (dense && dense.getNumElements() == 1) {
+    if (auto ity = dyn_cast<IntegerType>(elemTy)) {
+      for (APInt v : dense.getValues<APInt>())
+        return arith::ConstantIntOp::create(rewriter, loc, ity,
+                                            v.getSExtValue());
+    } else if (auto fty = dyn_cast<FloatType>(elemTy)) {
+      for (APFloat v : dense.getValues<APFloat>())
+        return arith::ConstantFloatOp::create(rewriter, loc, fty, v);
+    }
+  }
+  // Runtime value (possibly GPU-computed): synchronized host readback.
+  return ReadbackScalarOp::create(rewriter, loc, elemTy, ctx, operand)
+      .getResult();
+}
+
 /// Empty-result condition for integer Range:
 /// - delta > 0 and limit <= start
 /// - delta < 0 and limit >= start
@@ -199,12 +245,21 @@ struct RangeToHip : public RewritePattern {
     if (failed(verifyConstantDeltaNonZero(op, op->getOperand(2), elemTy)))
       return failure();
 
-    Value startE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(0),
-                                             ValueRange{});
-    Value limitE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(1),
-                                             ValueRange{});
-    Value deltaE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(2),
-                                             ValueRange{});
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (failed(ctxOrFailure))
+      return failure();
+    Value ctx = *ctxOrFailure;
+
+    // Read start/limit/delta to host SSA values for the trip-count arithmetic.
+    // Constants fold; GPU-computed operands go through a synchronized
+    // hip.readback_scalar (see readScalarOperand for why a plain tensor.extract
+    // is a correctness bug on true-device-memory targets).
+    Value startE =
+        readScalarOperand(rewriter, loc, ctx, op->getOperand(0), elemTy);
+    Value limitE =
+        readScalarOperand(rewriter, loc, ctx, op->getOperand(1), elemTy);
+    Value deltaE =
+        readScalarOperand(rewriter, loc, ctx, op->getOperand(2), elemTy);
 
     Value len = llvm::TypeSwitch<Type, Value>(elemTy)
                     .Case<IntegerType>([&](IntegerType ity) {
@@ -218,11 +273,6 @@ struct RangeToHip : public RewritePattern {
                     .Default([&](Type) { return Value(); });
     if (!len)
       return failure();
-
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (failed(ctxOrFailure))
-      return failure();
-    Value ctx = *ctxOrFailure;
 
     Value init;
     if (resultType.isDynamicDim(0)) {

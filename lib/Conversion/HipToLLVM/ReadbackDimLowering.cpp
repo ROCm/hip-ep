@@ -33,8 +33,20 @@ struct ReadbackDimOpLowering : public ConvertOpToLLVMPattern<ReadbackDimOp> {
     Type i64Type = rewriter.getI64Type();
 
     Value statePtr = adaptor.getCtx();
-    Value scalarPtr =
-        extractContiguousMemRefPtr(adaptor.getScalar(), rewriter, loc);
+    // The scalar may be a `memref.view` into the host-scratch buffer with a
+    // non-zero descriptor offset (MaterializeHostScalars packs several small
+    // integer scalars into one allocation). Use the offset-aware data-ptr
+    // helper, NOT extractContiguousMemRefPtr (which returns the base alignedPtr
+    // and would read the wrong scratch slot).
+    Value scalarPtr;
+    if (auto scalarMemRefTy = dyn_cast<MemRefType>(op.getScalar().getType()))
+      scalarPtr = extractMemRefDataPtr(adaptor.getScalar(), scalarMemRefTy,
+                                       typeConverter, rewriter, loc);
+    else
+      scalarPtr =
+          extractContiguousMemRefPtr(adaptor.getScalar(), rewriter, loc);
+    if (!scalarPtr)
+      return rewriter.notifyMatchFailure(op, "failed to compute scalar ptr");
 
     // int32_t hipdnn_ep_readback_i32(RuntimeState* state, const void* scalar)
     SmallVector<Type, 2> paramTypes = {ptrType, ptrType};
