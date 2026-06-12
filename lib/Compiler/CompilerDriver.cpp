@@ -23,11 +23,13 @@
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "hip/debug_log.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <sstream>
@@ -172,10 +174,15 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
   //                                          hook (called from EP-side
   //                                          MlirCustomOp::Compute() entry)
-  std::vector<std::string> export_symbols = {
-      "inference_init",    "inference_compute",
-      "inference_cleanup", "inference_get_metadata_json",
-      "test_hip_from_dll", "hipdnn_ep_runtime_begin_compute"};
+  //   hipdnn_ep_set_output_allocator       — EP installs the output allocator
+  //                                          before inference_compute
+  std::vector<std::string> export_symbols = {"inference_init",
+                                             "inference_compute",
+                                             "inference_cleanup",
+                                             "inference_get_metadata_json",
+                                             "test_hip_from_dll",
+                                             "hipdnn_ep_runtime_begin_compute",
+                                             "hipdnn_ep_set_output_allocator"};
   std::vector<std::string> libraries;
   std::vector<std::string> library_paths;
   discoverLibraries(libraries, library_paths);
@@ -211,6 +218,13 @@ bool CompilerDriver::runMLIRPasses(
   onnxToHipOpts.externalizeMinNumElements =
       mlir::hip::kDefaultExternalizeMinNumElements;
   onnxToHipOpts.skipConstantData = options.skip_constant_data;
+  // Allocator mode is selected once, here, on the OnnxToHip half: when set, the
+  // slot-4.5 pair (hip-use-output-allocator + hip-set-output-allocator-attr)
+  // runs in the OnnxToHip tail and stamps the `hipdnn.output_allocator` module
+  // attribute. The HipToLLVM half (convert-hip-to-llvm + generate-interface)
+  // reads that attribute off the IR, so it needs no separate flag -- the mode
+  // rides on the module, keeping the two halves from ever disagreeing.
+  onnxToHipOpts.useOutputAllocator = options.use_output_allocator;
 
   if (hipdnnHandle_) {
     compiledGraphs_ =
@@ -231,19 +245,71 @@ bool CompilerDriver::runMLIRPasses(
   mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
 
   std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;
-  if (const char *dumpPath = std::getenv("HIPDNN_EP_IR_DUMP_PATH")) {
-    std::error_code ec;
-    irDumpStream = std::make_unique<llvm::raw_fd_ostream>(dumpPath, ec);
-    if (!ec) {
+  // hip_get_env, not std::getenv: this code may be linked into the static-CRT
+  // EP DLL where std::getenv cannot see host-process env vars.
+  std::string dumpPath = hip_get_env("HIPDNN_EP_IR_DUMP_PATH");
+  if (!dumpPath.empty()) {
+    // ORT can invoke the EP compiler multiple times per session (shape sub-
+    // graphs, prefill specialization, decode specialization). A single sink
+    // file gets overwritten on each call, masking divergence between
+    // invocations. Insert a process-wide monotonic counter so each compile
+    // dumps to its own file. The counter is inserted BEFORE the extension so
+    // editors / file viewers still recognize the result as MLIR:
+    //   /tmp/ir.mlir -> /tmp/ir.0.mlir, /tmp/ir.1.mlir, ...
+    //   /tmp/ir      -> /tmp/ir.0,      /tmp/ir.1,      ...    (extensionless)
+    // When HIPDNN_EP_IR_DUMP_SINGLE=1 the legacy single-file behaviour is
+    // restored (no counter, output overwritten across compiles).
+    static std::atomic<unsigned> sCompileSeq{0};
+    std::string finalPath = dumpPath;
+    if (hip_get_env("HIPDNN_EP_IR_DUMP_SINGLE").empty()) {
+      // llvm::sys::path::extension/stem are path-separator aware, so
+      // dots inside parent directory names (e.g. ".cache/ir") don't get
+      // mistaken for an extension.
+      llvm::StringRef pathRef(dumpPath);
+      llvm::StringRef ext = llvm::sys::path::extension(pathRef);
+      llvm::StringRef stem = pathRef.drop_back(static_cast<size_t>(ext.size()));
+      std::string counter = "." + std::to_string(sCompileSeq.fetch_add(1));
+      finalPath = (llvm::Twine(stem) + counter + ext).str();
+    }
+    // HIPDNN_EP_IR_DUMP_AFTER_ONLY=1 suppresses the per-pass "before" dump.
+    // Combined with printAfterOnlyOnChange=true (always on), this leaves a
+    // dump that contains only the IR after passes that actually changed
+    // something -- typically halves the file size on a full pipeline run
+    // while keeping every meaningful transformation visible.
+    bool afterOnly = !hip_get_env("HIPDNN_EP_IR_DUMP_AFTER_ONLY").empty();
+    auto shouldPrintBefore = [afterOnly](mlir::Pass *, mlir::Operation *) {
+      return !afterOnly;
+    };
+    auto shouldPrintAfter = [](mlir::Pass *, mlir::Operation *) {
+      return true;
+    };
+    // HIPDNN_EP_IR_DUMP_TREE=1 splits the dump into one .mlir file per pass
+    // under finalPath as a DIRECTORY (vs. a single concatenated file). Per-
+    // pass files are typically <1 MB even on a full LLM pipeline -- editable
+    // in any editor, unlike the multi-MB monolithic dump. Files are named
+    // `<idx>_<pass-name>.mlir` under `<finalPath>/<op>_<symbol>/`. See MLIR's
+    // PassManager::enableIRPrintingToFileTree for the tree layout.
+    bool treeMode = !hip_get_env("HIPDNN_EP_IR_DUMP_TREE").empty();
+    if (treeMode) {
       module.getContext()->disableMultithreading();
-      pm.enableIRPrinting([](mlir::Pass *, mlir::Operation *) { return true; },
-                          [](mlir::Pass *, mlir::Operation *) { return true; },
-                          /*printModuleScope=*/true,
-                          /*printAfterOnlyOnChange=*/true,
-                          /*printAfterOnlyOnFailure=*/false, *irDumpStream);
+      pm.enableIRPrintingToFileTree(shouldPrintBefore, shouldPrintAfter,
+                                    /*printModuleScope=*/true,
+                                    /*printAfterOnlyOnChange=*/true,
+                                    /*printAfterOnlyOnFailure=*/false,
+                                    /*printTreeDir=*/finalPath);
     } else {
-      llvm::errs() << "[CompilerDriver] Failed to open IR dump file: "
-                   << dumpPath << ": " << ec.message() << "\n";
+      std::error_code ec;
+      irDumpStream = std::make_unique<llvm::raw_fd_ostream>(finalPath, ec);
+      if (!ec) {
+        module.getContext()->disableMultithreading();
+        pm.enableIRPrinting(shouldPrintBefore, shouldPrintAfter,
+                            /*printModuleScope=*/true,
+                            /*printAfterOnlyOnChange=*/true,
+                            /*printAfterOnlyOnFailure=*/false, *irDumpStream);
+      } else {
+        llvm::errs() << "[CompilerDriver] Failed to open IR dump file: "
+                     << dumpPath << ": " << ec.message() << "\n";
+      }
     }
   }
 
@@ -253,6 +319,22 @@ bool CompilerDriver::runMLIRPasses(
       llvm::errs() << "\n=== Failed Module IR ===\n";
       module.print(llvm::errs());
       llvm::errs() << "\n========================\n";
+    }
+    // Strict mode (opt-in): when HIPDNN_EP_STRICT=1 is set, abort so the
+    // cpptrace SIGABRT handler prints a backtrace pinpointing the failing
+    // pass. Use this when verifying that a model is fully offloaded — any
+    // graph MorphiZenEP claims but cannot compile is a regression, and
+    // catching it as a crash beats silent CPU fallback masking the bug
+    // (e.g. accuracy tests passing cosine=1.0 because they compare CPU vs
+    // CPU). Default behaviour returns false so ORT's CPU fallback handles
+    // the graph normally — required for multi-session pipelines where
+    // MorphiZenEP is registered only for HipDataTransferImpl visibility
+    // (e.g. multi-stage VLM pipelines where embedding / vision sub-sessions
+    // are intentionally not claimed by the EP).
+    if (!hip_get_env("HIPDNN_EP_STRICT").empty()) {
+      llvm::errs() << "[CompilerDriver] aborting on pass failure "
+                      "(HIPDNN_EP_STRICT=1).\n";
+      std::abort();
     }
     return false;
   }
@@ -334,11 +416,14 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
 void CompilerDriver::discoverLibraries(
     std::vector<std::string> &libraries,
     std::vector<std::string> &library_paths) {
-  const char *therock = std::getenv("THEROCK_DIST");
-  if (!therock)
+  // hip_get_env, not std::getenv: this code runs inside the static-CRT EP DLL
+  // when invoked from the EP. std::getenv there has its own (empty) CRT env
+  // table and silently returned NULL, leaving library_paths empty — lld then
+  // failed with "could not open 'amdhip64.lib'" and the EP fell back to CPU.
+  std::string dist = hip_get_env("THEROCK_DIST");
+  if (dist.empty())
     return;
 
-  std::string dist(therock);
   std::string lib_dir = dist + "/lib";
   library_paths.push_back(lib_dir);
   COMPILER_DEBUG_LOG("THEROCK_DIST detected: " << dist << "\n");
@@ -378,9 +463,9 @@ void CompilerDriver::discoverLibraries(
   {
     bool found = false;
 
-    const char *custom_dir_env = std::getenv("HIP_CUSTOM_KERNELS_DIR");
-    if (custom_dir_env && custom_dir_env[0] != '\0') {
-      std::string custom_dir(custom_dir_env);
+    // hip_get_env, not std::getenv: see THEROCK_DIST comment above.
+    std::string custom_dir = hip_get_env("HIP_CUSTOM_KERNELS_DIR");
+    if (!custom_dir.empty()) {
       library_paths.push_back(custom_dir);
       libraries.push_back("hip_custom_kernels");
       found = true;

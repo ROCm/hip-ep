@@ -8,12 +8,20 @@ add_library(HipDialectTransforms STATIC
   BufferUtils.cpp
   GenerateInterface.cpp
   InsertTensorDump.cpp
+  HoistAllocSizeArith.cpp
+  InferLoopBodyShapesPass.cpp
+  InferShapesPass.cpp
+  LoopBodyToOutParams.cpp
   LowerAllocs.cpp
+  MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
+  RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp
+  ResolveTensorDims.cpp
+  UseOutputAllocator.cpp
 )
 
 add_dependencies(HipDialectTransforms
@@ -35,15 +43,18 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRAffineDialect
   MLIRLLVMDialect
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
   MLIRBufferizationPipelines
   MLIRBufferizationToMemRef
+  MLIRAffineToStandard
   MLIRArithToLLVM
   MLIRMemRefToLLVM
   MLIRFuncToLLVM
-  MLIRAffineToStandard
   MLIRReconcileUnrealizedCasts
+  MLIRInferTypeOpInterface
+  MLIRTensorDialect
   flatbuffers::flatbuffers
 )

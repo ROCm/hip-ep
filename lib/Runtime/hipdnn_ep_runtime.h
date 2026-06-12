@@ -147,6 +147,49 @@ static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// Global pool reduction modes (must match kGlobalPool* in HipToLLVMUtils.h).
+//===----------------------------------------------------------------------===//
+
+#define HIPDNN_EP_GLOBAL_POOL_AVERAGE 0
+#define HIPDNN_EP_GLOBAL_POOL_MAX 1
+#define HIPDNN_EP_GLOBAL_POOL_LP 2
+
+static inline const char *hipdnn_ep_global_pool_mode_name(int64_t mode) {
+  switch (mode) {
+  case HIPDNN_EP_GLOBAL_POOL_AVERAGE:
+    return "global_avg_pool";
+  case HIPDNN_EP_GLOBAL_POOL_MAX:
+    return "global_max_pool";
+  case HIPDNN_EP_GLOBAL_POOL_LP:
+    return "global_lp_pool";
+  default:
+    return "global_pool_unknown";
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Window-pool reduction modes (must match kPool* in HipToLLVMUtils.h and the
+// pool_mode constants used in OnnxToHip/PoolConversion.cpp).
+//===----------------------------------------------------------------------===//
+
+#define HIPDNN_EP_POOL_AVERAGE 0
+#define HIPDNN_EP_POOL_MAX 1
+#define HIPDNN_EP_POOL_LP 2
+
+static inline const char *hipdnn_ep_pool_mode_name(int64_t mode) {
+  switch (mode) {
+  case HIPDNN_EP_POOL_AVERAGE:
+    return "avg_pool";
+  case HIPDNN_EP_POOL_MAX:
+    return "max_pool";
+  case HIPDNN_EP_POOL_LP:
+    return "lp_pool";
+  default:
+    return "pool_unknown";
+  }
+}
+
 // Opaque handle for runtime state
 typedef struct RuntimeState RuntimeState;
 
@@ -164,6 +207,72 @@ typedef struct RuntimeState RuntimeState;
 // Lifecycle: init -> use -> cleanup (must call in this order)
 // Thread safety: Not thread-safe (one inference per state at a time)
 //===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// Output Allocator Contract
+//===----------------------------------------------------------------------===//
+//
+// The EP installs an output allocator before inference_compute; the generated
+// main_graph obtains each graph-output buffer from it at the point the output
+// shape is known (lowered from hip.alloc_output -> hipdnn_ep_alloc_output).
+//
+// Call flow (allocator mode):
+//   MlirCustomOp::Compute
+//     -> hipdnn_ep_set_output_allocator(state, &alloc)   (EP installs)
+//     -> inference_compute(state, inputs)                (2-arg, no out span)
+//        -> main_graph -> main_graph_internal -> ...
+//           -> hipdnn_ep_alloc_output(state, out_idx, shape, rank, elem)
+//                -> alloc.allocate(self, ...)            (= EP callback)
+//                     -> GetOutput(shape)               (GPU zero-copy /
+//                                                         host scratch + D2H)
+//     -> set_output_allocator(nullptr); completeness check; host D2H
+//
+// ABI: this struct crosses the model.dll <-> EP boundary. Its layout is a fixed
+// contract, locked by static_asserts and mirrored by an identical EP-side copy
+// -- same convention as tensor_t below. There is intentionally no size/version
+// field: a layout change is an ABI break, handled by rebuilding the model.dll
+// (deleting the stale cached DLLs), the same as any other runtime change.
+// A model.dll built before this contract simply lacks the exported setter, so
+// the EP's GetProcAddress returns null and it no-ops.
+typedef struct {
+  void *self; // opaque EP context (borrowed; runtime never owns/frees)
+  void *(*allocate)(void *self, int64_t out_idx, const int64_t *shape,
+                    int64_t rank, int64_t elem_size);
+} hipdnn_output_allocator_t;
+
+// Compile-time layout lock (mirrors the tensor_t static_assert idiom below).
+// The EP-side copy must carry the same asserts.
+static_assert(offsetof(hipdnn_output_allocator_t, self) == 0,
+              "self must remain first -- update all "
+              "hipdnn_output_allocator_t copies");
+
+// Export attribute for runtime entry points the EP resolves by name. dllexport
+// keeps the symbol alive through LLVM optimization in the bitcode build (the
+// export_symbols /EXPORT list in CompilerDriver.cpp runs after opt and cannot
+// resurrect an uncalled symbol). Must be applied to BOTH the declaration and
+// the definition: output_allocator.cpp is also compiled natively by MSVC for
+// the GPU-free unit test, and MSVC rejects a decl/def mismatch (C2375). The
+// unit-test build defines HIPDNN_EP_RT_NO_EXPORT to drop the attribute.
+#if defined(_WIN32) && !defined(HIPDNN_EP_RT_NO_EXPORT)
+#define HIPDNN_EP_RT_EXPORT __declspec(dllexport)
+#else
+#define HIPDNN_EP_RT_EXPORT
+#endif
+
+// EP -> model.dll (exported), installs the allocator before inference_compute.
+// `state` is RuntimeState* to match every other state entry point; the EP side
+// resolves this by name and treats state as an opaque void* (pointer-
+// compatible), exactly like hipdnn_ep_runtime_begin_compute.
+HIPDNN_EP_RT_EXPORT void
+hipdnn_ep_set_output_allocator(RuntimeState *state,
+                               const hipdnn_output_allocator_t *allocator);
+
+// generated main_graph -> runtime (internal), forwards to the installed
+// callback. Returns a generic address-space-0 device pointer (the lowering
+// casts to the memref's address space). Returns null if none is installed.
+void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
+                             const int64_t *shape, int64_t rank,
+                             int64_t elem_size);
 
 // Initialize runtime state with external constant storage via FileSystem.
 // Used when compiled with hip_compile_with_fs.
@@ -188,6 +297,15 @@ int hipdnn_ep_state_cleanup(RuntimeState *state);
 // Ownership: Caller does NOT own stream (destroyed in cleanup)
 void *hipdnn_ep_state_get_stream(RuntimeState *state);
 
+// Current inference session stream (hipStream_t as void*), set per Compute by
+// hipdnn_ep_runtime_begin_compute. Lets ABI-fixed runtime helpers that don't
+// receive `state` -- notably memrefCopy (MLIR memref.copy lowering) -- issue
+// their work on the session stream instead of the default/null stream (0).
+// Default-stream work serializes with the session stream (legacy implicit
+// sync) and shows up as GPU idle in the prefill profile. Returns NULL before
+// the first begin_compute on this thread (callers fall back to stream 0).
+void *hipdnn_ep_get_current_stream(void);
+
 // Get MIOpen handle from state (for MIOpen operations)
 // Returns: miopenHandle_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own handle (destroyed in cleanup)
@@ -203,10 +321,41 @@ void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
 // Ownership: Caller does NOT own pointer (freed in cleanup)
 void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 
-// Get the base pointer of the GPU memory pool
-// Returns: GPU base pointer of pool (NULL if pool not initialized)
-// Used by hip.get_pool lowering in generated compute kernels
-void *hipdnn_ep_get_pool_base(RuntimeState *state);
+// Get the base pointer of one of the runtime's GPU memory pools, growing it
+// if needed. Called from PoolAllocs-generated code, once per emitted
+// hip.get_pool, at the start of each inference.
+//
+// `domain_id` selects which pool to access: hip-pool-allocs partitions the
+// function's pooled allocs into independent dominance domains and emits one
+// hip.get_pool per domain (id starts at 0). Domain 0 inherits the legacy
+// single-pool semantics — its pool was eagerly sized by hipdnn_ep_pool_init
+// using the static buffer offsets, so single-domain models are bit-identical
+// to the pre-multi-domain runtime. Domains 1..N start with size 0 and grow
+// lazily on their first call here.
+//
+// When `needed_size` exceeds the selected domain's current allocation, that
+// pool is grown via stream-sync + hipFree + hipMalloc. Pools never shrink and
+// are independent across domains: growing domain N does not touch domain M.
+//
+// There is no compile-time cap on `domain_id`: the per-domain arrays are
+// themselves grown on demand the first time a higher id is seen (a cold-path
+// event on the first inference). A negative `domain_id` returns NULL with a
+// stderr diagnostic (it would indicate a compiler bug — ids start at 0).
+//
+// Returns: GPU base pointer for the selected domain (NULL on bad domain_id
+//          or allocation failure).
+void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
+                              size_t needed_size);
+
+// Get the host-mapped scratch buffer base, growing it if needed. Called from
+// hip.get_host_scratch (emitted by hip-materialize-host-scalars) once per
+// inference for tiny host-fed scalar memrefs that would otherwise land in the
+// GPU pool. Memory is hipHostMalloc(hipHostMallocMapped) - host-writable AND
+// GPU-readable via the device pointer mapping. Grow semantics mirror
+// hipdnn_ep_get_pool_base: stream-synced hipHostFree + hipHostMalloc; never
+// shrinks.
+// Returns: host-mapped base pointer (NULL on allocation failure)
+void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
 
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);
@@ -224,6 +373,16 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
 void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
                                              size_t needed_size);
+
+// Per-state MIOpen convolution workspace pool (used by
+// wrap_miopenConvolutionForward for both 2D and the H=1 1D conv path). Lazily
+// grown via hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch
+// above: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
+// reused across all conv calls in the session -- safe because the stream is
+// serialised. See runtime_state_internal.h for design rationale.
+void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
+                                        size_t needed_size);
 
 // Device-side runtime error flag (set by kernels, observed by wrappers).
 // Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
@@ -483,8 +642,13 @@ int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
 
 // MIOpen convolution forward operation
 // Full wrapper with descriptor creation, algorithm finding, workspace
-// management Follows opaque RuntimeState pattern - extracts handle/stream
-// internally Parameters match generated LLVM IR from HipToLLVM pass
+// management. Follows opaque RuntimeState pattern - extracts handle/stream
+// internally. Parameters match generated LLVM IR from HipToLLVM pass.
+//
+// `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
+// input / weights / output tensor descriptors — MIOpen requires all three to
+// share the same element type. The host-side lowering derives this from the
+// hip.conv result memref's element type.
 int wrap_miopenConvolutionForward(
     RuntimeState
         *state, // RuntimeState (opaque - extracts handle/stream internally)
@@ -509,7 +673,41 @@ int wrap_miopenConvolutionForward(
     int64_t pad_right,   // Padding right
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
-    int64_t group);      // Number of groups
+    int64_t group,       // Number of groups
+    int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
+
+// MIOpen transposed convolution (deconvolution) wrapper
+// Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
+// RuntimeState pattern - extracts handle/stream internally.
+// Weight layout is ONNX ConvTranspose's [C, M/group, kH, kW] (input channels
+// first); M/group is derived from output_c and group inside the wrapper.
+int wrap_miopenConvolutionTranspose(
+    RuntimeState *state, // RuntimeState (opaque)
+    const void *input,   // Input tensor GPU pointer [N, C, H, W]
+    int64_t input_n,     // Input batch size
+    int64_t input_c,     // Input channels (C)
+    int64_t input_h,     // Input height
+    int64_t input_w,     // Input width
+    const void *weights, // Weights GPU pointer [C, M/group, kH, kW]
+    const void *bias,    // Bias GPU pointer (nullable) [M]
+    void *output,        // Output tensor GPU pointer (in-place) [N, M, H', W']
+    int64_t output_c,    // Output channels (M)
+    int64_t output_h,    // Output height
+    int64_t output_w,    // Output width
+    int64_t kernel_h,    // Kernel height
+    int64_t kernel_w,    // Kernel width
+    int64_t stride_h,    // Stride height
+    int64_t stride_w,    // Stride width
+    int64_t pad_top,     // Padding top
+    int64_t pad_left,    // Padding left
+    int64_t pad_bottom,  // Padding bottom
+    int64_t pad_right,   // Padding right
+    int64_t dilation_h,  // Dilation height
+    int64_t dilation_w,  // Dilation width
+    int64_t output_padding_h, // Output padding height (ONNX "adjs")
+    int64_t output_padding_w, // Output padding width
+    int64_t group,            // Number of groups
+    int64_t data_type);       // HIPDNN_EP_DATATYPE_* element type
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations
@@ -527,16 +725,31 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // Computes output = A @ B for each batch
 // A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
 // output: [batch_count x M x N]
+//
+// `b_batch_stride` is hipBLASLt's STRIDED_BATCH_OFFSET on layA when
+// `batch_count > 1`: the per-batch advance in elements through B. It MUST be:
+//   * 0   when B is a broadcast weight — one matrix reused across all
+//         batches. Includes both rank-2 `[K, N]` and rank-N
+//         `[1, ..., 1, K, N]` (any leading-dim product == 1).
+//   * K*N when B is per-batch — leading-dim product > 1, so the buffer
+//         actually holds multiple `[K, N]` matrices laid out contiguously.
+// Mis-setting this to K*N for a broadcast B causes hipBLASLt to step K*N
+// elements past the end of the weight buffer on every batch beyond the
+// first, reading uninitialised memory into the GEMM and producing wrong
+// (often NaN) outputs for batch > 0. For batch_count == 1 the value is
+// ignored. Always pass an exact stride; the compiler computes 0 vs K*N
+// at compile time when B's leading dims are static, else at runtime.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
-    const void *A,       // Matrix A GPU pointer
-    const void *B,       // Matrix B GPU pointer
-    void *output,        // Output GPU pointer
-    int64_t M,           // Rows of A (per batch)
-    int64_t N,           // Columns of B
-    int64_t K,           // Columns of A / Rows of B
-    int64_t batch_count, // Number of batches
-    int64_t elem_size);  // Element size in bytes (2=f16, 4=f32)
+    const void *A,           // Matrix A GPU pointer
+    const void *B,           // Matrix B GPU pointer
+    void *output,            // Output GPU pointer
+    int64_t M,               // Rows of A (per batch)
+    int64_t N,               // Columns of B
+    int64_t K,               // Columns of A / Rows of B
+    int64_t batch_count,     // Number of batches
+    int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
+    int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
@@ -556,11 +769,14 @@ int wrap_group_query_attention(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (12)
+    // Attributes (13)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
+    // Whisper bidirectional-attention flag: when non-zero, the causal mask
+    // step is skipped. Default 0 preserves Llama / gpt-oss behaviour.
+    int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
@@ -616,11 +832,16 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t out_c, int64_t out_h, int64_t out_w,
                         int64_t data_type, int64_t tensor_op);
 
-// Element-wise subtraction wrapper
-// Computes output = lhs - rhs element-wise
+// Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
+// Computes output = lhs - rhs; materialises broadcast via hip_expand when
+// an operand shape differs from the output shape. Sub is not commutative --
+// operands are never swapped.
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t num_elements,
-                         int64_t element_size_bytes);
+                         void *output, int64_t lhs_n, int64_t lhs_c,
+                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                         int64_t out_n, int64_t out_c, int64_t out_h,
+                         int64_t out_w, int64_t data_type);
 
 // Element-wise Where wrapper (NumPy-style multidirectional broadcasting,
 // arbitrary rank). Computes output[i] = condition[i] ? x[i] : y[i] with
@@ -653,11 +874,15 @@ int wrap_power(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha,
                double beta, double gamma);
 
-// Gather operation wrapper
+// Gather operation wrapper.
+// `axis_size` = data.shape[axis]; `inner_size` = product of
+// data.shape[axis+1:]. outer_size is derived as data_num_elements / (axis_size
+// * inner_size).
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
-                int64_t element_size_bytes);
+                int64_t axis_size, int64_t inner_size,
+                int64_t element_size_bytes, int64_t indices_element_size_bytes);
 
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
@@ -708,6 +933,61 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 // approximate: 0 = exact (erf), 1 = tanh approximation
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
+
+// LeakyRelu activation wrapper (uses custom HIP kernel).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, DOUBLE)
+// alpha: slope for negative values (default 0.01 per ONNX spec)
+int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type, double alpha);
+
+// Window-pool wrapper (uses custom HIP kernel).
+// Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
+// input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
+// the per-window reduction: AVERAGE / MAX / LP.  When `has_indices=1` (MAX
+// only), also writes per-output flat int64 indices into the unpadded input.
+// `spatial_rank` selects how many of the three trailing axes
+// (in_*, out_*, k*, s*, p*, dil*) are read; unused slots must be 1
+// (kernel/dim) or 0 (pad).  `storage_order` and `ceil_mode` are pre-resolved
+// at compile time and accepted only for ABI completeness.  `count_include_pad`
+// is the AveragePool divisor selector; `p` is the LpPool norm exponent — both
+// are ignored for the modes that don't use them.
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
+              int64_t data_type, int64_t pool_mode, int64_t spatial_rank,
+              int64_t N, int64_t C, int64_t in0, int64_t in1, int64_t in2,
+              int64_t out0, int64_t out1, int64_t out2, int64_t k0, int64_t k1,
+              int64_t k2, int64_t s0, int64_t s1, int64_t s2, int64_t p0,
+              int64_t p1, int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+              int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
+              int64_t count_include_pad, int64_t p);
+// Resize wrapper (uses custom HIP kernel).
+// Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
+// pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
+// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
+// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
+// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// BFLOAT16, DOUBLE).
+
+int wrap_resize(RuntimeState *state, void *input, void *output,
+                int64_t data_type, int64_t spatial_rank, int64_t N, int64_t C,
+                int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+                int64_t out1, int64_t out2, int64_t mode,
+                int64_t coord_transform, int64_t nearest_mode);
+
+// Global pool wrapper (uses custom HIP kernel).
+// Treats the data as a flat [outer, reduce_size] matrix and writes one
+// reduced value per row into output. Covers ONNX GlobalAveragePool /
+// GlobalMaxPool / GlobalLpPool of any input rank >= 3:
+//   outer       = N * C                       (leading two input dims)
+//   reduce_size = D_1 * D_2 * ... * D_k       (product of spatial dims)
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
+// mode      : HIPDNN_EP_GLOBAL_POOL_* (AVERAGE / MAX / LP)
+// p         : LP-norm exponent; only consumed when mode == LP, otherwise
+//             ignored. ONNX spec requires `p >= 1`; values below that are
+//             rejected upstream during ONNX→HIP conversion.
+int wrap_global_pool(RuntimeState *state, void *input, void *output,
+                     int64_t outer, int64_t reduce_size, int64_t data_type,
+                     int64_t mode, int64_t p);
 
 // Rotary embedding operation wrapper.
 //
@@ -883,8 +1163,14 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
               int64_t cDim0, int64_t cDim1);
 
+// `out_num_elements` is the broadcast result count.  `a_num_elements` and
+// `b_num_elements` are the per-input element counts; either may be 1 to
+// indicate scalar broadcast.  Today only same-shape OR scalar-vs-tensor is
+// supported (the common case for embedding-style models like Qwen3.5 where
+// `Equal(input_ids[1,N], scalar)` lowers without an intervening `Expand`).
 int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t num_elements, int64_t data_type);
+               int64_t a_num_elements, int64_t b_num_elements,
+               int64_t out_num_elements, int64_t data_type);
 
 // Element-wise logical AND wrapper. Inputs / output share the same data_type
 // (HIPDNN_EP_DATATYPE_*); ONNX `And` is defined on bool tensors, which the
@@ -906,16 +1192,29 @@ int wrap_not(RuntimeState *state, void *input, void *output,
 // input rank and N is the (data-dependent) number of non-zero entries.
 // The caller pre-allocates the output buffer with capacity `output_capacity`
 // elements along the N dim (the OnnxToHip pass uses `input_num_elements`
-// as the upper bound).
+// as the upper bound); columns beyond the true count are left undefined.
+//
+// The kernel writes the true count N into the device i32 scalar `count_ptr`.
+// The generated code reads it back to the host via `hipdnn_ep_readback_i32`
+// (lowered from hip.readback_dim) and slices `output` to [R, N] so consumers
+// and the ORT-reported output shape see the real extent, not the capacity.
+//
+// `input_dims` is the host array of the R input extents (the runtime copies it
+// to the device so the kernel can decompose flat indices into coordinates).
 //
 // `input_data_type` is the HIPDNN_EP_DATATYPE_* value of the input tensor.
 // Bool (ONNX `tensor(bool)`) is marshalled as 1-byte uint8 by the EP and
-// reuses the INT8 slot here. Today this is a stub: it logs its parameters
-// and throws std::runtime_error so an inference path that actually
-// reaches NonZero fails loudly instead of producing uninitialised output.
+// reuses the INT8 slot here.
 int wrap_nonzero(RuntimeState *state, void *input, void *output,
-                 int64_t input_num_elements, int64_t input_rank,
+                 int32_t *count_ptr, int64_t input_num_elements,
+                 int64_t input_rank, const int64_t *input_dims,
                  int64_t output_capacity, int64_t input_data_type);
+
+// Synchronize the GPU stream (so the producing kernel has completed), then
+// copy a single device-resident i32 scalar back to the host and return it.
+// Used by hip.readback_dim to turn a kernel-computed runtime extent (e.g.
+// NonZero's non-zero count) into a host value that can size dynamic shapes.
+int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar);
 
 // ONNX Size wrapper (dynamic-shape path only).
 //
@@ -930,9 +1229,17 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
-
-int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
+int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+
+// Element-wise division with 4D ONNX broadcast (rank <= 4, left-padded).
+// Computes output = lhs / rhs; materialises broadcast via hip_expand when
+// an operand shape differs from the output shape.
+int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
+             int64_t lhs_n, int64_t lhs_c, int64_t lhs_h, int64_t lhs_w,
+             int64_t rhs_n, int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+             int64_t out_n, int64_t out_c, int64_t out_h, int64_t out_w,
+             int64_t data_type);
 
 // CumSum operation wrapper (cumulative sum along an axis).
 // `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the
@@ -1034,12 +1341,12 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
 // The runtime is responsible (when implemented) for both the initial
 // data -> output copy and the per-index scatter writes.
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
-                    void *updates, void *output, const int64_t *data_shape,
-                    int64_t data_rank, const int64_t *indices_shape,
-                    int64_t indices_rank, const int64_t *updates_shape,
-                    int64_t updates_rank, const int64_t *output_shape,
-                    int64_t output_rank, int64_t reduction_id,
-                    int64_t data_type);
+                    void *updates, void *output, const int32_t *count_ptr,
+                    const int64_t *data_shape, int64_t data_rank,
+                    const int64_t *indices_shape, int64_t indices_rank,
+                    const int64_t *updates_shape, int64_t updates_rank,
+                    const int64_t *output_shape, int64_t output_rank,
+                    int64_t reduction_id, int64_t data_type);
 
 //===----------------------------------------------------------------------===//
 // ONNX Loop Drivers

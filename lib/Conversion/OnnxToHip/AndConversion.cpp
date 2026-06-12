@@ -12,10 +12,9 @@ namespace {
 /// onnx.And -> hip.and
 ///
 /// Element-wise logical AND of two boolean tensors with NumPy-style
-/// broadcasting. Mirrors the EqualConversion pattern: pick whichever input
-/// already matches the broadcast output rank as the shape source for
-/// `createEmptyTensor`, so dynamic-shape models still get correct
-/// `tensor.dim` extractions for the DPS init.
+/// broadcasting. Dynamic output dims are resolved via
+/// `createBroadcastEmptyTensor` so each axis picks the non-broadcasting operand
+/// (e.g. `[?x1] & [1x?] -> [?x?]`).
 struct AndToHip : public mlir::RewritePattern {
   AndToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.And", /*benefit=*/1, ctx) {}
@@ -44,16 +43,14 @@ struct AndToHip : public mlir::RewritePattern {
     if (!aType || !bType)
       return rewriter.notifyMatchFailure(op, "expected ranked tensor inputs");
 
-    // Pick the side whose rank already matches the broadcast output so
-    // dynamic dims line up dim-by-dim for createEmptyTensor. When both
-    // operands have the same rank as the result this is just `a`; when
-    // one operand has a smaller rank (e.g. broadcasting a [N] mask against
-    // a [B, N] tensor) we prefer the larger-rank operand.
-    mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+    mlir::FailureOr<mlir::Value> initOrFailure =
+        createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+    if (mlir::failed(initOrFailure))
+      return rewriter.notifyMatchFailure(
+          op, "And: no ranked operand spans dynamic result dim");
 
-    auto hipOp = mlir::hip::AndOp::create(rewriter, loc, resultType, context, a,
-                                          b, init);
+    auto hipOp =
+        mlir::hip::AndOp::create(rewriter, loc, context, a, b, *initOrFailure);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

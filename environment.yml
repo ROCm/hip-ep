@@ -26,6 +26,10 @@ dependencies:
     - onnx
     - onnx_ir
     - onnxruntime-directml
+    # huggingface_hub for gated-repo downloads in test/python (e.g. the AMD
+    # gemma3-4b-it ONNX repo that test_gemma3_4b.py pulls). Authenticate once
+    # per machine via `hf auth login` (formerly `huggingface-cli login`).
+    - huggingface_hub
     # Needed by OGA fork build (wheel packaging, distutils replacement)
     # and for fetching dependency archives during the OGA build.
     - setuptools

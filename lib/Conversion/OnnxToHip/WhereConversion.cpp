@@ -119,8 +119,8 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
   if (mlir::failed(initOrFailure))
     return rewriter.notifyMatchFailure(
         op, "onnx.Where: no ranked operand spans dynamic result dim");
-  auto hipOp = mlir::hip::WhereOp::create(rewriter, loc, resultType, context,
-                                          condition, x, y, *initOrFailure);
+  auto hipOp = mlir::hip::WhereOp::create(rewriter, loc, context, condition, x,
+                                          y, *initOrFailure);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

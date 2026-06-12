@@ -35,6 +35,17 @@ set_target_properties(hip-compiler-dll PROPERTIES
     OUTPUT_NAME "hip-compiler"
 )
 
+# Localize statically-linked LLVM/MLIR/clang symbols so they are not exported
+# into the global dynamic symbol table. If they are exported, ROCm's
+# libamd_comgr.so binds its own (versioned @LLVM_22.0) llvm:: references to our
+# ABI-incompatible upstream-LLVM copy at runtime and its in-process device-code
+# compile segfaults. The version script keeps only the C API visible. Windows
+# is naturally immune (PE doesn't export symbols by default).
+if(NOT WIN32)
+    target_link_options(hip-compiler-dll PRIVATE
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/hip-compiler.exports")
+endif()
+
 # Install DLL and import library
 install(TARGETS hip-compiler-dll
     RUNTIME DESTINATION bin

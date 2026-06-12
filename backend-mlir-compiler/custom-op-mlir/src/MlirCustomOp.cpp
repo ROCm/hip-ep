@@ -204,6 +204,15 @@ static std::vector<int> build_output_index_map(
 // Marshal output tensors from ORT context using metadata outputs.
 // output_index_map maps from metadata output index (= DLL output index) to
 // the ORT kernel context output index.
+//
+// Classic ABI only (use_output_allocator=0): every output shape in the
+// metadata is fully static. Dynamic output dims (and the runtime DimSource
+// resolution / OGA shared-KV-buffer override that classic mode once used to
+// size them) were removed when the output-allocator ABI became the default --
+// allocator mode sizes dynamic outputs in-graph via output_allocate_cb and
+// never calls this function. The compiler rejects a dynamic output dim in
+// classic mode at build time (see build_metadata_json), so a -1 surviving to
+// here indicates a metadata/compiler bug and aborts.
 TensorData marshal_output_tensors(
     OrtKernelContext *context,
     const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
@@ -223,6 +232,14 @@ TensorData marshal_output_tensors(
     const auto &output_meta = outputs[i];
     data.shapes[i].assign(output_meta.shape().begin(),
                           output_meta.shape().end());
+
+    for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
+      CHECK(data.shapes[i][d] >= 0)
+          << "Output '" << output_meta.name() << "' dim " << d
+          << " is dynamic (-1) in classic ABI metadata. Classic mode supports "
+          << "only static output shapes; this model must be compiled with the "
+          << "output allocator (the default ABI).";
+    }
 
     int ort_idx = output_index_map[i];
     auto output_tensor = ctx.GetOutput(ort_idx, data.shapes[i]);
@@ -447,6 +464,136 @@ struct PerfSummaryPrinter {
 };
 PerfSummaryPrinter g_perf_printer;
 
+// ===========================================================================
+// Output-allocator mode (2-arg inference_compute) plumbing.
+//
+// In allocator mode the DLL receives no pre-filled outputs span. Instead
+// main_graph calls hipdnn_ep_alloc_output(out_idx, shape, rank, elem_size) for
+// each graph output once its runtime shape is known; the runtime forwards to
+// the callback the EP installed. The callback maps out_idx -> ORT output, asks
+// ORT for the buffer at the DLL's in-graph shape, and returns a pointer the DLL
+// writes into:
+//   * GPU (aliased) output -> ORT's GPU-accessible pointer (zero-copy).
+//   * host (CPU) output    -> an EP-owned GPU scratch pointer; Compute()
+//                             D2H-copies it into ORT's host buffer afterwards.
+// ===========================================================================
+
+// One deferred device->host copy for a host (CPU) output.
+struct PendingD2H {
+  void *gpu_src;  // EP GPU scratch the DLL wrote into
+  void *host_dst; // ORT host output buffer
+  size_t nbytes;
+};
+
+// Per-Compute() context passed to the C callback via output_allocator_t.self.
+// Lives on compute_with_output_allocator's stack for the duration of the 2-arg
+// inference_compute; the allocator is cleared on the RuntimeState before it
+// goes out of scope so `self` can never dangle.
+struct OutputAllocatorCtx {
+  Ort::KernelContext *ctx = nullptr;
+  const google::protobuf::RepeatedPtrField<mlir_metadata::Output> *outputs =
+      nullptr;
+  const std::vector<int> *output_index_map = nullptr;
+  // Borrowed from the MlirCustomOp instance (grow-on-demand, reused across
+  // Compute()): one GPU scratch buffer per output index for host outputs.
+  std::vector<HostOutputScratch> *host_out_scratch = nullptr;
+  std::vector<PendingD2H> pending_d2h; // filled during compute, consumed after
+  // Output-completeness guard: which metadata outputs received an alloc call.
+  std::vector<bool> allocated;
+};
+
+#ifndef BUILD_MOCK_RUNTIME
+// Ensure scratch[idx] holds at least nbytes of device memory. Grows by
+// hipFree + hipMalloc (never shrinks). Safe within a Compute(): each output
+// index is allocated exactly once, so a grow here cannot invalidate a pointer
+// the DLL is still about to write this pass (distinct indices = distinct
+// buffers). LOG(FATAL) on failure -- never returns null.
+static void *ensure_host_out_slot(std::vector<HostOutputScratch> &scratch,
+                                  size_t idx, size_t nbytes) {
+  if (idx >= scratch.size())
+    scratch.resize(idx + 1);
+  HostOutputScratch &slot = scratch[idx];
+  if (slot.capacity < nbytes) {
+    if (slot.ptr)
+      (void)hipFree(slot.ptr);
+    void *p = nullptr;
+    hipError_t e = hipMalloc(&p, nbytes ? nbytes : 1);
+    if (e != hipSuccess || !p)
+      LOG(FATAL) << "hipMalloc(" << nbytes
+                 << ") for output-allocator host scratch failed: "
+                 << hipGetErrorString(e);
+    slot.ptr = p;
+    slot.capacity = nbytes;
+  }
+  return slot.ptr;
+}
+#endif // BUILD_MOCK_RUNTIME
+
+// C callback installed on the RuntimeState (output_allocator_t.allocate).
+// noexcept: invoked from C (the model.dll runtime); a C++ exception crossing
+// that boundary is UB. Any failure aborts via LOG(FATAL) with a clear message
+// rather than returning null (a null would be written by the DLL -> segfault
+// with no diagnostic).
+void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
+                         int64_t rank, int64_t elem_size) noexcept {
+  auto *octx = static_cast<OutputAllocatorCtx *>(self);
+  try {
+    if (out_idx < 0 || out_idx >= static_cast<int64_t>(octx->outputs->size())) {
+      LOG(FATAL) << "output allocator: out_idx " << out_idx << " out of range ("
+                 << octx->outputs->size() << " outputs)";
+    }
+    // Use the DLL's in-graph shape verbatim -- the EP never reshapes an output
+    // here. The shape is computed in-graph by hip.alloc_output from its
+    // producer's operands; when a dynamic output dim is sized from a graph
+    // input's `memref.dim`, the requested shape already equals that input
+    // buffer's allocated extent. ORT's GetOutput then returns the pre-bound
+    // (IO-bound) buffer rather than allocating a fresh one, so when an input
+    // and output are bound to the same buffer that identity is preserved with
+    // no EP-side override.
+    std::vector<int64_t> out_shape(shape, shape + rank);
+
+    int ort_idx = (*octx->output_index_map)[static_cast<int>(out_idx)];
+    auto out_tensor = octx->ctx->GetOutput(ort_idx, out_shape);
+    int mem_type =
+        static_cast<int>(out_tensor.GetTensorMemoryInfo().GetDeviceType());
+    void *ort_ptr = out_tensor.GetTensorMutableRawData();
+
+    octx->allocated[static_cast<size_t>(out_idx)] = true;
+
+    if (mem_type == TENSOR_MEMORY_GPU) {
+      // Zero-copy: ORT buffer is already GPU-accessible (e.g. the EP's
+      // host-mapped allocator, or caller-provided device memory). The DLL
+      // writes into it directly.
+      return ort_ptr;
+    }
+
+    // Host (CPU) output: the DLL writes into EP GPU scratch; Compute()
+    // D2H-copies into ort_ptr after inference_compute returns (the 2-arg
+    // interface already stream-synced).
+#ifndef BUILD_MOCK_RUNTIME
+    size_t nelem = 1;
+    for (int64_t d : out_shape)
+      nelem *= static_cast<size_t>(d);
+    size_t nbytes = nelem * static_cast<size_t>(elem_size);
+    void *gpu = ensure_host_out_slot(*octx->host_out_scratch,
+                                     static_cast<size_t>(out_idx), nbytes);
+    octx->pending_d2h.push_back({gpu, ort_ptr, nbytes});
+    return gpu;
+#else
+    // Mock runtime writes host memory directly; no GPU staging needed.
+    (void)elem_size;
+    return ort_ptr;
+#endif
+  } catch (const std::exception &e) {
+    LOG(FATAL) << "output allocator callback failed for out_idx " << out_idx
+               << ": " << e.what();
+  } catch (...) {
+    LOG(FATAL) << "output allocator callback failed for out_idx " << out_idx
+               << " (unknown exception)";
+  }
+  return nullptr; // unreachable: LOG(FATAL) aborts. Silences -Wreturn-type.
+}
+
 } // anonymous namespace
 
 MlirCustomOp::MlirCustomOp(
@@ -459,6 +606,9 @@ MlirCustomOp::MlirCustomOp(
 
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
+  // Dispatch mode travels with the artifact's metadata (not a live provider
+  // option), so it always matches the loaded DLL's ABI.
+  use_output_allocator_ = metadata_.use_output_allocator();
   // Precompute index mappings (compiler order -> ORT kernel context order)
   input_index_map_ = build_input_index_map(*meta_def);
   output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);
@@ -470,6 +620,81 @@ MlirCustomOp::MlirCustomOp(
   inference_state_ = customop::InferenceState::create(
       load_artifact_from_epcontext(context, metadata_.artifact_filename()),
       fs.get());
+}
+
+MlirCustomOp::~MlirCustomOp() {
+#ifndef BUILD_MOCK_RUNTIME
+  // Free the allocator-mode host-output GPU scratch (one buffer per output
+  // index). No-op in classic mode (the vector stays empty).
+  for (const HostOutputScratch &slot : host_out_scratch_)
+    if (slot.ptr)
+      (void)hipFree(slot.ptr);
+#endif
+}
+
+// Output-allocator dispatch: 2-arg inference_compute with in-graph
+// hip.alloc_output. The EP installs a per-Compute callback that hands each
+// graph output an ORT (or GPU-scratch) buffer; host outputs are D2H-copied
+// afterwards. See the OutputAllocatorCtx / output_allocate_cb block above.
+void MlirCustomOp::compute_with_output_allocator(
+    OrtKernelContext *context) const {
+  MY_LOG(2) << "MlirCustomOp::compute_with_output_allocator()";
+
+  auto inputs = marshal_input_tensors(context, input_index_map_);
+
+  Ort::KernelContext ort_ctx(context);
+  OutputAllocatorCtx octx;
+  octx.ctx = &ort_ctx;
+  octx.outputs = &metadata_.outputs();
+  octx.output_index_map = &output_index_map_;
+  octx.host_out_scratch = &host_out_scratch_;
+  octx.allocated.assign(metadata_.outputs().size(), false);
+
+  output_allocator_t alloc;
+  alloc.self = &octx;
+  alloc.allocate = &output_allocate_cb;
+  inference_state_->set_output_allocator(&alloc);
+
+  int ret = inference_state_->compute_with_output_allocator(&inputs.span);
+
+  // Clear before octx leaves scope so a stale self pointer can never be used by
+  // a later call (e.g. the next Compute() before it reinstalls its own ctx).
+  inference_state_->set_output_allocator(nullptr);
+
+  if (ret != 0) {
+    LOG(ERROR) << "inference_compute (allocator) failed with code: " << ret;
+  }
+
+  // Output-completeness guard. Allocator mode requires every declared output to
+  // be produced in-graph (each yields a hip.alloc_output -> callback). A
+  // missing one means a passthrough / aliased output the DLL never allocates --
+  // unsupported today. Fail loudly rather than hand ORT an uninitialized buffer
+  // (which can silently pass a CPU-vs-CPU comparison).
+  for (size_t i = 0; i < octx.allocated.size(); ++i) {
+    if (!octx.allocated[i]) {
+      LOG(FATAL) << "output allocator: output '"
+                 << metadata_.outputs()[static_cast<int>(i)].name() << "' (idx "
+                 << i
+                 << ") was never allocated by the model.dll. Passthrough / "
+                    "aliased outputs are not supported in output-allocator "
+                    "mode yet.";
+    }
+  }
+
+#ifndef BUILD_MOCK_RUNTIME
+  // Deferred host-output copies. The 2-arg interface already stream-synced, so
+  // the GPU scratch holds final data; a blocking hipMemcpy is safe.
+  for (const auto &p : octx.pending_d2h) {
+    hipError_t e =
+        hipMemcpy(p.host_dst, p.gpu_src, p.nbytes, hipMemcpyDeviceToHost);
+    if (e != hipSuccess) {
+      LOG(FATAL) << "output allocator: D2H copy of " << p.nbytes
+                 << " bytes failed: " << hipGetErrorString(e);
+    }
+  }
+#endif
+
+  MY_LOG(2) << "compute_with_output_allocator completed";
 }
 
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
@@ -484,6 +709,14 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   // LOG(WARNING). The call is a single cached indirect dispatch, so
   // leaving it on the fast path costs ~1 ns.
   inference_state_->begin_compute();
+
+  if (use_output_allocator_) {
+    // Allocator mode owns its output staging (no pre-filled outputs span) and
+    // its own post-compute host D2H; it does not share the classic perf path.
+    compute_with_output_allocator(context);
+    MY_LOG(2) << "Compute completed successfully (allocator mode)";
+    return;
+  }
 
   if (!perf_enabled()) {
     // --- Fast path: original behaviour, no timing overhead. ---

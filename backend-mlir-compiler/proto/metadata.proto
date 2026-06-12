@@ -9,11 +9,31 @@ package mlir_metadata;
 message Metadata {
   string artifact_filename = 1;
   repeated Output outputs = 2;
+  repeated Input inputs = 3;
+  // True when the artifact was compiled in output-allocator mode: the DLL's
+  // inference_compute takes (state, inputs) only and allocates graph outputs
+  // in-graph via the EP's output-allocator callback. The EP reads this to
+  // choose its dispatch arity. Travels with the artifact, so a reused
+  // EPContext always reports the mode matching its own DLL ABI.
+  bool use_output_allocator = 4;
+}
+
+message Input {
+  string name = 1;
+  int32 rank = 2;
+  int32 elem_type = 3;
+  repeated int64 shape = 4;
 }
 
 message Output {
   string name = 1;
   int32 rank = 2;
   int32 elem_type = 3;
+  // Static dims carry their extent; dynamic dims carry -1. In output-allocator
+  // mode (the default) the DLL sizes dynamic outputs in-graph via the
+  // EP's output-allocator callback, so no per-dim resolution metadata is
+  // needed. Classic mode (use_output_allocator=0) supports only fully-static
+  // output shapes.
+  // NOTE: field number 5 is intentionally retired (was `dim_sources`).
   repeated int64 shape = 4;
 }

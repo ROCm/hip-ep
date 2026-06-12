@@ -9,11 +9,12 @@
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <glog/logging.h>
-#include <sstream>
+#include <limits>
 #include <vector>
 
 // Protobuf
@@ -41,6 +42,12 @@ static CompilationConfig load_config(PassContext *ctx) {
   CompilationConfig config;
   config.artifactFormat = ArtifactFormat::Native;
   config.optLevel = 2;
+  // Output-allocator ABI is the only mode: the DLL allocates graph outputs
+  // in-graph (hip.alloc_output) and the EP dispatches the 2-arg
+  // inference_compute. There is no provider option; the classic out-param ABI
+  // has been removed at the EP front-end. Threaded into both the compile
+  // pipeline and the embedded metadata flag so they can never disagree.
+  config.useOutputAllocator = true;
 
   auto ep_ctx = ctx->get_session_config("ep.context_enable");
   bool epctxExport = ep_ctx.has_value() && ep_ctx.value() == "1";
@@ -135,27 +142,63 @@ static bool write_artifact_to_epcontext(PassContext *ctx,
   return true;
 }
 
-// Step 5: Build metadata JSON from graph outputs
+// MLIR uses kDynamic (INT64_MIN) for dynamic dims; ONNX metadata uses -1.
+// The MLIR backend may mutate graph shapes during bytecode construction,
+// replacing -1 with kDynamic.  Normalize back to -1 for the metadata.
+static constexpr int64_t kMLIRDynamic = std::numeric_limits<int64_t>::min();
+static int64_t normalizeDim(int64_t dim) {
+  return dim == kMLIRDynamic ? -1 : dim;
+}
+
+// Step 5: Build metadata JSON from graph inputs and outputs.
+// Output shapes are emitted verbatim (static extent or -1 for dynamic dims);
+// the DLL sizes dynamic outputs in-graph at runtime via the output-allocator
+// callback (the only ABI).
 static std::string build_metadata_json(const CompilationArtifact &artifact,
                                        Graph &graph) {
   mlir_metadata::Metadata metadata;
   metadata.set_artifact_filename(artifact.filename);
+  // Always the output-allocator ABI -- there is no classic out-param mode at
+  // the EP front-end. The same value is set on the compile flag
+  // (CompilationConfig::useOutputAllocator), so the DLL ABI and the EP's
+  // runtime dispatch arity can never disagree.
+  metadata.set_use_output_allocator(true);
 
   GraphRef graphRef(graph);
+
+  for (const auto &input : graphRef.inputs()) {
+    auto *input_proto = metadata.add_inputs();
+    input_proto->set_name(input.name());
+    input_proto->set_elem_type(input.element_type());
+
+    auto shape_ptr = input.shape();
+    if (shape_ptr && !input.is_unknown_shape()) {
+      input_proto->set_rank(static_cast<int32_t>(shape_ptr->size()));
+      for (int64_t dim : *shape_ptr) {
+        input_proto->add_shape(normalizeDim(dim));
+      }
+    } else {
+      input_proto->set_rank(-1);
+    }
+  }
+
   for (const auto &output : graphRef.outputs()) {
     auto *output_proto = metadata.add_outputs();
     output_proto->set_name(output.name());
     output_proto->set_elem_type(output.element_type());
 
-    // Get shape and rank
     auto shape_ptr = output.shape();
     if (shape_ptr && !output.is_unknown_shape()) {
       output_proto->set_rank(static_cast<int32_t>(shape_ptr->size()));
-      for (int64_t dim : *shape_ptr) {
-        output_proto->add_shape(dim);
+
+      // Emit the output shape verbatim (static extent, or -1 for a dynamic
+      // dim). Dynamic output dims are sized in-graph at runtime by the DLL's
+      // output-allocator callback.
+      for (int d = 0; d < static_cast<int>(shape_ptr->size()); ++d) {
+        output_proto->add_shape(normalizeDim((*shape_ptr)[d]));
       }
     } else {
-      output_proto->set_rank(-1); // Unknown rank
+      output_proto->set_rank(-1);
     }
 
     MY_LOG(2) << "Output " << output.name() << ": rank=" << output_proto->rank()

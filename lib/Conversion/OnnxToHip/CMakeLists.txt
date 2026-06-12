@@ -17,24 +17,36 @@ add_library(OnnxToHip STATIC
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
   ConvConversion.cpp
+  ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
   GqaConversion.cpp
   MultiHeadAttentionConversion.cpp
+  AttentionConversion.cpp
+  HipGqaBuilder.cpp
   GatherConversion.cpp
+  GatherShapeFold.cpp
+  ReshapeShapeFold.cpp
+  ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
   WhereConversion.cpp
   LinearAttentionConversion.cpp
   RangeConversion.cpp
+  FastGeluFusion.cpp
+  ErfGeluFusion.cpp
+  ProjectorOpsRewrites.cpp
+  LpNormalizationConversion.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp
   MinConversion.cpp
+  MaxConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   SinConversion.cpp
+  ExpConversion.cpp
   CumSumConversion.cpp
   PadConversion.cpp
   TileConversion.cpp
@@ -52,7 +64,14 @@ add_library(OnnxToHip STATIC
   SizeConversion.cpp
   NonZeroConversion.cpp
   ConcatConversion.cpp
+  PoolConversion.cpp
+  ResizeConversion.cpp
+  GlobalPoolConversion.cpp
+  FlattenConversion.cpp
   LoopOutline.cpp
+  ReluConversion.cpp
+  LeakyReluConversion.cpp
+  ClipConversion.cpp
 )
 
 add_dependencies(OnnxToHip

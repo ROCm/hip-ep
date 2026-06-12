@@ -10,6 +10,7 @@
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -22,9 +23,11 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
@@ -87,10 +90,53 @@ struct HipDstBufferizableModel
   }
 };
 
+// Bufferization model for the non-DPS hip.readback_dim op (mirror of the
+// canonical one in HipBufferize.h). Reads the scalar tensor operand to its
+// memref buffer; the `index` result passes through unchanged.
+struct HipReadbackDimBufferizableModel
+    : public mlir::bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackDimBufferizableModel, mlir::hip::ReadbackDimOp> {
+  bool
+  bufferizesToMemoryRead(mlir::Operation *, mlir::OpOperand &,
+                         const mlir::bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool
+  bufferizesToMemoryWrite(mlir::Operation *, mlir::OpOperand &,
+                          const mlir::bufferization::AnalysisState &) const {
+    return false;
+  }
+  mlir::bufferization::AliasingValueList
+  getAliasingValues(mlir::Operation *, mlir::OpOperand &,
+                    const mlir::bufferization::AnalysisState &) const {
+    return {};
+  }
+  mlir::LogicalResult
+  bufferize(mlir::Operation *op, mlir::RewriterBase &rewriter,
+            const mlir::bufferization::BufferizationOptions &options,
+            mlir::bufferization::BufferizationState &state) const {
+    auto readback = mlir::cast<mlir::hip::ReadbackDimOp>(op);
+    mlir::FailureOr<mlir::Value> scalarBuf =
+        getBuffer(rewriter, readback.getScalar(), options, state);
+    if (mlir::failed(scalarBuf))
+      return mlir::failure();
+    auto newOp = mlir::hip::ReadbackDimOp::create(
+        rewriter, op->getLoc(), rewriter.getIndexType(), readback.getCtx(),
+        *scalarBuf);
+    mlir::bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                       newOp.getResult());
+    return mlir::success();
+  }
+};
+
 void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
   registry.addExtension(+[](mlir::MLIRContext *ctx, mlir::hip::HipDialect *) {
+    mlir::hip::ReadbackDimOp::attachInterface<HipReadbackDimBufferizableModel>(
+        *ctx);
     mlir::hip::ConvOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ConvOp>>(*ctx);
+    mlir::hip::ConvTransposeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ConvTransposeOp>>(*ctx);
     mlir::hip::MatmulOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::MatmulOp>>(*ctx);
     mlir::hip::RmsNormOp::attachInterface<
@@ -125,6 +171,14 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::SoftplusOp>>(*ctx);
     mlir::hip::GeluOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::GeluOp>>(*ctx);
+    mlir::hip::LeakyReluOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::LeakyReluOp>>(*ctx);
+    mlir::hip::PoolOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::PoolOp>>(*ctx);
+    mlir::hip::ResizeOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ResizeOp>>(*ctx);
+    mlir::hip::GlobalPoolOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GlobalPoolOp>>(*ctx);
     mlir::hip::ReciprocalOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::ReciprocalOp>>(*ctx);
     mlir::hip::SqrtOp::attachInterface<
@@ -165,6 +219,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::CosOp>>(*ctx);
     mlir::hip::SinOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::SinOp>>(*ctx);
+    mlir::hip::ExpOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ExpOp>>(*ctx);
     mlir::hip::CumSumOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::CumSumOp>>(*ctx);
     mlir::hip::PadOp::attachInterface<
@@ -216,10 +272,12 @@ int main(int argc, char **argv) {
   registry.insert<hip::compiler::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   registerHipBufferizableOpInterfaceModels(registry);
 
@@ -240,6 +298,10 @@ int main(int argc, char **argv) {
   mlir::registerSCFToControlFlowPass();
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerReconcileUnrealizedCastsPass();
+  // Registered so that LIT tests and end-to-end pipelines can fold
+  // `tensor.dim` / `memref.dim` of HIP op results through the reify
+  // implementation. Used in `hip-matmul-reify-shapes.mlir`.
+  mlir::memref::registerResolveShapedTypeResultDimsPass();
   mlir::registerPass(
       []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {

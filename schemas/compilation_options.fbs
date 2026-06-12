@@ -16,6 +16,10 @@ table CompilationOptions {
   dump_tensors: bool = false;
   dump_tensors_dir: string;
   skip_constant_data: bool = false;
+  // When true, compile in output-allocator mode: graph outputs are allocated
+  // in-graph via hip.alloc_output and inference_compute takes (state, inputs)
+  // only (no out-param span). Default off keeps the classic 3-arg ABI.
+  use_output_allocator: bool = false;
 }
 
 root_type CompilationOptions;
