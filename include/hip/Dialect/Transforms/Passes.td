@@ -671,49 +671,19 @@ def FixLoopAccumulatorOffsetPass
   let summary = "Rewrite frozen Concat-accumulator offsets in outlined "
                 "hip.loop body functions to iter-driven offsets";
   let description = [{
-    Runs on outlined `*_loop_body_*` func.func ops AFTER bufferization +
-    out-param promotion (`buffer-results-to-out-params` /
-    `hip-loop-body-to-out-params`) + buffer-deallocation, and BEFORE
-    `hip-optimize-memrefs` / `hip-materialize-host-scalars` /
-    `hip-pool-allocs`.
+    Out-param promotion + the LoopLowering trampoline alias each loop-carried
+    `v_in` arg and its `{bufferize.result}` `v_out` out-param onto one
+    immutable memref descriptor, so `memref.dim %v_in, %cN` is frozen at the
+    v_init dim every iteration. A growing-Concat accumulator then appends each
+    chunk at that frozen offset and only the last chunk survives.
 
-    PROBLEM. The HIP loop runtime aliases each loop-carried `v_in` arg and
-    its `{bufferize.result}` `v_out` out-param onto the SAME memref
-    descriptor (LoopLowering trampoline, "v_out_i == v_in_i (same buffer)").
-    A memref descriptor is immutable SSA, so the body's
-    `memref.dim %v_in, %cN` evaluates to the v_init descriptor's dim for
-    EVERY iteration. The canonical growing-Concat accumulator bufferizes to:
-
-      %dim = memref.dim %v_in, %c1                    // FROZEN at v_init dim
-      %sub = memref.subview %v_out[0, %dim, 0] [1, %chunk, W] [1, 1, 1]
-      memref.copy %chunk_src, %sub                    // append at FROZEN offset
-
-    Because the offset is frozen, every iteration writes its chunk to the
-    same byte offset; only the last iteration survives (cos ~= 1/max_trip
-    vs a reference for a windowed-attention vision encoder).
-
-    FIX. For each `memref.subview` whose OFFSET operand for some dim is
-    `memref.dim %v_in, %cN`, replace that offset with the real per-iter
-    chunk start. The start is `seqlens_k[iter]`, recovered from the body's
-    `hip.gather(%seqlens_capture, %iter) -> memref<1xi32>` and read back to
-    the host via a SYNCHRONIZED `hip.readback_scalar` (NOT a bare
-    `memref.load`, which races the async gather on true-device-memory
-    targets). When no such gather exists (fixed-stride loops) the offset
-    falls back to `iter * chunk_size`. SIZE operands are left untouched, so
-    the in-place self-copy subview (dim in sizes, offset all-static-0) is
-    unaffected. No onnx/new tensor ops are introduced, so bufferization is
-    not re-triggered.
-
-    Before:
-      %dim = memref.dim %arg_vin, %c1
-      %sub = memref.subview %arg_vout[0, %dim, 0] [1, %chunk, W] [1, 1, 1]
-      memref.copy %src, %sub
-
-    After:
-      %s_i32 = hip.readback_scalar(%ctx, %gather_out : memref<1xi32>) -> i32
-      %start = arith.index_cast %s_i32 : i32 to index
-      %sub = memref.subview %arg_vout[0, %start, 0] [1, %chunk, W] [1, 1, 1]
-      memref.copy %src, %sub
+    This pass rewrites each chunk-append `memref.subview` OFFSET from the frozen
+    `memref.dim` to the real per-iter chunk start: `seqlens_k[iter]` (read via a
+    synchronized `hip.readback_scalar` of the body's first
+    `hip.gather -> memref<1xi32>`), or `iter * chunk_size` when there is no
+    seqlens gather. Only OFFSETs are touched. Runs after buffer-deallocation
+    and before the pool/hoist passes. See FixLoopAccumulatorOffset.cpp for the
+    matcher and a Before/After snippet.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",
