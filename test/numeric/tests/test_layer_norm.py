@@ -86,6 +86,84 @@ def _make_skip_simplified_layer_norm_model(input_shape: list[int]):
     return model
 
 
+def _make_skip_layer_norm_model(input_shape: list[int]):
+    """Build a standard com.microsoft.SkipLayerNormalization ONNX model (f16).
+
+    This is mean-subtracting LayerNorm WITH a skip/residual add and bias (beta),
+    distinct from SkipSimplifiedLayerNormalization (RMS norm). 4-input form
+    (input, skip, gamma, beta), 4-output (output, mean, inv_std, sum) with only
+    output[0] and output[3] consumed -- exactly the Whisper encoder pattern.
+
+    Semantics (MS spec, 4-input / no input-bias):
+        sum    = input + skip
+        output = LayerNorm(sum, gamma, beta, epsilon)
+        output[3] (input_skip_bias_sum) = sum
+
+    ORT CPU provider supports it. Validates the converter's hip.add +
+    hip.layer_norm composition end-to-end.
+    """
+    hidden = input_shape[-1]
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
+    skip = helper.make_tensor_value_info("skip", TensorProto.FLOAT16, input_shape)
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
+    # output[3] = input_skip_bias_sum (Whisper consumes this as next residual).
+    Y3 = helper.make_tensor_value_info("Y3", TensorProto.FLOAT16, input_shape)
+
+    rng = np.random.default_rng(66)
+    gamma_data = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
+    beta_data = rng.uniform(-0.5, 0.5, [hidden]).astype(np.float16)
+    gamma_init = numpy_helper.from_array(gamma_data, name="gamma")
+    beta_init = numpy_helper.from_array(beta_data, name="beta")
+
+    node = helper.make_node(
+        "SkipLayerNormalization",
+        ["X", "skip", "gamma", "beta"],
+        ["Y", "", "", "Y3"],
+        domain="com.microsoft",
+        epsilon=1e-5,
+    )
+    ms_opset = helper.make_opsetid("com.microsoft", 1)
+    model = make_model_from_nodes(
+        [node],
+        [X, skip],
+        [Y, Y3],
+        initializers=[gamma_init, beta_init],
+        extra_opsets=[ms_opset],
+    )
+    return model
+
+
+class TestSkipLayerNorm:
+    """Standard SkipLayerNormalization (Whisper encoder, 4-in / output[0]+[3])."""
+
+    @pytest.mark.parametrize(
+        "input_shape",
+        [
+            [1, 4, 16],
+            [1, 8, 32],
+        ],
+    )
+    def test_skip_layer_norm(self, model_runner, input_shape):
+        model = _make_skip_layer_norm_model(input_shape)
+        rng = np.random.default_rng(77)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        # output[0] = LayerNorm(x+skip); output[3] = x+skip. Block-per-row fp32
+        # reduction + fp16 I/O round-trip -> ~2e-3.
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+    def test_skip_layer_norm_whisper_shape(self, model_runner):
+        """SkipLayerNorm at the real Whisper-large-v3 encoder hidden size 1280."""
+        input_shape = [1, 16, 1280]
+        model = _make_skip_layer_norm_model(input_shape)
+        rng = np.random.default_rng(78)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+
 class TestSimplifiedLayerNorm:
     @pytest.mark.parametrize(
         "input_shape",
