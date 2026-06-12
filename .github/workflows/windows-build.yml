@@ -775,13 +775,11 @@ jobs:
 
           $failed = 0
           foreach ($modelDir in (Get-ChildItem $ogaModelRoot -Directory)) {
-            $pipelineConfig = Join-Path $modelDir.FullName "genai_config_128.json"
-            if (-not (Test-Path $pipelineConfig)) {
-              Write-Host "[SKIP] No genai_config_128.json in $($modelDir.Name)"
+            $genaiCfgPath = Join-Path $modelDir.FullName "genai_config.json"
+            if (-not (Test-Path $genaiCfgPath)) {
+              Write-Host "[SKIP] No genai_config.json in $($modelDir.Name)"
               continue
             }
-            $genaiCfgPath = Join-Path $modelDir.FullName "genai_config.json"
-            Copy-Item $pipelineConfig $genaiCfgPath -Force
             $cfgJson = Get-Content $genaiCfgPath -Raw | ConvertFrom-Json
             $epName = try {
               $opts = $cfgJson.model.decoder.session_options.provider_options[0]
