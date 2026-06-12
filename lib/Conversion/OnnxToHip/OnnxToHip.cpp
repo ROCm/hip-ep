@@ -816,6 +816,17 @@ void ConvertOnnxToHipPass::runOnOperation() {
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
       return signalPassFailure();
+    // Phase 2: lower any `onnx.Constant` ops SYNTHESIZED during
+    // convertComputeOps. Some ONNX->HIP patterns introduce a fresh literal as
+    // an `onnx.Constant` (e.g. Relu(x) = hip.max(x, 0) emits a 0-D zero), which
+    // the Phase-1 lowerOnnxConstants above could not see because it ran before
+    // these ops existed. Without this second call those constants survive the
+    // pass and one-shot-bufferize aborts with "op was not bufferized" (the EP
+    // then silently falls back to CPU). Re-running externalizes / inlines them
+    // exactly like every other constant.
+    if (mlir::failed(
+            lowerOnnxConstants(module, funcOp, minElems, extState.get())))
+      return signalPassFailure();
   }
 
   if (timing && extState) {
