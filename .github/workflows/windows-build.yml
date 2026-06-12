@@ -488,11 +488,10 @@ jobs:
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
 
       # -----------------------------------------------------------------------
-      # Standalone, offline Python wheel package: the three project wheels + the
-      # full ROCm wheel closure (pip-downloaded from repo.amd.com) + run_onnx.py
-      # + OGA's benchmark scripts. Self-contained for ROCm (install offline via
-      # --find-links); only rocm-sdk init expands the devel libs afterwards.
-      # Uploaded as a separate artifact from gpu-test-package.
+      # Python wheel package: the three project wheels + run_onnx.py + OGA
+      # benchmark scripts. ROCm wheels are NOT bundled — they are installed
+      # from repo.amd.com at runtime (CI smoke) or downloaded by the local
+      # package_release.ps1 script when building the offline distribution.
       # -----------------------------------------------------------------------
       - name: Stage Python wheel package
         shell: bash
@@ -512,10 +511,6 @@ jobs:
           cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
           cp python/examples/run_onnx.py wheelpkg/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
-          # Download EP dependency closure (ROCm) for the wheel package.
-          python -m pip download "$EP_WHEEL" \
-            --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ \
-            -d wheelpkg/wheels
           echo "=== Python wheel package layout ==="
           find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
 
@@ -779,10 +774,9 @@ jobs:
           exit $failed
 
       # -----------------------------------------------------------------------
-      # OGA wheel smoke: install the wheels from the offline morphizen-python-
-      # package and run OGA's benchmark_e2e.py against a real model. ROCm comes
-      # from the package's bundled TheRock (THEROCK_DIST), so no pip ROCm /
-      # rocm-sdk init is needed. Validates the self-contained wheel package.
+      # OGA wheel smoke: install the project wheels from the morphizen-python-
+      # package artifact + ROCm wheels from repo.amd.com, then run OGA's
+      # benchmark_e2e.py against a real model.
       # -----------------------------------------------------------------------
       # The cp314 ORT/OGA wheels need Python 3.14 to create the smoke venv (the
       # runner's default python may be a different version).
@@ -809,16 +803,13 @@ jobs:
           python -m venv $venv
           $py = "$venv\Scripts\python.exe"
 
-          # Install project + ROCm wheels from local dir; ORT deps from PyPI.
+          # Install project wheels from local dir + ROCm wheels from repo.amd.com.
           Push-Location "$pkg\wheels"
           & $py -m pip install --quiet `
             (Get-Item onnxruntime_directml-*.whl).Name `
             (Get-Item onnxruntime_morphizen_ep-*.whl).Name `
             (Get-Item onnxruntime_genai_directml-*.whl).Name `
-            (Get-Item rocm-*.tar.gz).Name `
-            (Get-Item rocm_sdk_core-*.whl).Name `
-            (Get-Item rocm_sdk_devel-*.whl).Name `
-            (Get-Item rocm_sdk_libraries_*.whl).Name `
+            --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ `
             psutil tqdm pandas
           Pop-Location
           if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
