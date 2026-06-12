@@ -77,20 +77,54 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value keepdimsVal = createI64Const(op.getKeepdims());
     Value noopWithEmptyAxesVal = createI64Const(op.getNoopWithEmptyAxes());
 
-    SmallVector<Type, 10> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+    // inner_size = product of input dims AFTER the reduced axis, derived purely
+    // from the static input/output shapes (no need for the axes values): align
+    // input & output shapes from the trailing end and multiply the dims that
+    // match; the first mismatch is the reduced axis. The runtime kernel uses
+    // this stride so a NON-trailing-axis reduce (e.g. NCHW channel-axis
+    // LayerNorm2d, axes=[1]) reads the correct strided elements instead of
+    // contiguous trailing ones.
+    //
+    //   Before: out[o] = sum_r data[o*reduce + r]            (inner==1,
+    //   trailing) After:  out[oo*inner+ii] = sum_r data[oo*reduce*inner +
+    //   r*inner + ii]
+    //
+    // Falls back to 1 (contiguous fast path, original behavior) for any dynamic
+    // dim or if the trailing-match product does not divide the output size.
+    int64_t innerSize = 1;
+    if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
+      llvm::ArrayRef<int64_t> inShape = dataType.getShape();
+      llvm::ArrayRef<int64_t> outShape = outputType.getShape();
+      int64_t i = static_cast<int64_t>(inShape.size()) - 1;
+      int64_t o = static_cast<int64_t>(outShape.size()) - 1;
+      while (i >= 0 && o >= 0 && inShape[i] == outShape[o]) {
+        innerSize *= inShape[i];
+        --i;
+        --o;
+      }
+      int64_t outNum = 1;
+      for (int64_t d : outShape)
+        outNum *= d;
+      if (innerSize <= 0 || (outNum % innerSize) != 0)
+        innerSize = 1;
+    }
+    Value innerSizeVal = createI64Const(innerSize);
+
+    SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         i64Type, i64Type, i64Type, i64Type,
-                                        i64Type, i64Type};
+                                        i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, funcName, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 10> args = {statePtr,        dataPtr,
+    SmallVector<Value, 11> args = {statePtr,        dataPtr,
                                    axesPtr,         outputPtr,
                                    dataNumElements, outputNumElements,
                                    axesNumElements, dataTypeVal,
-                                   keepdimsVal,     noopWithEmptyAxesVal};
+                                   keepdimsVal,     noopWithEmptyAxesVal,
+                                   innerSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

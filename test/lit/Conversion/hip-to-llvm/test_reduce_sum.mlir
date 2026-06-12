@@ -34,7 +34,7 @@ module {
                          outs(%output : memref<8x128xf32, 1>)
                          {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
 
-    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -58,7 +58,7 @@ module {
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
 
-    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
