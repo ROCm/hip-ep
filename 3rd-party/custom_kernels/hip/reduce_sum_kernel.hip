@@ -18,12 +18,20 @@
 // =============================================================================
 
 // Parallel sum reduction for i64. Each block reduces one output element
-// by summing reduce_size consecutive input elements using shared memory.
+// using shared memory.
+//
 // `inner` is the product of the input dims AFTER the reduced axis (1 for a
-// trailing/contiguous reduce). The reduced elements for output `out_idx`
-// (= oo*inner + ii) live at data[oo*reduce_size*inner + r*inner + ii], i.e.
-// strided by `inner`. inner==1 collapses to the contiguous slice
-// data[out_idx*reduce_size + r] (original behavior).
+// trailing/contiguous reduce). For the output element at linear index
+// `out_idx`, decompose it into outer/inner indices:
+//   oo = out_idx / inner   (outer: index of the block of `inner` outputs)
+//   ii = out_idx % inner   (inner: offset within that block)
+// The `reduce_size` reduced elements then live at
+//   data[oo*reduce_size*inner + r*inner + ii]   for r in [0, reduce_size)
+// i.e. strided by `inner`. inner==1 collapses to the original contiguous slice
+//   data[out_idx*reduce_size + r].
+// Example (NCHW channel reduce [1,512,64,64] -> [1,1,64,64]): inner = 64*64 =
+// 4096, reduce_size = 512; out_idx=100 -> oo=0, ii=100, reads
+// data[r*4096 + 100] for r in [0,512).
 __global__ void reduce_sum_i64_kernel(
     const int64_t* __restrict__ data,
     int64_t* __restrict__ output,
@@ -287,8 +295,10 @@ extern "C" int hip_reduce_sum(
               (long long)reduce_size, (long long)num_output_elements,
               block_size, shared_mem);
 
-      // Vectorized shfl path is only valid for a contiguous reduce (inner==1).
-      if(reduce_size >= 2048 && inner_size == 1){
+      // Use the warp-shuffle kernel only for large contiguous reductions; the
+      // vectorized shfl path is only valid for a contiguous reduce (inner==1).
+      constexpr int64_t kReduceShflThreshold = 2048;
+      if(reduce_size >= kReduceShflThreshold && inner_size == 1){
         hipLaunchKernelGGL(reduce_sum_i64_shfl_kernel,
                          dim3(static_cast<unsigned>(num_output_elements)),
                          dim3(block_size),

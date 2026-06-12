@@ -62,4 +62,28 @@ module {
 
     return
   }
+
+  // Test 3: NON-trailing (strided) reduce — reduce the channel axis of an
+  // NCHW-style tensor (the LayerNorm2d case). Shapes are chosen so inner_size
+  // (=15) is distinct from output_num_elements (=4*1*3*5=60) and
+  // data_num_elements (=4*8*3*5=480), so the CHECK below pins the inner_size
+  // arg specifically. Trailing-match: [4,8,3,5] vs [4,1,3,5] -> dims 3,5 match,
+  // axis 1 (8 vs 1) is the reduced axis -> inner = 3*5 = 15.
+  func.func @reduce_sum_strided_channel_axis(
+      %ctx: !hip.context,
+      %input: memref<4x8x3x5xf32, 1>,
+      %axes: memref<1xi64, 1>,
+      %output: memref<4x1x3x5xf32, 1>) {
+    // CHECK-LABEL: llvm.func @reduce_sum_strided_channel_axis
+
+    hip.reduce_sum(%ctx) ins(%input, %axes : memref<4x8x3x5xf32, 1>, memref<1xi64, 1>)
+                         outs(%output : memref<4x1x3x5xf32, 1>)
+                         {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+
+    // inner_size = 15 is passed as the trailing i64 arg.
+    // CHECK-DAG: llvm.mlir.constant(15 : i64) : i64
+    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+    return
+  }
 }
