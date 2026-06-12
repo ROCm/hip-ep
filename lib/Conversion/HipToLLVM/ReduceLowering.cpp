@@ -85,9 +85,36 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     // LayerNorm2d, axes=[1]) reads the correct strided elements instead of
     // contiguous trailing ones.
     //
-    //   Before: out[o] = sum_r data[o*reduce + r]            (inner==1,
-    //   trailing) After:  out[oo*inner+ii] = sum_r data[oo*reduce*inner +
-    //   r*inner + ii]
+    // Before / After (channel-axis ReduceSum over NCHW, the LayerNorm2d case;
+    // only the trailing i64 operand of the call changes -- it carries the new
+    // inner_size):
+    //
+    //   %data : memref<1x512x64x64xf16>   %out : memref<1x1x64x64xf16>
+    //   // align from the right: [1,512,64,64] vs [1,1,64,64] -> first mismatch
+    //   // at axis 1, so inner_size = 64*64 = 4096, reduce_size = 512.
+    //
+    //   Before (this lowering, contiguous-only): emitted inner=1 implicitly
+    //     llvm.call @wrap_reduce_sum(state, data, axes, out,
+    //         dataNum, outNum, axesNum, dtype, keepdims, noop)        // 10
+    //         args
+    //     // kernel did out[o] = sum_r data[o*512 + r]  -- WRONG (reads 512
+    //     // contiguous elems instead of 512 elems spaced 4096 apart)
+    //
+    //   After:
+    //     %inner = llvm.mlir.constant(4096 : i64)
+    //     llvm.call @wrap_reduce_sum(state, data, axes, out,
+    //         dataNum, outNum, axesNum, dtype, keepdims, noop, %inner) // 11
+    //         args
+    //     // kernel does out[oo*4096+ii] = sum_r data[oo*512*4096 + r*4096 +
+    //     ii]
+    //
+    // Assumption: the reduced axis is the FIRST position where input and output
+    // shapes diverge when aligned from the trailing end. This holds for the
+    // standard ONNX reduce ops we lower (single reduced axis, keepdims or not).
+    // `axes` is a runtime memref here so we cannot cross-check the inferred
+    // axis against it at compile time; the inner<=0 / outNum%inner!=0 fallback
+    // below (and the dynamic-shape guard) keep us on the original contiguous
+    // path when the inference does not apply.
     //
     // Falls back to 1 (contiguous fast path, original behavior) for any dynamic
     // dim or if the trailing-match product does not divide the output size.

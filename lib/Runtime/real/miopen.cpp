@@ -489,10 +489,13 @@ int wrap_miopenConvolutionTranspose(
     MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
         bias_desc, miopen_dt, miopenTensorNCHW, b_dims, 4));
-    float a1 = 1.0f, a2 = 1.0f, bz = 0.0f;
-    MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &a1,
-                                output_desc, output, &a2, bias_desc, bias, &bz,
-                                output_desc, output));
+    // miopenOpTensor computes C = alpha1*A + alpha2*B + beta*C. With
+    // alpha1=alpha2=1, beta=0 and A==C==output, B==bias this is
+    // output = output + bias (in place); A==C is required by MIOpen.
+    const float alpha1 = 1.0f, alpha2 = 1.0f, beta_zero = 0.0f;
+    MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &alpha1,
+                                output_desc, output, &alpha2, bias_desc, bias,
+                                &beta_zero, output_desc, output));
   }
 
 cleanup:
