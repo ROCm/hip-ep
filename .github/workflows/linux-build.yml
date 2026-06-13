@@ -32,10 +32,11 @@ env:
   # the official prebuilt release. Part of the ort-install cache key. Remove a
   # PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: "28608"
-  # OGA fork+pin: built against the same ORT and tokenizer surface so the OGA
-  # binaries stay ABI-compatible.
-  OGA_REPO: AMDmoore/onnxruntime-genai
-  OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
+  OGA_VERSION: "0.14.0"
+  # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
+  # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
+  # cache key. Remove a PR once it lands in the pinned OGA release.
+  OGA_PR_PATCHES: "2194"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx1151
@@ -256,7 +257,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -265,12 +266,36 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: ${{ env.OGA_REPO }}
-          ref: ${{ env.OGA_REF }}
+          repository: microsoft/onnxruntime-genai
+          ref: v${{ env.OGA_VERSION }}
           submodules: recursive
           path: onnxruntime-genai
           fetch-depth: 1
           show-progress: false
+
+      # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
+      # OGA_PR_PATCHES (env), mirroring the ONNX Runtime PR patch step. Fresh
+      # checkout => patches apply directly; the OGA cache key includes the PR
+      # list, so editing it forces a rebuild.
+      - name: Apply OGA PR patches
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        working-directory: onnxruntime-genai
+        env:
+          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
+        run: |
+          set -euo pipefail
+          prs="$(echo "$OGA_PRS" | xargs || true)"
+          if [ -z "$prs" ]; then
+            echo "OGA_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          fi
+          for pr in $prs; do
+            url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.patch"
+            echo "Fetching $url"
+            curl -fsSL "$url" -o "/tmp/oga-pr-${pr}.patch"
+            echo "Applying PR #${pr}"
+            git apply --whitespace=nowarn "/tmp/oga-pr-${pr}.patch"
+          done
 
       - name: Build OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'

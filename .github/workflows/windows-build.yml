@@ -46,8 +46,11 @@ jobs:
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: "28608"
       SCCACHE_GHA_ENABLED: "true"
-      OGA_REPO: AMDmoore/onnxruntime-genai
-      OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
+      OGA_VERSION: "0.14.0"
+      # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
+      # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
+      # cache key. Remove a PR once it lands in the pinned OGA release.
+      OGA_PR_PATCHES: "2194"
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -317,20 +320,51 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          # Bump the v<N> token to invalidate the OGA cache when its output
-          # set changes shape (e.g. a new artifact) without an OGA_REF/ORT bump.
-          key: oga-dml-v2-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # OGA is built against the patched ort-install, so the key folds in
+          # both OGA's own PR list and ONNXRUNTIME_PR_PATCHES; editing either
+          # forces a rebuild. The mm<N> token bumps when the OGA artifact set
+          # changes shape (e.g. model_mm / benchmark_multimodal.py added).
+          key: oga-dml-mm1-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: ${{ env.OGA_REPO }}
-          ref: ${{ env.OGA_REF }}
+          repository: microsoft/onnxruntime-genai
+          ref: v${{ env.OGA_VERSION }}
           path: source-oga
           submodules: true
           fetch-depth: 1
           show-progress: false
+
+      # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
+      # OGA_PR_PATCHES (env), mirroring the ONNX Runtime PR patch step. The
+      # source-oga tree is a fresh checkout so patches apply directly; the OGA
+      # cache key includes the PR list, so editing it forces a rebuild.
+      - name: Apply OGA PR patches
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}\source-oga
+        env:
+          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
+        run: |
+          $prs = $env:OGA_PRS.Trim()
+          if (-not $prs) {
+            Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          }
+          foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.patch"
+            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.patch"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            Write-Host "Applying PR #$pr"
+            git apply --whitespace=nowarn $tmp
+            if ($LASTEXITCODE -ne 0) {
+              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
+            }
+          }
 
       - name: Prepare ORT_HOME for OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -383,6 +417,27 @@ jobs:
           cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_e2e.py" \
              "${{ github.workspace }}/source-oga/benchmark/python/metrics.py" \
              "${{ runner.workspace }}/oga-artifacts/benchmark-python/"
+
+          # build.py --skip_examples leaves examples/c unbuilt. Build only
+          # model_mm (the multimodal example used by VL model CI) as a standalone
+          # cmake project against the just-built OGA lib + ORT_HOME. build.py's
+          # build_examples ignores CXXFLAGS, so set -DCMAKE_CXX_FLAGS=-FS here to
+          # force synchronous compiler-PDB writes (parallel model_mm.cpp /
+          # common.cpp otherwise clash on vc140.pdb -> C1041).
+          cmake -S "${{ github.workspace }}/source-oga/examples/c" \
+            -B "${{ runner.workspace }}/build-oga-examples" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DMODEL_MM=ON -DCMAKE_CXX_FLAGS=-FS \
+            -DORT_INCLUDE_DIR="$ORT_HOME/include" \
+            -DORT_LIB_DIR="$ORT_HOME/lib" \
+            -DOGA_INCLUDE_DIR="${{ github.workspace }}/source-oga/src" \
+            -DOGA_LIB_DIR="$OGA_OUT"
+          cmake --build "${{ runner.workspace }}/build-oga-examples" --target model_mm
+          cp "${{ runner.workspace }}/build-oga-examples/model_mm.exe" \
+            "${{ runner.workspace }}/oga-artifacts/"
+
+          # benchmark_multimodal.py drives model_mm for the VL benchmark.
+          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_multimodal.py" \
+            "${{ runner.workspace }}/oga-artifacts/"
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -453,10 +508,13 @@ jobs:
           done
 
           # ---------------------------------------------------------------
-          # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll
+          # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll, plus
+          # model_mm.exe + benchmark_multimodal.py for the VL model tests.
           # ---------------------------------------------------------------
           cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
 
           # ---------------------------------------------------------------
           # Python wheels (ORT + OGA cp314) bundled into the artifact under
@@ -737,24 +795,15 @@ jobs:
             exit 0
           }
 
-          $epDll = Join-Path $pkgBin "onnxruntime_morphizen_ep.dll"
           New-Item -ItemType Directory -Force -Path "oga-results" | Out-Null
 
           $failed = 0
           foreach ($modelDir in (Get-ChildItem $ogaModelRoot -Directory)) {
-            $pipelineConfig = Join-Path $modelDir.FullName "genai_config_128.json"
-            if (-not (Test-Path $pipelineConfig)) {
-              Write-Host "[SKIP] No genai_config_128.json in $($modelDir.Name)"
+            $genaiCfgPath = Join-Path $modelDir.FullName "genai_config.json"
+            if (-not (Test-Path $genaiCfgPath)) {
+              Write-Host "[SKIP] No genai_config.json in $($modelDir.Name)"
               continue
             }
-            $genaiCfgPath = Join-Path $modelDir.FullName "genai_config.json"
-            Copy-Item $pipelineConfig $genaiCfgPath -Force
-            $cfgJson = Get-Content $genaiCfgPath -Raw | ConvertFrom-Json
-            $epName = try {
-              $opts = $cfgJson.model.decoder.session_options.provider_options[0]
-              ($opts.PSObject.Properties | Select-Object -First 1).Name
-            } catch { $null }
-            if (-not $epName) { $epName = "MorphiZenExecutionProvider" }
             $promptFile = Join-Path $modelDir.FullName "prompt.txt"
             $promptArgs = if (Test-Path $promptFile) {
               @("--prompt_file", $promptFile)
@@ -762,12 +811,15 @@ jobs:
               @("-l", "128")
             }
             $outFile = "oga-results\$($modelDir.Name).txt"
-            Write-Host "=== OGA Benchmark: $($modelDir.Name) (EP=$epName) ==="
+            # MorphiZenEP is selected via genai_config.json provider_options and
+            # the EP DLL is auto-discovered next to onnxruntime-genai.dll. Do NOT
+            # pass --ep_library: upstream model_benchmark rejects it, and where
+            # supported it double-registers the EP and crashes on shutdown.
+            Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
             & $benchmark `
               -i $modelDir.FullName `
               -g 128 -r 5 -w 1 -b 1 -ml -1 `
               @promptArgs `
-              --ep_library $epName $epDll `
               -v 2>&1 | Tee-Object -FilePath $outFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
           }
