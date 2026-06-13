@@ -61,7 +61,8 @@ std::atomic<size_t> g_gpu_shared_peak{0};    // DXGI NON_LOCAL segment
 std::atomic<int> g_live_instances{0};
 
 #ifdef _WIN32
-// AMD adapter handle, resolved once on first sample. nullptr => sampling no-op.
+// AMD adapter handle, resolved once on first sample, released by the last
+// instance's destructor. nullptr => sampling no-op.
 IDXGIAdapter3 *g_dxgi_adapter = nullptr;
 std::once_flag g_dxgi_once;
 
@@ -91,6 +92,19 @@ void init_dxgi_adapter() {
   factory->Release();
 }
 #endif
+
+// Release the cached adapter. Called from the last instance's destructor -- a
+// normal execution point, deliberately NOT static/DLL-detach teardown, where
+// releasing a COM object under the loader lock is hazardous. After release,
+// sampling no-ops for any later session in the same process (fine: diagnostic).
+void release_dxgi_adapter() {
+#ifdef _WIN32
+  if (g_dxgi_adapter) {
+    g_dxgi_adapter->Release();
+    g_dxgi_adapter = nullptr;
+  }
+#endif
+}
 
 #ifdef _WIN32
 // CAS the running max into an atomic high-water mark.
@@ -754,6 +768,7 @@ MlirCustomOp::~MlirCustomOp() {
               << " bytes" << std::endl;
     std::cout << "[PEAKMEM] Shared GPU memory: " << g_gpu_shared_peak
               << " bytes" << std::endl;
+    release_dxgi_adapter();
   }
 }
 
