@@ -461,6 +461,7 @@ private:
         {"hipdnn_ep_stream_sync", i32, {ptr}},
         {"hipdnn_ep_state_reset_error_flag", i32, {ptr}},
         {"hipdnn_ep_state_read_and_clear_error_flag", i32, {ptr}},
+        {"hipdnn_ep_runtime_begin_compute", vd, {ptr}},
     };
   }
 
@@ -733,6 +734,28 @@ private:
     builder.setInsertionPointToStart(entryBlock);
 
     Value state = entryBlock->getArgument(0);
+
+    // Re-publish THIS state's stream as the thread-local "current stream" before
+    // any op runs. The in-tree memrefCopy (MLIR memref.copy lowering, ABI-fixed
+    // signature with no `state` arg) issues its D2D copies on that thread-local;
+    // it is otherwise only set by the EP's per-Compute begin_compute hook. When
+    // several inference sessions (e.g. a dynamic model's shape/prefill/decode
+    // specializations) are backed by ONE model.dll, they share this single
+    // thread-local but each owns a DISTINCT hipStream. Without this re-publish,
+    // a memref.copy in one specialization's main_graph can run on a different
+    // specialization's stream than the consuming kernels (which take `state`'s
+    // stream) -> unordered producer/consumer -> nondeterministic data race
+    // (observed as partial/garbled ScatterND in the Qwen3.5 VLM embedding graph,
+    // and only inside the live multi-session pipeline; isolated single-session
+    // runs serialize coincidentally). Binding it here makes every main_graph
+    // invocation's copies use its own stream. begin_compute also resets the
+    // per-Compute GQA seqlens_k cache, which is correct at compute entry; the
+    // EP's own begin_compute call is then a harmless idempotent repeat.
+    auto beginComputeFunc =
+        module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_runtime_begin_compute");
+    if (beginComputeFunc)
+      LLVM::CallOp::create(builder, loc, beginComputeFunc, ValueRange{state});
+
     Value inputsSpanPtr = entryBlock->getArgument(1);
     // outputsSpanPtr is arg 2 in classic mode only; allocator mode has no
     // outputs span (outputs are allocated in-graph).
