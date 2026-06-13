@@ -816,12 +816,43 @@ jobs:
             # pass --ep_library: upstream model_benchmark rejects it, and where
             # supported it double-registers the EP and crashes on shutdown.
             Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
-            & $benchmark `
-              -i $modelDir.FullName `
-              -g 128 -r 5 -w 1 -b 1 -ml -1 `
-              @promptArgs `
-              -v 2>&1 | Tee-Object -FilePath $outFile
-            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+            $bargs = @('-i', $modelDir.FullName, '-g', '128', '-r', '5', '-w', '1', '-b', '1', '-ml', '-1') + $promptArgs + @('-v')
+            $tmpOut = [System.IO.Path]::GetTempFileName()
+            $tmpErr = [System.IO.Path]::GetTempFileName()
+            # Launch model_benchmark and sample its per-process GPU memory via
+            # Windows perf counters while it runs (peak of dedicated + shared).
+            # External measurement keeps the EP/inference path untouched.
+            $proc = Start-Process -FilePath $benchmark -ArgumentList $bargs `
+              -NoNewWindow -PassThru `
+              -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+            # Cache the native handle so $proc.ExitCode is readable after exit;
+            # without this Start-Process -PassThru can leave ExitCode $null, and
+            # `$null -ne 0` is $true in PowerShell -> false failure.
+            $null = $proc.Handle
+            $peakDed = 0L
+            $peakShared = 0L
+            while (-not $proc.HasExited) {
+              Start-Sleep -Milliseconds 1500
+              try {
+                $d = (Get-Counter "\GPU Process Memory(pid_$($proc.Id)_*)\Dedicated Usage" -ErrorAction Stop).CounterSamples |
+                  Measure-Object -Property CookedValue -Sum
+                if ($d.Sum -gt $peakDed) { $peakDed = [long]$d.Sum }
+                $s = (Get-Counter "\GPU Process Memory(pid_$($proc.Id)_*)\Shared Usage" -ErrorAction Stop).CounterSamples |
+                  Measure-Object -Property CookedValue -Sum
+                if ($s.Sum -gt $peakShared) { $peakShared = [long]$s.Sum }
+              } catch { }
+            }
+            $proc.WaitForExit()
+            # Reassemble tool output into $outFile (so the publish-step parsers
+            # see model_benchmark's TTFT/TPS/Peak working set), echo to the log,
+            # then append the sampled GPU peaks for the publish step.
+            Get-Content $tmpOut, $tmpErr -ErrorAction SilentlyContinue | Set-Content $outFile
+            Add-Content $outFile "[GPUMEM] Dedicated GPU memory: $peakDed bytes"
+            Add-Content $outFile "[GPUMEM] Shared GPU memory: $peakShared bytes"
+            Get-Content $outFile | Write-Host
+            Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
+            $ec = $proc.ExitCode
+            if ($null -ne $ec -and $ec -ne 0) { $failed = 1 }
           }
           exit $failed
 
@@ -1083,13 +1114,25 @@ jobs:
             $ttft = if ($ttftMatch.Success) { "{0:F1}" -f ([double]$ttftMatch.Groups[1].Value / 1000) } else { "-" }
             $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[2].Value } else { "-" }
             $mem  = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
-            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem |`n"
+            # GPU peak sampled externally during the run (see OGA benchmark
+            # step). Report the total (dedicated + shared): on the UMA APU the
+            # WDDM dedicated/shared split drifts with memory pressure run-to-run,
+            # but their sum -- the real footprint -- is stable.
+            $gpuDed = [regex]::Match($content, '\[GPUMEM\]\s*Dedicated GPU memory:\s+(\d+)\s+bytes')
+            $gpuSh  = [regex]::Match($content, '\[GPUMEM\]\s*Shared GPU memory:\s+(\d+)\s+bytes')
+            $gpuGB = if ($gpuDed.Success -or $gpuSh.Success) {
+              $tot = 0.0
+              if ($gpuDed.Success) { $tot += [double]$gpuDed.Groups[1].Value }
+              if ($gpuSh.Success) { $tot += [double]$gpuSh.Groups[1].Value }
+              "{0:F2}" -f ($tot / 1GB)
+            } else { "-" }
+            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem | $gpuGB |`n"
           }
           $ogaSection = ""
           if ($ogaRows) {
             $ogaSection = "`n## OGA Benchmark Results`n`n" +
-                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) |`n" +
-                          "|-------|----:|----:|----:|----:|----:|----:|----:|`n" +
+                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) | GPU Mem (GB) |`n" +
+                          "|-------|----:|----:|----:|----:|----:|----:|----:|----:|`n" +
                           $ogaRows
           }
 
