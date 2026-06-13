@@ -1024,11 +1024,28 @@ jobs:
           $sha = $rawSha.Substring(0, 7)
           $prNumber = "${{ github.event.pull_request.number }}"
 
+          # Peak GPU memory (MB) from the EP's [PEAKMEM] lines (emitted in bytes;
+          # one set per process run, multiple if a step appends several runs into
+          # one file). Returns Dedicated / Shared (max of each segment).
+          function Get-GpuMem($content) {
+            $d = [regex]::Matches($content, '\[PEAKMEM\]\s*Dedicated GPU memory:\s+(\d+)\s+bytes')
+            $s = [regex]::Matches($content, '\[PEAKMEM\]\s*Shared GPU memory:\s+(\d+)\s+bytes')
+            if ($d.Count -eq 0 -and $s.Count -eq 0) {
+              return [pscustomobject]@{ Dedicated = "-"; Shared = "-" }
+            }
+            $dMax = if ($d.Count) { ($d | ForEach-Object { [long]$_.Groups[1].Value } | Measure-Object -Maximum).Maximum } else { 0 }
+            $sMax = if ($s.Count) { ($s | ForEach-Object { [long]$_.Groups[1].Value } | Measure-Object -Maximum).Maximum } else { 0 }
+            return [pscustomobject]@{
+              Dedicated = [long]($dMax / 1MB)
+              Shared    = [long]($sMax / 1MB)
+            }
+          }
+
           # Helper: build table rows from a results dir.
           # Each file: extract Number of inferences per second / Session
-          # creation / 1st infer / Avg CPU / Peak WS for the standard
-          # 6-column format (Model | QPS | Session (s) | 1st Infer (ms) |
-          # CPU% | Mem (MB)).
+          # creation / 1st infer / Avg CPU / Peak WS / peak GPU mem (dedicated,
+          # shared) for the 8-column format (Model | QPS | Session (s) |
+          # 1st Infer (ms) | CPU% | Mem (MB) | GPU Ded (MB) | GPU Shared (MB)).
           function Get-PerfRows($dir) {
             $rows = ""
             foreach ($f in (Get-ChildItem "$dir/*.txt" -ErrorAction SilentlyContinue)) {
@@ -1043,11 +1060,12 @@ jobs:
               $first = if ($firstMatch.Success) { $firstMatch.Groups[1].Value } else { "-" }
               $cpu = if ($cpuMatch.Success) { $cpuMatch.Groups[1].Value } else { "-" }
               $memMB = if ($memMatch.Success) { "{0:F0}" -f ([double]$memMatch.Groups[1].Value / 1MB) } else { "-" }
+              $gpu = Get-GpuMem $content
               if ($qpsMatch.Success) {
                 $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
-                $rows += "| $model | $qps | $sess | $first | $cpu | $memMB |`n"
+                $rows += "| $model | $qps | $sess | $first | $cpu | $memMB | $($gpu.Dedicated) | $($gpu.Shared) |`n"
               } else {
-                $rows += "| $model | failed | $sess | $first | $cpu | $memMB |`n"
+                $rows += "| $model | failed | $sess | $first | $cpu | $memMB | $($gpu.Dedicated) | $($gpu.Shared) |`n"
               }
             }
             return $rows
@@ -1055,10 +1073,10 @@ jobs:
 
           # Build table rows from result files
           $tableRows = Get-PerfRows $resultsDir
-          if (-not $tableRows) { $tableRows = "| (no results) | - | - | - | - | - |`n" }
+          if (-not $tableRows) { $tableRows = "| (no results) | - | - | - | - | - | - | - |`n" }
 
-          $perfHeader = "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) |`n" +
-                        "|-------|----:|----:|----:|----:|----:|`n"
+          $perfHeader = "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) | GPU Ded (MB) | GPU Shared (MB) |`n" +
+                        "|-------|----:|----:|----:|----:|----:|----:|----:|`n"
           $header = "## MorphiZen EP Performance Results`n`n" + $perfHeader
 
           # EPContext export/import perf tables (full_model_seq128 only).
@@ -1083,13 +1101,16 @@ jobs:
             $ttft = if ($ttftMatch.Success) { "{0:F1}" -f ([double]$ttftMatch.Groups[1].Value / 1000) } else { "-" }
             $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[2].Value } else { "-" }
             $mem  = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
-            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem |`n"
+            $gpu = Get-GpuMem $content
+            $gpuDedGB = if ($gpu.Dedicated -ne "-") { "{0:F2}" -f ([double]$gpu.Dedicated / 1024) } else { "-" }
+            $gpuShGB  = if ($gpu.Shared -ne "-") { "{0:F2}" -f ([double]$gpu.Shared / 1024) } else { "-" }
+            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem | $gpuDedGB | $gpuShGB |`n"
           }
           $ogaSection = ""
           if ($ogaRows) {
             $ogaSection = "`n## OGA Benchmark Results`n`n" +
-                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) |`n" +
-                          "|-------|----:|----:|----:|----:|----:|----:|----:|`n" +
+                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) | GPU Ded (GB) | GPU Shared (GB) |`n" +
+                          "|-------|----:|----:|----:|----:|----:|----:|----:|----:|----:|`n" +
                           $ogaRows
           }
 
