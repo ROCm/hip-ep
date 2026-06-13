@@ -322,8 +322,9 @@ jobs:
           path: ${{ runner.workspace }}/oga-artifacts
           # OGA is built against the patched ort-install, so the key folds in
           # both OGA's own PR list and ONNXRUNTIME_PR_PATCHES; editing either
-          # forces a rebuild.
-          key: oga-dml-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          # forces a rebuild. The mm<N> token bumps when the OGA artifact set
+          # changes shape (e.g. model_mm / benchmark_multimodal.py added).
+          key: oga-dml-mm1-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -417,6 +418,27 @@ jobs:
              "${{ github.workspace }}/source-oga/benchmark/python/metrics.py" \
              "${{ runner.workspace }}/oga-artifacts/benchmark-python/"
 
+          # build.py --skip_examples leaves examples/c unbuilt. Build only
+          # model_mm (the multimodal example used by VL model CI) as a standalone
+          # cmake project against the just-built OGA lib + ORT_HOME. build.py's
+          # build_examples ignores CXXFLAGS, so set -DCMAKE_CXX_FLAGS=-FS here to
+          # force synchronous compiler-PDB writes (parallel model_mm.cpp /
+          # common.cpp otherwise clash on vc140.pdb -> C1041).
+          cmake -S "${{ github.workspace }}/source-oga/examples/c" \
+            -B "${{ runner.workspace }}/build-oga-examples" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DMODEL_MM=ON -DCMAKE_CXX_FLAGS=-FS \
+            -DORT_INCLUDE_DIR="$ORT_HOME/include" \
+            -DORT_LIB_DIR="$ORT_HOME/lib" \
+            -DOGA_INCLUDE_DIR="${{ github.workspace }}/source-oga/src" \
+            -DOGA_LIB_DIR="$OGA_OUT"
+          cmake --build "${{ runner.workspace }}/build-oga-examples" --target model_mm
+          cp "${{ runner.workspace }}/build-oga-examples/model_mm.exe" \
+            "${{ runner.workspace }}/oga-artifacts/"
+
+          # benchmark_multimodal.py drives model_mm for the VL benchmark.
+          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_multimodal.py" \
+            "${{ runner.workspace }}/oga-artifacts/"
+
       # -----------------------------------------------------------------------
       # Stage GPU test package:
       #   staging/bin/    – executables + DLLs needed at runtime on the GPU box
@@ -486,10 +508,13 @@ jobs:
           done
 
           # ---------------------------------------------------------------
-          # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll
+          # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll, plus
+          # model_mm.exe + benchmark_multimodal.py for the VL model tests.
           # ---------------------------------------------------------------
           cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
 
           # ---------------------------------------------------------------
           # Python wheels (ORT + OGA cp314) bundled into the artifact under
