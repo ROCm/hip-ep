@@ -4,13 +4,25 @@
  */
 
 #include "mlir-named-attribute.hpp"
+#include "mlir-constants.hpp"
 #include "mlir-context-manager.hpp"
 #include "mlir-node-arg.hpp"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "llvm/ADT/ArrayRef.h"
 #include <cstdint>
 #include <glog/logging.h>
+#include <vector>
+
+// `create_tensor` copies ONNX little-endian `raw_data` verbatim into a
+// `DenseElementsAttr` via `getFromRawBuffer`, i.e. in host byte order. A
+// big-endian host would need an explicit byte-swap; fail the build there
+// rather than silently emit corrupted attributes.
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#  error                                                                       \
+      "mlir-named-attribute.cpp assumes a little-endian host for ONNX raw_data"
+#endif
 
 namespace morphizen {
 namespace mlir_impl {
@@ -106,36 +118,85 @@ MLIRNamedAttribute::create_string(const std::string& name,
   return std::make_unique<mlir::NamedAttribute>(name, string_attr);
 }
 
-// Factory method to create tensor attribute
+// Factory method to create tensor attribute.
+//
+// ONNX `TENSOR` attributes (e.g. `onnx.Constant.value`,
+// `onnx.ConstantOfShape.value`) must carry the actual tensor *data*, not a host
+// pointer, so MLIR consumer passes -- including DenseElementsAttr-based folders
+// such as `ConstantOfShapeAsScalar` -- can read the bytes directly with no
+// out-of-band dereference.
+//
+// When the source `MLIRNodeArg` has inline data (the standard path for
+// `OpAttr_GetTensorAttributeAsOrtValue`, which materialises a freshly-allocated
+// CPU tensor that the ort-bridge then memcpy-copies into the proto), we build a
+// real `mlir::DenseElementsAttr` from the raw bytes. This keeps the attribute
+// self-contained and survives any IR serialisation / round-trip.
+//
+// If `onnxElementTypeToMlirElementType` does not yet map this ONNX element type
+// (it silently defaults BFLOAT16/FP8/INT4/STRING to F32), the dense byte-size
+// guard below fails and we LOG(FATAL) with a fix hint, rather than silently
+// degrading to a pointer-encoded attribute that DenseElementsAttr consumers
+// cannot read.
+//
+// The resulting `DenseElementsAttr` is the single source of truth: consumers
+// read the tensor value directly from it. The mlir-imp backend deliberately
+// does NOT expose TENSOR attributes through the legacy `attr_proto_get_tensor`
+// -> `tensor_proto_*` proto API (see the fatal in `morphizen-ort-api.cpp`).
 std::unique_ptr<mlir::NamedAttribute>
 MLIRNamedAttribute::create_tensor(const std::string& name,
                                   const MLIRNodeArg& tensor) {
-  static std::map<std::string, std::unique_ptr<MLIRNodeArg>> tensor_map;
+  auto& context = MLIRContextManager::getInstance().getContext();
+  mlir::OpBuilder builder(&context);
+
+  // The attribute path only ever receives data-carrying, inline tensors: every
+  // `tensor_proto_new_*` factory produces a data-carrying proto, and
+  // external-data protos reach `add_initialized_tensor` (initializer), never
+  // here (ORT also materialises external attrs before this point). After this
+  // CHECK, getData()/getDataSize() are non-null / non-zero (the inline ctor
+  // only stores data when data_size > 0).
+  CHECK(tensor.hasData()) << "create_tensor expects an inline (data-carrying) "
+                             "tensor on the attribute path";
+  CHECK(!tensor.isExternalData())
+      << "create_tensor expects a non-external tensor on the attribute path";
 
   // Tensor attributes always carry concrete weight data; unranked storage is
   // only possible at the ORT NodeArg boundary, not for initializers.
   auto shape = tensor.getShape();
   CHECK(shape.has_value()) << "tensor attribute has no rank: "
                            << tensor.getName();
-  std::unique_ptr<MLIRNodeArg> tensor_copy;
-  if (tensor.hasData()) {
-    tensor_copy = std::make_unique<MLIRNodeArg>(
-        tensor.getName(), *shape, tensor.getElementType(), tensor.getData(),
-        tensor.getDataSize());
-  } else {
-    tensor_copy = std::make_unique<MLIRNodeArg>(tensor.getName(), &*shape,
-                                                tensor.getElementType());
+
+  const void* data = tensor.getData();
+  size_t data_size = tensor.getDataSize();
+  llvm::SmallVector<int64_t> mlir_shape(shape->begin(), shape->end());
+  mlir::Type elem_type =
+      onnxElementTypeToMlirElementType(tensor.getElementType(), builder);
+  auto tensor_type = mlir::RankedTensorType::get(mlir_shape, elem_type);
+
+  // `DenseElementsAttr::getFromRawBuffer` requires data_size to equal the
+  // tensor's natural byte size (numElements * elemByteWidth). A mismatch means
+  // `onnxElementTypeToMlirElementType` did not map this ONNX element type and
+  // defaulted it to F32 (BFLOAT16 / FP8 / INT4 / STRING).
+  const size_t elem_bytes = (elem_type.getIntOrFloatBitWidth() + 7) / 8;
+  const size_t expected = tensor_type.getNumElements() * elem_bytes;
+  if (expected != data_size) {
+    LOG(FATAL)
+        << "create_tensor: ONNX element type " << tensor.getElementType()
+        << " is not representable as a DenseElementsAttr "
+           "(onnxElementTypeToMlirElementType defaulted it to F32: "
+        << elem_bytes << "B * " << tensor_type.getNumElements()
+        << " elems != raw_data " << data_size
+        << "B). Fix: add a case for this element type in "
+           "onnxElementTypeToMlirElementType (mlir-constants.cpp) so the "
+           "MLIR element width matches the ONNX raw_data byte size.";
   }
 
-  MLIRNodeArg* tensor_ptr = tensor_copy.get();
-
-  // Store in map
-  tensor_map[name] = std::move(tensor_copy);
-
-  mlir::OpBuilder builder(&MLIRContextManager::getInstance().getContext());
-  int64_t tensor_id = reinterpret_cast<int64_t>(tensor_ptr);
-  mlir::IntegerAttr tensor_ptr_attr = builder.getI64IntegerAttr(tensor_id);
-  return std::make_unique<mlir::NamedAttribute>(name, tensor_ptr_attr);
+  // Note: ONNX `raw_data` is little-endian; `getFromRawBuffer` reads the bytes
+  // in host byte order -- correct on little-endian hosts (x86, ROCm GPU hosts);
+  // a big-endian host would need an explicit byte-swap.
+  llvm::ArrayRef<char> raw(static_cast<const char*>(data), data_size);
+  mlir::DenseElementsAttr dense =
+      mlir::DenseElementsAttr::getFromRawBuffer(tensor_type, raw);
+  return std::make_unique<mlir::NamedAttribute>(name, dense);
 }
 
 std::unique_ptr<mlir::NamedAttribute>
@@ -230,17 +291,6 @@ std::vector<std::string> MLIRNamedAttribute::get_strings() const {
     }
   }
   return result;
-}
-
-const MLIRNodeArg* MLIRNamedAttribute::get_tensor() const {
-  if (auto int_attr = mlir::dyn_cast<mlir::IntegerAttr>(getValue())) {
-    int64_t tensor_id = int_attr.getInt();
-    MLIRNodeArg* tensor_ptr = reinterpret_cast<MLIRNodeArg*>(tensor_id);
-    return tensor_ptr;
-  }
-
-  // Return nullptr if no valid attribute found
-  return nullptr;
 }
 
 // Get the ONNX attribute type for this MLIR attribute
