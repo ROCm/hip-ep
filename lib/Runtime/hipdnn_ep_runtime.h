@@ -636,6 +636,16 @@ int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
                           const void *src_ptr, size_t src_pitch, size_t width,
                           size_t height);
 
+/// Parallel strided D2D copy via a single kernel launch (element units). Fast
+/// path for a pitched copy with very thin rows, where hipMemcpy2DAsync
+/// degenerates into one micro-transfer per row. `height` rows, each copying
+/// `row_elems` contiguous elements; outer strides are `*_pitch_elems`
+/// (elements). Falls back to hipMemcpy2DAsync internally on kernel failure.
+int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
+                      int64_t elem_bytes, int64_t height,
+                      int64_t src_pitch_elems, int64_t dst_pitch_elems,
+                      int64_t row_elems);
+
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
 //===----------------------------------------------------------------------===//

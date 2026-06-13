@@ -719,6 +719,45 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     int64_t srcPitchBytes = srcPitchElems * elemBytes;
     int64_t dstPitchBytes = dstPitchElems * elemBytes;
 
+    // Degenerate pitched-2D: very thin rows (few bytes) over many rows make
+    // hipMemcpy2DAsync pathological -- the copy engine processes each row as a
+    // separate tiny transfer, so the copy serializes into `height`
+    // micro-transfers. The canonical trigger is an interleave (e.g. sinusoidal
+    // position embedding's Concat(unsqueeze(sin), unsqueeze(cos), axis=last)),
+    // which bufferizes to a strided-dst copy with widthElems=1 and a very large
+    // height. A single parallel strided-copy kernel launch (one thread per
+    // element) is far faster. Wide rows keep the DMA path, where
+    // hipMemcpy2DAsync issues efficient contiguous bursts.
+    //
+    // Before:
+    //   memref.copy %sin, %dst_even
+    //       : memref<...x64x1xf16>
+    //         to memref<...x64x1xf16, strided<[...,2,1]>>
+    //   // splitDim picks widthElems=1, height=40000, dstPitch=2 elems
+    //   //   -> wrap_hipMemcpy2DAsync(width=2B, height=40000)  (slow)
+    // After:
+    //   wrap_strided_copy(%state, %dst, %src, elem=2, height=40000,
+    //                     srcPitch=1, dstPitch=2, row=1)       (one kernel)
+    constexpr int64_t kThinRowBytesMax = 256;
+    constexpr int64_t kManyRowsMin = 256;
+    if (widthBytes <= kThinRowBytesMax && height >= kManyRowsMin) {
+      FailureOr<LLVM::LLVMFuncOp> stridedFn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapStridedCopy,
+          {ptrType, ptrType, ptrType, i64Type, i64Type, i64Type, i64Type,
+           i64Type},
+          i32Type);
+      if (failed(stridedFn))
+        return failure();
+
+      LLVM::CallOp::create(
+          rewriter, loc, *stridedFn,
+          ValueRange{statePtr, dstPtr, srcPtr, i64Const(elemBytes),
+                     i64Const(height), i64Const(srcPitchElems),
+                     i64Const(dstPitchElems), i64Const(widthElems)});
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     FailureOr<LLVM::LLVMFuncOp> memcpy2dFn = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapHipMemcpy2DAsync,
         {ptrType, ptrType, i64Type, ptrType, i64Type, i64Type, i64Type},
