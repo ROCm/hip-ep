@@ -741,11 +741,11 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     constexpr int64_t kThinRowBytesMax = 256;
     constexpr int64_t kManyRowsMin = 256;
     if (widthBytes <= kThinRowBytesMax && height >= kManyRowsMin) {
-      FailureOr<LLVM::LLVMFuncOp> stridedFn = LLVM::lookupOrCreateFn(
-          rewriter, module, kWrapStridedCopy,
-          {ptrType, ptrType, ptrType, i64Type, i64Type, i64Type, i64Type,
-           i64Type},
-          i32Type);
+      FailureOr<LLVM::LLVMFuncOp> stridedFn =
+          LLVM::lookupOrCreateFn(rewriter, module, kWrapStridedCopy,
+                                 {ptrType, ptrType, ptrType, i64Type, i64Type,
+                                  i64Type, i64Type, i64Type},
+                                 i32Type);
       if (failed(stridedFn))
         return failure();
 
