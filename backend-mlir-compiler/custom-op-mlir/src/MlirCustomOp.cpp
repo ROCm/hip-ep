@@ -22,26 +22,11 @@
 #include <hip/hip_runtime_api.h>
 #endif
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <iostream>
 #include <mutex>
 #include <vector>
-
-// Peak-memory diagnostics: per-process GPU memory via the Windows DXGI
-// video-memory budget API, plus the host peak working set.
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-// dxgi1_4.h / psapi.h must follow windows.h.
-#include <dxgi1_4.h>
-#include <psapi.h>
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "psapi.lib")
-#endif
 
 // Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
@@ -49,114 +34,6 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
 
 namespace mlir_compilation {
-
-namespace {
-
-// High-water marks of this process's GPU memory (bytes), updated from the tail
-// of every Compute(). The two DXGI segment peaks are tracked independently.
-std::atomic<size_t> g_gpu_dedicated_peak{0}; // DXGI LOCAL segment
-std::atomic<size_t> g_gpu_shared_peak{0};    // DXGI NON_LOCAL segment
-// Live MlirCustomOp instances; the last destructor prints the [PEAKMEM] line so
-// multi-partition models emit it once.
-std::atomic<int> g_live_instances{0};
-
-#ifdef _WIN32
-// AMD adapter handle, resolved once on first sample, released by the last
-// instance's destructor. nullptr => sampling no-op.
-IDXGIAdapter3 *g_dxgi_adapter = nullptr;
-std::once_flag g_dxgi_once;
-
-void init_dxgi_adapter() {
-  IDXGIFactory1 *factory = nullptr;
-  if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),
-                                reinterpret_cast<void **>(&factory)))) {
-    return;
-  }
-  IDXGIAdapter1 *adapter = nullptr;
-  for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND;
-       ++i) {
-    DXGI_ADAPTER_DESC1 desc{};
-    if (SUCCEEDED(adapter->GetDesc1(&desc)) &&
-        !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && desc.VendorId == 0x1002) {
-      IDXGIAdapter3 *a3 = nullptr;
-      if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3),
-                                            reinterpret_cast<void **>(&a3)))) {
-        g_dxgi_adapter = a3;
-        adapter->Release();
-        break;
-      }
-    }
-    adapter->Release();
-    adapter = nullptr;
-  }
-  factory->Release();
-}
-#endif
-
-// Release the cached adapter. Called from the last instance's destructor -- a
-// normal execution point, deliberately NOT static/DLL-detach teardown, where
-// releasing a COM object under the loader lock is hazardous. After release,
-// sampling no-ops for any later session in the same process (fine: diagnostic).
-void release_dxgi_adapter() {
-#ifdef _WIN32
-  if (g_dxgi_adapter) {
-    g_dxgi_adapter->Release();
-    g_dxgi_adapter = nullptr;
-  }
-#endif
-}
-
-#ifdef _WIN32
-// CAS the running max into an atomic high-water mark.
-void update_peak(std::atomic<size_t> &peak, size_t v) {
-  size_t prev = peak.load(std::memory_order_relaxed);
-  while (v > prev &&
-         !peak.compare_exchange_weak(prev, v, std::memory_order_relaxed)) {
-  }
-}
-#endif
-
-// Sample this process's current GPU memory usage and update the high-water
-// marks. DXGI CurrentUsage is per-(calling-)process per-adapter: LOCAL is
-// dedicated VRAM (APU UMA carve-out), NON_LOCAL is shared system memory; their
-// sum is our total GPU footprint. All failures degrade silently -- this is
-// diagnostics, never inference-critical.
-void sample_gpu_peak() {
-#ifdef _WIN32
-  std::call_once(g_dxgi_once, init_dxgi_adapter);
-  if (g_dxgi_adapter == nullptr) {
-    return;
-  }
-  DXGI_QUERY_VIDEO_MEMORY_INFO local{};
-  DXGI_QUERY_VIDEO_MEMORY_INFO nonlocal{};
-  size_t dedicated = 0;
-  size_t shared = 0;
-  if (SUCCEEDED(g_dxgi_adapter->QueryVideoMemoryInfo(
-          0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
-    dedicated = local.CurrentUsage;
-  }
-  if (SUCCEEDED(g_dxgi_adapter->QueryVideoMemoryInfo(
-          0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal))) {
-    shared = nonlocal.CurrentUsage;
-  }
-  update_peak(g_gpu_dedicated_peak, dedicated);
-  update_peak(g_gpu_shared_peak, shared);
-#endif
-}
-
-// Process peak working set in bytes (0 if unavailable). Windows-only; the
-// peak-memory diagnostics are not implemented on other platforms.
-size_t host_peak_working_set() {
-#ifdef _WIN32
-  PROCESS_MEMORY_COUNTERS pmc{};
-  if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
-    return pmc.PeakWorkingSetSize;
-  }
-#endif
-  return 0;
-}
-
-} // namespace
 
 // Tensor marshaling state - holds tensors, shapes, and span
 struct TensorData {
@@ -727,8 +604,6 @@ MlirCustomOp::MlirCustomOp(
 
   MY_LOG(1) << "MlirCustomOp constructor";
 
-  g_live_instances.fetch_add(1, std::memory_order_relaxed);
-
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
   // Dispatch mode travels with the artifact's metadata (not a live provider
@@ -755,21 +630,6 @@ MlirCustomOp::~MlirCustomOp() {
     if (slot.ptr)
       (void)hipFree(slot.ptr);
 #endif
-
-  // Last live instance prints the peak-memory lines (once per process run) to
-  // stdout via std::cout, matching ORT perf_test's output style so CI captures
-  // them. Three lines, all in bytes: host working set uses ORT perf_test's
-  // exact wording; GPU uses the Windows Task Manager terms "Dedicated GPU
-  // memory" (DXGI LOCAL) and "Shared GPU memory" (DXGI NON_LOCAL).
-  if (g_live_instances.fetch_sub(1, std::memory_order_relaxed) == 1) {
-    std::cout << "[PEAKMEM] Peak working set size: " << host_peak_working_set()
-              << " bytes" << std::endl;
-    std::cout << "[PEAKMEM] Dedicated GPU memory: " << g_gpu_dedicated_peak
-              << " bytes" << std::endl;
-    std::cout << "[PEAKMEM] Shared GPU memory: " << g_gpu_shared_peak
-              << " bytes" << std::endl;
-    release_dxgi_adapter();
-  }
 }
 
 // Output-allocator dispatch: 2-arg inference_compute with in-graph
@@ -854,7 +714,6 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     // Allocator mode owns its output staging (no pre-filled outputs span) and
     // its own post-compute host D2H; it does not share the classic perf path.
     compute_with_output_allocator(context);
-    sample_gpu_peak();
     MY_LOG(2) << "Compute completed successfully (allocator mode)";
     return;
   }
@@ -871,7 +730,6 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
       // TODO: Throw ORT exception
     }
 
-    sample_gpu_peak();
     MY_LOG(2) << "Compute completed successfully";
     return;
   }
@@ -932,7 +790,6 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   s.fence_residual_ms = elapsed_ms(t_after_compute, t_after_fence);
   perf_collector().record(s);
 
-  sample_gpu_peak();
   MY_LOG(2) << "Compute completed successfully";
 #endif // BUILD_MOCK_RUNTIME
 }
