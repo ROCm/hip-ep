@@ -1045,7 +1045,8 @@ jobs:
           # Each file: extract Number of inferences per second / Session
           # creation / 1st infer / Avg CPU / Peak WS / peak GPU mem (dedicated,
           # shared) for the 8-column format (Model | QPS | Session (s) |
-          # 1st Infer (ms) | CPU% | Mem (MB) | GPU Ded (MB) | GPU Shared (MB)).
+          # 1st Infer (ms) | CPU% | Mem (MB) | GPU Dedicated (MB) |
+          # GPU Shared (MB)).
           function Get-PerfRows($dir) {
             $rows = ""
             foreach ($f in (Get-ChildItem "$dir/*.txt" -ErrorAction SilentlyContinue)) {
@@ -1075,7 +1076,7 @@ jobs:
           $tableRows = Get-PerfRows $resultsDir
           if (-not $tableRows) { $tableRows = "| (no results) | - | - | - | - | - | - | - |`n" }
 
-          $perfHeader = "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) | GPU Ded (MB) | GPU Shared (MB) |`n" +
+          $perfHeader = "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) | GPU Dedicated (MB) | GPU Shared (MB) |`n" +
                         "|-------|----:|----:|----:|----:|----:|----:|----:|`n"
           $header = "## MorphiZen EP Performance Results`n`n" + $perfHeader
 
@@ -1109,7 +1110,7 @@ jobs:
           $ogaSection = ""
           if ($ogaRows) {
             $ogaSection = "`n## OGA Benchmark Results`n`n" +
-                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) | GPU Ded (GB) | GPU Shared (GB) |`n" +
+                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) | GPU Dedicated (GB) | GPU Shared (GB) |`n" +
                           "|-------|----:|----:|----:|----:|----:|----:|----:|----:|----:|`n" +
                           $ogaRows
           }
