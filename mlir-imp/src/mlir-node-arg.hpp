@@ -17,6 +17,11 @@
 namespace morphizen {
 namespace mlir_impl {
 
+// Maps an MLIR element type back to its ONNX `TensorProto::DataType` code.
+// Inverse of `onnxElementTypeToMlirType`'s element-type half; used by the
+// `mlir::Value`-based shape/type extraction (`extractElementTypeFromValue`).
+int mlirElementTypeToOnnxType(mlir::Type element_type);
+
 // MLIRNodeArg — represents a named tensor value in the graph.
 //
 // Internally it holds:

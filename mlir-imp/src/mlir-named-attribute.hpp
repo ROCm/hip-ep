@@ -65,7 +65,6 @@ public:
   std::vector<int64_t> get_ints() const;
   const std::vector<float>& get_floats() const;
   std::vector<std::string> get_strings() const;
-  const MLIRNodeArg* get_tensor() const;
   MLIRGraph* get_subgraph_ref() const;
 
   /**

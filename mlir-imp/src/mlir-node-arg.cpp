@@ -39,64 +39,69 @@ int extractElementTypeFromValue(mlir::Value value) {
                  mlir::dyn_cast<mlir::UnrankedTensorType>(type)) {
     elementType = unrankedType.getElementType();
   }
-  if (elementType) {
-    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elementType)) {
-      // Map MLIR integer types to our element type constants
-      unsigned width = intType.getWidth();
-      bool isSigned = intType.isSigned() || intType.isSignless();
-      int mlir_type_code = -1;
-      switch (width) {
-      case 4:
-        mlir_type_code =
-            isSigned ? 21 : 22; // TensorProto_DataType_INT4 or UINT4
-        break;
-      case 8:
-        mlir_type_code = isSigned ? 3 : 2; // INT8 : UINT8
-        break;
-      case 16:
-        mlir_type_code = isSigned ? 5 : 4; // INT16 : UINT16
-        break;
-      case 32:
-        mlir_type_code = isSigned ? 6 : 12; // INT32 : UINT32
-        break;
-      case 64:
-        mlir_type_code = isSigned ? 7 : 13; // INT64 : UINT64
-        break;
-      default:
-        LOG(WARNING) << "Unsupported integer width: " << width
-                     << ", defaulting to INT32";
-        mlir_type_code = 6; // Default to INT32
-        break;
-      }
-      return mlir_type_code;
-    } else if (auto floatType = mlir::dyn_cast<mlir::FloatType>(elementType)) {
-      // Map MLIR float types to our element type constants
-      unsigned width = floatType.getWidth();
-      int mlir_type_code = -1;
-      switch (width) {
-      case 16:
-        mlir_type_code = 10; // TensorProto_DataType_FLOAT16
-        break;
-      case 32:
-        mlir_type_code = 1; // TensorProto_DataType_FLOAT
-        break;
-      case 64:
-        mlir_type_code = 11; // TensorProto_DataType_DOUBLE
-        break;
-      default:
-        LOG(WARNING) << "Unsupported float width: " << width
-                     << ", defaulting to FLOAT";
-        mlir_type_code = 1; // Default to FLOAT
-        break;
-      }
-      return mlir_type_code;
-    }
+  if (!elementType) {
+    LOG(WARNING) << "Value does not have a ranked or unranked tensor type, "
+                    "using default shape and type";
+    return 1; // TensorProto_DataType_FLOAT
   }
-  LOG(WARNING) << "Value does not have a ranked or unranked tensor type, "
-                  "using default shape and type";
-  return 1; // TensorProto_DataType_FLOAT
+  return mlirElementTypeToOnnxType(elementType);
 }
 } // anonymous namespace
+
+int mlirElementTypeToOnnxType(mlir::Type elementType) {
+  if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elementType)) {
+    // Map MLIR integer types to our element type constants
+    unsigned width = intType.getWidth();
+    bool isSigned = intType.isSigned() || intType.isSignless();
+    int mlir_type_code = -1;
+    switch (width) {
+    case 4:
+      mlir_type_code = isSigned ? 21 : 22; // TensorProto_DataType_INT4 or UINT4
+      break;
+    case 8:
+      mlir_type_code = isSigned ? 3 : 2; // INT8 : UINT8
+      break;
+    case 16:
+      mlir_type_code = isSigned ? 5 : 4; // INT16 : UINT16
+      break;
+    case 32:
+      mlir_type_code = isSigned ? 6 : 12; // INT32 : UINT32
+      break;
+    case 64:
+      mlir_type_code = isSigned ? 7 : 13; // INT64 : UINT64
+      break;
+    default:
+      LOG(WARNING) << "Unsupported integer width: " << width
+                   << ", defaulting to INT32";
+      mlir_type_code = 6; // Default to INT32
+      break;
+    }
+    return mlir_type_code;
+  } else if (auto floatType = mlir::dyn_cast<mlir::FloatType>(elementType)) {
+    // Map MLIR float types to our element type constants
+    unsigned width = floatType.getWidth();
+    int mlir_type_code = -1;
+    switch (width) {
+    case 16:
+      mlir_type_code = 10; // TensorProto_DataType_FLOAT16
+      break;
+    case 32:
+      mlir_type_code = 1; // TensorProto_DataType_FLOAT
+      break;
+    case 64:
+      mlir_type_code = 11; // TensorProto_DataType_DOUBLE
+      break;
+    default:
+      LOG(WARNING) << "Unsupported float width: " << width
+                   << ", defaulting to FLOAT";
+      mlir_type_code = 1; // Default to FLOAT
+      break;
+    }
+    return mlir_type_code;
+  }
+  LOG(WARNING) << "Unsupported MLIR element type, defaulting to FLOAT";
+  return 1; // TensorProto_DataType_FLOAT
+}
 
 MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t* shape,
                          int element_type)

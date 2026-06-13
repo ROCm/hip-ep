@@ -53,6 +53,14 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     // TensorProto_DataType_FLOAT8E5M2FNUZ = 20,
     // TensorProto_DataType_UINT4 = 21,
     // TensorProto_DataType_INT4 = 22
+    //
+    // NOTE: unmapped types silently fall back to F32 here. This is only safe
+    // because every consumer that needs exact bytes re-validates the width
+    // downstream: `create_tensor` (mlir-named-attribute.cpp) is the enforcement
+    // point -- its DenseElementsAttr byte-size guard catches this F32 default
+    // (4B/elem) against the real ONNX raw_data width and LOG(FATAL)s with a fix
+    // hint rather than emitting a corrupted attribute. Add a real case above
+    // when introducing support for any of these element types.
     LOG(WARNING) << "Unsupported element type: " << element_type
                  << ", using F32";
     return builder.getF32Type();

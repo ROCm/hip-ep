@@ -43,6 +43,7 @@
 #include "./mlir-constants.hpp"
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <glog/logging.h>
@@ -1232,10 +1233,28 @@ static void initialize_mlir_api() {
     return p->get_string();
   };
   the_mlir_instance_of_morphizen_ort_api.attr_proto_get_tensor =
-      [](const morphizen::AttributeProto& attr)
-      -> const morphizen::TensorProto& {
-    auto* p = reinterpret_cast<const mlir_impl::MLIRNamedAttribute*>(&attr);
-    return *reinterpret_cast<const morphizen::TensorProto*>(p->get_tensor());
+      [](const morphizen::AttributeProto&) -> const morphizen::TensorProto& {
+    // The mlir-imp backend stores ONNX TENSOR attributes as a self-describing
+    // `mlir::DenseElementsAttr` (see `MLIRNamedAttribute::create_tensor`),
+    // which is the single source of truth read directly by MLIR consumer
+    // passes. There is deliberately no `TensorProto`/`MLIRNodeArg` shim to
+    // satisfy this legacy proto-API accessor, so it is unsupported here. Read
+    // the DenseElementsAttr value directly instead.
+    LOG(FATAL)
+        << "attr_proto_get_tensor is not supported on the mlir-imp backend.\n"
+           "TENSOR attributes are stored as a self-describing "
+           "mlir::DenseElementsAttr; read it directly instead of going through "
+           "the TensorProto proto API.\n"
+           "  Replace:\n"
+           "    auto& t = api->attr_proto_get_tensor(attr);\n"
+           "    auto raw = api->tensor_proto_as_raw(graph, t);\n"
+           "  With:\n"
+           "    auto* a = "
+           "reinterpret_cast<const mlir_impl::MLIRNamedAttribute*>(&attr);\n"
+           "    auto dense = "
+           "mlir::dyn_cast<mlir::DenseElementsAttr>(a->getValue());\n"
+           "    auto values = dense.getValues<float>();  // or <int64_t>, ...";
+    std::abort(); // unreachable; silences non-void return path warnings
   };
   the_mlir_instance_of_morphizen_ort_api.attr_proto_get_ints =
       [](const morphizen::AttributeProto& attr) -> gsl::span<const int64_t> {
