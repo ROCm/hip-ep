@@ -1316,6 +1316,13 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
   if (!ensure_pool_domains(state, domain_id + 1)) {
     return nullptr;
   }
+  // Zero-byte pool requests arise when a dynamic temp has no elements (e.g.
+  // embedding NonZero count=0 → transpose/scatter scratch). hipMalloc(0) is
+  // invalid and an unallocated domain slot is nullptr, which poisons every
+  // memref.view built from that pool base. Reserve one byte so views always
+  // get a non-null alignedPtr; no kernel reads it when num_elements==0.
+  if (needed_size == 0)
+    needed_size = 1;
   // Grow-on-demand, per domain: when dynamic shapes produce larger
   // intermediates than the current allocation for this domain, reallocate
   // its pool. Pools never shrink, and other domains are untouched —
