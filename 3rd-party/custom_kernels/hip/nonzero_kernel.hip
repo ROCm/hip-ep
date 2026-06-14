@@ -35,13 +35,24 @@
 static constexpr int kMaxRank = 8;
 static constexpr int kNonZeroBlockSize = 1024;
 
+// Input dimensions passed BY VALUE (copied into the kernel argument buffer),
+// not via a device pointer. The dims are tiny (<= kMaxRank int64) and known on
+// the host; passing them by value removes a per-call hipMalloc/hipMemcpy/
+// hipFreeAsync of the dims buffer from the launcher. That per-call allocation
+// was an unchecked failure point under heavy device-memory pressure (a failed
+// hipMalloc left the device dims pointer garbage -> wrong row-major coordinate
+// decomposition -> indices written to wrong positions), and is exactly the
+// kind of hot-path device allocation the runtime is supposed to avoid.
+struct NonZeroDims {
+  int64_t d[kMaxRank];
+};
+
 template <typename T>
 __global__ void nonzero_ordered_kernel(const T *__restrict__ input,
                                        int64_t *__restrict__ output,
                                        int *__restrict__ count_ptr,
                                        int64_t capacity, int rank,
-                                       int64_t numel,
-                                       const int64_t *__restrict__ dims) {
+                                       int64_t numel, NonZeroDims dims) {
   __shared__ int s_chunk_count[kNonZeroBlockSize];
   __shared__ int s_chunk_offset[kNonZeroBlockSize];
 
@@ -89,7 +100,7 @@ __global__ void nonzero_ordered_kernel(const T *__restrict__ input,
       // Decompose flat index -> multi-dim coordinates (row-major).
       int64_t remaining = i;
       for (int d = rank - 1; d >= 0; --d) {
-        int64_t dim_size = dims[d];
+        int64_t dim_size = dims.d[d];
         int64_t coord = remaining % dim_size;
         remaining /= dim_size;
         output[d * capacity + pos] = coord;
@@ -116,11 +127,10 @@ extern "C" int hip_nonzero(void *stream, const void *input, void *output,
   // surface in indirect reads.
   hipMemsetAsync(output, 0, input_rank * output_capacity * sizeof(int64_t), s);
 
-  // Copy dims to device (small fixed-size buffer, async)
-  int64_t *d_dims = nullptr;
-  hipMalloc(&d_dims, input_rank * sizeof(int64_t));
-  hipMemcpyAsync(d_dims, input_dims_host, input_rank * sizeof(int64_t),
-                 hipMemcpyHostToDevice, s);
+  // Pack dims into a by-value struct (no device buffer, no per-call hipMalloc).
+  NonZeroDims dims;
+  for (int d = 0; d < (int)input_rank; ++d)
+    dims.d[d] = input_dims_host[d];
 
   // Single block, kNonZeroBlockSize threads -- cooperative ordered scan.
   // Each thread handles ceil(numel / kNonZeroBlockSize) elements.
@@ -128,39 +138,36 @@ extern "C" int hip_nonzero(void *stream, const void *input, void *output,
   case HIP_DTYPE_FLOAT16:
     nonzero_ordered_kernel<__half><<<1, kNonZeroBlockSize, 0, s>>>(
         (const __half *)input, (int64_t *)output, count_ptr, output_capacity,
-        (int)input_rank, input_num_elements, d_dims);
+        (int)input_rank, input_num_elements, dims);
     break;
   case HIP_DTYPE_FLOAT32:
     nonzero_ordered_kernel<float><<<1, kNonZeroBlockSize, 0, s>>>(
         (const float *)input, (int64_t *)output, count_ptr, output_capacity,
-        (int)input_rank, input_num_elements, d_dims);
+        (int)input_rank, input_num_elements, dims);
     break;
   case HIP_DTYPE_INT32:
     nonzero_ordered_kernel<int><<<1, kNonZeroBlockSize, 0, s>>>(
         (const int *)input, (int64_t *)output, count_ptr, output_capacity,
-        (int)input_rank, input_num_elements, d_dims);
+        (int)input_rank, input_num_elements, dims);
     break;
   case HIP_DTYPE_INT64:
     nonzero_ordered_kernel<int64_t><<<1, kNonZeroBlockSize, 0, s>>>(
         (const int64_t *)input, (int64_t *)output, count_ptr, output_capacity,
-        (int)input_rank, input_num_elements, d_dims);
+        (int)input_rank, input_num_elements, dims);
     break;
   case HIP_DTYPE_INT8:
     nonzero_ordered_kernel<int8_t><<<1, kNonZeroBlockSize, 0, s>>>(
         (const int8_t *)input, (int64_t *)output, count_ptr, output_capacity,
-        (int)input_rank, input_num_elements, d_dims);
+        (int)input_rank, input_num_elements, dims);
     break;
   case HIP_DTYPE_UINT8:
     nonzero_ordered_kernel<uint8_t><<<1, kNonZeroBlockSize, 0, s>>>(
         (const uint8_t *)input, (int64_t *)output, count_ptr, output_capacity,
-        (int)input_rank, input_num_elements, d_dims);
+        (int)input_rank, input_num_elements, dims);
     break;
   default:
-    hipFree(d_dims);
     return -1;
   }
 
-  // Free device dims after kernel completes (enqueue on stream)
-  hipFreeAsync(d_dims, s);
   return 0;
 }
