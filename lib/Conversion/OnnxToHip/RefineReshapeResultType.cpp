@@ -12,6 +12,24 @@
 // shape-inference pass runs between the `convert-onnx-to-hip` pre-lowering
 // rounds, so static info must be threaded forward by value-based rewrites.
 //
+// Relation to upstream shape inference
+// ------------------------------------
+// This is a deliberately narrow, value-based stand-in for a general ONNX
+// shape-inference pass. The "result types only ever get MORE static, never
+// change value semantics" contract is the same monotone-refinement invariant
+// that MLIR's `InferTypeOpInterface`
+// (mlir/include/mlir/Interfaces/InferTypeOpInterface.h) and StableHLO's
+// `--stablehlo-refine-shapes` pass (`hlo::inferMostSpecificType` in
+// StablehloRefineShapes.cpp) implement generically via op interfaces. We do
+// NOT reuse those: the project matches ONNX ops by name through the generic
+// `Operation` API and takes no onnx-mlir dependency, so onnx-mlir's
+// `ShapeInferenceOpInterface` is unavailable, and the `onnx.*` ops here carry
+// no `InferTypeOpInterface` model. Instead we re-derive the result extents for
+// the handful of ops a norm/projector chain needs by reading inline constants
+// and producer static dims directly — the targeted, dependency-free analogue
+// of running shape inference over a `Reshape -> Transpose -> elementwise`
+// region.
+//
 // Three patterns, all in `populateRefineReshapeResultTypePatterns`:
 //
 // 1. RefineReshapeResultFromShapeOperand — refine an `onnx.Reshape`'s RESULT
@@ -476,6 +494,13 @@ struct RefineReshapeResultFromShapeOperand : public mlir::RewritePattern {
 // onnx.Transpose result-type refinement
 //===----------------------------------------------------------------------===//
 
+// Pull each result dim from the permuted input dim when the input is more
+// static than the (export-dropped) result. Only the result type changes.
+//
+// Before (%r already refined to tensor<?x1152x256xf16> by pattern 1):
+//   %t = onnx.Transpose(%r) {perm=[0,2,1]} : tensor<?x?x?xf16>
+// After:
+//   %t = onnx.Transpose(%r) {perm=[0,2,1]} : tensor<?x256x1152xf16>
 struct RefineTransposeResultType : public mlir::RewritePattern {
   RefineTransposeResultType(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Transpose", /*benefit=*/1, ctx) {}
@@ -485,7 +510,8 @@ struct RefineTransposeResultType : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override {
     if (op->getNumOperands() != 1 || op->getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "transpose.arity");
-    auto inT = mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+    auto inT =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
     auto outT =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
     if (!inT || !outT || inT.getRank() != outT.getRank())
@@ -515,8 +541,7 @@ struct RefineTransposeResultType : public mlir::RewritePattern {
       int64_t p = perm[i];
       if (p < 0 || p >= rank)
         return rewriter.notifyMatchFailure(op, "transpose.perm_oob");
-      if (newShape[i] == mlir::ShapedType::kDynamic &&
-          !inT.isDynamicDim(p))
+      if (mlir::ShapedType::isDynamic(newShape[i]) && !inT.isDynamicDim(p))
         newShape[i] = inT.getDimSize(p);
     }
     if (llvm::ArrayRef<int64_t>(newShape) == outT.getShape())
@@ -548,6 +573,17 @@ static bool isBroadcastElementwise(llvm::StringRef name) {
   return llvm::is_contained(kOps, name);
 }
 
+// Resolve each dynamic result dim from the numpy-broadcast of the operands'
+// (now-more-static) dims: a single distinct static value > 1 wins; all-unit
+// contributors give 1; a static conflict or a dynamic non-unit leaves it
+// dynamic. Only the result type changes.
+//
+// Before (%a, %b refined upstream; result still export-dropped):
+//   %a = ... : tensor<?x256x1152xf16>
+//   %b = ... : tensor<?x256x1xf16>     // broadcasts over the last dim
+//   %m = onnx.Mul(%a, %b) : tensor<?x?x?xf16>
+// After:
+//   %m = onnx.Mul(%a, %b) : tensor<?x256x1152xf16>
 struct RefineElementwiseResultType : public mlir::RewritePattern {
   RefineElementwiseResultType(mlir::MLIRContext *ctx)
       : RewritePattern(mlir::Pattern::MatchAnyOpTypeTag(), /*benefit=*/1, ctx) {}
@@ -581,7 +617,7 @@ struct RefineElementwiseResultType : public mlir::RewritePattern {
     llvm::SmallVector<int64_t> newShape(outT.getShape().begin(),
                                         outT.getShape().end());
     for (auto i : llvm::seq<int64_t>(0, rank)) {
-      if (newShape[i] != mlir::ShapedType::kDynamic)
+      if (!mlir::ShapedType::isDynamic(newShape[i]))
         continue;
       // Resolve broadcast dim i: a single distinct static value > 1 wins; if
       // every contributing operand is static (all 1) the result is 1; a static
@@ -601,14 +637,14 @@ struct RefineElementwiseResultType : public mlir::RewritePattern {
         int64_t dv = t.getDimSize(ax);
         if (dv == 1)
           continue; // unit broadcasts; does not pin
-        if (resolved == mlir::ShapedType::kDynamic)
+        if (mlir::ShapedType::isDynamic(resolved))
           resolved = dv;
         else if (resolved != dv)
           conflict = true;
       }
       if (conflict)
         continue;
-      if (resolved != mlir::ShapedType::kDynamic)
+      if (!mlir::ShapedType::isDynamic(resolved))
         newShape[i] = resolved;
       else if (allStatic)
         newShape[i] = 1; // every contributor static and == 1
