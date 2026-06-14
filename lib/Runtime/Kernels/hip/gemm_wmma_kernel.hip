@@ -51,7 +51,12 @@ static constexpr int kWmmaTile = 16;  // RDNA 3 WMMA tile dimension (16x16x16)
 //   TransB == true  : B is [N, K] row-major  (ONNX Gemm transB=1, i.e. nn.Linear
 //                     weight). For a fixed output column the K elements are then
 //                     contiguous, so the B fragment can be vector-loaded too.
-template<int KX, int KY, bool TransB>
+// FullTile == true is launched only when M is a multiple of KX*16 and N is a
+// multiple of KY*16, so every (row, col) this wave touches is in-bounds. That
+// lets the compiler drop all per-element edge checks on the load and store
+// paths, producing branch-free vector loads/stores. FullTile == false keeps the
+// guarded path for remainder tiles.
+template<int KX, int KY, bool TransB, bool FullTile>
 __global__ void __launch_bounds__(32)
 gemm_wmma_fp16_kernel(
     const _Float16* __restrict__ A,
@@ -81,7 +86,7 @@ gemm_wmma_fp16_kernel(
         #pragma unroll
         for (int x = 0; x < KX; ++x) {
             int row = m_base + x * kWmmaTile + lane;
-            if (row < M) {
+            if (FullTile || row < M) {
                 a_frag[x] = *reinterpret_cast<const half16*>(&A[row * K + k]);
             } else {
                 #pragma unroll
@@ -99,7 +104,7 @@ gemm_wmma_fp16_kernel(
             #pragma unroll
             for (int y = 0; y < KY; ++y) {
                 int col = n_base + y * kWmmaTile + lane;
-                if (col < N) {
+                if (FullTile || col < N) {
                     b_frag[y] = *reinterpret_cast<const half16*>(&B[col * K + k]);
                 } else {
                     #pragma unroll
@@ -116,8 +121,8 @@ gemm_wmma_fp16_kernel(
                 #pragma unroll
                 for (int y = 0; y < KY; ++y) {
                     int col = n_base + y * kWmmaTile + lane;
-                    b_frag[y][ele] = (col < N) ? B[(k + ele) * N + col]
-                                               : (_Float16)0;
+                    b_frag[y][ele] = (FullTile || col < N) ? B[(k + ele) * N + col]
+                                                           : (_Float16)0;
                 }
             }
         }
@@ -135,13 +140,130 @@ gemm_wmma_fp16_kernel(
         int c = n_base + y * kWmmaTile + lane;
         // bias is broadcast along M (one value per output column). Load it once
         // per column here; bv is 0 when no bias so the add below is unconditional.
-        float bv = (bias && c < N) ? (float)bias[c] : 0.0f;
+        float bv = (bias && (FullTile || c < N)) ? (float)bias[c] : 0.0f;
         #pragma unroll
         for (int x = 0; x < KX; ++x) {
             #pragma unroll
             for (int ele = 0; ele < 8; ++ele) {
                 int r = m_base + x * kWmmaTile + ele * 2 + pair;
-                if (r < M && c < N)
+                if (FullTile || (r < M && c < N))
+                    C[r * N + c] = (_Float16)(c_frag[y][x][ele] + bv);
+            }
+        }
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// LDS-staged multi-wave variant (transB == 1 only)
+//===----------------------------------------------------------------------===//
+//
+// The single-wave kernel above re-reads the same A row-panel from global memory
+// once per N-tile and the same B col-panel once per M-tile, so a large GEMM
+// streams A and B from global many times. This variant groups WAVES_M x WAVES_N
+// waves into one block that cooperatively stages a single A panel [BM x 16] and
+// B panel [BN x 16] into LDS each k-step; every wave then reads its WMMA
+// fragments from LDS instead of global. Each k-panel is therefore fetched from
+// global exactly once per block instead of once per wave-tile.
+//
+// Numerics are bit-identical to the single-wave kernel: the per-wave a_frag /
+// b_frag index derivation and the WMMA accumulation order are unchanged; only
+// the *source* of the fragments (LDS vs global) differs. Restricted to
+// transB == 1 (B is [N,K], the nn.Linear weight layout) so the B panel is
+// contiguous along K and vector-loadable.
+//
+//   BM = WAVES_M * KX * 16   (block tile rows)
+//   BN = WAVES_N * KY * 16   (block tile cols)
+template <int KX, int KY, int WAVES_M, int WAVES_N, bool FullTile>
+__global__ void __launch_bounds__(WAVES_M* WAVES_N * 32)
+gemm_wmma_fp16_kernel_lds(
+    const _Float16* __restrict__ A,
+    const _Float16* __restrict__ B,
+    _Float16* __restrict__ C,
+    const _Float16* __restrict__ bias,
+    int M, int K, int N)
+{
+    constexpr int TPB = WAVES_M * WAVES_N * 32;
+    constexpr int BM = WAVES_M * KX * kWmmaTile;
+    constexpr int BN = WAVES_N * KY * kWmmaTile;
+
+    __shared__ _Float16 As[BM][kWmmaTile];
+    __shared__ _Float16 Bs[BN][kWmmaTile];
+
+    const int tid = threadIdx.x;
+    const int wid = tid / 32;          // wave index within block
+    const int lane = (tid % 32) % kWmmaTile;
+    const int pair = (tid % 32) / kWmmaTile;
+    const int wave_m = wid / WAVES_N;
+    const int wave_n = wid % WAVES_N;
+
+    const int m_block = blockIdx.y * BM;
+    const int n_block = blockIdx.x * BN;
+    const int m_base = m_block + wave_m * KX * kWmmaTile;
+    const int n_base = n_block + wave_n * KY * kWmmaTile;
+
+    half16 a_frag[KX];
+    half16 b_frag[KY];
+    float8 c_frag[KY][KX] = {};
+
+    for (int k = 0; k < K; k += kWmmaTile) {
+        // Cooperatively stage the A panel [BM x 16] into LDS.
+        #pragma unroll
+        for (int i = tid; i < BM; i += TPB) {
+            int row = m_block + i;
+            if (FullTile || row < M) {
+                *reinterpret_cast<half16*>(&As[i][0]) =
+                    *reinterpret_cast<const half16*>(&A[row * K + k]);
+            } else {
+                #pragma unroll
+                for (int ele = 0; ele < kWmmaTile; ++ele)
+                    As[i][ele] = (_Float16)0;
+            }
+        }
+        // Cooperatively stage the B panel [BN x 16] into LDS (transB == 1:
+        // B[col, k] is contiguous along K).
+        #pragma unroll
+        for (int i = tid; i < BN; i += TPB) {
+            int col = n_block + i;
+            if (FullTile || col < N) {
+                *reinterpret_cast<half16*>(&Bs[i][0]) =
+                    *reinterpret_cast<const half16*>(&B[col * K + k]);
+            } else {
+                #pragma unroll
+                for (int ele = 0; ele < kWmmaTile; ++ele)
+                    Bs[i][ele] = (_Float16)0;
+            }
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int x = 0; x < KX; ++x)
+            a_frag[x] = *reinterpret_cast<const half16*>(
+                &As[wave_m * KX * kWmmaTile + x * kWmmaTile + lane][0]);
+        #pragma unroll
+        for (int y = 0; y < KY; ++y)
+            b_frag[y] = *reinterpret_cast<const half16*>(
+                &Bs[wave_n * KY * kWmmaTile + y * kWmmaTile + lane][0]);
+
+        #pragma unroll
+        for (int y = 0; y < KY; ++y)
+            #pragma unroll
+            for (int x = 0; x < KX; ++x)
+                c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                                   a_frag[x], b_frag[y], c_frag[y][x]);
+
+        __syncthreads();  // protect LDS before the next k-panel overwrites it
+    }
+
+    #pragma unroll
+    for (int y = 0; y < KY; ++y) {
+        int c = n_base + y * kWmmaTile + lane;
+        float bv = (bias && (FullTile || c < N)) ? (float)bias[c] : 0.0f;
+        #pragma unroll
+        for (int x = 0; x < KX; ++x) {
+            #pragma unroll
+            for (int ele = 0; ele < 8; ++ele) {
+                int r = m_base + x * kWmmaTile + ele * 2 + pair;
+                if (FullTile || (r < M && c < N))
                     C[r * N + c] = (_Float16)(c_frag[y][x][ele] + bv);
             }
         }
@@ -193,17 +315,35 @@ int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
     // ---- Launch ----
     constexpr int KX = 2;
     constexpr int KY = 4;
-    dim3 block(32);
-    dim3 grid((N + KY * kWmmaTile - 1) / (KY * kWmmaTile),
-              (M + KX * kWmmaTile - 1) / (KX * kWmmaTile));
+    auto A16 = (const _Float16*)A;
+    auto B16 = (const _Float16*)B;
+    auto O16 = (_Float16*)output;
+
     if (transB) {
-        gemm_wmma_fp16_kernel<KX, KY, true><<<grid, block, 0, (hipStream_t)stream>>>(
-            (const _Float16*)A, (const _Float16*)B, (_Float16*)output,
-            bias, M, K, N);
+        // transB == 1: use the LDS-staged multi-wave kernel, which cuts
+        // redundant global reads of the A/B panels. Block tile BM x BN with
+        // WAVES_M x WAVES_N waves.
+        constexpr int WAVES_M = 2;
+        constexpr int WAVES_N = 4;
+        constexpr int BM = WAVES_M * KX * kWmmaTile;  // 64
+        constexpr int BN = WAVES_N * KY * kWmmaTile;  // 128
+        dim3 block(WAVES_M * WAVES_N * 32);
+        dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+        const bool full_tile = (M % BM == 0) && (N % BN == 0);
+        if (full_tile)
+            gemm_wmma_fp16_kernel_lds<KX, KY, WAVES_M, WAVES_N, true><<<grid, block, 0, (hipStream_t)stream>>>(A16, B16, O16, bias, M, K, N);
+        else
+            gemm_wmma_fp16_kernel_lds<KX, KY, WAVES_M, WAVES_N, false><<<grid, block, 0, (hipStream_t)stream>>>(A16, B16, O16, bias, M, K, N);
     } else {
-        gemm_wmma_fp16_kernel<KX, KY, false><<<grid, block, 0, (hipStream_t)stream>>>(
-            (const _Float16*)A, (const _Float16*)B, (_Float16*)output,
-            bias, M, K, N);
+        // transB == 0: keep the single-wave global-load kernel.
+        dim3 block(32);
+        dim3 grid((N + KY * kWmmaTile - 1) / (KY * kWmmaTile),
+                  (M + KX * kWmmaTile - 1) / (KX * kWmmaTile));
+        const bool full_tile = (M % (KX * kWmmaTile) == 0) && (N % (KY * kWmmaTile) == 0);
+        if (full_tile)
+            gemm_wmma_fp16_kernel<KX, KY, false, true><<<grid, block, 0, (hipStream_t)stream>>>(A16, B16, O16, bias, M, K, N);
+        else
+            gemm_wmma_fp16_kernel<KX, KY, false, false><<<grid, block, 0, (hipStream_t)stream>>>(A16, B16, O16, bias, M, K, N);
     }
     return hipGetLastError() == hipSuccess ? 0 : -1;
 }
