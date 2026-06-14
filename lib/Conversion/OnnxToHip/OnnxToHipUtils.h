@@ -338,6 +338,26 @@ void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
 void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 
+/// Pre-lowering pattern set that recovers static result dims dropped by ONNX
+/// export so downstream rewrites needing static dims can fire (instead of
+/// leaving ops to abort one-shot-bufferize). Three value-preserving patterns:
+///   1. refine an `onnx.Reshape` result from its (partially-dynamic) shape
+///      operand — `Concat`/`Slice`/`Gather` of `Shape`, a multi-element
+///      `Slice(Shape(...))`, literal constants, and a single inferred `-1`
+///      (resolved by element-count arithmetic with batch-dim cancellation);
+///   2. refine an `onnx.Transpose` result from its (more-static) input + perm;
+///   3. refine an elementwise op result from the numpy-broadcast of its
+///      (more-static) operands.
+/// Patterns 2/3 thread statics forward through a norm/projector chain
+/// (`Reshape -> Transpose -> Mul -> ReduceMean`) so `ReduceMeanToReduceSumDiv`
+/// / `AveragePoolToReshapeMean` see a static reduce/spatial dim. None touch
+/// operands; each only narrows dynamic result dims to provable statics. Must
+/// run BEFORE lowerOnnxConstants so the literal constants and Shape sources are
+/// still inline. Sibling of GatherShapeFold / ReshapeShapeFold. See
+/// RefineReshapeResultType.cpp.
+void populateRefineReshapeResultTypePatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
