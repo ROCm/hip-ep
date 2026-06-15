@@ -84,10 +84,11 @@ def main() -> int:
         "--fp32",
         action="store_true",
         help="use the fp32 model instead of the default fp16. The DEFAULT is the "
-        "fp16 model (built locally via the OGA DML builder; body fp16, lm_head "
-        "fp32 so greedy is argmax-lossless) — it is faster than fp32 on GPU. Both "
-        "precisions must be built first via 'python build.py "
-        "--build-whisper-models' (see docs/whisper_quick_start.md).",
+        "fp16 model (body fp16, lm_head fp32 so greedy is argmax-lossless) — it is "
+        "faster than fp32 on GPU. The raw model auto-downloads from "
+        "huggingface.co/amd/whisper-large-v3-onnx-{fp16,fp32} on first use; a local "
+        "'python build.py --build-whisper-models' is the backup "
+        "(see docs/whisper_quick_start.md).",
     )
     ap.add_argument(
         "--metrics",
@@ -120,8 +121,9 @@ def main() -> int:
     dtype = np.float16 if use_fp16 else np.float32
     model_dir = MODEL_DIR_FP16 if use_fp16 else MODEL_DIR
 
-    # The model must already be built (python build.py --build-whisper-models);
-    # the setup helpers are consume-only and raise FileNotFoundError if absent.
+    # The setup helpers auto-download the raw model from HF on first use (backup:
+    # python build.py --build-whisper-models) and raise FileNotFoundError if
+    # neither source is reachable.
     print(f"[transcribe] preparing {prec} model at {model_dir}")
     try:
         if use_fp16:
@@ -130,8 +132,6 @@ def main() -> int:
             setup_whisper_model_dir(model_dir)
     except FileNotFoundError as e:
         print(f"[transcribe] ERROR: {e}")
-        print("[transcribe] Build the model first:")
-        print("    python build.py --build-whisper-models")
         return 1
 
     print(f"[transcribe] loading audio features from {audio_path}")
