@@ -133,6 +133,52 @@ class TestReduceSum:
 
 
 # ---------------------------------------------------------------------------
+# ReduceMean -- first-class hip.reduce_mean op. The mean division happens
+# in-kernel (reduce_size = num_input / num_output), so the op needs no static
+# reduce dim. Runtime dtype: f16 only (ONNX ReduceMean is float-domain; the
+# true-fp16 EP path only ever feeds half tensors).
+# ---------------------------------------------------------------------------
+
+
+class TestReduceMean:
+    @pytest.mark.parametrize(
+        "shape,axes,keepdims",
+        [
+            ([4, 8], [1], 1),
+            ([4, 8], [1], 0),
+            ([1, 256, 1152], [-1], 1),
+        ],
+    )
+    def test_reduce_mean(self, model_runner, shape, axes, keepdims):
+        model = _make_reduce_model("ReduceMean", np.float16, shape, axes, keepdims)
+        rng = np.random.default_rng(401)
+        x = rng.uniform(-3.0, 3.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        # fp16 accumulate-in-float then divide; allow a small ULP tolerance.
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_reduce_mean_last_dim(self, model_runner, seq_len):
+        """fp16 ReduceMean over last dim: [1, S, 16, 128] -> [1, S, 16, 1]."""
+        shape = [1, seq_len, 16, 128]
+        model = _make_reduce_model("ReduceMean", np.float16, shape, [-1], 1)
+        rng = np.random.default_rng(402)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2)
+
+    def test_reduce_mean_strided_channel_axis(self, model_runner):
+        """Non-trailing (strided) channel-axis mean over NCHW: axes=[1].
+        Exercises the inner_size > 1 path (reduced elements are H*W apart)."""
+        shape = [2, 8, 3, 5]
+        model = _make_reduce_model("ReduceMean", np.float16, shape, [1], 1)
+        rng = np.random.default_rng(403)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
 # ReduceMax (added by qwen-vision-kernels PR)
 # Runtime dtypes: f16, i32, i64  (NO f32 -- not in the dispatch table)
 # ---------------------------------------------------------------------------

@@ -4,11 +4,15 @@
  */
 //===- UseOutputAllocator.cpp - returned allocs -> hip.alloc_output -------===//
 //
-// Rewrites each graph-output `memref.alloc` (a buffer returned by func.return)
-// into a `hip.alloc_output`, so output buffers are obtained from the EP output
+// Rewrites each graph-output `memref.alloc` (a buffer returned by func.return,
+// directly or through a single shape-adjusting `memref.cast`) into a
+// `hip.alloc_output`, so output buffers are obtained from the EP output
 // allocator (EP/runtime-owned) instead of being deallocated / pooled like
 // intermediates. `out_idx` is the operand position in func.return (= graph
-// output index); the alloc's dynamic-size operands are reused verbatim.
+// output index); the alloc's dynamic-size operands are reused verbatim. When
+// the buffer is returned through a `memref.cast` (the cast widens an
+// in-graph-static dim back to the ONNX-declared dynamic output dim), the cast
+// is left in place feeding the return; only the alloc becomes alloc_output.
 //
 // Scope: ONLY public (graph-entry) functions are rewritten. Private helpers --
 // e.g. outlined `onnx.Loop` bodies -- also carry a `!hip.context` arg 0 and
@@ -16,8 +20,9 @@
 // rewriting them would emit an `out_idx` colliding with the real graph outputs.
 // Functions lacking `!hip.context` as argument 0 are likewise skipped (no
 // runtime handle to build the new op). Intermediates (allocs NOT returned) and
-// passthrough outputs (returns whose defining op is not a memref.alloc, e.g.
-// block args / views) are left untouched. The function signature and the
+// true passthrough outputs (returns whose value traces to neither a
+// memref.alloc nor a memref.cast-of-alloc, e.g. block args / views) are left
+// untouched. The function signature and the
 // `func.return` terminator are intentionally NOT modified -- `convert-hip-to-
 // llvm` synthesizes the `-> i32` entry wrapper in a later phase.
 //
@@ -83,14 +88,35 @@ struct ReplaceOutputAllocPattern : public OpRewritePattern<memref::AllocOp> {
 
   LogicalResult matchAndRewrite(memref::AllocOp allocOp,
                                 PatternRewriter &rewriter) const override {
-    // Find if this alloc is returned (graph output) and at which index.
+    // Find if this alloc is returned (graph output) and at which index. The
+    // buffer may be returned DIRECTLY, or through a single `memref.cast` that
+    // adjusts the static/dynamic-ness of a dim to match the declared output
+    // type (e.g. a matmul whose middle dim is statically known by in-graph
+    // shape inference, `memref<?x256x2560>`, returned as the ONNX-declared
+    // `memref<?x?x2560>`). The cast is a pure descriptor reinterpretation, so
+    // the alloc is still the real graph-output buffer and must become a
+    // `hip.alloc_output`; otherwise the buffer is pooled/deallocated and the
+    // EP's allocator callback is never invoked for that output (runtime FATAL:
+    // "output ... was never allocated by the model.dll").
     func::ReturnOp returnOp = nullptr;
     int64_t outIdx = -1;
     for (OpOperand &use : allocOp->getUses()) {
-      if (auto ret = dyn_cast<func::ReturnOp>(use.getOwner())) {
+      Operation *owner = use.getOwner();
+      if (auto ret = dyn_cast<func::ReturnOp>(owner)) {
         returnOp = ret;
         outIdx = use.getOperandNumber();
         break; // first occurrence (aliased outputs share one rewrite)
+      }
+      if (auto castOp = dyn_cast<memref::CastOp>(owner)) {
+        for (OpOperand &castUse : castOp->getUses()) {
+          if (auto ret = dyn_cast<func::ReturnOp>(castUse.getOwner())) {
+            returnOp = ret;
+            outIdx = castUse.getOperandNumber();
+            break;
+          }
+        }
+        if (returnOp)
+          break;
       }
     }
     if (!returnOp)
