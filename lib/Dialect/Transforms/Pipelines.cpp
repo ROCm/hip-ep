@@ -46,6 +46,23 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //     the reference cases.
   pm.addPass(hip::createInferShapesPass());
 
+  // 1b'. Canonicalize + CSE immediately after shape inference. The conversion
+  //      emits the dynamic shape-computation chain for every `tensor.reshape`
+  //      whose result type the ONNX importer left fully dynamic: per dim a
+  //      `tensor.dim` of the (statically-typed) producer, assembled via
+  //      `tensor.from_elements` and read back to host with `hip.readback_scalar`
+  //      to size the dynamic result. Canonicalization folds `tensor.dim` of a
+  //      static dim to a constant, collapses that arithmetic, and DCEs the vast
+  //      majority of the readbacks (the only survivors are those gated behind a
+  //      `tensor.reshape` whose result type stays `?` because MLIR has no
+  //      reshape result-type folder). CSE then dedups the many identical
+  //      dim/shape recomputations the per-op conversion emits. Both are required
+  //      before bufferize regardless: without them `--hip-pool-allocs` sees the
+  //      un-folded `memref.dim`/readback chains and fragments pooling, and every
+  //      surviving `hip.readback_scalar` is a host D2H of a device scalar.
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::createCSEPass());
+
   // 1c. Fold `tensor.dim` queries on `tensor.expand_shape` /
   //     `tensor.collapse_shape` chains into arithmetic on the chain
   //     root's dims, in the tensor domain, before one-shot-bufferize.

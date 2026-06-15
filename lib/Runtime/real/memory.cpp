@@ -87,8 +87,11 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   int32_t host_val = 0;
+  // hipMemcpyDefault (not DeviceToHost): the source may be host-accessible
+  // memory (host-mapped scratch / UMA pool), where an explicit D2H fails
+  // `invalid argument`. Direction is inferred from the pointer via UVA.
   hipError_t err = hipMemcpyAsync(&host_val, device_scalar, sizeof(int32_t),
-                                  hipMemcpyDeviceToHost, stream);
+                                  hipMemcpyDefault, stream);
   if (err != hipSuccess) {
     fprintf(stderr, "hipdnn_ep_readback_i32: D2H copy failed: %s\n",
             hipGetErrorString(err));
