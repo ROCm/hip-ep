@@ -38,15 +38,6 @@ struct RuntimeState {
   void **gpu_constants;
   size_t num_constants;
 
-  // OGA pipeline shared constants cache: prefill and decode models share
-  // the same constants blob via process-wide named shared memory + atomic
-  // ref count. Set by try_attach_shared_constants when reusing another
-  // model's blob; cleanup decrements ref_count and only the last
-  // reference frees the GPU memory.
-  bool constants_is_shared;
-  void *shared_constants_mapping; // Win32 file mapping HANDLE
-  void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
-
   // Memory pooling support — multi-domain.
   //
   // hip-pool-allocs partitions a function's pooled allocs into independent
