@@ -371,8 +371,9 @@ use (shared from `test/python/whisper/whisper_infer.py`). It auto-prepares the m
 (§3) on first run, so this one command works from a fresh checkout. Runs
 identically in PowerShell and Git Bash.
 
-If you've already run the tests (§4), the bundled **jfk.wav** sample is sitting
-in the data dir — transcribe it directly:
+Transcribe the bundled **jfk.wav** demo clip — if it isn't cached yet, the script
+**downloads it on demand**, so this works on a fresh checkout with nothing
+pre-fetched:
 
 ```
 python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav
@@ -381,7 +382,8 @@ python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav
 (Expected: *"And so my fellow Americans, ask not what your country can do for
 you..."*) The LibriSpeech clips fetched by §4 also work, e.g.
 `test/python/data/whisper/librispeech/sample_0.wav`. For your own audio, pass any
-16 kHz mono wav in place of the path above.
+16 kHz mono wav in place of the path above (only the bundled jfk.wav is
+auto-downloaded; other paths must exist).
 
 By default this prints the transcription **plus** the per-phase latency / RTF
 table (see below), running one discarded warmup pass first so the numbers are
