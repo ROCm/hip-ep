@@ -179,7 +179,11 @@ struct PoolToHip : public mlir::RewritePattern {
     // Resolve auto_pad to explicit pads.  Only NOTSET keeps the user-supplied
     // `pads`; the four other modes derive pads from the static input/output
     // spatial extents.  `auto_pad` is ONNX-deprecated but still produced by
-    // some exporters.
+    // some exporters. The SAME_UPPER / SAME_LOWER pad-budget split below (split
+    // pad_total in half, give the odd pad to the end for SAME_UPPER / to the
+    // begin for SAME_LOWER) follows onnx-mlir's `customComputeShape`
+    // SAME_UPPER/SAME_LOWER handling
+    // (src/Dialect/ONNX/ONNXOps/NN/NNHelper.cpp.inc).
     std::string autoPad = "NOTSET";
     if (auto attr = op->getAttrOfType<mlir::StringAttr>("auto_pad"))
       autoPad = attr.getValue().str();
@@ -232,11 +236,36 @@ struct PoolToHip : public mlir::RewritePattern {
 
     // ===== DPS init tensors =================================================
     //
-    // Output shape leading dims (N, C) come from the input; spatial dims
-    // come from the type-inferred output shape (already computed by the
-    // ONNX importer).  For dynamic spatial dims we'd need arith
-    // floor/ceil-division at runtime — left out of scope (rare for CNNs;
-    // match-fail above keeps us correct).
+    // Output shape leading dims (N, C) are passed through from the input.
+    // A dynamic spatial output dim is materialized at runtime by emitting
+    // the ONNX pooling output-size formula in arith from the (dynamic)
+    // input spatial extent. Every window parameter (kernel / stride /
+    // dilation / pad) is a compile-time constant by this point (auto_pad
+    // already resolved to explicit `pads` above), so the only runtime input
+    // is the spatial extent read via `tensor.dim`:
+    //
+    //   kdTerm = (k - 1) * dilation + 1
+    //   t      = in + pad_begin + pad_end - kdTerm
+    //   out    = floor(t / stride) + 1        (ceil_mode = 0)
+    //          = ceil (t / stride) + 1        (ceil_mode = 1)
+    //
+    // Mirrors the NOTSET branch of onnx-mlir's
+    // `ONNXGenericPoolOpShapeHelper<>::customComputeShape`
+    // (src/Dialect/ONNX/ONNXOps/NN/NNHelper.cpp.inc), whose published formula
+    // is `O[i] = floor((I[i] + P[i] - ((K[i]-1)*d[i]+1)) / s[i]) + 1`.
+    //
+    // Before (dynamic spatial AveragePool, kernel=stride=4, no pad):
+    //   %y = "onnx.AveragePool"(%x) {kernel_shape=[4,4], strides=[4,4], ...}
+    //          : (tensor<?x?x?x?xf16>) -> tensor<?x?x?x?xf16>
+    // After:
+    //   %n   = tensor.dim %x, %c0
+    //   %c   = tensor.dim %x, %c1
+    //   %h   = tensor.dim %x, %c2
+    //   %ho  = arith.addi (arith.floordivsi (arith.addi %h, -4), 4-as-stride),
+    //   1
+    //   ... (same for W) ...
+    //   %init = tensor.empty(%n, %c, %ho, %wo) : tensor<?x?x?x?xf16>
+    //   %y    = hip.pool(%ctx) ins(%x) outs(%init) {pool_mode=0, ...}
     auto buildInit = [&](mlir::RankedTensorType resultType) -> mlir::Value {
       llvm::SmallVector<mlir::Value> dynSizes;
       for (int64_t dimIdx : llvm::seq<int64_t>(rank)) {
@@ -246,11 +275,31 @@ struct PoolToHip : public mlir::RewritePattern {
           // N or C — passthrough from input.
           dynSizes.push_back(
               mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx));
-        } else {
-          // Dynamic spatial dim is unsupported (we'd need to materialize
-          // the output-size formula in arith ops).  Bail.
-          return mlir::Value();
+          continue;
         }
+        // Dynamic spatial dim: materialize out = f(in) in arith. The window
+        // params are all compile-time constants, so `in` is the only runtime
+        // value; `kdTerm`/`pad`/`stride` fold into two index constants.
+        int64_t s = dimIdx - 2; // spatial index
+        int64_t kdTerm = (kernelShape[s] - 1) * dilations[s] + 1;
+        int64_t addConst = pads[s] + pads[spatialRank + s] - kdTerm;
+        mlir::Value inDim =
+            mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx);
+        mlir::Value t = mlir::arith::AddIOp::create(
+            rewriter, loc, inDim,
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, addConst));
+        mlir::Value strideV =
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, strides[s]);
+        mlir::Value div =
+            ceilMode
+                ? mlir::arith::CeilDivSIOp::create(rewriter, loc, t, strideV)
+                      .getResult()
+                : mlir::arith::FloorDivSIOp::create(rewriter, loc, t, strideV)
+                      .getResult();
+        mlir::Value outDim = mlir::arith::AddIOp::create(
+            rewriter, loc, div,
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
+        dynSizes.push_back(outDim);
       }
       return mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                            resultType.getElementType(),
@@ -258,19 +307,12 @@ struct PoolToHip : public mlir::RewritePattern {
     };
 
     mlir::Value yInit = buildInit(outputType);
-    if (!yInit)
-      return rewriter.notifyMatchFailure(
-          op, "dynamic spatial dims in output not supported");
-
     llvm::SmallVector<mlir::Value> outputs = {yInit};
     llvm::SmallVector<mlir::Type> resultTypes = {outputType};
     if (numResults == 2) {
       auto idxType =
           mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
       mlir::Value idxInit = buildInit(idxType);
-      if (!idxInit)
-        return rewriter.notifyMatchFailure(
-            op, "dynamic spatial dims in indices output not supported");
       outputs.push_back(idxInit);
       resultTypes.push_back(idxType);
     }

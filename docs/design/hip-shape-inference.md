@@ -549,7 +549,7 @@ Pick the reify helper that matches the op's shape contract:
 | Result shape == named INPUT operand shape (e.g. rope, rms_norm, qmoe) | hand-written body calling `reifyElementwiseSameShape(b, loc, getInput())` | #262 |
 | NumPy broadcast (add, mul, where, ...) | `Hip_DpsOp_Broadcast<[...]>` sub-base + `reifyBroadcastShape` | #263 |
 | Permutation (`hip.transpose`) | `reifyTransposeByPerm` | #263 |
-| Reduction with `keepdims` (reduce_sum, reduce_max, reduce_prod) | `Hip_DpsOp_Reduction` sub-base + `reifyReductionWithKeepdims` | #263 |
+| Reduction with `keepdims` (reduce_sum, reduce_mean, reduce_max, reduce_prod) | `Hip_DpsOp_Reduction` sub-base + `reifyReductionWithKeepdims` | #263 |
 | Gather along an axis (`hip.gather`, `hip.gather_nd`) | `reifyGatherWithAxis` / `reifyGatherND` | #263 |
 | Multi-init outs-lifting (gqa, mha, layer_norm, ...) | shared `Hip_DpsOp` default (walks every DPS init via `getDpsInits()`) | #260 |
 | Value-dependent output dims (pad, tile, slice, expand, range, nonzero) | shared `Hip_DpsOp` default; the converter sets `outs` to `tensor.empty(<runtime extent>)` so a downstream `tensor.dim` on the result folds to the SSA extent. Per-op fold-on-constant helpers (`reifyPadShape` / `reifyTileShape` / `reifySliceShape` / `reifyExpandShape` / `reifyRangeShape`) deferred to a follow-up | #263 (default), #264 (helpers) |
