@@ -14,9 +14,21 @@ namespace {
 /// Direct, dim-tolerant conversion: the division by the reduced-element count
 /// happens inside the runtime kernel, so (unlike the retired
 /// ReduceMeanToReduceSumDiv decomposition) no static reduce axis is required.
-/// Result dims are refined later by --hip-infer-shapes via the
-/// Hip_DpsOp_Reduction reify/InferType interfaces, so no ONNX-level shape
-/// refinement is needed upstream.
+/// Result dims are refined later by --hip-infer-shapes through the upstream
+/// MLIR ReifyRankedShapedTypeOpInterface / InferTypeOpInterface that
+/// Hip_DpsOp_Reduction implements, so no ONNX-level shape refinement is needed.
+///
+/// `axes` is always materialized as an operand for the DPS op: opset >= 18
+/// already supplies it as an operand; for older opsets (or the all-axes
+/// default) it is built here from the `axes` attribute into an i64 constant.
+///
+/// Before (opset < 18, axes as attribute):
+///   %y = "onnx.ReduceMean"(%x) {axes = [1], keepdims = 1}
+///          : (tensor<?x4096xf16>) -> tensor<?x1xf16>
+/// After:
+///   %axes = arith.constant dense<[1]> : tensor<1xi64>
+///   %init = tensor.empty(%n) : tensor<?x1xf16>
+///   %y    = hip.reduce_mean(%ctx) ins(%x, %axes) outs(%init) {keepdims = 1}
 struct ReduceMeanToHip : public mlir::RewritePattern {
   ReduceMeanToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ReduceMean", /*benefit=*/1, ctx) {}

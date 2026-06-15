@@ -4,11 +4,11 @@
  */
 //===- ProjectorOpsRewrites.cpp - Pre-lowering rewrites for projector ops --==//
 //
-// The Gemma-3 vision encoder's `multi_modal_projector` block uses two ops
-// here that have no direct HIP converters: `onnx.Pow` and `onnx.AveragePool`.
-// Rather than introduce new HIP dialect ops + runtime kernels for each, we
-// rewrite them in pre-lowering to compositions of ops that ALREADY have
-// converters:
+// Some vision-encoder projector blocks (e.g. a `multi_modal_projector`) use
+// two ops here that have no direct HIP converters: `onnx.Pow` and
+// `onnx.AveragePool`. Rather than introduce new HIP dialect ops + runtime
+// kernels for each, we rewrite them in pre-lowering to compositions of ops
+// that ALREADY have converters:
 //
 //   1. `Pow(x, c)` for small integer constants c -> chain of `Mul`s
 //      (c==2 -> Mul(x,x); c==3 -> Mul(x, Mul(x,x)); etc.). Sqrt special-cased
