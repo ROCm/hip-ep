@@ -182,7 +182,8 @@ struct PoolToHip : public mlir::RewritePattern {
     // some exporters. The SAME_UPPER / SAME_LOWER pad-budget split below (split
     // pad_total in half, give the odd pad to the end for SAME_UPPER / to the
     // begin for SAME_LOWER) follows onnx-mlir's `customComputeShape`
-    // SAME_UPPER/SAME_LOWER handling (src/Dialect/ONNX/ONNXOps/NN/NNHelper.cpp.inc).
+    // SAME_UPPER/SAME_LOWER handling
+    // (src/Dialect/ONNX/ONNXOps/NN/NNHelper.cpp.inc).
     std::string autoPad = "NOTSET";
     if (auto attr = op->getAttrOfType<mlir::StringAttr>("auto_pad"))
       autoPad = attr.getValue().str();
@@ -260,7 +261,8 @@ struct PoolToHip : public mlir::RewritePattern {
     //   %n   = tensor.dim %x, %c0
     //   %c   = tensor.dim %x, %c1
     //   %h   = tensor.dim %x, %c2
-    //   %ho  = arith.addi (arith.floordivsi (arith.addi %h, -4), 4-as-stride), 1
+    //   %ho  = arith.addi (arith.floordivsi (arith.addi %h, -4), 4-as-stride),
+    //   1
     //   ... (same for W) ...
     //   %init = tensor.empty(%n, %c, %ho, %wo) : tensor<?x?x?x?xf16>
     //   %y    = hip.pool(%ctx) ins(%x) outs(%init) {pool_mode=0, ...}
@@ -289,12 +291,11 @@ struct PoolToHip : public mlir::RewritePattern {
         mlir::Value strideV =
             mlir::arith::ConstantIndexOp::create(rewriter, loc, strides[s]);
         mlir::Value div =
-            ceilMode ? mlir::arith::CeilDivSIOp::create(rewriter, loc, t,
-                                                        strideV)
-                           .getResult()
-                     : mlir::arith::FloorDivSIOp::create(rewriter, loc, t,
-                                                         strideV)
-                           .getResult();
+            ceilMode
+                ? mlir::arith::CeilDivSIOp::create(rewriter, loc, t, strideV)
+                      .getResult()
+                : mlir::arith::FloorDivSIOp::create(rewriter, loc, t, strideV)
+                      .getResult();
         mlir::Value outDim = mlir::arith::AddIOp::create(
             rewriter, loc, div,
             mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
