@@ -738,6 +738,29 @@ int hip_reduce_sum(
     int hip_dtype);
 
 /* =========================================================================
+ * ReduceMean (Parallel Mean Reduction)
+ * =========================================================================
+ *
+ * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
+ * divides the float-accumulated sum of each `reduce_size`-element slice by
+ * reduce_size = num_input / num_output before the half narrowing. The division
+ * is performed in-kernel so the op needs no compile-time-static reduce dim and
+ * tolerates a dynamic reduce axis.
+ *
+ * Supported types: HIP_DTYPE_FLOAT16 only (ONNX ReduceMean is float-domain;
+ * the true-fp16 EP path only ever feeds half tensors). Other dtypes return -1.
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_reduce_mean(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype);
+
+/* =========================================================================
  * Pool — MaxPool / AveragePool / LpPool (1D / 2D / 3D)
  * =========================================================================
  *
