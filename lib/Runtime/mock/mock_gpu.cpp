@@ -448,7 +448,7 @@ int wrap_miopenConvolutionForward(
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
@@ -458,7 +458,8 @@ int wrap_miopenConvolutionForward(
   MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
              (long long)input_c, (long long)input_h, (long long)input_w);
   MOCK_PRINT("[MOCK]   weights=[%lld,%lld,%lld,%lld],\n", (long long)weights_k,
-             (long long)input_c, (long long)kernel_h, (long long)kernel_w);
+             (long long)(input_c / (group ? group : 1)), (long long)kernel_h,
+             (long long)kernel_w);
   MOCK_PRINT("[MOCK]   output=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
              (long long)weights_k, (long long)output_h, (long long)output_w);
   MOCK_PRINT("[MOCK]   stride=[%lld,%lld], pad=[%lld,%lld,%lld,%lld], "
@@ -468,9 +469,49 @@ int wrap_miopenConvolutionForward(
              (long long)dilation_h, (long long)dilation_w, (long long)group);
 
   // Mock: Fill output with dummy data (zeros in this case)
-  // In a real implementation, this would call MIOpen
-  size_t output_size =
-      input_n * weights_k * output_h * output_w * sizeof(float);
+  // In a real implementation, this would call MIOpen. Use the actual element
+  // size so fp16 buffers aren't overrun.
+  int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+  size_t elem = (elem_bytes > 0) ? (size_t)elem_bytes : sizeof(float);
+  size_t output_size = (size_t)input_n * weights_k * output_h * output_w * elem;
+  memset(output, 0, output_size);
+
+  return 0;
+}
+
+int wrap_miopenConvolutionTranspose(
+    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, const void *weights, const void *bias,
+    void *output, int64_t output_c, int64_t output_h, int64_t output_w,
+    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
+    int64_t dilation_h, int64_t dilation_w, int64_t output_padding_h,
+    int64_t output_padding_w, int64_t group, int64_t data_type) {
+  if (!state || !input || !weights || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionTranspose\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_miopenConvolutionTranspose(\n");
+  MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld,%lld],\n", (long long)input_n,
+             (long long)input_c, (long long)input_h, (long long)input_w);
+  MOCK_PRINT("[MOCK]   weights=[%lld,%lld,%lld,%lld],\n", (long long)input_c,
+             (long long)(output_c / (group ? group : 1)), (long long)kernel_h,
+             (long long)kernel_w);
+  MOCK_PRINT("[MOCK]   output=[%lld,%lld,%lld,%lld], bias=%s,\n",
+             (long long)input_n, (long long)output_c, (long long)output_h,
+             (long long)output_w, bias ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   stride=[%lld,%lld], pad=[%lld,%lld,%lld,%lld], "
+             "dilation=[%lld,%lld], output_padding=[%lld,%lld], group=%lld, "
+             "dtype=%s)\n",
+             (long long)stride_h, (long long)stride_w, (long long)pad_top,
+             (long long)pad_left, (long long)pad_bottom, (long long)pad_right,
+             (long long)dilation_h, (long long)dilation_w,
+             (long long)output_padding_h, (long long)output_padding_w,
+             (long long)group, hipdnn_ep_datatype_name(data_type));
+
+  // Mock: zero the output (real implementation calls MIOpen transpose conv).
+  size_t output_size = input_n * output_c * output_h * output_w * sizeof(float);
   memset(output, 0, output_size);
 
   return 0;
@@ -549,7 +590,9 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
 
 int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                          void *output, int64_t M, int64_t N, int64_t K,
-                         int64_t batch_count, int64_t elem_size) {
+                         int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride) {
+  (void)b_batch_stride;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hipblasLtMatmul\n");
     return -1;
@@ -574,11 +617,13 @@ int wrap_group_query_attention(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (12)
+    // Attributes (13)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
+    // Whisper bidirectional-attention flag (mock stub ignores it).
+    int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
@@ -599,6 +644,7 @@ int wrap_group_query_attention(
   (void)k_quant_type;
   (void)v_quant_type;
   (void)kv_cache_bit_width;
+  (void)no_causal;
   (void)past_buf_seq;
   (void)present_key;
   (void)present_value;
@@ -748,16 +794,23 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 }
 
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t num_elements,
-                         int64_t element_size_bytes) {
+                         void *output, int64_t lhs_n, int64_t lhs_c,
+                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                         int64_t out_n, int64_t out_c, int64_t out_h,
+                         int64_t out_w, int64_t data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_elementwise_sub\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_elementwise_sub(num_elements=%lld, "
-             "element_size=%lld)\n",
-             (long long)num_elements, (long long)element_size_bytes);
+  MOCK_PRINT("[MOCK] wrap_elementwise_sub lhs=[%lld,%lld,%lld,%lld] "
+             "rhs=[%lld,%lld,%lld,%lld] out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+             (long long)lhs_n, (long long)lhs_c, (long long)lhs_h,
+             (long long)lhs_w, (long long)rhs_n, (long long)rhs_c,
+             (long long)rhs_h, (long long)rhs_w, (long long)out_n,
+             (long long)out_c, (long long)out_h, (long long)out_w,
+             hipdnn_ep_datatype_name(data_type));
 
   return 0;
 }
@@ -765,7 +818,14 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
-                int64_t element_size_bytes) {
+                int64_t axis_size, int64_t inner_size,
+                int64_t element_size_bytes,
+                int64_t indices_element_size_bytes) {
+  (void)data;
+  (void)indices;
+  (void)output;
+  (void)axis_size;
+  (void)inner_size;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_gather\n");
     return -1;
@@ -773,10 +833,13 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 
   MOCK_PRINT("[MOCK] wrap_gather(axis=%lld, data_num_elements=%lld, "
              "indices_num_elements=%lld, output_num_elements=%lld, "
-             "element_size=%lld)\n",
+             "axis_size=%lld, inner_size=%lld, element_size=%lld, "
+             "indices_element_size=%lld)\n",
              (long long)axis, (long long)data_num_elements,
              (long long)indices_num_elements, (long long)output_num_elements,
-             (long long)element_size_bytes);
+             (long long)axis_size, (long long)inner_size,
+             (long long)element_size_bytes,
+             (long long)indices_element_size_bytes);
 
   return 0;
 }
@@ -851,6 +914,86 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
+              int64_t data_type, int64_t pool_mode, int64_t spatial_rank,
+              int64_t N, int64_t C, int64_t in0, int64_t in1, int64_t in2,
+              int64_t out0, int64_t out1, int64_t out2, int64_t k0, int64_t k1,
+              int64_t k2, int64_t s0, int64_t s1, int64_t s2, int64_t p0,
+              int64_t p1, int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
+              int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
+              int64_t count_include_pad, int64_t p) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pool\n");
+    return -1;
+  }
+  (void)k0;
+  (void)k1;
+  (void)k2;
+  (void)s0;
+  (void)s1;
+  (void)s2;
+  (void)p0;
+  (void)p1;
+  (void)p2;
+  (void)dil0;
+  (void)dil1;
+  (void)dil2;
+  MOCK_PRINT("[MOCK] wrap_pool(mode=%s, dtype=%s(%lld), rank=%lld, N=%lld, "
+             "C=%lld, in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], "
+             "storage_order=%lld, ceil_mode=%lld, has_indices=%lld, "
+             "count_include_pad=%lld, p=%lld, in=%s, out=%s, idx=%s)\n",
+             hipdnn_ep_pool_mode_name(pool_mode),
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)spatial_rank, (long long)N, (long long)C,
+             (long long)in0, (long long)in1, (long long)in2, (long long)out0,
+             (long long)out1, (long long)out2, (long long)storage_order,
+             (long long)ceil_mode, (long long)has_indices,
+             (long long)count_include_pad, (long long)p, input ? "yes" : "null",
+             output ? "yes" : "null", indices ? "yes" : "null");
+  return 0;
+}
+
+int wrap_resize(RuntimeState *state, void *input, void *output,
+                int64_t data_type, int64_t spatial_rank, int64_t N, int64_t C,
+                int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+                int64_t out1, int64_t out2, int64_t mode,
+                int64_t coord_transform, int64_t nearest_mode) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_resize\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_resize(dtype=%s(%lld), rank=%lld, N=%lld, C=%lld, "
+             "in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], mode=%lld, "
+             "coord_transform=%lld, nearest_mode=%lld, in=%s, out=%s)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)spatial_rank, (long long)N, (long long)C,
+             (long long)in0, (long long)in1, (long long)in2, (long long)out0,
+             (long long)out1, (long long)out2, (long long)mode,
+             (long long)coord_transform, (long long)nearest_mode,
+             input ? "yes" : "null", output ? "yes" : "null");
+  return 0;
+}
+
+int wrap_global_pool(RuntimeState *state, void *input, void *output,
+                     int64_t outer, int64_t reduce_size, int64_t data_type,
+                     int64_t mode, int64_t p) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_global_pool\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_global_pool(mode=%s(%lld), p=%lld, outer=%lld, "
+             "reduce_size=%lld, data_type=%s(%lld), elem_size=%lld, in=%s, "
+             "out=%s)\n",
+             hipdnn_ep_global_pool_mode_name(mode), (long long)mode,
+             (long long)p, (long long)outer, (long long)reduce_size,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)hipdnn_ep_datatype_size(data_type),
+             input ? "yes" : "null", output ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
@@ -866,6 +1009,39 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
              (long long)data_type,
              (long long)hipdnn_ep_datatype_size(data_type));
 
+  return 0;
+}
+
+int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type, double alpha) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_leaky_relu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_leaky_relu(num_elements=%lld, data_type=%s(%lld), "
+             "alpha=%f)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, alpha);
+
+  return 0;
+}
+
+// Mock impl of the runtime symbol referenced by the hip.miopen.softmax
+// lowering. Signature must match lib/Runtime/real/miopen.cpp.
+extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
+                                  void *output, int64_t rows, int64_t cols,
+                                  int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in hip_miopen_softmax\n");
+    return -1;
+  }
+  (void)input;
+  (void)output;
+  MOCK_PRINT("[MOCK] hip_miopen_softmax(rows=%lld, cols=%lld, "
+             "data_type=%s(%lld))\n",
+             (long long)rows, (long long)cols,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type);
   return 0;
 }
 
@@ -1110,13 +1286,19 @@ int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
 }
 
 int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t num_elements, int64_t data_type) {
+               int64_t a_num_elements, int64_t b_num_elements,
+               int64_t out_num_elements, int64_t data_type) {
+  (void)a;
+  (void)b;
+  (void)output;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_equal\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_equal(num_elements=%lld, data_type=%s)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+  MOCK_PRINT("[MOCK] wrap_equal(a_num=%lld, b_num=%lld, out=%lld, "
+             "data_type=%s)\n",
+             (long long)a_num_elements, (long long)b_num_elements,
+             (long long)out_num_elements, hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 
@@ -1135,13 +1317,21 @@ int wrap_and(RuntimeState *state, void *a, void *b, void *output,
 }
 
 int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type) {
+             int64_t lhs_n, int64_t lhs_c, int64_t lhs_h, int64_t lhs_w,
+             int64_t rhs_n, int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+             int64_t out_n, int64_t out_c, int64_t out_h, int64_t out_w,
+             int64_t data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_div\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_div(num_elements=%lld, data_type=%s)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+  MOCK_PRINT("[MOCK] wrap_div lhs=[%lld,%lld,%lld,%lld] "
+             "rhs=[%lld,%lld,%lld,%lld] out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+             (long long)lhs_n, (long long)lhs_c, (long long)lhs_h,
+             (long long)lhs_w, (long long)rhs_n, (long long)rhs_c,
+             (long long)rhs_h, (long long)rhs_w, (long long)out_n,
+             (long long)out_c, (long long)out_h, (long long)out_w,
+             hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 
@@ -1168,22 +1358,69 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+// Mock memory is plain host memory, so we can compute the true non-zero count
+// directly from `input`. This makes the host-readback path (hip.readback_dim
+// -> hipdnn_ep_readback_i32) return a meaningful dynamic dim under mock builds.
+template <typename T>
+static int32_t mock_count_nonzero(const void *data, int64_t n) {
+  const T *p = static_cast<const T *>(data);
+  int32_t count = 0;
+  for (int64_t i = 0; i < n; ++i)
+    if (p[i] != static_cast<T>(0))
+      ++count;
+  return count;
+}
+
 int wrap_nonzero(RuntimeState *state, void *input, void *output,
-                 int64_t input_num_elements, int64_t input_rank,
+                 int32_t *count_ptr, int64_t input_num_elements,
+                 int64_t input_rank, const int64_t *input_dims,
                  int64_t output_capacity, int64_t input_data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_nonzero\n");
     return -1;
   }
-  (void)input;
   (void)output;
+  (void)input_dims;
+
+  int32_t count = 0;
+  if (input && count_ptr) {
+    switch (input_data_type) {
+    case HIPDNN_EP_DATATYPE_FLOAT:
+      count = mock_count_nonzero<float>(input, input_num_elements);
+      break;
+    case HIPDNN_EP_DATATYPE_INT32:
+      count = mock_count_nonzero<int32_t>(input, input_num_elements);
+      break;
+    case HIPDNN_EP_DATATYPE_INT64:
+      count = mock_count_nonzero<int64_t>(input, input_num_elements);
+      break;
+    case HIPDNN_EP_DATATYPE_INT8:
+    case HIPDNN_EP_DATATYPE_UINT8:
+      count = mock_count_nonzero<int8_t>(input, input_num_elements);
+      break;
+    default:
+      // f16 and any other types: leave count at 0 (mock has no fp16 type).
+      break;
+    }
+  }
+  if (count_ptr)
+    *count_ptr = count;
+
   MOCK_PRINT("[MOCK] wrap_nonzero(input_num_elements=%lld, input_rank=%lld, "
-             "output_capacity=%lld, input_data_type=%s(%lld))\n",
+             "output_capacity=%lld, input_data_type=%s(%lld)) -> count=%d\n",
              (long long)input_num_elements, (long long)input_rank,
              (long long)output_capacity,
              hipdnn_ep_datatype_name(input_data_type),
-             (long long)input_data_type);
+             (long long)input_data_type, count);
   return 0;
+}
+
+int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
+  (void)state;
+  // Mock "device" memory is host memory: read the scalar directly.
+  if (!device_scalar)
+    return 0;
+  return *static_cast<const int32_t *>(device_scalar);
 }
 
 int wrap_cos(RuntimeState *state, void *input, void *output,
@@ -1205,6 +1442,18 @@ int wrap_sin(RuntimeState *state, void *input, void *output,
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_sin(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_exp(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_exp\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_exp(num_elements=%lld, data_type=%s(%lld))\n",
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
@@ -1355,12 +1604,12 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
 }
 
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
-                    void *updates, void *output, const int64_t *data_shape,
-                    int64_t data_rank, const int64_t *indices_shape,
-                    int64_t indices_rank, const int64_t *updates_shape,
-                    int64_t updates_rank, const int64_t *output_shape,
-                    int64_t output_rank, int64_t reduction_id,
-                    int64_t data_type) {
+                    void *updates, void *output, const int32_t *count_ptr,
+                    const int64_t *data_shape, int64_t data_rank,
+                    const int64_t *indices_shape, int64_t indices_rank,
+                    const int64_t *updates_shape, int64_t updates_rank,
+                    const int64_t *output_shape, int64_t output_rank,
+                    int64_t reduction_id, int64_t data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_scatter_nd\n");
     return -1;
@@ -1369,17 +1618,18 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
   (void)indices;
   (void)updates;
   (void)output;
+  (void)count_ptr;
   (void)data_shape;
   (void)indices_shape;
   (void)updates_shape;
   (void)output_shape;
   MOCK_PRINT("[MOCK] wrap_scatter_nd(data_rank=%lld, indices_rank=%lld, "
              "updates_rank=%lld, output_rank=%lld, reduction_id=%lld, "
-             "data_type=%s(%lld))\n",
+             "data_type=%s(%lld), has_count=%d)\n",
              (long long)data_rank, (long long)indices_rank,
              (long long)updates_rank, (long long)output_rank,
              (long long)reduction_id, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type);
+             (long long)data_type, count_ptr != nullptr);
   return 0;
 }
 

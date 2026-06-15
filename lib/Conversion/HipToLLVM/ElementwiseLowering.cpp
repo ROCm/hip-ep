@@ -150,11 +150,13 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   }
 };
 
-// hip.sub(handle, lhs, rhs, output)
-//   -> wrap_miopenTensorOp(state, lhs, rhs, output, num_lhs, num_rhs,
-//                          data_type, tensor_op=0)
-// Supports both static and dynamic shapes (computes num_lhs, num_rhs at
-// runtime).
+// hip.sub(ctx, lhs, rhs, output)
+//   -> wrap_elementwise_sub(state, lhs, rhs, output,
+//                           lhs_n..lhs_w, rhs_n..rhs_w, out_n..out_w,
+//                           data_type)
+//
+// Full 4D shapes enable runtime broadcast materialisation via hip_expand
+// before the flat hip_elementwise_sub kernel (rank <= 4, left-padded with 1).
 struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -167,56 +169,51 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
 
-    // Helper to create i64 constants
-    auto createI64Const = [&](int64_t value) -> Value {
-      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(value));
-    };
-
-    // Helper to compute num_elements for a memref (static or dynamic)
-    auto computeNumElements = [&](MemRefType type, Value descriptor) -> Value {
-      Value num = createI64Const(1);
-      MemRefDescriptor desc(descriptor);
-      for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
-        Value dimSize;
-        if (type.isDynamicDim(dimIdx)) {
-          dimSize = desc.size(rewriter, loc, dimIdx);
-        } else {
-          dimSize = createI64Const(type.getDimSize(dimIdx));
-        }
-        num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
-      }
-      return num;
-    };
-
-    Value statePtr = adaptor.getCtx();
-    Value lhsPtr = extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc);
-    Value rhsPtr = extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
+    auto lhsType = cast<MemRefType>(op.getLhs().getType());
+    auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    // Compute num_elements (supports dynamic shapes)
-    Value numElementsVal = computeNumElements(outputType, adaptor.getOutput());
+    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
+        outputType.getRank() > 4)
+      return rewriter.notifyMatchFailure(
+          op, "rank > 4 unsupported by 4D broadcast descriptor API");
 
-    unsigned elementSizeBytes =
-        outputType.getElementType().getIntOrFloatBitWidth() / 8;
-    Value elemSizeVal = createI64Const(elementSizeBytes);
+    auto lhsDims =
+        extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
+    auto rhsDims =
+        extractShape4D(rhsType, adaptor.getRhs(), rewriter, loc, i64Type);
+    auto outDims =
+        extractShape4D(outputType, adaptor.getOutput(), rewriter, loc, i64Type);
 
-    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
-                                       ptrType, i64Type, i64Type};
+    int64_t dataType = getHipdnnDataType(outputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+
+    auto createI64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    // 17 params: state + 3 data ptrs + 12 shape dims + data_type
+    SmallVector<Type, 17> paramTypes(4, ptrType);
+    paramTypes.append(13, i64Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapElementwiseSub, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr,  lhsPtr,         rhsPtr,
-                                  outputPtr, numElementsVal, elemSizeVal};
+    SmallVector<Value, 17> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+    args.append(lhsDims.begin(), lhsDims.end());
+    args.append(rhsDims.begin(), rhsDims.end());
+    args.append(outDims.begin(), outDims.end());
+    args.push_back(createI64Const(dataType));
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
-
     rewriter.eraseOp(op);
     return success();
   }
@@ -228,7 +225,8 @@ void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns) {
   patterns.add<ElementwiseOpLowering<MulOp, kTensorOpMul>,
                ElementwiseOpLowering<AddOp, kTensorOpAdd>,
-               ElementwiseOpLowering<MinOp, kTensorOpMin>, SubOpLowering>(
+               ElementwiseOpLowering<MinOp, kTensorOpMin>,
+               ElementwiseOpLowering<MaxOp, kTensorOpMax>, SubOpLowering>(
       converter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(converter, kMiopenAdd);
 }

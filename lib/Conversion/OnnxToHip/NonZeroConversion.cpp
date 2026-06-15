@@ -119,14 +119,45 @@ struct NonZeroToHip : public mlir::RewritePattern {
             mlir::arith::MulIOp::create(rewriter, loc, upperBound, dim);
       }
     }
-    mlir::Value init = mlir::tensor::EmptyOp::create(
+    // Destination for the indices: [R, capacity] where capacity = numel(X)
+    // is the worst-case (every element non-zero) upper bound.
+    mlir::Value yInit = mlir::tensor::EmptyOp::create(
         rewriter, loc, resultType.getShape(), resultType.getElementType(),
         mlir::ValueRange{upperBound});
 
+    // Second destination: a device i32 scalar the kernel writes with the
+    // actual number of non-zero elements (the data-dependent count N). The
+    // capacity buffer above is over-allocated; only the first N columns are
+    // meaningful. Reading the count back lets us slice `y` to its true extent
+    // so downstream ops and the ORT-reported output shape use N, not capacity.
+    auto countType =
+        mlir::RankedTensorType::get(/*shape=*/{}, rewriter.getI32Type());
+    mlir::Value countInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, countType.getShape(), countType.getElementType());
+
+    // hip.nonzero is multi-result (autoInfer=0): pass explicit result types.
     auto hipOp = mlir::hip::NonZeroOp::create(
-        rewriter, loc, resultType, context, op->getOperand(0), init,
+        rewriter, loc, mlir::TypeRange{resultType, countType}, context,
+        op->getOperand(0), yInit, countInit,
         rewriter.getI64IntegerAttr(inputDataType));
-    rewriter.replaceOp(op, hipOp->getResult(0));
+
+    // Read the device count back to a host `index` (D2H + stream sync), then
+    // slice the capacity buffer to [R, N] so the true extent flows onward.
+    mlir::Value count =
+        mlir::hip::ReadbackDimOp::create(rewriter, loc, rewriter.getIndexType(),
+                                         context, hipOp.getResult(1))
+            .getResult();
+
+    mlir::SmallVector<mlir::OpFoldResult, 2> offsets = {
+        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0)};
+    mlir::SmallVector<mlir::OpFoldResult, 2> sizes = {
+        rewriter.getIndexAttr(inputRank), mlir::OpFoldResult(count)};
+    mlir::SmallVector<mlir::OpFoldResult, 2> strides = {
+        rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)};
+    mlir::Value trimmed = mlir::tensor::ExtractSliceOp::create(
+        rewriter, loc, resultType, hipOp.getResult(0), offsets, sizes, strides);
+
+    rewriter.replaceOp(op, trimmed);
     return mlir::success();
   }
 };

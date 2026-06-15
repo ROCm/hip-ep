@@ -12,12 +12,18 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Types.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "hip/Dialect/IR/HipDialect.h.inc"
 
 #define GET_TYPEDEF_CLASSES
 #include "hip/Dialect/IR/HipTypes.h.inc"
+
+// Generated header for the `HipDpsOp` C++ interface class (TableGen def
+// `HipDpsOpInterface`). Must precede HipOps.h.inc — every Hip_DpsOp's
+// generated declaration references `HipDpsOp::Trait`.
+#include "hip/Dialect/IR/HipDpsOpInterface.h.inc"
 
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.h.inc"

@@ -10,17 +10,12 @@ message Metadata {
   string artifact_filename = 1;
   repeated Output outputs = 2;
   repeated Input inputs = 3;
-}
-
-// Tracks which input tensor dimension provides a dynamic output dimension's
-// runtime value. `resolved` disambiguates the {input_idx=0, dim_idx=0}
-// default — a real (input 0, dim 0) source has resolved=true; an
-// unresolved dim (or a static dim with no source needed) has resolved=false.
-// Consumers MUST treat resolved=false as "do not use input_idx/dim_idx".
-message DimSource {
-  int32 input_idx = 1;
-  int32 dim_idx = 2;
-  bool resolved = 3;
+  // True when the artifact was compiled in output-allocator mode: the DLL's
+  // inference_compute takes (state, inputs) only and allocates graph outputs
+  // in-graph via the EP's output-allocator callback. The EP reads this to
+  // choose its dispatch arity. Travels with the artifact, so a reused
+  // EPContext always reports the mode matching its own DLL ABI.
+  bool use_output_allocator = 4;
 }
 
 message Input {
@@ -34,8 +29,11 @@ message Output {
   string name = 1;
   int32 rank = 2;
   int32 elem_type = 3;
+  // Static dims carry their extent; dynamic dims carry -1. In output-allocator
+  // mode (the default) the DLL sizes dynamic outputs in-graph via the
+  // EP's output-allocator callback, so no per-dim resolution metadata is
+  // needed. Classic mode (use_output_allocator=0) supports only fully-static
+  // output shapes.
+  // NOTE: field number 5 is intentionally retired (was `dim_sources`).
   repeated int64 shape = 4;
-  // One per dimension. For dynamic dims (shape[i] == -1), specifies which
-  // input tensor + dimension provides the runtime value.
-  repeated DimSource dim_sources = 5;
 }

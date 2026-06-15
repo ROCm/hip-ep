@@ -1,929 +1,476 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Build automation for onnx-hipdnn-ep.
+"""Native cross-platform build driver for onnx-hipdnn-ep.
 
-Downloads dependencies and builds the project:
-  1. Downloads and extracts TheRock ROCm SDK
-  2. Downloads and extracts prebuilt LLVM/MLIR/FlatBuffers/Protobuf
-  3. Downloads and extracts ONNX Runtime pre-built binaries
-  4. Configures, builds, and installs via CMake
+Structured after ONNX Runtime's tools/ci_build/build.py (logging, run_subprocess,
+update_submodules, --config/--cmake_generator/--cmake_extra_defines/
+--skip_submodule_sync conventions) but deliberately plain: it ensures
+submodules, sets up the platform compiler environment, picks the GPU arch, runs
+the cmake configure/build/install for this project's artifacts -- the MorphiZen
+EP shared library (libonnxruntime_morphizen_ep.so / .dll) plus the HIP MLIR
+tools -- and (on Linux) bundles the runtime .so into a self-contained install/.
 
-All artifacts are placed under install/ in the project root.
+All C++ dependency *acquisition* is delegated to cmake/deps.cmake: LLVM/MLIR/LLD
+(from-source fallback), protobuf/flatbuffers (from source), ONNX Runtime
+(official release download), and the TheRock ROCm SDK (auto-download). This
+script does NOT build or cache those itself -- caching and any
+build-into-a-prefix optimization are a CI concern (see
+.github/workflows/linux-build.yml), and CI injects its cached prefixes via
+--cmake_prefix_path. It also does NOT build onnxruntime-genai (OGA).
 
-Prerequisite: activate the conda environment first:
-    conda env create -f environment.yml   # one-time
-    conda activate hipdnn-ep
+Layout (siblings of the repo, matching docs/quick_start.md and CI):
+    <workspace>/<repo>/          project source (this repo)
+    <workspace>/build/<repo>/    cmake build tree (+ _therock, _deps)
+    <workspace>/install/         install prefix (self-contained on Linux)
 
 Usage:
-    python build.py                # Full setup + build
-    python build.py --skip-build   # Setup only (download deps)
-    python build.py --clean        # Remove install/ and start fresh
-    python build.py --build-oga    # Also build the onnxruntime-genai fork
-    python build.py --build-vulkan # Also build the Vulkan baseline (llama.cpp)
+    python build.py                       # real build, auto-detect arch
+    python build.py --mock                # mock runtime (no GPU/HIP/TheRock)
+    python build.py --hip_arch gfx1151    # explicit GPU arch
+    python build.py --cmake_prefix_path "/x/llvm-install;/x/ort-install"
+    python build.py --clean               # remove build/ + install/
 """
 
 import argparse
-import io
+import logging
 import os
-import re
+import shlex
 import shutil
 import subprocess
 import sys
-import tarfile
-import urllib.request
-import zipfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-INSTALL = ROOT / "install"
-CACHE = INSTALL / "_cache"
-THEROCK = INSTALL / "therock"
-DEPS = INSTALL / "deps"
-ORT = INSTALL / "onnxruntime"
-BUILD = INSTALL / "build"
-DIST = INSTALL / "dist"
-OGA_SOURCE = INSTALL / "oga-source"
-OGA_BUILD = INSTALL / "oga-build"
-VULKAN_SDK = INSTALL / "vulkan-sdk"
-LLAMACPP_SRC = INSTALL / "llama.cpp"
-LLAMACPP_BUILD = INSTALL / "llama.cpp-build"
-LLAMACPP_DIST = INSTALL / "llama-vulkan"
+REPO = Path(__file__).resolve().parent
+WORKSPACE = REPO.parent
+PROJECT_NAME = REPO.name
+IS_WINDOWS = os.name == "nt"
 
-THEROCK_URL = (
-    "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1151-7.11.0.tar.gz"
-)
-
-# Pinned llama.cpp commit + Vulkan SDK version for reproducible Vulkan baselines.
-LLAMACPP_REPO = "https://github.com/ggml-org/llama.cpp.git"
-LLAMACPP_REF = "683c5acb90478a9e7e20eb65a1bfee334635216d"
-VULKAN_VERSION = "1.4.341.1"
-VULKAN_INSTALLER_NAME = f"vulkansdk-windows-X64-{VULKAN_VERSION}.exe"
-# ?Human=true disables LunarG's download-token throttling for direct fetches.
-VULKAN_INSTALLER_URL = (
-    f"https://sdk.lunarg.com/sdk/download/{VULKAN_VERSION}/windows/"
-    f"{VULKAN_INSTALLER_NAME}?Human=true"
-)
-
-# Prebuilt deps — keep in sync with scripts/setup-prebuilt.sh
-_PREBUILT_BASE = "https://github.com/wcy123/llvm-mlir-prebuilt/releases/download"
-_PREBUILTS = [
-    ("llvm-22.1.0-release", "llvm-22.1.0-release-windows-x64.zip"),
-    ("protobuf-34.0-release", "protobuf-34.0-release-windows-x64.zip"),
-    ("flatbuffers-25.12.19-release", "flatbuffers-25.12.19-release-windows-x64.zip"),
-]
+logging.basicConfig(format="[build] %(message)s", level=logging.INFO)
+log = logging.getLogger("hipdnn-ep.build")
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Errors + subprocess helper (ONNX Runtime style)
 # ---------------------------------------------------------------------------
 
 
-def log(msg):
-    print(f"[build] {msg}")
+class BuildError(Exception):
+    pass
 
 
-def download(url, dest):
-    """Download *url* to *dest* with a progress indicator. Skips if cached."""
-    if dest.exists():
-        log(f"  Cached: {dest.name}")
-        return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    log(f"  Downloading {dest.name} ...")
-
-    def _progress(block, block_size, total):
-        done = block * block_size
-        if total > 0:
-            pct = min(100.0, done * 100.0 / total)
-            print(
-                f"\r  {done / 1048576:.1f} / {total / 1048576:.1f} MB ({pct:.0f}%)",
-                end="",
-                flush=True,
-            )
-
-    try:
-        urllib.request.urlretrieve(url, str(tmp), reporthook=_progress)
-        print()
-        tmp.rename(dest)
-    except Exception as exc:
-        print()
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"Download failed: {url}") from exc
-
-
-def _tar_extract(archive, dest, *, strip=0):
-    """Extract a tar archive, optionally stripping leading path components."""
-    log(f"  Extracting {archive.name} -> {dest} ...")
-    dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive, "r:*") as tar:
-        for member in tar:
-            p = Path(member.name)
-            if p.is_absolute() or ".." in p.parts:
-                continue
-            if strip:
-                parts = p.parts
-                if len(parts) <= strip:
-                    continue
-                member.name = str(Path(*parts[strip:]))
-            try:
-                if sys.version_info >= (3, 12):
-                    tar.extract(member, dest, filter="data")
-                else:
-                    tar.extract(member, dest)
-            except (OSError, PermissionError):
-                pass
-
-
-def _zip_extract(archive, dest, *, strip=0):
-    """Extract a zip archive, optionally stripping leading path components."""
-    log(f"  Extracting {archive.name} -> {dest} ...")
-    dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive) as zf:
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            p = Path(info.filename)
-            if strip:
-                parts = p.parts
-                if len(parts) <= strip:
-                    continue
-                out = dest / Path(*parts[strip:])
-            else:
-                out = dest / p
-            out.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, open(out, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-
-
-def _read_ci_env(*keys):
-    """Read env var values from .github/workflows/windows-build.yml (single source of truth)."""
-    ci_yaml = ROOT / ".github" / "workflows" / "windows-build.yml"
-    text = ci_yaml.read_text()
-    result = {}
-    for key in keys:
-        m = re.search(rf"^\s+{re.escape(key)}:\s*(.+?)\s*$", text, re.MULTILINE)
-        if not m:
-            raise RuntimeError(f"{key} not found in {ci_yaml}")
-        result[key] = m.group(1).strip().strip('"').strip("'")
-    return result
-
-
-# ---------------------------------------------------------------------------
-# TheRock ROCm SDK
-# ---------------------------------------------------------------------------
-
-
-def fetch_therock():
-    log("Setting up TheRock ROCm SDK ...")
-    sentinel = THEROCK / ".ok"
-    if sentinel.exists():
-        log("  Already installed.")
-        return
-    archive = CACHE / Path(THEROCK_URL).name
-    download(THEROCK_URL, archive)
-    if THEROCK.exists():
-        shutil.rmtree(THEROCK)
-    _tar_extract(archive, THEROCK, strip=1)
-    sentinel.touch()
-    log("  TheRock SDK ready.")
-
-
-# ---------------------------------------------------------------------------
-# Prebuilt LLVM / MLIR / Protobuf / FlatBuffers
-# Tags and assets mirror scripts/setup-prebuilt.sh — keep in sync.
-# ---------------------------------------------------------------------------
-
-
-def fetch_prebuilt_deps():
-    log("Setting up prebuilt dependencies (LLVM, Protobuf, FlatBuffers) ...")
-    for tag, asset in _PREBUILTS:
-        sentinel = DEPS / f".{tag}.ok"
-        if sentinel.exists():
-            log(f"  {tag}: already installed.")
-            continue
-        url = f"{_PREBUILT_BASE}/{tag}/{asset}"
-        archive = CACHE / asset
-        download(url, archive)
-        _zip_extract(archive, DEPS)
-        sentinel.touch()
-        log(f"  {tag}: done.")
-
-
-# ---------------------------------------------------------------------------
-# ONNX Runtime
-# ---------------------------------------------------------------------------
-
-ORT_VERSION = "1.24.4"  # must match pip onnxruntime-directml for Python API compat
-
-
-def fetch_onnxruntime():
-    log("Setting up ONNX Runtime ...")
-    sentinel = ORT / ".ok"
-    if sentinel.exists():
-        _generate_ort_cmake_config()
-        log("  Already installed.")
-        return
-
-    version = ORT_VERSION
-    log(f"  Target version: {version}")
-
-    target = f"onnxruntime-win-x64-{version}.zip"
-    url = (
-        f"https://github.com/microsoft/onnxruntime/releases/download/"
-        f"v{version}/{target}"
+def run_subprocess(args, cwd=None, env=None, capture_stdout=False):
+    """Run a command (sequence of str/Path), echoing it. Raises on failure."""
+    if isinstance(args, str):
+        raise ValueError("args should be a sequence of strings, not a string")
+    args = [str(a) for a in args]
+    my_env = os.environ.copy()
+    if env:
+        my_env.update(env)
+    log.info(" ".join(shlex.quote(a) for a in args))
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        env=my_env,
+        check=True,
+        stdout=subprocess.PIPE if capture_stdout else None,
+        text=True if capture_stdout else None,
     )
 
-    archive = CACHE / target
-    download(url, archive)
-    if ORT.exists():
-        shutil.rmtree(ORT)
-    _zip_extract(archive, ORT, strip=1)
-    _generate_ort_cmake_config()
-    sentinel.touch()
-    log(f"  ONNX Runtime {version} ready.")
+
+def step(msg):
+    bar = "=" * 68
+    print(f"\n{bar}\n> {msg}\n{bar}", flush=True)
 
 
-def _generate_ort_cmake_config():
-    """Create a CMake config so find_package(onnxruntime CONFIG) works."""
-    cmake_dir = ORT / "lib" / "cmake" / "onnxruntime"
-    cmake_dir.mkdir(parents=True, exist_ok=True)
-    config = cmake_dir / "onnxruntimeConfig.cmake"
-    config.write_text("""\
-# Auto-generated by build.py for pre-built ONNX Runtime binaries.
-get_filename_component(_ort_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+def have_tool(name):
+    return shutil.which(name) is not None
 
-if(NOT TARGET onnxruntime::onnxruntime)
-  add_library(onnxruntime::onnxruntime SHARED IMPORTED)
-  set_target_properties(onnxruntime::onnxruntime PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${_ort_root}/include"
-    IMPORTED_IMPLIB "${_ort_root}/lib/onnxruntime.lib"
-    IMPORTED_LOCATION "${_ort_root}/lib/onnxruntime.dll"
-  )
-endif()
 
-set(onnxruntime_FOUND TRUE)
-""")
+def _check_python_version():
+    if sys.version_info[:2] < (3, 8):
+        raise BuildError(f"Python 3.8+ required; found {sys.version.split()[0]}")
 
 
 # ---------------------------------------------------------------------------
-# Build
+# Submodules + platform toolchain
 # ---------------------------------------------------------------------------
 
 
-def _ensure_submodules():
-    log("  Checking git submodules ...")
+def update_submodules():
+    log.info("Checking git submodules ...")
     r = subprocess.run(
         ["git", "submodule", "status", "--recursive"],
         capture_output=True,
         text=True,
-        cwd=str(ROOT),
+        cwd=str(REPO),
     )
     uninitialized = any(
-        line.strip().startswith("-") for line in r.stdout.splitlines() if line.strip()
+        ln.strip().startswith("-") for ln in r.stdout.splitlines() if ln.strip()
     )
-    if uninitialized:
-        log("  Initializing submodules ...")
-        subprocess.run(
-            ["git", "submodule", "update", "--init", "--recursive"],
-            check=True,
-            cwd=str(ROOT),
-        )
-    else:
-        log("  Submodules OK.")
-
-
-def _ensure_dia_sdk_junction():
-    """Create C:\\msvsn2022 junction if needed (LLVM prebuilt hardcoded path)."""
-    junction = Path("C:/msvsn2022")
-    if junction.exists():
+    if not uninitialized:
+        log.info("  submodules OK.")
         return
-    vswhere = (
-        Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
-        / "Microsoft Visual Studio"
-        / "Installer"
-        / "vswhere.exe"
+    log.info("  initializing submodules ...")
+    run_subprocess(["git", "submodule", "sync", "--recursive"], cwd=str(REPO))
+    run_subprocess(
+        ["git", "submodule", "update", "--init", "--recursive"], cwd=str(REPO)
     )
-    if not vswhere.exists():
-        log("  WARNING: vswhere not found — cannot create DIA SDK junction.")
-        return
-    r = subprocess.run(
-        [str(vswhere), "-latest", "-property", "installationPath"],
-        capture_output=True,
-        text=True,
-    )
-    vs_path = r.stdout.strip()
-    if not vs_path:
-        log("  WARNING: No Visual Studio installation found.")
-        return
-    log(f"  Creating DIA SDK junction: C:\\msvsn2022 -> {vs_path}")
-    try:
-        subprocess.run(
-            ["cmd", "/c", "mklink", "/J", "C:\\msvsn2022", vs_path],
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError:
-        log("  WARNING: mklink failed (may need admin). See docs/quick_start.md.")
 
 
-def _detect_gpu_arch():
-    exe = THEROCK / "lib" / "llvm" / "bin" / "amdgpu-arch.exe"
-    if not exe.exists():
+def default_generator():
+    # Like ONNX Runtime: on Windows default to the Visual Studio generator so
+    # CMake locates MSVC itself (no vcvarsall sourcing); Ninja elsewhere.
+    return "Visual Studio 17 2022" if IS_WINDOWS else "Ninja"
+
+
+def check_toolchain(generator):
+    for tool in ("cmake", "git"):
+        if not have_tool(tool):
+            raise BuildError(f"required tool not found on PATH: {tool}")
+    if generator == "Ninja" and not have_tool("ninja"):
+        raise BuildError("Ninja generator selected but 'ninja' is not on PATH")
+    if IS_WINDOWS:
+        # The Visual Studio generator finds MSVC on its own. For Ninja we rely on
+        # the caller having loaded the MSVC environment (run from an "x64 Native
+        # Tools Command Prompt for VS"), exactly as ONNX Runtime's build expects.
+        if generator == "Ninja" and not have_tool("cl"):
+            log.warning(
+                "cl.exe not on PATH; for the Ninja generator on Windows run from "
+                "an 'x64 Native Tools Command Prompt for VS' (or pass "
+                "--cmake_generator 'Visual Studio 17 2022')."
+            )
+    elif not (have_tool("c++") or have_tool("g++") or have_tool("clang++")):
+        raise BuildError("no C++ compiler (c++/g++/clang++) on PATH")
+
+
+# ---------------------------------------------------------------------------
+# GPU architecture detection (no ROCm/TheRock needed)
+#   Linux:   amdgpu kernel sysfs (/sys/class/kfd)
+#   Windows: the driver-provided HIP runtime (amdhip64_*.dll), via ctypes
+# ---------------------------------------------------------------------------
+
+
+def _detect_hip_arch_windows():
+    """Read gcnArchName from the driver-provided HIP runtime via ctypes.
+
+    Loads amdhip64_*.dll (shipped by the GPU driver in System32 -- no ROCm or
+    TheRock needed) and reads gcnArchName through the fixed hipDeviceProp_t
+    offsets, mirroring LLVM's offload-arch. Returns a gfx string or None.
+    """
+    import ctypes
+
+    # gcnArchName offset matches HIP's R0600 (6.x+) hipDeviceProp_t layout.
+    class _PropR0600(ctypes.Structure):
+        _fields_ = [
+            ("_pad", ctypes.c_char * 1160),
+            ("gcnArchName", ctypes.c_char * 256),
+            ("_pad2", ctypes.c_char * 56),
+        ]
+
+    for dll in ("amdhip64_7.dll", "amdhip64_6.dll", "amdhip64.dll"):
+        try:
+            lib = ctypes.WinDLL(dll)
+        except OSError:
+            continue
+        try:
+            get_count = lib.hipGetDeviceCount
+            get_props = lib.hipGetDevicePropertiesR0600
+        except AttributeError:
+            continue
+        count = ctypes.c_int(0)
+        if get_count(ctypes.byref(count)) != 0 or count.value <= 0:
+            continue
+        prop = _PropR0600()
+        if get_props(ctypes.byref(prop), 0) != 0:
+            continue
+        name = prop.gcnArchName.decode("ascii", "ignore").strip()
+        if name:
+            return name.split(":", 1)[0]  # drop feature flags (gfx1151:xnack-)
+    return None
+
+
+def _detect_hip_arch_linux():
+    """Read gfx_target_version from /sys/class/kfd topology (no ROCm needed).
+
+    gfx_target_version encodes the arch as major*10000 + minor*100 + step
+    (e.g. 110501 -> gfx1151, 90010 -> gfx90a). The CPU node reports 0.
+    Returns a gfx string or None.
+    """
+    nodes = Path("/sys/class/kfd/kfd/topology/nodes")
+    if not nodes.is_dir():
         return None
-    try:
-        r = subprocess.run(
-            [str(exe)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        # Recent TheRock builds emit an informational "HIP Library Path: ..."
-        # line on stdout before the arch line; pick the first line that
-        # actually looks like a gfx target.
-        for line in r.stdout.strip().splitlines():
-            tok = line.strip()
-            if tok.startswith("gfx"):
-                return tok
-        # Fallback: legacy single-line output.
-        lines = r.stdout.strip().splitlines()
-        return lines[0].strip() if lines else None
-    except Exception:
-        return None
+    for props in sorted(nodes.glob("*/properties")):
+        try:
+            text = props.read_text()
+        except OSError:
+            continue
+        ver = None
+        for ln in text.splitlines():
+            if ln.startswith("gfx_target_version "):
+                ver = int(ln.split()[1])
+                break
+        if not ver:
+            continue
+        major, minor, step = ver // 10000, (ver // 100) % 100, ver % 100
+        return f"gfx{major}{minor:x}{step:x}"
+    return None
 
 
-def _ensure_msvc_env():
-    """Detect VS2022 and inject its x64 environment into this process."""
-    if shutil.which("cl"):
-        return
-    log("  cl.exe not on PATH — locating Visual Studio ...")
-    vswhere = (
-        Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
-        / "Microsoft Visual Studio"
-        / "Installer"
-        / "vswhere.exe"
-    )
-    if not vswhere.exists():
-        log("  ERROR: vswhere.exe not found. Install Visual Studio 2022.")
-        sys.exit(1)
-    r = subprocess.run(
-        [str(vswhere), "-latest", "-property", "installationPath"],
-        capture_output=True,
-        text=True,
-    )
-    vs_path = r.stdout.strip()
-    if not vs_path:
-        log("  ERROR: No Visual Studio installation found.")
-        sys.exit(1)
-    vcvarsall = Path(vs_path) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
-    if not vcvarsall.exists():
-        log(f"  ERROR: vcvarsall.bat not found at {vcvarsall}")
-        sys.exit(1)
-    log(f"  Sourcing MSVC environment from {vs_path} ...")
-    # Run vcvarsall and dump the resulting environment
-    r = subprocess.run(
-        ["cmd", "/C", "call", str(vcvarsall), "x64", "&&", "set"],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        log("  ERROR: vcvarsall.bat failed.")
-        sys.exit(1)
-    for line in r.stdout.splitlines():
-        if "=" in line:
-            key, _, value = line.partition("=")
-            os.environ[key] = value
-    if not shutil.which("cl"):
-        log("  ERROR: cl.exe still not found after sourcing vcvarsall.bat.")
-        sys.exit(1)
-    # Restart sccache so the daemon inherits the MSVC environment (cl.exe
-    # depends on DLLs that must be on PATH for CreateProcess to succeed).
-    if shutil.which("sccache"):
-        subprocess.run(["sccache", "--stop-server"], capture_output=True)
-    log("  MSVC environment ready.")
+def detect_hip_arch():
+    """Detect the local AMD GPU's gfx arch (TheRock-free). Returns gfx or None."""
+    return _detect_hip_arch_windows() if IS_WINDOWS else _detect_hip_arch_linux()
 
 
-def configure_and_build():
-    log("Building onnx-hipdnn-ep ...")
+# ---------------------------------------------------------------------------
+# Configure / build / install (deps resolved by cmake/deps.cmake)
+# ---------------------------------------------------------------------------
 
-    _ensure_msvc_env()
-    for tool in ("cmake", "ninja"):
-        if not shutil.which(tool):
-            log(f"  ERROR: {tool} not found. Run: conda activate hipdnn-ep")
-            sys.exit(1)
 
-    _ensure_submodules()
-    _ensure_dia_sdk_junction()
-
-    BUILD.mkdir(parents=True, exist_ok=True)
-
-    # -- cmake configure args --
-    prefix_paths = [str(DEPS)]
-    if (ORT / ".ok").exists():
-        prefix_paths.append(str(ORT))
-
-    cmake_args = [
-        "cmake",
-        "-S",
-        str(ROOT),
-        "-B",
-        str(BUILD),
-        "-G",
-        "Ninja",
-        "-DBUILD_SHARED_LIBS=OFF",
-        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
-        f"-DCMAKE_PREFIX_PATH={';'.join(prefix_paths)}",
-        f"-DCMAKE_INSTALL_PREFIX={DIST}",
-        "-DBUILD_HIP_TOOLS=ON",
+def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
+    step(f"Configure (HIP_ARCHITECTURES={hip_arch or 'mock'})")
+    cmd = ["cmake", "-S", str(REPO), "-B", str(build_dir), "-G", args.cmake_generator]
+    # The Visual Studio (multi-config) generator needs the target platform via -A
+    # (Ninja/Makefiles take the build type via CMAKE_BUILD_TYPE only).
+    if args.cmake_generator.startswith("Visual Studio"):
+        cmd += ["-A", "x64"]
+    cmd += [
+        f"-DCMAKE_BUILD_TYPE={args.config}",
+        f"-DCMAKE_INSTALL_PREFIX={args.install_dir}",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         "-DBUILD_EP=ON",
+        "-DBUILD_HIP_TOOLS=ON",
     ]
-
-    if shutil.which("sccache"):
-        cmake_args += [
+    # Build the Python wheel by default for real builds; mock has no ROCm libs
+    # to bundle, and --skip_wheel opts out.
+    if not mock and not args.skip_wheel:
+        cmd.append("-DBUILD_PYTHON_WHEEL=ON")
+    if prefix_paths:
+        # CMAKE_PREFIX_PATH always uses ';' as the list separator.
+        cmd.append("-DCMAKE_PREFIX_PATH=" + ";".join(prefix_paths))
+    if mock:
+        cmd.append("-DBUILD_MOCK_RUNTIME=ON")
+    else:
+        cmd.append("-DBUILD_MOCK_RUNTIME=OFF")
+        cmd.append(f"-DHIP_ARCHITECTURES={hip_arch}")
+        if args.therock_dist:
+            cmd.append(f"-DTHEROCK_DIST={args.therock_dist}")
+    if IS_WINDOWS:
+        cmd.append("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
+    if have_tool("sccache"):
+        cmd += [
             "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
             "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
         ]
-
-    cmake_args.append(f"-DPython3_EXECUTABLE={sys.executable}")
-
-    # Real runtime (TheRock + detected GPU) vs mock
-    therock_ready = (THEROCK / ".ok").exists()
-    if therock_ready:
-        gpu_arch = _detect_gpu_arch()
-        if gpu_arch:
-            log(f"  GPU architecture: {gpu_arch}")
-            cmake_args += [
-                f"-DTHEROCK_DIST={THEROCK}",
-                "-DHIP_PLATFORM=amd",
-                f"-DHIP_ARCHITECTURES={gpu_arch}",
-                "-DBUILD_MOCK_RUNTIME=OFF",
-            ]
-        else:
-            log("  No GPU detected — using mock runtime.")
-            cmake_args.append("-DBUILD_MOCK_RUNTIME=ON")
-    else:
-        log("  TheRock not installed — using mock runtime.")
-        cmake_args.append("-DBUILD_MOCK_RUNTIME=ON")
-
-    # -- configure --
-    log("  Configuring ...")
-    subprocess.run(cmake_args, check=True)
-
-    # -- build --
-    log("  Compiling ...")
-    subprocess.run(
-        ["cmake", "--build", str(BUILD), "--config", "RelWithDebInfo", "--parallel"],
-        check=True,
-    )
-
-    # -- install --
-    log("  Installing ...")
-    subprocess.run(
-        ["cmake", "--install", str(BUILD), "--config", "RelWithDebInfo"],
-        check=True,
-    )
-
-    log(f"  Done. Installed to: {DIST}")
+    cmd.append(f"-DPython3_EXECUTABLE={sys.executable}")
+    # Arbitrary -D escape hatch (ORT-style --cmake_extra_defines KEY=VALUE).
+    for define in args.cmake_extra_defines:
+        cmd.append(f"-D{define}")
+    run_subprocess(cmd)
 
 
-# ---------------------------------------------------------------------------
-# OGA (onnxruntime-genai) fork
-# ---------------------------------------------------------------------------
+def _llvm_built_from_source(build_dir):
+    """True when cmake/deps.cmake built LLVM in-tree (embedded sub-build)."""
+    cache = Path(build_dir) / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    for line in cache.read_text(errors="ignore").splitlines():
+        if line.startswith("HIPDNN_LLVM_EMBEDDED:") and line.rstrip().endswith("ON"):
+            return True
+    return False
 
 
-def _ensure_dml_header():
-    """Fetch dml_provider_factory.h from ORT DirectML NuGet if missing."""
-    header = ORT / "include" / "dml_provider_factory.h"
-    if header.exists():
-        return
-    log("  Fetching dml_provider_factory.h from ORT DirectML NuGet ...")
-    url = (
-        "https://www.nuget.org/api/v2/package/"
-        f"Microsoft.ML.OnnxRuntime.DirectML/{ORT_VERSION}"
-    )
-    data = urllib.request.urlopen(url).read()
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for name in z.namelist():
-            if name.endswith("dml_provider_factory.h"):
-                header.write_bytes(z.read(name))
-                return
-    raise RuntimeError("dml_provider_factory.h not found in NuGet package")
-
-
-def build_oga():
-    """Build the onnxruntime-genai fork with MorphiZen EP device support."""
-    ci = _read_ci_env("OGA_REPO", "OGA_REF")
-    oga_repo = f"https://github.com/{ci['OGA_REPO']}.git"
-    oga_ref = ci["OGA_REF"]
-    log(f"Building OGA fork ({ci['OGA_REPO']} @ {oga_ref[:10]}) ...")
-
-    if not (ORT / ".ok").exists():
-        log(
-            "  ERROR: ONNX Runtime not installed. Run build.py without --skip-build first."
-        )
-        sys.exit(1)
-
-    _ensure_msvc_env()
-
-    # -- clone --
-    sentinel = OGA_SOURCE / ".ok"
-    if not sentinel.exists():
-        if OGA_SOURCE.exists():
-            shutil.rmtree(OGA_SOURCE)
-        log("  Cloning OGA fork ...")
-        subprocess.run(
-            [
-                "git",
-                "clone",
-                "--branch",
-                "feat/oga_hipdnn_experiment",
-                oga_repo,
-                str(OGA_SOURCE),
-            ],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "checkout", oga_ref],
-            check=True,
-            cwd=str(OGA_SOURCE),
-        )
-        subprocess.run(
-            ["git", "submodule", "update", "--init", "--recursive"],
-            check=True,
-            cwd=str(OGA_SOURCE),
-        )
-        sentinel.touch()
-    else:
-        log("  OGA source already cloned.")
-
-    _ensure_dml_header()
-
-    # -- build --
-    log("  Building OGA ...")
-    # Force the OGA cmake to use the same Python interpreter that's running
-    # build.py (the conda env's python). cmake otherwise auto-picks the first
-    # python on PATH (e.g. miniforge base, system Python), producing a .pyd
-    # whose ABI tag (cp312/cp313) doesn't match the install target's cp314.
-    py_for_cmake = sys.executable.replace("\\", "/")
-    build_cmd = [
-        sys.executable,
-        str(OGA_SOURCE / "build.py"),
-        "--config",
-        "RelWithDebInfo",
-        "--cmake_generator",
-        "Ninja",
-        "--use_dml",
-        "--ort_home",
-        str(ORT),
-        "--skip_tests",
-        "--skip_examples",
-        "--parallel",
-        "--build_dir",
-        str(OGA_BUILD),
-        "--cmake_extra_defines",
-        "CMAKE_CXX_FLAGS=/EHsc",
-        # pybind11 v2.13.6 (vendored by OGA) uses the removed
-        # distutils.sysconfig under Python 3.12+; PYBIND11_FINDPYTHON=ON
-        # routes through modern CMake FindPython3 instead.
-        "--cmake_extra_defines",
-        "PYBIND11_FINDPYTHON=ON",
-        # PYBIND11_FINDPYTHON routes through CMake FindPython, which keys off
-        # `Python_EXECUTABLE` (no `3` suffix) — passing `Python3_EXECUTABLE`
-        # alone gets ignored with a "Manually-specified variables were not used"
-        # warning, and cmake then auto-detects the wrong python on PATH.
-        "--cmake_extra_defines",
-        f"Python_EXECUTABLE={py_for_cmake}",
-    ]
-    # OGA's terminal `PyPackageBuild` ninja target invokes `cmd /C "... && -m pip
-    # wheel --no-deps ."` — note the missing `python` before `-m pip`. The C/C++
-    # artifacts (DLL, EXE, .pyd) are already built before this step fails, so
-    # tolerate non-zero exit and finish the wheel ourselves below.
-    rc = subprocess.run(build_cmd).returncode
-    if rc != 0:
-        log(
-            f"  OGA build.py exited {rc} (PyPackageBuild step likely failed; "
-            "binaries should still be present)."
-        )
-
-    # -- install binaries --
-    bin_dir = DIST / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    oga_bin = OGA_BUILD / "RelWithDebInfo"
-    oga_files = {
-        "onnxruntime-genai.dll": oga_bin / "onnxruntime-genai.dll",
-        "model_benchmark.exe": oga_bin / "benchmark" / "c" / "model_benchmark.exe",
-    }
-    for name, src in oga_files.items():
-        if src.exists():
-            shutil.copy2(src, bin_dir / name)
-            log(f"  Installed {name}")
-        else:
-            log(f"  ERROR: missing OGA artifact {src}")
-            sys.exit(1)
-
-    # Required by model_benchmark.exe: the freshly-built ORT must shadow any
-    # System32 onnxruntime.dll (often v1.17 = API 17) so the EP-built-against
-    # ORT 1.24 (API 24) can load.
-    for ort_dll in ("onnxruntime.dll", "onnxruntime_providers_shared.dll"):
-        src = ORT / "lib" / ort_dll
-        if src.exists():
-            shutil.copy2(src, bin_dir / ort_dll)
-
-    # -- build wheel (workaround for OGA PyPackageBuild bug) --
-    # OGA stages the wheel layout under <build>/wheel/ before invoking pip.
-    # If the broken target left no .whl, run pip wheel manually from there.
-    wheel_dir = oga_bin / "wheel"
-    wheels = (
-        list(wheel_dir.glob("onnxruntime_genai_directml-*.whl"))
-        if wheel_dir.exists()
-        else []
-    )
-    if not wheels and wheel_dir.exists() and (wheel_dir / "setup.py").exists():
-        log("  PyPackageBuild produced no wheel — running pip wheel manually.")
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "wheel",
-                "--no-deps",
-                "--wheel-dir",
-                str(wheel_dir),
-                str(wheel_dir),
-            ],
-            check=True,
-            cwd=str(wheel_dir),
-        )
-        wheels = list(wheel_dir.glob("onnxruntime_genai_directml-*.whl"))
-
-    if wheels:
-        log(f"  Installing wheel: {wheels[0].name}")
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--force-reinstall",
-                "--no-deps",
-                str(wheels[0]),
-            ],
-            check=True,
-        )
-    else:
-        log("  ERROR: No OGA wheel produced; cannot install onnxruntime_genai.")
-        sys.exit(1)
-
-    log("  OGA build complete.")
-
-
-# ---------------------------------------------------------------------------
-# Vulkan baseline (llama.cpp built against the LunarG Vulkan SDK)
-# ---------------------------------------------------------------------------
-
-
-def _download_with_browser_ua(url, dest):
-    """Wrap download() with a Mozilla UA opener. LunarG's CDN returns 403/404
-    to the default Python urllib User-Agent."""
-    prev_opener = urllib.request._opener
-    opener = urllib.request.build_opener()
-    opener.addheaders = [("User-Agent", "Mozilla/5.0")]
-    urllib.request.install_opener(opener)
-    try:
-        download(url, dest)
-    finally:
-        urllib.request.install_opener(prev_opener)
-
-
-def fetch_vulkan_sdk():
-    log("Setting up Vulkan SDK ...")
-    sentinel = VULKAN_SDK / ".ok"
-    if sentinel.exists():
-        log("  Already installed.")
-        return
-
-    installer = CACHE / VULKAN_INSTALLER_NAME
-    _download_with_browser_ua(VULKAN_INSTALLER_URL, installer)
-
-    if VULKAN_SDK.exists():
-        shutil.rmtree(VULKAN_SDK)
-    VULKAN_SDK.mkdir(parents=True, exist_ok=True)
-
-    # Qt Installer Framework based; --root makes it install user-writable
-    # (no admin/UAC) and the silent flags suppress the GUI. Default component
-    # set covers what llama.cpp needs (Headers, Loader, glslc, validation).
-    log(f"  Running installer (silent) -> {VULKAN_SDK}")
-    r = subprocess.run(
+def build_targets(args, build_dir):
+    step("Build")
+    run_subprocess(
         [
-            str(installer),
-            "--root",
-            str(VULKAN_SDK),
-            "--accept-licenses",
-            "--default-answer",
-            "--confirm-command",
-            "install",
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--config",
+            args.config,
+            "--parallel",
+            str(args.parallel),
         ]
     )
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"Vulkan SDK installer exited with code {r.returncode}. "
-            "If a UAC prompt was dismissed, re-run from an elevated shell."
+    # The embedded LLVM sub-build marks lld EXCLUDE_FROM_ALL, so the main build
+    # never produces it. The runtime per-model link (`clang++ -fuse-ld=lld`)
+    # needs ld.lld next to the in-tree clang++, so build it explicitly by name.
+    # (We cannot pull lld into the CMake graph via add_dependencies -- that
+    # corrupts LLVM's install(EXPORT); see cmake/deps.cmake.) clang itself is
+    # already built as a dependency of lib/Runtime's bitcode step.
+    if _llvm_built_from_source(build_dir) and not IS_WINDOWS:
+        step("Build in-tree lld (runtime device-link toolchain)")
+        run_subprocess(
+            [
+                "cmake",
+                "--build",
+                str(build_dir),
+                "--config",
+                args.config,
+                "--parallel",
+                str(args.parallel),
+                "--target",
+                "lld",
+            ]
         )
-
-    must_exist = [
-        VULKAN_SDK / "Include" / "vulkan" / "vulkan.h",
-        VULKAN_SDK / "Lib" / "vulkan-1.lib",
-        VULKAN_SDK / "Bin" / "glslc.exe",
-    ]
-    missing = [p for p in must_exist if not p.exists()]
-    if missing:
-        raise RuntimeError(
-            "Vulkan SDK install looks incomplete. Missing:\n  "
-            + "\n  ".join(str(p) for p in missing)
-        )
-
-    sentinel.touch()
-    log(f"  Vulkan SDK {VULKAN_VERSION} ready.")
+    step("Install")
+    run_subprocess(["cmake", "--install", str(build_dir), "--config", args.config])
 
 
-def fetch_llamacpp():
-    log("Setting up llama.cpp source ...")
-    sentinel = LLAMACPP_SRC / ".ok"
-    if sentinel.exists():
-        # Verify the pinned commit is checked out — if HEAD moved we don't
-        # want to silently build the wrong thing.
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(LLAMACPP_SRC),
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        if head == LLAMACPP_REF:
-            log(f"  Already at pinned commit {LLAMACPP_REF[:8]}.")
-            return
-        log(f"  HEAD is {head[:8]}, expected {LLAMACPP_REF[:8]} — re-checking out.")
-
-    if not LLAMACPP_SRC.exists():
-        LLAMACPP_SRC.parent.mkdir(parents=True, exist_ok=True)
-        log(f"  Cloning {LLAMACPP_REPO} ...")
-        subprocess.run(
-            ["git", "clone", "--filter=blob:none", LLAMACPP_REPO, str(LLAMACPP_SRC)],
-            check=True,
-        )
-
-    log(f"  Fetching pinned commit {LLAMACPP_REF[:8]} ...")
-    subprocess.run(
-        ["git", "fetch", "--depth=1", "origin", LLAMACPP_REF],
-        cwd=str(LLAMACPP_SRC),
-        check=True,
-    )
-    subprocess.run(
-        ["git", "checkout", "--detach", LLAMACPP_REF],
-        cwd=str(LLAMACPP_SRC),
-        check=True,
-    )
-
-    sentinel.touch()
-    log("  llama.cpp ready.")
-
-
-def build_vulkan():
-    """Fetch the Vulkan SDK + llama.cpp source, then build llama.cpp with
-    GGML_VULKAN=ON. Installs binaries into install/llama-vulkan/bin."""
-    log("Building Vulkan baseline (llama.cpp) ...")
-
-    fetch_vulkan_sdk()
-    fetch_llamacpp()
-
-    _ensure_msvc_env()
-    for tool in ("cmake", "ninja"):
-        if not shutil.which(tool):
-            log(f"  ERROR: {tool} not found. Run: conda activate hipdnn-ep")
-            sys.exit(1)
-
-    # Make the SDK visible to CMake's FindVulkan via the standard env var.
-    os.environ["VULKAN_SDK"] = str(VULKAN_SDK)
-    os.environ["PATH"] = str(VULKAN_SDK / "Bin") + os.pathsep + os.environ["PATH"]
-
-    LLAMACPP_BUILD.mkdir(parents=True, exist_ok=True)
-
-    cmake_args = [
-        "cmake",
-        "-S",
-        str(LLAMACPP_SRC),
-        "-B",
-        str(LLAMACPP_BUILD),
-        "-G",
-        "Ninja",
-        "-DCMAKE_BUILD_TYPE=Release",
-        f"-DCMAKE_INSTALL_PREFIX={LLAMACPP_DIST}",
-        "-DGGML_VULKAN=ON",
-        "-DGGML_NATIVE=ON",
-        "-DGGML_CUDA=OFF",
-        "-DGGML_HIP=OFF",
-        "-DLLAMA_BUILD_TESTS=OFF",
-        "-DLLAMA_CURL=OFF",
-        f"-DVulkan_INCLUDE_DIR={VULKAN_SDK / 'Include'}",
-        f"-DVulkan_LIBRARY={VULKAN_SDK / 'Lib' / 'vulkan-1.lib'}",
-        f"-DVulkan_GLSLC_EXECUTABLE={VULKAN_SDK / 'Bin' / 'glslc.exe'}",
-    ]
-
-    if shutil.which("sccache"):
-        cmake_args += [
-            "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
-            "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
+def run_tests(args, build_dir):
+    """Run the LIT suite (MLIR pass verification; no GPU needed)."""
+    step("Test (check-hip-mlir-lit)")
+    run_subprocess(
+        [
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--config",
+            args.config,
+            "--target",
+            "check-hip-mlir-lit",
         ]
-
-    log("  Configuring ...")
-    subprocess.run(cmake_args, check=True)
-
-    log("  Compiling ...")
-    subprocess.run(
-        ["cmake", "--build", str(LLAMACPP_BUILD), "--config", "Release"],
-        check=True,
     )
-
-    log("  Installing ...")
-    subprocess.run(
-        ["cmake", "--install", str(LLAMACPP_BUILD), "--config", "Release"],
-        check=True,
-    )
-    log(f"  Vulkan baseline ready -> {LLAMACPP_DIST}")
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Arguments + main
 # ---------------------------------------------------------------------------
+
+
+def parse_arguments():
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--config",
+        default="Release",
+        choices=["Release", "RelWithDebInfo", "Debug"],
+        help="build configuration (default: Release)",
+    )
+    p.add_argument("--build_dir", default=str(WORKSPACE / "build" / PROJECT_NAME))
+    p.add_argument("--install_dir", default=str(WORKSPACE / "install"))
+    p.add_argument(
+        "--cmake_generator",
+        default=None,
+        help="cmake generator (default: 'Visual Studio 17 2022' on Windows, Ninja elsewhere)",
+    )
+    p.add_argument(
+        "--cmake_extra_defines",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="extra -D<KEY=VALUE> forwarded to cmake configure (repeatable)",
+    )
+    p.add_argument(
+        "--cmake_prefix_path",
+        default="",
+        help="extra prefixes (';'-separated) forwarded to CMAKE_PREFIX_PATH, "
+        "e.g. CI-built/cached llvm-install;ort-install",
+    )
+    p.add_argument(
+        "--therock_dist",
+        default="",
+        help="path to a TheRock ROCm SDK (else cmake/deps.cmake auto-downloads)",
+    )
+    p.add_argument(
+        "--hip_arch",
+        default="",
+        help="GPU arch (e.g. gfx1151); auto-detected on Linux if unset",
+    )
+    p.add_argument(
+        "--mock", action="store_true", help="mock runtime (no GPU/HIP/TheRock)"
+    )
+    p.add_argument(
+        "--skip_submodule_sync",
+        action="store_true",
+        help="do not sync/update git submodules",
+    )
+    p.add_argument(
+        "--clean", action="store_true", help="remove build/ and install/ then exit"
+    )
+    p.add_argument(
+        "--skip_build", action="store_true", help="configure only; do not build/install"
+    )
+    p.add_argument(
+        "--skip_wheel",
+        action="store_true",
+        help="do not build the Python wheel (built by default for real builds)",
+    )
+    p.add_argument(
+        "--skip_tests",
+        action="store_true",
+        help="do not run the LIT tests after install",
+    )
+    p.add_argument("--allow_running_as_root", action="store_true")
+    p.add_argument("-j", "--parallel", type=int, default=os.cpu_count() or 4)
+    return p.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Build automation for onnx-hipdnn-ep",
-    )
-    parser.add_argument(
-        "--clean",
-        action="store_true",
-        help="Remove install/ directory and start fresh",
-    )
-    parser.add_argument(
-        "--skip-build",
-        action="store_true",
-        help="Only download dependencies, do not build",
-    )
-    parser.add_argument(
-        "--build-oga",
-        action="store_true",
-        help="Build and install onnxruntime-genai fork with MorphiZen EP device support",
-    )
-    parser.add_argument(
-        "--build-vulkan",
-        action="store_true",
-        help="Build the Vulkan baseline (llama.cpp + LunarG Vulkan SDK)",
-    )
-    args = parser.parse_args()
+    log.debug("argv: %s", " ".join(shlex.quote(a) for a in sys.argv[1:]))
+    _check_python_version()
+    args = parse_arguments()
+
+    build_dir = Path(args.build_dir)
+    install_dir = Path(args.install_dir)
+    prefix_paths = [
+        s for s in args.cmake_prefix_path.replace(os.pathsep, ";").split(";") if s
+    ]
 
     if args.clean:
-        if INSTALL.exists():
-            log(f"Removing {INSTALL} ...")
-            shutil.rmtree(INSTALL)
-        log("Clean complete.")
+        for d in (build_dir, install_dir):
+            if d.exists():
+                log.info(f"removing {d}")
+                shutil.rmtree(d)
+        log.info("clean complete.")
         return
 
-    fetch_therock()
-    fetch_prebuilt_deps()
-    fetch_onnxruntime()
+    if not IS_WINDOWS and os.geteuid() == 0 and not args.allow_running_as_root:
+        raise BuildError(
+            "Running as root is not allowed. Pass --allow_running_as_root to override."
+        )
 
+    log.info(f"REPO={REPO}")
+    log.info(f"WORKSPACE={WORKSPACE}")
+    log.info(f"platform={'windows' if IS_WINDOWS else 'linux'}  jobs={args.parallel}")
+
+    args.cmake_generator = args.cmake_generator or default_generator()
+    log.info(f"cmake generator: {args.cmake_generator}")
+
+    if not args.skip_submodule_sync:
+        update_submodules()
+    check_toolchain(args.cmake_generator)
+
+    mock = args.mock
+    hip_arch = args.hip_arch.strip()
+    if not mock and not hip_arch:
+        hip_arch = detect_hip_arch() or ""
+        if hip_arch:
+            log.info(f"auto-detected HIP_ARCHITECTURES={hip_arch}")
+        else:
+            log.info("no AMD GPU detected and no --hip_arch; falling back to --mock")
+            mock = True
+
+    generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock)
     if args.skip_build:
-        log("")
-        log("Setup complete (build skipped).")
-    else:
-        configure_and_build()
-        log("")
-        log("Setup + build complete!")
+        log.info("configure done; skipping build (--skip_build).")
+        return
+    build_targets(args, build_dir)
 
-    if args.build_oga:
-        build_oga()
+    if not args.skip_tests:
+        run_tests(args, build_dir)
 
-    if args.build_vulkan:
-        build_vulkan()
-
-    log(f"  TheRock SDK:    {THEROCK}")
-    log(f"  Dependencies:   {DEPS}")
-    log(f"  ONNX Runtime:   {ORT}")
-    if not args.skip_build:
-        log(f"  Build output:   {BUILD}")
-        log(f"  Install dir:    {DIST}")
-    if args.build_oga:
-        log(f"  OGA source:     {OGA_SOURCE}")
-        log(f"  OGA build:      {OGA_BUILD}")
-    if args.build_vulkan:
-        log(f"  Vulkan SDK:     {VULKAN_SDK}")
-        log(f"  llama.cpp src:  {LLAMACPP_SRC} (commit {LLAMACPP_REF[:8]})")
-        log(f"  Vulkan binaries:{LLAMACPP_DIST}")
+    step("DONE")
+    log.info(f"install tree: {install_dir}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BuildError as exc:
+        log.error(str(exc))
+        sys.exit(1)

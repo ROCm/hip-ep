@@ -105,6 +105,11 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value kQuantType = createI64Const(quantTypeToEnum(op.getKQuantType()));
     Value vQuantType = createI64Const(quantTypeToEnum(op.getVQuantType()));
 
+    // no_causal: emit as i32 (matches wrap_group_query_attention signature).
+    Value noCausal = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type,
+        rewriter.getI32IntegerAttr(op.getNoCausal() ? 1 : 0));
+
     // Extract shape info from query memref: [batch, seq_q, num_heads *
     // head_dim]. Uses getMemRefDimSize() to handle both static and dynamic
     // dimensions — static dims become LLVM constants, dynamic dims are
@@ -180,7 +185,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     // Function signature matches wrap_group_query_attention() in gqa.cpp
-    SmallVector<Type, 38> paramTypes = {
+    SmallVector<Type, 39> paramTypes = {
         ptrType, // state
         // Inputs (14 pointers - some may be nullptr)
         ptrType, // query
@@ -215,6 +220,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // k_quant_type
         i64Type, // v_quant_type
         i64Type, // kv_cache_bit_width
+        i32Type, // no_causal
         // Shape info (6 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
@@ -229,7 +235,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 38> args = {
+    SmallVector<Value, 39> args = {
         statePtr,
         // Inputs (14 pointers)
         queryPtr, keyPtr, valuePtr, pastKeyPtr, pastValuePtr, seqlensKPtr,
@@ -237,10 +243,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         attentionBiasPtr, headSinkPtr, kScalePtr, vScalePtr,
         // Outputs (4 pointers)
         outputPtr, presentKeyPtr, presentValuePtr, outputQkPtr,
-        // Attributes (12 values)
+        // Attributes (13 values)
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
-        kvCacheBitWidth,
+        kvCacheBitWidth, noCausal,
         // Shape info (6 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
         elemSizeVal};

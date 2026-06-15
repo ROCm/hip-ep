@@ -13,6 +13,7 @@
 // Currently implemented:
 //   - onnx.Custom(SimplifiedLayerNormalization)         -> hip.rms_norm
 //   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
+//   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
 //===----------------------------------------------------------------------===//
 
@@ -106,10 +107,11 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
   // Create init tensor
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
-  // Create hip.rms_norm operation
-  auto hipOp = mlir::hip::RmsNormOp::create(rewriter, loc, resultType, context,
-                                            input, scale, init, axisI64Attr,
-                                            epsilonAttr, stashTypeI64Attr);
+  // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
+  // result type == outs operand type.
+  auto hipOp =
+      mlir::hip::RmsNormOp::create(rewriter, loc, context, input, scale, init,
+                                   axisI64Attr, epsilonAttr, stashTypeI64Attr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
@@ -265,6 +267,154 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
       replacements.push_back(mlir::tensor::EmptyOp::create(
           rewriter, loc, dummyType.getShape(), dummyType.getElementType()));
     }
+  }
+
+  rewriter.replaceOp(op, replacements);
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// onnx.Custom(SkipLayerNormalization) -> hip.add + hip.layer_norm
+//===----------------------------------------------------------------------===//
+
+/// com.microsoft.SkipLayerNormalization -> hip.add + hip.layer_norm.
+///
+/// This is STANDARD (mean-subtracting) LayerNorm with a skip/residual add and
+/// bias, distinct from SkipSimplifiedLayerNormalization (which is RMS norm and
+/// maps to hip.skip_rms_norm). No fused hip op exists for the standard-LN skip
+/// variant, so we compose:
+///   sum    = input + skip               (hip.add)
+///   output = LayerNorm(sum, gamma, beta, epsilon)   (hip.layer_norm)
+///   output[3] (input_skip_bias_sum) = sum           (the pre-norm residual)
+///
+/// MS spec (com.microsoft.SkipLayerNormalization):
+///   inputs (3-5): input, skip, gamma, [beta], [bias-on-input].
+///                 Whisper uses exactly 4 (input, skip, gamma, beta) with no
+///                 5th input-bias, so input_skip_bias_sum = input + skip.
+///   outputs (1-4): output, [mean], [inv_std_var], [input_skip_bias_sum].
+///                  Whisper consumes output[0] and output[3]; mean/inv_std are
+///                  emitted as None and never materialized.
+///
+/// We emit hip.* ops DIRECTLY (not onnx.*): the greedy driver applies these
+/// patterns with ExistingOps strictness, so a freshly-emitted onnx.* op would
+/// not be revisited for lowering (see AttentionConversion.cpp:174-178 and
+/// MultiHeadAttentionConversion.cpp:40 for the same gotcha).
+struct SkipLayerNormToHip : public mlir::RewritePattern {
+  SkipLayerNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
+                                    mlir::PatternRewriter &rewriter) const {
+  // Match com.microsoft.SkipLayerNormalization (NOT the Simplified variant,
+  // which is handled separately and maps to hip.skip_rms_norm).
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "SkipLayerNormalization")
+    return rewriter.notifyMatchFailure(
+        op, "not a SkipLayerNormalization operation");
+
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for SkipLayerNormalization");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // MS spec: 3-5 inputs (input, skip, gamma, [beta], [input-bias]).
+  size_t numOps = op->getNumOperands();
+  if (numOps < 3 || numOps > 5)
+    return rewriter.notifyMatchFailure(
+        op, "SkipLayerNormalization expects 3-5 operands");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value skip = op->getOperand(1);
+  mlir::Value gamma = op->getOperand(2);
+  // beta (output bias for the LayerNorm) is optional.
+  mlir::Value beta = getOptionalOperand(op, 3);
+  // 5th input is an optional bias added to `input` BEFORE the skip add (so it
+  // also feeds input_skip_bias_sum). Whisper does not use it; reject if present
+  // so we never silently drop it.
+  mlir::Value inputBias = getOptionalOperand(op, 4);
+  if (inputBias)
+    return rewriter.notifyMatchFailure(
+        op, "5-input SkipLayerNormalization (input-bias) not supported");
+
+  // Epsilon (default 1e-5 per MS spec).
+  llvm::APFloat epsValue(9.99999974E-6f);
+  if (auto a = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = a.getValue();
+
+  auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+
+  // === 1. sum = input + skip (this is also output[3] input_skip_bias_sum) ===
+  mlir::Value sumInit = createEmptyTensor(rewriter, loc, inputType, input);
+  mlir::Value sum = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
+                                             input, skip, sumInit)
+                        .getResult(0);
+
+  // === 2. output = LayerNorm(sum, gamma, beta, epsilon) =====================
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+
+  // hip.layer_norm uses AttrSizedOperandSegments: [ctx, input, scale, bias?,
+  // outputs*]. Whisper requests only output[0], so a single output buffer.
+  llvm::SmallVector<mlir::Value> operands;
+  operands.push_back(context);
+  operands.push_back(sum);
+  operands.push_back(gamma);
+  if (beta)
+    operands.push_back(beta);
+  operands.push_back(outputInit);
+
+  llvm::SmallVector<int32_t> segmentSizes;
+  segmentSizes.push_back(/*ctx=*/1);
+  segmentSizes.push_back(/*input=*/1);
+  segmentSizes.push_back(/*scale=*/1);
+  segmentSizes.push_back(beta ? 1 : 0);
+  segmentSizes.push_back(/*outputs=*/1);
+
+  llvm::SmallVector<mlir::NamedAttribute> attrs;
+  // Standard ONNX LayerNorm defaults: axis=-1, stash_type=1 (fp32 reduction).
+  attrs.push_back(
+      rewriter.getNamedAttr("axis", rewriter.getI64IntegerAttr(-1)));
+  attrs.push_back(rewriter.getNamedAttr(
+      "epsilon", rewriter.getF32FloatAttr(epsValue.convertToFloat())));
+  attrs.push_back(
+      rewriter.getNamedAttr("stash_type", rewriter.getI64IntegerAttr(1)));
+
+  mlir::OperationState state(loc, "hip.layer_norm");
+  state.addOperands(operands);
+  state.addAttributes(attrs);
+  state.addTypes(outputType);
+  state.addAttribute("operand_segment_sizes",
+                     rewriter.getDenseI32ArrayAttr(segmentSizes));
+  mlir::Operation *lnOp = rewriter.create(state);
+  mlir::Value output = lnOp->getResult(0);
+
+  // === 3. Map results: output[0] = LN output; output[1..2] (mean, inv_std)
+  //        are None and dropped; output[3] (input_skip_bias_sum) = sum. =====
+  unsigned numResults = op->getNumResults();
+  llvm::SmallVector<mlir::Value> replacements;
+  replacements.push_back(output); // output[0]
+  for (unsigned i = 1; i < numResults; ++i) {
+    mlir::Type origType = op->getResult(i).getType();
+    if (mlir::isa<mlir::NoneType>(origType)) {
+      replacements.push_back(mlir::Value{}); // mean / inv_std -> None
+      continue;
+    }
+    // The last real (non-None) result is input_skip_bias_sum = input + skip.
+    replacements.push_back(sum);
   }
 
   rewriter.replaceOp(op, replacements);
@@ -429,7 +579,7 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
   patterns.add<SimplifiedLayerNormToHip, SkipSimplifiedLayerNormToHip,
-               LayerNormToHip>(ctx);
+               SkipLayerNormToHip, LayerNormToHip>(ctx);
 }
 
 } // namespace hip
