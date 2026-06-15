@@ -97,9 +97,8 @@ struct GatherBlockQuantizedOpLowering
       Value arr =
           LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
       for (auto i : llvm::seq<int64_t>(0, rank)) {
-        Value dim =
-            getMemRefDimSize(type, static_cast<unsigned>(i), descriptor,
-                             rewriter, loc);
+        Value dim = getMemRefDimSize(type, static_cast<unsigned>(i), descriptor,
+                                     rewriter, loc);
         Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                              rewriter.getI32IntegerAttr(i));
         Value elemPtr =
@@ -148,27 +147,12 @@ struct GatherBlockQuantizedOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 24> args = {statePtr,
-                                   dataPtr,
-                                   indicesPtr,
-                                   scalesPtr,
-                                   zpPtr,
-                                   outPtr,
-                                   dataShape,
-                                   dataRank,
-                                   indicesShape,
-                                   indicesRank,
-                                   scalesShape,
-                                   scalesRank,
-                                   outShape,
-                                   outRank,
-                                   bits,
-                                   blockSize,
-                                   gatherAxis,
-                                   quantAxis,
-                                   dataDtypeVal,
-                                   indicesDtypeVal,
-                                   scalesDtypeVal};
+    SmallVector<Value, 24> args = {
+        statePtr,      dataPtr,    indicesPtr, scalesPtr,    zpPtr,
+        outPtr,        dataShape,  dataRank,   indicesShape, indicesRank,
+        scalesShape,   scalesRank, outShape,   outRank,      bits,
+        blockSize,     gatherAxis, quantAxis,  dataDtypeVal, indicesDtypeVal,
+        scalesDtypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

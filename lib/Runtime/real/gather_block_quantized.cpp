@@ -56,30 +56,26 @@ int map_to_hip_dtype(int64_t hipdnn_dtype) {
 } // namespace
 
 extern "C" int wrap_gather_block_quantized(
-    RuntimeState *state,
-    const void *data, const void *indices, const void *scales,
-    const void *zero_points, void *output,
-    const int64_t *data_shape, int64_t data_rank,
-    const int64_t *indices_shape, int64_t indices_rank,
-    const int64_t *scales_shape, int64_t scales_rank,
-    const int64_t *output_shape, int64_t output_rank,
-    int64_t bits, int64_t block_size, int64_t gather_axis,
-    int64_t quantize_axis,
+    RuntimeState *state, const void *data, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
     int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
   OP_PROFILE(
       "gather_block_quantized",
       [&] {
         char b[128];
-        snprintf(b, sizeof(b),
-                 "bits=%lld bs=%lld dr=%lld qr=%lld",
-                 (long long)bits, (long long)block_size,
-                 (long long)data_rank, (long long)indices_rank);
+        snprintf(b, sizeof(b), "bits=%lld bs=%lld dr=%lld qr=%lld",
+                 (long long)bits, (long long)block_size, (long long)data_rank,
+                 (long long)indices_rank);
         return std::string(b);
       },
       state);
 
-  if (!state || !data || !indices || !scales || !output ||
-      !data_shape || !indices_shape || !scales_shape || !output_shape) {
+  if (!state || !data || !indices || !scales || !output || !data_shape ||
+      !indices_shape || !scales_shape || !output_shape) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized: null required argument\n");
     return -1;
@@ -94,8 +90,8 @@ extern "C" int wrap_gather_block_quantized(
   int quantize_axis_n = static_cast<int>(quantize_axis);
   if (quantize_axis_n < 0)
     quantize_axis_n += static_cast<int>(data_rank);
-  if (gather_axis_n < 0 || gather_axis_n >= data_rank ||
-      quantize_axis_n < 0 || quantize_axis_n >= data_rank) {
+  if (gather_axis_n < 0 || gather_axis_n >= data_rank || quantize_axis_n < 0 ||
+      quantize_axis_n >= data_rank) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized: axis out of range "
             "(data_rank=%lld gather_axis=%lld quantize_axis=%lld)\n",
@@ -148,8 +144,8 @@ extern "C" int wrap_gather_block_quantized(
   // zero_points tensors are not packed and keep their original shape (the
   // per-block scale axis already divides the logical element count).
   int64_t logical_data_shape_buf[8];
-  if (data_rank > static_cast<int64_t>(sizeof(logical_data_shape_buf) /
-                                       sizeof(int64_t))) {
+  if (data_rank >
+      static_cast<int64_t>(sizeof(logical_data_shape_buf) / sizeof(int64_t))) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized: data_rank=%lld exceeds "
             "max supported rank %zu\n",
@@ -208,13 +204,11 @@ extern "C" int wrap_gather_block_quantized(
       (long long)total);
 
   return hip_gather_block_quantized(
-      stream, data, indices, scales, zero_points, output,
-      logical_data_shape, static_cast<int>(data_rank),
-      indices_shape, static_cast<int>(indices_rank),
-      scales_shape, static_cast<int>(scales_rank),
-      output_shape, static_cast<int>(output_rank),
-      static_cast<int>(bits), static_cast<int>(block_size),
-      gather_axis_n, quantize_axis_n,
-      default_zp, is_signed_data ? 1 : 0, indices_is_int64,
-      hip_out_dtype);
+      stream, data, indices, scales, zero_points, output, logical_data_shape,
+      static_cast<int>(data_rank), indices_shape,
+      static_cast<int>(indices_rank), scales_shape,
+      static_cast<int>(scales_rank), output_shape,
+      static_cast<int>(output_rank), static_cast<int>(bits),
+      static_cast<int>(block_size), gather_axis_n, quantize_axis_n, default_zp,
+      is_signed_data ? 1 : 0, indices_is_int64, hip_out_dtype);
 }

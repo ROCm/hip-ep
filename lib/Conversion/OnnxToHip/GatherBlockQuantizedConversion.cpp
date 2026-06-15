@@ -53,8 +53,8 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
     mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "GatherBlockQuantized")
-    return rewriter.notifyMatchFailure(
-        op, "not a GatherBlockQuantized custom op");
+    return rewriter.notifyMatchFailure(op,
+                                       "not a GatherBlockQuantized custom op");
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
     return rewriter.notifyMatchFailure(op, "not a com.microsoft domain op");
@@ -65,8 +65,8 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "expected at least 3 inputs (data, indices, scales)");
   if (op->getNumResults() != 1)
-    return rewriter.notifyMatchFailure(
-        op, "expected exactly 1 result (output)");
+    return rewriter.notifyMatchFailure(op,
+                                       "expected exactly 1 result (output)");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
@@ -94,19 +94,16 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   //   quantize_axis  — optional, default 0
   auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
   if (!bitsIntAttr)
-    return rewriter.notifyMatchFailure(
-        op, "missing required `bits` attribute");
+    return rewriter.notifyMatchFailure(op, "missing required `bits` attribute");
   auto blockSizeIntAttr = op->getAttrOfType<mlir::IntegerAttr>("block_size");
   if (!blockSizeIntAttr)
     return rewriter.notifyMatchFailure(
         op, "missing required `block_size` attribute");
   auto gatherAxisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("gather_axis");
-  auto quantAxisIntAttr =
-      op->getAttrOfType<mlir::IntegerAttr>("quantize_axis");
+  auto quantAxisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("quantize_axis");
 
   auto bitsAttr = rewriter.getI64IntegerAttr(bitsIntAttr.getSInt());
-  auto blockSizeAttr =
-      rewriter.getI64IntegerAttr(blockSizeIntAttr.getSInt());
+  auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSizeIntAttr.getSInt());
   auto gatherAxisAttr = rewriter.getI64IntegerAttr(
       gatherAxisIntAttr ? gatherAxisIntAttr.getSInt() : 0);
   auto quantAxisAttr = rewriter.getI64IntegerAttr(
@@ -127,22 +124,19 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   llvm::SmallVector<mlir::Value> dynSizes;
   int64_t outDimIdx = 0;
   for (auto i : llvm::seq<int64_t>(0, normalizedGatherAxis)) {
-    if (outDimIdx < resultType.getRank() &&
-        resultType.isDynamicDim(outDimIdx))
+    if (outDimIdx < resultType.getRank() && resultType.isDynamicDim(outDimIdx))
       dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
     outDimIdx++;
   }
   for (auto i : llvm::seq<int64_t>(0, indicesType.getRank())) {
-    if (outDimIdx < resultType.getRank() &&
-        resultType.isDynamicDim(outDimIdx))
+    if (outDimIdx < resultType.getRank() && resultType.isDynamicDim(outDimIdx))
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, indices, i));
     outDimIdx++;
   }
   for (auto i :
        llvm::seq<int64_t>(normalizedGatherAxis + 1, dataType.getRank())) {
-    if (outDimIdx < resultType.getRank() &&
-        resultType.isDynamicDim(outDimIdx))
+    if (outDimIdx < resultType.getRank() && resultType.isDynamicDim(outDimIdx))
       dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
     outDimIdx++;
   }
@@ -161,8 +155,8 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
 
 } // namespace
 
-void populateGatherBlockQuantizedConversionPatterns(
-    RewritePatternSet &patterns, MLIRContext *ctx) {
+void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
+                                                    MLIRContext *ctx) {
   patterns.add<GatherBlockQuantizedToHip>(ctx);
 }
 
