@@ -48,13 +48,14 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
 
   // 1b'. Canonicalize + CSE immediately after shape inference. The dynamic-
   //      shape op conversions (e.g. pool / reduce) size each dynamic result dim
-  //      by emitting `tensor.dim` of a (statically-typed) producer plus a little
-  //      index arithmetic, then build the `tensor.empty` init from those values.
-  //      InferShapes above has just tightened many of those producers to static
-  //      dims, so canonicalization now folds `tensor.dim` of a static dim to a
-  //      constant, collapses the dependent arithmetic, and DCEs the dead shape
-  //      computations; CSE dedups the identical per-dim recomputations the
-  //      per-op conversions emit independently. Both run before bufferize so
+  //      by emitting `tensor.dim` of a (statically-typed) producer plus a
+  //      little index arithmetic, then build the `tensor.empty` init from those
+  //      values. InferShapes above has just tightened many of those producers
+  //      to static dims, so canonicalization now folds `tensor.dim` of a static
+  //      dim to a constant, collapses the dependent arithmetic, and DCEs the
+  //      dead shape computations; CSE dedups the identical per-dim
+  //      recomputations the per-op conversions emit independently. Both run
+  //      before bufferize so
   //      `--hip-pool-allocs` sees folded constant dims instead of fragmented
   //      `memref.dim` chains (un-folded chains split the pool and pessimize
   //      buffer reuse).
