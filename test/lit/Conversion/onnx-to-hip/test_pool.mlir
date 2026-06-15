@@ -143,8 +143,9 @@ module {
   }
 
   // Test 7: non-overlapping 2D AveragePool (kernel == stride, no pad).
-  // Pre-lowering decomposes to expand_shape + transpose + reduce_sum + mul
+  // Pre-lowering decomposes to expand_shape + transpose + reduce_mean
   // instead of hip.pool — the fast path for projector-style patch pooling.
+  // The mean division happens in the reduce_mean kernel (no separate Mul).
   func.func @test_averagepool_2d(%arg0: tensor<1x3x32x32xf32>)
       -> tensor<1x3x16x16xf32> {
     // CHECK-LABEL: func.func @test_averagepool_2d
@@ -159,9 +160,8 @@ module {
     // CHECK-SAME: output_shape [1, 3, 16, 2, 16, 2]
     // CHECK: hip.transpose
     // CHECK-SAME: perm = [0, 1, 2, 4, 3, 5]
-    // CHECK: hip.reduce_sum
+    // CHECK: hip.reduce_mean
     // CHECK-SAME: keepdims = 0
-    // CHECK: hip.mul
 
     return %y : tensor<1x3x16x16xf32>
   }
