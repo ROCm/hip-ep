@@ -744,10 +744,10 @@ private:
     // thread-local but each owns a DISTINCT hipStream. Without this re-publish,
     // a memref.copy in one specialization's main_graph can run on a different
     // specialization's stream than the consuming kernels (which take `state`'s
-    // stream) -> unordered producer/consumer -> nondeterministic data race
-    // (observed as partial/garbled ScatterND in the Qwen3.5 VLM embedding graph,
-    // and only inside the live multi-session pipeline; isolated single-session
-    // runs serialize coincidentally). Binding it here makes every main_graph
+    // stream) -> unordered producer/consumer -> nondeterministic data race on
+    // the copied buffer. It only manifests while several specializations are
+    // concurrently live; an isolated single-session run serializes coincidentally
+    // and hides it. Binding it here makes every main_graph
     // invocation's copies use its own stream. begin_compute also resets the
     // per-Compute GQA seqlens_k cache, which is correct at compute entry; the
     // EP's own begin_compute call is then a harmless idempotent repeat.
