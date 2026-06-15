@@ -255,6 +255,12 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   attrs.push_back(rewriter.getNamedAttr("v_quant_type", vQuantTypeAttr));
   attrs.push_back(
       rewriter.getNamedAttr("kv_cache_bit_width", kvCacheBitWidthAttr));
+  // Explicit no_causal=false: existing GroupQueryAttention ONNX op is always
+  // causal. The Whisper bidirectional paths (encoder self-attn and decoder
+  // cross-attn) construct hip.gqa via different conversions that set this to
+  // true explicitly.
+  attrs.push_back(
+      rewriter.getNamedAttr("no_causal", rewriter.getBoolAttr(false)));
 
   // Create operation using builder
   // We need to compute the operand_segment_sizes attribute for

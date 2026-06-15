@@ -42,6 +42,28 @@ EP_REGISTRATION_NAME = "MorphiZenExecutionProvider"
 _morphizen_registered = False
 
 
+def _ep_runtime_dirs(repo_root):
+    """Return (ep_bin, therock_bin) for locating the EP DLL + ROCm runtime DLLs.
+
+    Honours an out-of-tree install layout via env vars (set them when you build
+    with a custom --install_dir / --build_dir, e.g. the quick-start $ROOT layout):
+      MORPHIZEN_EP_BIN  -- dir holding onnxruntime_morphizen_ep.dll
+                           (default <repo>/install/dist/bin)
+      THEROCK_DIST      -- TheRock SDK root; its bin/ holds amdhip64*.dll etc.
+                           (default <repo>/install/therock)
+    Falls back to the legacy in-repo layout so existing setups keep working.
+    """
+    ep_env = os.environ.get("MORPHIZEN_EP_BIN")
+    ep_bin = pathlib.Path(ep_env) if ep_env else repo_root / "install" / "dist" / "bin"
+    therock_env = os.environ.get("THEROCK_DIST")
+    therock_bin = (
+        pathlib.Path(therock_env) / "bin"
+        if therock_env
+        else repo_root / "install" / "therock" / "bin"
+    )
+    return ep_bin, therock_bin
+
+
 # ── Model download / shape fixing ────────────────────────────────────────────
 
 
@@ -50,6 +72,35 @@ def download(url: str, dest: pathlib.Path) -> None:
     urllib.request.urlretrieve(url, str(dest))
     mb = dest.stat().st_size / (1024 * 1024)
     print(f"  Saved {dest.name} ({mb:.1f} MB)")
+
+
+def setup_jfk_sample(data_dir: pathlib.Path) -> bool:
+    """Idempotently fetch ``jfk.wav`` (the JFK inaugural-address excerpt) into
+    ``data_dir/jfk.wav``.
+
+    Source: the whisper.cpp repo's ``samples/jfk.wav`` — a 16 kHz mono 16-bit PCM
+    WAV mirror of the clip openai/whisper ships only as FLAC. We download rather
+    than commit the binary so the PR stays free of test-data blobs (the file is
+    gitignored). Provenance / license is documented in
+    ``test/python/data/whisper/README.md``.
+
+    Returns ``True`` if the file is present (already cached or freshly fetched),
+    ``False`` if the network fetch failed and nothing is cached (caller should
+    ``pytest.skip``). Never raises on a fetch failure.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    dest = data_dir / "jfk.wav"
+    if dest.exists():
+        return True  # idempotent — already cached
+    url = "https://github.com/ggml-org/whisper.cpp/raw/master/samples/jfk.wav"
+    try:
+        download(url, dest)
+    except Exception as e:  # network / 404 / partial write
+        print(f"  [jfk] fetch failed ({e!r})")
+        # Clean up any partial file so the existence gate above stays honest.
+        dest.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def fix_shapes(src: pathlib.Path, dst: pathlib.Path, dim_map: dict) -> None:
@@ -66,6 +117,208 @@ def fix_shapes(src: pathlib.Path, dst: pathlib.Path, dim_map: dict) -> None:
                 d.dim_value = v
     onnx.save(m, str(dst), save_as_external_data=False)
     print(f"  Fixed-shape model -> {dst.name}")
+
+
+def _prune_dead_nodes(graph) -> int:
+    """Erase nodes whose every output is neither consumed by another node nor a
+    graph output. Iterates to a fixed point so a dead chain (e.g.
+    Shape→Gather→Add→Unsqueeze) is removed end-to-end: deleting the tail
+    Unsqueeze makes the Add dead on the next pass, then the Gather, then the
+    Shape. Returns the number of nodes removed. Initializers/graph inputs are
+    never touched — only graph.node entries. Behavior-preserving: a node deleted
+    here is by definition unreachable from any graph output.
+    """
+    removed = 0
+    graph_out = {o.name for o in graph.output}
+    changed = True
+    while changed:
+        changed = False
+        consumed = {i for n in graph.node for i in n.input if i}
+        for node in list(graph.node):
+            if all(o not in consumed and o not in graph_out for o in node.output):
+                graph.node.remove(node)
+                removed += 1
+                changed = True
+    return removed
+
+
+def inject_seqlens_k(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """Inject the ``past_sequence_length`` input into all self-attention
+    ``MultiHeadAttention`` nodes in a Whisper decoder ONNX. Cross-attention MHAs
+    (identified by an empty or ``past_key_cross_*`` ``input[6]``) are untouched.
+
+    Self-attn detection: ``input[6].startswith("past_key_self_")``. We pad
+    ``node.input`` to length 8 (empty strings for missing slots — bias /
+    key_padding_mask / attention_bias are optional in MHA) and append
+    ``input[8] = "past_sequence_length"`` per the MHA spec.
+
+    The ``past_sequence_length`` input (MHA spec slot 9) is the ONLY signal the
+    MorphiZen converter needs to recognise post-surgery decoder self-attn
+    (``MultiHeadAttentionConversion.cpp`` branch 2 keys on the operand's
+    presence). We deliberately do NOT add a ``past_present_share_buffer``
+    attribute: that attribute is NOT in ORT's ``com.microsoft.MultiHeadAttention``
+    schema (it lives on ``GroupQueryAttention``/``Attention``), so emitting it
+    makes ORT reject the graph at session load with "Unrecognized attribute:
+    past_present_share_buffer for operator MultiHeadAttention" — before the EP
+    ever sees the model. Threading the input alone keeps the graph ORT-valid
+    while still driving the shared-buffer KV path.
+
+    Idempotency contract: this helper short-circuits when ``dst`` exists.
+    Callers MUST delete ``dst`` when ``src`` changes, otherwise stale output
+    will be reused silently.
+    """
+    if dst.exists():
+        return  # idempotent
+    import onnx
+    from onnx import TensorProto, helper
+
+    m = onnx.load(str(src), load_external_data=False)
+    # Add new graph input (skip if a prior run already added it)
+    if "past_sequence_length" not in {i.name for i in m.graph.input}:
+        m.graph.input.append(
+            helper.make_tensor_value_info(
+                "past_sequence_length", TensorProto.INT32, [1]
+            )
+        )
+    self_count = 0
+    for node in m.graph.node:
+        if node.op_type != "MultiHeadAttention":
+            continue
+        # Self-attn nodes have past_key_self_* in slot 6; cross-attn have
+        # either no slot 6 (3-input form) or a non-self past_key reference.
+        if len(node.input) < 7 or not node.input[6].startswith("past_key_self_"):
+            continue
+        # Pad to 8 inputs (bias / key_padding_mask / attention_bias may be
+        # absent), then append slot 8 = past_sequence_length. The while-loop
+        # above guarantees len(node.input) == 8 on exit, so a plain append
+        # always lands at index 8 — no need for a separate overwrite branch.
+        while len(node.input) < 8:
+            node.input.append("")
+        node.input.append("past_sequence_length")
+        # NOTE: do NOT add a past_present_share_buffer attribute here — ORT's
+        # com.microsoft.MultiHeadAttention schema does not recognise it and
+        # would reject the graph at load. The slot-8 past_sequence_length input
+        # is the sole signal the MorphiZen converter keys on (see
+        # MultiHeadAttentionConversion.cpp branch 2).
+        self_count += 1
+
+    # ── Replace the position-embedding Slice with a Gather(position_ids) ───────
+    #
+    # The decoder's position-embedding preprocessing computes a slice offset into
+    # ``decoder.embed_positions.weight`` from ``Shape(past_key_self_0)[2]`` (the
+    # past-KV seq dim) and does ``Slice(embed_positions, [offset], [offset+S])``.
+    # In the original DYNAMIC model the past-KV seq dim == the real past length
+    # (0 at prefill, growing). But shared-buffer ``fix_shapes`` pins that dim to
+    # the STATIC 448-slot buffer, so the offset becomes a constant 448 → the
+    # Slice reads ``embed_positions[448:452]`` → empty {0,1280} → "Add
+    # Incompatible dimensions" at load.
+    #
+    # The OBVIOUS fix (re-source the offset from ``past_sequence_length`` and
+    # rebuild the Slice bounds) does NOT work on the MorphiZen GPU path: a Slice
+    # with RUNTIME-data-dependent start/end falls through to the ``hip.slice``
+    # runtime op, whose start/end come from int64 SCALAR arithmetic
+    # (Cast/Gather/Add/Sub) that the GPU lowering mishandles — int64 scalar Add
+    # lowers to ``miopenOpTensor`` and fails ("descriptor cache creation
+    # failed"), so the bounds resolve to 0, ``wrap_slice`` computes extent 0 and
+    # aborts ("derived output extent != IR output_shape"), and the
+    # position-embedding output is left ZERO. Zeroed position embeddings corrupt
+    # the hidden state going into layer 0 → wrong present_key_self_0 → broken
+    # logits (prefill argmax 50360 instead of 400). This was the LAST greedy
+    # blocker, and it is a GPU-runtime limitation (runtime-bounds Slice +
+    # int64-scalar arith), not a graph-semantics bug — the SAME surgered graph
+    # run on the ORT CPU EP produces the correct embedding (cosine 0.99999).
+    #
+    # Fix: eliminate the runtime-bounds Slice AND the scalar arithmetic entirely.
+    # Add a ``position_ids`` int64 [sequence_length] graph input and replace the
+    # Slice with ``Gather(embed_positions.weight, position_ids, axis=0)``. A
+    # Gather with a runtime int64 *indices input* lowers to ``hip.gather``
+    # (wrap_gather), which IS correct on GPU (verified). The caller feeds
+    # ``position_ids = [real_past, real_past+1, ..., real_past+S-1]`` where
+    # ``real_past = total_tokens - S`` (0 at prefill, the running past count at
+    # decode) — the SAME values the original Slice would have produced, now
+    # computed host-side where it is trivial. This also decouples the
+    # position offset from ``past_sequence_length`` (which still feeds the 32
+    # self-attn MHAs as seqlens_k under the runtime's total = seqlens_k + 1
+    # convention), removing the two-consumers-need-different-values entanglement.
+    slice_node = None
+    for node in m.graph.node:
+        if (
+            node.op_type == "Slice"
+            and node.input
+            and node.input[0].endswith("embed_positions.weight")
+        ):
+            slice_node = node
+            break
+    if slice_node is not None:
+        if "position_ids" not in {i.name for i in m.graph.input}:
+            m.graph.input.append(
+                helper.make_tensor_value_info(
+                    "position_ids", TensorProto.INT64, ["sequence_length"]
+                )
+            )
+        embed_positions = slice_node.input[0]
+        slice_out = slice_node.output[0]
+        gather_node = helper.make_node(
+            "Gather",
+            [embed_positions, "position_ids"],
+            [slice_out],  # reuse the Slice's output name → consumers unchanged
+            name="surgery/pos_embed_gather",
+            axis=0,
+        )
+        # Remove the Slice. Its now-dead index-producer chain (the
+        # Shape→Gather→Add→Unsqueeze that computed the old [offset, offset+S]
+        # bounds) becomes unreachable from any graph output; the _prune_dead_nodes
+        # sweep below erases it so the saved graph is clean. (ONNX/the EP would
+        # ignore the dead nodes at load anyway — this is purely for a tidy graph.)
+        m.graph.node.remove(slice_node)
+        m.graph.node.insert(0, gather_node)
+        print(
+            "  Replaced position-embedding Slice with "
+            "Gather(embed_positions, position_ids) (shared-buffer GPU fix)"
+        )
+
+    # ── Widen input_ids int32 -> int64 (token-embedding Gather indices) ────────
+    #
+    # The MorphiZen ``hip_gather`` custom kernel hardcodes the INDICES operand as
+    # ``int64_t*`` (gather_kernel.hip ``gather_axis0_kernel``); it has no int32
+    # indices path. Whisper's ``input_ids`` is INT32, so the token-embedding
+    # ``Gather(embed_tokens.weight, input_ids)`` reads the int32 indices as int64
+    # on GPU → garbage indices → the kernel's bounds check zeros every row → the
+    # token embedding is ALL ZEROS (verified: int32-indices Gather cos -0.016 /
+    # row0 = 0 vs int64-indices Gather cos 1.0). That zeroed token embedding (on
+    # top of the now-correct position embedding) corrupts the hidden state into
+    # layer 0 → broken logits.
+    #
+    # An in-graph ``Cast(input_ids int32->int64)`` does NOT work either: the
+    # ``hip_cast`` kernel rejects int32->int64 ("unsupported conversion
+    # input_dtype=3 -> output_dtype=2"), producing zero indices. So fix at the
+    # graph BOUNDARY: re-type the ``input_ids`` graph input to INT64 and have the
+    # caller feed int64 ids directly. The Gather then receives genuine int64
+    # indices (the only dtype the kernel supports). ``input_ids`` is consumed
+    # only by the token Gather (and a now-dead Shape from the replaced offset
+    # chain), so widening it is safe. No runtime rebuild; GATE-1 (Llama) is
+    # untouched. (A proper runtime fix would thread the indices dtype through
+    # hip_gather / hip_cast; left as a follow-up — the int64-input boundary fully
+    # resolves Whisper.)
+    for gi in m.graph.input:
+        if gi.name == "input_ids":
+            gi.type.tensor_type.elem_type = TensorProto.INT64
+            print("  Re-typed input_ids graph input int32 -> int64 (GPU Gather fix)")
+            break
+
+    # Drop nodes orphaned by the surgery above (the position-embedding Slice's
+    # index-producer chain, plus any Shape(input_ids) left dangling once the
+    # offset arithmetic was removed). Purely cosmetic — these are already
+    # unreachable from a graph output, so behavior is unchanged; this just keeps
+    # the saved graph readable in a viewer.
+    n_pruned = _prune_dead_nodes(m.graph)
+    if n_pruned:
+        print(f"  Pruned {n_pruned} dead node(s) orphaned by surgery")
+
+    onnx.save(m, str(dst), save_as_external_data=False)
+    print(
+        f"  Injected past_sequence_length into {self_count} self-attn MHAs -> {dst.name}"
+    )
 
 
 # ── Perf helpers ─────────────────────────────────────────────────────────────
@@ -184,12 +437,40 @@ def compare_outputs(ref_outputs, test_outputs, output_names, label, valid_seq=No
     return all_ok, report_str
 
 
+def get_amd_dml_providers():
+    """Return DML provider list targeting the AMD GPU, falling back to default."""
+    if "DmlExecutionProvider" not in ort.get_available_providers():
+        return None
+    try:
+        import subprocess
+
+        r = subprocess.run(
+            [
+                "powershell",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for i, line in enumerate(r.stdout.strip().splitlines()):
+            if "AMD" in line.upper() or "RADEON" in line.upper():
+                print(f"  DirectML: using device {i} ({line.strip()})")
+                return [
+                    ("DmlExecutionProvider", {"device_id": str(i)}),
+                    "CPUExecutionProvider",
+                ]
+    except Exception:
+        pass
+    return ["DmlExecutionProvider", "CPUExecutionProvider"]
+
+
 def register_morphizen_ep(repo_root):
     """Register the MorphiZen EP library with ONNX Runtime (once per process)."""
     global _morphizen_registered
 
-    dist_bin = repo_root / "install" / "dist" / "bin"
-    therock_bin = repo_root / "install" / "therock" / "bin"
+    dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
     ep_dll = dist_bin / EP_DLL_NAME
 
     if not ep_dll.exists():
@@ -246,6 +527,311 @@ def make_llama_inputs(cfg: LlamaModelConfig, seq_len=1, seed=0) -> dict:
             (1, cfg.num_kv_heads, cfg.max_seq_len, cfg.head_dim), dtype=np.float16
         )
     return inputs
+
+
+# ── Whisper-large-v3 setup ───────────────────────────────────────────────────
+#
+# The raw fp32 + fp16 Whisper ONNX bundles are PRODUCED by
+# ``scripts/build_whisper_models.py`` (the pinned OGA DirectML model builder,
+# from ``openai/whisper-large-v3`` at a pinned commit revision) — they are NOT
+# downloaded. The setup functions below are consume-only: they run the shared
+# decoder surgery + fix_shapes on an already-built raw bundle and raise
+# FileNotFoundError with a build hint if it is absent.
+
+
+@dataclass
+class WhisperModelConfig:
+    """Shape parameters for Whisper-large-v3.
+
+    Defaults match the official ``openai/whisper-large-v3`` config; override
+    when running smaller variants. ``n_audio_ctx=1500`` is fixed by the
+    log-mel preprocessor (30 s @ 100 Hz / 2 conv stride).
+    """
+
+    n_audio_state: int = 1280
+    n_audio_layer: int = 32
+    n_audio_head: int = 20
+    n_audio_ctx: int = 1500
+    n_text_state: int = 1280
+    n_text_layer: int = 32
+    n_text_head: int = 20
+    n_text_ctx: int = 448
+    n_mels: int = 128
+    n_vocab: int = 51866
+
+
+def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
+    """Idempotent fp32 Whisper preparation — CONSUMES a locally-built raw model.
+
+    The raw fp32 ONNX is produced by ``scripts/build_whisper_models.py`` (pinned
+    OGA DirectML builder) into ``model_dir`` — there is NO download (the old
+    external prebuilt was non-reproducible). This function only runs the shared
+    surgery + fix_shapes on the already-present raw bundle.
+
+    Raises FileNotFoundError with a build hint if the raw model is absent, so
+    callers (pytest fixture / CLI) can skip/instruct cleanly.
+    """
+    # Guard checks BOTH encoder + decoder: _apply_whisper_surgery_and_fix_shapes
+    # reads encoder.onnx (fix_shapes) too, so a half-built dir with one but not
+    # the other must fail here with the build hint, not crash later raw.
+    for fname in ("encoder.onnx", "decoder.onnx"):
+        if not (model_dir / fname).exists():
+            raise FileNotFoundError(
+                f"Whisper raw model incomplete at {model_dir} (missing {fname}). "
+                "Build it first: python build.py --build-whisper-models"
+            )
+    _apply_whisper_surgery_and_fix_shapes(model_dir)
+
+
+def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
+    """Surgery + fix_shapes on a locally-built Whisper bundle (fp32 OR fp16).
+
+    Consumes ``model_dir/{encoder,decoder}.onnx`` (+ ``.data`` sidecars) and emits
+    ``decoder_surgery.onnx`` + the three canonical fixed-shape variants. This is
+    the SAME pipeline for both precisions: the fp16 OGA build has the identical
+    graph layout (node names, 8-input self-attn MHA, ``embed_positions`` Slice,
+    int32 ``input_ids``) as the locally-built fp32 model, so ``inject_seqlens_k`` and
+    ``fix_shapes`` apply unchanged. Idempotent (each step gates on its output).
+    """
+    # Stage 2: KV-cache surgery on the decoder (past_sequence_length input +
+    # position_ids Gather + int64 input_ids — see inject_seqlens_k).
+    decoder_surgery = model_dir / "decoder_surgery.onnx"
+    inject_seqlens_k(model_dir / "decoder.onnx", decoder_surgery)
+
+    # Stage 3: fix dynamic shapes — three variants with canonical names.
+    encoder_fixed = model_dir / "encoder_fixed.onnx"
+    if not encoder_fixed.exists():
+        fix_shapes(model_dir / "encoder.onnx", encoder_fixed, {"batch_size": 1})
+
+    # Pin past_seq_len == total_seq_len == n_text_ctx so the runtime can alias
+    # past and present KV buffers (shared-buffer mode).
+    prefill_fixed = model_dir / "decoder_fixed_prefill.onnx"
+    if not prefill_fixed.exists():
+        fix_shapes(
+            decoder_surgery,
+            prefill_fixed,
+            {
+                "batch_size": 1,
+                "sequence_length": 4,
+                "past_sequence_length": 448,
+                "total_sequence_length": 448,
+            },
+        )
+
+    decode_fixed = model_dir / "decoder_fixed_decode.onnx"
+    if not decode_fixed.exists():
+        fix_shapes(
+            decoder_surgery,
+            decode_fixed,
+            {
+                "batch_size": 1,
+                "sequence_length": 1,
+                "past_sequence_length": 448,
+                "total_sequence_length": 448,
+            },
+        )
+
+
+def setup_whisper_fp16_model_dir(model_dir: pathlib.Path) -> None:
+    """Idempotent fp16 Whisper preparation — CONSUMES a locally-built raw model.
+
+    Identical to ``setup_whisper_model_dir`` but for the fp16 bundle (built by
+    ``scripts/build_whisper_models.py`` with -p fp16). The fp16 OGA graph has the
+    same layout as fp32, so ``_apply_whisper_surgery_and_fix_shapes`` applies
+    unchanged. The fp16 lm_head stays fp32 (OGA convention) -> argmax-lossless.
+    """
+    # Guard checks BOTH encoder + decoder (see setup_whisper_model_dir).
+    for fname in ("encoder.onnx", "decoder.onnx"):
+        if not (model_dir / fname).exists():
+            raise FileNotFoundError(
+                f"Whisper fp16 raw model incomplete at {model_dir} (missing {fname}). "
+                "Build it first: python build.py --build-whisper-models"
+            )
+    _apply_whisper_surgery_and_fix_shapes(model_dir)
+
+
+def make_whisper_inputs(audio_path: pathlib.Path, cfg: WhisperModelConfig) -> dict:
+    """Build encoder input from a 16 kHz mono WAV using the HF feature extractor.
+
+    Returns ``{"audio_features": np.ndarray[1, n_mels, 3000] fp32}``.
+
+    NOTE: Whisper is fp32-only here (``encoder_fixed.onnx`` and the CPU
+    ``encoder.onnx`` reference are both fp32), so ``audio_features`` is fed as
+    fp32 to every backend with no caller cast. ``WhisperFeatureExtractor``
+    always returns fp32, which is exactly what the fp32 graphs expect.
+
+    Audio loading: ``soundfile`` for the file, ``librosa.resample`` if the WAV
+    isn't already 16 kHz. ``librosa`` is an optional dep (no hard requirement
+    in environment.yml today) — the bundled ``jfk.wav`` is 16 kHz so the
+    smoke path does NOT need librosa. If you supply a non-16k WAV and
+    librosa is missing, this raises ``ImportError`` with a clear message.
+    """
+    import soundfile as sf
+    from transformers import WhisperFeatureExtractor
+
+    # The processor config (mel filterbanks, target sample rate, n_mels)
+    # is the same across whisper-large-v3 variants — use the openai original
+    # so we don't depend on the built ONNX bundle shipping a processor.
+    fe = WhisperFeatureExtractor.from_pretrained("openai/whisper-large-v3")
+
+    audio, sr = sf.read(str(audio_path))
+    # soundfile returns shape (N,) for mono, (N, C) for multi-channel.
+    if audio.ndim == 2:
+        audio = audio.mean(axis=1)
+    if sr != 16000:
+        try:
+            import librosa
+        except ImportError as e:
+            raise ImportError(
+                f"Audio at {audio_path} is {sr} Hz but librosa is not installed; "
+                "install librosa to enable resampling, or supply a 16 kHz WAV."
+            ) from e
+        audio = librosa.resample(audio.astype(np.float32), orig_sr=sr, target_sr=16000)
+
+    out = fe(audio, sampling_rate=16000, return_tensors="np")
+    return {"audio_features": out["input_features"].astype(np.float32)}
+
+
+# ── LibriSpeech test-clip provisioning (no `datasets` / `jiwer` deps) ─────────
+#
+# The HF datasets-server exposes the LibriSpeech "dummy" split (5-15 s read-speech
+# clips from public-domain LibriVox audiobooks, CC BY 4.0) plus the ground-truth
+# reference text and signed FLAC URLs over plain HTTP JSON. We fetch a handful of
+# clips ONCE, transcode FLAC -> 16 kHz mono WAV via soundfile (no librosa needed —
+# LibriSpeech is already 16 kHz), and write the WAVs + a references.json locally
+# (gitignored, NOT committed) so the tests are deterministic and offline after the
+# first run. The signed URLs expire, so the fetch is best-effort: if it fails AND
+# no cached WAVs exist, the caller pytest.skips.
+
+LIBRISPEECH_DATASET = "hf-internal-testing/librispeech_asr_dummy"
+LIBRISPEECH_N_SAMPLES = 5  # sample_0.wav .. sample_4.wav
+# The ~30 s "long" clip is built by concatenating the first few dummy clips with
+# short silences between them; the reference is their texts joined in order. This
+# gives a known ground truth for free and stays just under Whisper's 30 s window
+# (so it exercises deep decode without triggering whisper's chunking).
+LIBRISPEECH_LONG_TARGET_S = 29.0
+LIBRISPEECH_LONG_SILENCE_S = 0.3
+
+
+def _fetch_librispeech_rows(n: int) -> list:
+    """Fetch the first ``n`` dummy clips' (flac_bytes, reference_text) over HTTP.
+
+    Returns a list of ``(audio_bytes, text)`` tuples, or raises on any network /
+    JSON / signature error so the caller can decide to skip vs use cache.
+    """
+    import json
+
+    url = (
+        "https://datasets-server.huggingface.co/rows"
+        f"?dataset={LIBRISPEECH_DATASET}&config=clean&split=validation"
+        f"&offset=0&length={max(n, 10)}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    data = json.load(urllib.request.urlopen(req, timeout=120))
+    rows = data["rows"]
+    out = []
+    for r in rows[:n]:
+        row = r["row"]
+        src = row["audio"][0]["src"]  # signed flac URL
+        areq = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"})
+        audio_bytes = urllib.request.urlopen(areq, timeout=120).read()
+        out.append((audio_bytes, row["text"]))
+    return out
+
+
+def setup_librispeech_samples(data_dir: pathlib.Path) -> bool:
+    """Idempotently provision the LibriSpeech test clips under ``data_dir``.
+
+    Produces (all gated on existence — zero cost once cached):
+
+      * ``sample_0.wav`` .. ``sample_{N-1}.wav``  — 16 kHz mono WAV transcodes of
+        the first N dummy clips.
+      * ``long_30s.wav``  — several clips concatenated (~29 s) with 0.3 s silence
+        between, staying under Whisper's 30 s window.
+      * ``references.json`` — ``{filename: UPPERCASE_reference_text}`` for every
+        WAV above (the long clip's reference is the concatenation, in order, of
+        the clips that compose it).
+
+    Returns ``True`` if the clips are available (cached or freshly fetched),
+    ``False`` if the network fetch failed and nothing is cached (caller should
+    ``pytest.skip``). Never raises on a fetch failure.
+    """
+    import json
+
+    import soundfile as sf
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    refs_path = data_dir / "references.json"
+    sample_paths = [data_dir / f"sample_{i}.wav" for i in range(LIBRISPEECH_N_SAMPLES)]
+    long_path = data_dir / "long_30s.wav"
+
+    # Fast path: everything already on disk.
+    if (
+        refs_path.exists()
+        and all(p.exists() for p in sample_paths)
+        and long_path.exists()
+    ):
+        return True
+
+    try:
+        rows = _fetch_librispeech_rows(LIBRISPEECH_N_SAMPLES)
+    except Exception as e:  # network / expired signature / JSON shape change
+        print(f"  [librispeech] fetch failed ({e!r})")
+        # If a previous run already cached the clips, use them anyway.
+        if (
+            refs_path.exists()
+            and all(p.exists() for p in sample_paths)
+            and long_path.exists()
+        ):
+            return True
+        return False
+
+    import io
+
+    refs: dict = {}
+    decoded = []  # (audio_16k_mono_fp32, text) for the long-clip build
+    for i, (audio_bytes, text) in enumerate(rows):
+        audio, sr = sf.read(io.BytesIO(audio_bytes))
+        if audio.ndim == 2:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32)
+        # LibriSpeech is natively 16 kHz; assert rather than silently resample so
+        # a future dataset change can't sneak a wrong sample rate past us.
+        assert sr == 16000, f"expected 16 kHz LibriSpeech, got {sr} Hz for clip {i}"
+        sf.write(str(sample_paths[i]), audio, 16000, subtype="PCM_16")
+        refs[sample_paths[i].name] = text
+        decoded.append((audio, text))
+
+    # Build the ~30 s long clip by concatenating clips (with 0.3 s silence between)
+    # until we approach LIBRISPEECH_LONG_TARGET_S. The reference is the joined text.
+    silence = np.zeros(int(0.0 + LIBRISPEECH_LONG_SILENCE_S * 16000), dtype=np.float32)
+    chunks: list = []
+    long_texts: list = []
+    total_s = 0.0
+    # Greedy pack: take clips (in order) that still fit under the budget, skipping
+    # ones too long rather than stopping — gets us closest to ~29 s.
+    for audio, text in decoded:
+        clip_s = len(audio) / 16000.0
+        # +silence only between clips, not after the last; check the running budget.
+        added = clip_s + (LIBRISPEECH_LONG_SILENCE_S if chunks else 0.0)
+        if chunks and total_s + added > LIBRISPEECH_LONG_TARGET_S:
+            continue  # this clip overflows; try the next (shorter) one
+        if chunks:
+            chunks.append(silence)
+            total_s += LIBRISPEECH_LONG_SILENCE_S
+        chunks.append(audio)
+        total_s += clip_s
+        long_texts.append(text)
+    long_audio = np.concatenate(chunks).astype(np.float32)
+    sf.write(str(long_path), long_audio, 16000, subtype="PCM_16")
+    refs[long_path.name] = " ".join(long_texts)
+    print(
+        f"  [librispeech] long_30s.wav = {len(long_audio) / 16000.0:.1f} s "
+        f"from {len(long_texts)} clips"
+    )
+
+    refs_path.write_text(json.dumps(refs, indent=2) + "\n")
+    return True
 
 
 AMD_VENDOR_ID = 0x1002
@@ -415,12 +1001,18 @@ def create_cpu_session(model_path):
     return ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
 
 
-def create_ep_session(model_path, repo_root):
+def create_ep_session(model_path, repo_root, provider_options=None):
+    """Create a MorphiZen-EP InferenceSession.
+
+    provider_options: optional dict forwarded to the EP. Defaults to {}. The EP
+    compiles every model in output-allocator mode (the 2-arg in-graph
+    hip.alloc_output ABI) -- there is no provider option to select a mode.
+    """
     devices = register_morphizen_ep(repo_root)
     if not devices:
         pytest.skip("MorphiZen EP not found — run build.py first")
     so = ort.SessionOptions()
-    so.add_provider_for_devices(devices, {})
+    so.add_provider_for_devices(devices, provider_options or {})
     return ort.InferenceSession(model_path, sess_options=so)
 
 
@@ -595,9 +1187,8 @@ def setup_oga_ep(repo_root):
     if not hasattr(og, "register_execution_provider_library"):
         pytest.skip("OGA version does not support custom EP registration")
 
-    dist_bin = repo_root / "install" / "dist" / "bin"
-    therock_bin = repo_root / "install" / "therock" / "bin"
-    ep_dll = dist_bin / "onnxruntime_morphizen_ep.dll"
+    dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
+    ep_dll = dist_bin / EP_DLL_NAME
     if not ep_dll.exists():
         pytest.skip("MorphiZen EP DLL not found — run build.py first")
 
@@ -891,6 +1482,12 @@ class ModelSpec:
     # gemma3 VLM pipeline. ORT-direct tests for the same models still run
     # with STRICT=1 because they only exercise the text decoder.
     oga_strict: bool = True
+
+    # Opt-in for the output-allocator (2-arg ABI) end-to-end accuracy test
+    # (BaseORTTests.test_ort_output_allocator_dynamic). Default False so the
+    # heavier model files skip it; enabled on the fast Llama-1B spec, which is
+    # representative because allocator mode is model-agnostic EP plumbing.
+    output_allocator_e2e: bool = False
 
     def __post_init__(self):
         if (self.hf_base is None) == (self.hf_repo is None):
@@ -1343,6 +1940,115 @@ class BaseORTTests:
             valid_seq=position + 1,
         )
         assert ok, "Dynamic decode accuracy check failed"
+
+    def test_ort_output_allocator_dynamic(
+        self, dynamic_model_path, repo_root, golden_store
+    ):
+        """Output-allocator mode (2-arg ABI) on dynamic shapes, one session.
+
+        Opt-in per spec (output_allocator_e2e; enabled on Llama-1B). Drives
+        SEVERAL distinct shapes through a SINGLE EP session (no recompilation
+        between shapes) and checks each against the CPU golden, exercising both
+        the host-output D2H path (use_device_memory=False, all outputs land in
+        CPU memory) and the GPU zero-copy path (use_device_memory=True). Reuses
+        the existing prefill/decode goldens so the CPU references are shared with
+        the other accuracy tests.
+        """
+        spec = self.spec
+        if not spec.output_allocator_e2e:
+            pytest.skip("output_allocator_e2e not enabled for this spec")
+
+        # One EP session reused for every shape below — proves a single compiled
+        # DLL handles dynamic shapes (the output allocator is the only ABI).
+        sess = create_ep_session(dynamic_model_path, repo_root)
+        try:
+            # 1) Dynamic-shape stress: two prefill lengths, host D2H path.
+            #    sq=128 reuses the classic golden key; sq=64 is a distinct shape
+            #    in the SAME session (no recompile).
+            for seq_len, key in (
+                (128, "dynamic_prefill_sq128"),
+                (64, "dynamic_prefill_sq64"),
+            ):
+                cfg = spec.make_cfg(seq_len)
+                inputs = spec.build_prefill_inputs(cfg, seq_len, seq_len)
+                dim_map = make_dim_map(seq_len, seq_len)
+                ref, output_names = self._golden(
+                    golden_store, dynamic_model_path, key, inputs
+                )
+                test = run_iobinding_once(
+                    sess, inputs, cfg, use_device_memory=False, dim_map=dim_map
+                )
+                ok, _ = compare_outputs(
+                    ref,
+                    test,
+                    output_names,
+                    f"EP allocator dynamic prefill sq={seq_len}",
+                    valid_seq=seq_len,
+                )
+                assert ok, f"Allocator-mode dynamic prefill sq={seq_len} failed"
+
+            # 2) Decode (seq=1) in the same session — host D2H path.
+            cfg = spec.make_cfg(spec.max_seq_len)
+            position = spec.decode_position
+            inputs = spec.build_decode_inputs(
+                cfg,
+                position,
+                make_zero_kv_cache(cfg, spec.max_seq_len),
+                spec.max_seq_len,
+            )
+            dim_map = make_dim_map(1, spec.max_seq_len)
+            key = f"dynamic_decode_sq1_kv{spec.max_seq_len}"
+            ref, output_names = self._golden(
+                golden_store, dynamic_model_path, key, inputs
+            )
+            test = run_iobinding_once(
+                sess, inputs, cfg, use_device_memory=False, dim_map=dim_map
+            )
+            ok, _ = compare_outputs(
+                ref,
+                test,
+                output_names,
+                "EP allocator dynamic decode sq=1",
+                valid_seq=position + 1,
+            )
+            assert ok, "Allocator-mode dynamic decode failed"
+
+            # 3) GPU zero-copy path: device-memory IOBinding. Use PREFILL (past
+            #    KV is not attended at past_len=0, so the uninitialized device
+            #    KV buffer is never read) so the result is still comparable to
+            #    the zero-past CPU golden. This validates the callback returning
+            #    ORT's GPU pointer directly (no host staging).
+            #    Best-effort: allocating an AMD-device OrtValue from Python needs
+            #    an ORT build with that capability; the stock CPU/DML wheel raises
+            #    "Can't allocate memory on the AMD device". Skip just this
+            #    sub-check there (host-D2H + dynamic stress above still ran). GPU
+            #    zero-copy is additionally covered by the OGA suite (EP GPU
+            #    allocator) and the opt-in latency tests.
+            cfg = spec.make_cfg(128)
+            inputs = spec.build_prefill_inputs(cfg, 128, 128)
+            dim_map = make_dim_map(128, 128)
+            ref, output_names = self._golden(
+                golden_store, dynamic_model_path, "dynamic_prefill_sq128", inputs
+            )
+            try:
+                test_gpu = run_iobinding_once(
+                    sess, inputs, cfg, use_device_memory=True, dim_map=dim_map
+                )
+            except RuntimeError as e:
+                if "AMD device" not in str(e):
+                    raise
+                print(f"  [skip] GPU zero-copy sub-check (no device memory): {e}")
+            else:
+                ok, _ = compare_outputs(
+                    ref,
+                    test_gpu,
+                    output_names,
+                    "EP allocator dynamic prefill sq=128 (GPU zero-copy)",
+                    valid_seq=128,
+                )
+                assert ok, "Allocator-mode GPU zero-copy prefill failed"
+        finally:
+            cleanup(sess)
 
     # ── Latency tests (opt-in via `pytest -m latency` or `--latency`) ──────
 

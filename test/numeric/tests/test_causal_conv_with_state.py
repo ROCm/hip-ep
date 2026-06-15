@@ -43,6 +43,12 @@ CHUNK_OPT_CHANNELS = 8192
 CHUNK_OPT_K = 4  # kernel size; carry state size = K - 1 = 3
 
 
+_NP_TO_TP = {
+    np.float16: TensorProto.FLOAT16,
+    np.float32: TensorProto.FLOAT,
+}
+
+
 def _make_causal_conv_with_state_model(
     batch: int,
     channels: int,
@@ -50,11 +56,15 @@ def _make_causal_conv_with_state_model(
     kernel_size: int,
     activation: str = "silu",
     with_bias: bool = True,
+    dtype: np.dtype = np.float16,
 ):
     """Build a 1D CausalConvWithState ONNX model with weight/bias as
     initializers and runtime inputs for the data tensor and carry state.
+
+    `dtype` defaults to fp16 (the chunk_opt footprint); pass np.float32 to
+    exercise the kernel's f32 path.
     """
-    tp = TensorProto.FLOAT16
+    tp = _NP_TO_TP[dtype]
     state_len = kernel_size - 1
 
     X = helper.make_tensor_value_info("input", tp, [batch, channels, seq_len])
@@ -69,11 +79,11 @@ def _make_causal_conv_with_state_model(
     # Weight / bias are realistic small magnitudes; keeping them tight
     # avoids fp16 overflow in long-S prefill cases when SiLU saturates.
     rng = np.random.default_rng(0xC0DE)
-    weight = (rng.standard_normal((channels, 1, kernel_size)) * 0.1).astype(np.float16)
+    weight = (rng.standard_normal((channels, 1, kernel_size)) * 0.1).astype(dtype)
     initializers = [numpy_helper.from_array(weight, name="weight")]
     inputs_w = ["input", "weight"]
     if with_bias:
-        bias = (rng.standard_normal((channels,)) * 0.05).astype(np.float16)
+        bias = (rng.standard_normal((channels,)) * 0.05).astype(dtype)
         initializers.append(numpy_helper.from_array(bias, name="bias"))
         inputs_w.append("bias")
     else:
@@ -147,6 +157,36 @@ class TestCausalConvWithState:
         actual, expected = model_runner.run_sample(model, [x, state])
         # Two outputs: depthwise fp16 conv; tight tolerance is fine.
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-2)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    @pytest.mark.parametrize("with_bias", [True, False])
+    def test_ccws_prefill_dtype_bias(self, model_runner, dtype, with_bias):
+        """Prefill (seq_len>1) across the fused kernel's dtype and bias
+        branches: f32 in addition to fp16, and the no-bias (HAS_BIAS=0) path
+        that the chunk_opt footprint (always-bias) never exercises.
+        """
+        batch, channels, seq_len, kernel_size = 1, 32, 128, 4
+        model = _make_causal_conv_with_state_model(
+            batch,
+            channels,
+            seq_len,
+            kernel_size,
+            activation="silu",
+            with_bias=with_bias,
+            dtype=dtype,
+        )
+
+        rng = np.random.default_rng(3)
+        x = (rng.standard_normal((batch, channels, seq_len)) * 0.5).astype(dtype)
+        state = (rng.standard_normal((batch, channels, kernel_size - 1)) * 0.5).astype(
+            dtype
+        )
+
+        actual, expected = model_runner.run_sample(model, [x, state])
+        if dtype == np.float32:
+            compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)
+        else:
+            compare_outputs(actual, expected, atol=2e-3, rtol=1e-2)
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_ccws_chunk_opt_shape(self, model_runner, seq_len):

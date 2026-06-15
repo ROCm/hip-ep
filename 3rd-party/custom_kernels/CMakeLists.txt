@@ -35,9 +35,10 @@ hip_add_library(hip_custom_kernels STATIC
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip
+    hip/leaky_relu_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/elementwise_unary_kernel.hip
-    hip/elementwise_binary_kernel.hip
+    hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
     hip/tile_kernel.hip
     hip/expand_kernel.hip
     hip/gather_nd_kernel.hip
@@ -48,6 +49,9 @@ hip_add_library(hip_custom_kernels STATIC
     hip/range_kernel.hip
     hip/gather_kernel.hip
     hip/reduce_sum_kernel.hip
+    hip/pool_kernel.hip
+    hip/resize_kernel.hip
+    hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
     hip/linear_attention_kernel.hip
@@ -56,6 +60,9 @@ hip_add_library(hip_custom_kernels STATIC
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
     hip/gather_block_quantized_kernel.hip
+    hip/softmax_kernel.hip
+    hip/nonzero_kernel.hip
+    hip/strided_copy_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

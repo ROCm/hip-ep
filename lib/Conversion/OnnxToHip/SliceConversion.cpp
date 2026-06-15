@@ -314,9 +314,8 @@ struct SliceToHip : public mlir::RewritePattern {
         mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                       resultType.getElementType(), dynSizes);
 
-    auto hipOp =
-        mlir::hip::SliceOp::create(rewriter, loc, resultType, context, data,
-                                   starts, ends, axes, steps, init);
+    auto hipOp = mlir::hip::SliceOp::create(rewriter, loc, context, data,
+                                            starts, ends, axes, steps, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

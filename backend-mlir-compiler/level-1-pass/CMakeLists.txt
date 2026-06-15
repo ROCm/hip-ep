@@ -5,8 +5,15 @@
 
 message(STATUS "Configuring level-1-pass (MLIR compiler plugin)")
 
-find_package(glog CONFIG REQUIRED)
-find_package(Protobuf CONFIG REQUIRED)
+# glog::glog and protobuf::libprotobuf are provided by cmake/deps.cmake or the
+# morphizen subdirectory (find_package or from-source fallback). Only resolve
+# standalone when the targets are absent.
+if(NOT TARGET glog::glog)
+  find_package(glog CONFIG REQUIRED)
+endif()
+if(NOT TARGET protobuf::libprotobuf)
+  find_package(Protobuf CONFIG REQUIRED)
+endif()
 
 # Use shared protobuf library (no local generation needed)
 # Proto is generated in parent CMakeLists.txt as mlir_compilation_proto
