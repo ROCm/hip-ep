@@ -2001,9 +2001,10 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     The division by the reduced-element count is performed inside the runtime
     kernel (`reduce_size = num_input / num_output`), so this op is tolerant of
     a dynamic reduce axis -- no compile-time static reduce dim is required.
-    Result dims are refined post-conversion by `--hip-infer-shapes` via the
-    `Hip_DpsOp_Reduction` reify/InferType interfaces (no ONNX-level shape
-    refinement needed).
+    Result dims are refined post-conversion by `--hip-infer-shapes` through the
+    upstream MLIR `ReifyRankedShapedTypeOpInterface` / `InferTypeOpInterface`
+    that `Hip_DpsOp_Reduction` implements (no ONNX-level shape refinement
+    needed).
 
     When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
