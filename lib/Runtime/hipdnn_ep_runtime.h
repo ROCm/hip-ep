@@ -911,6 +911,20 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t keepdims, int64_t noop_with_empty_axes,
                     int64_t inner_size);
 
+// ReduceMean operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF (ONNX ReduceMean is float-domain).
+// The division by the reduced-element count happens in-kernel, so a dynamic
+// reduce axis is tolerated.
+// `inner_size` = product of input dims AFTER the reduced axis (1 for a
+// trailing/contiguous reduce); enables strided reduction over a non-trailing
+// axis (e.g. NCHW channel-axis LayerNorm2d).
+int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
+                     int64_t data_num_elements, int64_t output_num_elements,
+                     int64_t axes_num_elements, int64_t data_type,
+                     int64_t keepdims, int64_t noop_with_empty_axes,
+                     int64_t inner_size);
+
 // ReduceMax operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
 int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
