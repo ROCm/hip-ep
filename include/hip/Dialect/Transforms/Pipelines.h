@@ -37,9 +37,9 @@ namespace hip {
 /// USE-based decision, not a size one. Keep this at 1; any dynamic shape dim
 /// that an externalized scalar would have carried is recovered post-conversion
 /// by the dialect-level `--hip-infer-shapes` pass + canonicalize/cse, and the
-/// residual runtime reads go through a synchronized D2H readback (`hip.readback_dim`,
-/// using hipMemcpyDefault so it works whether the source scalar lives in device
-/// or host-accessible memory).
+/// residual runtime reads go through a synchronized D2H readback
+/// (`hip.readback_dim`, using hipMemcpyDefault so it works whether the source
+/// scalar lives in device or host-accessible memory).
 constexpr int64_t kDefaultExternalizeMinNumElements = 1;
 
 /// Pipeline options forwarded to the ConvertOnnxToHipPass for constant
