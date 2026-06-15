@@ -46,12 +46,19 @@ sys.path.insert(0, str(REPO_ROOT / "test" / "python" / "whisper"))
 
 import whisper_infer  # noqa: E402
 from conftest import (  # noqa: E402
+    setup_jfk_sample,
     setup_whisper_fp16_model_dir,
     setup_whisper_model_dir,
 )
 
 MODEL_DIR = REPO_ROOT / "models" / "whisper-large-v3-onnx"
 MODEL_DIR_FP16 = REPO_ROOT / "models" / "whisper-large-v3-onnx-fp16"
+
+# Canonical location of the bundled jfk.wav demo clip (the path shown in the
+# quick-start). It is gitignored and fetched on demand, so a fresh checkout that
+# runs the headline `transcribe_whisper.py test/python/data/whisper/jfk.wav`
+# command needs us to download it rather than error out.
+JFK_SAMPLE = REPO_ROOT / "test" / "python" / "data" / "whisper" / "jfk.wav"
 
 
 def main() -> int:
@@ -108,6 +115,15 @@ def main() -> int:
     args = ap.parse_args()
 
     audio_path = pathlib.Path(args.audio)
+    # The bundled jfk.wav demo clip is gitignored + fetched on demand. If the
+    # user passes that canonical path and it's not cached yet (fresh checkout),
+    # download it so the headline quick-start command works out of the box. Any
+    # OTHER missing path is a user error and still fails fast.
+    if not audio_path.exists() and audio_path.resolve() == JFK_SAMPLE.resolve():
+        print(f"[transcribe] fetching demo clip jfk.wav -> {audio_path}")
+        if not setup_jfk_sample(JFK_SAMPLE.parent):
+            print("[transcribe] ERROR: could not download jfk.wav (no network?)")
+            return 1
     if not audio_path.exists():
         print(f"[transcribe] ERROR: audio file not found: {audio_path}")
         return 1
