@@ -179,7 +179,10 @@ struct PoolToHip : public mlir::RewritePattern {
     // Resolve auto_pad to explicit pads.  Only NOTSET keeps the user-supplied
     // `pads`; the four other modes derive pads from the static input/output
     // spatial extents.  `auto_pad` is ONNX-deprecated but still produced by
-    // some exporters.
+    // some exporters. The SAME_UPPER / SAME_LOWER pad-budget split below (split
+    // pad_total in half, give the odd pad to the end for SAME_UPPER / to the
+    // begin for SAME_LOWER) follows onnx-mlir's `customComputeShape`
+    // SAME_UPPER/SAME_LOWER handling (src/Dialect/ONNX/ONNXOps/NN/NNHelper.cpp.inc).
     std::string autoPad = "NOTSET";
     if (auto attr = op->getAttrOfType<mlir::StringAttr>("auto_pad"))
       autoPad = attr.getValue().str();
@@ -245,7 +248,10 @@ struct PoolToHip : public mlir::RewritePattern {
     //   out    = floor(t / stride) + 1        (ceil_mode = 0)
     //          = ceil (t / stride) + 1        (ceil_mode = 1)
     //
-    // (mirrors onnx-mlir's ONNXGenericPoolOpShapeHelper NOTSET branch).
+    // Mirrors the NOTSET branch of onnx-mlir's
+    // `ONNXGenericPoolOpShapeHelper<>::customComputeShape`
+    // (src/Dialect/ONNX/ONNXOps/NN/NNHelper.cpp.inc), whose published formula
+    // is `O[i] = floor((I[i] + P[i] - ((K[i]-1)*d[i]+1)) / s[i]) + 1`.
     //
     // Before (dynamic spatial AveragePool, kernel=stride=4, no pad):
     //   %y = "onnx.AveragePool"(%x) {kernel_shape=[4,4], strides=[4,4], ...}
