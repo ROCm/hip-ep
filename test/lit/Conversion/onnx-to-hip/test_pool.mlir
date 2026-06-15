@@ -186,6 +186,33 @@ module {
     return %y : tensor<1x3x31x31xf32>
   }
 
+  // Test 7c: dynamic-spatial AveragePool. The decomposition fast path bails
+  // (needs static spatial dims), so it falls back to hip.pool, which now
+  // materializes the dynamic output spatial extents with arith from the
+  // input dims: out = floordiv(in + pad_b + pad_e - ((k-1)*d+1), stride) + 1.
+  // For kernel=stride=4, no pad, dilation=1: out = floordiv(in - 4, 4) + 1.
+  func.func @test_averagepool_dynamic_spatial(%arg0: tensor<?x?x?x?xf16>)
+      -> tensor<?x?x?x?xf16> {
+    // CHECK-LABEL: func.func @test_averagepool_dynamic_spatial
+    %y = "onnx.AveragePool"(%arg0)
+        {kernel_shape = [4, 4], strides = [4, 4], pads = [0, 0, 0, 0],
+         count_include_pad = 1 : si64}
+        : (tensor<?x?x?x?xf16>) -> tensor<?x?x?x?xf16>
+
+    // CHECK-NOT: onnx.AveragePool
+    // N and C are passthrough dims; the two spatial dims use the arith
+    // output-size formula (in - 4) floordiv 4 + 1.
+    // CHECK-DAG: %[[H:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x?x?x?xf16>
+    // CHECK-DAG: arith.floordivsi
+    // CHECK: tensor.empty
+    // CHECK: hip.pool
+    // CHECK-SAME: kernel_shape = [4, 4]
+    // CHECK-SAME: pool_mode = 0
+    // CHECK-SAME: strides = [4, 4]
+
+    return %y : tensor<?x?x?x?xf16>
+  }
+
   // Test 8: 2D LpPool with p = 3. Lowers to pool_mode = 2 and carries p.
   func.func @test_lppool_2d(%arg0: tensor<1x3x32x32xf32>)
       -> tensor<1x3x16x16xf32> {
