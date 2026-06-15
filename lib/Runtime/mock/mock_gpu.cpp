@@ -1133,9 +1133,8 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
 int wrap_gather_block_quantized(
     RuntimeState *state, const void *data, const void *indices,
     const void *scales, const void *zero_points, void *output,
-    const int64_t *data_shape, int64_t data_rank,
-    const int64_t *indices_shape, int64_t indices_rank,
-    const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
     const int64_t *output_shape, int64_t output_rank, int64_t bits,
     int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
     int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {

@@ -1072,22 +1072,20 @@ int wrap_matmul_nbits(
 // Currently a stub — see lib/Runtime/real/gather_block_quantized.cpp.
 int wrap_gather_block_quantized(
     RuntimeState *state,
-    const void *data,           // packed quantized [r-rank]
-    const void *indices,        // i32/i64 [q-rank]
-    const void *scales,         // dequant scales (T2)
-    const void *zero_points,    // dequant zero points (nullable)
-    void *output,               // dequantized output [q + (r-1)-rank]
-    const int64_t *data_shape, int64_t data_rank,
-    const int64_t *indices_shape, int64_t indices_rank,
-    const int64_t *scales_shape, int64_t scales_rank,
+    const void *data,        // packed quantized [r-rank]
+    const void *indices,     // i32/i64 [q-rank]
+    const void *scales,      // dequant scales (T2)
+    const void *zero_points, // dequant zero points (nullable)
+    void *output,            // dequantized output [q + (r-1)-rank]
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
     const int64_t *output_shape, int64_t output_rank,
-    int64_t bits,               // 4 or 8
-    int64_t block_size,         // power of 2, >= 16
-    int64_t gather_axis,
-    int64_t quantize_axis,
-    int64_t data_dtype,         // HIPDNN_EP_DATATYPE_* (uint8 packed)
-    int64_t indices_dtype,      // INT32 / INT64
-    int64_t scales_dtype);      // FLOAT / HALF / BFLOAT16
+    int64_t bits,       // 4 or 8
+    int64_t block_size, // power of 2, >= 16
+    int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype,    // HIPDNN_EP_DATATYPE_* (uint8 packed)
+    int64_t indices_dtype, // INT32 / INT64
+    int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
