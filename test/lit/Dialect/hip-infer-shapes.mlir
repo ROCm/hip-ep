@@ -550,9 +550,9 @@ func.func @refine_reduce_sum_keepdims_constant_axes(%ctx: !hip.context,
 // reduce_sum/max/prod (same `reifyReductionShape` helper), so the constant-axes
 // refinement applies identically: data=<?x4096xf16>, axes=dense<[1]>,
 // keepdims=1 → dim 0 passes through (dynamic), dim 1 tightens to static 1.
-// This is the key scalability property: the dynamic Reshape result dims that
-// the retired ONNX RefineReshapeResultType pass used to recover are now
-// recovered post-conversion by this dialect-level pass instead.
+// This is the key scalability property: dynamic Reshape result dims that an
+// ONNX-level result-type refiner would once have recovered pre-conversion are
+// now recovered post-conversion by this dialect-level pass instead.
 // CHECK-LABEL: func.func @refine_reduce_mean_keepdims_constant_axes
 // CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<?x1xf16>
 // CHECK:         %[[Y:.*]] = hip.reduce_mean
