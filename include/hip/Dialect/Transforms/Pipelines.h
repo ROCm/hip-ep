@@ -29,17 +29,17 @@ namespace hip {
 ///
 /// NOTE: a pure SIZE threshold cannot safely inline shape metadata. Raising
 /// this to 16 (to keep tiny `Reshape`/`Range` shape scalars inline for
-/// post-conversion shape inference) was tried and reintroduced the fault:
-/// gemma3's vision-attention scale scalar (`mul` by a `[1,1,1,1]` operand) is
-/// also a sub-threshold constant, got inlined as host data, and the softmax
-/// kernel page-faulted. Distinguishing a shape scalar (safe to inline) from a
-/// data scalar (must stay externalized) requires a USE-based decision, not a
-/// size one. Keep this at 1; any dynamic shape dim that an externalized scalar
-/// would have carried is read back on demand via `hip.readback_scalar` (a
-/// synchronized D2H that uses hipMemcpyDefault, so it works whether the source
-/// scalar lives in device or host-accessible memory), and the dialect-level
-/// `--hip-infer-shapes` pass + canonicalize/cse recover the statics that can be
-/// proven post-conversion.
+/// post-conversion shape inference) was tried and reintroduced the fault: a
+/// sub-threshold attention scale scalar (a `mul` by a `[1,1,1,1]` operand) is
+/// also a small constant, got inlined as host data, and the consuming kernel
+/// page-faulted dereferencing the host pointer. Distinguishing a shape scalar
+/// (safe to inline) from a data scalar (must stay externalized) requires a
+/// USE-based decision, not a size one. Keep this at 1; any dynamic shape dim
+/// that an externalized scalar would have carried is recovered post-conversion
+/// by the dialect-level `--hip-infer-shapes` pass + canonicalize/cse, and the
+/// residual runtime reads go through a synchronized D2H readback (`hip.readback_dim`,
+/// using hipMemcpyDefault so it works whether the source scalar lives in device
+/// or host-accessible memory).
 constexpr int64_t kDefaultExternalizeMinNumElements = 1;
 
 /// Pipeline options forwarded to the ConvertOnnxToHipPass for constant

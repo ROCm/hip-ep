@@ -46,20 +46,18 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //     the reference cases.
   pm.addPass(hip::createInferShapesPass());
 
-  // 1b'. Canonicalize + CSE immediately after shape inference. The conversion
-  //      emits the dynamic shape-computation chain for every `tensor.reshape`
-  //      whose result type the ONNX importer left fully dynamic: per dim a
-  //      `tensor.dim` of the (statically-typed) producer, assembled via
-  //      `tensor.from_elements` and read back to host with `hip.readback_scalar`
-  //      to size the dynamic result. Canonicalization folds `tensor.dim` of a
-  //      static dim to a constant, collapses that arithmetic, and DCEs the vast
-  //      majority of the readbacks (the only survivors are those gated behind a
-  //      `tensor.reshape` whose result type stays `?` because MLIR has no
-  //      reshape result-type folder). CSE then dedups the many identical
-  //      dim/shape recomputations the per-op conversion emits. Both are required
-  //      before bufferize regardless: without them `--hip-pool-allocs` sees the
-  //      un-folded `memref.dim`/readback chains and fragments pooling, and every
-  //      surviving `hip.readback_scalar` is a host D2H of a device scalar.
+  // 1b'. Canonicalize + CSE immediately after shape inference. The dynamic-
+  //      shape op conversions (e.g. pool / reduce) size each dynamic result dim
+  //      by emitting `tensor.dim` of a (statically-typed) producer plus a little
+  //      index arithmetic, then build the `tensor.empty` init from those values.
+  //      InferShapes above has just tightened many of those producers to static
+  //      dims, so canonicalization now folds `tensor.dim` of a static dim to a
+  //      constant, collapses the dependent arithmetic, and DCEs the dead shape
+  //      computations; CSE dedups the identical per-dim recomputations the
+  //      per-op conversions emit independently. Both run before bufferize so
+  //      `--hip-pool-allocs` sees folded constant dims instead of fragmented
+  //      `memref.dim` chains (un-folded chains split the pool and pessimize
+  //      buffer reuse).
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::createCSEPass());
 
