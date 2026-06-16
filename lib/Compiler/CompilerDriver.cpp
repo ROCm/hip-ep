@@ -176,6 +176,11 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
     //   hipdnn_ep_set_output_allocator       — EP installs the output allocator
     //                                          before inference_compute
+    //   hipdnn_ep_runtime_flush_op_profile   — HIPDNN_EP_PERF per-op resolve +
+    //                                          print hook (called by EP AFTER
+    //                                          its wall_ms window closes so the
+    //                                          resolve cost doesn't pollute
+    //                                          TPS)
     std::vector<std::string> export_symbols = {
         hipdnn::abi::kInferenceInit,
         hipdnn::abi::kInferenceCompute,
@@ -183,7 +188,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
         hipdnn::abi::kInferenceGetMetadataJson,
         "test_hip_from_dll",
         hipdnn::abi::kRuntimeBeginCompute,
-        hipdnn::abi::kSetOutputAllocator};
+        hipdnn::abi::kSetOutputAllocator,
+        hipdnn::abi::kRuntimeFlushOpProfile};
     std::vector<std::string> libraries;
     std::vector<std::string> library_paths;
     discoverLibraries(libraries, library_paths);
