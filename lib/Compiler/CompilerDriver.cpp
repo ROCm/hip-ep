@@ -179,7 +179,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     //   hipdnn_ep_runtime_flush_op_profile   — HIPDNN_EP_PERF per-op resolve +
     //                                          print hook (called by EP AFTER
     //                                          its wall_ms window closes so the
-    //                                          resolve cost doesn't pollute TPS)
+    //                                          resolve cost doesn't pollute
+    //                                          TPS)
     std::vector<std::string> export_symbols = {
         hipdnn::abi::kInferenceInit,
         hipdnn::abi::kInferenceCompute,
