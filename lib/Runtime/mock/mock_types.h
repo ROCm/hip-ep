@@ -29,6 +29,10 @@ struct hipDeviceProp_t {
 #define hipHostMallocMapped 0
 #define hipHostMallocNonCoherent 0
 #define hipEventDisableTiming 0
+// Mock stub: the real flag drops hipEventRecord's system-scope fence (see
+// op_profile.cpp). The mock hipEventCreateWithFlags ignores flags, so the
+// value is irrelevant -- it only needs to be a declared identifier.
+#define hipEventDisableSystemFence 0
 
 // MIOpen tensor layout enum (subset used by the runtime)
 typedef int miopenTensorLayout_t;
