@@ -93,7 +93,7 @@ hip-mlir-opt after_onnx_to_hip.mlir --convert-hip-to-llvm > after_hip_to_llvm.ml
 
 **hip-test:**
 - Purpose: Run and validate a compiled per-model artifact end-to-end
-- Input: LLVM bitcode (`.bc`) or native `.dll`/`.so` (auto-detected by magic bytes)
+- Input: LLVM bitcode (`.bc`) or native `.dll`/`.so` (detected by file extension)
 - Output: Inference run + optional NaN/Inf output validation
 - Use when: Smoke-testing an artifact through the same loader the EP uses
 

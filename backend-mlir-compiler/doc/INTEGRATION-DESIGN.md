@@ -192,6 +192,9 @@ Metadata stored in MetaDefProto separately from the bitcode bytes. Rationale: en
 **In-process JIT Loading:**
 CustomOp hands bitcode bytes directly to ORC LLJIT — no temp files, no `LoadLibrary`, nothing that violates Microsoft's signed-DLL-only loading requirement. The 5-symbol contract (`inference_init`, `inference_compute`, `inference_cleanup`, `inference_get_metadata_json`, `inference_runtime_begin_compute`) is resolved from the JITted module.
 
+**No `thread_local` in the JIT'd runtime (emulated-TLS avoidance):**
+`runtime.bc` must not define a `thread_local`. The ORC JIT lowers any thread-local in a JIT'd module to *emulated* TLS — a call to `__emutls_get_address` (a compiler-rt symbol) that has no definition inside the JIT process, so the module fails to materialize at load. Native TLS would avoid the emutls call, but the ORC JIT's native-TLS support is unimplemented on Windows/COFF (it exists only on macOS and, partially, Linux). The native `.dll`/`.so` path is unaffected — `lld-link` lowers `thread_local` to OS-managed native TLS like any normal DLL. The one per-thread slot the runtime needs (the current session stream) therefore lives in natively-compiled host code (`lib/Runtime/tls_stream.cpp`, linked into the EP/tools and into native model DLLs): the JIT'd runtime only *calls* `hipdnn_ep_get/set_current_stream` as ordinary external functions, which `LlvmIrJit` resolves as absolute symbols. See `LlvmIrJit.cpp` and `tls_stream.cpp`.
+
 **Lifecycle Management:**
 Destructor sequence: `inference_cleanup(state)` → `LlvmIrJit` destructor (tears down `LLJIT`). Rationale: prevents GPU resource leaks; no temp files to remove.
 

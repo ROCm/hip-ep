@@ -156,7 +156,7 @@ These operations are handled through standard MLIR transformations without requi
 │                          RUNTIME                               │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  Load artifact + constants.bin  (loader = artifact magic)    │
+│  Load artifact + constants.bin  (loader = artifact_format)   │
 │   ├─ LLVM_IR: LlvmIrJit JIT-links model.bc + the runtime.bc  │
 │   │           embedded in the EP, in-process (LLVM ORC)      │
 │   └─ NATIVE : LoadLibrary/dlopen model.dll/.so               │
@@ -173,8 +173,8 @@ These operations are handled through standard MLIR transformations without requi
 ```
 
 > **Artifact format.** Selected by the single compile option `artifact_format`
-> (`LLVM_IR` default, `NATIVE` opt-in) and auto-detected from the artifact's
-> magic bytes at load time. The default ships **OS-portable LLVM IR** (`.bc`,
+> (`LLVM_IR` default, `NATIVE` opt-in) and recorded in the EPContext metadata,
+> which the EP reads at load time. The default ships **OS-portable LLVM IR** (`.bc`,
 > JIT-loaded in-process); native `.dll`/`.so` stays a first-class opt-in for
 > benchmarking/parity — see
 > [docs/native-vs-ir-comparison.md](docs/native-vs-ir-comparison.md).

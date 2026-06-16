@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+// Forward declare to avoid include order issues
 namespace morphizen {
 class FileSystem;
 } // namespace morphizen
@@ -25,9 +26,24 @@ class LoadedArtifact;
 // identical 5-symbol C ABI, so the cached hot-path function pointers and
 // Compute()/begin_compute()/cleanup paths are format-agnostic.
 class InferenceState {
-  // Passkey so only create() (via make_unique) reaches the public ctor.
-  // Defined here, before any member that names it, so the ctor signature
-  // resolves consistently on MSVC and GCC.
+  // Passkey tag for the public constructor below: external callers cannot
+  // name this type (it is implicitly private under the `class` keyword), so
+  // the constructor is effectively unreachable from outside the class even
+  // though it is declared in the public section. Members and friends can
+  // still construct one, which is what std::make_unique<InferenceState>(
+  // PrivateTag{}, ...) needs inside create().
+  //
+  // Declaring the type here -- at the very top of the class body, before any
+  // member function signature -- means name lookup for the constructor below
+  // resolves to this inner type on both MSVC and GCC. Two earlier shapes
+  // both broke one compiler:
+  //   - Forward decl in `public:` + definition in `private:` is rejected by
+  //     GCC with `error: ... PrivateTag redeclared with different access`.
+  //   - Spelling the parameter as `struct PrivateTag` (an elaborated type
+  //     specifier) makes MSVC introduce a brand-new outer-scope type, so
+  //     the .cpp definition no longer matches the header signature and
+  //     fails with C2511.
+  // Defining it once, here, sidesteps both.
   struct PrivateTag {};
 
 public:
@@ -42,6 +58,7 @@ public:
 
   ~InferenceState();
 
+  // Non-copyable, non-movable
   InferenceState(const InferenceState &) = delete;
   InferenceState &operator=(const InferenceState &) = delete;
   InferenceState(InferenceState &&) = delete;
@@ -68,9 +85,15 @@ public:
   // warns when the symbol is absent.
   void begin_compute() const;
 
-  // Returns the hipStream_t (as void* to keep hip headers out of this
-  // header) used by inference_compute, by reading the first field of
-  // RuntimeState. For HIPDNN_EP_PERF instrumentation only.
+  // Diagnostic-only accessor: returns the hipStream_t used by
+  // inference_compute, as a void*.  Relies on RuntimeState
+  // (lib/Runtime/runtime_state_internal.h) keeping hipStream_t as its first
+  // field; the cast is encapsulated in InferenceState.cpp with a static_assert
+  // on pointer size.  Returning void* keeps hip headers out of this public
+  // header.
+  //
+  // Intended for HIPDNN_EP_PERF instrumentation in MlirCustomOp::Compute().
+  // Callers reinterpret_cast to hipStream_t (itself a void* on amdhip64).
   void *get_stream_raw() const;
 
   // Public constructor gated by PrivateTag (defined at the top of this
@@ -85,6 +108,7 @@ private:
   // Resolve and cache the inference_* entry points from the loaded artifact.
   void resolveEntryPoints(const LoadedArtifact &artifact);
 
+  // Opaque handle returned by inference_init()
   void *state_;
   // Must outlive `state_`: `inference_init` returned a pointer into memory
   // allocated by the loaded artifact.

@@ -41,18 +41,18 @@ public:
   LoadedArtifact(LoadedArtifact &&) = delete;
   LoadedArtifact &operator=(LoadedArtifact &&) = delete;
 
-  // In-memory artifact (EPContext model). `kind` is chosen by the caller
-  // (metadata + magic-byte cross-check). For Native the bytes are spilled to a
+  // In-memory artifact (EPContext model). `kind` is chosen by the caller from
+  // the metadata's artifact_format field. For Native the bytes are spilled to a
   // temp file -- morphizen::Plugin loads from a path -- which this object
   // removes on destruction. `module_name` is a diagnostic tag for the JIT.
   static std::unique_ptr<LoadedArtifact>
   createInMemory(const std::vector<uint8_t> &bytes, ArtifactKind kind,
                  const std::string &module_name, std::string *error = nullptr);
 
-  // On-disk artifact (standalone tools). Format is sniffed from the file's
-  // magic bytes. Native is loaded directly from `path` (no temp file, so
-  // co-located deps such as custom_kernels_<arch> resolve as usual); LLVM IR
-  // is read and JITed in-process.
+  // On-disk artifact (standalone tools). Format is taken from the file
+  // extension (.bc -> LLVM IR, .dll/.so -> native). Native is loaded directly
+  // from `path` (no temp file, so co-located deps such as custom_kernels_<arch>
+  // resolve as usual); LLVM IR is read and JITed in-process.
   static std::unique_ptr<LoadedArtifact>
   createFromFile(const std::string &path, std::string *error = nullptr);
 

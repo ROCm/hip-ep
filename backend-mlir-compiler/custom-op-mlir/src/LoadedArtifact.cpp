@@ -115,8 +115,13 @@ LoadedArtifact::createFromFile(const std::string &path, std::string *error) {
   }
 
   std::unique_ptr<LoadedArtifact> art(new LoadedArtifact());
-  const bool native = hasNativeMagic(bytes.data(), bytes.size());
-  art->kind_ = native ? ArtifactKind::NATIVE : ArtifactKind::LLVM_IR;
+  if (!artifactKindFromPath(path, art->kind_)) {
+    if (error)
+      *error = "cannot determine artifact format from extension of '" + path +
+               "' (expected .bc, .dll, or .so)";
+    return nullptr;
+  }
+  const bool native = (art->kind_ == ArtifactKind::NATIVE);
 
   if (!native) {
     auto jit = LlvmIrJit::create(bytes, path);

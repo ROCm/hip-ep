@@ -26,7 +26,7 @@ compile option (`artifact_format` / `CompilationOptions.output_mode`):
 **Native DLL (opt-in, benchmarking/dev).**
 - `hip-compiler.dll` merges the embedded `runtime.bc` at producer time (`LLVMBackend::linkRuntimeModule`), emits a host object (`compileToObjectFile`, PIC), and links a per-OS `.dll`/`.so` via `DLLLinker` (in-process `lld-link` COFF on Windows; `clang++ -shared -fuse-ld=lld` subprocess on Linux), linking the per-arch `custom_kernels_<arch>` import lib + ROCm import libs.
 - `onnxruntime_morphizen_ep.dll` writes the artifact bytes to a temp file and loads it via `morphizen::Plugin` (`LoadLibraryW` / `dlopen`), resolving the same five-symbol C ABI through `get_method` (`GetProcAddress` / `dlsym`). The temp file is deleted on session teardown.
-- The EP picks the loader from the `artifact_format` field in the EPContext metadata (`mlir_metadata::Metadata`), cross-checked against the artifact's magic bytes.
+- The EP picks the loader from the `artifact_format` field in the EPContext metadata (`mlir_metadata::Metadata`); the compiler always records it, and an empty/unknown value is fatal.
 
 Why native is **not** the production default — the signed-DLL-only loading
 policy below. It remains available for internal benchmarking against the JIT
@@ -104,8 +104,9 @@ per artifact is now implemented:
 
 - **Tag:** `mlir_metadata::Metadata.artifact_format` (`"LLVM_IR"` | `"NATIVE"`),
   written by the compiler in `pass_main.cpp` alongside `artifact_filename` and
-  read by `MlirCustomOp` before the artifact is opened. A magic-byte assertion
-  (`BC\xC0\xDE` vs `MZ` / `\x7fELF`) guards against metadata/artifact drift.
+  read by `MlirCustomOp` before the artifact is opened. The compiler always
+  records it; an empty/unknown value is fatal at load. (The standalone tools,
+  which see a bare file with no metadata, detect format by file extension.)
 - **Selection:** a single compile option, `artifact_format` (EP provider option)
   → `CompilationOptions.output_mode` (FlatBuffers enum `LLVM_IR` | `NATIVE`).
 - **Default:** `LLVM_IR`. `NATIVE` is opt-in — the Native branch is still

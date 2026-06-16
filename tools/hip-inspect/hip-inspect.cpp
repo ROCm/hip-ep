@@ -7,7 +7,7 @@
 // hip-inspect - Print metadata embedded in a compiled model artifact
 //===----------------------------------------------------------------------===//
 // Prints a human-readable summary of the model's inputs, outputs, and
-// constants. Two artifact formats, dispatched by magic bytes:
+// constants. Two artifact formats, dispatched by file extension:
 //   * LLVM bitcode (.bc): parse the IR and read the `@__metadata_json`
 //     global -- lightweight, no ROCm/JIT needed.
 //   * native .dll/.so: load via morphizen::Plugin and call
@@ -20,7 +20,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CrashHandler.h"
-#include "artifact_format.h"  // hasNativeMagic
+#include "artifact_format.h"  // ArtifactKind, artifactKindFromPath
 #include "hip/artifact_abi.h" // hipdnn::abi symbol names
 #ifdef HIPDNN_INSPECT_NATIVE
 // morphizen.hpp must precede plugin.hpp (morphizen/_sanity_check.hpp enforces
@@ -261,8 +261,16 @@ int main(int argc, char **argv) {
   llvm::StringRef buf = bufOrErr.get()->getBuffer();
 
   std::string json;
-  const bool is_native = mlir_compilation::customop::hasNativeMagic(
-      reinterpret_cast<const uint8_t *>(buf.data()), buf.size());
+  // Format from the file extension (.bc / .dll / .so); a bare artifact carries
+  // no EPContext metadata to read it from.
+  mlir_compilation::customop::ArtifactKind kind;
+  if (!mlir_compilation::customop::artifactKindFromPath(bcPath, kind)) {
+    std::cerr << "Cannot determine artifact format from extension of '"
+              << bcPath << "' (expected .bc, .dll, or .so).\n";
+    return 1;
+  }
+  const bool is_native =
+      (kind == mlir_compilation::customop::ArtifactKind::NATIVE);
 
   if (is_native) {
 #ifdef HIPDNN_INSPECT_NATIVE

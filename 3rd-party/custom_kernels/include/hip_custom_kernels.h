@@ -14,13 +14,18 @@
  *   - Clang during bitcode compilation (lib/Runtime/real/)
  *   - MSVC for any host-side C/C++ code
  *
- * The .hip implementations (compiled by hipcc into a static library) define
- * these functions with extern "C" linkage. At model-DLL link time, the static
- * library is linked alongside MIOpen/hipBLASLt/amdhip64 import libs.
+ * The .hip implementations (compiled by hipcc) define these functions with
+ * extern "C" linkage and ship in a per-arch shared library
+ * (custom_kernels_<arch>.{dll,so}); see HIP_KERNEL_API below.
  */
 
 #include <stdint.h>
 
+// Exports each launcher from the per-arch kernel shared library
+// (custom_kernels_<arch>.{dll,so}), which the model artifact resolves at load
+// (JIT dlopen, or native import). Pre-dual-format the kernels were linked into
+// model.dll, so no export was needed -- hence this is new. EXPORTS is defined
+// only when building that library (hip_utils.cmake); consumers leave it empty.
 #if defined(_WIN32)
   #if defined(HIP_CUSTOM_KERNELS_EXPORTS)
     #define HIP_KERNEL_API __declspec(dllexport)

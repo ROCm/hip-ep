@@ -4,8 +4,8 @@
 ##
 
 # hip-test loads a per-model artifact -- LLVM bitcode via LlvmIrJit or a
-# native .dll/.so via morphizen::Plugin, selected by magic bytes (the same two
-# loaders the EP uses at runtime) -- resolves the inference_* entry points,
+# native .dll/.so via morphizen::Plugin, selected by file extension (the same
+# two loaders the EP uses at runtime) -- resolves the inference_* entry points,
 # runs the model end-to-end, and optionally validates outputs.
 add_executable(hip-test
   hip-test.cpp

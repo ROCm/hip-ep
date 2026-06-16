@@ -4,9 +4,9 @@
  */
 
 // hip-test: load a per-model artifact (LLVM .bc via LlvmIrJit, or a native
-// .dll/.so via morphizen::Plugin -- selected by magic bytes), parse metadata,
-// generate test inputs, run inference, validate outputs. Exercises both
-// loaders the EP uses at runtime.
+// .dll/.so via morphizen::Plugin -- selected by file extension), parse
+// metadata, generate test inputs, run inference, validate outputs. Exercises
+// both loaders the EP uses at runtime.
 
 #include "CrashHandler.h"
 #include "LoadedArtifact.h" // LoadedArtifact, ArtifactKind
@@ -301,8 +301,8 @@ int main(int argc, char **argv) {
     std::cerr << "Example: " << argv[0]
               << " model.bc --input-shape 0=8,3,224,224 --iterations 10 "
                  "--verbose --validate\n";
-    std::cerr << "The loader is chosen automatically from the artifact's "
-                 "magic bytes (LLVM bitcode vs native PE/ELF).\n";
+    std::cerr << "The loader is chosen from the artifact's file extension "
+                 "(.bc -> LLVM IR, .dll/.so -> native).\n";
     return 1;
   }
 
@@ -327,9 +327,9 @@ int main(int argc, char **argv) {
 
   if (verbose)
     std::cout << "Loading artifact: " << bc_path << "\n";
-  // LoadedArtifact sniffs the format from magic bytes and selects the loader
-  // (LlvmIrJit for LLVM IR, morphizen::Plugin for native) -- the same loader
-  // the EP uses, so the tool and the library never drift.
+  // LoadedArtifact picks the format from the file extension and selects the
+  // loader (LlvmIrJit for LLVM IR, morphizen::Plugin for native) -- the same
+  // loader the EP uses, so the tool and the library never drift.
   std::string load_err;
   auto artifact = mlir_compilation::customop::LoadedArtifact::createFromFile(
       bc_path, &load_err);

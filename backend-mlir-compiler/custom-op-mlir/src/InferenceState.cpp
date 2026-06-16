@@ -14,6 +14,7 @@
 #include <glog/logging.h>
 #include <utility>
 
+// Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)

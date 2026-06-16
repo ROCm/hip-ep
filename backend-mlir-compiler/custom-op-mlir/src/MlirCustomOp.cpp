@@ -330,17 +330,16 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 }
 
 // Decide which loader the EP should use for this artifact. The format is
-// recorded in the EPContext metadata by the compiler (artifact_format).
-// Cross-check against the artifact's magic bytes so a metadata/artifact
-// mismatch fails loudly here instead of crashing inside the wrong loader.
-customop::ArtifactKind
-determine_artifact_kind(const std::string &format_str,
-                        const std::vector<uint8_t> &bytes) {
-  std::string mismatch;
-  const customop::ArtifactKind kind = customop::artifactKindFromMetadata(
-      format_str, bytes.data(), bytes.size(), &mismatch);
-  if (!mismatch.empty()) {
-    LOG(FATAL) << "EPContext " << mismatch << ". Metadata/artifact mismatch.";
+// recorded in the EPContext metadata by the compiler (artifact_format), which
+// always sets it (see pass_main.cpp); an empty/unknown value means a malformed
+// or pre-PR EPContext and is fatal here rather than mis-loaded.
+customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
+  customop::ArtifactKind kind;
+  if (!customop::artifactKindFromFormat(format_str, kind)) {
+    LOG(FATAL) << "EPContext metadata has empty/unknown artifact_format='"
+               << format_str << "'; expected '"
+               << customop::kArtifactFormatLlvmIr << "' or '"
+               << customop::kArtifactFormatNative << "'.";
   }
 
   MY_LOG(1) << "Artifact loader: "
@@ -639,8 +638,7 @@ MlirCustomOp::MlirCustomOp(
       const_cast<morphizen::PassContext *>(context.get())->get_file_system();
   auto artifact_bytes =
       load_artifact_from_epcontext(context, metadata_.artifact_filename());
-  auto kind =
-      determine_artifact_kind(metadata_.artifact_format(), artifact_bytes);
+  auto kind = determine_artifact_kind(metadata_.artifact_format());
   inference_state_ =
       customop::InferenceState::create(artifact_bytes, fs.get(), kind);
 }
