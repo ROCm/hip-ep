@@ -328,5 +328,19 @@ void populateSliceConversionPatterns(RewritePatternSet &patterns,
   patterns.add<SliceDecompose, SliceToHip>(ctx);
 }
 
+// Pre-lowering: only the constant-folding `SliceDecompose`. Registered in the
+// pre-`lowerOnnxConstants` phase so the matcher can read the inline
+// `onnx.Constant` starts/ends/axes/steps. Constant externalization
+// (externalize-min-num-elements=1) strips the inline value from even tiny
+// index tensors, so by the time `populateSliceConversionPatterns` runs in
+// `convertComputeOps` the fold fails and the slice falls back to the runtime
+// `hip.slice` D2H readback. Folding pre-externalization rewrites
+// constant + positive-step + static-dim slices to a zero-copy
+// `tensor.extract_slice` -- zero runtime readback, correct (compiler) layer.
+void populateSlicePreLoweringPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx) {
+  patterns.add<SliceDecompose>(ctx);
+}
+
 } // namespace hip
 } // namespace mlir

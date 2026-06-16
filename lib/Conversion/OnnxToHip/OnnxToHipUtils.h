@@ -364,6 +364,15 @@ void populateFlattenConversionPatterns(RewritePatternSet &patterns,
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fold compile-time-constant, positive-step
+/// `onnx.Slice` to a zero-copy `tensor.extract_slice` (the `SliceDecompose`
+/// pattern). Must run BEFORE `lowerOnnxConstants` so the starts/ends/axes/steps
+/// are still inline in `onnx.Constant` -- after externalization the matcher
+/// cannot read them and the op falls back to the runtime `hip.slice` D2H
+/// readback. Folding here eliminates that readback at the compiler layer.
+void populateSlicePreLoweringPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+
 /// Pre-lowering pattern set: rewrite the `Reshape(data, Shape(src))` idiom
 /// so the shape operand becomes an explicit
 /// `tensor.from_elements(tensor.dim(src, *))`. This lets ReshapeConversion's
