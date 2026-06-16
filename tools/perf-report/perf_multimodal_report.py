@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+#
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 """Format a HIPDNN EP OGA model_benchmark log into a structured profiling report.
 
 The report is the locked-down rendering of three independent measurement streams
