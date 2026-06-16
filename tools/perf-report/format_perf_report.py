@@ -49,6 +49,7 @@ USAGE
     tools/perf-report/format_perf_report.py <log-file> --no-banner  # CI embed
     tools/perf-report/format_perf_report.py <log-file> --indent 2   # indent N
 """
+
 from __future__ import annotations
 
 import argparse
@@ -143,7 +144,6 @@ class OgaHeadline:
     @classmethod
     def parse(cls, lines: list[str]) -> "OgaHeadline":
         out = cls()
-        cur_field: Optional[str] = None
         cur_block: Optional[dict] = None
 
         # Pre-compile per-row patterns. model_benchmark uses literal tabs
@@ -163,31 +163,33 @@ class OgaHeadline:
             stripped = line.lstrip()
 
             # Single-line headers and tail rows
-            m = re.match(r"Batch size:\s*(\d+),\s*prompt tokens:\s*(\d+),"
-                         r"\s*tokens to generate:\s*(\d+)", line)
+            m = re.match(
+                r"Batch size:\s*(\d+),\s*prompt tokens:\s*(\d+),"
+                r"\s*tokens to generate:\s*(\d+)",
+                line,
+            )
             if m:
                 out.batch_size = int(m.group(1))
                 out.prompt_tokens = int(m.group(2))
                 out.tokens_to_generate = int(m.group(3))
-                cur_field, cur_block = None, None
+                cur_block = None
                 continue
 
             m = re.match(r"Peak working set size \(bytes\):\s*(\d+)", line)
             if m:
                 out.peak_ws_bytes = int(m.group(1))
-                cur_field, cur_block = None, None
+                cur_block = None
                 continue
 
             # Block-start headers — always unindented
             if not line.startswith(("\t", " ")):
                 field_name = cls._BLOCKS.get(line.rstrip())
                 if field_name is not None:
-                    cur_field = field_name
                     cur_block = {}
                     setattr(out, field_name, cur_block)
                     continue
                 # Any other unindented line ends the current block
-                cur_field, cur_block = None, None
+                cur_block = None
                 continue
 
             if cur_block is None:
@@ -291,8 +293,9 @@ class DecodeBreakdown:
     perop_gpu_median_ms: float
 
     @classmethod
-    def build(cls, head: OgaHeadline, perf: PerfSummary,
-              perop: PerOpTable) -> Optional["DecodeBreakdown"]:
+    def build(
+        cls, head: OgaHeadline, perf: PerfSummary, perop: PerOpTable
+    ) -> Optional["DecodeBreakdown"]:
         if not (head.decode and perf and perop.total_gpu_median_ms is not None):
             return None
         oga_p50_us = head.decode.get("p50_us")
@@ -401,7 +404,7 @@ def run_params_from_log_path(p: Path) -> dict:
 # embed raw glyphs inline — one place to swap if a third style is ever added.
 TREE_CHARS = {
     "unicode": {"branch": "├─", "last": "└─", "pipe": "│ ", "blank": "  "},
-    "ascii":   {"branch": "+-", "last": "+-", "pipe": "| ", "blank": "  "},
+    "ascii": {"branch": "+-", "last": "+-", "pipe": "| ", "blank": "  "},
 }
 
 SECTION_RULE = "─" * 74
@@ -412,7 +415,9 @@ SECTION_RULE = "─" * 74
 LABEL_WIDTH = 42
 
 
-def render_banner(model: str, run_params: dict, perf: PerfSummary, indent: str) -> list[str]:
+def render_banner(
+    model: str, run_params: dict, perf: PerfSummary, indent: str
+) -> list[str]:
     bar = "═" * (74 + len(indent))
     bits = [f"HIPDNN EP profile  ·  {model}"]
     # Show shape only when it's worth flagging. "dynamic" is the default for
@@ -434,7 +439,9 @@ def render_banner(model: str, run_params: dict, perf: PerfSummary, indent: str) 
     return [f"{indent}{bar}", f"{indent}  {'  ·  '.join(bits)}", f"{indent}{bar}"]
 
 
-def render_section_header(num: int, title: str, subtitle: str, indent: str) -> list[str]:
+def render_section_header(
+    num: int, title: str, subtitle: str, indent: str
+) -> list[str]:
     return [
         f"{indent}  § {num}  {title}  —  {subtitle}",
         f"{indent}  {SECTION_RULE}",
@@ -452,22 +459,31 @@ def render_section_1_headline(head: OgaHeadline, indent: str) -> list[str]:
                    sub-blocks within head render the literal ``(absent)``.
     """
     lines = render_section_header(
-        1, "HEADLINE",
+        1,
+        "HEADLINE",
         f"model_benchmark (batch={head.batch_size}, prompt={head.prompt_tokens}, "
         f"gen={head.tokens_to_generate})",
         indent,
     )
     # Column widths chosen so all five rows align with the header.
     fmt = "    {label:<18} {tps:>13}   {p50:>13}   {std:>11}   {n}"
-    lines.append(indent + fmt.format(
-        label="", tps="throughput",
-        p50="p50 latency", std="stddev", n="samples"
-    ).rstrip())
+    lines.append(
+        indent
+        + fmt.format(
+            label="", tps="throughput", p50="p50 latency", std="stddev", n="samples"
+        ).rstrip()
+    )
 
-    def row(label: str, block: Optional[dict], lat_unit: str, *, has_tps: bool = True) -> str:
+    def row(
+        label: str, block: Optional[dict], lat_unit: str, *, has_tps: bool = True
+    ) -> str:
         if block is None:
             return indent + f"    {label:<18} (absent)"
-        tps = f"{block.get('avg_tps', 0):.2f} t/s" if has_tps and "avg_tps" in block else "—"
+        tps = (
+            f"{block.get('avg_tps', 0):.2f} t/s"
+            if has_tps and "avg_tps" in block
+            else "—"
+        )
         p50_key = f"p50_{lat_unit}"
         p50 = f"{block.get(p50_key, 0):.2f} {lat_unit}" if p50_key in block else "—"
         std_key = f"stddev_{lat_unit}"
@@ -475,17 +491,21 @@ def render_section_1_headline(head: OgaHeadline, indent: str) -> list[str]:
         n = block.get("n", "—")
         return indent + fmt.format(label=label, tps=tps, p50=p50, std=std, n=n).rstrip()
 
-    lines.append(row("Prefill (TTFT)", head.prefill,  "us"))
-    lines.append(row("Decode",         head.decode,   "us"))
-    lines.append(row("Sampling",       head.sampling, "us"))
-    lines.append(row("E2E generation", head.e2e,      "ms", has_tps=False))
-    lines.append(indent + f"    {'Peak working set':<18} "
-                          f"{human_bytes(head.peak_ws_bytes)} "
-                          f"({head.peak_ws_bytes or '?'} bytes)")
+    lines.append(row("Prefill (TTFT)", head.prefill, "us"))
+    lines.append(row("Decode", head.decode, "us"))
+    lines.append(row("Sampling", head.sampling, "us"))
+    lines.append(row("E2E generation", head.e2e, "ms", has_tps=False))
+    lines.append(
+        indent + f"    {'Peak working set':<18} "
+        f"{human_bytes(head.peak_ws_bytes)} "
+        f"({head.peak_ws_bytes or '?'} bytes)"
+    )
     return lines
 
 
-def render_section_2_breakdown(bd: DecodeBreakdown, charset: str, indent: str) -> list[str]:
+def render_section_2_breakdown(
+    bd: DecodeBreakdown, charset: str, indent: str
+) -> list[str]:
     """§ 2 STEADY-STATE DECODE BREAKDOWN — drawn as an actual tree.
 
     Source:        ``DecodeBreakdown`` -> joined OgaHeadline + PerfSummary +
@@ -502,20 +522,24 @@ def render_section_2_breakdown(bd: DecodeBreakdown, charset: str, indent: str) -
     tc = TREE_CHARS[charset]
     arrow = "<-" if charset == "ascii" else "◀"
     lines = render_section_header(
-        2, "STEADY-STATE DECODE BREAKDOWN",
+        2,
+        "STEADY-STATE DECODE BREAKDOWN",
         "1 decode token, median across run",
         indent,
     )
-    lines.append(indent + f"    {'':<{LABEL_WIDTH}} "
-                          f"{'latency':>10}   {'share':>6}   {'source':<20}")
+    lines.append(
+        indent + f"    {'':<{LABEL_WIDTH}} "
+        f"{'latency':>10}   {'share':>6}   {'source':<20}"
+    )
 
-    def row(prefix: str, label: str, ms: float, share: float,
-            src: str = "") -> str:
+    def row(prefix: str, label: str, ms: float, share: float, src: str = "") -> str:
         pad = LABEL_WIDTH - len(prefix) - len(label)
         if pad < 1:
             pad = 1
-        return (f"{indent}    {prefix}{label}{' ' * pad} "
-                f"{ms:>7.3f} ms   {share:>5.1f} %   {src}").rstrip()
+        return (
+            f"{indent}    {prefix}{label}{' ' * pad} "
+            f"{ms:>7.3f} ms   {share:>5.1f} %   {src}"
+        ).rstrip()
 
     total = bd.oga_p50_ms
 
@@ -539,42 +563,115 @@ def render_section_2_breakdown(bd: DecodeBreakdown, charset: str, indent: str) -
     #      │  ├─ GPU: unwrapped + glue kernels
     #      │  └─ CPU: host dispatch + sync poll      <- last L3
     #      └─ Trailing fence (hipStreamSync)         <- last L2 under L1-LAST
-    PIPE   = f"{tc['pipe']} "    # "│  " — parent has more siblings below
-    BLANK  = "   "               # parent was last — no pipe through this column
+    PIPE = f"{tc['pipe']} "  # "│  " — parent has more siblings below
+    BLANK = "   "  # parent was last — no pipe through this column
     BRANCH = f"{tc['branch']} "  # "├─ " — this row has siblings below
-    LAST   = f"{tc['last']} "    # "└─ " — last sibling at this level
+    LAST = f"{tc['last']} "  # "└─ " — last sibling at this level
 
-    lines.append(row("", "OGA::GenerateNextToken", bd.oga_p50_ms, 100.0,
-                     f"{arrow} § 1 Decode p50"))
-    lines.append(row(BRANCH, "OGA + ORT framework overhead",
-                     bd.oga_overhead_ms, pct(bd.oga_overhead_ms)))
-    lines.append(row(PIPE + BRANCH, "Token sampling",
-                     bd.sampling_avg_ms, pct(bd.sampling_avg_ms),
-                     f"{arrow} § 1 Sampling avg"))
-    lines.append(row(PIPE + LAST, "Other (IoBinding rebind, etc.)",
-                     bd.other_oga_ms, pct(bd.other_oga_ms)))
-    lines.append(row(LAST, "EP MlirCustomOp::Compute()",
-                     bd.wall_ms, pct(bd.wall_ms),
-                     f"{arrow} § 4 wall_ms"))
-    lines.append(row(BLANK + BRANCH, "Marshal in (input descriptors)",
-                     bd.marshal_in_ms, pct(bd.marshal_in_ms),
-                     f"{arrow} § 4 marshal_in_ms"))
-    lines.append(row(BLANK + BRANCH, "Marshal out (output desc.)",
-                     bd.marshal_out_ms, pct(bd.marshal_out_ms),
-                     f"{arrow} § 4 marshal_out_ms"))
-    lines.append(row(BLANK + BRANCH, "model.dll inference_compute()",
-                     bd.compute_cpu_ms, pct(bd.compute_cpu_ms),
-                     f"{arrow} § 4 compute_cpu_ms"))
-    lines.append(row(BLANK + PIPE + BRANCH, "GPU: OP_PROFILE kernels (sum)",
-                     bd.perop_gpu_median_ms, pct(bd.perop_gpu_median_ms),
-                     f"{arrow} § 3 TOTAL"))
-    lines.append(row(BLANK + PIPE + BRANCH, "GPU: outside § 3 scopes",
-                     bd.unprofiled_gpu_ms, pct(bd.unprofiled_gpu_ms)))
-    lines.append(row(BLANK + PIPE + LAST, "CPU: host dispatch + sync poll",
-                     bd.cpu_overhead_ms, pct(bd.cpu_overhead_ms)))
-    lines.append(row(BLANK + LAST, "Trailing fence (hipStreamSync)",
-                     bd.fence_ms, pct(bd.fence_ms),
-                     f"{arrow} § 4 fence_residual_ms"))
+    lines.append(
+        row(
+            "",
+            "OGA::GenerateNextToken",
+            bd.oga_p50_ms,
+            100.0,
+            f"{arrow} § 1 Decode p50",
+        )
+    )
+    lines.append(
+        row(
+            BRANCH,
+            "OGA + ORT framework overhead",
+            bd.oga_overhead_ms,
+            pct(bd.oga_overhead_ms),
+        )
+    )
+    lines.append(
+        row(
+            PIPE + BRANCH,
+            "Token sampling",
+            bd.sampling_avg_ms,
+            pct(bd.sampling_avg_ms),
+            f"{arrow} § 1 Sampling avg",
+        )
+    )
+    lines.append(
+        row(
+            PIPE + LAST,
+            "Other (IoBinding rebind, etc.)",
+            bd.other_oga_ms,
+            pct(bd.other_oga_ms),
+        )
+    )
+    lines.append(
+        row(
+            LAST,
+            "EP MlirCustomOp::Compute()",
+            bd.wall_ms,
+            pct(bd.wall_ms),
+            f"{arrow} § 4 wall_ms",
+        )
+    )
+    lines.append(
+        row(
+            BLANK + BRANCH,
+            "Marshal in (input descriptors)",
+            bd.marshal_in_ms,
+            pct(bd.marshal_in_ms),
+            f"{arrow} § 4 marshal_in_ms",
+        )
+    )
+    lines.append(
+        row(
+            BLANK + BRANCH,
+            "Marshal out (output desc.)",
+            bd.marshal_out_ms,
+            pct(bd.marshal_out_ms),
+            f"{arrow} § 4 marshal_out_ms",
+        )
+    )
+    lines.append(
+        row(
+            BLANK + BRANCH,
+            "model.dll inference_compute()",
+            bd.compute_cpu_ms,
+            pct(bd.compute_cpu_ms),
+            f"{arrow} § 4 compute_cpu_ms",
+        )
+    )
+    lines.append(
+        row(
+            BLANK + PIPE + BRANCH,
+            "GPU: OP_PROFILE kernels (sum)",
+            bd.perop_gpu_median_ms,
+            pct(bd.perop_gpu_median_ms),
+            f"{arrow} § 3 TOTAL",
+        )
+    )
+    lines.append(
+        row(
+            BLANK + PIPE + BRANCH,
+            "GPU: outside § 3 scopes",
+            bd.unprofiled_gpu_ms,
+            pct(bd.unprofiled_gpu_ms),
+        )
+    )
+    lines.append(
+        row(
+            BLANK + PIPE + LAST,
+            "CPU: host dispatch + sync poll",
+            bd.cpu_overhead_ms,
+            pct(bd.cpu_overhead_ms),
+        )
+    )
+    lines.append(
+        row(
+            BLANK + LAST,
+            "Trailing fence (hipStreamSync)",
+            bd.fence_ms,
+            pct(bd.fence_ms),
+            f"{arrow} § 4 fence_residual_ms",
+        )
+    )
 
     # Notes for the two "residual" rows that don't have a direct § N cross-ref
     # (they are subtractive — what's left after the named rows are accounted
@@ -583,20 +680,34 @@ def render_section_2_breakdown(bd: DecodeBreakdown, charset: str, indent: str) -
     # speak for themselves once you've followed their § N arrow.
     lines.append("")
     lines.append(indent + "    notes:")
-    lines.append(indent + "      - \"GPU: outside § 3 scopes\" = § 4 gpu_ms − § 3 "
-                          "TOTAL: GPU work not bracketed by any")
-    lines.append(indent + "        OP_PROFILE wrapper. Typical sources: MIOpen / "
-                          "hipBLASLt internal helper")
-    lines.append(indent + "        launches, ops lacking an OP_PROFILE scope, "
-                          "hipMemset / glue between ops. If")
-    lines.append(indent + "        this row grows after a runtime change, "
-                          "OP_PROFILE coverage has regressed.")
-    lines.append(indent + "      - \"Other (IoBinding rebind, etc.)\" = § 1 Decode "
-                          "p50 − sampling − EP wall: OGA")
-    lines.append(indent + "        framework overhead between Generator steps. "
-                          "Dominated by IoBinding's per-token")
-    lines.append(indent + "        rebind of all input/output tensors (scales "
-                          "with KV buffer size, not seq len).")
+    lines.append(
+        indent + '      - "GPU: outside § 3 scopes" = § 4 gpu_ms − § 3 '
+        "TOTAL: GPU work not bracketed by any"
+    )
+    lines.append(
+        indent + "        OP_PROFILE wrapper. Typical sources: MIOpen / "
+        "hipBLASLt internal helper"
+    )
+    lines.append(
+        indent + "        launches, ops lacking an OP_PROFILE scope, "
+        "hipMemset / glue between ops. If"
+    )
+    lines.append(
+        indent + "        this row grows after a runtime change, "
+        "OP_PROFILE coverage has regressed."
+    )
+    lines.append(
+        indent + '      - "Other (IoBinding rebind, etc.)" = § 1 Decode '
+        "p50 − sampling − EP wall: OGA"
+    )
+    lines.append(
+        indent + "        framework overhead between Generator steps. "
+        "Dominated by IoBinding's per-token"
+    )
+    lines.append(
+        indent + "        rebind of all input/output tensors (scales "
+        "with KV buffer size, not seq len)."
+    )
     return lines
 
 
@@ -619,7 +730,8 @@ def render_section_3_perop(perop: PerOpTable, indent: str) -> list[str]:
     if not perop:
         return []
     lines = render_section_header(
-        3, "PER-OP GPU BREAKDOWN",
+        3,
+        "PER-OP GPU BREAKDOWN",
         "last Compute() = steady-state decode token",
         indent,
     )
@@ -649,20 +761,22 @@ def render_section_4_distribution(perf: PerfSummary, indent: str) -> list[str]:
     if not perf:
         return []
     lines = render_section_header(
-        4, "PER-CALL DISTRIBUTION",
+        4,
+        "PER-CALL DISTRIBUTION",
         f"EP MlirCustomOp::Compute() over {perf.total_inferences} invocations (all ms)",
         indent,
     )
-    lines.append(indent + f"    {'':<18} {'min':>10} {'median':>10}"
-                          f" {'p99':>10} {'max':>12}")
+    lines.append(
+        indent + f"    {'':<18} {'min':>10} {'median':>10} {'p99':>10} {'max':>12}"
+    )
     for name in PerfSummary.METRIC_ORDER:
         stats = perf.metrics.get(name)
         if not stats:
             continue
         lines.append(
             indent + f"    {name:<18} "
-                     f"{stats['min']:>10.3f} {stats['median']:>10.3f}"
-                     f" {stats['p99']:>10.3f} {stats['max']:>12.3f}"
+            f"{stats['min']:>10.3f} {stats['median']:>10.3f}"
+            f" {stats['p99']:>10.3f} {stats['max']:>12.3f}"
         )
     # The two-line note below catches the two most-common "wait, what?" moments
     # readers have when first comparing § 4 against § 1:
@@ -671,13 +785,19 @@ def render_section_4_distribution(perf: PerfSummary, indent: str) -> list[str]:
     #       windows: § 1 reports only OGA's timed iterations, § 4 reports every
     #       EP call including warmup + verbose-mode display generation.
     lines.append(indent + "    notes:")
-    lines.append(indent + "      - `max` includes first-Compute cold start "
-                          "(kernel autotune + pool grow);")
+    lines.append(
+        indent + "      - `max` includes first-Compute cold start "
+        "(kernel autotune + pool grow);"
+    )
     lines.append(indent + "        § 2 uses median to skip those outliers.")
-    lines.append(indent + "      - this count covers ALL EP calls (warmup + "
-                          "verbose-display + timed reps);")
-    lines.append(indent + "        § 1's per-block `samples` column is the "
-                          "OGA-timed subset only.")
+    lines.append(
+        indent + "      - this count covers ALL EP calls (warmup + "
+        "verbose-display + timed reps);"
+    )
+    lines.append(
+        indent + "        § 1's per-block `samples` column is the "
+        "OGA-timed subset only."
+    )
     return lines
 
 
@@ -721,8 +841,13 @@ def render_footer(head: OgaHeadline, indent: str) -> list[str]:
 # ─── main ────────────────────────────────────────────────────────────────────
 
 
-def render_report(log_path: Path, *, charset: str = "unicode",
-                  show_banner: bool = True, indent: str = "") -> str:
+def render_report(
+    log_path: Path,
+    *,
+    charset: str = "unicode",
+    show_banner: bool = True,
+    indent: str = "",
+) -> str:
     lines = log_path.read_text(errors="replace").splitlines()
 
     perf = PerfSummary.parse(lines)
@@ -772,12 +897,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("log", type=Path, help="Path to a HIPDNN EP / OGA bench log")
-    p.add_argument("--ascii", action="store_true",
-                   help="Use ASCII tree chars instead of Unicode box-drawing")
-    p.add_argument("--no-banner", action="store_true",
-                   help="Omit the top/bottom identity banner")
-    p.add_argument("--indent", type=int, default=0,
-                   help="Indent every output line by N spaces (default: 0)")
+    p.add_argument(
+        "--ascii",
+        action="store_true",
+        help="Use ASCII tree chars instead of Unicode box-drawing",
+    )
+    p.add_argument(
+        "--no-banner", action="store_true", help="Omit the top/bottom identity banner"
+    )
+    p.add_argument(
+        "--indent",
+        type=int,
+        default=0,
+        help="Indent every output line by N spaces (default: 0)",
+    )
     args = p.parse_args(argv)
 
     if not args.log.is_file():
@@ -791,8 +924,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         indent=" " * args.indent,
     )
     if not report:
-        print(f"warning: log has no model_benchmark stats block: {args.log}",
-              file=sys.stderr)
+        print(
+            f"warning: log has no model_benchmark stats block: {args.log}",
+            file=sys.stderr,
+        )
         return 2
     print(report)
     return 0
