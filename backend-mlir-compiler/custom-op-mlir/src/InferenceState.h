@@ -85,6 +85,14 @@ public:
   // warns when the symbol is absent.
   void begin_compute() const;
 
+  // Flush per-op profile (HIPDNN_EP_PERF). Called by the EP AFTER its
+  // wall_ms timing window closes, so the resolve + std::map + fprintf cost
+  // no longer pollutes Compute() latency. No-op when the model.dll predates
+  // the export (per-op PERF block is silently skipped for such DLLs;
+  // inference is unaffected). Symbol resolved once in create() so the call
+  // is a single cached indirect dispatch.
+  void flush_op_profile() const;
+
   // Diagnostic-only accessor: returns the hipStream_t used by
   // inference_compute, as a void*.  Relies on RuntimeState
   // (lib/Runtime/runtime_state_internal.h) keeping hipStream_t as its first
@@ -138,6 +146,13 @@ private:
   // DLLs); only used in output-allocator mode.
   using SetOutputAllocatorFn = void (*)(void *, const output_allocator_t *);
   SetOutputAllocatorFn set_output_allocator_fn_;
+
+  // Cached function pointer for hipdnn_ep_runtime_flush_op_profile. Same
+  // contract as begin_compute_fn_: resolved once at session creation, null
+  // when the symbol is absent (older DLLs), one cached indirect call when
+  // present.
+  using FlushOpProfileFn = void (*)(void *);
+  FlushOpProfileFn flush_op_profile_fn_;
 };
 
 } // namespace mlir_compilation::customop

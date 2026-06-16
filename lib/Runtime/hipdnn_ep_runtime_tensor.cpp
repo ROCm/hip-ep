@@ -48,11 +48,20 @@ static PerfState g_perf;
 static void perf_ensure_events() {
   if (g_perf.initialized)
     return;
-  if (hipEventCreate(&g_perf.h2d_start) != hipSuccess ||
-      hipEventCreate(&g_perf.h2d_end) != hipSuccess ||
-      hipEventCreate(&g_perf.d2h_start) != hipSuccess ||
-      hipEventCreate(&g_perf.d2h_end) != hipSuccess) {
-    fprintf(stderr, "[PERF] WARNING: hipEventCreate failed, disabling PERF\n");
+  // hipEventDisableSystemFence: see op_profile.cpp
+  // (op_profile_acquire_event_pair) for the canonical rationale and the
+  // "never set without a following sync" guardrail. Safe here -- these phase
+  // events are read via hipEventElapsedTime only after hipStreamSynchronize.
+  if (hipEventCreateWithFlags(&g_perf.h2d_start, hipEventDisableSystemFence) !=
+          hipSuccess ||
+      hipEventCreateWithFlags(&g_perf.h2d_end, hipEventDisableSystemFence) !=
+          hipSuccess ||
+      hipEventCreateWithFlags(&g_perf.d2h_start, hipEventDisableSystemFence) !=
+          hipSuccess ||
+      hipEventCreateWithFlags(&g_perf.d2h_end, hipEventDisableSystemFence) !=
+          hipSuccess) {
+    fprintf(stderr,
+            "[PERF] WARNING: hipEventCreateWithFlags failed, disabling PERF\n");
     if (g_perf.h2d_start) {
       (void)hipEventDestroy(g_perf.h2d_start);
       g_perf.h2d_start = nullptr;
@@ -700,8 +709,10 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
             total_ms > 0 ? (h2d_ms / total_ms * 100.0) : 0.0,
             total_ms > 0 ? (compute_ms / total_ms * 100.0) : 0.0,
             total_ms > 0 ? (d2h_ms / total_ms * 100.0) : 0.0);
-    auto *op_ps = static_cast<OpProfileState *>(state->op_profile);
-    op_profile_resolve_and_print(op_ps);
+    // Per-op resolve+print was moved out of the hot path -- the EP now
+    // calls hipdnn_ep_runtime_flush_op_profile() after its wall_ms window
+    // closes, so the N x hipEventElapsedTime + std::map + fprintf cost no
+    // longer inflates the Compute() latency that drives TPS measurements.
   }
 
   return HIPDNN_EP_SUCCESS;
