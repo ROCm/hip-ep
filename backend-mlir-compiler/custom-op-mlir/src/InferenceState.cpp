@@ -4,17 +4,13 @@
  */
 #include "InferenceState.h"
 
-// CRITICAL: morphizen.hpp must be included before other morphizen headers
-#include "../../common/temp_path.hpp"
+#include "LoadedArtifact.h"
+#include "hip/artifact_abi.h"
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
-#include "morphizen/plugin.hpp"
 #include <cstddef>
-#include <cstdio>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <glog/logging.h>
 #include <utility>
 
@@ -23,53 +19,62 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
 
-namespace {
-// Returns the platform-appropriate file extension for a compiled artifact.
-// TODO: derive from artifact format stored in metadata when multiple formats
-// are supported (e.g. ArtifactFormat::SharedLib → ".so" on Linux,
-// ArtifactFormat::Portable → ".mlir")
-std::string artifactExtension() {
-#ifdef _WIN32
-  return ".dll";
-#else
-  return ".so";
-#endif
-}
-} // anonymous namespace
-
 namespace mlir_compilation::customop {
 
-InferenceState::InferenceState(PrivateTag, void *state,
-                               std::unique_ptr<morphizen::Plugin> plugin,
-                               const std::string &temp_dll_path)
-    : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path),
-      begin_compute_fn_(nullptr), set_output_allocator_fn_(nullptr) {
-  // Cache the begin_compute symbol so the per-Compute() invocation is a
-  // single indirect call. Older model.dlls do not export this symbol; in
-  // that case we leave begin_compute_fn_ null and begin_compute() becomes
-  // a no-op.
-  if (plugin_) {
-    begin_compute_fn_ =
-        plugin_->get_method<void, void *>("hipdnn_ep_runtime_begin_compute");
-    MY_LOG(2) << "begin_compute symbol "
-              << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
-    // Output-allocator setter: optional, like begin_compute. Only invoked in
-    // allocator mode; classic DLLs leave this null.
-    set_output_allocator_fn_ =
-        plugin_->get_method<void, void *, const output_allocator_t *>(
-            "hipdnn_ep_set_output_allocator");
-    MY_LOG(2) << "set_output_allocator symbol "
-              << (set_output_allocator_fn_ ? "resolved"
-                                           : "not exported (no-op)");
+namespace {
+// Resolve inference_init from the loaded artifact, call it, and return the
+// opaque state. FATALs (like the rest of create()) on a missing symbol or
+// non-zero return.
+void *runInit(const LoadedArtifact &artifact, morphizen::FileSystem *fs) {
+  auto init_fn =
+      artifact.get_method<int, void **, void *>(hipdnn::abi::kInferenceInit);
+  if (!init_fn) {
+    LOG(FATAL) << "inference_init not found in artifact.";
   }
-  // Safety net: warn loudly when the seqlens_k cache is effectively on
-  // but the model.dll predates the begin_compute export. Without the
-  // invalidation hook the cache would survive across forward passes and
-  // the gqa.cpp readback would return token-1 values for tokens 2..N,
-  // producing silently wrong logits. The cache defaults to on, so this
-  // fires unless the user has explicitly set HIPDNN_EP_GQA_CACHE_SEQLENS=0.
-  // Detected once at session creation so the user gets an actionable
-  // signal before observing decode output corruption.
+  void *state = nullptr;
+  int ret = init_fn(&state, static_cast<void *>(fs));
+  if (ret != 0) {
+    LOG(FATAL) << "inference_init() failed with code: " << ret;
+  }
+  return state;
+}
+} // namespace
+
+// Resolve the hot-path entry points from the loaded artifact; LoadedArtifact
+// exposes one get_method form over either backend.
+void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
+  // inference_compute is exported with exactly one arity (fixed at compile
+  // time by use_output_allocator); we cache both typed pointers to the same
+  // symbol and call only the one matching the artifact's mode.
+  compute_fn_ = artifact.get_method<int, void *, span_t *, span_t *>(
+      hipdnn::abi::kInferenceCompute);
+  compute_alloc_fn_ = artifact.get_method<int, void *, span_t *>(
+      hipdnn::abi::kInferenceCompute);
+  cleanup_fn_ =
+      artifact.get_method<int, void *>(hipdnn::abi::kInferenceCleanup);
+  begin_compute_fn_ =
+      artifact.get_method<void, void *>(hipdnn::abi::kRuntimeBeginCompute);
+  set_output_allocator_fn_ =
+      artifact.get_method<void, void *, const output_allocator_t *>(
+          hipdnn::abi::kSetOutputAllocator);
+}
+
+InferenceState::InferenceState(PrivateTag, void *state,
+                               std::unique_ptr<LoadedArtifact> artifact)
+    : state_(state), artifact_(std::move(artifact)), compute_fn_(nullptr),
+      compute_alloc_fn_(nullptr), cleanup_fn_(nullptr),
+      begin_compute_fn_(nullptr), set_output_allocator_fn_(nullptr) {
+  resolveEntryPoints(*artifact_);
+
+  MY_LOG(2) << "begin_compute symbol "
+            << (begin_compute_fn_ ? "resolved" : "not exported (no-op)");
+  MY_LOG(2) << "set_output_allocator symbol "
+            << (set_output_allocator_fn_ ? "resolved" : "not exported (no-op)");
+
+  // Without begin_compute, the GQA seqlens_k cache survives across
+  // forward passes and decode returns token-1 values for tokens 2..N
+  // (silently wrong logits). The cache is on by default, so warn unless
+  // it was explicitly disabled.
   if (!begin_compute_fn_) {
     const char *env = std::getenv("HIPDNN_EP_GQA_CACHE_SEQLENS");
     const bool cache_enabled = !env || env[0] != '0';
@@ -77,130 +82,98 @@ InferenceState::InferenceState(PrivateTag, void *state,
       LOG(WARNING) << "GQA seqlens_k cache is enabled "
                    << "(HIPDNN_EP_GQA_CACHE_SEQLENS="
                    << (env ? env : "<unset, default 1>")
-                   << "), but the loaded model.dll does not export "
+                   << "), but the loaded model artifact does not export "
                       "hipdnn_ep_runtime_begin_compute. Per-Compute() cache "
-                      "invalidation will not happen and decode output will be "
-                      "incorrect from token 2 onward. Either set "
-                      "HIPDNN_EP_GQA_CACHE_SEQLENS=0 or rebuild the model.dll "
-                      "with a runtime that exports the hook.";
+                      "invalidation will not happen and decode output will "
+                      "be incorrect from token 2 onward. Either set "
+                      "HIPDNN_EP_GQA_CACHE_SEQLENS=0 or rebuild the model "
+                      "artifact with a runtime that exports the hook.";
     }
   }
 }
 
 std::unique_ptr<InferenceState>
-InferenceState::create(const std::vector<uint8_t> &dll_bytes,
-                       morphizen::FileSystem *fs) {
-  MY_LOG(1) << "Loading inference plugin from memory...";
-
+InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
+                       morphizen::FileSystem *fs, ArtifactKind kind) {
   auto t0 = timing_now();
   auto t_prev = t0;
 
-  // Write DLL to temp file (morphizen::Plugin loads from file path)
-  std::string dll_path =
-      mlir_compiler_utils::generateTempPath(artifactExtension());
-  MY_LOG(2) << "Temporary DLL path: " << dll_path;
+  const char *kind_name =
+      (kind == ArtifactKind::LLVM_IR) ? "LLVM IR" : "native";
+  MY_LOG(1) << "Loading inference artifact from EPContext (" << kind_name
+            << ")...";
 
-  // Write DLL to temp file
-  {
-    std::ofstream dll_out(dll_path, std::ios::binary);
-    if (!dll_out) {
-      LOG(FATAL) << "Failed to create temporary DLL file: " << dll_path;
-    }
-    dll_out.write(reinterpret_cast<const char *>(dll_bytes.data()),
-                  dll_bytes.size());
-    dll_out.close();
+  // LoadedArtifact selects the backend (in-process ORC JIT for LLVM IR, or a
+  // temp .dll/.so + morphizen::Plugin for native) and owns its teardown.
+  std::string load_err;
+  auto artifact = LoadedArtifact::createInMemory(artifact_bytes, kind,
+                                                 "model_compiled", &load_err);
+  if (!artifact) {
+    LOG(FATAL) << "InferenceState::create: failed to load " << kind_name
+               << " artifact: " << load_err
+               << " (per-model artifact malformed, or required external "
+                  "symbols -- kernels / HIP runtime / CRT -- could not be "
+                  "resolved in the EP DLL process).";
   }
 
-  TIMING_LOG("[Session] Write DLL to temp file: %.3fs (%zu bytes)\n",
-             record_elapsed(t_prev), dll_bytes.size());
+  TIMING_LOG("[Session] LoadedArtifact::createInMemory (parse + JIT-init / "
+             "Plugin load): %.3fs (%zu bytes)\n",
+             record_elapsed(t_prev), artifact_bytes.size());
 
-  // Load plugin using morphizen infrastructure (factory pattern)
-  // Pass path without extension — Plugin::guess_name adds platform-correct
-  // suffix
-  std::string base_path =
-      std::filesystem::path(dll_path).replace_extension("").string();
-  auto plugin = morphizen::Plugin::create(base_path.c_str());
+  // The inference_init lookup also triggers ORC's lazy codegen for the host
+  // wrappers (LLVM IR), so this also covers first-symbol materialization.
+  void *state = runInit(*artifact, fs);
 
-  // Check if plugin DLL loaded successfully
-  if (!plugin) {
-    LOG(FATAL)
-        << "Failed to load DLL: " << dll_path
-        << " - check that the file exists and all dependencies are available";
-  }
-
-  TIMING_LOG("[Session] Plugin::create (LoadLibrary): %.3fs\n",
+  TIMING_LOG("[Session] inference_init (lookup + lazy codegen): %.3fs\n",
              record_elapsed(t_prev));
-
-  // inference_init(void** out_state, void* fs) — the DLL needs a FileSystem
-  // to resolve and load model constants from the EPContext archive.
-  auto init_fn = plugin->get_method<int, void **, void *>("inference_init");
-  if (!init_fn) {
-    LOG(FATAL) << "inference_init function not found in plugin: " << dll_path
-               << " - DLL loaded successfully but symbol is missing";
-  }
-
-  TIMING_LOG("[Session] get_method (symbol lookup): %.3fs\n",
-             record_elapsed(t_prev));
-
-  void *state = nullptr;
-  int ret = init_fn(&state, static_cast<void *>(fs));
-  if (ret != 0) {
-    LOG(FATAL) << "inference_init() failed with code: " << ret;
-  }
-
-  TIMING_LOG("[Session] inference_init: %.3fs\n", record_elapsed(t_prev));
   TIMING_LOG("[Session] InferenceState::create total: %.3fs\n",
              elapsed_since(t0));
 
-  MY_LOG(1) << "Inference state initialized";
-
+  MY_LOG(1) << "Inference state initialized (" << kind_name << ")";
   return std::make_unique<InferenceState>(PrivateTag{}, state,
-                                          std::move(plugin), dll_path);
+                                          std::move(artifact));
 }
 
 InferenceState::~InferenceState() {
   MY_LOG(1) << "InferenceState destructor: cleaning up state";
-  if (state_ && plugin_) {
-    auto cleanup_fn = plugin_->get_method<int, void *>("inference_cleanup");
-    if (cleanup_fn) {
-      int ret = cleanup_fn(state_);
+  if (state_) {
+    if (cleanup_fn_) {
+      int ret = cleanup_fn_(state_);
       if (ret != 0) {
         LOG(WARNING) << "inference_cleanup() failed with code: " << ret;
       }
+    } else {
+      LOG(WARNING)
+          << "inference_cleanup symbol was not resolved at session "
+             "creation; skipping teardown call (potential GPU resource "
+             "leak in the loaded module).";
     }
     state_ = nullptr;
   }
-  MY_LOG(1) << "InferenceState destructor: plugin will be destroyed next";
-  // plugin_ destructor runs automatically after this
-
-  // Delete temporary DLL file after plugin is destroyed
-  if (!temp_dll_path_.empty()) {
-    std::remove(temp_dll_path_.c_str());
-    MY_LOG(2) << "Deleted temporary DLL: " << temp_dll_path_;
-  }
+  // artifact_ is destroyed next (LoadedArtifact tears down the ORC JIT or
+  // unloads the Plugin, and removes any native temp file it created).
+  MY_LOG(1) << "InferenceState destructor: loaded artifact will be destroyed "
+               "next";
 }
 
 int InferenceState::compute(span_t *inputs, span_t *outputs) const {
-  auto compute_fn =
-      plugin_->get_method<int, void *, span_t *, span_t *>("inference_compute");
-  if (!compute_fn) {
-    LOG(ERROR) << "inference_compute function not found in plugin";
+  if (!compute_fn_) {
+    LOG(ERROR) << "inference_compute symbol not resolved in loaded artifact";
     return -1;
   }
-  return compute_fn(state_, inputs, outputs);
+  return compute_fn_(state_, inputs, outputs);
 }
 
 int InferenceState::compute_with_output_allocator(span_t *inputs) const {
-  // Same symbol as compute(), resolved with the 2-arg ABI. The DLL exports
-  // exactly one arity (fixed at compile time by use_output_allocator), so this
-  // is only ever called against an allocator-mode DLL.
-  auto compute_fn =
-      plugin_->get_method<int, void *, span_t *>("inference_compute");
-  if (!compute_fn) {
-    LOG(ERROR) << "inference_compute (2-arg allocator ABI) not found in plugin";
+  // Cached 2-arg view of inference_compute (resolved in resolveEntryPoints for
+  // whichever loader owns the artifact). Only valid against an allocator-mode
+  // artifact, which the EP selects via use_output_allocator metadata.
+  if (!compute_alloc_fn_) {
+    LOG(ERROR) << "inference_compute (2-arg allocator ABI) not resolved in "
+                  "loaded artifact";
     return -1;
   }
-  return compute_fn(state_, inputs);
+  return compute_alloc_fn_(state_, inputs);
 }
 
 void InferenceState::set_output_allocator(
@@ -229,24 +202,13 @@ void InferenceState::begin_compute() const {
   }
 }
 
-// ----------------------------------------------------------------------------
-// Diagnostic-only stream accessor.
-//
-// state_ is the opaque handle returned by inference_init() in the JIT-compiled
-// model.dll.  That DLL's implementation of inference_init allocates a
-// RuntimeState (see lib/Runtime/runtime_state_internal.h) and returns it as
-// void*.  RuntimeState's first field is `hipStream_t stream`, so a first-field
-// cast gives us the stream without a codegen change or a DLL export.
-//
-// The EP DLL and the JIT model.dll's linked-in runtime bitcode are built from
-// the same commit of the same tree, so layout is consistent by construction.
-// If RuntimeState ever gains a field before `stream`, this returns garbage
-// silently; we'd notice via absurd hipEventElapsedTime readings.  Acceptable
-// for a diagnostic (HIPDNN_EP_PERF) instrumentation.
-// ----------------------------------------------------------------------------
+// First-field cast onto RuntimeState (see runtime_state_internal.h).
+// EP DLL and runtime.bc come from the same source tree, so layout is
+// consistent by construction; a layout drift would surface as absurd
+// hipEventElapsedTime readings under HIPDNN_EP_PERF.
 namespace {
 struct RuntimeStateHead {
-  void *stream; // mirrors RuntimeState::stream (hipStream_t is pointer-sized)
+  void *stream;
 };
 static_assert(sizeof(void *) == 8, "expected 64-bit target");
 static_assert(offsetof(RuntimeStateHead, stream) == 0,

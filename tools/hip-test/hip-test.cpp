@@ -3,17 +3,16 @@
  * Licensed under the MIT License.
  */
 
-//===----------------------------------------------------------------------===//
-// test-model-dll - E2E testing tool for compiled MLIR models
-//===----------------------------------------------------------------------===//
-// Loads a compiled DLL, discovers metadata, generates test data, runs
-// inference, and validates outputs. Supports shape overrides and performance
-// measurement.
-//===----------------------------------------------------------------------===//
+// hip-test: load a per-model artifact (LLVM .bc via LlvmIrJit, or a native
+// .dll/.so via morphizen::Plugin -- selected by file extension), parse
+// metadata, generate test inputs, run inference, validate outputs. Exercises
+// both loaders the EP uses at runtime.
 
-#include "../common/DllLoader.h"
 #include "CrashHandler.h"
+#include "LoadedArtifact.h" // LoadedArtifact, ArtifactKind
 #include "hip/Support/DiskFileSystem.h"
+#include "hip/artifact_abi.h" // hipdnn::abi symbol names
+#include <memory>
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4244) // Conversion warnings in LLVM JSON.h
@@ -28,6 +27,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -35,20 +35,9 @@
 #include <string>
 #include <vector>
 
-// Interface function types
-typedef int (*InferenceInitFunc)(void **out_state, void *fs);
-typedef int (*InferenceComputeFunc)(void *state, void *inputs, void *outputs);
-typedef int (*InferenceCleanupFunc)(void *state);
-typedef const char *(*InferenceGetMetadataJsonFunc)(void);
-
-// Local copy of the tensor_t wire-protocol ABI -- the three components
-// (compiler-emitted model.dll, EP runtime DLL, this hip-test-dll harness)
-// are intentionally kept decoupled, so we re-declare the struct here
-// instead of sharing a header. The static_assert block below catches
-// any layout drift between the three copies. Sibling copies live at:
-//   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
-//   * `lib/Runtime/hipdnn_ep_runtime.h`                             (EP
-//   runtime)
+// Local copy of the tensor_t wire-protocol ABI; sibling copies live in
+// custom_op_mlir.hpp (compiler) and hipdnn_ep_runtime.h (runtime). The
+// static_asserts below catch layout drift between the three copies.
 enum {
   TENSOR_MEMORY_CPU = 0,  // == OrtMemoryInfoDeviceType_CPU
   TENSOR_MEMORY_GPU = 1,  // == OrtMemoryInfoDeviceType_GPU
@@ -64,12 +53,6 @@ typedef struct {
   int memory_type;     // TENSOR_MEMORY_CPU / _GPU / _FPGA / _NPU
 } tensor_t;
 
-// Compile-time guard for the wire-protocol ABI described above. The same
-// three asserts live in each of the three sibling headers; if you reorder
-// / add / remove a field in one copy and forget to mirror it in the others,
-// at least one of them fails to build. Per-field offsets (not raw sizeof)
-// because trailing padding after `memory_type` is compiler-defined and not
-// part of what model.dll actually reads.
 static_assert(offsetof(tensor_t, data) == 0,
               "tensor_t.data must remain the first field");
 static_assert(offsetof(tensor_t, shape) == sizeof(void *),
@@ -309,20 +292,21 @@ static bool parseMetadata(const char *json_str, std::vector<TensorMeta> &inputs,
 
   return parseTensors("inputs", inputs) && parseTensors("outputs", outputs);
 }
-
 int main(int argc, char **argv) {
-  hip::install_crash_handlers("hip-test-dll");
+  hip::install_crash_handlers("hip-test");
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
-              << " <model.dll> [--input-shape INDEX=DIMS;...] [--iterations N] "
-                 "[--verbose] [--validate]\n";
+              << " <model.{bc,dll,so}> [--input-shape INDEX=DIMS;...] "
+                 "[--iterations N] [--verbose] [--validate]\n";
     std::cerr << "Example: " << argv[0]
-              << " model.dll --input-shape 0=8,3,224,224 --iterations 10 "
+              << " model.bc --input-shape 0=8,3,224,224 --iterations 10 "
                  "--verbose --validate\n";
+    std::cerr << "The loader is chosen from the artifact's file extension "
+                 "(.bc -> LLVM IR, .dll/.so -> native).\n";
     return 1;
   }
 
-  std::string dll_path = argv[1];
+  std::string bc_path = argv[1];
   std::map<int, std::vector<int64_t>> shape_overrides;
   int iterations = 1;
   bool verbose = false;
@@ -341,20 +325,30 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Load DLL
   if (verbose)
-    std::cout << "Loading DLL: " << dll_path << "\n";
-  DllLoader dll(dll_path);
-  if (!dll.isValid()) {
+    std::cout << "Loading artifact: " << bc_path << "\n";
+  // LoadedArtifact picks the format from the file extension and selects the
+  // loader (LlvmIrJit for LLVM IR, morphizen::Plugin for native) -- the same
+  // loader the EP uses, so the tool and the library never drift.
+  std::string load_err;
+  auto artifact = mlir_compilation::customop::LoadedArtifact::createFromFile(
+      bc_path, &load_err);
+  if (!artifact) {
+    std::cerr << "ERROR: " << load_err << "\n";
     return 1;
   }
+  if (verbose &&
+      artifact->kind() == mlir_compilation::customop::ArtifactKind::NATIVE)
+    std::cout << "Detected native artifact (loaded via morphizen::Plugin)\n";
 
-  // Load interface functions
-  auto init_func = (InferenceInitFunc)dll.getSymbol("inference_init");
-  auto compute_func = (InferenceComputeFunc)dll.getSymbol("inference_compute");
-  auto cleanup_func = (InferenceCleanupFunc)dll.getSymbol("inference_cleanup");
-  auto get_metadata_func = (InferenceGetMetadataJsonFunc)dll.getSymbol(
-      "inference_get_metadata_json");
+  auto init_func =
+      artifact->get_method<int, void **, void *>(hipdnn::abi::kInferenceInit);
+  auto compute_func = artifact->get_method<int, void *, void *, void *>(
+      hipdnn::abi::kInferenceCompute);
+  auto cleanup_func =
+      artifact->get_method<int, void *>(hipdnn::abi::kInferenceCleanup);
+  auto get_metadata_func = artifact->get_method<const char *>(
+      hipdnn::abi::kInferenceGetMetadataJson);
 
   if (!init_func || !compute_func || !cleanup_func || !get_metadata_func) {
     std::cerr << "ERROR: Missing required interface functions\n";

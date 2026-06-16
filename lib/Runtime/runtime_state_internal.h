@@ -186,8 +186,8 @@ struct RuntimeState {
   //
   // Invalidated by hipdnn_ep_runtime_begin_compute() at the start of each
   // Compute(), called from the EP-side MlirCustomOp::Compute() entry.
-  // If the symbol is not exported (older model.dll), invalidation does
-  // not happen and the cache is unsafe -- the EP logs a warning at
+  // If the symbol is not exported (older per-model bitcode), invalidation
+  // does not happen and the cache is unsafe -- the EP logs a warning at
   // session creation and the user must set HIPDNN_EP_GQA_CACHE_SEQLENS=0.
   bool seqlens_k_cached_valid;
   int32_t seqlens_k_cached_val;

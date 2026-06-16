@@ -10,7 +10,8 @@
 // Three consumers:
 //   1. hip-compiler.dll (handle creation + singleton registry population)
 //   2. The ORT EP (registry management + attach)
-//   3. model.dll generated code (hipdnn_graph_execute)
+//   3. JITted per-model bitcode (hipdnn_graph_execute, resolved by
+//      LlvmIrJit's process search generator against this DLL)
 //
 // All functions use C linkage and opaque pointers for cross-DLL safety.
 //
@@ -56,7 +57,8 @@ hipdnn_graph_registry_store(void *registry, int32_t graph_id, void *graph);
 
 /// Set the process-level default graph registry. Used by the same-process
 /// singleton pattern: hip-compiler.dll populates this during compilation,
-/// model.dll reads it during inference via hipdnn_graph_execute fallback.
+/// the JITted per-model code reads it during inference via the
+/// hipdnn_graph_execute fallback.
 HIPDNN_GRAPH_RUNTIME_API void hipdnn_graph_set_default_registry(void *registry);
 
 /// Set the process-level default hipDNN handle. Same singleton pattern.
@@ -70,7 +72,7 @@ HIPDNN_GRAPH_RUNTIME_API void hipdnn_graph_set_default_handle(void *handle);
 HIPDNN_GRAPH_RUNTIME_API void
 hipdnn_graph_runtime_attach(void *state, void *handle, void *registry);
 
-/// Execute a compiled hipDNN graph. Called from model.dll generated code.
+/// Execute a compiled hipDNN graph. Called from the JITted per-model code.
 /// Each compiled graph owns its GPU workspace (allocated during Compile()),
 /// so no workspace management is needed from the caller.
 /// Falls back to process-level defaults if state fields are nullptr.

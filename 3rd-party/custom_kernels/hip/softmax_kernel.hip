@@ -27,6 +27,11 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+// Pulls in the HIP_KERNEL_API (dllexport) declaration of
+// hip_softmax_row_2d_inplace so this TU exports it from the per-arch SHARED
+// kernel DLL (the native artifact link resolves it via the import lib).
+#include "hip_custom_kernels.h"
+
 #ifndef WAVE_SIZE
 #if defined(__GFX9__) || defined(__GFX9_NEXT__)
 #define WAVE_SIZE 64

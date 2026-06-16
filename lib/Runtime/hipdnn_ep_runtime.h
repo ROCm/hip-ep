@@ -304,7 +304,16 @@ void *hipdnn_ep_state_get_stream(RuntimeState *state);
 // Default-stream work serializes with the session stream (legacy implicit
 // sync) and shows up as GPU idle in the prefill profile. Returns NULL before
 // the first begin_compute on this thread (callers fall back to stream 0).
-void *hipdnn_ep_get_current_stream(void);
+//
+// Defined in the natively-compiled tls_stream.cpp (NOT runtime.bc) so the
+// thread_local storage stays out of the JIT'd module; exported so the JIT's
+// process search generator can resolve it from the host.
+HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
+
+// Publishes the session stream for hipdnn_ep_get_current_stream. Called by
+// hipdnn_ep_runtime_begin_compute (and cleared on stream teardown). Lives in
+// tls_stream.cpp alongside the getter.
+HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 
 // Get MIOpen handle from state (for MIOpen operations)
 // Returns: miopenHandle_t cast to void* (NULL on error)
@@ -421,7 +430,7 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 // Today the runtime only special-cases TENSOR_MEMORY_GPU (alias path,
 // avoids the per-inference H2D / D2H copy on AMD APU iGPU mapped-pinned
 // memory). CPU / FPGA / NPU all fall through to the legacy host H2D / D2H
-// path, preserving existing behaviour for hip-test-dll, hip-onnx-runner,
+// path, preserving existing behaviour for hip-test, hip-onnx-runner,
 // and any other host-input caller.
 //
 // Must match the matching enum in
@@ -443,12 +452,12 @@ enum {
 // whether to copy H2D/D2H or alias the caller's GPU-accessible buffer.
 //
 // tensor_t is the wire-protocol ABI between three components that are
-// intentionally kept decoupled (compiler-emitted model.dll, EP runtime
-// DLL, hip-test-dll harness), so we re-declare it here instead of
-// sharing a header. The static_assert block below catches any layout
-// drift at compile time. Sibling copies live at:
+// intentionally kept decoupled (compiler-emitted bitcode, EP runtime,
+// hip-test harness), so we re-declare it here instead of sharing a
+// header. The static_assert block below catches any layout drift at
+// compile time. Sibling copies live at:
 //   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
-//   * `tools/hip-test-dll/hip-test-dll.cpp`                         (test
+//   * `tools/hip-test/hip-test.cpp`                           (test
 //   driver)
 typedef struct {
   void *data;          // Data pointer (host or GPU-accessible per memory_type)
@@ -463,7 +472,7 @@ typedef struct {
 // / add / remove a field in one copy and forget to mirror it in the others,
 // at least one of them fails to build. Per-field offsets (not raw sizeof)
 // because trailing padding after `memory_type` is compiler-defined and not
-// part of what model.dll actually reads.
+// part of what the JITted per-model code actually reads.
 static_assert(offsetof(tensor_t, data) == 0,
               "tensor_t.data must remain the first field");
 static_assert(offsetof(tensor_t, shape) == sizeof(void *),

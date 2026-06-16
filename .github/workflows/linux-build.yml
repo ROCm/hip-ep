@@ -369,7 +369,7 @@ jobs:
             "$INSTALL"/lib/libhip-compiler.so \
             "$INSTALL"/bin/hip-compiler \
             "$INSTALL"/bin/hip-onnx-runner \
-            "$INSTALL"/bin/hip-test-dll \
+            "$INSTALL"/bin/hip-test \
             "$INSTALL"/bin/model_benchmark
           prev=0
           for _ in 1 2 3 4; do
@@ -457,6 +457,16 @@ jobs:
           fi
 
           cp "${{ github.workspace }}/etc/morphizen_config.json" staging/etc/
+
+          # Smoke: per-arch kernel SO must sit next to libonnxruntime_morphizen_ep.so;
+          # the EP anchors dlopen via dladdr() + RPATH=$ORIGIN.
+          KERNEL_SO="staging/lib/libcustom_kernels_gfx1151.so"
+          if [ ! -f "$KERNEL_SO" ]; then
+            echo "ERROR: $KERNEL_SO missing from install (HIP_ARCHITECTURES=gfx1151)"
+            ls -1 staging/lib/ | head -40
+            exit 1
+          fi
+          echo "OK: $(basename "$KERNEL_SO") present"
 
           rm -f staging/lib/libHipCInterface.a \
                 staging/lib/libcpptrace.a \

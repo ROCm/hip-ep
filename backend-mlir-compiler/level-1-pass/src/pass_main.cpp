@@ -40,7 +40,7 @@ namespace {
 // Step 1: Load configuration from provider options
 static CompilationConfig load_config(PassContext *ctx) {
   CompilationConfig config;
-  config.artifactFormat = ArtifactFormat::Native;
+  config.artifactFormat = ArtifactFormat::LLVM_IR;
   config.optLevel = 2;
   // Output-allocator ABI is the only mode: the DLL allocates graph outputs
   // in-graph (hip.alloc_output) and the EP dispatches the 2-arg
@@ -54,17 +54,25 @@ static CompilationConfig load_config(PassContext *ctx) {
   config.skipConstantData = !epctxExport;
 
   try {
-    // Parse artifact format
+    // Single compile option selecting the per-model artifact format.
+    //   "LLVM_IR" (default) -> OS-portable LLVM IR (.bc), JIT-loaded by the EP.
+    //   "NATIVE"            -> per-OS native .dll/.so loaded via LoadLibrary/
+    //                          dlopen. Opt-in for benchmarking/dev; not the
+    //                          production deployment format (signed-DLL
+    //                          policy).
+    // Unknown values are logged and coerced to LLVM_IR.
     std::string artifact_format_str =
-        ctx->get_provider_option("artifact_format", "native");
-    if (artifact_format_str == "llvm_ir") {
-      config.artifactFormat = ArtifactFormat::LlvmIr;
-    } else if (artifact_format_str != "native") {
-      MY_LOG(1) << "Unknown artifact_format: " << artifact_format_str
-                << ", using default: native";
+        ctx->get_provider_option("artifact_format", "LLVM_IR");
+    if (artifact_format_str == "NATIVE") {
+      config.artifactFormat = ArtifactFormat::NATIVE;
+    } else {
+      config.artifactFormat = ArtifactFormat::LLVM_IR;
+      if (artifact_format_str != "LLVM_IR") {
+        MY_LOG(1) << "artifact_format=" << artifact_format_str
+                  << " is not recognized; falling back to LLVM_IR.";
+      }
     }
 
-    // Parse optimization level
     std::string opt_level_str =
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
@@ -75,8 +83,8 @@ static CompilationConfig load_config(PassContext *ctx) {
   }
 
   MY_LOG(1) << "Artifact format: "
-            << (config.artifactFormat == ArtifactFormat::Native ? "native"
-                                                                : "llvm_ir")
+            << (config.artifactFormat == ArtifactFormat::NATIVE ? "NATIVE"
+                                                                : "LLVM_IR")
             << "; skipConstantData="
             << (config.skipConstantData ? "true" : "false")
             << (epctxExport ? " (EPContext export -> sidecar)"
@@ -159,6 +167,11 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
   // (CompilationConfig::useOutputAllocator), so the DLL ABI and the EP's
   // runtime dispatch arity can never disagree.
   metadata.set_use_output_allocator(true);
+  // Record the artifact format so the EP picks the matching loader before it
+  // opens the artifact (the artifact's own metadata blob is inside the
+  // artifact and cannot drive the load decision).
+  metadata.set_artifact_format(
+      artifact.format == ArtifactFormat::NATIVE ? "NATIVE" : "LLVM_IR");
 
   GraphRef graphRef(graph);
 
