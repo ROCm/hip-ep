@@ -73,8 +73,23 @@ int op_profile_acquire_event_pair(OpProfileState *ps) {
   int idx = ps->nextEventIndex++;
   if (idx >= (int)ps->eventPool.size()) {
     OpProfileState::EventPair ep;
-    hipEventCreate(&ep.start);
-    hipEventCreate(&ep.stop);
+    // Canonical rationale for hipEventDisableSystemFence across the profiler
+    // (other call sites reference this comment): hipEventRecord issues a
+    // system-scope acquire/release fence by default, which is wasted work for
+    // events whose elapsed time we read only after a hipStreamSynchronize.
+    // Disabling it preserves elapsed-time accuracy and GPU completion ordering
+    // while removing a per-record fence that, at hundreds of records per
+    // inference, otherwise dominated the per-op table.
+    //
+    // Guardrail: do NOT set this flag on events observed without a following
+    // stream/device sync (cross-stream coordination, CPU polling via
+    // hipEventQuery, multi-device visibility) -- those rely on the default
+    // flush semantics. No profiler event falls into that category.
+    //
+    // Pool slots are created once and reused across inferences, so creation
+    // cost is paid during warmup and every later record is free.
+    hipEventCreateWithFlags(&ep.start, hipEventDisableSystemFence);
+    hipEventCreateWithFlags(&ep.stop, hipEventDisableSystemFence);
     ps->eventPool.push_back(ep);
   }
   return idx;
