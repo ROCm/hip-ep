@@ -37,7 +37,7 @@ GPU events are recorded but not synchronized per-operator. Instead:
 
 1. Each `OpProfileScope` records `hipEventRecord(start)` in its constructor and `hipEventRecord(stop)` in its destructor, both on the existing HIP stream.
 2. Pending entries (name, shape, event pool index, CPU time) are stored in a vector inside `OpProfileState`.
-3. After `hipStreamSynchronize` completes (in `hipdnn_ep_stream_sync`), all pending events are resolved in bulk via `hipEventElapsedTime` and accumulated into a two-level profile map (op → shapes).
+3. After `hipStreamSynchronize` completes, all pending events are resolved in bulk via `hipEventElapsedTime` and accumulated into a two-level profile map (op → shapes). Resolve+print is invoked by the EP through `hipdnn_ep_runtime_flush_op_profile()` AFTER the `MlirCustomOp::Compute` wall-clock window closes — see "Resolve placement" below.
 
 This avoids per-operator GPU synchronization overhead.
 
@@ -45,7 +45,21 @@ This avoids per-operator GPU synchronization overhead.
 
 HIP events are pre-allocated in `OpProfileState::eventPool` and reused across inferences. `op_profile_acquire_event_pair()` returns the next available index; if the pool is exhausted, a new pair is created and appended. The pool grows on demand but never shrinks — after the first inference, all subsequent inferences reuse existing events with zero `hipEventCreate`/`hipEventDestroy` calls.
 
-For Llama 8B (486 operator calls per inference), this eliminates 972 `hipEventCreate` + 972 `hipEventDestroy` per inference. Measured overhead dropped from +56 ms (93%) to +35 ms (60%) compared to profiling-off baseline.
+For Llama 8B (486 operator calls per inference), this eliminates 972 `hipEventCreate` + 972 `hipEventDestroy` per inference.
+
+### `hipEventDisableSystemFence` on every recorded event
+
+Every event in the pool — plus the four H2D/D2H phase events in `hipdnn_ep_runtime_tensor.cpp` and the two EP-side wall-clock events in `MlirCustomOp.cpp` — is created with `hipEventCreateWithFlags(..., hipEventDisableSystemFence)`. By default, each `hipEventRecord` issues a system-scope acquire/release fence (CPU-visible cache flush across all GPUs and the CPU). The fence is wasted work for events we only read via `hipEventElapsedTime` AFTER an explicit `hipStreamSynchronize` — that sync already establishes the required ordering. Dropping the per-record fence cuts ~1 ms / Compute / ~500 records on Llama-8B decode. The flag is set once at creation time and applies to every subsequent record on the same event, so the win compounds across the session.
+
+Do NOT use this flag on events whose results are observed without a subsequent stream sync (e.g., cross-stream synchronization, multi-GPU coordination, CPU-side polling via `hipEventQuery`). All HIPDNN_EP_PERF events are read after sync, so all of them use the flag.
+
+### Resolve placement (`hipdnn_ep_runtime_flush_op_profile`)
+
+The resolve+print step (N × `hipEventElapsedTime` + `std::map` aggregation + ~hundreds of `fprintf` lines per Compute) was historically called from `hipdnn_ep_stream_sync` — which runs inside the generated `main_graph` function, which the EP times as part of `compute_cpu_ms` / `wall_ms`. That inflated the per-Compute latency reported in `[PERF SUMMARY]` and conflated kernel+dispatch time with profile-printing time.
+
+The resolve is now exported as a separate runtime entry point — `hipdnn_ep_runtime_flush_op_profile(RuntimeState*)` — and called by the EP from `MlirCustomOp::Compute` AFTER the `hipDeviceSynchronize` fence and AFTER `perf_collector().record(s)`. Symbol resolution is cached at session creation (`InferenceState::create`) so the per-Compute dispatch is a single indirect call; older model.dlls without the export silently skip the flush (per-op `[PERF]` block missing, inference otherwise unaffected — same compatibility contract as `hipdnn_ep_runtime_begin_compute`).
+
+This does NOT reduce OGA's measured TPS (the flush still runs inside `MlirCustomOp::Compute`, just after the EP's wall window) — its purpose is to make the `wall_ms` / `compute_cpu_ms` / `gpu_ms` numbers in `[PERF SUMMARY]` honest kernel+dispatch time, NOT kernel+dispatch+resolve time.
 
 ### State ownership
 
@@ -58,7 +72,7 @@ RuntimeState
 
 - Created in `hipdnn_ep_state_init_with_fs()` (only when PERF enabled)
 - Reset at the start of each inference (`prepare_input` with index==0)
-- Resolved and printed in `hipdnn_ep_stream_sync()` after GPU sync
+- Resolved and printed by the EP via `hipdnn_ep_runtime_flush_op_profile()` AFTER the EP's wall-clock window closes (post-`hipDeviceSynchronize`, post-`perf_collector().record`) — see "Resolve placement" above
 - Destroyed in `hipdnn_ep_state_cleanup()`
 
 ### Output format
@@ -102,10 +116,14 @@ Use the CPU column as a diagnostic: if an op that should be fully async shows >1
 | File | Role |
 |------|------|
 | `lib/Runtime/op_profile.h` | RAII scope guards (`OpProfileScope`, `OpProfileCpuScope`), `OP_PROFILE`/`OP_PROFILE_CPU` macros |
-| `lib/Runtime/op_profile.cpp` | `OpProfileState` struct (event pool + two-level: OpEntry → ShapeEntry), create/destroy/reset/resolve/print |
+| `lib/Runtime/op_profile.cpp` | `OpProfileState` struct (event pool + two-level: OpEntry → ShapeEntry), create/destroy/reset/resolve/print. Pool events created with `hipEventDisableSystemFence`. |
 | `lib/Runtime/debug_log.h` | `hipdnn_ep_perf_enabled()` — env var check (uses Win32 API on Windows) |
 | `lib/Runtime/runtime_state_internal.h` | `void *op_profile` field in `RuntimeState` |
-| `lib/Runtime/hipdnn_ep_runtime.h` | `hipdnn_ep_state_get_op_profile()` accessor |
+| `lib/Runtime/hipdnn_ep_runtime.h` | `hipdnn_ep_state_get_op_profile()` accessor; declarations for `hipdnn_ep_runtime_begin_compute` and `hipdnn_ep_runtime_flush_op_profile` |
+| `lib/Runtime/hipdnn_ep_runtime_state.cpp` | Implementations of the two `__declspec(dllexport)` runtime hooks above |
+| `lib/Compiler/CompilerDriver.cpp` | `export_symbols` list — both hooks must appear here so lld-link emits them in the model.dll export table |
+| `backend-mlir-compiler/custom-op-mlir/src/InferenceState.{h,cpp}` | Cached symbol lookup for both hooks (`begin_compute_fn_`, `flush_op_profile_fn_`); null when the model.dll predates the export |
+| `backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.{h,cpp}` | EP-side wall-clock timing; session-scoped `ep_perf_ev_{start,stop}_` event pair (lazy-allocated with `hipEventDisableSystemFence`); calls `flush_op_profile()` after `t_after_fence` |
 | `lib/Runtime/real/*.cpp` | One `OP_PROFILE`/`OP_PROFILE_CPU` call per wrapper function |
 
 ## Adding profiling to a new operator
@@ -127,9 +145,20 @@ int wrap_new_op(RuntimeState *state, ..., int64_t M, int64_t N, ...) {
 
 Use `OP_PROFILE_CPU` instead for operations that don't launch GPU kernels (e.g., `stream_sync`). The shape lambda is only called when profiling is active, so there is no `snprintf` overhead on the hot path.
 
+## Measured overhead (Llama-3.1-8B AWQ INT4 g128, gfx1151, OGA `model_benchmark -l 128 -g 128 -r 3`)
+
+After Fix 1 (`hipEventDisableSystemFence`) + Fix 2 (`flush_op_profile` hook) + Fix 3 (session-scoped EP-side events):
+
+| Mode | decode tok/s | per-Compute median wall | gap vs `mode=none` |
+|---|---|---|---|
+| `HIPDNN_EP_PERF=0` (none) | 42.79 | n/a | baseline |
+| `HIPDNN_EP_PERF=1` (perf) | 38.68 / 39.70 (two runs) | 24.05–24.76 ms | ~8% |
+
+Before any of these fixes the same workload showed `HIPDNN_EP_PERF=1` decode = 37.85 tok/s and per-Compute median wall = 25.51 ms — a ~12.3% gap. Roughly a third of the original PERF overhead was driver-induced (per-record system fences); the rest is intrinsic to per-op profiling (the ~500 `hipEventRecord` calls themselves, the same number of `hipEventElapsedTime` queries during resolve, and the `fprintf` traffic for the per-op breakdown block). Closing more requires changes in the "Future optimization ideas" section below.
+
 ## Future optimization ideas
 
-Current profiling-on overhead is ~35 ms (+60%) on Llama 8B, from 972 `hipEventRecord` + 486 `hipEventElapsedTime` HIP driver calls. Three approaches to reduce this further:
+After the three fixes above, residual overhead on Llama 8B is ~8% of decode TPS, dominated by the bare cost of recording ~500 events per inference plus the `fprintf` traffic for the per-op block. Approaches to reduce this further:
 
 ### Two-tier profiling (recommended next step)
 
