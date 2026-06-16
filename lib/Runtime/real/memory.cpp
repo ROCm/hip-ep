@@ -203,9 +203,13 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
   }
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  // hipMemcpyDefault (not DeviceToHost): the source may be host-accessible
+  // memory (host-mapped scratch from the host-scalar materialization pass, or a
+  // UMA pool), where an explicit D2H fails `invalid argument`. Direction is
+  // inferred from the pointer via UVA. Mirrors hipdnn_ep_readback_i32.
   hipError_t err =
       hipMemcpyAsync(host_dst, device_scalar, static_cast<size_t>(num_bytes),
-                     hipMemcpyDeviceToHost, stream);
+                     hipMemcpyDefault, stream);
   if (err != hipSuccess) {
     fprintf(stderr, "hipdnn_ep_readback_scalar: D2H copy failed: %s\n",
             hipGetErrorString(err));
