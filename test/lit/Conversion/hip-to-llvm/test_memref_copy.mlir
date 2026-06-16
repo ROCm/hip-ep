@@ -5,9 +5,10 @@
 // TEST PURPOSE:
 // Verify `memref.copy` is lowered to one of our runtime helpers
 // (`wrap_hipMemcpyAsync` for fully-dense d2d, `wrap_hipMemcpy2DAsync` for
-// pitched 2D copies) and never falls through to MLIR's default
-// `MemRef -> LLVM` lowering, which would emit an external `memrefCopy`
-// C-runner-utils call that we do not link.
+// pitched 2D copies with wide rows, `wrap_strided_copy` for degenerate
+// pitched 2D copies with thin rows over a large height) and never falls
+// through to MLIR's default `MemRef -> LLVM` lowering, which would emit an
+// external `memrefCopy` C-runner-utils call that we do not link.
 //
 // The pitched 2D path covers the canonical `tensor.insert_slice` ->
 // `memref.subview + memref.copy` shape produced by ONNX Concat / Split
@@ -115,5 +116,31 @@ func.func @copy_dense_1d(%ctx: !hip.context,
                          %src: memref<256xf32>,
                          %dst: memref<256xf32>) {
   memref.copy %src, %dst : memref<256xf32> to memref<256xf32>
+  return
+}
+
+// -----
+
+// Test 6: DEGENERATE pitched 2D -- a dense source scattered into a strided
+// destination with a 1-element contiguous row over a very large height. This
+// is the sinusoidal position-embedding interleave: Concat(unsqueeze(sin),
+// unsqueeze(cos), axis=last) bufferizes to a copy of `memref<...x64x1>` into
+// one half (stride 2) of the `...x64x2` parent. splitDim lands on the last
+// dim -> widthElems=1 (widthBytes=2), height=40000, dstPitch=2 elems. Because
+// the row is thin (<= 256B) and the height is large (>= 256), this must lower
+// to the parallel `wrap_strided_copy` kernel, NOT the per-row
+// `wrap_hipMemcpy2DAsync` (which serializes into 40000 micro-transfers).
+//
+// CHECK-LABEL: llvm.func @copy_degenerate_thin_interleave
+// CHECK:         llvm.call @wrap_strided_copy({{.*}}) :
+// CHECK-NOT:     llvm.call @wrap_hipMemcpy2DAsync
+// CHECK-NOT:     llvm.call @memrefCopy
+func.func @copy_degenerate_thin_interleave(
+    %ctx: !hip.context,
+    %src: memref<1x25x25x64x1xf16>,
+    %dst: memref<1x25x25x64x1xf16, strided<[80000, 3200, 128, 2, 1], offset: 0>>) {
+  memref.copy %src, %dst
+      : memref<1x25x25x64x1xf16>
+        to memref<1x25x25x64x1xf16, strided<[80000, 3200, 128, 2, 1], offset: 0>>
   return
 }
