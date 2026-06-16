@@ -10,66 +10,62 @@
 #include <llvm/Target/TargetMachine.h>
 #include <mlir/IR/BuiltinOps.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace hipdnn {
 
-// LLVM Backend: Translates MLIR to LLVM IR and optionally compiles to native
-// object file Supports two compilation modes:
-//   1. IR Mode: MLIR → LLVM IR (.ll text file) - for debugging and
-//   cross-platform
-//   2. Native Mode: MLIR → LLVM IR → Object File (.obj/.o) - for production DLL
-//   generation
-
+// LLVM Backend: MLIR -> LLVM IR, then one of two artifact backends selected
+// by the compile option (CompilationOptions.output_mode):
+//   * Bitcode (default): emitLlvmIr writes OS-portable .bc with the target
+//     triple + data layout stripped; LlvmIrJit in the EP fills both from
+//     detectHost at JIT time.
+//   * Native: linkRuntimeModule merges the embedded runtime.bc at producer
+//     time, compileToObjectFile emits a host object, and DLLLinker links a
+//     per-OS .dll/.so. Used for benchmarking/dev (signed-DLL policy keeps it
+//     out of production deployment).
 class LLVMBackend {
 public:
   LLVMBackend();
   ~LLVMBackend();
 
-  // MLIR → LLVM IR translation (used by both modes)
-  // Translates MLIR module in LLVM dialect to LLVM IR using C++ library API
-  // Returns nullptr on failure
+  // MLIR -> LLVM IR translation (used by both backends). Returns nullptr on
+  // failure.
   std::unique_ptr<llvm::Module>
   translateMLIRtoLLVMIR(mlir::ModuleOp mlirModule,
                         llvm::LLVMContext &llvmContext);
 
-  // LLVM IR optimization (used by both modes)
-  // Runs standard optimization passes at specified level (0-3)
-  // Level 0: No optimization
-  // Level 1: Basic optimization
-  // Level 2: Default optimization (recommended)
-  // Level 3: Aggressive optimization
+  // Target-independent PerModule optimization pipeline at level 0-3 (used by
+  // both backends).
   void optimizeLLVMIR(llvm::Module *module, int optLevel);
 
-  // IR Mode: Emit LLVM IR to text file (.ll)
-  // Returns true on success, false on failure
-  bool emitLLVMIR(llvm::Module *module, const std::string &outputPath);
+  // ---- Bitcode backend (default) -------------------------------------------
+  // Emits OS-portable LLVM bitcode (triple + data layout stripped). Consumed
+  // by LlvmIrJit in the EP DLL.
+  bool emitLlvmIr(llvm::Module *module, const std::string &outputPath);
 
-  // Native Mode: Compile LLVM IR to object file (.obj on Windows, .o on Linux)
-  // Uses LLVM TargetMachine to emit native code
-  // Returns true on success, false on failure
+  // ---- Native backend ------------------------------------------------------
+  // Compile LLVM IR to a host object file (.obj on Windows, .o on Linux) using
+  // a PIC TargetMachine for the default host triple.
   bool compileToObjectFile(llvm::Module *module, const std::string &outputPath);
 
-  // In-Memory Mode: Emit LLVM IR to string (for EPContext storage)
-  // Returns true on success, false on failure
-  bool emitLLVMIRToString(llvm::Module *module, std::string &outIR);
-
-  // In-Memory Mode: Compile LLVM IR to object in memory (for EPContext storage)
-  // Returns true on success, false on failure
+  // In-memory variant of compileToObjectFile.
   bool compileToObjectInMemory(llvm::Module *module,
                                std::vector<uint8_t> &outBytes);
 
-  // Link embedded Runtime IR into destination module
-  // Merges Runtime bitcode with generated IR for zero-cost abstraction
-  // Returns true on success, false on failure
+  // Merge the embedded runtime.bc into destModule at producer time. Native
+  // path only: the bitcode path JIT-loads runtime.bc separately in the EP so
+  // the artifact stays OS-portable. Returns true (degraded no-op) when the
+  // embedded runtime bitcode is empty (Clang absent at build configure).
   bool linkRuntimeModule(llvm::Module *destModule);
 
 private:
-  // Helper: Initialize LLVM target for current platform
+  // Helper: Initialize LLVM native target for object file emission.
   void initializeTarget();
 
-  // Helper: Create TargetMachine for native compilation
+  // Helper: Create a PIC TargetMachine for the default host triple.
   llvm::TargetMachine *createTargetMachine();
 
   bool target_initialized_;

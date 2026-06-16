@@ -464,14 +464,26 @@ jobs:
           cp "$PREBUILT/bin/onnxruntime_providers_shared.dll" staging/bin/
           cp "$PREBUILT/bin/DirectML.dll" staging/bin/
 
-          # MorphiZen EP DLL + other DLLs/EXEs from onnx-hipdnn-ep install
+          # MorphiZen EP DLL + per-arch custom_kernels_gfx<arch>.dll + other
+          # install DLLs/EXEs (kernel DLL must sit next to the EP DLL so
+          # LlvmIrJit's GetModuleFileName-anchored Load finds it).
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
-          # Import libraries needed by the MorphiZen JIT linker (lld-link).
-          # hip-compiler.dll embeds the build-time install path for
-          # hip_custom_kernels.lib; staging/lib/ preserves them so the
-          # gpu-test job can restore them at the expected location.
+          # Smoke: the per-arch kernel DLL must be present in staging/bin/
+          # for the gpu-test job to load it. Failure here means the install
+          # rule in 3rd-party/custom_kernels/CMakeLists.txt regressed.
+          KERNEL_DLL="staging/bin/custom_kernels_gfx1151.dll"
+          if [ ! -f "$KERNEL_DLL" ]; then
+            echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=gfx1151)"
+            ls -1 "${{ runner.workspace }}/install/bin/" || true
+            exit 1
+          fi
+          echo "OK: $(basename "$KERNEL_DLL") present"
+
+          # Import libraries that get bundled into the MorphiZen JIT-linker
+          # path. Kept as a glob so the set evolves with the install rules
+          # without touching this workflow each time.
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
           # amdhip64_7.dll – HIP runtime required at inference time. TheRock was
@@ -641,15 +653,10 @@ jobs:
           tar -xzf therock.tar.gz -C $dist --strip-components=1
           Remove-Item therock.tar.gz
 
-      # Run perf test against seq128 models via MorphiZen EP.
-      # Models are pre-placed on the runner at C:\actions-runner\_work\model\.
-      # -t 30        : run for 30 seconds per model
-      # -c 1         : single session
-      # -s           : sequential execution
-      # -I           : generate random inputs (no test data files needed)
-      # THEROCK_DIST : required by discoverLibraries() to locate HIP libs
-      # LIB          : all link-time libs are packaged in gpu-test-package/lib/
-      #                (MSVC release CRT + hip_custom_kernels); no VS required.
+      # Run perf test against seq128 models via MorphiZen EP (models pre-placed
+      # at C:\actions-runner\_work\model\). THEROCK_DIST locates HIP libs; LIB
+      # carries the link-time CRT + per-arch import libs (GPU kernels ship as
+      # runtime DLLs in gpu-test-package/bin co-located with the EP DLL).
       # Output is tee'd to results/ for QPS extraction. Non-zero exit code
       # sets FAILED but continues so all models are tested.
       - name: Run onnxruntime_perf_test (GPU)
@@ -685,6 +692,51 @@ jobs:
             if errorlevel 1 set FAILED=1
           )
           exit /b %FAILED%
+
+      # ----------------------------------------------------------------------
+      # Native artifact smoke test (artifact_format=NATIVE).
+      # Exercises the dual-format path: CompilerDriver emits a per-model .dll
+      # (lld-link in-process), InferenceState loads it via morphizen::Plugin
+      # (LoadLibrary). LLVM IR stays the production default; native is opt-in
+      # for benchmarking, so this is best-effort and never fails the job. The
+      # MSVC/UCRT release CRT import libs staged into gpu-test-package/lib (+
+      # LIB) are what lld-link consumes to link the model .dll at runtime.
+      # ----------------------------------------------------------------------
+      - name: Run native-artifact smoke test (GPU)
+        if: always()
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 0
+          )
+          cd gpu-test-package\bin
+          mkdir ..\results-native 2>nul
+          rem Smoke, not a benchmark: first seq128 model, ONE inference (-r 1).
+          rem Exercises native compile -> link -> load -> execute end-to-end
+          rem without a full perf sweep (native is opt-in / non-production; the
+          rem LLVM-IR default path is what the perf jobs above measure).
+          set "SMOKE_MODEL="
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
+          if not defined SMOKE_MODEL (
+            echo [SKIP] no *seq128.onnx model under %MODEL_DIR%
+            exit /b 0
+          )
+          echo === Native smoke %SMOKE_MODEL% ===
+          onnxruntime_perf_test.exe ^
+            --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+            --plugin_eps "MorphiZenExecutionProvider" ^
+            --plugin_ep_options "config_file|..\morphizen_config.json artifact_format|NATIVE" ^
+            -C "session.disable_cpu_ep_fallback|1" ^
+            -r 1 -c 1 -s ^
+            "%SMOKE_MODEL%" > "..\results-native\smoke.txt" 2>&1
+          type "..\results-native\smoke.txt"
+          rem Best-effort: native is opt-in, never fail the pipeline on it.
+          exit /b 0
 
       # ----------------------------------------------------------------------
       # EPContext export + import perf test (PR #132 sidecar-in-tar path).
@@ -781,7 +833,6 @@ jobs:
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
           $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
-          $env:HIP_CUSTOM_KERNELS_DIR = Join-Path $PWD "gpu-test-package\lib"
 
           $ogaModelRoot = "${{ runner.workspace }}\oga-models"
           if (-not (Test-Path $ogaModelRoot)) {

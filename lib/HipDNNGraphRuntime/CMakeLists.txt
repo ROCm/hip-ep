@@ -59,11 +59,6 @@ if(AMDHIP64_LIB)
   target_link_libraries(hipdnn_graph_runtime PRIVATE ${AMDHIP64_LIB})
 endif()
 
-# Make the import library location available as a compile definition
-# for CompilerDriver to discover at link time.
-set(HIPDNN_GRAPH_RUNTIME_LIB_PATH "$<TARGET_LINKER_FILE:hipdnn_graph_runtime>"
-  CACHE INTERNAL "Path to hipdnn_graph_runtime import library")
-
 set_target_properties(hipdnn_graph_runtime PROPERTIES
   FOLDER "mlir/HipDNNGraphRuntime"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"

@@ -30,13 +30,16 @@ class FileSystem;
 
 namespace hip::compiler {
 
-/// End-to-end compilation driver for MLIR → DLL/Object/IR.
+/// End-to-end compilation driver for MLIR → per-model artifact.
 ///
 /// Orchestrates the complete compilation pipeline:
-/// - MLIR pass pipeline (ONNX→HIP→LLVM→Interface)
-/// - LLVM IR translation and optimization
-/// - Object file generation
-/// - DLL linking
+/// - MLIR pass pipeline (ONNX->HIP->LLVM->Interface)
+/// - LLVM IR translation and target-independent optimization
+/// - Artifact emission selected by CompilationOptions.output_mode:
+///     * Bitcode (default): OS-portable LLVM bitcode (consumed by LlvmIrJit
+///       in the EP DLL, which JIT-loads its own per-OS runtime.bc separately).
+///     * Native: merge runtime.bc, emit a host object, and link a per-OS
+///       .dll/.so via DLLLinker. Opt-in for benchmarking/dev.
 class CompilerDriver {
 public:
   CompilerDriver() = default;
@@ -84,26 +87,34 @@ private:
   translateToLLVMIR(mlir::ModuleOp module, llvm::LLVMContext &llvmContext,
                     std::string &error_message);
 
-  bool linkRuntime(llvm::Module *llvmModule, std::string &error_message);
-
   void optimizeLLVMIR(llvm::Module *llvmModule, int optLevel);
 
-  bool emitLLVMIR(llvm::Module *llvmModule, const std::string &outputPath,
+  // ---- Bitcode backend (default) ----
+  bool emitLlvmIr(llvm::Module *llvmModule, const std::string &outputPath,
                   std::string &error_message);
 
+  // ---- Native backend (output_mode == NATIVE) ----
+  // Merge the embedded runtime.bc into the module before object codegen
+  // (producer-time link; the bitcode path skips this for OS-portability).
+  bool linkRuntime(llvm::Module *llvmModule, std::string &error_message);
+
+  // Emit a host object file (.obj/.o).
   bool compileToObject(llvm::Module *llvmModule, const std::string &outputPath,
                        std::string &error_message);
 
+  // Link the object into a per-OS .dll/.so exporting the 5 inference symbols.
   bool linkToDLL(const std::string &objPath, const std::string &dllPath,
                  const std::vector<std::string> &libraries,
                  const std::vector<std::string> &library_paths,
                  const std::vector<std::string> &export_symbols,
                  std::string &error_message);
 
-  /// Discover GPU runtime libraries from THEROCK_DIST environment variable.
+  // Discover GPU runtime libraries (THEROCK_DIST), the per-arch custom-kernels
+  // import lib, and the hipDNN graph runtime, for the native link step.
   void discoverLibraries(std::vector<std::string> &libraries,
                          std::vector<std::string> &library_paths);
 
+  // Remove intermediate .ll/.obj files left by the native path.
   void cleanupIntermediates(const std::string &basePath);
 
   morphizen::FileSystem *fileSystem_ = nullptr;

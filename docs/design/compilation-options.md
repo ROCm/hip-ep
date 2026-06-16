@@ -30,16 +30,19 @@ Callers may pass `NULL` for `options_json` to accept all defaults when using the
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `opt_level` | `int` | `2` | LLVM optimization level (0–3) |
-| `output_mode` | `OutputMode` | `DLL` | Output format: `DLL` or `LLVM_IR` |
 | `verbose` | `bool` | `false` | Enable verbose diagnostic output |
 | `constants_file` | `string` | `"constants.bin"` | Filename (relative to the `FileSystem` root) where constant weight data is written during compilation and read back at `inference_init` time. See [constant-handling-design.md](constant-handling-design.md). |
+| `output_mode` | `OutputMode` enum | `LLVM_IR` | Per-model artifact format. `LLVM_IR` (default) emits OS-portable LLVM IR (serialized as `.bc`), JIT-loaded in-process by `LlvmIrJit`. `NATIVE` emits a per-OS native `.dll`/`.so` (runtime merged at producer time, linked via `DLLLinker`) loaded via `morphizen::Plugin` (`LoadLibrary`/`dlopen`). See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md). |
 
-### `output_mode` values
+The default `LLVM_IR` format produces a single OS-portable `.bc` consumed by
+`LlvmIrJit`. The opt-in `NATIVE` format is per-OS and is intended for
+internal benchmarking/dev (the signed-DLL policy keeps it out of production).
+The EP records the chosen format in the EPContext metadata
+(`mlir_metadata::Metadata.artifact_format`) and selects the matching loader at
+session creation.
 
-| Value | Meaning |
-|-------|---------|
-| `DLL` | Produce a shared library (`.dll` / `.so`) |
-| `LLVM_IR` | Emit LLVM IR text (`.ll`) for inspection |
+The EP provider option `artifact_format` (`"LLVM_IR"` | `"NATIVE"`) maps to
+this field; the `hip-compiler` CLI exposes it as `--mode {LLVM_IR,NATIVE}`.
 
 ---
 
@@ -48,18 +51,18 @@ Callers may pass `NULL` for `options_json` to accept all defaults when using the
 ### From `hip-compiler` CLI
 
 ```sh
-hip-compiler --mode dll --constants-file weights.bin --constants-dir ./out -O 2 model.mlir -o model.dll
+hip-compiler --constants-file weights.bin --constants-dir ./out -O 2 model.mlir -o model.bc
 ```
 
 | CLI flag | Maps to |
 |----------|---------|
-| `--mode dll\|ir` | `output_mode` |
 | `--constants-file <name>` | `constants_file` |
 | `-O <level>` | `opt_level` |
 | `-v / --verbose` | `verbose` |
+| `--mode {LLVM_IR,NATIVE}` | `output_mode` |
 
 `--constants-dir` is CLI-only — it sets the `DiskFileSystem` root directory and
-is never embedded in compilation options or the DLL metadata.
+is never embedded in compilation options or the bitcode metadata.
 
 ### From `hip-mlir-opt` pipeline
 
@@ -85,7 +88,6 @@ CompilerErrorCode hip_compile_with_fs(
 ```json
 {
   "opt_level": 0,
-  "output_mode": "LLVM_IR",
   "verbose": true,
   "constants_file": "my_model/weights.bin"
 }
@@ -96,5 +98,5 @@ CompilerErrorCode hip_compile_with_fs(
 ## Related Documents
 
 - **[constant-handling-design.md](constant-handling-design.md)** — How `constants_file` is used during constant extraction and runtime upload
-- **[compiler-runtime-contract.md](compiler-runtime-contract.md)** — How `constants_file` is embedded in `__metadata_blob` inside the DLL
+- **[compiler-runtime-contract.md](compiler-runtime-contract.md)** — How `constants_file` is embedded in `__metadata_blob` inside the bitcode
 - **[morphizen-ep-integration.md](morphizen-ep-integration.md)** — End-to-end compilation and inference flow
