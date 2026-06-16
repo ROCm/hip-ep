@@ -252,6 +252,8 @@ void populateCastConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateReduceSumConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateReduceMeanConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
 void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,

@@ -636,6 +636,16 @@ int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
                           const void *src_ptr, size_t src_pitch, size_t width,
                           size_t height);
 
+/// Parallel strided D2D copy via a single kernel launch (element units). Fast
+/// path for a pitched copy with very thin rows, where hipMemcpy2DAsync
+/// degenerates into one micro-transfer per row. `height` rows, each copying
+/// `row_elems` contiguous elements; outer strides are `*_pitch_elems`
+/// (elements). Falls back to hipMemcpy2DAsync internally on kernel failure.
+int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
+                      int64_t elem_bytes, int64_t height,
+                      int64_t src_pitch_elems, int64_t dst_pitch_elems,
+                      int64_t row_elems);
+
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
 //===----------------------------------------------------------------------===//
@@ -910,6 +920,20 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes,
                     int64_t inner_size);
+
+// ReduceMean operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF (ONNX ReduceMean is float-domain).
+// The division by the reduced-element count happens in-kernel, so a dynamic
+// reduce axis is tolerated.
+// `inner_size` = product of input dims AFTER the reduced axis (1 for a
+// trailing/contiguous reduce); enables strided reduction over a non-trailing
+// axis (e.g. NCHW channel-axis LayerNorm2d).
+int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
+                     int64_t data_num_elements, int64_t output_num_elements,
+                     int64_t axes_num_elements, int64_t data_type,
+                     int64_t keepdims, int64_t noop_with_empty_axes,
+                     int64_t inner_size);
 
 // ReduceMax operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.

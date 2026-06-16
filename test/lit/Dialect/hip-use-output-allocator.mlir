@@ -163,6 +163,24 @@ func.func private @priv_with_dealloc(%ctx: !hip.context, %M: index) -> memref<?x
   return %out : memref<?xf16>
 }
 
+// --- Output returned through a shape-adjusting memref.cast: the alloc still
+//     becomes hip.alloc_output (reusing its own %M dynamic size + static dims),
+//     the cast is left in place feeding the return, and out_idx is the cast's
+//     return position. Models the matmul-output buffer whose middle dim is
+//     statically known in-graph (memref<?x256x2560>) but declared dynamic in
+//     the ONNX output type (memref<?x?x2560>). ---
+// CHECK-LABEL: func.func @cast_output
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[M:.*]]: index)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[M]]) {out_idx = 0 : i64} : memref<?x256x2560xf16>
+// CHECK:         %[[C:.*]] = memref.cast %[[OUT]] : memref<?x256x2560xf16> to memref<?x?x2560xf16>
+// CHECK:         return %[[C]]
+func.func @cast_output(%ctx: !hip.context, %M: index) -> memref<?x?x2560xf16> {
+  %out = memref.alloc(%M) : memref<?x256x2560xf16>
+  %c = memref.cast %out : memref<?x256x2560xf16> to memref<?x?x2560xf16>
+  return %c : memref<?x?x2560xf16>
+}
+
 // --- out_idx follows func.return POSITION, not definition order. %a is defined
 //     first but returned at index 1; %b is defined second but returned at index
 //     0. Each hip.alloc_output is emitted at its alloc's original site, so the

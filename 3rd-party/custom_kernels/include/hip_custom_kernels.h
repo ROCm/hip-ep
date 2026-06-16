@@ -243,6 +243,33 @@ int hip_elementwise_mod(
     int hip_dtype,
     int fmod_flag);
 
+/* Broadcasting binary elementwise (Add / Mul / Min / Max), 4-D operands.
+ *
+ * Each operand is described by a 4-element int64 shape array (the lowering
+ * left-pads ranks < 4 with leading 1s). NumPy/ONNX broadcasting is applied
+ * per axis: any axis whose operand extent is 1 is broadcast against the
+ * (larger) output extent. `out_shape4` is the broadcast result shape.
+ *
+ * Replaces MIOpen's miopenOpTensor for the float/half path, which is
+ * pathologically slow on gfx1151 for vision-encoder elementwise shapes.
+ *
+ *   op: 0 = add, 1 = mul, 2 = min, 3 = max
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Returns: 0 on success, -1 on unsupported dtype / launch error, -2 when the
+ * output volume exceeds the 32-bit index range (caller should fall back).
+ */
+int hip_elementwise_binary_bcast(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    const int64_t* lhs_shape4,
+    const int64_t* rhs_shape4,
+    const int64_t* out_shape4,
+    int op,
+    int hip_dtype);
+
 /*
  * Element-wise Equal with optional scalar broadcast.
  *
@@ -729,6 +756,29 @@ int hip_gather(
  * channel-axis LayerNorm2d over NCHW): reduced elements are strided by
  * `inner_size`. inner_size==1 preserves the contiguous fast path. */
 int hip_reduce_sum(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype);
+
+/* =========================================================================
+ * ReduceMean (Parallel Mean Reduction)
+ * =========================================================================
+ *
+ * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
+ * divides the float-accumulated sum of each `reduce_size`-element slice by
+ * reduce_size = num_input / num_output before the half narrowing. The division
+ * is performed in-kernel so the op needs no compile-time-static reduce dim and
+ * tolerates a dynamic reduce axis.
+ *
+ * Supported types: HIP_DTYPE_FLOAT16 only (ONNX ReduceMean is float-domain;
+ * the true-fp16 EP path only ever feeds half tensors). Other dtypes return -1.
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_reduce_mean(
     void* stream,
     const void* data,
     void* output,
