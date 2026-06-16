@@ -816,7 +816,7 @@ jobs:
             # pass --ep_library: upstream model_benchmark rejects it, and where
             # supported it double-registers the EP and crashes on shutdown.
             Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
-            $bargs = @('-i', $modelDir.FullName, '-g', '128', '-r', '5', '-w', '1', '-b', '1', '-ml', '-1') + $promptArgs + @('-v')
+            $bargs = @('-i', $modelDir.FullName, '-g', '128', '-r', '5', '-w', '1', '-b', '1') + $promptArgs + @('-v')
             $tmpOut = [System.IO.Path]::GetTempFileName()
             $tmpErr = [System.IO.Path]::GetTempFileName()
             # Launch model_benchmark and sample its per-process GPU memory via
