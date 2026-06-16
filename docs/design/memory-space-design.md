@@ -80,8 +80,7 @@ graph TD
 ### Crossing correctness (D2H)
 
 - **Space — by construction:** the converter retargets the host read to the `host` copy, so the load reads a `host` buffer; the original `device` value stays for device consumers.
-- **Freshness — ordering:** `memref.copy` is an *async* `hipMemcpyAsync`, so `hip.stream_sync` (a barrier) must sit between copy and load.
-- Freshness holds **by construction:** the converter authors copy+sync+extract as one unit; bufferize materializes them in order. The sync is *authored*, never *inferred*.
+- **Freshness — by construction:** `memref.copy` is an *async* `hipMemcpyAsync`, so a `hip.stream_sync` barrier sits between copy and load; the converter authors copy+sync+load as one ordered unit, so the sync is never separated from them (*authored*, never *inferred*).
 
 ---
 
@@ -100,7 +99,7 @@ Land **end-to-front**: foundations → allocation routing → device→host tran
 %a : memref<i64>                       // device (elided)
 %h : memref<i64, #hip.mem<host>>       // host
 
-%v = memref.load %h[]   // a host load reads a host buffer (the only legal form)
+%v = memref.load %h[]   // a host load must read a host buffer; a device value goes through the D2H transfer (Phase 3)
 ```
 
 ### Phase 2 — Space-driven allocation routing
@@ -117,7 +116,7 @@ Land **end-to-front**: foundations → allocation routing → device→host tran
 
 // === Output (after the routing pass) ===
 %hs = hip.get_host_scratch(%ctx, %sz) : memref<?xi8, #hip.mem<host>>                          // inserted
-%a  = memref.view %hs[%off][] : memref<?xi8, #hip.mem<host>> to memref<i64, #hip.mem<host>>   // host alloc -> scratch view
+%av = memref.view %hs[%off][] : memref<?xi8, #hip.mem<host>> to memref<i64, #hip.mem<host>>   // %a replaced by a scratch view
 %t  = memref.alloc() : memref<4x8xf16>                // unchanged — pooled by hip-pool-allocs
 ```
 
@@ -157,10 +156,10 @@ hip.stream_sync(%ctx)
 
 - **Goal:** bridge the reverse edge (a host buffer read by a kernel), then delete the heuristic.
 - This crossing is reconciled at the **memref stage** because the mismatch does not exist until bufferize assigns spaces (a tensor has no space to cast).
-- Insert `memref.memory_space_cast` wherever a `host` memref reaches a `device`-typed operand, in a small pass **right after bufferize**.
+- Insert `memref.memory_space_cast` wherever a `host` memref reaches a `device`-typed operand, in a small pass that runs **before `convert-hip-to-llvm`** (after which both spaces collapse to AS 0 and the host/device type distinction is gone). It is order-independent of the other post-bufferize passes (Phase-2 routing / `hip-pool-allocs`), since the host buffer stays `host`-typed in both its alloc and scratch-view forms.
 - **Mechanical, not heuristic** — keyed on operand type; cast only on the host→device mismatch; leave the D2H copy's host destination and host loads untouched.
-- The cast is a no-op alias (both AS 0, host memory is GPU-readable), so it carries no runtime stake — it only keeps operand types consistent with each op's space contract.
-- Then **delete `hip-materialize-host-scalars`** — both crossings are now authored by the converters/passes, so residency is correct by construction.
+- The cast carries no runtime stake — it only keeps operand types consistent with each op's space contract (it is a no-op alias; see Key Points).
+- Then **delete `hip-materialize-host-scalars`** — both crossings are now authored by the converters/passes, so the interim heuristic is no longer needed.
 
 ```mlir
 // === Input: after bufferize — a host buffer reaches a device-typed ins operand ===
@@ -181,16 +180,12 @@ hip.cast(%ctx) ins(%d : memref<i64>) outs(%o : memref<1xi32>)                  /
 
 ## Key Points
 
-- **The aliasing cast is truly free:** both spaces map to AS 0, so `memref.memory_space_cast` lowers to no `llvm.addrspacecast` — no instructions, no pointer conversion, no allocation, no copy.
-- **Only D2H moves bytes:** the transfer's allocation is the separate host landing buffer; the cast never allocates.
-- **Correctness is by construction, not by checking:** the converter authors D2H (copy+sync+retarget) and the Phase-4 pass inserts the H2D cast, so a correct pass set yields correct residency with no verifier in the loop.
-- **D2H is authored at the tensor stage; H2D is reconciled at the memref stage** — because D2H carries authored correctness (the `hip.stream_sync`) that only the tensor stage can hold, while H2D is a pure type cast recoverable from local memref types (lossless to defer).
-- **Nothing is lost by deferring H2D:** the cast decision is a local function of `(operand space, consumer contract)`; bufferize never blurs the space (it won't alias across spaces, and propagates through views/casts/control flow).
-- **`hip-pool-allocs` guard makes separation type-enforced:** a `host` alloc that reaches pool-allocs is skipped on its space, so it can never be pooled into device memory regardless of pass order.
-- **The heuristic is temporary:** `hip-materialize-host-scalars` is the interim space source for Phases 2–3 and is deleted in Phase 4.
-- **stream_sync must be a barrier** (side-effecting) so no pass can hoist the host load above it; the plain copy→load dependency is not enough because the copy is async.
-- **If buffers were not host-mapped** (e.g. discrete VRAM), H2D would also need a copy — both crossings would then be tensor-stage copies and the memref-stage cast pass would drop out.
-- **Optional debug aid (not in the pipeline):** a standalone `-hip-verify-memory-space` pass could assert the invariants (no host load of a `device` buffer; casts sourced from `host`) to localize a converter/pass bug — but it does not perform any conversion and is not required for correctness.
+- **Cost model:** the H2D cast is free (both spaces are AS 0 → no `llvm.addrspacecast`, no alloc, no copy); only D2H moves bytes, and its only allocation is the host landing buffer.
+- **Stage split:** D2H is authored at the tensor stage because it carries the authored `hip.stream_sync`; H2D is reconciled at the memref stage because it is a pure type cast, recoverable from local memref types — lossless to defer.
+- **Correct by construction:** the converter authors D2H and the Phase-4 pass inserts the H2D cast — no verifier in the loop (an optional `-hip-verify-memory-space` pass can assert the invariants for debugging, but does no conversion).
+- **`stream_sync` must be a barrier** (side-effecting), or the async copy and the host load could be reordered.
+- **`hip-pool-allocs` skips `host` allocs** — separation is type-enforced, not ordering-enforced, so a host alloc can never be pooled into device memory.
+- **Discrete VRAM:** without host-mapped buffers, H2D would also be a copy and the memref-stage cast pass would drop out.
 
 ---
 
