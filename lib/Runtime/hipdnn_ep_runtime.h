@@ -1245,6 +1245,16 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
 // NonZero's non-zero count) into a host value that can size dynamic shapes.
 int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar);
 
+// Synchronize the GPU stream, then copy a small device-resident scalar of
+// arbitrary byte width (1/2/4/8) into the caller-provided host buffer. The
+// generic counterpart to hipdnn_ep_readback_i32, used by hip.readback_scalar to
+// materialise a GPU-computed scalar (i64/f32/f16/...) on the host for shape
+// arithmetic — e.g. the limit/start/delta of a data-dependent onnx.Range whose
+// trip count is computed host-side. See the runtime impl for why a bare
+// memref.load of a GPU scalar is incorrect on true-device-memory targets.
+void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
+                               const void *device_scalar, int64_t num_bytes);
+
 // ONNX Size wrapper (dynamic-shape path only).
 //
 // Static-shape Size ops are folded into arith.constant at OnnxToHip time
