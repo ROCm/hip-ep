@@ -29,6 +29,8 @@ inline constexpr const char *kRuntimeBeginCompute =
     "hipdnn_ep_runtime_begin_compute";
 inline constexpr const char *kSetOutputAllocator =
     "hipdnn_ep_set_output_allocator";
+inline constexpr const char *kRuntimeFlushOpProfile =
+    "hipdnn_ep_runtime_flush_op_profile";
 
 // Internal-linkage globals baked into the artifact by GenerateInterface.
 //   kMetadataBlobGlobal: FlatBuffers HipModelMetaInfo consumed by
