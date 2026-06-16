@@ -736,11 +736,15 @@ MlirCustomOp::~MlirCustomOp() {
   for (const HostOutputScratch &slot : host_out_scratch_)
     if (slot.ptr)
       (void)hipFree(slot.ptr);
-#endif
-#ifndef BUILD_MOCK_RUNTIME
+
   // Release the lazy-allocated HIPDNN_EP_PERF event pair. Created on first
-  // perf-enabled Compute() and reused for the session lifetime; nullptr
-  // here means perf was never enabled, so nothing to release.
+  // perf-enabled Compute() and reused for the session lifetime; nullptr here
+  // means perf was never enabled, so nothing to release. Guarded by
+  // HIPDNN_EP_LINK_HIP_HOST (not BUILD_MOCK_RUNTIME): hipEvent_t /
+  // hipEventDestroy are only declared when the HIP headers are linked, and
+  // ep_perf_ev_* are only ever assigned by EpPerfTimer, which is itself behind
+  // this same macro -- so in builds without it these handles are always null
+  // and need no cleanup.
   if (ep_perf_ev_start_) {
     (void)hipEventDestroy(static_cast<hipEvent_t>(ep_perf_ev_start_));
     ep_perf_ev_start_ = nullptr;
