@@ -299,6 +299,38 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
   let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
 }
 
+def Hip_AllocOutputOp : Hip_Op<"alloc_output",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Obtain a graph-output buffer from the EP output allocator";
+  let description = [{
+    Allocates the buffer for graph output `out_idx` via the EP-supplied output
+    allocator, at the point in the graph where the output shape is known.
+    Operands: runtime context + one Index per dynamic dim of the result memref
+    (same operand convention as hip.alloc). The `out_idx` attribute identifies
+    which graph output this buffer is.
+
+    Unlike hip.alloc / hip.get_pool / hip.get_host_scratch, this op intentionally
+    does NOT carry an Allocate memory effect: the buffer is EP/runtime-owned (it
+    is a graph output), so buffer-deallocation must not free it and
+    hip-pool-allocs must not pool it. It DOES carry a Write effect so later
+    DCE/CSE cannot drop or merge it -- see AllocOutputOp::getEffects in
+    HipDialect.cpp for the rationale.
+
+    Example:
+    ```mlir
+    %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64} : memref<?x?xf16>
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Variadic<Index>:$dynamicSizes,
+                       I64Attr:$out_idx);
+  let results = (outs AnyMemRef:$memref);
+  let assemblyFormat = [{
+    `(` $ctx (`,` $dynamicSizes^ )? `)` attr-dict `:` type($memref)
+  }];
+  let hasVerifier = 1;
+}
+
 // ===== Control flow ==========================================================
 
 def Hip_LoopOp : Hip_Op<"loop",
@@ -494,6 +526,67 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
     I64ArrayAttr:$strides,
     I64ArrayAttr:$pads,
     I64ArrayAttr:$dilations,
+    I64Attr:$group
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
+    type($input) `,` type($weights) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^ )?
+  }];
+}
+
+def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
+  let summary = "2D transposed convolution / deconvolution using MIOpen "
+                "(in-place)";
+  let description = [{
+    Performs 2D transposed convolution (a.k.a. deconvolution) using MIOpen's
+    `miopenTranspose` convolution mode (`miopenConvolutionForward` with a
+    transpose-mode descriptor).
+
+    Uses destination-passing style: output buffer is provided as argument,
+    operation writes result in-place.
+
+    Tensor layouts (NCHW), matching ONNX ConvTranspose:
+    - input:  [N, C, H, W]            (C = input channels)
+    - weights:[C, M/group, kH, kW]    (note: input channels come first, unlike
+                                       the forward Conv weight layout [M, C, ...])
+    - bias:   [M]                     (optional)
+    - output: [N, M, H', W']          (M = weights.dim(1) * group)
+
+    Attributes:
+    - kernel_shape:    Array of kernel dimensions [kH, kW]
+    - strides:         Array of stride values [sH, sW]
+    - pads:            Array of padding values [top, left, bottom, right]
+    - dilations:       Array of dilation values [dH, dW]
+    - output_padding:  Array of extra output padding [oH, oW] (ONNX "adjs")
+    - group:           Number of groups for grouped transposed convolution
+
+    Example:
+    ```mlir
+    hip.conv_transpose(%ctx) ins(%input, %weights, %bias :
+                       memref<1x1x3x3xf32, 1>,
+                       memref<1x2x3x3xf32, 1>,
+                       memref<2xf32, 1>)
+                   outs(%output : memref<1x2x5x5xf32, 1>)
+                   {kernel_shape = [3, 3], strides = [1, 1],
+                    pads = [0, 0, 0, 0], dilations = [1, 1],
+                    output_padding = [0, 0], group = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weights,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64ArrayAttr:$output_padding,
     I64Attr:$group
   );
 
@@ -1117,6 +1210,38 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
+def Hip_MaxOp : Hip_DpsOp<"max"> {
+  let summary = "Elementwise maximum";
+  let description = [{
+    Performs elementwise maximum: output = max(lhs, rhs)
+
+    Supports multidirectional (NumPy-style) broadcasting via MIOpen's
+    miopenOpTensor with miopenTensorOpMax.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.max(%ctx) ins(%lhs, %rhs : memref<3xf32, 1>,
+                                   memref<3xf32, 1>)
+                  outs(%output : memref<3xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax",
                                     /*traits=*/[],
                                     /*outsAccessor=*/"Output",
@@ -1350,6 +1475,38 @@ def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<StrAttr, "\"none\"">:$approximate
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
+  let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
+  let description = [{
+    Applies LeakyRelu activation element-wise.
+    Implements the ONNX LeakyRelu operator.
+
+    Formula: Y = X if X >= 0, else alpha * X
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.leaky_relu(%ctx) ins(%x : memref<3x4xf32, 1>)
+                         outs(%y : memref<3x4xf32, 1>)
+                         {alpha = 0.01 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F64Attr, "0.01">:$alpha
   );
 
   let assemblyFormat = [{
@@ -1624,6 +1781,38 @@ def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
   }];
 }
 
+def Hip_ExpOp : Hip_DpsOp<"exp"> {
+  let summary = "Element-wise natural exponential: y = exp(x)";
+  let description = [{
+    Computes the natural exponential of each element.
+    Implements the standard ONNX Exp operator.
+
+    Formula: Y = exp(X)
+
+    Lowered via the unified unary elementwise path (wrap_exp).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.exp(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                  outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NegOp : Hip_DpsOp<"neg", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,
@@ -1782,6 +1971,49 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
     ```mlir
     hip.reduce_sum(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
                          outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
+  let summary = "Reduce tensor by averaging along axes";
+  let description = [{
+    Computes the mean of input tensor elements along the specified axes.
+    Implements the ONNX ReduceMean operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    The division by the reduced-element count is performed inside the runtime
+    kernel (`reduce_size = num_input / num_output`), so this op is tolerant of
+    a dynamic reduce axis -- no compile-time static reduce dim is required.
+    Result dims are refined post-conversion by `--hip-infer-shapes` through the
+    upstream MLIR `ReifyRankedShapedTypeOpInterface` / `InferTypeOpInterface`
+    that `Hip_DpsOp_Reduction` implements (no ONNX-level shape refinement
+    needed).
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_mean(%ctx) ins(%data, %axes : memref<1x128xf16, 1>, memref<i64, 1>)
+                          outs(%output : memref<1x1xf16, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
     ```
   }];
 
@@ -2002,7 +2234,12 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
     // Quantization related attributes
     DefaultValuedAttr<StrAttr, "\"NONE\"">:$k_quant_type,  // "NONE"/"PER_TENSOR"/"PER_CHANNEL"
     DefaultValuedAttr<StrAttr, "\"NONE\"">:$v_quant_type,
-    DefaultValuedAttr<I64Attr, "8">:$kv_cache_bit_width  // 8 or 4
+    DefaultValuedAttr<I64Attr, "8">:$kv_cache_bit_width,  // 8 or 4
+
+    // Whisper / bidirectional-attention enabler: when true, the causal mask
+    // step in the runtime is skipped. Default false preserves all existing
+    // Llama / gpt-oss callers' behaviour.
+    DefaultValuedAttr<BoolAttr, "false">:$no_causal
   );
 
   let assemblyFormat = [{
@@ -2613,6 +2850,52 @@ def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
   }];
 }
 
+def Hip_GlobalPoolOp : Hip_DpsOp<"global_pool"> {
+  let summary = "Global pooling over spatial dimensions (average / max / lp)";
+  let description = [{
+    Unified lowering for ONNX GlobalAveragePool / GlobalMaxPool / GlobalLpPool.
+    For an input of shape `(N, C, D_1, D_2, ..., D_k)`, produces an output of
+    shape `(N, C, 1, 1, ..., 1)` (same rank as input). Each output element is
+    a per-`(n, c)` reduction across all spatial elements; `mode` selects the
+    reduction:
+
+      * mode=0 (AVERAGE): Y = mean(X[n, c, *...])
+      * mode=1 (MAX)    : Y = max(X[n, c, *...])
+      * mode=2 (LP)     : Y = pow(sum(pow(|X[n, c, *...]|, p)), 1/p)
+                          (LP norm; `p` defaults to 2)
+
+    Both input and output rank must be >= 3 (i.e. at least one spatial dim);
+    the dimensions at positions 0 (N) and 1 (C) are passthrough, and every
+    spatial dimension in the output is 1.
+
+    The `p` attribute is only meaningful when `mode == 2` (LP); for AVERAGE
+    and MAX it is ignored by the runtime.
+
+    Uses destination-passing style: the output buffer is provided.
+
+    Example:
+    ```mlir
+    hip.global_pool(%ctx) ins(%x : memref<1x3x5x5xf32, 1>)
+                          outs(%y : memref<1x3x1x1xf32, 1>)
+                          {mode = 0 : i64, p = 2 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    DefaultValuedAttr<I64Attr, "2">:$p
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
   let summary = "Reduce tensor by multiplying elements along axes";
   let description = [{
@@ -2954,7 +3237,7 @@ def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
 
 def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
                               /*autoReify=*/1,
-                              /*autoInfer=*/1, /*declareInfer=*/1> {
+                              /*autoInfer=*/0, /*declareInfer=*/0> {
   let summary = "Indices of non-zero elements (ONNX NonZero)";
   let description = [{
     Implements the standard ONNX NonZero operator (opset 13+):
@@ -2965,16 +3248,26 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
     `y` has shape `[R, N]` of element type `i64`, where `R` is the input
     rank and `N` is the (data-dependent) number of non-zero elements.
     The `N` dimension is represented as `?` in MLIR; the compiler
-    over-allocates using `numel(x)` as the upper bound (since the input
-    has fully static shape).
+    over-allocates `y` using `numel(x)` as the upper-bound *capacity*
+    (`N` columns beyond the true count are left undefined).
 
-    Uses destination-passing style: the output buffer is provided as
-    argument.
+    The true count `N` is data-dependent and only known once the kernel
+    has scanned the input, so the op also takes a second destination
+    `count` (a device `i32` scalar buffer) that the kernel writes with
+    the actual number of non-zero elements. Downstream code reads it back
+    to the host via `hip.readback_dim` and slices `y` to `[R, N]` so the
+    real extent (not the capacity) flows to consumers and to the
+    ORT-reported output shape. Two destinations means the op is
+    multi-result (`y`, `count`); like the other multi-output DPS ops it
+    keeps `autoInfer=0` (converters pass explicit result types).
+
+    Uses destination-passing style: both output buffers are provided as
+    arguments.
 
     Example:
     ```mlir
     hip.nonzero(%ctx) ins(%x : memref<3x4xf16, 1>)
-                      outs(%y : memref<2x?xi64, 1>)
+                      outs(%y, %count : memref<2x?xi64, 1>, memref<i32, 1>)
                       {input_data_type = 1 : i64}
     ```
   }];
@@ -2983,13 +3276,232 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$x,
     Hip_TensorOrMemRef:$y,
+    Hip_TensorOrMemRef:$count,
     I64Attr:$input_data_type
   );
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
-    `outs` `(` $y `:` type($y) `)`
+    `outs` `(` $y `,` $count `:` type($y) `,` type($count) `)`
     attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_PoolOp : Hip_DpsOp<"pool"> {
+  let summary = "Spatial pooling (ONNX MaxPool / AveragePool / LpPool)";
+  let description = [{
+    Unified window pooling for ONNX MaxPool / AveragePool / LpPool. For an
+    input of shape `(N, C, D_1, D_2, ..., D_k)` (rank = 2 + spatial_rank,
+    with spatial_rank in {1, 2, 3}) reduces each sliding window described by
+    `kernel_shape`, `strides`, `pads`, and `dilations` into a single output
+    element. Output shape is `(N, C, O_1, ..., O_k)`.
+
+    `pool_mode` selects the per-window reduction (values mirror
+    HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h):
+
+      * pool_mode=0 (AVERAGE): Y = mean over the window
+      * pool_mode=1 (MAX)    : Y = max over the window
+      * pool_mode=2 (LP)     : Y = pow(sum(pow(|x|, p)), 1/p)
+
+    Pad positions are never read (they fall outside the input bounds). For
+    AVERAGE, `count_include_pad` selects the divisor: 0 = number of in-bounds
+    window elements, 1 = full kernel volume (pad cells contribute 0 to the
+    sum). For LP, `p` is the norm exponent (>= 1). For MAX, both attributes
+    are ignored.
+
+    Only MAX may produce a second output `Indices` of element type i64
+    holding the flattened input index of each selected element (per the ONNX
+    spec, indices are a flat 1-D tensor of size `N * C * D_1 * ... * D_k`,
+    ignoring padding). AVERAGE / LP always have exactly one output.
+
+    Attributes:
+    - pool_mode:    0 = AVERAGE, 1 = MAX, 2 = LP
+    - kernel_shape: spatial kernel dims (length = spatial_rank)
+    - strides:      spatial strides (length = spatial_rank)
+    - pads:         [x1_begin, ..., xk_begin, x1_end, ..., xk_end]
+    - dilations:    spatial dilations (length = spatial_rank)
+    - ceil_mode:    0 = floor (default), 1 = ceil  (already absorbed into
+                    output shape at compile time; passed through for
+                    runtime debugging)
+    - storage_order: 0 = row-major (default). 1 (column-major) is not
+                    supported and rejected at conversion time. MAX only.
+    - count_include_pad: AVERAGE divisor selector (default 0). AVERAGE only.
+    - p:            LP norm exponent (default 2). LP only.
+
+    Uses destination-passing style: the output buffer (and optional indices
+    buffer) are provided as Variadic `outputs`.
+
+    Example (2D MaxPool, with indices):
+    ```mlir
+    hip.pool(%ctx) ins(%x : memref<1x3x32x32xf16, 1>)
+                   outs(%y, %idx : memref<1x3x16x16xf16, 1>,
+                                   memref<1x3x16x16xi64, 1>)
+                   {pool_mode = 1, kernel_shape = [2, 2], strides = [2, 2],
+                    pads = [0, 0, 0, 0], dilations = [1, 1],
+                    ceil_mode = 0, storage_order = 0,
+                    count_include_pad = 0, p = 2}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I64Attr:$pool_mode,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$ceil_mode,
+    I64Attr:$storage_order,
+    DefaultValuedAttr<I64Attr, "0">:$count_include_pad,
+    DefaultValuedAttr<I64Attr, "2">:$p
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ResizeOp : Hip_DpsOp<"resize"> {
+  let summary = "Spatial resize / interpolation (ONNX Resize)";
+  let description = [{
+    Implements a subset of ONNX Resize that covers the common image / volume
+    upsample-and-downsample patterns.  Resamples the trailing spatial axes of
+    an `(N, C, D_1, ..., D_k)` input onto an `(N, C, O_1, ..., O_k)` output
+    grid.  The leading two dims (N, C) must be unchanged at runtime — i.e.
+    we only resize spatial axes.
+
+    Supported attribute set (anything outside is rejected at conversion):
+      * mode in {"nearest", "linear"}              — encoded as i64
+        - 0 = nearest, 1 = linear (N-linear: bilinear / trilinear)
+      * coordinate_transformation_mode in
+          {"half_pixel", "asymmetric", "align_corners"}  — encoded as i64
+        - 0 = half_pixel, 1 = asymmetric, 2 = align_corners
+      * nearest_mode in {"round_prefer_floor"}      — encoded as i64
+        - 0 = round_prefer_floor (only used when mode=nearest)
+
+    Per-axis scale is recovered at runtime from the input/output spatial
+    extents (`scale = in_dim / out_dim`), so neither `scales` nor `sizes`
+    appear as operands here — they were resolved at compile time into the
+    output type that the upstream importer produced.
+
+    Uses destination-passing style: the output buffer is provided.
+
+    Example (2D bilinear upsample with half_pixel):
+    ```mlir
+    hip.resize(%ctx) ins(%x : memref<1x3x16x16xf16, 1>)
+                     outs(%y : memref<1x3x32x32xf16, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 0}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$mode,
+    I64Attr:$coord_transform,
+    I64Attr:$nearest_mode
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// hip.readback_dim : materialize a kernel-computed runtime extent as a host
+// `index`. It synchronizes the stream so the producing kernel has finished,
+// then reads back a single device-resident integer `scalar`.
+//
+// This is the host-side half of the data-dependent dynamic-shape lowering: a
+// kernel writes a runtime extent (a count, valid-length, selected-element
+// tally, ...) into a small device buffer, and `readback_dim` turns it into a
+// host `index` that can size a `tensor.extract_slice`, `tensor.empty`, or
+// `hip.alloc_output`.
+//
+// It is deliberately not `Pure` and not speculatable: it performs a
+// device->host copy plus a stream synchronization, and must remain below the
+// producing kernel in program order. Non-speculatability is also what stops
+// `hip-hoist-alloc-size-arith` from lifting an extent-sized allocation above
+// that kernel into the function entry block.
+//
+// Before (tensor form, after convert-onnx-to-hip):
+//   %n = hip.readback_dim(%ctx, %count : tensor<i32>) -> index
+// After bufferize:
+//   %n = hip.readback_dim(%ctx, %count : memref<i32, 1>) -> index
+def Hip_ReadbackDimOp : Hip_Op<"readback_dim",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize and read a device i32 scalar into a host index";
+  let description = [{
+    Reads the single integer stored in the device-resident `scalar` buffer
+    back to the host as an `index`, after synchronizing the GPU stream so the
+    kernel that wrote `scalar` is guaranteed to have completed.
+
+    Has device->host copy + stream-synchronization side effects; it is not
+    speculative and must not be hoisted across the kernel that produces
+    `scalar`.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$scalar
+  );
+  let results = (outs Index:$dim);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($dim)
+  }];
+}
+
+// hip.readback_scalar : synchronize the stream and read a single
+// device-resident scalar of ARBITRARY element type back to a host scalar of
+// the same type. The general-purpose sibling of `hip.readback_dim` (which is
+// specialised to a non-negative i32 extent and returns `index`): this op
+// preserves the operand's element type (i64 / f32 / f16 / ...) and is used
+// where the host needs the actual value — e.g. the limit/start/delta of a
+// data-dependent `onnx.Range` whose trip count is computed host-side from
+// signed integers or floats.
+//
+// Like `hip.readback_dim` it performs a device->host copy plus a stream
+// synchronization, so it is NOT `Pure`/speculatable and must stay below the
+// kernel that produced `scalar` in program order. A bare `tensor.extract` /
+// `memref.load` of a GPU-written scalar is incorrect on targets where the pool
+// is true device memory: the host read races / reads stale memory and yields a
+// zero count, collapsing the dynamic dimension. (It accidentally works where
+// the pool is UMA-mapped host-accessible memory.)
+//
+// Before (tensor form, after convert-onnx-to-hip):
+//   %v = hip.readback_scalar(%ctx, %limit : tensor<i64>) -> i64
+// After bufferize:
+//   %v = hip.readback_scalar(%ctx, %limit : memref<i64, 1>) -> i64
+def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize and read a device scalar into a host scalar of the "
+                "same element type";
+  let description = [{
+    Reads the single value stored in the device-resident `scalar` buffer back
+    to the host as a value of the SAME element type, after synchronizing the
+    GPU stream so the kernel that wrote `scalar` is guaranteed to have
+    completed.
+
+    Has device->host copy + stream-synchronization side effects; it is not
+    speculative and must not be hoisted across the kernel that produces
+    `scalar`.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$scalar
+  );
+  let results = (outs AnyTypeOf<[AnyInteger, AnyFloat, Index]>:$value);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
 }
 #endif // HIP_OPS

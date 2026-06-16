@@ -48,18 +48,44 @@
 // offset.  See test/lit/Dialect/hip-materialize-host-scalars.mlir for the
 // full set of accepted/rejected shapes.
 //
+// Peeking through view ops (host scalar reached via a descriptor edit)
+// --------------------------------------------------------------------
+// Bufferization + CSE often fuse two `tensor.from_elements` shape-arith
+// buffers into one alloc and `memref.reinterpret_cast` it for the second
+// (smaller) use, so the host store reaches its hip consumer through a view:
+//
+//   %alloc = memref.alloc() : memref<3xi64>          // <-- candidate
+//   memref.store %d0, %alloc[%c0] : memref<3xi64>    // host store (direct)
+//   hip.expand ins(%expand, %alloc) ...              // hip consumer (direct)
+//   %rc = memref.reinterpret_cast %alloc to          // view of the alloc
+//           offset: [0], sizes: [1], strides: [1]
+//           : memref<3xi64> to memref<1xi64>
+//   memref.store %n, %rc[%c0] : memref<1xi64>        // host store (via view)
+//   hip.slice ins(..., %rc) ...                      // hip consumer (via view)
+//
+// `classifyHostScalarUsers` recurses through the reinterpret_cast -- which
+// touches no memory of its own -- finds only host-I/O and hip users at the
+// leaves, and accepts the alloc.  Before this peek-through, the lone
+// reinterpret_cast user rejected the alloc, so it stayed in the GPU pool and
+// the host store SEGV'd on targets where the pool is real device memory.
+//
+// View ops are matched generically through `ViewLikeOpInterface` rather than a
+// fixed `isa<>` list, so `memref.reshape` (whose result aliases its DATA
+// operand, never its shape operand) and any future view op are covered without
+// editing this pass.  `memref.copy` is accepted as a terminal host-mapping-safe
+// use: some shape-staging chains end in a copy into another buffer, and the
+// host-mapped scratch is a valid copy source/destination.
+//
 // Hip-dialect users are accepted, not rejected
 // --------------------------------------------
 // `hipHostMalloc(hipHostMallocMapped)` returns a host pointer that is also
 // GPU-accessible at the same virtual address on UMA targets, so the bare-ptr
 // ABI used by `--convert-hip-to-llvm` consumes the same buffer regardless of
-// whether it was hipMalloc'd or hipHostMalloc'd.  This is the correctness fix
-// vs the early design that rejected hip consumers: the canonical
-// `tensor.from_elements -> reduce_sum + sub + cast -> seqlens_k` GQA
-// pattern produces exactly an alloc with a host `memref.store` followed
-// by a `hip.cast` reading it; rejecting it left the host store crashing
-// inside the GPU pool.  `isHostScalarCandidate` allows `hip.*` users for
-// this reason -- see the inline comment on the user-classification loop.
+// whether it was hipMalloc'd or hipHostMalloc'd.  The canonical
+// `tensor.from_elements -> reduce_sum + sub + cast -> seqlens_k` GQA pattern
+// produces exactly an alloc with a host `memref.store` followed by a
+// `hip.cast` that reads it; an earlier design rejected such hip consumers and
+// left the host store crashing inside the GPU pool.
 //
 // Non-goals
 // ---------
@@ -91,6 +117,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
@@ -113,24 +140,63 @@ static int64_t roundUp(int64_t x, int64_t align) {
   return (x + align - 1) & ~(align - 1);
 }
 
-/// True if \p allocOp looks like a tiny host-fed scalar staging buffer:
-///   - static shape, small (<=16 elements)
-///   - integer or index element type (no float -> these are bigger and almost
-///     always GPU-consumed in flight)
-///   - has at least one host I/O user (memref.store or memref.load): this is
-///     the SEGV trigger on targets where the GPU pool is real device memory
-///     — host accessing a GPU-pool address
-///   - every user is in {memref.store, load, dim, dealloc} OR is a hip dialect
-///     op. Hip consumers are fine: hipHostMalloc(hipHostMallocMapped) returns
-///     a host pointer that is also GPU-accessible at the same VA on UMA
-///     targets, so the bare-ptr ABI used by --convert-hip-to-llvm works
-///     whether the backing memory is hipMalloc'd or hipHostMalloc'd.
+/// Classify every transitive user of \p memrefVal and decide whether they are
+/// all compatible with the backing buffer living in host-mapped scratch (see
+/// the file header for the rationale behind each category). Sets \p sawHostIO
+/// when a `memref.store`/`load` is found anywhere in the chain. Returns false
+/// at the first user we cannot vouch for -- an op of an unknown dialect, or a
+/// view whose own users escape.
 ///
-/// Critically, we DO accept allocs with hip op users (writers and readers).
-/// The original implementation rejected those — but the canonical
-/// `tensor.from_elements` -> `reduce_sum + sub + cast -> seqlens_k` pattern
-/// produces exactly such an alloc: `memref.store` from host then `hip.cast`
-/// reads it. Rejecting it left the host store crashing inside the GPU pool.
+/// View/descriptor ops are recognized generically via `ViewLikeOpInterface`
+/// (reinterpret_cast, expand/collapse_shape, subview, view, cast, AND reshape)
+/// instead of a hand-maintained `isa<>` list. They touch no memory themselves,
+/// so the backing buffer is still a host-staged scalar; we recurse into the
+/// view's result. The recursion is gated on `getViewSource() == memrefVal`:
+/// this matters for `memref.reshape`, whose viewed source is the DATA operand,
+/// not the shape operand -- when our buffer is the shape operand the reshape
+/// result aliases the data (not us), so it is a terminal accept, not a recurse.
+/// `memref.copy` is not view-like (it carries Read/Write memory effects); it is
+/// a terminal host-mapping-safe use and does not itself flag host I/O.
+static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO) {
+  for (Operation *user : memrefVal.getUsers()) {
+    // Host I/O — the SEGV trigger we're staging away from the GPU pool.
+    if (isa<memref::StoreOp, memref::LoadOp>(user)) {
+      sawHostIO = true;
+      continue;
+    }
+    // Metadata-only / lifetime users: harmless.
+    if (isa<memref::DimOp, memref::DeallocOp>(user))
+      continue;
+    // hip.* consumers are host-mapping-safe (hipHostMallocMapped is
+    // GPU-readable at the same VA on UMA targets).
+    if (user->getDialect() && user->getDialect()->getNamespace() == "hip")
+      continue;
+    // View/alias ops: recurse ONLY into the result that actually aliases this
+    // buffer. getViewSource() pins which operand is the viewed one — critical
+    // for memref.reshape, where our buffer may be the SHAPE operand (then the
+    // result aliases the DATA, not us → terminal accept, not a recurse).
+    if (auto view = dyn_cast<ViewLikeOpInterface>(user)) {
+      if (view.getViewSource() == memrefVal) {
+        if (!classifyHostScalarUsers(view->getResult(0), sawHostIO))
+          return false;
+      }
+      continue;
+    }
+    // memref.copy is not view-like; it's a terminal host-mapping-safe use
+    // (Read src / Write dst) and does NOT itself flag host I/O.
+    if (isa<memref::CopyOp>(user))
+      continue;
+
+    return false; // genuinely unknown user → reject candidate
+  }
+  return true;
+}
+
+/// True if \p allocOp is a tiny host-fed scalar staging buffer: a static,
+/// small (<= 16 elements), integer-or-index memref with at least one host-I/O
+/// user (possibly reached through view ops) whose entire transitive user set
+/// is host I/O, metadata, or hip consumers. See classifyHostScalarUsers and
+/// the file header for why each constraint exists.
 static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
@@ -142,21 +208,8 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
     return false;
 
   bool hasHostIO = false;
-  for (Operation *user : allocOp->getUsers()) {
-    if (isa<memref::StoreOp, memref::LoadOp>(user)) {
-      hasHostIO = true;
-      continue;
-    }
-    if (isa<memref::DimOp, memref::DeallocOp>(user))
-      continue;
-    // Hip dialect users (e.g. hip.cast that consumes a host-stored scalar to
-    // produce a GPU i32 for GQA) are fine — see comment above.
-    if (user->getDialect() && user->getDialect()->getNamespace() == "hip")
-      continue;
-    // Anything else (view-likes, casts that escape the function, unknown
-    // dialects) — bail out: we can't reason about its memory expectations.
+  if (!classifyHostScalarUsers(allocOp.getResult(), hasHostIO))
     return false;
-  }
   return hasHostIO;
 }
 

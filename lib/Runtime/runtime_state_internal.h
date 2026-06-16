@@ -18,6 +18,10 @@
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
 #include "runtime_types.h"
+// For hipdnn_output_allocator_t (the output_allocator field below). Acyclic:
+// hipdnn_ep_runtime.h only forward-declares RuntimeState; it does not include
+// this internal header.
+#include "hipdnn_ep_runtime.h"
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
@@ -33,15 +37,6 @@ struct RuntimeState {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
-
-  // OGA pipeline shared constants cache: prefill and decode models share
-  // the same constants blob via process-wide named shared memory + atomic
-  // ref count. Set by try_attach_shared_constants when reusing another
-  // model's blob; cleanup decrements ref_count and only the last
-  // reference frees the GPU memory.
-  bool constants_is_shared;
-  void *shared_constants_mapping; // Win32 file mapping HANDLE
-  void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
 
   // Memory pooling support — multi-domain.
   //
@@ -85,6 +80,13 @@ struct RuntimeState {
   void *host_scratch_base;
   size_t host_scratch_size;
 
+  // Output allocator installed by the EP before inference_compute via
+  // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
+  // allocate(self, ...). Borrowed: `self` is EP-owned, never freed here.
+  // allocate == nullptr means no allocator is installed (the classic pipeline
+  // never calls alloc_output); zero-initialized in initialize_state_handles.
+  hipdnn_output_allocator_t output_allocator;
+
   // Per-state scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
   // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
@@ -108,6 +110,22 @@ struct RuntimeState {
   size_t qmoe_scratch_size;
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
+
+  // Per-state scratch buffer for the MIOpen convolution workspace
+  // (wrap_miopenConvolutionForward, both 2D and the H=1 1D conv path).
+  //
+  // The MIOpen forward-convolution Find API selects an algorithm whose
+  // workspace requirement is shape-dependent (winograd/gemm/etc). Whisper's
+  // encoder front-end runs the same two Conv shapes every inference
+  // (Cin=128/Cout=1280 K=3 s=1, Cin=1280/Cout=1280 K=3 s=2), so a per-call
+  // hipMalloc/hipFree of the workspace would be wasted work after the
+  // first call. Same grow-on-demand policy as qmoe_scratch above: lazily
+  // allocated on first use, never shrinks, freed in
+  // hipdnn_ep_state_cleanup. Single-buffer reuse is safe because the HIP
+  // stream is serialised -- the next conv launches only after the previous
+  // miopenConvolutionForward + bias add have consumed the workspace.
+  void *conv_scratch;
+  size_t conv_scratch_size;
 
   // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
   // Caches hipBLASLt descriptors + algorithms by GEMM shape.

@@ -546,6 +546,34 @@ func.func @refine_reduce_sum_keepdims_constant_axes(%ctx: !hip.context,
 
 // -----
 
+// `hip.reduce_mean` shares the `Hip_DpsOp_Reduction` reify/InferType path with
+// reduce_sum/max/prod (same `reifyReductionShape` helper), so the constant-axes
+// refinement applies identically: data=<?x4096xf16>, axes=dense<[1]>,
+// keepdims=1 → dim 0 passes through (dynamic), dim 1 tightens to static 1.
+// This is the key scalability property: dynamic Reshape result dims that an
+// ONNX-level result-type refiner would once have recovered pre-conversion are
+// now recovered post-conversion by this dialect-level pass instead.
+// CHECK-LABEL: func.func @refine_reduce_mean_keepdims_constant_axes
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<?x1xf16>
+// CHECK:         %[[Y:.*]] = hip.reduce_mean
+// CHECK-SAME:                  outs(%[[E]] : tensor<?x1xf16>){{.*}}: tensor<?x1xf16>
+// CHECK:         tensor.cast %[[Y]] : tensor<?x1xf16> to tensor<?x?xf16>
+func.func @refine_reduce_mean_keepdims_constant_axes(%ctx: !hip.context,
+                                                     %data: tensor<?x4096xf16>,
+                                                     %d0: index, %d1: index)
+    -> tensor<?x?xf16> {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf16>
+  %y = hip.reduce_mean(%ctx)
+    ins(%data, %axes : tensor<?x4096xf16>, tensor<1xi64>)
+    outs(%e : tensor<?x?xf16>)
+    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    : tensor<?x?xf16>
+  return %y : tensor<?x?xf16>
+}
+
+// -----
+
 // `hip.pad` (along with tile, expand, slice, range) uses the shared
 // `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
 // `getDpsInits()` and lifts each output dim from the DPS `outs`
@@ -856,19 +884,21 @@ func.func @refine_layer_norm_variadic_three_outs(
 // dependent shapes.
 // CHECK-LABEL: func.func @refine_nonzero_data_dependent_dim1
 // CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xi64>
-// CHECK:         %[[Y:.*]] = hip.nonzero
-// CHECK-SAME:      outs(%[[E]] : tensor<?x?xi64>){{.*}}: tensor<?x?xi64>
-// CHECK:         return %[[Y]] : tensor<?x?xi64>
+// CHECK:         %[[C:.*]] = tensor.empty() : tensor<i32>
+// CHECK:         %[[Y:.*]]:2 = hip.nonzero
+// CHECK-SAME:      outs(%[[E]], %[[C]] : tensor<?x?xi64>, tensor<i32>){{.*}}: tensor<?x?xi64>, tensor<i32>
+// CHECK:         return %[[Y]]#0 : tensor<?x?xi64>
 func.func @refine_nonzero_data_dependent_dim1(
     %ctx: !hip.context,
     %x: tensor<3x4xf16>,
     %d0: index, %d1: index)
     -> tensor<?x?xi64> {
   %e = tensor.empty(%d0, %d1) : tensor<?x?xi64>
-  %y = hip.nonzero(%ctx) ins(%x : tensor<3x4xf16>)
-                          outs(%e : tensor<?x?xi64>)
+  %c = tensor.empty() : tensor<i32>
+  %y, %cnt = hip.nonzero(%ctx) ins(%x : tensor<3x4xf16>)
+                          outs(%e, %c : tensor<?x?xi64>, tensor<i32>)
                           {input_data_type = 1 : i64}
-                          : tensor<?x?xi64>
+                          : tensor<?x?xi64>, tensor<i32>
   return %y : tensor<?x?xi64>
 }
 

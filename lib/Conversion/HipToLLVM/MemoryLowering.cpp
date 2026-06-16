@@ -215,6 +215,127 @@ struct GetHostScratchOpLowering
   }
 };
 
+// --- AllocOutputOp: hip.alloc_output(%ctx, %dyn...) {out_idx} : memref<...>
+//     -> llvm.call @hipdnn_ep_alloc_output(state, out_idx, shape, rank,
+//        elem_size) + a memref descriptor over the returned device pointer.
+//
+// The op obtains a graph-output buffer from the EP output allocator at the
+// point where the output shape is known. The shape is handed to the runtime as
+// a stack-allocated i64[rank] array (static dims become constants, dynamic dims
+// come from the op's operands, in type order); the runtime returns the device
+// pointer, which the lowering wraps in a standard memref descriptor with
+// row-major strides. Unlike AllocOp this issues no hipMalloc/hipFree -- the
+// buffer is EP-owned (a graph output), matching AllocOutputOp::getEffects
+// (no Allocate effect). Works uniformly for static, dynamic, and mixed shapes
+// because getMemRefDescriptorSizes interleaves type constants with operands.
+//
+// Before:
+//   %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64} : memref<?x?xf16>
+//
+// After:
+//   %shape = llvm.alloca %c1 x !llvm.array<2 x i64>
+//   llvm.store %M, %shape[0]            // gep elem i64, index 0
+//   llvm.store %N, %shape[1]            // gep elem i64, index 1
+//   %p = llvm.call @hipdnn_ep_alloc_output(%state, %c0_outidx, %shape,
+//                                          %c2_rank, %c2_elem)
+//          : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
+//   // descriptor { alloc=%p, aligned=%p, offset=0, sizes=[%M,%N],
+//   //              strides=[%N,1] }
+struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(AllocOutputOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    MemRefType memRefType = cast<MemRefType>(op.getMemref().getType());
+
+    if (!isConvertibleAndHasIdentityMaps(memRefType))
+      return rewriter.notifyMatchFailure(op, "incompatible memref type");
+
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type i32Type = rewriter.getI32Type();
+
+    Type elemType = memRefType.getElementType();
+    if (!elemType.isIntOrFloat())
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    int64_t elemSizeBytes = elemType.getIntOrFloatBitWidth() / 8;
+    if (elemSizeBytes <= 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element bit width");
+
+    int64_t rank = memRefType.getRank();
+
+    // sizes[] interleaves static dims (type constants) with the dynamic-size
+    // operands (in type order); strides[] are row-major. Same helper AllocOp
+    // uses, so static / dynamic / mixed shapes all flow through one path. The
+    // returned sizeBytes is unused here (the runtime computes bytes itself).
+    SmallVector<Value, 4> sizes;
+    SmallVector<Value, 4> strides;
+    Value sizeBytes;
+    getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
+                             rewriter, sizes, strides, sizeBytes, true);
+
+    // Stack-allocate the i64[rank] shape array and populate it from sizes[].
+    Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                            rewriter.getI64IntegerAttr(1));
+    auto shapeArrayType =
+        LLVM::LLVMArrayType::get(i64Type, rank > 0 ? rank : 1);
+    Value shapeAlloca = LLVM::AllocaOp::create(
+        rewriter, loc, ptrType, shapeArrayType, oneI64, /*alignment=*/8);
+    for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+      Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                           rewriter.getI32IntegerAttr(i));
+      Value gep = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
+                                      shapeAlloca, idx);
+      LLVM::StoreOp::create(rewriter, loc, sizes[i], gep);
+    }
+
+    Value outIdxVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getOutIdx()));
+    Value rankVal = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(rank));
+    Value elemSizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemSizeBytes));
+
+    // void* hipdnn_ep_alloc_output(void* state, int64_t out_idx,
+    //                              const int64_t* shape, int64_t rank,
+    //                              int64_t elem_size)
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipAllocOutput,
+        {ptrType, i64Type, ptrType, i64Type, i64Type}, ptrType);
+    if (failed(funcOp))
+      return failure();
+
+    Value rawPtr =
+        LLVM::CallOp::create(rewriter, loc, *funcOp,
+                             ValueRange{adaptor.getCtx(), outIdxVal,
+                                        shapeAlloca, rankVal, elemSizeVal})
+            .getResult();
+
+    // The runtime returns a generic (AS 0) pointer; cast to the memref's
+    // address space if it differs (mirrors GetConstant / AllocOp).
+    FailureOr<unsigned> addrSpace =
+        getTypeConverter()->getMemRefAddressSpace(memRefType);
+    if (failed(addrSpace))
+      return failure();
+
+    Value dataPtr = rawPtr;
+    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
+        *addrSpace)
+      dataPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+          rawPtr);
+
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, memRefType, dataPtr, dataPtr, sizes, strides, rewriter);
+    rewriter.replaceOp(op, {desc});
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // GetConstantOp Lowering
 //===----------------------------------------------------------------------===//
@@ -501,16 +622,34 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       return success();
     }
 
-    // Pitched 2D copy: last dim contiguous (stride 1), collapse leading dims.
-    // Destination must be dense row-major (typical output buffer); source may
-    // be a strided view into a parent allocation.
+    // Pitched 2D copy: last dim contiguous (stride 1) on BOTH sides, and a
+    // common contiguous suffix exists (computed below as splitDim). Either
+    // side may be a strided subview into a parent allocation -- the canonical
+    // case is Concat / insert_slice, which bufferizes to a memref.subview on
+    // the destination side: the slice's outer strides inherit the parent's
+    // (larger) pitch, while the inner suffix [axis..rank-1] is still
+    // contiguous. The splitDim finder + outer-collapse loop below cover both
+    // src-strided and dst-strided shapes, so we do NOT require either side to
+    // be dense row-major here.
+    //
+    // Before (a Concat axis=1 of two halves bufferizes to a strided-dst copy):
+    //   %parent = memref.alloc() : memref<1x256x64x64xf16>
+    //   %slice  = memref.subview %parent[0,0,0,0] [1,128,64,64] [1,1,1,1]
+    //       : memref<1x256x64x64xf16>
+    //         to memref<1x128x64x64xf16, strided<[1048576,4096,64,1]>>
+    //   memref.copy %in, %slice
+    //       : memref<1x128x64x64xf16>
+    //         to memref<1x128x64x64xf16, strided<[1048576,4096,64,1]>>
+    //   // dst is NOT dense row-major (outer stride 1048576 keeps the parent
+    //   // pitch, dense would be 524288) -> old code rejected this copy.
+    //
+    // After (splitDim=1: row = contiguous suffix [1..3] = 128*64*64 elems,
+    // height = dim 0 = 1, dst pitch = dstStrides[0] = 1048576 elems):
+    //   llvm.call @wrap_hipMemcpy2DAsync(%state, %dstPtr, %dstPitchBytes,
+    //       %srcPtr, %srcPitchBytes, %widthBytes, %height) : ...
     if (rank < 2)
       return rewriter.notifyMatchFailure(
           op, "rank-1 non-uniform stride needs different lowering");
-
-    if (!strideVectorsEqual(dstStrides, ArrayRef<int64_t>(*denseStridesOr)))
-      return rewriter.notifyMatchFailure(
-          op, "expect dense row-major destination for pitched copy");
 
     if (srcStrides[static_cast<unsigned>(rank - 1)] != 1 ||
         dstStrides[static_cast<unsigned>(rank - 1)] != 1)
@@ -580,6 +719,45 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     int64_t srcPitchBytes = srcPitchElems * elemBytes;
     int64_t dstPitchBytes = dstPitchElems * elemBytes;
 
+    // Degenerate pitched-2D: very thin rows (few bytes) over many rows make
+    // hipMemcpy2DAsync pathological -- the copy engine processes each row as a
+    // separate tiny transfer, so the copy serializes into `height`
+    // micro-transfers. The canonical trigger is an interleave (e.g. sinusoidal
+    // position embedding's Concat(unsqueeze(sin), unsqueeze(cos), axis=last)),
+    // which bufferizes to a strided-dst copy with widthElems=1 and a very large
+    // height. A single parallel strided-copy kernel launch (one thread per
+    // element) is far faster. Wide rows keep the DMA path, where
+    // hipMemcpy2DAsync issues efficient contiguous bursts.
+    //
+    // Before:
+    //   memref.copy %sin, %dst_even
+    //       : memref<...x64x1xf16>
+    //         to memref<...x64x1xf16, strided<[...,2,1]>>
+    //   // splitDim picks widthElems=1, height=40000, dstPitch=2 elems
+    //   //   -> wrap_hipMemcpy2DAsync(width=2B, height=40000)  (slow)
+    // After:
+    //   wrap_strided_copy(%state, %dst, %src, elem=2, height=40000,
+    //                     srcPitch=1, dstPitch=2, row=1)       (one kernel)
+    constexpr int64_t kThinRowBytesMax = 256;
+    constexpr int64_t kManyRowsMin = 256;
+    if (widthBytes <= kThinRowBytesMax && height >= kManyRowsMin) {
+      FailureOr<LLVM::LLVMFuncOp> stridedFn =
+          LLVM::lookupOrCreateFn(rewriter, module, kWrapStridedCopy,
+                                 {ptrType, ptrType, ptrType, i64Type, i64Type,
+                                  i64Type, i64Type, i64Type},
+                                 i32Type);
+      if (failed(stridedFn))
+        return failure();
+
+      LLVM::CallOp::create(
+          rewriter, loc, *stridedFn,
+          ValueRange{statePtr, dstPtr, srcPtr, i64Const(elemBytes),
+                     i64Const(height), i64Const(srcPitchElems),
+                     i64Const(dstPitchElems), i64Const(widthElems)});
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     FailureOr<LLVM::LLVMFuncOp> memcpy2dFn = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapHipMemcpy2DAsync,
         {ptrType, ptrType, i64Type, ptrType, i64Type, i64Type, i64Type},
@@ -601,8 +779,9 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
-               GetHostScratchOpLowering, GetConstantOpLowering,
-               MemRefAllocOpLowering, MemRefDeallocOpLowering>(converter);
+               GetHostScratchOpLowering, AllocOutputOpLowering,
+               GetConstantOpLowering, MemRefAllocOpLowering,
+               MemRefDeallocOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 

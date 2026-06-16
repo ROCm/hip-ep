@@ -32,6 +32,13 @@ struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
   bool skipConstantData = true;
+  // Output-allocator mode (2-arg inference_compute + in-graph hip.alloc_output)
+  // is the only ABI at the EP front-end -- there is no provider option and no
+  // classic out-param fallback. load_config sets this true unconditionally and
+  // writes the SAME value into the model metadata so the EP's dispatch arity
+  // always agrees with the compiled DLL's ABI. Default true so any path that
+  // bypasses load_config still gets the supported ABI.
+  bool useOutputAllocator = true;
 };
 
 // Compiled artifact (bytes + metadata)

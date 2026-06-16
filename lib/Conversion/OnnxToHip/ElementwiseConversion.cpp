@@ -53,11 +53,14 @@ AddToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-  auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-  mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+  mlir::FailureOr<mlir::Value> initOrFailure =
+      createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+  if (mlir::failed(initOrFailure))
+    return rewriter.notifyMatchFailure(
+        op, "Add: no ranked operand spans dynamic result dim");
 
-  auto hipOp = mlir::hip::AddOp::create(rewriter, loc, context, a, b, init);
+  auto hipOp =
+      mlir::hip::AddOp::create(rewriter, loc, context, a, b, *initOrFailure);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -76,13 +79,14 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-  // Use the operand whose rank matches the result for dim extraction
-  // (handles scalar * tensor broadcasting).
-  auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-  mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+  mlir::FailureOr<mlir::Value> initOrFailure =
+      createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+  if (mlir::failed(initOrFailure))
+    return rewriter.notifyMatchFailure(
+        op, "Mul: no ranked operand spans dynamic result dim");
 
-  auto hipOp = mlir::hip::MulOp::create(rewriter, loc, context, a, b, init);
+  auto hipOp =
+      mlir::hip::MulOp::create(rewriter, loc, context, a, b, *initOrFailure);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -100,12 +104,13 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value rhs = op->getOperand(1);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  // Use the operand whose rank matches the result for dynamic dim extraction
-  // (the other may be a broadcast scalar with fewer dims).
-  auto lhsType = mlir::cast<mlir::RankedTensorType>(lhs.getType());
-  mlir::Value source = (lhsType.getRank() == resultType.getRank()) ? lhs : rhs;
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
-  auto hipOp = mlir::hip::SubOp::create(rewriter, loc, context, lhs, rhs, init);
+  mlir::FailureOr<mlir::Value> initOrFailure =
+      createBroadcastEmptyTensor(rewriter, loc, resultType, {lhs, rhs});
+  if (mlir::failed(initOrFailure))
+    return rewriter.notifyMatchFailure(
+        op, "Sub: no ranked operand spans dynamic result dim");
+  auto hipOp = mlir::hip::SubOp::create(rewriter, loc, context, lhs, rhs,
+                                        *initOrFailure);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

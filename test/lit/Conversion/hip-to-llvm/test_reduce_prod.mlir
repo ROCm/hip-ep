@@ -24,7 +24,7 @@ module {
                           outs(%output : memref<3x1x2xf32, 1>)
                           {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
 
-    // CHECK: llvm.call @wrap_reduce_prod({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_prod({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -40,7 +40,7 @@ module {
                           outs(%output : memref<?x?xf32, 1>)
                           {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
 
-    // CHECK: llvm.call @wrap_reduce_prod({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_prod({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 }

@@ -11,6 +11,7 @@ namespace {
 
 // hip.scatter_nd(ctx, data, indices, updates, output) {reduction}
 //   -> wrap_scatter_nd(state, data_ptr, indices_ptr, updates_ptr, out_ptr,
+//                      count_ptr,
 //                      data_shape_ptr, data_rank,
 //                      indices_shape_ptr, indices_rank,
 //                      updates_shape_ptr, updates_rank,
@@ -18,9 +19,21 @@ namespace {
 //                      reduction_id, data_type)
 //
 // `reduction_id` encodes the ONNX `reduction` string attribute as a small
-// integer enum (see ScatterNDOpLowering::reductionIdFromString below). The
-// runtime side is a stub today that only logs its parameters, but the
-// signature is shaped to match the future kernel implementation.
+// integer enum (see ScatterNDOpLowering::reductionIdFromString below).
+//
+// `count_ptr` is a device pointer to a dynamic "valid index-slice count" that
+// the NonZero->ScatterND path uses to skip padded rows. hip.scatter_nd has no
+// such operand: its `indices` buffer is already truncated to the valid extent
+// upstream (readback_dim -> subview -> transpose), so `indices_shape` already
+// equals the valid count and we pass null. The runtime treats a null count_ptr
+// as "process all num_slices rows".
+//
+// The argument is part of the ABI, not optional: wrap_scatter_nd is a 16-param
+// C function whose 6th parameter is count_ptr. Omitting it shifts every later
+// argument by one slot, so the callee reads the `indices_shape` pointer as
+// `data_rank` and dereferences a small-integer-as-pointer (SIGSEGV). Keep the
+// param list here in lockstep with the wrap_scatter_nd declaration in
+// hipdnn_ep_runtime.h.
 struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -99,9 +112,13 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
         createI64Const(reductionIdFromString(op.getReduction()));
     Value dataTypeVal = createI64Const(hipDtype);
 
+    // The op has no valid-count operand; pass null (see file header).
+    Value nullCountPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+
     SmallVector<Type, 16> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, ptrType, // state, data, idx,
                                                      // updates, out
+        ptrType,                                     // count_ptr (nullable)
         ptrType, i64Type,                            // data_shape, data_rank
         ptrType, i64Type,                            // idx_shape, idx_rank
         ptrType, i64Type,                            // upd_shape, upd_rank
@@ -114,9 +131,10 @@ struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
       return failure();
 
     SmallVector<Value, 16> args = {
-        statePtr,    dataPtr,  indicesPtr,   updatesPtr,   outPtr,
-        dataShape,   dataRank, indicesShape, indicesRank,  updatesShape,
-        updatesRank, outShape, outRank,      reductionVal, dataTypeVal};
+        statePtr,     dataPtr,      indicesPtr,   updatesPtr,
+        outPtr,       nullCountPtr, dataShape,    dataRank,
+        indicesShape, indicesRank,  updatesShape, updatesRank,
+        outShape,     outRank,      reductionVal, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

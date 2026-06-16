@@ -234,6 +234,69 @@ static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
   }
 }
 
+// Standalone Softmax runtime entry point — called from
+// `ConvertHipToLLVM`'s `MiopenSoftmaxOpLowering` for `onnx.Softmax` paths
+// outside fused attention (vision encoder self-attention, primarily; text
+// decoders fuse softmax inside hip.gqa and don't reach this path).
+// Dispatches to `hip_softmax_row_2d_inplace` (custom HIP kernel) —
+// row-wise softmax over a contiguous row-major [rows, cols] fp16 buffer
+// with `cols` = the softmax axis size (ONNX Softmax axis = -1 over the
+// last dim of the flattened input).
+//
+// fp16-only today. The buffer element type is taken on faith from the
+// MemRef the lowering hands us; the runtime does not validate the dtype.
+// If a future model needs fp32 softmax, plumb an `elem_size` (or dtype
+// enum) through the lowering and dispatch in the kernel launcher.
+//
+// Symbol name is `hip_miopen_softmax` (not `hip_softmax`) to match the
+// lowering side's `kMiopenSoftmax` constant. The kernel-level dispatch
+// is unrelated to MIOpen.
+//
+// Reusing `hip_gqa_softmax_inplace` (from gqa_kernel.hip) would not work:
+// that kernel is column-wise over a GQA-specific layout AND its launcher
+// only spawns `total_head_queries` blocks, not `total_head_queries * cols`.
+// A standalone softmax wired to that path produces NaN downstream.
+extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
+                                  int64_t rows, int64_t cols) {
+  RuntimeState *st = static_cast<RuntimeState *>(state);
+  OP_PROFILE(
+      "softmax",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lld", (long long)rows, (long long)cols);
+        return std::string(b);
+      },
+      st);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] hip_miopen_softmax: null argument\n");
+    return -1;
+  }
+  if (rows <= 0 || cols <= 0) {
+    fprintf(stderr,
+            "[REAL] hip_miopen_softmax: invalid dims rows=%lld cols=%lld\n",
+            (long long)rows, (long long)cols);
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(st);
+
+  // Copy input -> output (kernel is in-place; both are fp16 contiguous
+  // buffers from `extractContiguousMemRefPtr`).
+  hipError_t err = hipMemcpyAsync(
+      output, input, static_cast<size_t>(rows) * cols * sizeof(uint16_t),
+      hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
+  if (err != hipSuccess) {
+    fprintf(stderr, "[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
+            hipGetErrorString(err));
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] hip_miopen_softmax: rows=%lld cols=%lld\n",
+                    (long long)rows, (long long)cols);
+  return hip_softmax_row_2d_inplace(stream, output, static_cast<int>(rows),
+                                    static_cast<int>(cols));
+}
+
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate) {
   OP_PROFILE(
@@ -278,5 +341,47 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gelu: completed successfully\n");
+  return 0;
+}
+
+int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type, double alpha) {
+  OP_PROFILE(
+      "leaky_relu",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] wrap_leaky_relu: null argument\n");
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+
+  if (hip_dtype < 0) {
+    fprintf(stderr, "[REAL] wrap_leaky_relu: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_leaky_relu: num_elements=%lld, "
+                    "data_type=%s(%lld), alpha=%f\n",
+                    (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+                    (long long)data_type, alpha);
+
+  int result =
+      hip_leaky_relu(stream, input, output, num_elements, hip_dtype, alpha);
+
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_leaky_relu: kernel launch failed (%d)\n",
+            result);
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_leaky_relu: completed successfully\n");
   return 0;
 }

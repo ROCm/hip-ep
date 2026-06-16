@@ -45,9 +45,6 @@ struct RuntimeStateLayout {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
-  bool constants_is_shared;
-  void *shared_constants_mapping;
-  void *shared_constants_view;
   void *pool_base;
   size_t pool_size;
   size_t *buffer_offsets;
