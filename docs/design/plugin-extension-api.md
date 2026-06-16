@@ -835,6 +835,51 @@ on it; they can land in any order relative to vendor-side work.
    linker entries (PR 4) without any MLIR state crossing the DLL
    boundary, so the broader design is not blocked.
 
+   **Experiment (2026-06-16) — resolution path VALIDATED on the
+   Linux/ELF toolchain.** A focused spike (host + dlopen'd plugin,
+   each a separate binary, both compiled by the project's own
+   `clang++`/`libMLIR.so.22.1`) confirmed the resolution path works
+   end-to-end:
+
+   - **Positive.** With one shared `libMLIR.so` in the process, the
+     plugin's `mlir::PassRegistration<>` lands in the *same* pass
+     registry the host's `parsePassPipeline` reads: the host resolved
+     the plugin pass *by name* and ran it on host-created `func.func`
+     IR. So both halves of the concern — pass-registry sharing AND
+     `TypeID`/op-identity across the DLL boundary — hold once MLIR is
+     a single shared instance.
+   - **Negative, on the real artifacts.** `ldd` confirms the shipped
+     `hip-mlir-opt` (≈56 MB) and `hip_ep_sample_plugin.so` (≈3.3 MB)
+     each statically link MLIR — there is **no `libMLIR.so` in the
+     process**. Running the real
+     `env HIP_EP_PLUGINS=… hip-mlir-opt --hip-ep-sample-print-functions`
+     prints usage and never runs the pass: the flag is unknown
+     because the plugin's registration landed in the plugin's own MLIR
+     copy. This reproduces the `XFAIL`'d LIT test on the real binaries
+     (not just in theory).
+   - **ELF nuance (narrows the fix on Linux).** On ELF with
+     default-visibility MLIR symbols, a plugin that *statically* links
+     MLIR still works **as long as the host carries the shared
+     `libMLIR.so`** — the plugin's MLIR symbols are interposed onto
+     the one already-loaded `libMLIR.so`. So the minimal Linux change
+     is "build the **host** (`hip-mlir-opt`, and the EP/`hip-compiler`
+     host) against the MLIR dylib"; plugins need not change. Windows
+     has no symbol interposition, so there both host and plugin link
+     the MLIR DLL (as the original resolution path states).
+
+   **Remaining work is engineering, not uncertainty.** The mechanism
+   is proven; what is left is the tree-wide build conversion: MLIR is
+   currently linked via explicit per-target component lists in ~8–10
+   `CMakeLists.txt` (e.g. `tools/hip-mlir-opt/CMakeLists.txt` lists
+   ~35 `MLIR*` components; `lib/Dialect/IR`, `HipConversion`,
+   `HipToLLVM`, `OnnxToHip`, `HipDialectTransforms`, `LibHipCompiler`
+   each have their own). The swap to the `libMLIR` aggregate is
+   **all-or-nothing per process** — mixing static MLIR components with
+   the dylib double-registers static `cl::opt`/pass initializers and
+   aborts at startup — so every internal lib + tool in a given process
+   must drop the components in favour of the dylib together, followed
+   by a full rebuild + LIT re-verify. Tracked as the build-system PR.
+
 ### Resolved by adopting the upstream pattern
 
 - *Versioning scheme*: dropped major/minor in favor of single
@@ -852,8 +897,14 @@ on it; they can land in any order relative to vendor-side work.
 
 ## 8. Confidence Assessment
 
-The design is rated at **high** confidence overall after a 2026-05-26
-spike that exercised the proposed ABI shape end-to-end on Windows MSVC.
+The design is rated at **high** confidence on the infrastructure
+(ABI / loader / bitcode / library) and, after the 2026-06-16
+shared-MLIR experiment (see Open Question 6), **high** confidence
+that the MLIR-pass extension path works once the host links the MLIR
+dylib. The one item that is engineering-not-uncertainty is the
+tree-wide build conversion that makes the *shipping* host carry
+shared `libMLIR` (today it statically links MLIR, so a DLL-loaded
+plugin pass is not visible to the host — the `XFAIL`'d LIT test).
 Per-axis breakdown:
 
 | Axis | Confidence | Why |
@@ -861,7 +912,8 @@ Per-axis breakdown:
 | Plugin ABI shape matches upstream | **High** | Field-for-field aligned with `mlir::PassPluginLibraryInfo` and `llvm::PassPluginLibraryInfo`. Verified against upstream sources cited in Appendix C. |
 | ABI works on Windows MSVC | **High** | Spike on 2026-05-26 built + ran on cl.exe (MSVC 19.44) clean. Entry-point export, struct-by-value return, and callback-with-reference all behave correctly. See "Spike findings" below. |
 | Hook sites are the right ones | **High** | Three hooks anchor to single, named, narrow functions: pipeline-slot in `Pipelines.cpp`, `linkRuntimeModule`, `discoverLibraries`. No speculative additions. |
-| Registry covers needed capabilities | **High** for passes; **Medium-High** for bitcode/library | Pass registration uses MLIR's existing global registry, so the upstream pattern carries directly. Bitcode and library injection are extensions beyond upstream — concept is sound but only public-tree validation will close out the residual risk. |
+| Registry covers needed capabilities — bitcode + library | **High** | `addRuntimeBitcode` / `addLibraryPath` / `addLibrary` round-trip the DLL boundary through the host-owned vtable; validated by `test/plugin/test_plugin_loader.cpp` (bitcode buffer carries valid `BC\xc0\xde` magic; lib path/name recorded). No MLIR state crosses the boundary, so these work in the shipping (static-MLIR) configuration today. |
+| Registry covers needed capabilities — **MLIR passes** | **Mechanism: High; shipping config: blocked on build PR** | `registerPass<>()` only reaches the host's registry when host + plugin share one MLIR instance. The 2026-06-16 spike PROVED this works (plugin pass resolved by name + ran on host IR) with a shared `libMLIR.so`; the real artifacts statically link MLIR (no shared `libMLIR`), so the DLL-loaded plugin pass is not visible today (the `XFAIL`'d LIT test, reproduced on the real binaries). See Open Question 6. Closing this is the tree-wide MLIR-dylib build PR, not a design unknown. |
 | ABI versioning is workable | **High** | Single `APIVersion` matches upstream discipline; rebuild-on-change is the simple, well-understood model. |
 | Multi-PR sequencing is mergeable | **High** | Each PR only fills in registry methods one capability at a time; the previous PR's tests still pass without later capabilities. |
 | Vendor-side build works against the public install tree | **Medium** | Symmetric to how the public EP consumes TheRock today; validated end-to-end only in PR 6. |
