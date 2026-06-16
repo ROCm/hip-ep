@@ -61,14 +61,17 @@ struct HipDstBufferizableModel
   }
 };
 
-// Bufferization model for the non-DPS hip.readback_dim op. It reads the
-// `scalar` tensor operand (device i32 buffer) and produces a host `index`
-// result; it does not allocate, write, or alias any tensor value (the result
-// is not a tensor). Bufferization just rewrites the tensor operand to its
-// memref buffer; the index result passes through unchanged.
-struct HipReadbackDimBufferizableModel
+// Bufferization model for the non-DPS readback ops (hip.readback_dim,
+// hip.readback_scalar). Each reads its `scalar` tensor operand (a device
+// buffer) and produces a NON-tensor result (index for readback_dim, the
+// operand's element type for readback_scalar). So bufferization only rewrites
+// the tensor operand to its memref buffer; the result type passes through
+// unchanged and nothing aliases the operand. `op->getResult(0).getType()`
+// already carries the right result type for either op.
+template <typename OpTy>
+struct HipReadbackBufferizableModel
     : public bufferization::BufferizableOpInterface::ExternalModel<
-          HipReadbackDimBufferizableModel, ReadbackDimOp> {
+          HipReadbackBufferizableModel<OpTy>, OpTy> {
   bool bufferizesToMemoryRead(Operation *, OpOperand &,
                               const bufferization::AnalysisState &) const {
     return true;
@@ -80,21 +83,19 @@ struct HipReadbackDimBufferizableModel
   bufferization::AliasingValueList
   getAliasingValues(Operation *, OpOperand &,
                     const bufferization::AnalysisState &) const {
-    // The only result is an `index`, not a tensor, so no value aliases the
-    // (scalar) operand buffer.
     return {};
   }
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const bufferization::BufferizationOptions &options,
                           bufferization::BufferizationState &state) const {
-    auto readback = cast<ReadbackDimOp>(op);
+    auto readback = cast<OpTy>(op);
     FailureOr<Value> scalarBuf =
         getBuffer(rewriter, readback.getScalar(), options, state);
     if (failed(scalarBuf))
       return failure();
     auto newOp =
-        ReadbackDimOp::create(rewriter, op->getLoc(), rewriter.getIndexType(),
-                              readback.getCtx(), *scalarBuf);
+        OpTy::create(rewriter, op->getLoc(), op->getResult(0).getType(),
+                     readback.getCtx(), *scalarBuf);
     bufferization::replaceOpWithBufferizedValues(rewriter, op,
                                                  newOp.getResult());
     return success();
@@ -104,7 +105,10 @@ struct HipReadbackDimBufferizableModel
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
-    ReadbackDimOp::attachInterface<HipReadbackDimBufferizableModel>(*ctx);
+    ReadbackDimOp::attachInterface<HipReadbackBufferizableModel<ReadbackDimOp>>(
+        *ctx);
+    ReadbackScalarOp::attachInterface<
+        HipReadbackBufferizableModel<ReadbackScalarOp>>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);

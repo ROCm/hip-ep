@@ -165,6 +165,48 @@ func.func @host_scalar_view_escapes_left_alone(%ctx: !hip.context,
   return %rc : memref<1xi64>
 }
 
+// --- Host scalar consumed by memref.copy (the bufferized Concat /
+//     insert_slice that stages grid-dim scalars into a shape vector, e.g.
+//     vision rope `ReduceMax->Reshape->Gather->Range` arithmetic). memref.copy
+//     is a terminal, host-mapping-safe use (the runtime memrefCopy issues
+//     hipMemcpyAsync, which accepts host-mapped operands). The pass MUST accept
+//     it and redirect the buffer to host scratch — otherwise the host store
+//     into the buffer SEGVs on real-device-memory targets. ---
+// CHECK-LABEL: func.func @host_scalar_via_memref_copy
+// CHECK:         hip.get_host_scratch
+// CHECK:         %[[V:.*]] = memref.view %{{.*}} : memref<?xi8> to memref<1xi64>
+// CHECK:         memref.store {{.*}}, %[[V]]
+// CHECK:         memref.copy %[[V]]
+func.func @host_scalar_via_memref_copy(%ctx: !hip.context, %x: i64,
+                                       %dst: memref<2xi64>) {
+  %c0 = arith.constant 0 : index
+  %a = memref.alloc() : memref<1xi64>
+  memref.store %x, %a[%c0] : memref<1xi64>
+  %sv = memref.subview %dst[0] [1] [1] : memref<2xi64> to memref<1xi64, strided<[1]>>
+  memref.copy %a, %sv : memref<1xi64> to memref<1xi64, strided<[1]>>
+  memref.dealloc %a : memref<1xi64>
+  return
+}
+
+// --- Host scalar used as the SHAPE operand of memref.reshape: the reshape
+//     reads the (host-staged) shape vector; its result aliases the data
+//     operand, not our buffer, so it is a terminal accept. The pass MUST
+//     redirect the shape buffer to host scratch. (When the buffer is instead
+//     the reshape's SOURCE, the pass recurses into the aliasing result.) ---
+// CHECK-LABEL: func.func @host_scalar_as_reshape_shape
+// CHECK:         hip.get_host_scratch
+// CHECK:         memref.view %{{.*}} : memref<?xi8> to memref<2xi64>
+func.func @host_scalar_as_reshape_shape(%ctx: !hip.context, %x: i64,
+                                        %data: memref<?xf16>) -> memref<?x?xf16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %a = memref.alloc() : memref<2xi64>
+  memref.store %x, %a[%c0] : memref<2xi64>
+  memref.store %x, %a[%c1] : memref<2xi64>
+  %r = memref.reshape %data(%a) : (memref<?xf16>, memref<2xi64>) -> memref<?x?xf16>
+  return %r : memref<?x?xf16>
+}
+
 // --- Function whose arg 0 is NOT a !hip.context: the pass silently leaves
 //     it alone (best-effort mitigation; utility funcs without runtime
 //     access don't have a context to call hip.get_host_scratch on). The

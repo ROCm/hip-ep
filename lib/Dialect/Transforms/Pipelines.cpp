@@ -10,9 +10,12 @@
 
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
@@ -136,9 +139,38 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   if (useOutputAllocator)
     pm.addNestedPass<func::FuncOp>(hip::createUseOutputAllocatorPass());
 
+  // 4.6. Rewrite frozen Concat-accumulator offsets in outlined hip.loop bodies
+  //      to iter-driven offsets (the loop trampoline aliases v_in/v_out onto
+  //      one descriptor, freezing `memref.dim %v_in` so a growing accumulator
+  //      keeps only its last chunk). Placement is load-bearing: AFTER
+  //      buffer-deallocation (the in-place-writer alias only exists
+  //      post-out-param-promotion) and BEFORE the pool/hoist passes (so the
+  //      synthesized readback + index_cast flow through them). No-op on
+  //      non-loop-body funcs. See FixLoopAccumulatorOffset.cpp.
+  pm.addNestedPass<func::FuncOp>(hip::createFixLoopAccumulatorOffsetPass());
+
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
+
+  // 5a. Convert any memref-level `linalg.*` (today only the rank-0
+  //     `linalg.fill` that `ConstantOfShapeAsScalar` emits for a
+  //     `ConstantOfShape -> Where` fill-value buffer) to `scf` loops +
+  //     `memref.store`.  ConvertHipToLLVM has no linalg patterns, so a
+  //     surviving `linalg.fill` would leave an unrealized cast and abort
+  //     translation.
+  //
+  //     Placement is load-bearing: it MUST run BEFORE MaterializeHostScalars
+  //     (6b).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
+  //     only AFTER this pass does it become `memref.alloc + memref.store`,
+  //     which is the shape MaterializeHostScalars recognises as a tiny
+  //     host-fed scalar and redirects to host-mapped scratch.  If this ran
+  //     after MaterializeHostScalars, the alloc would still carry a
+  //     `linalg.fill` user (not a `memref.store`), the candidate scan would
+  //     skip it, and the rank-0 buffer would land in the GPU pool with a
+  //     host store on it -- a device fault on targets whose pool is real
+  //     device memory.  No-op on graphs that emit no linalg ops.
+  pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
   // 6. HIP-specific buffer optimizations
   pm.addNestedPass<func::FuncOp>(hip::createOptimizeMemRefsPass());
@@ -318,6 +350,15 @@ void mlir::hip::buildHipToLLVMPipeline(
   // surviving affine.apply leaves builtin.unrealized_conversion_cast in the
   // final LLVM IR and "Failed to translate MLIR to LLVM IR" aborts compile.
   pm.addPass(createLowerAffinePass());
+
+  // Lower `scf.for` / `scf.if` introduced by convert-linalg-to-loops (5a) to
+  // unstructured control flow, then reconcile any leftover unrealized casts.
+  // ConvertHipToLLVM has no SCF patterns, so a surviving scf.for would fail
+  // translation. No-op on graphs whose linalg ops all folded to rank-0
+  // stores (no loop emitted); kept for any future linalg lowering that does
+  // emit real loops.
+  pm.addPass(createSCFToControlFlowPass());
+  pm.addPass(createReconcileUnrealizedCastsPass());
 
   pm.addPass(createConvertHipToLLVMPass());
 

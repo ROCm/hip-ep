@@ -36,6 +36,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ReadbackScalar.h"
+
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
@@ -61,46 +63,29 @@ namespace {
 // Helpers
 //===----------------------------------------------------------------------===//
 
-/// Try to read the single scalar value from a 0-D `onnx.Constant`. Returns
-/// `nullopt` for any value not produced by an `onnx.Constant` with a dense
-/// 0-D attribute of the requested integer width.
-template <typename IntTy>
-static std::optional<IntTy> readOnnxConstantScalar(Value v, unsigned bitWidth) {
-  Operation *defOp = v.getDefiningOp();
-  if (!defOp || defOp->getName().getStringRef() != "onnx.Constant")
-    return std::nullopt;
-  auto attr = defOp->getAttrOfType<DenseElementsAttr>("value");
-  if (!attr)
-    return std::nullopt;
-  auto t = dyn_cast<RankedTensorType>(attr.getType());
-  if (!t || t.getRank() != 0 || !t.getElementType().isInteger(bitWidth))
-    return std::nullopt;
-  return static_cast<IntTy>((*attr.getValues<APInt>().begin()).getZExtValue());
-}
-
-/// Materialize an `index` scalar from a 0-D `tensor<i64>` operand. When
-/// `mTensor` is an `onnx.Constant`, the value is folded directly into an
-/// `arith.constant` -- avoiding a `tensor.extract` that would later
-/// bufferize to a host-side `memref.load` from an externalized
-/// GPU-resident constant (which crashes at runtime; same family of bug
-/// as PR #212's "host-scalar memory placement" issue). For non-constant
-/// `mTensor` (e.g. `Squeeze(Dim(input))`), we fall back to
-/// `tensor.extract` + `arith.index_cast`; if that path is ever wired up,
-/// the source memref must be made host-resident (e.g. via
-/// `hip-materialize-host-scalars`) before bufferization.
+/// Materialize an `index` scalar from a 0-D `tensor<i64>` trip count. A runtime
+/// trip count (e.g. a window count derived from a graph input via `onnx.Sub`)
+/// goes through `hip.readback_scalar` (D2H + stream sync) -- a bare
+/// `tensor.extract` would read stale bytes on true-device pools and run the
+/// loop the wrong number of times. See ReadbackScalar.h.
 static FailureOr<Value> unboxTripCount(OpBuilder &builder, Location loc,
-                                       Value mTensor) {
+                                       Value ctx, Value mTensor) {
   auto t = dyn_cast<RankedTensorType>(mTensor.getType());
   if (!t || t.getRank() != 0 || !t.getElementType().isInteger(64))
     return failure();
-  if (auto folded = readOnnxConstantScalar<int64_t>(mTensor, 64)) {
-    Value indexVal = arith::ConstantIndexOp::create(builder, loc, *folded);
-    return indexVal;
-  }
-  Value i64Val = tensor::ExtractOp::create(builder, loc, mTensor, ValueRange{});
-  Value indexVal =
-      arith::IndexCastOp::create(builder, loc, builder.getIndexType(), i64Val);
-  return indexVal;
+  // A constant trip count folds straight to an index (no readback, no cast).
+  if (DenseElementsAttr dense = getConstantDense(mTensor))
+    if (dense.getNumElements() == 1)
+      return arith::ConstantIndexOp::create(
+                 builder, loc,
+                 (*dense.getValues<APInt>().begin()).getSExtValue())
+          .getResult();
+  // Runtime (possibly GPU-computed) trip count: synchronized readback then
+  // cast.
+  Value i64Val = readbackScalarToHost(builder, loc, ctx, mTensor);
+  return arith::IndexCastOp::create(builder, loc, builder.getIndexType(),
+                                    i64Val)
+      .getResult();
 }
 
 /// Materialize an `i1` scalar from a 0-D BOOL-like tensor operand.
@@ -463,7 +448,7 @@ LogicalResult OnnxLoopOutlinePass::outlineLoop(Operation *loopOp,
   Value ctxVal = parentFn.getArgument(0);
 
   // Unbox M (tensor<i64>) -> index, and cond_init (tensor<i1>) -> i1.
-  FailureOr<Value> mIdx = unboxTripCount(outerBuilder, loc, mTensor);
+  FailureOr<Value> mIdx = unboxTripCount(outerBuilder, loc, ctxVal, mTensor);
   if (failed(mIdx))
     return loopOp->emitOpError("could not unbox M to index (expected "
                                "tensor<i64>, got ")

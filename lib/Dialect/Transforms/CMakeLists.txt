@@ -6,6 +6,7 @@
 add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
   BufferUtils.cpp
+  FixLoopAccumulatorOffset.cpp
   GenerateInterface.cpp
   HoistAllocSizeArith.cpp
   InferLoopBodyShapesPass.cpp
@@ -53,6 +54,9 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRMemRefToLLVM
   MLIRFuncToLLVM
   MLIRReconcileUnrealizedCasts
+  MLIRLinalgDialect
+  MLIRLinalgTransforms
+  MLIRSCFToControlFlow
   MLIRInferTypeOpInterface
   MLIRTensorDialect
   flatbuffers::flatbuffers
