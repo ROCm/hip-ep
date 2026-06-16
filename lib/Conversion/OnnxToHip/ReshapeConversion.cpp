@@ -172,16 +172,20 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     // produces a `tensor<i64>` scalar that the model then `Reshape`s to
     // `tensor<1xi64>` so it can be `Concat`-ed into a larger shape vector.
     //
+    // The scalar must reach the host to re-emit via tensor.from_elements. For a
+    // runtime, GPU-produced scalar a plain tensor.extract races the kernel (see
+    // ReadbackScalar.h); we read it back through hip.readback_scalar
+    // (D2H + stream sync) instead. Compile-time constants fold.
+    //
     // Before:
     //   %r = onnx.Reshape %s : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
-    // After:
-    //   %v = tensor.extract %s[] : tensor<i64>
+    // After (runtime scalar):
+    //   %v = hip.readback_scalar(%ctx, %s : tensor<i64>) -> i64
     //   %r = tensor.from_elements %v : tensor<1xi64>
     if (inputRank == 0 && outputRank > 0 && outputType.hasStaticShape() &&
         outputType.getNumElements() == 1) {
-      mlir::Value scalar = mlir::tensor::ExtractOp::create(rewriter, loc, data,
-                                                           mlir::ValueRange{})
-                               .getResult();
+      mlir::Value scalar =
+          readbackScalarToHostOrExtract(rewriter, loc, op, data);
       mlir::Value flat = mlir::tensor::FromElementsOp::create(
           rewriter, loc,
           mlir::RankedTensorType::get({1}, inputType.getElementType()),
@@ -479,10 +483,12 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         dims.reserve(outputRank);
         mlir::Value posProduct = cOne;
         for (int64_t i : llvm::seq<int64_t>(outputRank)) {
-          mlir::Value idx =
-              mlir::arith::ConstantIndexOp::create(rewriter, loc, i);
-          mlir::Value v = mlir::tensor::ExtractOp::create(
-              rewriter, loc, shapeOperand, mlir::ValueRange{idx});
+          // Read each shape entry to the host with a stream sync (constants
+          // fold) instead of a bare host load of device memory. A bare
+          // tensor.extract here races a GPU-computed shape tensor and yields a
+          // garbage dim that collapses the reshape. See ReadbackScalar.h.
+          mlir::Value v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
+                                                            shapeOperand, i);
           dims.push_back(v);
           mlir::Value isPositive = mlir::arith::CmpIOp::create(
               rewriter, loc, mlir::arith::CmpIPredicate::sgt, v, cOne);

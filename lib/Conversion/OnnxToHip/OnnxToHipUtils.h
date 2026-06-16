@@ -12,6 +12,8 @@
 #ifndef HIP_CONVERSION_ONNXTOHIP_UTILS_H
 #define HIP_CONVERSION_ONNXTOHIP_UTILS_H
 
+#include "ReadbackScalar.h"
+
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -20,6 +22,7 @@
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
@@ -203,6 +206,38 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::RankedTensorType presentKeyType,
                 mlir::RankedTensorType presentValueType);
 
+/// `readbackScalarToHost` recovering !hip.context from `op`. Falls back to a
+/// bare `tensor.extract` when the function has no context arg (utility funcs /
+/// pre-context-arg conversions) -- the only case where the unsynchronized load
+/// is acceptable because there is no runtime to sync against.
+inline mlir::Value
+readbackScalarToHostOrExtract(mlir::PatternRewriter &rewriter,
+                              mlir::Location loc, mlir::Operation *op,
+                              mlir::Value rank0Tensor) {
+  auto ctx = getContextArg(op, rewriter);
+  if (mlir::failed(ctx))
+    return mlir::tensor::ExtractOp::create(rewriter, loc, rank0Tensor,
+                                           mlir::ValueRange{})
+        .getResult();
+  return readbackScalarToHost(rewriter, loc, *ctx, rank0Tensor);
+}
+
+/// `readbackShapeEntryToHost` recovering !hip.context from `op`. Falls back to
+/// a bare `tensor.extract %shape[idx]` when there is no context arg.
+inline mlir::Value
+readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
+                                  mlir::Location loc, mlir::Operation *op,
+                                  mlir::Value shape, int64_t idx) {
+  auto ctx = getContextArg(op, rewriter);
+  if (mlir::failed(ctx)) {
+    mlir::Value cidx = mlir::arith::ConstantIndexOp::create(rewriter, loc, idx);
+    return mlir::tensor::ExtractOp::create(rewriter, loc, shape,
+                                           mlir::ValueRange{cidx})
+        .getResult();
+  }
+  return readbackShapeEntryToHost(rewriter, loc, *ctx, shape, idx);
+}
+
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
@@ -339,6 +374,15 @@ void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
 /// See ReshapeShapeFold.cpp.
 void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+
+/// Pre-lowering pattern set: stamp `onnx.Pad`'s compile-time `pads` (and
+/// optional `axes`) constant onto the op as `hipdnn.pad_amounts` /
+/// `hipdnn.pad_axes` attributes so PadConversion can compute the dynamic
+/// output shape from them without reading the (by-then externalized) operand.
+/// Sibling of GatherShapeFold; must run BEFORE lowerOnnxConstants. See
+/// PadShapeFold.cpp.
+void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
+                                  MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
