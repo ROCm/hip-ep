@@ -160,13 +160,13 @@ def precision(request):
     """Parametrize a test across BOTH precisions — fp16 FIRST (the default path).
 
     Yields ``(model_dir, np_dtype, label)``:
-      * fp16 → the locally-built OGA DML bundle (body fp16 + fp32 lm_head).
-        Built ahead of time via ``python build.py --build-whisper-models``. If
-        absent/unbuilt, the fp16 parametrization SKIPS cleanly (the fp32 leg
-        still runs, so a machine without the OGA builder keeps full fp32
-        coverage).
-      * fp32 → the locally-built native-fp32 bundle (set up by the autouse
-        ``_setup`` fixture; always present).
+      * fp16 → the OGA DML bundle (body fp16 + fp32 lm_head), auto-downloaded
+        from ``amd/whisper-large-v3-onnx-fp16`` on first use (backup: ``python
+        build.py --build-whisper-models``). If it can be neither downloaded nor
+        found, the fp16 parametrization SKIPS cleanly (the fp32 leg still runs,
+        so an offline machine keeps full fp32 coverage).
+      * fp32 → the native-fp32 bundle (set up by the autouse ``_setup``
+        fixture; downloaded from ``amd/whisper-large-v3-onnx-fp32`` if absent).
 
     fp16 is listed first so it is the primary, default-precision leg.
     """
@@ -174,10 +174,11 @@ def precision(request):
     if label == "fp16":
         try:
             model_dir = _prepare_fp16_model_dir()
-        except Exception as e:  # noqa: BLE001 — unbuilt model / surgery error → skip
+        except Exception as e:  # noqa: BLE001 — download/build/surgery error → skip
             pytest.skip(
-                f"fp16 Whisper model unavailable: {e!r} "
-                "(build it: python build.py --build-whisper-models)"
+                f"fp16 Whisper model unavailable: {e!r} (auto-downloads from "
+                "huggingface.co/amd/whisper-large-v3-onnx-fp16; backup: "
+                "python build.py --build-whisper-models)"
             )
         return model_dir, np.float16, "fp16"
     return _MODEL_DIR, np.float32, "fp32"
@@ -1254,12 +1255,14 @@ def test_perf_decode_tps():
     # fp32 — always run (locally-built model is set up by the autouse fixture).
     _perf_one_precision(audio, "fp32", _MODEL_DIR, np.float32, results)
 
-    # fp16 — best-effort: build on demand; skip the precision entirely on failure.
+    # fp16 — best-effort: download/prepare on demand; skip the precision on failure.
     try:
         setup_whisper_fp16_model_dir(_MODEL_DIR_FP16)
         _perf_one_precision(audio, "fp16", _MODEL_DIR_FP16, np.float16, results)
     except Exception as e:  # noqa: BLE001
-        print(f"[perf] fp16 unavailable (build failed) — fp32-only table: {e!r}")
+        print(
+            f"[perf] fp16 unavailable (download/build failed) — fp32-only table: {e!r}"
+        )
 
     # ── Report ───────────────────────────────────────────────────────────────
     print("\n" + "=" * 86)

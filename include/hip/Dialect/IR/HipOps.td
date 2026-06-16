@@ -1990,6 +1990,49 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
   }];
 }
 
+def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
+  let summary = "Reduce tensor by averaging along axes";
+  let description = [{
+    Computes the mean of input tensor elements along the specified axes.
+    Implements the ONNX ReduceMean operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    The division by the reduced-element count is performed inside the runtime
+    kernel (`reduce_size = num_input / num_output`), so this op is tolerant of
+    a dynamic reduce axis -- no compile-time static reduce dim is required.
+    Result dims are refined post-conversion by `--hip-infer-shapes` through the
+    upstream MLIR `ReifyRankedShapedTypeOpInterface` / `InferTypeOpInterface`
+    that `Hip_DpsOp_Reduction` implements (no ONNX-level shape refinement
+    needed).
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_mean(%ctx) ins(%data, %axes : memref<1x128xf16, 1>, memref<i64, 1>)
+                          outs(%output : memref<1x1xf16, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
   let summary = "Reduce tensor by taking maximum along axes";
   let description = [{

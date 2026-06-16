@@ -170,11 +170,36 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   // throughs it to the output parameter exactly like the rank-4 path, leaving
   // NO transient alloc (a lone transient would not be pooled and would lower
   // to the undefined hip_device_malloc).
+  // Size the destination init's dynamic dims from the conv INPUT, not the conv
+  // result. Sourcing from op->getResult(0) is self-referential: replaceOp later
+  // remaps the DimOp's operand to the freshly-created hip.conv result, but the
+  // DimOp stays positioned *before* the conv it now reads from — a
+  // use-before-def / dominance error that aborts the pipeline. This only
+  // manifests when an output dim is dynamic (e.g. a dynamic batch), so static-
+  // shape convs never hit it. For a standard convolution the only dynamic
+  // output dim is the batch N (dim 0), which equals the input's batch dim;
+  // output channels are static (Cout from weights) and the spatial extents are
+  // statically inferred here. A dynamic non-batch output dim cannot be sized
+  // from the input alone, so bail (CPU fallback) rather than emit a wrong size.
+  //
+  // Before (buggy — %dst defined below its use):
+  //   %n   = tensor.dim %dst, 0
+  //   %ini = tensor.empty(%n)
+  //   %dst = hip.conv ..., %ini
+  // After:
+  //   %n   = tensor.dim %input, 0
+  //   %ini = tensor.empty(%n)
+  //   %dst = hip.conv ..., %ini
   llvm::SmallVector<mlir::Value> dynSizes;
   for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
-    if (resultType.isDynamicDim(dimIdx))
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, op->getResult(0), dimIdx));
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+    if (dimIdx != 0)
+      return rewriter.notifyMatchFailure(
+          op, "ConvToHip can only size a dynamic batch dim from the input; "
+              "dynamic non-batch output dims are unsupported");
+    dynSizes.push_back(
+        mlir::tensor::DimOp::create(rewriter, loc, input, /*index=*/0));
   }
 
   mlir::Value init =
