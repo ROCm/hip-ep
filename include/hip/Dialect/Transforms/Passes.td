@@ -403,6 +403,51 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def RelaxMultiDynExpandShapePass
+    : Pass<"hip-relax-multi-dyn-expand-shape", "mlir::func::FuncOp"> {
+  let summary = "Rewrite memref.expand_shape ops with multiple dynamic output "
+                "dims per reassociation group into memref.reinterpret_cast";
+  let description = [{
+    Workaround for upstream `expand-strided-metadata` (LLVM as of our
+    prebuilt) asserting "There must be at most one dynamic size per group"
+    when a `memref.expand_shape` carries a reassociation group containing
+    more than one dynamic output dim — even though the op carries explicit
+    `output_shape` operands that fully determine every dim's size.
+
+    This pass matches exactly that case and rewrites the op into a
+    `memref.reinterpret_cast` with explicit sizes/strides computed from the
+    `output_shape` operands and the source's static layout.  The resulting
+    `memref.reinterpret_cast` is already lowerable by the existing
+    downstream LLVM-conversion patterns.
+
+    Single-dyn-per-group `memref.expand_shape` and all `memref.collapse_shape`
+    are left untouched — upstream handles those correctly.
+
+    Canonical IR pattern that triggers a match (ONNX `Range -> Reshape`
+    materialising 2-D position_ids):
+
+        %expand = memref.expand_shape %src [[0, 1]]
+                  output_shape [%bs, %ss]
+                  : memref<?xi64> into memref<?x?xi64>
+
+    After this pass:
+
+        %cast = memref.reinterpret_cast %src to
+                  offset: [0], sizes: [%bs, %ss], strides: [%ss, 1]
+                  : memref<?xi64> to memref<?x?xi64>
+
+    Pipeline placement: very first sub-pass of `buildHipToLLVMPipeline`,
+    immediately before `memref::createExpandStridedMetadataPass()`.
+
+    Retirement: when upstream `expand-strided-metadata` is upgraded to
+    consult `output_shape`, this pass becomes a no-op and can be deleted.
+  }];
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def ResolveTensorDimsPass
     : Pass<"hip-resolve-tensor-dims", "mlir::func::FuncOp"> {
   let summary = "Fold `tensor.dim` queries via upstream reify patterns "
@@ -436,6 +481,67 @@ def ResolveTensorDimsPass
   let dependentDialects = [
     "mlir::affine::AffineDialect",
     "mlir::arith::ArithDialect"
+  ];
+}
+
+def LoopBodyToOutParamsPass
+    : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
+  let summary = "Promote outlined hip.loop body returns to out-param ABI";
+  let description = [{
+    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation` in
+    both classic and allocator pipelines.
+
+    `onnx-loop-outline` emits each `hip.loop` body as a private
+    `func.func` named `*_loop_body_*`. After bufferization those helpers
+    still return loop-carried memrefs, while `convert-hip-to-llvm`
+    LoopLowering expects the out-param ABI (`v_in` + `v_out` per
+    loop-carried value, with `{bufferize.result}` on each out-param).
+
+    Module-level `buffer-results-to-out-params` promotes `@main_graph` in
+    the classic pipeline but skips private functions; the allocator
+    pipeline skips module-level out-params on `@main_graph` entirely.
+    This pass closes the gap by calling MLIR's
+    `promoteBufferResultsToOutParams` with `modifyPublicFunctions = false`
+    and a filter on `*_loop_body_*` only.
+
+    Example (one loop-carried memref):
+      Before:  private @body(..., %v_in) -> memref<16xf32> { return %out }
+      After:   private @body(..., %v_in, %v_out {bufferize.result}) { return }
+  }];
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def UseOutputAllocatorPass
+    : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
+  let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";
+  let description = [{
+    Replaces each graph-output memref.alloc (a value returned by func.return)
+    with hip.alloc_output, reusing the alloc's dynamic-size operands and setting
+    out_idx to the return operand position.  Output buffers are then obtained
+    from the EP output allocator (EP/runtime-owned) instead of being deallocated
+    or pooled.
+
+    Scope: only public (graph-entry) functions are rewritten.  Private helpers
+    (e.g. outlined onnx.Loop bodies) carry a !hip.context arg 0 and return
+    memref.allocs too, but their results are DLL-internal, never EP outputs, so
+    they are left unchanged.  Functions lacking !hip.context as argument 0 are
+    likewise skipped.
+
+    The pass also stamps the `hipdnn.use_output_allocator` BoolAttr (value =
+    true) on the parent module -- the allocator-mode marker that downstream
+    convert-hip-to-llvm and generate-interface read to select the allocator ABI.
+    It is a typed bool, not a presence-only UnitAttr, so readers test the VALUE
+    (absence and `= false` both mean classic mode).  It is stamped even when no
+    alloc is rewritten, because the mode is decided by the pass being run, not by
+    the IR contents (a zero-output graph must still be marked).  Leaves the
+    function signature and func.return untouched.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
   ];
 }
 
@@ -501,6 +607,89 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::tensor::TensorDialect"
+  ];
+}
+
+def InferLoopBodyShapesPass
+    : Pass<"hip-infer-loop-body-shapes", "mlir::ModuleOp"> {
+  let summary = "Rank-establish unranked tensors inside outlined hip.loop "
+                "body functions before `convert-onnx-to-hip`";
+  let description = [{
+    Runs AFTER `onnx-loop-outline` and BEFORE `convert-onnx-to-hip`. The
+    importer (MorphiZen) emits `tensor<*xT>` (unranked) for values whose
+    shape it cannot infer -- most commonly an outlined `hip.loop` body's
+    loop-carried output (e.g. an `onnx.Concat` that accumulates along the
+    sequence axis). `convert-onnx-to-hip`'s op converters require ranked
+    result types (`ConcatConversion` bails on unranked), so an unranked
+    body output blocks conversion AND leaves the body `func.return`
+    operand type-incompatible with the func signature.
+
+    This pass closes that gap by, for every `hip.loop` body func:
+      1. Seeding the body's loop-carried block args from the loop op's
+         `$v_init` operand types (already ranked post-outline; done for
+         robustness / parity with onnx-mlir `ONNXLoopOp::inferShapes`).
+      2. Forward-inferring unranked `onnx.*` result types from operand
+         types (currently: `onnx.Concat`), iterated to a fixed point.
+      3. Loop-contract backstop: any loop-carried body output still
+         unranked is set to the matching `$v_init` type -- the ONNX Loop
+         spec guarantees body-output type == loop-carried-input type.
+      4. Reconciling the body func's declared result types from the (now
+         ranked) terminator operand types.
+
+    Post-conversion `--hip-infer-shapes` still handles all `?`-dim
+    narrowing on HIP-dialect ops; this pass only establishes rank so
+    conversion can proceed.
+
+    Example (one body func):
+    ```mlir
+    // before
+    func.func private @loop_body(%ctx, %i, %c, %acc: tensor<1x?x1152xf16>, ...)
+        -> tensor<*xf16> {
+      %a = hip.multi_head_attention ... : tensor<?x?x?xf16>
+      %r = "onnx.Concat"(%acc, %a) {axis = 1} :
+             (tensor<1x?x1152xf16>, tensor<?x?x?xf16>) -> tensor<*xf16>
+      return %r : tensor<*xf16>
+    }
+
+    // after
+    func.func private @loop_body(%ctx, %i, %c, %acc: tensor<1x?x1152xf16>, ...)
+        -> tensor<1x?x1152xf16> {
+      %a = hip.multi_head_attention ... : tensor<?x?x?xf16>
+      %r = "onnx.Concat"(%acc, %a) {axis = 1} :
+             (tensor<1x?x1152xf16>, tensor<?x?x?xf16>) -> tensor<1x?x1152xf16>
+      return %r : tensor<1x?x1152xf16>
+    }
+    ```
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
+def FixLoopAccumulatorOffsetPass
+    : Pass<"hip-fix-loop-accumulator-offset", "mlir::func::FuncOp"> {
+  let summary = "Rewrite frozen Concat-accumulator offsets in outlined "
+                "hip.loop body functions to iter-driven offsets";
+  let description = [{
+    Out-param promotion + the LoopLowering trampoline alias each loop-carried
+    `v_in` arg and its `{bufferize.result}` `v_out` out-param onto one
+    immutable memref descriptor, so `memref.dim %v_in, %cN` is frozen at the
+    v_init dim every iteration. A growing-Concat accumulator then appends each
+    chunk at that frozen offset and only the last chunk survives.
+
+    This pass rewrites each chunk-append `memref.subview` OFFSET from the frozen
+    `memref.dim` to the real per-iter chunk start: `seqlens_k[iter]` (read via a
+    synchronized `hip.readback_scalar` of the body's first
+    `hip.gather -> memref<1xi32>`), or `iter * chunk_size` when there is no
+    seqlens gather. Only OFFSETs are touched. Runs after buffer-deallocation
+    and before the pool/hoist passes. See FixLoopAccumulatorOffset.cpp for the
+    matcher and a Before/After snippet.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
   ];
 }
 

@@ -47,6 +47,7 @@ option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
 option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
+option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 
 # Centralized dependency resolution. Always included; internally partitions by
 # BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the
@@ -143,5 +144,15 @@ if(BUILD_HIP_TOOLS)
 
     # E2E integration tests (compile MLIR → DLL → execute)
     add_subdirectory(test/e2e)
+
+    # Runtime unit tests (GPU-free; native against mock types)
+    add_subdirectory(test/runtime)
   endif()
+endif()
+
+# Python wheel packaging (opt-in; defines the 'wheel' target). Added last so
+# both the EP target (morphizen_CORE_DYNAMIC_UNIQUE_ID, from deps.cmake) and the
+# JIT compiler plugin target (hip-compiler-dll, from BUILD_HIP_TOOLS) exist.
+if(BUILD_EP AND BUILD_PYTHON_WHEEL)
+  add_subdirectory(python)
 endif()

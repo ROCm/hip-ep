@@ -6,17 +6,22 @@
 add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
   BufferUtils.cpp
+  FixLoopAccumulatorOffset.cpp
   GenerateInterface.cpp
   HoistAllocSizeArith.cpp
+  InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
+  LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
+  RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp
   ResolveTensorDims.cpp
+  UseOutputAllocator.cpp
 )
 
 add_dependencies(HipDialectTransforms
@@ -38,6 +43,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRAffineDialect
   MLIRLLVMDialect
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
@@ -47,7 +53,6 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRArithToLLVM
   MLIRMemRefToLLVM
   MLIRFuncToLLVM
-  MLIRAffineToStandard
   MLIRReconcileUnrealizedCasts
   MLIRLinalgDialect
   MLIRLinalgTransforms

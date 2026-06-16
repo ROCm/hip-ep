@@ -36,3 +36,12 @@ dependencies:
     - wheel
     - packaging
     - requests
+    # transformers: TEST-RUNTIME dep for the Whisper tests — WhisperFeatureExtractor
+    # (mel features) + WhisperTokenizer (detokenize). NOT needed to BUILD the
+    # models: scripts/build_whisper_models.py installs its own pinned torch +
+    # transformers + onnxruntime-genai-directml into an isolated venv
+    # (install/whisper-builder-venv/), so the model build never touches this env
+    # and the stock OGA never shadows the OGA fork (build.py --build-oga).
+    # Pinned to match the builder venv's transformers (build_whisper_models.py)
+    # so test-runtime and build-time tokenizer/processor behavior stay in lockstep.
+    - transformers==4.49.0

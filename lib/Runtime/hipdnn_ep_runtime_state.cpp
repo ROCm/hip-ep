@@ -16,74 +16,15 @@
 #include <cstdlib>
 #include <cstring>
 
-// Win32 API declarations for the OGA pipeline shared-constants cache
-// (named shared memory + atomic ref counting). Model DLLs link static
-// CRT, so kernel32 calls go through declared imports rather than
-// <windows.h> (which would pull a much larger surface).
-#ifdef _WIN32
-extern "C" {
-void *__stdcall CreateFileMappingA(void *, void *, unsigned long, unsigned long,
-                                   unsigned long, const char *);
-void *__stdcall OpenFileMappingA(unsigned long, int, const char *);
-void *__stdcall MapViewOfFile(void *, unsigned long, unsigned long,
-                              unsigned long, size_t);
-int __stdcall UnmapViewOfFile(const void *);
-int __stdcall CloseHandle(void *);
-unsigned long __stdcall GetCurrentProcessId(void);
-}
-
-// Metadata block stored in the named shared memory. The actual constants
-// live in the publishing model's hipMalloc'd blob; this struct only
-// carries the GPU pointer + size + atomic ref count.
-//
-// NOTE: layout intentionally diverges from main: PR #109 had a `bool
-// is_host` here to support a hipHostMalloc fallback path on iGPU. We
-// dropped that path (constants blob is always hipMalloc'd VRAM), so
-// is_host is removed. Cross-DLL sharing relies on both publisher and
-// consumer using this same struct, which holds for OGA pipeline (both
-// model.dll built from the same hip-compiler).
-struct SharedConstantsMeta {
-  void *blob_ptr;
-  size_t blob_size;
-  volatile long ref_count;
-};
-
-// Atomic ref-count helpers. Model DLL bitcode is compiled by Clang/LLVM
-// where InterlockedIncrement/Decrement are not linkable symbols (MSVC
-// intrinsics, not kernel32 exports). Use compiler builtins that lower
-// to LLVM atomicrmw.
-#if defined(__clang__) || defined(__GNUC__)
-static inline long shm_ref_inc(volatile long *p) {
-  return __sync_add_and_fetch(p, 1);
-}
-static inline long shm_ref_dec(volatile long *p) {
-  return __sync_sub_and_fetch(p, 1);
-}
-#else
-static inline long shm_ref_inc(volatile long *p) { return ++(*p); }
-static inline long shm_ref_dec(volatile long *p) { return --(*p); }
-#endif
-
-#define SHM_FILE_MAP_ALL_ACCESS 0x000F001Fu
-#define SHM_PAGE_READWRITE 0x04u
-#endif
-
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
 static int prepare_constants_array(RuntimeState *state,
                                    const mlir::hip::HipModelMetaInfo *meta);
 static size_t
 compute_constants_total_size(const mlir::hip::HipModelMetaInfo *meta);
-static uint64_t
-compute_constants_fingerprint(const mlir::hip::HipModelMetaInfo *meta);
 static int hipmalloc_and_fixup(RuntimeState *state,
                                const mlir::hip::HipModelMetaInfo *meta,
                                size_t total_size);
-static bool try_attach_shared_constants(RuntimeState *state,
-                                        const mlir::hip::HipModelMetaInfo *meta,
-                                        size_t total_size);
-static void publish_shared_constants(RuntimeState *state, size_t total_size,
-                                     uint64_t fingerprint);
 static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
                                const char *constants_filename);
 static int per_entry_load_constants(RuntimeState *state,
@@ -121,31 +62,16 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return 0;
   }
 
-  // 1. Pre-allocate the gpu_constants[] pointer array (cheap, needed by
-  //    both shared-cache hit and miss paths). num_constants is set here.
+  // 1. Pre-allocate the gpu_constants[] pointer array (cheap).
+  //    num_constants is set here.
   if (int rc = prepare_constants_array(*out_state, meta); rc != 0) {
     hipdnn_ep_state_cleanup(*out_state);
     *out_state = nullptr;
     return rc;
   }
 
-  // 2. Try to attach a process-wide shared constants blob (OGA pipeline
-  //    optimization: prefill+decode share the same constants, so the
-  //    second model can skip both hipMalloc and the data load entirely).
-  //    Cache key includes a fingerprint over the per-constant descriptors
-  //    (offset/size/source) so two compiled DLLs that happen to have the
-  //    same total_size but different constants content -- e.g. a fixed-shape
-  //    and dynamic-shape variant of the same model whose compiler folded
-  //    different shape constants -- never collide.
+  // 2. Allocate the VRAM blob and fix up gpu_constants[i].
   size_t total_size = compute_constants_total_size(meta);
-  if (try_attach_shared_constants(*out_state, meta, total_size)) {
-    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs "
-               "(shared blob attached)\n",
-               elapsed_since(t0));
-    return 0;
-  }
-
-  // 3. Cache miss: allocate our own VRAM blob and fix up gpu_constants[i].
   if (int rc = hipmalloc_and_fixup(*out_state, meta, total_size); rc != 0) {
     hipdnn_ep_state_cleanup(*out_state);
     *out_state = nullptr;
@@ -154,7 +80,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
 
-  // 4. Dispatch by metadata semantics: if any constant carries a per-entry
+  // 3. Dispatch by metadata semantics: if any constant carries a per-entry
   //    source descriptor (Splat / FileRef), do per-tensor upload driven by
   //    the source union. Otherwise fall back to the bulk sidecar path (used
   //    by EPContext export / import and has_mem_addr downgrade).
@@ -184,10 +110,11 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return rc;
   }
 
-  // 5. Publish the freshly loaded blob to the shared cache (best-effort;
-  //    failure means subsequent models won't be able to share).
-  publish_shared_constants(*out_state, total_size,
-                           compute_constants_fingerprint(meta));
+  // Marker (gated on HIPDNN_EP_DEBUG=1) of how much VRAM the model's constants
+  // occupy -- handy to confirm at a glance the constants blob size loaded for
+  // this session.
+  RUNTIME_DEBUG_LOG("[CONSTANTS] Loaded constants blob: %zu bytes\n",
+                    total_size);
 
   TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
              elapsed_since(t0));
@@ -215,9 +142,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
-  state->constants_is_shared = false;
-  state->shared_constants_mapping = nullptr;
-  state->shared_constants_view = nullptr;
   // Per-domain pool arrays start empty; grown on demand (no compile-time cap).
   state->num_pool_domains = 0;
   state->pool_base = nullptr;
@@ -228,10 +152,17 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->workspace_size = 0;
   state->host_scratch_base = nullptr;
   state->host_scratch_size = 0;
+  // No allocator installed by default (null context + callback). The EP
+  // overwrites this via hipdnn_ep_set_output_allocator; the classic pipeline
+  // leaves it null and never calls hipdnn_ep_alloc_output.
+  state->output_allocator.self = nullptr;
+  state->output_allocator.allocate = nullptr;
   state->qmoe_scratch = nullptr;
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
   state->qmoe_host_scratch_size = 0;
+  state->conv_scratch = nullptr;
+  state->conv_scratch_size = 0;
   state->gqa_gemm_cache = nullptr;
   state->mha_gemm_cache = nullptr;
   state->causal_conv_cache = nullptr;
@@ -334,9 +265,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
 }
 
 // Allocate the gpu_constants[] pointer array (one slot per constant)
-// and record num_constants. This is a few KB at most and is needed by
-// both shared-cache hit and miss paths -- doing it up front lets
-// try_attach_shared_constants fix up the slots without an extra malloc.
+// and record num_constants. This is a few KB at most; hipmalloc_and_fixup
+// fixes up the slots to point inside the VRAM blob.
 static int prepare_constants_array(RuntimeState *state,
                                    const mlir::hip::HipModelMetaInfo *meta) {
   auto *constants = meta ? meta->constants() : nullptr;
@@ -352,108 +282,6 @@ static int prepare_constants_array(RuntimeState *state,
   }
   state->num_constants = static_cast<size_t>(count);
   return 0;
-}
-
-// 64-bit FNV-1a fingerprint over per-constant descriptor metadata.
-//
-// What this hashes:
-//   * meta->constants_filename() once at the top (the single external-data
-//     file all FileRefSource entries reference in the current EP design)
-//   * a fixed 32-byte descriptor PER constant: (offset, size, source_type,
-//     source_specific_u64) where source_specific_u64 is the splat value
-//     bytes / file_offset / sidecar_offset depending on the kind.
-//
-// What this does NOT hash (and why this is fast):
-//   * The multi-GB constants blob itself is never touched. The cost is
-//     O(num_constants) descriptor scans -- ~22 KB for gemma3 (687 entries).
-//   * Per-constant FileRefSource.path is intentionally skipped: every
-//     FileRefSource in a single model points to meta->constants_filename
-//     (the EP only emits one external-data file per model), and that is
-//     already covered by the global constants_filename hash above. If a
-//     future EP design ever produces per-constant FileRefSource paths that
-//     differ from constants_filename, this fingerprint would alias models
-//     that share blob layout but read from different files -- update this
-//     function then.
-//
-// Correctness contract: identical fingerprint <=> the constants blob bytes
-// loaded will also be identical (modulo the path-uniqueness assumption
-// above). Sole purpose: extend the SHARED_CONSTANTS cache key beyond just
-// total_size so that two DLLs whose constants happen to be the same size
-// but with different content (different splat values, different file
-// offsets, ...) do not silently alias.
-static uint64_t
-compute_constants_fingerprint(const mlir::hip::HipModelMetaInfo *meta) {
-  constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
-  constexpr uint64_t kFnvPrime = 1099511628211ULL;
-  uint64_t h = kFnvOffset;
-  auto fnv_update = [&h](const void *data, size_t len) {
-    const uint8_t *p = static_cast<const uint8_t *>(data);
-    for (size_t i = 0; i < len; ++i) {
-      h ^= p[i];
-      h *= kFnvPrime;
-    }
-  };
-  if (!meta)
-    return h;
-  if (auto *fname = meta->constants_filename())
-    fnv_update(fname->c_str(), fname->size());
-
-  auto *constants = meta->constants();
-  if (!constants)
-    return h;
-
-  // Pack each constant into a fixed-size 32-byte descriptor:
-  //   [0..7]  : offset    (u64)
-  //   [8..15] : size      (u64)
-  //   [16..23]: source_type (u8 in [16]; [17..23] zero-padded for stability)
-  //   [24..31]: source-specific scalar (splat elem_bytes / file_offset /
-  //             sidecar_offset / 0)
-  // Hashed in a single fnv_update per constant -- no per-source switch in
-  // the hot loop.
-  uint8_t buf[32];
-  for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
-    auto *c = constants->Get(i);
-    std::memset(buf, 0, sizeof(buf));
-    uint64_t off = c->offset();
-    uint64_t sz = c->size();
-    std::memcpy(buf + 0, &off, 8);
-    std::memcpy(buf + 8, &sz, 8);
-    buf[16] = static_cast<uint8_t>(c->source_type());
-
-    switch (c->source_type()) {
-    case mlir::hip::ConstantSource::SplatSource: {
-      auto *splat = c->source_as_SplatSource();
-      if (splat) {
-        if (auto *eb = splat->elem_bytes()) {
-          size_t n_bytes = std::min<size_t>(eb->size(), 8);
-          if (n_bytes > 0)
-            std::memcpy(buf + 24, eb->data(), n_bytes);
-        }
-      }
-      break;
-    }
-    case mlir::hip::ConstantSource::FileRefSource: {
-      auto *fref = c->source_as_FileRefSource();
-      if (fref) {
-        int64_t fo = fref->file_offset();
-        std::memcpy(buf + 24, &fo, 8);
-      }
-      break;
-    }
-    case mlir::hip::ConstantSource::SidecarSource: {
-      auto *side = c->source_as_SidecarSource();
-      if (side) {
-        int64_t so = side->sidecar_offset();
-        std::memcpy(buf + 24, &so, 8);
-      }
-      break;
-    }
-    default:
-      break;
-    }
-    fnv_update(buf, sizeof(buf));
-  }
-  return h;
 }
 
 // Sum of max(end = offset + size) across all constants -- this is the
@@ -493,116 +321,6 @@ static int hipmalloc_and_fixup(RuntimeState *state,
         static_cast<char *>(state->gpu_constants_blob) + offset;
   }
   return 0;
-}
-
-// Try to attach to a process-wide shared constants blob keyed by
-// (pid, total_size). On hit: state->gpu_constants_blob is set to the
-// shared GPU pointer, gpu_constants[i] are fixed up against it, and
-// state->constants_is_shared is set to true. The shared blob's
-// ref_count is incremented; cleanup decrements and only the last
-// reference frees the GPU memory.
-//
-// Cache key matches the "OGA prefill+decode share identical
-// model.constants.bin" invariant: same pid + same total_size implies
-// same content. If two models with the same total_size diverge in
-// content (rare), the consumer will silently get the wrong constants.
-//
-// Precondition: state->gpu_constants_blob == nullptr and
-// gpu_constants[] has been prepared. On miss / non-Windows: returns
-// false without touching state, caller proceeds with hipMalloc.
-static bool try_attach_shared_constants(RuntimeState *state,
-                                        const mlir::hip::HipModelMetaInfo *meta,
-                                        size_t total_size) {
-#ifndef _WIN32
-  (void)state;
-  (void)meta;
-  (void)total_size;
-  return false;
-#else
-  if (total_size == 0)
-    return false;
-
-  uint64_t fp = compute_constants_fingerprint(meta);
-  char shm_name[128];
-  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu_%016llx",
-           (unsigned long)GetCurrentProcessId(), total_size,
-           (unsigned long long)fp);
-
-  void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
-  if (!existing_map)
-    return false;
-
-  auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
-      existing_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedConstantsMeta));
-  if (!smeta || smeta->blob_size != total_size || !smeta->blob_ptr) {
-    if (smeta)
-      UnmapViewOfFile(smeta);
-    CloseHandle(existing_map);
-    return false;
-  }
-
-  long new_ref = shm_ref_inc(&smeta->ref_count);
-
-  state->gpu_constants_blob = smeta->blob_ptr;
-  state->constants_is_shared = true;
-  state->shared_constants_mapping = existing_map;
-  state->shared_constants_view = smeta;
-
-  auto *constants = meta->constants();
-  for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
-    size_t offset = static_cast<size_t>(constants->Get(i)->offset());
-    state->gpu_constants[i] =
-        static_cast<char *>(state->gpu_constants_blob) + offset;
-  }
-
-  fprintf(stderr,
-          "[SHARED_CONSTANTS] Reusing existing blob "
-          "(%zu bytes, ref_count=%ld)\n",
-          total_size, new_ref);
-  return true;
-#endif
-}
-
-// Publish the freshly loaded blob into the process-wide shared cache so
-// later models with the same total_size can attach. Best-effort:
-// failures are silently tolerated (the model still works, just no
-// sharing). On non-Windows: no-op.
-static void publish_shared_constants(RuntimeState *state, size_t total_size,
-                                     uint64_t fingerprint) {
-#ifndef _WIN32
-  (void)state;
-  (void)total_size;
-  (void)fingerprint;
-#else
-  if (total_size == 0)
-    return;
-
-  char shm_name[128];
-  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu_%016llx",
-           (unsigned long)GetCurrentProcessId(), total_size,
-           (unsigned long long)fingerprint);
-
-  void *new_map =
-      CreateFileMappingA((void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
-                         (unsigned long)sizeof(SharedConstantsMeta), shm_name);
-  if (!new_map)
-    return;
-
-  auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
-      new_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedConstantsMeta));
-  if (!smeta) {
-    CloseHandle(new_map);
-    return;
-  }
-
-  smeta->blob_ptr = state->gpu_constants_blob;
-  smeta->blob_size = total_size;
-  smeta->ref_count = 1;
-  state->shared_constants_mapping = new_map;
-  state->shared_constants_view = smeta;
-  fprintf(stderr, "[SHARED_CONSTANTS] Published new blob (%zu bytes)\n",
-          total_size);
-#endif
 }
 
 // Load the entire constants sidecar as one blob and hipMemcpy it into the
@@ -954,6 +672,14 @@ static int per_entry_load_constants(RuntimeState *state,
   return 0;
 }
 
+// Set per Compute in hipdnn_ep_runtime_begin_compute; read by memrefCopy and
+// any other ABI-fixed helper that lacks a `state` arg so it can run on the
+// session stream rather than the default/null stream. thread_local mirrors
+// g_pool_depth's rationale: one inference per thread, but parallel sessions on
+// separate threads each keep their own stream. Defined here (ahead of cleanup)
+// so cleanup can null it out when the owning stream is destroyed.
+static thread_local void *g_hipdnn_ep_current_stream = nullptr;
+
 int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (!state) {
     fprintf(stderr, "Invalid runtime state in cleanup\n");
@@ -979,6 +705,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
+  }
+
+  // Free the MIOpen convolution workspace pool (if allocated). The stream
+  // sync above has drained any in-flight conv that may still be reading it.
+  if (state->conv_scratch) {
+    HIP_CLEANUP(hipFree(state->conv_scratch));
   }
 
   // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
@@ -1028,24 +760,8 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
 
   // Free the single constants blob and the pointer array.
-  // With shared constants, only the last reference frees the GPU memory.
   if (state->gpu_constants_blob) {
-#ifdef _WIN32
-    if (state->shared_constants_view) {
-      auto *smeta = (SharedConstantsMeta *)state->shared_constants_view;
-      long remaining = shm_ref_dec(&smeta->ref_count);
-      fprintf(stderr, "[SHARED_CONSTANTS] Cleanup: ref_count=%ld\n", remaining);
-      if (remaining <= 0) {
-        HIP_CLEANUP(hipFree(state->gpu_constants_blob));
-      }
-      UnmapViewOfFile(state->shared_constants_view);
-      if (state->shared_constants_mapping)
-        CloseHandle(state->shared_constants_mapping);
-    } else
-#endif
-    {
-      HIP_CLEANUP(hipFree(state->gpu_constants_blob));
-    }
+    HIP_CLEANUP(hipFree(state->gpu_constants_blob));
   }
   if (state->gpu_constants)
     free(state->gpu_constants);
@@ -1092,6 +808,13 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Destroy HIP stream
   if (state->stream) {
+    // Stop ABI-fixed helpers (memrefCopy) from reading this stream after it is
+    // destroyed. begin_compute re-publishes the stream each forward pass, so
+    // this only matters for a stray call after teardown -- but it keeps the
+    // thread-local from dangling on a freed hipStream_t.
+    if (g_hipdnn_ep_current_stream == static_cast<void *>(state->stream)) {
+      g_hipdnn_ep_current_stream = nullptr;
+    }
     HIP_CLEANUP(hipStreamDestroy(state->stream));
   }
 
@@ -1113,6 +836,8 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
 void *hipdnn_ep_state_get_stream(RuntimeState *state) {
   return state ? static_cast<void *>(state->stream) : nullptr;
 }
+
+void *hipdnn_ep_get_current_stream(void) { return g_hipdnn_ep_current_stream; }
 
 void *hipdnn_ep_state_get_miopen_handle(RuntimeState *state) {
   return state ? static_cast<void *>(state->miopen_handle) : nullptr;
@@ -1144,6 +869,9 @@ extern "C"
   }
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_ptr = nullptr;
+  // Publish the session stream for ABI-fixed helpers (memrefCopy) that run
+  // before/within main_graph and otherwise default to stream 0.
+  g_hipdnn_ep_current_stream = static_cast<void *>(state->stream);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1283,6 +1011,13 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
   if (!ensure_pool_domains(state, domain_id + 1)) {
     return nullptr;
   }
+  // Zero-byte pool requests arise when a dynamic temp has no elements (e.g.
+  // embedding NonZero count=0 → transpose/scatter scratch). hipMalloc(0) is
+  // invalid and an unallocated domain slot is nullptr, which poisons every
+  // memref.view built from that pool base. Reserve one byte so views always
+  // get a non-null alignedPtr; no kernel reads it when num_elements==0.
+  if (needed_size == 0)
+    needed_size = 1;
   // Grow-on-demand, per domain: when dynamic shapes produce larger
   // intermediates than the current allocation for this domain, reallocate
   // its pool. Pools never shrink, and other domains are untouched —
@@ -1560,6 +1295,54 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
     return -1;
   }
   state->qmoe_host_scratch_size = alloc_size;
+  return 0;
+}
+
+// MIOpen convolution workspace pool. Same grow-on-demand policy as qmoe_scratch
+// above. Single-buffer reuse is safe because the stream is serialised: the
+// next conv only launches after the previous miopenConvolutionForward (+ bias
+// add) has consumed the workspace.
+void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state) {
+  return state ? state->conv_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
+                                        size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->conv_scratch_size >= needed_size)
+    return 0;
+
+  // 1.5x growth amortisation mirrors workspace / qmoe_scratch.
+  size_t alloc_size = needed_size;
+  if (state->conv_scratch_size > 0) {
+    size_t grown = state->conv_scratch_size + state->conv_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->conv_scratch) {
+    // Drain any in-flight conv that may still be reading the old workspace
+    // before we free it. Growth is rare (only on first call per new shape)
+    // so the sync cost is amortised away.
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->conv_scratch));
+    state->conv_scratch = nullptr;
+    state->conv_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->conv_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
+            "bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->conv_scratch_size = alloc_size;
   return 0;
 }
 

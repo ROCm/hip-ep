@@ -249,6 +249,7 @@ compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 compile_to_bitcode(hipdnn_ep_runtime_loop.cpp runtime_loop.bc)
 compile_to_bitcode(op_profile.cpp runtime_op_profile.bc)
+compile_to_bitcode(output_allocator.cpp runtime_output_allocator.bc)
 
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
@@ -270,6 +271,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
+    compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
     compile_to_bitcode(real/reduce_max.cpp runtime_reduce_max.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
@@ -286,6 +288,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/not.cpp runtime_not.bc)
     compile_to_bitcode(real/cos.cpp runtime_cos.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
+    compile_to_bitcode(real/exp.cpp runtime_exp.bc)
     compile_to_bitcode(real/cumsum.cpp runtime_cumsum.bc)
     compile_to_bitcode(real/pad.cpp runtime_pad.bc)
     compile_to_bitcode(real/tile.cpp runtime_tile.bc)
@@ -300,12 +303,16 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/multi_head_attention.cpp runtime_multi_head_attention.bc)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
+    compile_to_bitcode(real/pool.cpp runtime_pool.bc)
+    compile_to_bitcode(real/resize.cpp runtime_resize.bc)
+    compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
@@ -323,6 +330,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_range.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
@@ -339,6 +347,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_not.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cos.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_exp.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cumsum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pad.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tile.bc
@@ -353,6 +362,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
     )
 else()
     # Mock runtime for testing without GPU
@@ -365,6 +377,7 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc

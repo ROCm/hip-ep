@@ -15,6 +15,42 @@ static constexpr int GQA_THREADS = 256;
 static constexpr int WAVE_SIZE = 32;  // RDNA wave32; not portable to CDNA/wave64
 static constexpr float LOG2E = 1.4426950408889634f;
 
+// Element-size dispatch helper for the pure data-movement kernels (transpose,
+// kv-cache append/concat, kv-expand, split-qkv). These kernels only copy bytes
+// of the element type, so templating them on T and selecting __half (2 bytes)
+// vs float (4 bytes) is sufficient to fp32-enable the decomposed GQA path
+// (Whisper no_causal). 2 == fp16, 4 == fp32; anything else is an error.
+#define GQA_DISPATCH_BY_ELEM_SIZE(elem_size, FN, ...)                          \
+  do {                                                                         \
+    /* Clear any stale error so a launch failure is attributed to THIS         \
+     * kernel, not blamed on the next op that happens to call                  \
+     * hipGetLastError() (was misreported as "hip_layer_norm launch           \
+     * failed" on the Whisper path). */                                        \
+    (void)hipGetLastError();                                                   \
+    if ((elem_size) == 2) {                                                    \
+      FN<__half>(__VA_ARGS__);                                                 \
+    } else if ((elem_size) == 4) {                                            \
+      FN<float>(__VA_ARGS__);                                                  \
+    } else {                                                                   \
+      fprintf(stderr, "%s: unsupported element_size_bytes=%d (must be 2 or 4)\n", \
+              __func__, (int)(elem_size));                                     \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
+
+// Report (and return) the launch status of the kernel issued just above.
+// hipGetLastError() returns + clears the most recent error, so pairing this
+// with the clear in GQA_DISPATCH_BY_ELEM_SIZE (or an explicit clear before a
+// raw <<<>>> launch) attributes errors to the correct kernel.
+#define GQA_RETURN_LAUNCH_STATUS()                                             \
+  do {                                                                         \
+    hipError_t _gqa_err = hipGetLastError();                                   \
+    if (_gqa_err != hipSuccess)                                                \
+      fprintf(stderr, "[custom_kernels] %s launch failed: %s\n", __func__,     \
+              hipGetErrorString(_gqa_err));                                     \
+    return _gqa_err;                                                           \
+  } while (0)
+
 //===----------------------------------------------------------------------===//
 // Algorithm: ONNX com.microsoft.GroupQueryAttention
 //===----------------------------------------------------------------------===//
@@ -185,11 +221,37 @@ static constexpr float LOG2E = 1.4426950408889634f;
 // Ref: onnxruntime/core/mlas/lib/rotary_embedding.cpp (MlasRotaryEmbedOneRow)
 // -------------------------------------------------------------------------
 
+// Scalar load/store helpers that promote the element type to float for math
+// and narrow back on store. Specialized for __half (HW convert) and float
+// (identity) so the data-movement / RoPE kernels can be templated on T.
+template <typename T>
+__device__ __forceinline__ float gqa_to_float(T v);
+template <>
+__device__ __forceinline__ float gqa_to_float<__half>(__half v) {
+  return __half2float(v);
+}
+template <>
+__device__ __forceinline__ float gqa_to_float<float>(float v) {
+  return v;
+}
+
+template <typename T>
+__device__ __forceinline__ T gqa_from_float(float v);
+template <>
+__device__ __forceinline__ __half gqa_from_float<__half>(float v) {
+  return __float2half(v);
+}
+template <>
+__device__ __forceinline__ float gqa_from_float<float>(float v) {
+  return v;
+}
+
+template <typename T>
 __global__ void rope_kernel(
-    const __half* __restrict__ input,
-    __half* __restrict__ output,
-    const __half* __restrict__ cos_cache,
-    const __half* __restrict__ sin_cache,
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const T* __restrict__ cos_cache,
+    const T* __restrict__ sin_cache,
     int seq_len, int num_heads, int head_dim,
     int half_rot, int past_len,
     const int* __restrict__ seqlens_k) {
@@ -211,13 +273,13 @@ __global__ void rope_kernel(
   int pos = eff_past_len + s;
   int base = ((batch_idx * seq_len + s) * num_heads + h) * head_dim;
 
-  float x1 = __half2float(input[base + d]);
-  float x2 = __half2float(input[base + d + half_rot]);
-  float c  = __half2float(cos_cache[pos * half_rot + d]);
-  float sn = __half2float(sin_cache[pos * half_rot + d]);
+  float x1 = gqa_to_float<T>(input[base + d]);
+  float x2 = gqa_to_float<T>(input[base + d + half_rot]);
+  float c  = gqa_to_float<T>(cos_cache[pos * half_rot + d]);
+  float sn = gqa_to_float<T>(sin_cache[pos * half_rot + d]);
 
-  output[base + d]            = __float2half(x1 * c - x2 * sn);
-  output[base + d + half_rot] = __float2half(x2 * c + x1 * sn);
+  output[base + d]            = gqa_from_float<T>(x1 * c - x2 * sn);
+  output[base + d + half_rot] = gqa_from_float<T>(x2 * c + x1 * sn);
 }
 
 // -------------------------------------------------------------------------
@@ -230,9 +292,10 @@ __global__ void rope_kernel(
 // Thread: one per element in dim1*dim2*D sub-tensor. blockIdx.y = batch.
 // -------------------------------------------------------------------------
 
+template <typename T>
 __global__ void transpose_mid_dims_kernel(
-    const __half* __restrict__ src,
-    __half* __restrict__ dst,
+    const T* __restrict__ src,
+    T* __restrict__ dst,
     int dim1, int dim2, int D) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -267,9 +330,10 @@ __global__ void transpose_mid_dims_kernel(
 // Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h (ConcatStateChunkGQA)
 // -------------------------------------------------------------------------
 
+template <typename T>
 __global__ void kv_cache_append_kernel(
-    const __half* __restrict__ src,
-    __half* __restrict__ cache,
+    const T* __restrict__ src,
+    T* __restrict__ cache,
     int sq, int G, int d, int present_seq, int past_len,
     const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
@@ -308,10 +372,11 @@ __global__ void kv_cache_append_kernel(
 // Thread: one per (b, s_present, g, d_i) element. blockIdx.y = batch.
 // -------------------------------------------------------------------------
 
+template <typename T>
 __global__ void kv_cache_concat_kernel(
-    const __half* __restrict__ past,
-    const __half* __restrict__ current,
-    __half* __restrict__ present,
+    const T* __restrict__ past,
+    const T* __restrict__ current,
+    T* __restrict__ present,
     int past_len, int sq, int G, int d,
     int past_seq, int present_seq) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
@@ -350,9 +415,10 @@ __global__ void kv_cache_concat_kernel(
 // Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h line 238
 // -------------------------------------------------------------------------
 
+template <typename T>
 __global__ void expand_kv_kernel(
-    const __half* __restrict__ src,
-    __half* __restrict__ dst,
+    const T* __restrict__ src,
+    T* __restrict__ dst,
     int heads_per_group,
     int src_stride,
     int dst_stride,
@@ -376,18 +442,19 @@ __global__ void expand_kv_kernel(
 // Thread: one per element in the packed tensor.
 // -------------------------------------------------------------------------
 
+template <typename T>
 __global__ void split_qkv_kernel(
-    const __half* __restrict__ packed,
-    __half* __restrict__ Q,
-    __half* __restrict__ K,
-    __half* __restrict__ V,
+    const T* __restrict__ packed,
+    T* __restrict__ Q,
+    T* __restrict__ K,
+    T* __restrict__ V,
     int BS, int D_total, int Q_dim, int K_dim) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= BS * D_total) return;
 
   int row = idx / D_total;
   int col = idx % D_total;
-  __half val = packed[idx];
+  T val = packed[idx];
 
   if (col < Q_dim)
     Q[row * Q_dim + col] = val;
@@ -557,105 +624,157 @@ __global__ void softmax_inplace_kernel(
 // Extern "C" Launchers (thin wrappers, ordered by pipeline step)
 //===----------------------------------------------------------------------===//
 
+// Templated launch helpers (one per data-movement kernel). The extern "C"
+// launchers below dispatch to <__half> or <float> via element_size_bytes.
+
+template <typename T>
+static void launch_rope(
+    hipStream_t stream, const void* input, void* output,
+    const void* cos_cache, const void* sin_cache,
+    int batch_size, int seq_len, int num_heads,
+    int head_dim, int half_rot, int past_len, const void* seqlens_k) {
+  int elems = seq_len * num_heads * half_rot;
+  int blocks = (elems + GQA_THREADS - 1) / GQA_THREADS;
+  rope_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
+      static_cast<const T*>(input), static_cast<T*>(output),
+      static_cast<const T*>(cos_cache), static_cast<const T*>(sin_cache),
+      seq_len, num_heads, head_dim, half_rot, past_len,
+      static_cast<const int*>(seqlens_k));
+}
+
+template <typename T>
+static void launch_transpose_mid_dims(
+    hipStream_t stream, const void* src, void* dst,
+    int batch_size, int dim1, int dim2, int D) {
+  int per_batch = dim1 * dim2 * D;
+  int blocks = (per_batch + GQA_THREADS - 1) / GQA_THREADS;
+  transpose_mid_dims_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                                 stream>>>(
+      static_cast<const T*>(src), static_cast<T*>(dst), dim1, dim2, D);
+}
+
+template <typename T>
+static void launch_kv_cache_append(
+    hipStream_t stream, const void* src, void* cache,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len,
+    const void* seqlens_k) {
+  int total = sq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  kv_cache_append_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                              stream>>>(
+      static_cast<const T*>(src), static_cast<T*>(cache),
+      sq, G, d, present_seq, past_len, static_cast<const int*>(seqlens_k));
+}
+
+template <typename T>
+static void launch_kv_cache_concat(
+    hipStream_t stream, const void* past, const void* current, void* present,
+    int batch_size, int past_len, int sq, int G, int d,
+    int past_seq, int present_seq) {
+  int total_seq = past_len + sq;
+  int total = total_seq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  kv_cache_concat_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                              stream>>>(
+      static_cast<const T*>(past), static_cast<const T*>(current),
+      static_cast<T*>(present), past_len, sq, G, d, past_seq, present_seq);
+}
+
+template <typename T>
+static void launch_expand_kv(
+    hipStream_t stream, const void* src, void* dst,
+    int total_heads, int heads_per_group,
+    int src_stride, int dst_stride, int copy_elems) {
+  int blocksY = (copy_elems + GQA_THREADS - 1) / GQA_THREADS;
+  expand_kv_kernel<T><<<dim3(total_heads, blocksY), GQA_THREADS, 0, stream>>>(
+      static_cast<const T*>(src), static_cast<T*>(dst),
+      heads_per_group, src_stride, dst_stride, copy_elems);
+}
+
+template <typename T>
+static void launch_split_qkv(
+    hipStream_t stream, const void* packed, void* Q, void* K, void* V,
+    int BS, int D_total, int Q_dim, int K_dim) {
+  int total_elems = BS * D_total;
+  int blocks = (total_elems + GQA_THREADS - 1) / GQA_THREADS;
+  split_qkv_kernel<T><<<blocks, GQA_THREADS, 0, stream>>>(
+      static_cast<const T*>(packed), static_cast<T*>(Q),
+      static_cast<T*>(K), static_cast<T*>(V), BS, D_total, Q_dim, K_dim);
+}
+
 // Step 1-2: RoPE
 extern "C" int hip_gqa_rope(
     void* stream_ptr, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
-    const void* seqlens_k) {
+    const void* seqlens_k, int element_size_bytes) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int elems = seq_len * num_heads * half_rot;
-  int blocks = (elems + GQA_THREADS - 1) / GQA_THREADS;
-  rope_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
-      static_cast<const __half*>(input),
-      static_cast<__half*>(output),
-      static_cast<const __half*>(cos_cache),
-      static_cast<const __half*>(sin_cache),
-      seq_len, num_heads, head_dim, half_rot, past_len,
-      static_cast<const int*>(seqlens_k));
-  return hipSuccess;
+  GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_rope, stream, input,
+                            output, cos_cache, sin_cache, batch_size, seq_len,
+                            num_heads, head_dim, half_rot, past_len, seqlens_k);
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 3 / Step 11: Transpose middle dims
 extern "C" int hip_gqa_transpose_mid_dims(
     void* stream_ptr, const void* src, void* dst,
-    int batch_size, int dim1, int dim2, int D) {
+    int batch_size, int dim1, int dim2, int D, int element_size_bytes) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int per_batch = dim1 * dim2 * D;
-  int blocks = (per_batch + GQA_THREADS - 1) / GQA_THREADS;
-  transpose_mid_dims_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
-      static_cast<const __half*>(src),
-      static_cast<__half*>(dst),
-      dim1, dim2, D);
-  return hipSuccess;
+  GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_transpose_mid_dims,
+                            stream, src, dst, batch_size, dim1, dim2, D);
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 4-5: KV cache append (same-buffer)
 extern "C" int hip_gqa_kv_cache_append(
     void* stream_ptr, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
-    const void* seqlens_k) {
+    const void* seqlens_k, int element_size_bytes) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int total = sq * G * d;
-  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
-  kv_cache_append_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
-      static_cast<const __half*>(src),
-      static_cast<__half*>(cache),
-      sq, G, d, present_seq, past_len,
-      static_cast<const int*>(seqlens_k));
-  return hipSuccess;
+  GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_kv_cache_append, stream,
+                            src, cache, batch_size, sq, G, d, present_seq,
+                            past_len, seqlens_k);
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 4-5: KV cache concat (separate-buffer)
 extern "C" int hip_gqa_kv_cache_concat(
     void* stream_ptr, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq) {
+    int past_seq, int present_seq, int element_size_bytes) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int total_seq = past_len + sq;
-  int total = total_seq * G * d;
-  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
-  kv_cache_concat_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
-      static_cast<const __half*>(past),
-      static_cast<const __half*>(current),
-      static_cast<__half*>(present),
-      past_len, sq, G, d, past_seq, present_seq);
-  return hipSuccess;
+  GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_kv_cache_concat, stream,
+                            past, current, present, batch_size, past_len, sq, G,
+                            d, past_seq, present_seq);
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 6-7: KV group expansion
 extern "C" int hip_gqa_expand_kv(
     void* stream_ptr, const void* src, void* dst,
     int total_heads, int heads_per_group,
-    int src_stride, int dst_stride, int copy_elems) {
+    int src_stride, int dst_stride, int copy_elems, int element_size_bytes) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int blocksY = (copy_elems + GQA_THREADS - 1) / GQA_THREADS;
-  expand_kv_kernel<<<dim3(total_heads, blocksY), GQA_THREADS, 0, stream>>>(
-      static_cast<const __half*>(src),
-      static_cast<__half*>(dst),
-      heads_per_group, src_stride, dst_stride, copy_elems);
-  return hipSuccess;
+  GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_expand_kv, stream, src,
+                            dst, total_heads, heads_per_group, src_stride,
+                            dst_stride, copy_elems);
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 0: Split packed QKV
 extern "C" int hip_gqa_split_qkv(
     void* stream_ptr, const void* packed, void* Q, void* K, void* V,
-    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim) {
+    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim,
+    int element_size_bytes) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int BS = batch_size * seq_len;
   int Q_dim = num_heads * head_dim;
   int K_dim = kv_num_heads * head_dim;
   int D_total = Q_dim + 2 * K_dim;
-  int total_elems = BS * D_total;
-  int blocks = (total_elems + GQA_THREADS - 1) / GQA_THREADS;
-  split_qkv_kernel<<<blocks, GQA_THREADS, 0, stream>>>(
-      static_cast<const __half*>(packed),
-      static_cast<__half*>(Q),
-      static_cast<__half*>(K),
-      static_cast<__half*>(V),
-      BS, D_total, Q_dim, K_dim);
-  return hipSuccess;
+  GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_split_qkv, stream, packed,
+                            Q, K, V, BS, D_total, Q_dim, K_dim);
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 9a: Causal mask launchers (fp16 and fp32 instantiations)
@@ -667,10 +786,11 @@ extern "C" int hip_gqa_causal_mask(
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int total = skv * sq;
   int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
+  (void)hipGetLastError();  // clear stale error for correct attribution
   causal_mask_kernel_impl<__half><<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
       static_cast<__half*>(S),
       skv, sq, batch_stride, past_len, local_window_size);
-  return hipSuccess;
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 extern "C" int hip_gqa_causal_mask_f32(
@@ -680,24 +800,29 @@ extern "C" int hip_gqa_causal_mask_f32(
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int total = skv * sq;
   int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
+  (void)hipGetLastError();  // clear stale error for correct attribution
   causal_mask_kernel_impl<float><<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
       static_cast<float*>(S),
       skv, sq, batch_stride, past_len, local_window_size);
-  return hipSuccess;
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 9b (fp32->fp16 variant): Softmax reading fp32 scores, writing fp16 output
 // Avoids inf-inf=NaN by operating entirely in fp32 before the final fp16 store.
 
-__global__ void softmax_f32_to_f16_kernel(
-    const float* input, __half* output,
+// Output-type-templated: reads fp32 scores, writes TOut ∈ {__half, float}.
+// fp16 output (TOut=__half) feeds the fp16 Value GEMM; fp32 output (TOut=float)
+// feeds the fp32 Value GEMM on the Whisper no_causal fp32 decomposed path.
+template <typename TOut>
+__global__ void softmax_f32_to_out_kernel(
+    const float* input, TOut* output,
     int rows, int cols, int input_batch_stride, int output_batch_stride,
     const __half* head_sink, int num_heads, int use_smooth_softmax) {
   const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
   const int head = __builtin_amdgcn_readfirstlane(linear / cols);
   const int col  = __builtin_amdgcn_readfirstlane(linear % cols);
   const float* in_col = input + (size_t)head * input_batch_stride + (size_t)col * rows;
-  __half* out_col = output + (size_t)head * output_batch_stride + (size_t)col * rows;
+  TOut* out_col = output + (size_t)head * output_batch_stride + (size_t)col * rows;
 
   const int tid = threadIdx.x;
   const int wave_id = tid / WAVE_SIZE;
@@ -749,12 +874,29 @@ __global__ void softmax_f32_to_f16_kernel(
     sum_val += expf(0.0f - max_val);
   }
 
-  // Pass 3: normalize and write fp16 output
+  // Pass 3: normalize and write output (fp16 or fp32 per TOut).
   float inv_sum = 1.0f / sum_val;
   for (int i = tid; i < rows; i += blockDim.x) {
     float e = exp2f((in_col[i] - max_val) * LOG2E);
-    out_col[i] = __float2half(e * inv_sum);
+    out_col[i] = gqa_from_float<TOut>(e * inv_sum);
   }
+}
+
+template <typename TOut>
+static void launch_softmax_f32_to_out(
+    hipStream_t stream, const void* input_f32, void* output,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax) {
+  int threads = 32;
+  while (threads < std::min(rows, 256)) threads *= 2;
+  if (threads > 256) threads = 256;
+  int num_waves = threads / WAVE_SIZE;
+  softmax_f32_to_out_kernel<TOut><<<total_head_queries, threads,
+                                    num_waves * sizeof(float), stream>>>(
+      static_cast<const float*>(input_f32), static_cast<TOut*>(output),
+      rows, cols, input_batch_stride, output_batch_stride,
+      static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax);
 }
 
 extern "C" int hip_gqa_softmax_f32_to_f16(
@@ -763,17 +905,29 @@ extern "C" int hip_gqa_softmax_f32_to_f16(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int threads = 32;
-  while (threads < std::min(rows, 256)) threads *= 2;
-  if (threads > 256) threads = 256;
-  int num_waves = threads / WAVE_SIZE;
-  softmax_f32_to_f16_kernel<<<total_head_queries, threads,
-                              num_waves * sizeof(float), stream>>>(
-      static_cast<const float*>(input_f32),
-      static_cast<__half*>(output_f16),
-      rows, cols, input_batch_stride, output_batch_stride,
-      static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax);
-  return hipSuccess;
+  (void)hipGetLastError();  // clear stale error for correct attribution
+  launch_softmax_f32_to_out<__half>(
+      stream, input_f32, output_f16, total_head_queries, rows, cols,
+      input_batch_stride, output_batch_stride, head_sink, num_heads,
+      use_smooth_softmax);
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// fp32-output variant: fp32 scores -> fp32 probabilities, feeding the fp32
+// Value GEMM on the Whisper no_causal fp32 decomposed path. output_batch_stride
+// is in float elements (same units as the fp16 variant's half elements).
+extern "C" int hip_gqa_softmax_f32_to_f32(
+    void* stream_ptr, const void* input_f32, void* output_f32,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  (void)hipGetLastError();  // clear stale error for correct attribution
+  launch_softmax_f32_to_out<float>(
+      stream, input_f32, output_f32, total_head_queries, rows, cols,
+      input_batch_stride, output_batch_stride, head_sink, num_heads,
+      use_smooth_softmax);
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 9b: Softmax
@@ -787,12 +941,13 @@ extern "C" int hip_gqa_softmax_inplace(
   while (threads < std::min(rows, 256)) threads *= 2;
   if (threads > 256) threads = 256;
   int num_waves = threads / WAVE_SIZE;
+  (void)hipGetLastError();  // clear stale error for correct attribution
   softmax_inplace_kernel<<<total_head_queries, threads,
                            num_waves * sizeof(float), stream>>>(
       static_cast<__half*>(data),
       rows, cols, batch_stride,
       static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax);
-  return hipSuccess;
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1196,6 +1351,7 @@ extern "C" int hip_gqa_fused_decode(
   const __half* hV = static_cast<const __half*>(Vcache);
   __half* hO = static_cast<__half*>(O);
   const int* iSeqlensK = static_cast<const int*>(seqlens_k);
+  (void)hipGetLastError();  // clear stale error for correct attribution
   switch (d) {
     case 64:
       fused_gqa_decode_kernel<64><<<grid, 64, 0, stream>>>(
@@ -1214,7 +1370,7 @@ extern "C" int hip_gqa_fused_decode(
               "(must be 64, 128, or 256)\n", d);
       return -1;
   }
-  return hipSuccess;
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Fused prefill launcher
