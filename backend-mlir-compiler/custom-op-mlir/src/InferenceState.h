@@ -5,23 +5,26 @@
 #ifndef INFERENCE_STATE_H
 #define INFERENCE_STATE_H
 
+#include "artifact_format.h" // ArtifactKind
 #include "custom_op_mlir.hpp"
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
 // Forward declare to avoid include order issues
 namespace morphizen {
-struct Plugin; // Must match definition in morphizen_plugin.hpp (struct, not
-               // class)
 class FileSystem;
 } // namespace morphizen
 
 namespace mlir_compilation::customop {
 
-// Manages inference state and owns the plugin that provides inference
-// functions. Uses morphizen::Plugin infrastructure for dynamic library loading.
+class LoadedArtifact;
+
+// Owns the loaded per-model artifact (via LoadedArtifact) that provides the
+// `inference_*` entry points. The artifact is either an in-process ORC JIT
+// (LLVM IR) or a morphizen::Plugin (native .dll/.so); both expose the
+// identical 5-symbol C ABI, so the cached hot-path function pointers and
+// Compute()/begin_compute()/cleanup paths are format-agnostic.
 class InferenceState {
   // Passkey tag for the public constructor below: external callers cannot
   // name this type (it is implicitly private under the `class` keyword), so
@@ -44,11 +47,14 @@ class InferenceState {
   struct PrivateTag {};
 
 public:
-  // Create inference state from DLL bytes.
-  // fs: FileSystem for resolving model constants (passed to inference_init).
-  // Logs FATAL and terminates on failure.
+  // Create inference state from the per-model artifact stored in the
+  // EPContext tar. `artifact_bytes` is the raw `.bc` (Bitcode) or native
+  // `.dll`/`.so` (Native) blob; `kind` selects the loader. `fs` is the
+  // morphizen FileSystem that resolves model constants and is forwarded
+  // to `inference_init`. Logs FATAL and terminates on failure.
   static std::unique_ptr<InferenceState>
-  create(const std::vector<uint8_t> &dll_bytes, morphizen::FileSystem *fs);
+  create(const std::vector<uint8_t> &artifact_bytes, morphizen::FileSystem *fs,
+         ArtifactKind kind = ArtifactKind::LLVM_IR);
 
   ~InferenceState();
 
@@ -61,27 +67,22 @@ public:
   // Execute inference computation (classic 3-arg ABI).
   int compute(span_t *inputs, span_t *outputs) const;
 
-  // Execute inference in output-allocator mode: 2-arg inference_compute
-  // (state, inputs). Graph outputs are allocated in-graph via the callback
-  // previously installed by set_output_allocator(); there is no outputs span.
-  // Resolves the same "inference_compute" symbol as compute() but with the
-  // 2-arg ABI (the DLL exports exactly one arity, fixed at compile time).
+  // Output-allocator mode: 2-arg inference_compute (state, inputs). Graph
+  // outputs are allocated in-graph via the callback installed by
+  // set_output_allocator(); there is no outputs span. The artifact exports
+  // exactly one arity, fixed at compile time by use_output_allocator.
   int compute_with_output_allocator(span_t *inputs) const;
 
   // Install (allocator != nullptr) or clear (nullptr) the output allocator on
-  // the model.dll's RuntimeState before compute_with_output_allocator().
-  // Resolved once in the ctor (like begin_compute). Fatal if called with a
-  // non-null allocator but the DLL does not export the setter (a stale
-  // allocator-mode DLL would otherwise crash with a null output buffer).
+  // the loaded artifact's RuntimeState before compute_with_output_allocator().
+  // Resolved once in the ctor. Fatal if called with a non-null allocator but
+  // the artifact does not export the setter (a stale allocator-mode artifact
+  // would otherwise crash with a null output buffer).
   void set_output_allocator(const output_allocator_t *allocator) const;
 
-  // Mark the start of a new forward pass before inference_compute. If the
-  // model.dll exports hipdnn_ep_runtime_begin_compute (resolved once in
-  // create()) it is invoked to invalidate per-Compute() runtime caches
-  // such as the GQA seqlens_k cache. On older model.dlls the symbol is
-  // absent and this call is a no-op -- such DLLs must be paired with
-  // HIPDNN_EP_GQA_CACHE_SEQLENS=0 (the cache is on by default; create()
-  // logs a LOG(WARNING) when it detects the mismatch).
+  // Invokes the optional `hipdnn_ep_runtime_begin_compute` hook to invalidate
+  // per-forward-pass runtime caches (e.g. the GQA seqlens_k cache). create()
+  // warns when the symbol is absent.
   void begin_compute() const;
 
   // Diagnostic-only accessor: returns the hipStream_t used by
@@ -98,24 +99,37 @@ public:
   // Public constructor gated by PrivateTag (defined at the top of this
   // class). Use the create() factory instead -- external callers cannot
   // construct a PrivateTag and therefore cannot call this constructor.
+  // `artifact` owns the active backend (LLVM-IR JIT or native Plugin);
+  // teardown (incl. any native temp file) is handled by LoadedArtifact.
   InferenceState(PrivateTag, void *state,
-                 std::unique_ptr<morphizen::Plugin> plugin,
-                 const std::string &temp_dll_path);
+                 std::unique_ptr<LoadedArtifact> artifact);
 
 private:
+  // Resolve and cache the inference_* entry points from the loaded artifact.
+  void resolveEntryPoints(const LoadedArtifact &artifact);
+
   // Opaque handle returned by inference_init()
   void *state_;
+  // Must outlive `state_`: `inference_init` returned a pointer into memory
+  // allocated by the loaded artifact.
+  std::unique_ptr<LoadedArtifact> artifact_;
 
-  // Owned plugin - must outlive state_
-  std::unique_ptr<morphizen::Plugin> plugin_;
+  // Entry points cached at construction so the per-Compute() (compute_fn_) and
+  // teardown (cleanup_fn_) paths each pay one indirect call instead of an ORC
+  // symbol lookup -- the lookup walks the JITDylib and every search generator
+  // (tens of microseconds per token at 32-layer LLM decode). A missing symbol
+  // leaves the pointer null; the error surfaces at first use (compute() /
+  // ~InferenceState()) rather than at session creation.
+  using ComputeFn = int (*)(void *, span_t *, span_t *);
+  using ComputeAllocFn = int (*)(void *,
+                                 span_t *); // 2-arg output-allocator ABI
+  using CleanupFn = int (*)(void *);
+  ComputeFn compute_fn_;
+  ComputeAllocFn compute_alloc_fn_;
+  CleanupFn cleanup_fn_;
 
-  // Temporary DLL file path (deleted in destructor)
-  std::string temp_dll_path_;
-
-  // Cached function pointer for hipdnn_ep_runtime_begin_compute. Resolved
-  // once in create() so begin_compute() avoids a per-call GetProcAddress /
-  // dlsym round-trip on the decode hot path. Null when the model.dll
-  // predates the export.
+  // Cached so begin_compute() is a single indirect call on the decode hot
+  // path. Null when the module does not export the hook.
   using BeginComputeFn = void (*)(void *);
   BeginComputeFn begin_compute_fn_;
 

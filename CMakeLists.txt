@@ -55,9 +55,34 @@ option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as 
 # EP-only bits (morphizen, ORT, protobuf).
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 
+option(HIPDNN_EP_LINK_HIP_HOST
+       "Link hip::host into the EP DLL (enables HIP host APIs in EP code)" ON)
+option(HIPDNN_EP_LOAD_KERNEL_DLLS
+       "JIT-load per-arch custom_kernels_<arch>.{dll,so} at session create" ON)
+
+if(BUILD_MOCK_RUNTIME)
+  set(HIPDNN_EP_LINK_HIP_HOST OFF)
+  set(HIPDNN_EP_LOAD_KERNEL_DLLS OFF)
+endif()
+
+if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
+  message(FATAL_ERROR
+    "HIPDNN_EP_LOAD_KERNEL_DLLS=ON requires HIPDNN_EP_LINK_HIP_HOST=ON "
+    "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
+endif()
+
 if(BUILD_EP)
-  # MLIR backend compiler
-  add_subdirectory(backend-mlir-compiler)
+  # Add custom_kernels here so the per-arch custom_kernels_<arch> SHARED
+  # targets exist for custom-op-mlir to depend on. The guard prevents a
+  # duplicate add_subdirectory when BUILD_HIP_TOOLS re-includes it below.
+  if(NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
+    add_subdirectory(3rd-party/custom_kernels)
+    set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
+  endif()
+
+  # backend-mlir-compiler is added later (in the BUILD_HIP_TOOLS block, after
+  # lib/Runtime so the RuntimeBitcode target exists when custom-op-mlir embeds
+  # runtime.bc).
   add_subdirectory(tools/hip-onnx-runner)
 endif()
 
@@ -101,22 +126,23 @@ if(BUILD_HIP_TOOLS)
   # FlatBuffers schemas (GenerateInterface pass metadata)
   add_subdirectory(schemas)
 
-  # ==============================================================================
-  # Mock vs Real Runtime Configuration
-  # ==============================================================================
-  if(BUILD_MOCK_RUNTIME)
-    message(STATUS "Building with MOCK runtime (no GPU required)")
-  else()
-    message(STATUS "Building with REAL runtime (requires HIP/MIOpen)")
-    # Add custom HIP kernels library for Real Runtime
+  # Real-runtime GPU kernels (guarded against the early BUILD_EP add above).
+  if(NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
     add_subdirectory(3rd-party/custom_kernels)
+    set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
   endif()
 
   # TableGen targets
   add_subdirectory(include/hip)
 
-  # Library targets
+  # lib/Runtime produces runtime.bc consumed by backend-mlir-compiler.
   add_subdirectory(lib)
+
+  # Must come AFTER lib/Runtime (RuntimeBitcode dep) and BEFORE tools/
+  # (tools/hip-test links morphizen-custom-op-mlir).
+  if(BUILD_EP)
+    add_subdirectory(backend-mlir-compiler)
+  endif()
 
   # DLL target (hip-compiler.dll)
   add_subdirectory(dll)

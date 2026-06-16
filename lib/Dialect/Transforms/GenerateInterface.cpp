@@ -18,6 +18,7 @@
 #include "flatbuffers/flatbuffers.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/artifact_abi.h"
 #include "hip/debug_log.h"
 #include "hip/flatbuffers_json.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -206,7 +207,7 @@ void generateMetadataGlobal(ModuleOp module, const std::string &jsonStr) {
   builder.setInsertionPoint(&module.getBody()->front());
   LLVM::GlobalOp::create(builder, module.getLoc(), arrayType,
                          /*isConstant=*/true, LLVM::Linkage::Internal,
-                         "__metadata_json",
+                         hipdnn::abi::kMetadataJsonGlobal,
                          builder.getStringAttr(jsonStr + '\0'));
 }
 
@@ -226,7 +227,8 @@ void generateMetadataBlobGlobal(ModuleOp module,
                           blob.size());
   LLVM::GlobalOp::create(builder, module.getLoc(), arrayType,
                          /*isConstant=*/true, LLVM::Linkage::Internal,
-                         "__metadata_blob", builder.getStringAttr(blobRef));
+                         hipdnn::abi::kMetadataBlobGlobal,
+                         builder.getStringAttr(blobRef));
 }
 
 /// Generate inference_get_metadata_json() function.
@@ -247,15 +249,15 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
   auto funcType = LLVM::LLVMFunctionType::get(ptrType, {});
 
   auto funcOp = LLVM::LLVMFuncOp::create(
-      builder, loc, "inference_get_metadata_json", funcType);
+      builder, loc, hipdnn::abi::kInferenceGetMetadataJson, funcType);
   funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
   funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
   Block *entry = funcOp.addEntryBlock(builder);
   builder.setInsertionPointToStart(entry);
 
-  Value addr =
-      LLVM::AddressOfOp::create(builder, loc, ptrType, "__metadata_json");
+  Value addr = LLVM::AddressOfOp::create(builder, loc, ptrType,
+                                         hipdnn::abi::kMetadataJsonGlobal);
   LLVM::ReturnOp::create(builder, loc, addr);
 }
 
@@ -488,10 +490,11 @@ private:
     Type i32Type = IntegerType::get(ctx, 32);
     Type i64Type = IntegerType::get(ctx, 64);
 
-    if (module.lookupSymbol<LLVM::LLVMFuncOp>("inference_init") ||
-        module.lookupSymbol<LLVM::LLVMFuncOp>("inference_compute") ||
-        module.lookupSymbol<LLVM::LLVMFuncOp>("inference_cleanup") ||
-        module.lookupSymbol<LLVM::LLVMFuncOp>("inference_get_metadata_json")) {
+    if (module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceInit) ||
+        module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceCompute) ||
+        module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceCleanup) ||
+        module.lookupSymbol<LLVM::LLVMFuncOp>(
+            hipdnn::abi::kInferenceGetMetadataJson)) {
       COMPILER_DEBUG_LOG(
           "[GenerateInterface] Interface functions already exist. "
           << "Pass already ran.\n");
@@ -591,8 +594,8 @@ private:
     SmallVector<Type> paramTypes = {ptrType, ptrType};
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
-    auto funcOp =
-        LLVM::LLVMFuncOp::create(builder, loc, "inference_init", funcType);
+    auto funcOp = LLVM::LLVMFuncOp::create(
+        builder, loc, hipdnn::abi::kInferenceInit, funcType);
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
@@ -602,8 +605,8 @@ private:
     Value outStatePtr = entryBlock->getArgument(0);
     Value fsPtr = entryBlock->getArgument(1);
 
-    Value blobPtr =
-        LLVM::AddressOfOp::create(builder, loc, ptrType, "__metadata_blob");
+    Value blobPtr = LLVM::AddressOfOp::create(builder, loc, ptrType,
+                                              hipdnn::abi::kMetadataBlobGlobal);
     Value blobSizeVal = LLVM::ConstantOp::create(
         builder, loc, i64Type, builder.getI64IntegerAttr((int64_t)blobSize));
 
@@ -725,8 +728,8 @@ private:
                       : SmallVector<Type>{ptrType, ptrType, ptrType};
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
-    auto funcOp =
-        LLVM::LLVMFuncOp::create(builder, loc, "inference_compute", funcType);
+    auto funcOp = LLVM::LLVMFuncOp::create(
+        builder, loc, hipdnn::abi::kInferenceCompute, funcType);
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
@@ -1029,8 +1032,8 @@ private:
     SmallVector<Type> paramTypes = {ptrType};
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
-    auto funcOp =
-        LLVM::LLVMFuncOp::create(builder, loc, "inference_cleanup", funcType);
+    auto funcOp = LLVM::LLVMFuncOp::create(
+        builder, loc, hipdnn::abi::kInferenceCleanup, funcType);
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 

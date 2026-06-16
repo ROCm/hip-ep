@@ -18,7 +18,7 @@
 #include "InferenceState.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
 #include <hip/hip_runtime_api.h>
 #endif
 #include <algorithm>
@@ -328,6 +328,25 @@ std::vector<uint8_t> load_artifact_from_epcontext(
   MY_LOG(1) << "Loaded artifact: " << total_read << " bytes";
   return artifact_bytes;
 }
+
+// Decide which loader the EP should use for this artifact. The format is
+// recorded in the EPContext metadata by the compiler (artifact_format), which
+// always sets it (see pass_main.cpp); an empty/unknown value means a malformed
+// or pre-PR EPContext and is fatal here rather than mis-loaded.
+customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
+  customop::ArtifactKind kind;
+  if (!customop::artifactKindFromFormat(format_str, kind)) {
+    LOG(FATAL) << "EPContext metadata has empty/unknown artifact_format='"
+               << format_str << "'; expected '"
+               << customop::kArtifactFormatLlvmIr << "' or '"
+               << customop::kArtifactFormatNative << "'.";
+  }
+
+  MY_LOG(1) << "Artifact loader: "
+            << (kind == customop::ArtifactKind::NATIVE ? "native (Plugin)"
+                                                       : "LLVM IR (JIT)");
+  return kind;
+}
 } // anonymous namespace
 
 // ============================================================================
@@ -352,7 +371,8 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 // Interpretation grid for the decode gap vs llama.cpp Vulkan:
 //   compute_cpu >> gpu       -> host dispatch / launch overhead dominates
 //                               (per-kernel hipLaunchKernel cost, bitcode
-//                               trampolines, or glue code in model.dll)
+//                               trampolines, or glue code in the JITted
+//                               per-model module)
 //   fence_residual >> 0      -> compute() is queueing async GPU work; the
 //                               host returns early and we under-count GPU
 //                               per call
@@ -368,7 +388,7 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 namespace {
 
 bool perf_enabled() {
-#ifdef BUILD_MOCK_RUNTIME
+#ifndef HIPDNN_EP_LINK_HIP_HOST
   return false;
 #else
   static const bool enabled = [] {
@@ -502,7 +522,7 @@ struct OutputAllocatorCtx {
   std::vector<bool> allocated;
 };
 
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
 // Ensure scratch[idx] holds at least nbytes of device memory. Grows by
 // hipFree + hipMalloc (never shrinks). Safe within a Compute(): each output
 // index is allocated exactly once, so a grow here cannot invalidate a pointer
@@ -527,7 +547,7 @@ static void *ensure_host_out_slot(std::vector<HostOutputScratch> &scratch,
   }
   return slot.ptr;
 }
-#endif // BUILD_MOCK_RUNTIME
+#endif // HIPDNN_EP_LINK_HIP_HOST
 
 // C callback installed on the RuntimeState (output_allocator_t.allocate).
 // noexcept: invoked from C (the model.dll runtime); a C++ exception crossing
@@ -570,7 +590,7 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
     // Host (CPU) output: the DLL writes into EP GPU scratch; Compute()
     // D2H-copies into ort_ptr after inference_compute returns (the 2-arg
     // interface already stream-synced).
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
     size_t nelem = 1;
     for (int64_t d : out_shape)
       nelem *= static_cast<size_t>(d);
@@ -616,14 +636,15 @@ MlirCustomOp::MlirCustomOp(
   // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
   auto fs =
       const_cast<morphizen::PassContext *>(context.get())->get_file_system();
-  // Create inference state from DLL bytes (uses morphizen::Plugin)
-  inference_state_ = customop::InferenceState::create(
-      load_artifact_from_epcontext(context, metadata_.artifact_filename()),
-      fs.get());
+  auto artifact_bytes =
+      load_artifact_from_epcontext(context, metadata_.artifact_filename());
+  auto kind = determine_artifact_kind(metadata_.artifact_format());
+  inference_state_ =
+      customop::InferenceState::create(artifact_bytes, fs.get(), kind);
 }
 
 MlirCustomOp::~MlirCustomOp() {
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
   // Free the allocator-mode host-output GPU scratch (one buffer per output
   // index). No-op in classic mode (the vector stays empty).
   for (const HostOutputScratch &slot : host_out_scratch_)
@@ -681,7 +702,7 @@ void MlirCustomOp::compute_with_output_allocator(
     }
   }
 
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
   // Deferred host-output copies. The 2-arg interface already stream-synced, so
   // the GPU scratch holds final data; a blocking hipMemcpy is safe.
   for (const auto &p : octx.pending_d2h) {
@@ -702,8 +723,8 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
 
   // Tell the runtime that a new forward pass is starting so per-Compute()
   // caches (currently the GQA seqlens_k cache) are invalidated. No-op if
-  // the model.dll predates the begin_compute export -- but in that case
-  // the cache must be disabled via HIPDNN_EP_GQA_CACHE_SEQLENS=0
+  // the per-model bitcode predates the begin_compute export -- but in that
+  // case the cache must be disabled via HIPDNN_EP_GQA_CACHE_SEQLENS=0
   // (default-on), otherwise stale values would survive across forward
   // passes. The mismatch is detected at session creation and produces a
   // LOG(WARNING). The call is a single cached indirect dispatch, so
@@ -734,7 +755,7 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     return;
   }
 
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
   // --- HIPDNN_EP_PERF path: wall + per-phase + GPU timing. ---
   using clock = std::chrono::steady_clock;
   auto elapsed_ms = [](clock::time_point a, clock::time_point b) {
@@ -791,7 +812,7 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   perf_collector().record(s);
 
   MY_LOG(2) << "Compute completed successfully";
-#endif // BUILD_MOCK_RUNTIME
+#endif // HIPDNN_EP_LINK_HIP_HOST
 }
 
 } // namespace mlir_compilation

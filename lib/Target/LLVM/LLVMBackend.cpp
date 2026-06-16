@@ -9,6 +9,8 @@
 #include <mlir/Target/LLVMIR/Export.h>
 
 #include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/IR/DataLayout.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
@@ -18,11 +20,11 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
-
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/Triple.h>
 
 #include "hip/debug_log.h"
 
@@ -31,7 +33,7 @@
 namespace hipdnn {
 
 LLVMBackend::LLVMBackend() : target_initialized_(false) {
-  // Target initialization is deferred to first use
+  // Target initialization is deferred to first use (native path only).
 }
 
 LLVMBackend::~LLVMBackend() = default;
@@ -115,41 +117,43 @@ void LLVMBackend::optimizeLLVMIR(llvm::Module *module, int optLevel) {
   MPM.run(*module, MAM);
 }
 
-bool LLVMBackend::emitLLVMIR(llvm::Module *module,
+// ---- Bitcode backend -------------------------------------------------------
+
+// LLJIT fills triple + data layout from detectHost at load time.
+static void stripTargetMetadata(llvm::Module &module) {
+  module.setTargetTriple(llvm::Triple());
+  module.setDataLayout(llvm::DataLayout(""));
+}
+
+bool LLVMBackend::emitLlvmIr(llvm::Module *module,
                              const std::string &outputPath) {
   if (!module) {
-    llvm::errs() << "Null module in emitLLVMIR\n";
+    llvm::errs() << "Null module in emitLlvmIr\n";
     return false;
   }
 
-  // Open output file
+  stripTargetMetadata(*module);
+
   std::error_code EC;
   llvm::raw_fd_ostream out(outputPath, EC, llvm::sys::fs::OF_None);
   if (EC) {
-    llvm::errs() << "Failed to open output file: " << EC.message() << "\n";
+    llvm::errs() << "Failed to open bitcode output file: " << EC.message()
+                 << "\n";
     return false;
   }
 
-  // Print LLVM IR in human-readable text format
-  module->print(out, nullptr);
-
-  COMPILER_DEBUG_LOG("Emitted LLVM IR to: " << outputPath << "\n");
-  return true;
-}
-
-bool LLVMBackend::emitLLVMIRToString(llvm::Module *module, std::string &outIR) {
-  if (!module) {
-    llvm::errs() << "Null module in emitLLVMIRToString\n";
+  llvm::WriteBitcodeToFile(*module, out);
+  out.flush();
+  if (out.has_error()) {
+    llvm::errs() << "Failed to write bitcode to: " << outputPath << "\n";
     return false;
   }
 
-  // Use raw_string_ostream to write LLVM IR to string
-  llvm::raw_string_ostream stringStream(outIR);
-  module->print(stringStream, nullptr);
-  stringStream.flush();
-
+  COMPILER_DEBUG_LOG("Emitted LLVM bitcode to: " << outputPath << "\n");
   return true;
 }
+
+// ---- Native backend --------------------------------------------------------
 
 llvm::TargetMachine *LLVMBackend::createTargetMachine() {
   initializeTarget();
