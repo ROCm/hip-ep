@@ -20,6 +20,7 @@ Workarounds folded in (4-way version skew): pre-load locally-built ORT 1.26
 onnxruntime.dll + DirectML.dll before importing onnxruntime_genai, and chdir to
 the EP bin dir so the plugin loader resolves the EP DLL.
 """
+
 import atexit
 import ctypes
 import os
@@ -29,24 +30,37 @@ import sys
 
 # ===================== EDIT THESE PATHS PER MACHINE =====================
 # Each may also be set via the env var in [brackets]; the env var wins.
-REPO_ROOT  = os.environ.get("HIPDNN_EP_ROOT",  r"C:\Users\Administrator\workspace\onnx-hipdnn-ep")  # onnx-hipdnn-ep checkout (contains install/)
-THEROCK    = os.environ.get("THEROCK_DIST",    r"C:\Users\Administrator\workspace\therock-7.11")    # TheRock ROCm SDK dir
-OGA_DIR    = os.environ.get("HIPDNN_EP_OGA",   r"C:\Python3\Python310\lib\site-packages\onnxruntime_genai")  # onnxruntime_genai package dir
-DML_DLL    = os.environ.get("HIPDNN_EP_DML",   r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\oga-build\RelWithDebInfo\_deps\dmllib-src\bin\x64-win\DirectML.dll")  # x64 DirectML.dll
-MODEL_DIR  = os.environ.get("HIPDNN_EP_MODEL", r"")  # OGA model dir (or pass -i)
+REPO_ROOT = os.environ.get(
+    "HIPDNN_EP_ROOT", r"C:\Users\Administrator\workspace\onnx-hipdnn-ep"
+)  # onnx-hipdnn-ep checkout (contains install/)
+THEROCK = os.environ.get(
+    "THEROCK_DIST", r"C:\Users\Administrator\workspace\therock-7.11"
+)  # TheRock ROCm SDK dir
+OGA_DIR = os.environ.get(
+    "HIPDNN_EP_OGA", r"C:\Python3\Python310\lib\site-packages\onnxruntime_genai"
+)  # onnxruntime_genai package dir
+DML_DLL = os.environ.get(
+    "HIPDNN_EP_DML",
+    r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\oga-build\RelWithDebInfo\_deps\dmllib-src\bin\x64-win\DirectML.dll",
+)  # x64 DirectML.dll
+MODEL_DIR = os.environ.get("HIPDNN_EP_MODEL", r"")  # OGA model dir (or pass -i)
 IMAGE_PATH = os.environ.get("HIPDNN_EP_IMAGE", r"")  # test image (or pass --image_path)
-OUT_DIR    = os.environ.get("HIPDNN_EP_OUT",   os.getcwd())  # where the CSV + log are written
+OUT_DIR = os.environ.get(
+    "HIPDNN_EP_OUT", os.getcwd()
+)  # where the CSV + log are written
 # ========================================================================
 
 # Install-tree paths (fixed layout under REPO_ROOT).
-ORT_126_DIR  = os.path.join(REPO_ROOT, "install", "onnxruntime", "lib")
+ORT_126_DIR = os.path.join(REPO_ROOT, "install", "onnxruntime", "lib")
 PREBUILT_BIN = os.path.join(REPO_ROOT, "install", "dist", "bin")
 PREBUILT_LIB = os.path.join(REPO_ROOT, "install", "dist", "lib")
-BENCHMARK    = os.path.join(REPO_ROOT, "install", "oga-source",
-                            "benchmark", "python", "benchmark_multimodal.py")
-THEROCK_BIN  = os.path.join(THEROCK, "bin")
-REPORT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "perf_multimodal_report.py")
+BENCHMARK = os.path.join(
+    REPO_ROOT, "install", "oga-source", "benchmark", "python", "benchmark_multimodal.py"
+)
+THEROCK_BIN = os.path.join(THEROCK, "bin")
+REPORT_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "perf_multimodal_report.py"
+)
 
 
 # ---- Child mode: do the preloads + exec the benchmark in THIS process --------
@@ -56,8 +70,13 @@ REPORT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # pipe the parent is still draining*, so nothing is lost (unlike redirecting our
 # own fds, where the final flush would race the teardown).
 def _run_child(bench_argv):
-    for d in (THEROCK_BIN, PREBUILT_BIN, ORT_126_DIR, OGA_DIR,
-              os.path.dirname(DML_DLL) if DML_DLL else ""):
+    for d in (
+        THEROCK_BIN,
+        PREBUILT_BIN,
+        ORT_126_DIR,
+        OGA_DIR,
+        os.path.dirname(DML_DLL) if DML_DLL else "",
+    ):
         if d and os.path.isdir(d):
             os.add_dll_directory(d)
             os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
@@ -67,8 +86,10 @@ def _run_child(bench_argv):
     if os.path.isfile(shared):
         ctypes.CDLL(shared)
     ort = ctypes.CDLL(os.path.join(ORT_126_DIR, "onnxruntime.dll"))
-    print(f"[wrap] Pre-loaded ORT 1.26 onnxruntime.dll handle: {ort._handle:#x}",
-          flush=True)
+    print(
+        f"[wrap] Pre-loaded ORT 1.26 onnxruntime.dll handle: {ort._handle:#x}",
+        flush=True,
+    )
     os.chdir(PREBUILT_BIN)
     print(f"[wrap] cwd -> {os.getcwd()}", flush=True)
     sys.argv = [BENCHMARK] + list(bench_argv)
@@ -95,9 +116,9 @@ def _pop_value(argv, name, default=None):
         i = argv.index(name)
         if i + 1 < len(argv):
             val = argv[i + 1]
-            del argv[i:i + 2]
+            del argv[i : i + 2]
             return val
-        del argv[i:i + 1]
+        del argv[i : i + 1]
     return default
 
 
@@ -129,10 +150,16 @@ else:
     os.environ.setdefault("HIPDNN_EP_PERF", "1")
 os.environ.setdefault("PYTHONUTF8", "1")
 perf_on = os.environ["HIPDNN_EP_PERF"] != "0"
-print(f"[wrap] HIPDNN_EP_PERF={os.environ['HIPDNN_EP_PERF']}"
-      + ("  (per-op profiling ON; tok/s are instrumentation-bound -- "
-         "use --perf 0 for throughput)" if perf_on else "  (throughput mode)"),
-      flush=True)
+print(
+    f"[wrap] HIPDNN_EP_PERF={os.environ['HIPDNN_EP_PERF']}"
+    + (
+        "  (per-op profiling ON; tok/s are instrumentation-bound -- "
+        "use --perf 0 for throughput)"
+        if perf_on
+        else "  (throughput mode)"
+    ),
+    flush=True,
+)
 
 
 # ---- Auto-select the MorphiZenEP genai_config variant -----------------------
@@ -148,25 +175,33 @@ def maybe_swap_config(model_dir, keep):
     if "MorphiZenEP" in txt:
         return  # already MorphiZenEP
     if not os.path.isfile(variant):
-        print("[wrap] WARN: genai_config.json has no MorphiZenEP provider and "
-              "no genai_config_MorphiZenEP.json variant found; running as-is.",
-              flush=True)
+        print(
+            "[wrap] WARN: genai_config.json has no MorphiZenEP provider and "
+            "no genai_config_MorphiZenEP.json variant found; running as-is.",
+            flush=True,
+        )
         return
     backup = cfg + ".orig"
     if not os.path.exists(backup):
         shutil.copyfile(cfg, backup)
     shutil.copyfile(variant, cfg)
-    print(f"[wrap] swapped genai_config.json -> MorphiZenEP variant "
-          f"(original backed up to {os.path.basename(backup)})", flush=True)
+    print(
+        f"[wrap] swapped genai_config.json -> MorphiZenEP variant "
+        f"(original backed up to {os.path.basename(backup)})",
+        flush=True,
+    )
     if not keep:
+
         def _restore():
             try:
                 if os.path.exists(backup):
                     shutil.copyfile(backup, cfg)
-                    print(f"[wrap] restored original genai_config.json", flush=True)
+                    print("[wrap] restored original genai_config.json", flush=True)
             except Exception as e:
-                print(f"[wrap] WARN: failed to restore genai_config.json: {e}",
-                      flush=True)
+                print(
+                    f"[wrap] WARN: failed to restore genai_config.json: {e}", flush=True
+                )
+
         atexit.register(_restore)
 
 
@@ -174,8 +209,22 @@ if eff_model:
     maybe_swap_config(eff_model, opt_keep_config)
 
 # ---- Assemble the benchmark argv --------------------------------------------
-DEFAULT_ARGV = ["-g", "64", "-m", "2048", "-r", "10", "-w", "1",
-                "-k", "1", "-p", "1.0", "-v", "-mo"]
+DEFAULT_ARGV = [
+    "-g",
+    "64",
+    "-m",
+    "2048",
+    "-r",
+    "10",
+    "-w",
+    "1",
+    "-k",
+    "1",
+    "-p",
+    "1.0",
+    "-v",
+    "-mo",
+]
 argv = list(DEFAULT_ARGV) + list(user_args)
 # Inject model/image from CONFIG only if the user didn't pass them.
 if not _last_value(user_args, "-i", "--input_folder") and MODEL_DIR:
@@ -222,8 +271,11 @@ def run_and_tee(bench_argv, log_file_path):
     child_env["PYTHONUNBUFFERED"] = "1"
     proc = subprocess.Popen(
         [sys.executable, os.path.abspath(__file__)] + list(bench_argv),
-        env=child_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        bufsize=0)
+        env=child_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
     out = sys.stdout.buffer
     with open(log_file_path, "wb") as logf:
         while True:
