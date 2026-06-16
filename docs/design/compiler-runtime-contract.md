@@ -38,19 +38,34 @@ field in this schema.
         │    __metadata_json  (text, for inspection)
         ▼
   ┌──────────────────────────────────────┐
-  │              model.dll               │
-  │  __metadata_blob       (internal)    │  ← baked into DLL data section
+  │           model.bc (bitcode)         │
+  │  __metadata_blob       (internal)    │  ← baked into bitcode data
   │  __metadata_json       (internal)    │  ← human-readable copy
   │                                      │
   │  inference_init(out_state, fs)       │  ← public API
   │  inference_get_metadata_json()       │  ← public API
   └──────────────────────────────────────┘
         │
+        │  LlvmIrJit parses bytes → llvm::orc::LLJIT codegen
         │  inference_init reads __metadata_blob directly
         │  (same LLVM module — hidden from public API)
         ▼
-  Runtime
+  Runtime (EP DLL hosts the JIT)
 ```
+
+This contract is **format-independent**. The same metadata blob, the same
+`inference_*` / `hipdnn_ep_runtime_begin_compute` symbols, and the same JSON
+mirror are produced for both artifact formats
+(`CompilationOptions.output_mode`):
+
+- **LLVM IR** (default): the symbols are JIT-resolved by `LlvmIrJit` in-process.
+- **Native**: the same symbols are exported from the per-model `.dll`/`.so` and
+  resolved via `morphizen::Plugin` (`GetProcAddress` / `dlsym`). The runtime is
+  merged into the module at producer time so `hipdnn_ep_runtime_begin_compute`
+  is present in the native artifact too.
+
+The EP selects the loader from `mlir_metadata::Metadata.artifact_format` before
+opening the artifact. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
 
 ---
 
@@ -81,19 +96,21 @@ See [Current Fields](#current-fields) for the purpose of each field.
 
 The `GenerateInterface` pass (`lib/Dialect/Transforms/GenerateInterface.cpp`)
 builds the FlatBuffers blob from MLIR module attributes and emits two globals
-into the LLVM module with **internal linkage** (not visible outside `model.dll`):
+into the LLVM module with **internal linkage** (not visible to JITted callers
+outside `model.bc`):
 
 | Global | Content | Linkage |
 |--------|---------|---------|
 | `__metadata_blob` | FlatBuffers binary bytes | Internal |
 | `__metadata_json` | Human-readable JSON representation | Internal |
 
-Both are compile-time constants baked directly into `model.dll`'s data section.
-No file I/O is needed to access them at runtime.
+Both are compile-time constants baked directly into the bitcode's data section
+and end up in JITted memory after ORC codegen. No file I/O is needed to access
+them at runtime.
 
 The generated `inference_init` accesses `__metadata_blob` directly — they are
-in the same LLVM module and linked into the same DLL. This is entirely hidden
-from the public interface.
+in the same LLVM module and JITted together. This is entirely hidden from the
+public interface.
 
 ### inference_get_metadata_json
 
@@ -160,5 +177,5 @@ a separate file, environment variable, or hardcoded constant.
 ## Related Documents
 
 - [constant-handling-design.md](constant-handling-design.md) — how `constants_filename`, `sizes`, and `offsets` fields are produced and consumed
-- [morphizen-ep-integration.md](morphizen-ep-integration.md) — DLL contracts; `inference_init` public interface
+- [morphizen-ep-integration.md](morphizen-ep-integration.md) — JIT loader contract; `inference_init` public interface
 - [compilation-options.md](compilation-options.md) — `constants_file` compilation option

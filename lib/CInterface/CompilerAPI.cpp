@@ -28,12 +28,17 @@ static const char *COMPILER_VERSION = "1.0.0";
 // Parse JSON into CompilationOptionsT (defined in
 // schemas/compilation_options.fbs). Key fields:
 //   opt_level          — LLVM optimization level 0-3 (default 2)
-//   output_mode        — DLL or LLVM_IR (default DLL)
 //   constants_file     — externalized weights filename (default
-//   "constants.bin") skip_constant_data — skip writing constant bytes (default
-//   false)
+//                        "constants.bin")
+//   skip_constant_data — skip writing constant bytes (default false)
 //   use_output_allocator — compile in output-allocator mode: 2-arg
-//   inference_compute + in-graph hip.alloc_output (default false)
+//                        inference_compute + in-graph hip.alloc_output (default
+//                        false)
+//   output_mode        — LLVM_IR (default; OS-portable LLVM IR as .bc,
+//   JIT-loaded
+//                        by the EP) or Native (per-OS .dll/.so linked here and
+//                        loaded via LoadLibrary/dlopen). See
+//                        CompilerDriver::compileImpl.
 static bool parseOptions(const char *options_json,
                          mlir::hip::CompilationOptionsT &opts,
                          std::string &error_message) {

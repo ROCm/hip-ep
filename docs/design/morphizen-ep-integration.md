@@ -225,7 +225,7 @@ but differ in what they actually carry:
 | Channel | Owner | Format | Visible to |
 |---------|-------|--------|------------|
 | **A** (in-process) | `morphizen-ep.dll` level-1 pass | ProtoBuf message in MlirCustomOp `MetaDef` | session-creation path only |
-| **B** (on-disk in DLL) | `hip-compiler.dll` GenerateInterface | FlatBuffer in the compiled `model.dll`'s constants blob | runtime path; `hip-inspect-dll` |
+| **B** (on-disk in DLL) | `hip-compiler.dll` GenerateInterface | FlatBuffer in the compiled `model.dll`'s constants blob | runtime path; `hip-inspect` |
 
 **Channel A** is constructed at session creation as a ProtoBuf message
 holding the OrtGraph→MLIR metadata (input/output names, ranks, element

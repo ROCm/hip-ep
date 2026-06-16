@@ -13,18 +13,28 @@
 int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-compiler");
   std::string inputFilename;
-  std::string outputDll;
+  std::string outputPath;
+  std::string mode = "LLVM_IR"; // LLVM_IR (default) | NATIVE
 
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "-o" && i + 1 < argc) {
-      outputDll = argv[++i];
+      outputPath = argv[++i];
+    } else if (std::string(argv[i]) == "--mode" && i + 1 < argc) {
+      mode = argv[++i];
     } else if (argv[i][0] != '-') {
       inputFilename = argv[i];
     }
   }
 
-  if (inputFilename.empty() || outputDll.empty()) {
-    llvm::errs() << "Usage: " << argv[0] << " <input.mlir> -o <output.dll>\n";
+  if (inputFilename.empty() || outputPath.empty()) {
+    llvm::errs() << "Usage: " << argv[0]
+                 << " <input.mlir> -o <output.{bc,dll,so}> "
+                    "[--mode LLVM_IR|NATIVE]\n";
+    return 1;
+  }
+
+  if (mode != "LLVM_IR" && mode != "NATIVE") {
+    llvm::errs() << "error: --mode must be 'LLVM_IR' or 'NATIVE'\n";
     return 1;
   }
 
@@ -36,15 +46,17 @@ int main(int argc, char **argv) {
   }
 
   mlir::hip::CompilationOptionsT options;
+  options.output_mode = (mode == "NATIVE") ? mlir::hip::OutputMode::NATIVE
+                                           : mlir::hip::OutputMode::LLVM_IR;
   std::string errorMessage;
   hip::compiler::CompilerDriver driver;
 
-  if (!driver.compile((*bufOrErr)->getBuffer(), outputDll, options,
+  if (!driver.compile((*bufOrErr)->getBuffer(), outputPath, options,
                       errorMessage)) {
     llvm::errs() << "error: " << errorMessage << "\n";
     return 1;
   }
 
-  llvm::outs() << "Successfully generated " << outputDll << "\n";
+  llvm::outs() << "Successfully generated " << outputPath << "\n";
   return 0;
 }

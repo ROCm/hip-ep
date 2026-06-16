@@ -354,7 +354,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // this case (gated by TensorBuffer.is_aliased).
   //
   // Other memory_type values (CPU / FPGA / NPU) fall through to the legacy
-  // host H2D path below — preserves behaviour for hip-test-dll,
+  // host H2D path below — preserves behaviour for hip-test,
   // hip-onnx-runner, and the OGA path-B-only configuration where KV cache
   // still lives in host RAM.
   const bool alias_caller_buffer = (tensor->memory_type == TENSOR_MEMORY_GPU);

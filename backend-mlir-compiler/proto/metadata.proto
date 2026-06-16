@@ -16,6 +16,11 @@ message Metadata {
   // choose its dispatch arity. Travels with the artifact, so a reused
   // EPContext always reports the mode matching its own DLL ABI.
   bool use_output_allocator = 4;
+  // Per-model artifact format, mirrors CompilationOptions.output_mode.
+  // Read by the EP before loading the artifact to select the loader:
+  //   "LLVM_IR" (default / empty) -> LlvmIrJit (in-process ORC JIT)
+  //   "NATIVE"                    -> morphizen::Plugin (LoadLibrary/dlopen)
+  string artifact_format = 5;
 }
 
 message Input {

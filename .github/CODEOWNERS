@@ -36,7 +36,7 @@
 /test/lit/                      @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 /tools/hip-compiler/            @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 /tools/hip-mlir-opt/            @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
-/tools/hip-inspect-dll/         @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/tools/hip-inspect/             @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 
 # ---------------------------------------------------------------------------
 # Runtime: EP runtime state, real/mock GPU backends, graph runtime, runtime
@@ -45,7 +45,7 @@
 /lib/Runtime/                   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 /lib/HipDNNGraphRuntime/        @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 /tools/hip-onnx-runner/         @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
-/tools/hip-test-dll/            @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/tools/hip-test/                @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 
 # ---------------------------------------------------------------------------
 # Shared: utilities and graph machinery used by both compiler and runtime.
