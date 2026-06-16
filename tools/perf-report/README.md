@@ -11,7 +11,7 @@ report:
 | File | Purpose | Portability |
 |---|---|---|
 | [`format_perf_report.py`](format_perf_report.py) | Parses a captured log and renders the four-section report. The value-add tool. | Pure Python 3, stdlib only — any platform with Python ≥ 3.10. |
-| [`run_bench.sh`](run_bench.sh) | Bench driver. Runs `onnxruntime_perf_test` (default) or `model_benchmark` (`--oga`) against a model under `$WORKSPACE/oga_models/<dir>` and captures the log under `tools/perf-report/_perf_logs/`. The `--oga` path additionally pipes the log through `format_perf_report.py`; the perftest path prints its own grep-based summary inline. | Linux + AMD GPU + the in-container build artefacts at `$WORKSPACE/install/{bin,lib}`. |
+| [`run_bench.sh`](run_bench.sh) | Bench driver. Runs `onnxruntime_perf_test` (default), `model_benchmark` (`--oga`), or `model_mm` (`--mm`, multimodal/VLM) against a model under `$WORKSPACE/oga_models/<dir>` and captures the log under `tools/perf-report/_perf_logs/`. The `--oga` path pipes the log through `format_perf_report.py`; `--mm` surfaces `model_mm`'s headline timing line inline and (under `--mode perf`) renders the per-op breakdown via `perf_multimodal_report.py`; the perftest path prints its own grep-based summary inline. | Linux + AMD GPU + the in-container build artefacts at `$WORKSPACE/install/{bin,lib}`. |
 | [`docker_run_bench.sh`](docker_run_bench.sh) | Thin host-side wrapper that runs `run_bench.sh` (or any other repo-relative bench script via `REL_BENCH=...`) inside the `hipdnn-ep-build` Docker image as a `docker run --rm` one-shot — no interactive shell needed. | Linux + Docker + an AMD GPU exposed via `/dev/kfd` and `/dev/dri/renderD*`. |
 
 > **Scope: Linux Docker build.** The bench-side examples below use the
@@ -101,6 +101,32 @@ tools/perf-report/run_bench.sh --time 30 --mode perf
 # Different model (must already be staged at $WORKSPACE/oga_models/<dir>/):
 tools/perf-report/run_bench.sh --oga --model Mistral-7B-Instruct-v0.3-dml-int4-awq-block-128 --mode perf
 ```
+
+#### Multimodal / VLM models (`--mm`)
+
+`--mm` drives `install/bin/model_mm` (the OGA C++ multimodal example) with an
+image + prompt instead of `model_benchmark`. Unlike `--oga` there is no staged
+dynamic dir — `model_mm` reads `genai_config.json` from the model dir directly,
+so the dir's active config must already select MorphiZenEP (pass `--variant <v>`
+to swap `genai_config_<v>.json` into place for the run; it is restored on exit):
+
+```bash
+# profiler OFF (true throughput) and ON (per-op breakdown), via the host wrapper:
+tools/perf-report/docker_run_bench.sh --mm \
+    --model <vlm-dir> --image eiffel.jpg --prompt "What is in this image?" \
+    --mode none
+tools/perf-report/docker_run_bench.sh --mm \
+    --model <vlm-dir> --image eiffel.jpg --prompt "What is in this image?" \
+    --mode perf
+```
+
+> **`model_mm` ignores `-g`/`--max_new_tokens`** (that flag is honored only by
+> the `model_chat` example): generation runs until EOS, bounded only by
+> `search.max_length` in `genai_config.json`. A full VLM generation under
+> `--mode perf` dumps a per-op table after **every** token, which is slow and
+> produces a large log. To cap the token count for a `--mode perf` run, point
+> `--variant` at a config whose `search.max_length` is set to
+> `(prompt_len + desired_new_tokens)`.
 
 `run_bench.sh --help` prints the full flag list. Logs land at
 `tools/perf-report/_perf_logs/<model>_<tool>_<...>_<ts>.log` — keep them

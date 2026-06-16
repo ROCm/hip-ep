@@ -5,13 +5,14 @@
 ##
 
 # Linux bench driver for the MorphiZen EP. Benchmarks an ONNX model from
-# <workspace>/oga_models/<dir> using one of two host tools, captures the
+# <workspace>/oga_models/<dir> using one of three host tools, captures the
 # full stderr+stdout to a log under <script-dir>/_perf_logs/, and pipes
 # the result through format_perf_report.py (sibling under this directory).
 #
-# Two tools, selected by flag:
+# Three tools, selected by flag:
 #   (default)  onnxruntime_perf_test       -- per-Run() latency loop (kernel-level)
 #   --oga      install/bin/model_benchmark -- TTFT + decode-TPS (production OGA path)
+#   --mm       install/bin/model_mm        -- multimodal/VLM (image + prompt) TTFT + decode-TPS
 #
 # Both default to the dynamic single-graph model.onnx (PR #212). The decoder-
 # pipeline fixed-shape sub-models are still reachable via --shape static (perftest
@@ -46,6 +47,8 @@
 #   ./tools/perf-report/run_bench.sh --oga --prompt 2048 --gen 128 --max-length 16384
 #   ./tools/perf-report/run_bench.sh --shape static --seq 128 --seq 2048   # perftest, fixed-shape opt-in
 #   ./tools/perf-report/run_bench.sh --model <other-dir>             # different model under oga_models/
+#   ./tools/perf-report/run_bench.sh --mm --model <vlm-dir> --image eiffel.jpg \
+#       --prompt "What is in this image?" --gen 128 --mode none      # multimodal/VLM via model_mm
 
 set -euo pipefail
 
@@ -67,29 +70,45 @@ OGA_WARMUP=1
 OGA_MAX_LENGTH=""           # empty -> let model_benchmark default to prompt+gen
                             # NOTE: CLAUDE.md "For dynamic-shape models, do NOT pass -ml"
                             # -- inflates peak WS without changing TPS/TTFT.
+# Multimodal (--mm) defaults: drives install/bin/model_mm (the OGA C++ VLM
+# example, built only with the OGA examples target) instead of model_benchmark.
+# model_mm reads genai_config.json from the model dir directly, so unlike the
+# --oga path there is no staged dynamic dir.
+MM_IMAGE=""                 # --image: path to the test image (required for --mm)
+MM_PROMPT_TEXT="What is in this image?"   # --prompt text in --mm mode
+MM_SYSTEM="You are a helpful AI assistant."
+MM_VARIANT=""               # optional --variant: swap genai_config_<v>.json into
+                            # genai_config.json for this run (restored on exit)
 
 # ─── arg parse ────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
     case "$1" in
         --model)        MODEL_REL="$2"; shift 2 ;;
         --oga)          TOOL="oga"; shift ;;
+        --mm)           TOOL="mm"; shift ;;
         --shape)        SHAPE="$2"; shift 2 ;;
         --seq)          SEQS+=("$2"); shift 2 ;;
         --time|-t)      TIME_S="$2"; shift 2 ;;
         --mode)         MODE="$2"; shift 2 ;;
         --tag)          TAG="$2"; shift 2 ;;
-        --prompt|-l)    OGA_PROMPT="$2"; shift 2 ;;
+        --image)        MM_IMAGE="$2"; shift 2 ;;
+        --system)       MM_SYSTEM="$2"; shift 2 ;;
+        --variant)      MM_VARIANT="$2"; shift 2 ;;
+        # --prompt is overloaded by tool: an int prompt length for perftest/oga
+        # (-l), the user prompt TEXT for --mm. We store both; each path reads the
+        # one it needs, so a single invocation only ever uses the valid reading.
+        --prompt|-l)    OGA_PROMPT="$2"; MM_PROMPT_TEXT="$2"; shift 2 ;;
         --gen|-g)       OGA_GEN="$2"; shift 2 ;;
         --reps|-r)      OGA_REPS="$2"; shift 2 ;;
         --warmup|-w)    OGA_WARMUP="$2"; shift 2 ;;
         --max-length|-ml) OGA_MAX_LENGTH="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,43p' "$0"; exit 0 ;;
+            sed -n '2,51p' "$0"; exit 0 ;;
         *)  echo "unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
-case "$TOOL"  in perftest|oga)    ;; *) echo "bad --tool (internal): $TOOL"  >&2; exit 1 ;; esac
+case "$TOOL"  in perftest|oga|mm) ;; *) echo "bad --tool (internal): $TOOL"  >&2; exit 1 ;; esac
 case "$SHAPE" in dynamic|static)  ;; *) echo "bad --shape: $SHAPE"            >&2; exit 1 ;; esac
 case "$MODE"  in none|perf|debug) ;; *) echo "bad --mode: $MODE"              >&2; exit 1 ;; esac
 
@@ -144,13 +163,21 @@ esac
 EP_DLL="$ROOT/lib/libonnxruntime_morphizen_ep.so"
 PERFTEST="$WORKSPACE/build/onnxruntime/Release/onnxruntime_perf_test"
 MODEL_BENCHMARK="$ROOT/bin/model_benchmark"
+MODEL_MM="$ROOT/bin/model_mm"
 [ -f "$EP_DLL" ] || { echo "missing: $EP_DLL"; exit 1; }
-if [ "$TOOL" = "perftest" ]; then
-    [ -x "$PERFTEST" ] || { echo "missing: $PERFTEST"; exit 1; }
-else
-    [ -x "$MODEL_BENCHMARK" ] \
-        || { echo "missing: $MODEL_BENCHMARK -- rebuild with BUILD_OGA=1 ./docker/run.sh build"; exit 1; }
-fi
+case "$TOOL" in
+    perftest)
+        [ -x "$PERFTEST" ] || { echo "missing: $PERFTEST"; exit 1; } ;;
+    oga)
+        [ -x "$MODEL_BENCHMARK" ] \
+            || { echo "missing: $MODEL_BENCHMARK -- rebuild with BUILD_OGA=1 ./docker/run.sh build"; exit 1; } ;;
+    mm)
+        # model_mm is the OGA C++ multimodal example; it is NOT built by the
+        # default OGA target. Build it with the OGA examples (MODEL_MM=ON) and
+        # stage it into install/bin -- see the model_mm build recipe in the repo.
+        [ -x "$MODEL_MM" ] \
+            || { echo "missing: $MODEL_MM -- build the OGA model_mm example (MODEL_MM=ON) and copy it into $ROOT/bin"; exit 1; } ;;
+esac
 
 # ─── PR #212 check: dynamic-shape support is reachable from HEAD ──────────
 # `safe.directory='*'` disarms git's "dubious ownership" check that fires
@@ -443,10 +470,122 @@ run_oga() {
     python3 "$(format_perf_report)" "$log" --indent 2 || true
 }
 
+# Restore the model dir's genai_config.json after a --variant swap. Defined at
+# script scope (not nested in run_mm) and driven off script-global state so the
+# EXIT/INT/TERM trap can still see the backup path after run_mm has returned.
+# Idempotent: guards on the backup still existing and disarms the trap, so the
+# EXIT firing after an INT/TERM is a clean no-op.
+MM_CFG_BACKUP=""
+MM_ACTIVE_CFG=""
+restore_mm_cfg() {
+    [ -n "$MM_CFG_BACKUP" ] && [ -f "$MM_CFG_BACKUP" ] || return 0
+    cp -f "$MM_CFG_BACKUP" "$MM_ACTIVE_CFG"
+    rm -f "$MM_CFG_BACKUP"
+    trap - EXIT INT TERM
+    echo "Restored original genai_config.json"
+}
+
+# ─── multimodal path (model_mm on the VLM model dir) ─────────────────────
+# Unlike --oga, model_mm reads genai_config.json straight from the model dir,
+# so there is no staged dynamic dir. The dir's active genai_config.json must
+# already select MorphiZenEP (the gpu/allgpu variant). Pass --variant <v> to
+# swap genai_config_<v>.json into place for the run (restored on exit).
+run_mm() {
+    [ -n "$MM_IMAGE" ] || { echo "ERROR: --mm requires --image <path>" >&2; exit 1; }
+
+    # Resolve the image: as given, then relative to the model dir, then under a
+    # sibling packaging dir's test_images/ (covers the bundled sample images).
+    local img="$MM_IMAGE"
+    if [ ! -f "$img" ]; then
+        if [ -f "$MODEL_DIR/$MM_IMAGE" ]; then
+            img="$MODEL_DIR/$MM_IMAGE"
+        else
+            local cand
+            cand=$(ls "$MODEL_DIR"/../*/test_images/"$MM_IMAGE" 2>/dev/null | head -1 || true)
+            [ -n "$cand" ] && img="$cand"
+        fi
+    fi
+    [ -f "$img" ] || { echo "ERROR: image not found: $MM_IMAGE" >&2; exit 1; }
+
+    # Optional provider-variant swap (e.g. --variant allgpu). Backed up and
+    # restored on any exit (success, error, Ctrl-C) so the user's pristine
+    # genai_config.json is never left clobbered. The backup path + active-config
+    # path are deliberately script-GLOBAL (not `local`): the EXIT trap fires
+    # after run_mm has returned, so a function-local would be out of scope and
+    # the restore would silently no-op (leaving the swapped-in config in place).
+    if [ -n "$MM_VARIANT" ]; then
+        local vcfg="$MODEL_DIR/genai_config_${MM_VARIANT}.json"
+        [ -f "$vcfg" ] || { echo "ERROR: variant config not found: $vcfg" >&2; exit 1; }
+        MM_ACTIVE_CFG="$MODEL_DIR/genai_config.json"
+        MM_CFG_BACKUP="$(mktemp)"
+        cp -f "$MM_ACTIVE_CFG" "$MM_CFG_BACKUP"
+        trap restore_mm_cfg EXIT INT TERM
+        echo "Switching active config (temporary): genai_config_${MM_VARIANT}.json -> genai_config.json"
+        cp -f "$vcfg" "$MM_ACTIVE_CFG"
+    fi
+
+    local log_dir ts tag_suffix log
+    log_dir="$SCRIPT_DIR/_perf_logs"; mkdir -p "$log_dir"
+    ts=$(date +%Y%m%d_%H%M%S)
+    tag_suffix="${TAG:+_$TAG}"
+    log="$log_dir/${MODEL_TAG}_mm_${MODE}${tag_suffix}_${ts}.log"
+
+    echo
+    echo "=== $MODEL_TAG | OGA model_mm | image | mode=$MODE ==="
+    echo "    model dir : $MODEL_DIR"
+    echo "    image     : $img"
+    echo "    prompt    : $MM_PROMPT_TEXT"
+    echo "    log       : $log"
+    echo "──────────────────────────────────────────────────────"
+    # NOTE: model_mm IGNORES -g/--max_new_tokens (that flag is honored only by
+    # the model_chat example). Generation runs until EOS, bounded only by
+    # search.max_length in genai_config.json. To cap the token count -- e.g. to
+    # keep a --mode perf run (which dumps a per-op table after EVERY token) from
+    # producing a multi-minute run and a huge log -- point --variant at a config
+    # whose search.max_length is set to (prompt_len + desired_new_tokens).
+
+    # cd into install/lib so OGA auto-discovers libonnxruntime_morphizen_ep.so
+    # from CWD (same EP-discovery trick as the --oga path; no --ep_library).
+    SECONDS=0
+    ( cd "$ROOT/lib" && "$MODEL_MM" \
+        -m "$MODEL_DIR" \
+        --image_paths "$img" \
+        --system_prompt "$MM_SYSTEM" \
+        --user_prompt "$MM_PROMPT_TEXT" \
+        --non_interactive \
+        -v ) >"$log" 2>&1
+    local rc=$?
+    printf "  wall: %ds   exit=%d\n" "$SECONDS" "$rc"
+    echo
+
+    # model_mm prints its own headline timing line (Prompt length / Time to
+    # first / New tokens per second) -- surface it inline regardless of rc.
+    echo "  --- model_mm timing ---"
+    grep -E "Prompt length:|tokens per second|Time to first" "$log" | sed 's/^/  /' || true
+    echo "  ------------------------"
+
+    if [ "$rc" -ne 0 ]; then
+        echo "  --- raw tail (run failed) ---"
+        tail -n 25 "$log" | sed 's/^/  /'
+        echo "  ------------"
+        return 0
+    fi
+
+    # Render the EP-side per-op / per-Compute sections when present (--mode perf).
+    # perf_multimodal_report.py self-gates: a model_mm log has no model_benchmark
+    # "Batch size:" block, so it exits 2 and prints nothing -- hence `|| true`
+    # and the explicit timing grep above carries the headline for --mm.
+    local mm_report="$SCRIPT_DIR/perf_multimodal_report.py"
+    if [ "$MODE" != "none" ] && [ -f "$mm_report" ]; then
+        python3 "$mm_report" "$log" --indent 2 || true
+    fi
+}
+
 # ─── dispatch ─────────────────────────────────────────────────────────────
 case "$TOOL" in
     perftest) run_perftest ;;
     oga)      run_oga      ;;
+    mm)       run_mm       ;;
 esac
 
 echo
