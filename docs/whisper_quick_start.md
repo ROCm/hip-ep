@@ -12,10 +12,12 @@ Whisper runs **fp16 by default** — it is both faster on GPU and bit-faithful: 
 fp16 build keeps the `lm_head` in fp32 while the body is fp16, so greedy decoding
 is argmax-lossless (verbatim transcription, prefill logit cosine 1.0 vs the
 fp16 CPU reference). An **fp32** variant is also available (`--fp32`). **Both
-precisions are built locally by one command** — `python scripts/build_whisper_models.py`
-(a pinned OGA DirectML model builder in an isolated venv) — so there is no separate
-opt-in build step. fp32 is selected at run time with `--fp32`; see §6 for
-fp16-vs-fp32 numbers.
+precisions are downloaded automatically from the AMD Hugging Face repos on first
+use** — [`amd/whisper-large-v3-onnx-fp16`](https://huggingface.co/amd/whisper-large-v3-onnx-fp16)
+and [`amd/whisper-large-v3-onnx-fp32`](https://huggingface.co/amd/whisper-large-v3-onnx-fp32) —
+so the tests and `transcribe_whisper.py` work from a fresh checkout with no
+separate model step. Building the models locally is the **backup** (§3b). fp32 is
+selected at run time with `--fp32`; see §6 for fp16-vs-fp32 numbers.
 
 > **Shell:** commands in this guide are written for **Git Bash** (the repo's
 > convention, same as the main [Quick Start](quick_start.md) — launch it from an
@@ -85,10 +87,11 @@ conda activate hipdnn-ep
 ```
 
 The test audio is fetched from public URLs at runtime (no `datasets` / `jiwer`
-dependency), and the model build (`python scripts/build_whisper_models.py`, §3)
-installs its pinned builder deps into a **dedicated isolated venv**
-(`install/whisper-builder-venv/`), so it never touches the `hipdnn-ep` env or
-shadows the OGA fork.
+dependency), and the Whisper models are **downloaded from Hugging Face** on first
+use (§3) via `huggingface_hub` (already in `environment.yml`). The optional local
+model build (`python scripts/build_whisper_models.py`, §3b) installs its pinned
+builder deps into a **dedicated isolated venv** (`install/whisper-builder-venv/`),
+so it never touches the `hipdnn-ep` env or shadows the OGA fork.
 
 The one pip package you **do** need at a specific version is `onnxruntime` —
 see §1b, which is mandatory before the EP will load.
@@ -221,30 +224,28 @@ $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 
 ---
 
-## 3. Build + compile the model
+## 3. Get + compile the model
 
-Acquisition is **two steps**. First, **build the raw models** — `python
-scripts/build_whisper_models.py` builds BOTH the fp32 (`models/whisper-large-v3-onnx/`)
-and fp16 (`models/whisper-large-v3-onnx-fp16/`) bundles from
-`openai/whisper-large-v3` (pinned HF revision) via a pinned OGA DirectML model
-builder running in an isolated venv. No manual stock-OGA install is needed — the
-builder venv is self-contained. First run downloads HF weights + builds (~10 min);
-idempotent after.
-
-```
-python scripts/build_whisper_models.py
-```
-
-Then **prepare the model for the EP** — `setup_whisper_model.py` is consume-only:
-it applies the required ONNX surgery (`past_sequence_length` input + position-embed
-/ token-embed fixes for the static shared-buffer KV cache) and runs `fix_shapes`
-to lock the static shapes on the already-built raw bundle. It is idempotent and
-instant; if the raw model is absent it prints the build hint above and exits.
+**You normally don't run anything here** — the tests (§4) and
+`transcribe_whisper.py` (§5) prepare the model on demand: they download the raw
+OGA bundle from the AMD HF repo on first use, then apply the EP surgery +
+`fix_shapes` automatically. To do it ahead of time (or to verify the download),
+run the consume-only setup wrapper, which fetches the raw bundle if absent and
+prepares it for the EP:
 
 ```
-python scripts/setup_whisper_model.py          # fp16 (default)
-python scripts/setup_whisper_model.py --fp32   # fp32 model dir
+python scripts/setup_whisper_model.py          # fp16 (default) — amd/whisper-large-v3-onnx-fp16
+python scripts/setup_whisper_model.py --fp32   # fp32          — amd/whisper-large-v3-onnx-fp32
 ```
+
+This downloads `encoder.onnx`/`decoder.onnx` (+ `.data`) + tokenizer + config from
+Hugging Face (first run ~3–6 GB per precision), then applies the ONNX surgery
+(`past_sequence_length` input + position-/token-embed fixes for the static
+shared-buffer KV cache) and `fix_shapes`. Idempotent — instant once prepared.
+
+> **Gated / rate-limited?** If the download fails for auth reasons, run
+> `hf auth login` with a token that can read the repo and retry. If HF is
+> unreachable entirely, build the models locally instead (§3b).
 
 Verify the variants were produced (`ls` on Git Bash, `dir` on PowerShell) — the
 default fp16 bundle lives in `models/whisper-large-v3-onnx-fp16/`, the fp32 bundle
@@ -252,7 +253,7 @@ in `models/whisper-large-v3-onnx/`; both have the same file set:
 
 ```
 models/whisper-large-v3-onnx-fp16/   (default; fp32 dir mirrors this layout)
-  encoder.onnx (+.data), decoder.onnx (+.data), tokenizer.json, genai_config.json   (built raw bundle)
+  encoder.onnx (+.data), decoder.onnx (+.data), tokenizer.json, genai_config.json   (raw bundle from HF)
   encoder_fixed.onnx, decoder_surgery.onnx,
   decoder_fixed_prefill.onnx (S=4), decoder_fixed_decode.onnx (S=1)                  (compiled-shape variants)
 ```
@@ -267,20 +268,35 @@ models/whisper-large-v3-onnx-fp16/   (default; fp32 dir mirrors this layout)
 
 ---
 
-## 3b. Precisions (fp16 default, fp32 opt-out)
+## 3b. Build the models locally (backup)
+
+The §3 download is the normal path. Build locally only if HF is unreachable, or
+to **reproduce** the published models from source. `python
+scripts/build_whisper_models.py` builds BOTH the fp32 (`models/whisper-large-v3-onnx/`)
+and fp16 (`models/whisper-large-v3-onnx-fp16/`) bundles from
+`openai/whisper-large-v3` (pinned HF revision) via a pinned OGA DirectML model
+builder running in an isolated venv. This is exactly how the AMD HF repos were
+produced, so the output is byte-equivalent. First run downloads the HF *weights* +
+builds (~10 min); idempotent after.
+
+```
+python scripts/build_whisper_models.py            # both precisions
+python scripts/build_whisper_models.py --precision fp16   # one only
+```
+
+Because this writes the same `models/whisper-large-v3-onnx{,-fp16}/` dirs the §3
+download targets, a subsequent `setup_whisper_model.py` (or any test) sees the raw
+bundle already present and **skips the download** — the local build pre-populates
+the cache. No manual `onnxruntime-genai-directml` install is needed and the OGA
+fork is never shadowed — the builder runs in its own isolated venv (see §0).
+
+### Precisions (fp16 default, fp32 opt-out)
 
 fp16 is the **default** precision — faster on GPU and bit-faithful (fp32 `lm_head`
-keeps greedy argmax-lossless). Both bundles are produced **together** by the same
-`python scripts/build_whisper_models.py` in §3 — the pinned OGA DirectML model
-builder emits an fp16 body with an fp32 `lm_head` for the default model and an
-all-fp32 model for `--fp32`. `python scripts/setup_whisper_model.py` (default) and
-`--fp32` apply the SAME surgery + `fix_shapes`, writing
-`models/whisper-large-v3-onnx-fp16/` and `models/whisper-large-v3-onnx/`.
-
-No manual `onnxruntime-genai-directml` install is needed and the OGA fork is never
-shadowed — the builder runs in its own isolated venv (see §0). The default
-transcribe / test commands run fp16; add `--fp32` to use the fp32 model instead
-(§5, §6).
+keeps greedy argmax-lossless). The default transcribe / test commands run fp16;
+add `--fp32` to use the fp32 model instead (§5, §6). Both the HF download (§3) and
+the local build (above) provide the same two bundles; `setup_whisper_model.py`
+(default) and `--fp32` apply the SAME surgery + `fix_shapes` to each.
 
 ---
 
@@ -355,8 +371,9 @@ use (shared from `test/python/whisper/whisper_infer.py`). It auto-prepares the m
 (§3) on first run, so this one command works from a fresh checkout. Runs
 identically in PowerShell and Git Bash.
 
-If you've already run the tests (§4), the bundled **jfk.wav** sample is sitting
-in the data dir — transcribe it directly:
+Transcribe the bundled **jfk.wav** demo clip — if it isn't cached yet, the script
+**downloads it on demand**, so this works on a fresh checkout with nothing
+pre-fetched:
 
 ```
 python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav
@@ -365,7 +382,8 @@ python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav
 (Expected: *"And so my fellow Americans, ask not what your country can do for
 you..."*) The LibriSpeech clips fetched by §4 also work, e.g.
 `test/python/data/whisper/librispeech/sample_0.wav`. For your own audio, pass any
-16 kHz mono wav in place of the path above.
+16 kHz mono wav in place of the path above (only the bundled jfk.wav is
+auto-downloaded; other paths must exist).
 
 By default this prints the transcription **plus** the per-phase latency / RTF
 table (see below), running one discarded warmup pass first so the numbers are
@@ -384,8 +402,8 @@ python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --compare
 ```
 
 The default run uses the fp16 model. Add `--fp32` to run the fp32 model instead
-(build both precisions first with `python scripts/build_whisper_models.py`, §3).
-The metrics label shows the precision:
+(it auto-downloads on first use, same as fp16; see §3). The metrics label shows
+the precision:
 
 ```
 python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --fp32
@@ -503,6 +521,7 @@ EP comparison.
 | Transcription is garbage / a "GPU" run is suspiciously slow | Silent CPU fallback. Set the env (§2), clear the model cache (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`), and re-run. Confirm GPU dispatch with `HIPDNN_EP_DEBUG=1` (look for `[REAL] wrap_*` lines on stderr). |
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
+| Model setup fails / `Could not obtain the Whisper raw model` | The raw bundle download from `amd/whisper-large-v3-onnx-{fp16,fp32}` failed. If it's an auth / rate-limit error, run `hf auth login` and retry. If HF is unreachable, build the models locally instead (§3b: `python scripts/build_whisper_models.py`). |
 | Every test `skip`s with "MorphiZen EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `MORPHIZEN_EP_BIN` (§2). Verify the DLL exists at `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`. |
 | EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §1b). |
 
