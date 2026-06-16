@@ -243,6 +243,33 @@ int hip_elementwise_mod(
     int hip_dtype,
     int fmod_flag);
 
+/* Broadcasting binary elementwise (Add / Mul / Min / Max), 4-D operands.
+ *
+ * Each operand is described by a 4-element int64 shape array (the lowering
+ * left-pads ranks < 4 with leading 1s). NumPy/ONNX broadcasting is applied
+ * per axis: any axis whose operand extent is 1 is broadcast against the
+ * (larger) output extent. `out_shape4` is the broadcast result shape.
+ *
+ * Replaces MIOpen's miopenOpTensor for the float/half path, which is
+ * pathologically slow on gfx1151 for vision-encoder elementwise shapes.
+ *
+ *   op: 0 = add, 1 = mul, 2 = min, 3 = max
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Returns: 0 on success, -1 on unsupported dtype / launch error, -2 when the
+ * output volume exceeds the 32-bit index range (caller should fall back).
+ */
+int hip_elementwise_binary_bcast(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    const int64_t* lhs_shape4,
+    const int64_t* rhs_shape4,
+    const int64_t* out_shape4,
+    int op,
+    int hip_dtype);
+
 /*
  * Element-wise Equal with optional scalar broadcast.
  *

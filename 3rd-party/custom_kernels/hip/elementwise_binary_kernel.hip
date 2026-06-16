@@ -783,6 +783,147 @@ extern "C" int hip_elementwise_max(void *stream, const void *lhs,
   return static_cast<int>(hipGetLastError());
 }
 
+// =====================================================================
+// Broadcasting binary elementwise (Add / Mul / Min / Max), 4-D.
+//
+// MIOpen's miopenOpTensor is pathologically slow on gfx1151 for the
+// vision-encoder elementwise shapes (measured ~390 ms for a 6.3M-element
+// fp16 op), so wrap_miopenOpTensor routes the float/half Add/Mul/Min/Max
+// path here instead. Operand shapes are 4-D (left-padded with 1 by the
+// HipToLLVM lowering); per-axis broadcast is handled by a 0 stride on any
+// axis whose extent is 1. Output writes are fully coalesced; broadcast
+// reads hit the L2/L1 repeatedly (no expand materialisation needed).
+// =====================================================================
+
+namespace {
+
+struct Bcast4DMeta {
+  uint32_t out[4];     // output extents, dim 0 outermost .. dim 3 innermost
+  uint32_t lstride[4]; // lhs row-major stride per axis (0 = broadcast)
+  uint32_t rstride[4]; // rhs row-major stride per axis (0 = broadcast)
+};
+
+__device__ __forceinline__ float ew_load(const float *p, uint32_t i) {
+  return p[i];
+}
+__device__ __forceinline__ float ew_load(const __half *p, uint32_t i) {
+  return __half2float(p[i]);
+}
+__device__ __forceinline__ void ew_store(float *p, uint32_t i, float v) {
+  p[i] = v;
+}
+__device__ __forceinline__ void ew_store(__half *p, uint32_t i, float v) {
+  p[i] = __float2half(v);
+}
+
+// op: 0=add, 1=mul, 2=min, 3=max
+__device__ __forceinline__ float ew_apply(int op, float a, float b) {
+  switch (op) {
+  case 0:
+    return a + b;
+  case 1:
+    return a * b;
+  case 2:
+    return a < b ? a : b;
+  default:
+    return a > b ? a : b;
+  }
+}
+
+template <typename T>
+__global__ void ew_bcast4d_kernel(const T *__restrict__ lhs,
+                                   const T *__restrict__ rhs,
+                                   T *__restrict__ output, uint32_t num_elements,
+                                   int op, Bcast4DMeta meta) {
+  uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= num_elements)
+    return;
+  uint32_t rem = tid;
+  uint32_t li = 0, ri = 0;
+#pragma unroll
+  for (int d = 3; d >= 0; --d) {
+    uint32_t coord = rem % meta.out[d];
+    rem /= meta.out[d];
+    li += coord * meta.lstride[d];
+    ri += coord * meta.rstride[d];
+  }
+  float a = ew_load(lhs, li);
+  float b = ew_load(rhs, ri);
+  ew_store(output, tid, ew_apply(op, a, b));
+}
+
+} // namespace
+
+// Returns 0 on success, -2 when the output volume exceeds the 32-bit index
+// range (caller falls back to the MIOpen path).
+extern "C" int hip_elementwise_binary_bcast(void *stream, const void *lhs,
+                                            const void *rhs, void *output,
+                                            const int64_t *lhs_shape4,
+                                            const int64_t *rhs_shape4,
+                                            const int64_t *out_shape4, int op,
+                                            int hip_dtype) {
+  int64_t out_vol = out_shape4[0] * out_shape4[1] * out_shape4[2] * out_shape4[3];
+  if (out_vol <= 0)
+    return 0;
+  if (out_vol > static_cast<int64_t>(0xFFFFFFFFu))
+    return -2;
+
+  Bcast4DMeta meta{};
+  // Row-major contiguous strides derived from each operand's own 4-D shape;
+  // zeroed on any axis whose extent is 1 so that axis broadcasts.
+  int64_t lhs_contig[4], rhs_contig[4];
+  lhs_contig[3] = 1;
+  rhs_contig[3] = 1;
+  for (int d = 2; d >= 0; --d) {
+    lhs_contig[d] = lhs_contig[d + 1] * lhs_shape4[d + 1];
+    rhs_contig[d] = rhs_contig[d + 1] * rhs_shape4[d + 1];
+  }
+  for (int d = 0; d < 4; ++d) {
+    meta.out[d] = static_cast<uint32_t>(out_shape4[d]);
+    meta.lstride[d] =
+        (lhs_shape4[d] == 1) ? 0u : static_cast<uint32_t>(lhs_contig[d]);
+    meta.rstride[d] =
+        (rhs_shape4[d] == 1) ? 0u : static_cast<uint32_t>(rhs_contig[d]);
+  }
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  const uint32_t n = static_cast<uint32_t>(out_vol);
+  constexpr int kBlockSize = 256;
+  int grid_size = static_cast<int>((out_vol + kBlockSize - 1) / kBlockSize);
+
+  (void)hipGetLastError();
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    hipLaunchKernelGGL(ew_bcast4d_kernel<__half>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(lhs),
+                       static_cast<const __half *>(rhs),
+                       static_cast<__half *>(output), n, op, meta);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    hipLaunchKernelGGL(ew_bcast4d_kernel<float>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(lhs),
+                       static_cast<const float *>(rhs),
+                       static_cast<float *>(output), n, op, meta);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_binary_bcast: unsupported "
+            "dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_binary_bcast launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 extern "C" int hip_elementwise_div(void *stream, const void *lhs,
                                    const void *rhs, void *output,
                                    int64_t num_elements, int hip_dtype) {

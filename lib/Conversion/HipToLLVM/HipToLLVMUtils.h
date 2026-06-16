@@ -45,6 +45,7 @@ inline constexpr const char *kHipAllocOutput = "hipdnn_ep_alloc_output";
 
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
+inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
 
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
