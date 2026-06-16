@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Portable smoke-test runner for benchmark_multimodal.py on a locally-built
 MorphiZen EP / OGA (ORT 1.26 / OGA 0.13 / MorphiZenEP plugin).
 

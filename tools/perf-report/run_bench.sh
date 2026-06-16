@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # Linux bench driver for the MorphiZen EP. Benchmarks an ONNX model from
 # <workspace>/oga_models/<dir> using one of two host tools, captures the
 # full stderr+stdout to a log under <script-dir>/_perf_logs/, and pipes
