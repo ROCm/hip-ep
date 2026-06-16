@@ -35,8 +35,9 @@ public:
                onnxruntime::Model *model);
 
   // Defined out-of-line: frees the allocator-mode host-output GPU scratch and
-  // releases the lazy-allocated HIPDNN_EP_PERF event pair below (hipEventDestroy
-  // lives in the hip header, which we keep out of this header).
+  // releases the lazy-allocated HIPDNN_EP_PERF event pair below
+  // (hipEventDestroy lives in the hip header, which we keep out of this
+  // header).
   ~MlirCustomOp() override;
 
   // Execute inference using loaded artifact
