@@ -13,7 +13,7 @@ Licensed under the MIT License.
 
 ## Table of Contents
 
-- [Problem](#problem)
+- [Overview](#overview)
 - [Solution](#solution)
 - [Design](#design)
 - [Implementation Phases](#implementation-phases)
@@ -22,7 +22,7 @@ Licensed under the MIT License.
 
 ---
 
-## Problem
+## Overview
 
 - Data-dependent ops (`Range`, `Reshape -1`, `Expand`, `Loop` trip count, `Pad`, `ConstantOfShape`) need a few shape scalars host-accessible while the bulk compute stays on device.
 - The type system records none of this — residency is re-derived per-pass from the use graph, and crossings are hand-inserted in each converter.
