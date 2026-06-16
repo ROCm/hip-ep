@@ -222,6 +222,12 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         COMMAND ${CLANG_EXECUTABLE}
                 -c -emit-llvm -std=c++17
                 -D_CRT_SECURE_NO_WARNINGS
+                # Trim MSVC-CRT symbols the JIT can't resolve: _Init_thread_*
+                # (magic statics), sized operator delete, type_info vtable.
+                # LlvmIrJit shims the unsized delete; the rest go unused.
+                -fno-threadsafe-statics
+                -fno-sized-deallocation
+                -fno-rtti
                 $<$<CONFIG:Debug>:-D_DEBUG>
                 $<$<CONFIG:Debug>:-D_ITERATOR_DEBUG_LEVEL=2>
                 $<$<CONFIG:Debug>:-O0>
@@ -414,6 +420,63 @@ add_custom_target(HipRuntime
 set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc PARENT_SCOPE)
 
 add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
+
+# ============================================================================
+# STEP 6: Native current-stream accessor (NOT bitcode)
+# ============================================================================
+# The per-thread session-stream slot is compiled natively here, deliberately
+# kept out of runtime.bc. A thread_local inside runtime.bc would force the JIT
+# to lower emulated TLS (__emutls_get_address), which has no definition in the
+# JIT process. Instead the JIT'd runtime calls these accessors as ordinary
+# external functions: the host (EP DLL / hip-test / hip-inspect) defines them
+# (see LlvmIrJit absolute-symbol registration), and native model DLLs link
+# their own copy of this lib (CompilerDriver::discoverLibraries).
+add_library(hipdnn-ep-tls STATIC tls_stream.cpp)
+set_target_properties(hipdnn-ep-tls PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ============================================================================
+# STEP 7: Shared embedded runtime.bc (single source of truth)
+# ============================================================================
+# Both consumers need runtime.bc embedded as bytes:
+#   - the compiler (LLVMBackend::linkRuntimeModule, native producer path)
+#   - the EP / tools (LlvmIrJit, JIT load path)
+# Generate the C array ONCE here and expose it as a static lib both link,
+# instead of each target running its own xxd step. This keeps a single source
+# of truth and removes the latent duplicate-symbol hazard if a binary ever
+# links both consumers (each previously defined its own runtime_bc_data).
+# Note: each consuming binary still embeds its own copy (separate DLLs); this
+# consolidates the build logic, not the per-binary bytes.
+if(TARGET RuntimeBitcode)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+                --var runtime_bc_data
+                --output ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
+                ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc
+        COMMAND ${Python3_EXECUTABLE} -c
+                "import os; data = open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); bc_size = os.path.getsize('${CMAKE_CURRENT_BINARY_DIR}/runtime.bc'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t runtime_bc_data_size = {bc_size};\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp', 'w').write(data)"
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc RuntimeBitcode
+        COMMENT "Embedding runtime.bc (shared) via runtime_ir_data.cpp"
+        VERBATIM
+    )
+else()
+    # No clang at configure time -> empty bytes; consumers treat size 0 as a
+    # degraded/fatal mode but unrelated targets still build.
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp
+        "#include <cstddef>\n"
+        "extern \"C\" const unsigned char runtime_bc_data[] = {0};\n"
+        "extern \"C\" const size_t runtime_bc_data_size = 0;\n"
+    )
+endif()
+
+add_library(runtime-bc-embed STATIC ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp)
+set_target_properties(runtime-bc-embed PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(TARGET RuntimeBitcode)
+    add_dependencies(runtime-bc-embed RuntimeBitcode)
+endif()
 
 message(STATUS "Runtime library configuration:")
 message(STATUS "  Mode: ${BUILD_MOCK_RUNTIME}")

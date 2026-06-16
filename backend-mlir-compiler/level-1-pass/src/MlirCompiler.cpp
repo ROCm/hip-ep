@@ -46,11 +46,17 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
   std::ostringstream json;
   json << "{";
   json << "\"opt_level\": " << config.optLevel;
-  json << ", \"output_mode\": \"DLL\"";
   json << ", \"skip_constant_data\": "
        << (config.skipConstantData ? "true" : "false");
   json << ", \"use_output_allocator\": "
        << (config.useOutputAllocator ? "true" : "false");
+  // output_mode maps to the flatbuffers OutputMode enum
+  // (schemas/compilation_options.fbs). The flatbuffers JSON parser accepts
+  // the enum value name.
+  json << ", \"output_mode\": \""
+       << (config.artifactFormat == ArtifactFormat::NATIVE ? "NATIVE"
+                                                           : "LLVM_IR")
+       << "\"";
   json << "}";
   return json.str();
 }
@@ -76,9 +82,8 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   auto version = plugin->invoke<const char *>("hip_get_version");
   LOG(INFO) << "Plugin version: " << version;
 
-  // Generate temporary output path for compilation
-  // No extension: compiler derives output format from output_mode in options
-  // JSON
+  // Generate temporary output path for compilation. The compiler always
+  // emits bitcode; no extension required.
   std::string temp_output_path = mlir_compiler_utils::generateTempPath("");
 
   // Build JSON options string from config
