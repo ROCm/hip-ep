@@ -4,8 +4,8 @@
  */
 //===- ProjectorOpsRewrites.cpp - Pre-lowering rewrites for projector ops --==//
 //
-// The Gemma-3 vision encoder's `multi_modal_projector` block uses three ops
-// that have no direct HIP converters: `onnx.Pow`, `onnx.ReduceMean`, and
+// Some vision-encoder projector blocks (e.g. a `multi_modal_projector`) use
+// two ops here that have no direct HIP converters: `onnx.Pow` and
 // `onnx.AveragePool`. Rather than introduce new HIP dialect ops + runtime
 // kernels for each, we rewrite them in pre-lowering to compositions of ops
 // that ALREADY have converters:
@@ -13,10 +13,7 @@
 //   1. `Pow(x, c)` for small integer constants c -> chain of `Mul`s
 //      (c==2 -> Mul(x,x); c==3 -> Mul(x, Mul(x,x)); etc.). Sqrt special-cased
 //      for c==0.5.
-//   2. `ReduceMean(x, axes)` -> `ReduceSum(x, axes) / count` where `count`
-//      is the product of input dims along the reduce axes. Only fires when
-//      that count is compile-time-known (static along all reduce axes).
-//   3. `AveragePool(NCHW, kernel=K, stride=K, no pad)` -> Reshape ->
+//   2. `AveragePool(NCHW, kernel=K, stride=K, no pad)` -> Reshape ->
 //      Transpose -> ReduceMean. The 4-D NCHW input is first reshaped to
 //      6-D `[B, C, H/K, K, W/K, K]`, then transposed with perm
 //      `[0, 1, 2, 4, 3, 5]` to `[B, C, H/K, W/K, K, K]` so the K-K patch
@@ -39,17 +36,23 @@
 //      ensures the fast decomposition wins only when its preconditions
 //      are satisfied.
 //
-// All three rewrites run in the pre-lowering block of `ConvertOnnxToHipPass`,
+// These rewrites run in the pre-lowering block of `ConvertOnnxToHipPass`,
 // alongside `FastGeluFusionPatterns` in a fixed-point round loop (an emitted
 // op from one round may be the root of a rewrite in the next). ONNX constant
-// `value` attrs must still be
-// inline (lowerOnnxConstants has not run yet) so the scalar exponent of
-// Pow and the axes value of ReduceMean are readable.
+// `value` attrs must still be inline (lowerOnnxConstants has not run yet) so
+// the scalar exponent of Pow is readable.
+//
+// Note: `onnx.ReduceMean` is NOT rewritten here. It lowers directly to the
+// first-class `hip.reduce_mean` op (ReduceMeanConversion.cpp), whose runtime
+// kernel divides by the reduced-element count in-kernel -- so it needs no
+// compile-time-static reduce dim and no ONNX-level shape refinement. The
+// AveragePool decomposition below still emits an `onnx.ReduceMean`, which
+// then takes that direct path.
 //
 // Failure to rewrite returns `notifyMatchFailure` (silent at this layer).
-// For Pow / ReduceMean that leaves a dead-end `onnx.*` op. For AveragePool
-// the surviving op is converted to `hip.pool` by `PoolConversion.cpp` unless
-// it falls outside both the decomposition and the pool runtime's coverage.
+// For Pow that leaves a dead-end `onnx.*` op. For AveragePool the surviving
+// op is converted to `hip.pool` by `PoolConversion.cpp` unless it falls
+// outside both the decomposition and the pool runtime's coverage.
 //
 //===----------------------------------------------------------------------===//
 
@@ -63,8 +66,6 @@
 #define DEBUG_TYPE "projector-ops-rewrites"
 
 STATISTIC(NumPowRewrites, "onnx.Pow rewrites into Mul chains / Sqrt");
-STATISTIC(NumReduceMeanRewrites,
-          "onnx.ReduceMean rewrites into ReduceSum + Div");
 STATISTIC(NumAveragePoolRewrites,
           "onnx.AveragePool rewrites into Reshape + ReduceMean");
 STATISTIC(NumBroadcastDivRewrites,
@@ -169,125 +170,6 @@ struct PowToMul : public mlir::RewritePattern {
     }
 
     return rewriter.notifyMatchFailure(op, "pow.exp_not_supported");
-  }
-};
-
-//===----------------------------------------------------------------------===//
-// ReduceMean(x, axes) -> Div(ReduceSum(x, axes), N) where N = product of
-// input dims along the reduce axes.
-//===----------------------------------------------------------------------===//
-
-struct ReduceMeanToReduceSumDiv : public mlir::RewritePattern {
-  ReduceMeanToReduceSumDiv(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.ReduceMean", /*benefit=*/2, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    if (op->getNumResults() != 1)
-      return rewriter.notifyMatchFailure(op, "reducemean.arity");
-    mlir::Value data = op->getOperand(0);
-    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    auto outputType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!inputType || !outputType)
-      return rewriter.notifyMatchFailure(op, "reducemean.not_ranked");
-    int64_t rank = inputType.getRank();
-
-    // Collect reduce axes. ONNX ReduceMean opset 18+: axes is an input
-    // tensor. Older opsets: axes is an attribute. Handle both.
-    llvm::SmallVector<int64_t> axes;
-    bool axesFound = false;
-    if (op->getNumOperands() >= 2) {
-      mlir::Operation *axesDef = op->getOperand(1).getDefiningOp();
-      if (axesDef && axesDef->getName().getStringRef() == "onnx.Constant") {
-        if (auto attr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-                axesDef->getAttr("value"))) {
-          for (auto v : attr.getValues<llvm::APInt>())
-            axes.push_back(v.getSExtValue());
-          axesFound = true;
-        }
-      }
-    }
-    if (!axesFound) {
-      if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-        for (mlir::Attribute a : axesAttr) {
-          auto ia = mlir::dyn_cast<mlir::IntegerAttr>(a);
-          if (!ia)
-            return rewriter.notifyMatchFailure(op, "reducemean.axes_attr_kind");
-          axes.push_back(ia.getSInt());
-        }
-        axesFound = true;
-      }
-    }
-    if (!axesFound || axes.empty())
-      return rewriter.notifyMatchFailure(op, "reducemean.axes_not_found");
-
-    // Normalize negative axes; require all reduce dims static.
-    int64_t reduceCount = 1;
-    for (int64_t a : axes) {
-      int64_t n = a < 0 ? a + rank : a;
-      if (n < 0 || n >= rank)
-        return rewriter.notifyMatchFailure(op, "reducemean.axis_oob");
-      if (inputType.isDynamicDim(n))
-        return rewriter.notifyMatchFailure(op, "reducemean.reduce_dim_dynamic");
-      reduceCount *= inputType.getDimSize(n);
-    }
-    if (reduceCount <= 0)
-      return rewriter.notifyMatchFailure(op, "reducemean.zero_count");
-
-    mlir::Location loc = op->getLoc();
-
-    // Step 1: emit onnx.ReduceSum with the same operands / attrs (will use
-    // the existing converter). To avoid the axes-attr-vs-input difference
-    // re-tripping the converter, preserve the original op's operand layout.
-    mlir::OperationState sumState(loc, "onnx.ReduceSum");
-    sumState.addOperands(op->getOperands());
-    sumState.addTypes(outputType);
-    // Copy keepdims and noop_with_empty_axes attrs verbatim.
-    if (auto a = op->getAttrOfType<mlir::IntegerAttr>("keepdims"))
-      sumState.addAttribute("keepdims", a);
-    if (auto a = op->getAttrOfType<mlir::IntegerAttr>("noop_with_empty_axes"))
-      sumState.addAttribute("noop_with_empty_axes", a);
-    if (auto a = op->getAttrOfType<mlir::ArrayAttr>("axes"))
-      sumState.addAttribute("axes", a);
-    mlir::Value sum = rewriter.create(sumState)->getResult(0);
-
-    // Step 2: scalar fp constant `1/count` with the same element type as
-    // the sum. Multiply (faster than Div for fp16 on GPU + commutative).
-    mlir::Type elemType = outputType.getElementType();
-    if (!elemType.isF16() && !elemType.isF32() && !elemType.isBF16() &&
-        !elemType.isF64())
-      return rewriter.notifyMatchFailure(op, "reducemean.unsupported_dtype");
-    auto scalarType = mlir::RankedTensorType::get({}, elemType);
-    double invCount = 1.0 / static_cast<double>(reduceCount);
-    mlir::DenseElementsAttr scaleAttr;
-    if (elemType.isF32()) {
-      scaleAttr = mlir::DenseElementsAttr::get(scalarType,
-                                               static_cast<float>(invCount));
-    } else if (elemType.isF64()) {
-      scaleAttr = mlir::DenseElementsAttr::get(scalarType, invCount);
-    } else { // f16 or bf16: convert through fp32 with proper rounding.
-      llvm::APFloat f(static_cast<float>(invCount));
-      bool losesInfo = false;
-      f.convert(elemType.isF16() ? llvm::APFloat::IEEEhalf()
-                                 : llvm::APFloat::BFloat(),
-                llvm::APFloat::rmNearestTiesToEven, &losesInfo);
-      scaleAttr = mlir::DenseElementsAttr::get(scalarType, f);
-    }
-    mlir::OperationState constState(loc, "onnx.Constant");
-    constState.addTypes(scalarType);
-    constState.addAttribute("value", scaleAttr);
-    mlir::Value scale = rewriter.create(constState)->getResult(0);
-
-    mlir::OperationState mulState(loc, "onnx.Mul");
-    mulState.addOperands({sum, scale});
-    mulState.addTypes(outputType);
-    mlir::Value mean = rewriter.create(mulState)->getResult(0);
-
-    rewriter.replaceOp(op, mean);
-    ++NumReduceMeanRewrites;
-    return mlir::success();
   }
 };
 
@@ -813,8 +695,8 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
 
 void populateProjectorOpsRewritePatterns(mlir::RewritePatternSet &patterns,
                                          mlir::MLIRContext *ctx) {
-  patterns.add<PowToMul, ReduceMeanToReduceSumDiv, AveragePoolToReshapeMean,
-               BroadcastDivToMulReciprocal, PatchEmbedConvToGemm>(ctx);
+  patterns.add<PowToMul, AveragePoolToReshapeMean, BroadcastDivToMulReciprocal,
+               PatchEmbedConvToGemm>(ctx);
 }
 
 } // namespace hip
