@@ -983,6 +983,20 @@ void ReduceSumOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ReduceMeanOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMeanOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMeanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ReduceMaxOp: ins(data, axes), outs(output)
 //===----------------------------------------------------------------------===//
 

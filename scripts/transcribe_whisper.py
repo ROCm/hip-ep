@@ -46,12 +46,19 @@ sys.path.insert(0, str(REPO_ROOT / "test" / "python" / "whisper"))
 
 import whisper_infer  # noqa: E402
 from conftest import (  # noqa: E402
+    setup_jfk_sample,
     setup_whisper_fp16_model_dir,
     setup_whisper_model_dir,
 )
 
 MODEL_DIR = REPO_ROOT / "models" / "whisper-large-v3-onnx"
 MODEL_DIR_FP16 = REPO_ROOT / "models" / "whisper-large-v3-onnx-fp16"
+
+# Canonical location of the bundled jfk.wav demo clip (the path shown in the
+# quick-start). It is gitignored and fetched on demand, so a fresh checkout that
+# runs the headline `transcribe_whisper.py test/python/data/whisper/jfk.wav`
+# command needs us to download it rather than error out.
+JFK_SAMPLE = REPO_ROOT / "test" / "python" / "data" / "whisper" / "jfk.wav"
 
 
 def main() -> int:
@@ -84,10 +91,11 @@ def main() -> int:
         "--fp32",
         action="store_true",
         help="use the fp32 model instead of the default fp16. The DEFAULT is the "
-        "fp16 model (built locally via the OGA DML builder; body fp16, lm_head "
-        "fp32 so greedy is argmax-lossless) — it is faster than fp32 on GPU. Both "
-        "precisions must be built first via 'python build.py "
-        "--build-whisper-models' (see docs/whisper_quick_start.md).",
+        "fp16 model (body fp16, lm_head fp32 so greedy is argmax-lossless) — it is "
+        "faster than fp32 on GPU. The raw model auto-downloads from "
+        "huggingface.co/amd/whisper-large-v3-onnx-{fp16,fp32} on first use; a local "
+        "'python build.py --build-whisper-models' is the backup "
+        "(see docs/whisper_quick_start.md).",
     )
     ap.add_argument(
         "--metrics",
@@ -107,6 +115,15 @@ def main() -> int:
     args = ap.parse_args()
 
     audio_path = pathlib.Path(args.audio)
+    # The bundled jfk.wav demo clip is gitignored + fetched on demand. If the
+    # user passes that canonical path and it's not cached yet (fresh checkout),
+    # download it so the headline quick-start command works out of the box. Any
+    # OTHER missing path is a user error and still fails fast.
+    if not audio_path.exists() and audio_path.resolve() == JFK_SAMPLE.resolve():
+        print(f"[transcribe] fetching demo clip jfk.wav -> {audio_path}")
+        if not setup_jfk_sample(JFK_SAMPLE.parent):
+            print("[transcribe] ERROR: could not download jfk.wav (no network?)")
+            return 1
     if not audio_path.exists():
         print(f"[transcribe] ERROR: audio file not found: {audio_path}")
         return 1
@@ -120,8 +137,9 @@ def main() -> int:
     dtype = np.float16 if use_fp16 else np.float32
     model_dir = MODEL_DIR_FP16 if use_fp16 else MODEL_DIR
 
-    # The model must already be built (python build.py --build-whisper-models);
-    # the setup helpers are consume-only and raise FileNotFoundError if absent.
+    # The setup helpers auto-download the raw model from HF on first use (backup:
+    # python build.py --build-whisper-models) and raise FileNotFoundError if
+    # neither source is reachable.
     print(f"[transcribe] preparing {prec} model at {model_dir}")
     try:
         if use_fp16:
@@ -130,8 +148,6 @@ def main() -> int:
             setup_whisper_model_dir(model_dir)
     except FileNotFoundError as e:
         print(f"[transcribe] ERROR: {e}")
-        print("[transcribe] Build the model first:")
-        print("    python build.py --build-whisper-models")
         return 1
 
     print(f"[transcribe] loading audio features from {audio_path}")

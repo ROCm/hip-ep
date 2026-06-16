@@ -13,7 +13,7 @@ namespace {
 //   (data, axes, output, keepdims, noop_with_empty_axes)
 // signature, lowered to wrap_{op}.
 //
-// Handles: hip.reduce_sum, hip.reduce_max, hip.reduce_prod.
+// Handles: hip.reduce_sum, hip.reduce_mean, hip.reduce_max, hip.reduce_prod.
 //
 // All three runtime functions share the exact same calling convention:
 //   int wrap_reduce_*(RuntimeState* state, void* data, void* axes,
@@ -165,6 +165,8 @@ void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
   patterns.insert<ReduceOpLowering<ReduceSumOp>>(converter, kWrapReduceSum,
                                                  "reduce_sum");
+  patterns.insert<ReduceOpLowering<ReduceMeanOp>>(converter, kWrapReduceMean,
+                                                  "reduce_mean");
   patterns.insert<ReduceOpLowering<ReduceMaxOp>>(converter, kWrapReduceMax,
                                                  "reduce_max");
   patterns.insert<ReduceOpLowering<ReduceProdOp>>(converter, kWrapReduceProd,

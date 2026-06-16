@@ -458,6 +458,37 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     return rc;
   }
 
+  // Float/half Add/Mul/Min/Max fast path: a single broadcasting HIP kernel.
+  // MIOpen's miopenOpTensor is pathologically slow on gfx1151 for the
+  // vision-encoder elementwise shapes (~390 ms for a 6.3M-element fp16 op
+  // measured on SAM2.1's Hiera encoder); the custom kernel does the same work
+  // in well under a millisecond with fully coalesced output writes and native
+  // per-axis broadcasting (no Expand materialisation). bf16 and any future op
+  // not in {ADD,MUL,MIN,MAX} fall through to the MIOpen path below.
+  if ((data_type == HIPDNN_EP_DATATYPE_HALF ||
+       data_type == HIPDNN_EP_DATATYPE_FLOAT) &&
+      (tensor_op == HIPDNN_EP_TENSOR_OP_ADD ||
+       tensor_op == HIPDNN_EP_TENSOR_OP_MUL ||
+       tensor_op == HIPDNN_EP_TENSOR_OP_MIN ||
+       tensor_op == HIPDNN_EP_TENSOR_OP_MAX)) {
+    int bcast_op = (tensor_op == HIPDNN_EP_TENSOR_OP_ADD)   ? 0
+                   : (tensor_op == HIPDNN_EP_TENSOR_OP_MUL) ? 1
+                   : (tensor_op == HIPDNN_EP_TENSOR_OP_MIN) ? 2
+                                                            : 3;
+    int hip_dtype = hipdnn_to_hip_dtype(data_type);
+    void *stream = hipdnn_ep_state_get_stream(state);
+    const int64_t lhs_shape4[4] = {lhs_n, lhs_c, lhs_h, lhs_w};
+    const int64_t rhs_shape4[4] = {rhs_n, rhs_c, rhs_h, rhs_w};
+    const int64_t out_shape4[4] = {out_n, out_c, out_h, out_w};
+    int rc = hip_elementwise_binary_bcast(stream, lhs, rhs, output, lhs_shape4,
+                                          rhs_shape4, out_shape4, bcast_op,
+                                          hip_dtype);
+    // rc == -2: output volume exceeds the kernel's 32-bit index range; fall
+    // back to the MIOpen path below. Any other rc is terminal.
+    if (rc != -2)
+      return rc;
+  }
+
   // MIOpen's miopenOpTensor requires A.shape == C.shape; only B may broadcast
   // (dim==1) into A. Caller-provided lhs/rhs ordering is dictated by the
   // original ONNX graph and is not normalized by the lowering pass, so when
