@@ -9,11 +9,9 @@
 #include "llvm/ADT/TypeSwitch.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
-#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
@@ -1583,88 +1581,6 @@ void ReadbackScalarOp::getEffects(
     effects.emplace_back(MemoryEffects::Read::get(),
                          &getOperation()->getOpOperand(1),
                          SideEffects::DefaultResource::get());
-}
-
-// Eliminate a redundant readback whose source scalar was assembled host-side
-// by `tensor.from_elements`. The dynamic-shape converters (Expand / Range /
-// Slice / Reshape) build a shape vector with `tensor.from_elements %a, %b, ...`
-// from host index arithmetic (`index_cast` of `tensor.dim`, constants), then
-// read individual entries back to the host through a D2H copy + stream sync to
-// drive `tensor.empty` extents. But each entry IS the corresponding
-// `from_elements` operand — a value that never lived on the device — so the
-// copy + sync is pure overhead. Recover that operand and drop the readback.
-//
-// Tensor-level only: once `from_elements` is bufferized into `alloc` + `store`
-// the host origin is gone, so the `RankedTensorType` guard makes this a no-op
-// post-bufferize (the memref operand can no longer be traced).
-//
-// Before:
-//   %fe = tensor.from_elements %a, %b, %c4096 : tensor<3xi64>
-//   %es = tensor.extract_slice %fe[1] [1] [1] : tensor<3xi64> to tensor<1xi64>
-//   %s  = tensor.collapse_shape %es [] : tensor<1xi64> into tensor<i64>
-//   %v  = hip.readback_scalar(%ctx, %s : tensor<i64>) -> i64
-// After (uses of %v rewritten to %b; the slice/collapse/readback DCE away):
-//   %fe = tensor.from_elements %a, %b, %c4096 : tensor<3xi64>
-namespace {
-struct ReadbackScalarFromElements : public OpRewritePattern<ReadbackScalarOp> {
-  using OpRewritePattern<ReadbackScalarOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(ReadbackScalarOp op,
-                                PatternRewriter &rewriter) const override {
-    Value scalar = op.getScalar();
-    // Tensor form only; a bufferized memref operand cannot be traced to a host
-    // SSA value.
-    if (!isa<RankedTensorType>(scalar.getType()))
-      return failure();
-
-    // Peel an optional `collapse_shape` (tensor<1xT> -> tensor<T>). The
-    // single-element case may already have been folded by tensor
-    // canonicalization into a rank-0 `from_elements` with no collapse, so this
-    // step is optional.
-    Value vec = scalar;
-    if (auto collapse = vec.getDefiningOp<tensor::CollapseShapeOp>())
-      vec = collapse.getSrc();
-
-    // Optionally peel a static single-element `extract_slice %vec[i] [1] [1]`;
-    // otherwise `vec` is itself the (1-element or rank-0) source.
-    int64_t linearIdx = 0;
-    if (auto es = vec.getDefiningOp<tensor::ExtractSliceOp>()) {
-      ArrayRef<int64_t> offsets = es.getStaticOffsets();
-      ArrayRef<int64_t> sizes = es.getStaticSizes();
-      ArrayRef<int64_t> strides = es.getStaticStrides();
-      if (offsets.size() != 1 || ShapedType::isDynamic(offsets[0]))
-        return failure();
-      if (sizes.size() != 1 || sizes[0] != 1)
-        return failure();
-      if (strides.size() != 1 || strides[0] != 1)
-        return failure();
-      linearIdx = offsets[0];
-      vec = es.getSource();
-    }
-
-    auto fromElements = vec.getDefiningOp<tensor::FromElementsOp>();
-    if (!fromElements)
-      return failure();
-    if (linearIdx < 0 ||
-        linearIdx >= static_cast<int64_t>(fromElements.getElements().size()))
-      return failure();
-
-    Value host = fromElements.getElements()[linearIdx];
-    // `from_elements` element type equals the readback's result type by
-    // construction; guard against any unexpected mismatch rather than inserting
-    // a cast.
-    if (host.getType() != op.getValue().getType())
-      return failure();
-
-    rewriter.replaceOp(op, host);
-    return success();
-  }
-};
-} // namespace
-
-void ReadbackScalarOp::getCanonicalizationPatterns(RewritePatternSet &results,
-                                                   MLIRContext *context) {
-  results.add<ReadbackScalarFromElements>(context);
 }
 
 //===----------------------------------------------------------------------===//
