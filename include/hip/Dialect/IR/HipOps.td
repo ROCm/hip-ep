@@ -3503,5 +3503,11 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
+
+  // Look through a host-built `tensor.from_elements` shape vector to recover
+  // the scalar being read back, eliminating a redundant D2H copy + stream
+  // sync (the value never came from a kernel). Pattern in
+  // `ReadbackScalarOp::getCanonicalizationPatterns` (lib/Dialect/IR/HipDialect.cpp).
+  let hasCanonicalizer = 1;
 }
 #endif // HIP_OPS
