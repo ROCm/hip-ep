@@ -21,6 +21,15 @@ namespace {
 /// bufferization. Building hip.less / hip.not here keeps the lowering
 /// self-contained. No new hip.* op, lowering or runtime is required (hip.less
 /// and hip.not already exist).
+///
+/// KNOWN LIMITATION (NaN): the `A <= B  <=>  !(B < A)` identity holds only for
+/// a total order. With NaN operands it deviates from ONNX/IEEE-754: ONNX
+/// requires `x <= NaN` to be false, but `hip.less` (C++ `<`) returns false for
+/// any NaN comparison, so `!(B < A)` yields true. This is exact for integer
+/// inputs (the dominant index/mask use) and for NaN-free float models; float
+/// models that can produce NaN are not supported by this decomposition. A
+/// NaN-correct lowering would need e.g. `(A < B) || (A == B)` (extra ops) or a
+/// dedicated `<=` kernel.
 struct LessOrEqualDecompose : public mlir::RewritePattern {
   LessOrEqualDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.LessOrEqual", /*benefit=*/1, ctx) {}
