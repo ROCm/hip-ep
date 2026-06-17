@@ -82,6 +82,15 @@ def main():
         "hip_custom_kernels.lib.",
     )
     ap.add_argument(
+        "--optional-dll",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Externally-built runtime library to bundle if present (repeatable), "
+        "e.g. the amdgpu-ep/hipep-backend DLLs built in a separate repo. Missing "
+        "paths warn instead of failing, so a plain EP-only wheel build still works.",
+    )
+    ap.add_argument(
         "--with-crt",
         action="store_true",
         help="Also copy MSVC/WinSDK CRT import libs (Windows).",
@@ -106,6 +115,14 @@ def main():
             print(f"  packaged import lib: {lib.name} <- {lib}")
         else:
             print(f"  WARNING: extra import lib not found: {lib}")
+
+    for raw in args.optional_dll:
+        lib = Path(raw)
+        if lib.is_file():
+            shutil.copy2(lib, dest / lib.name)
+            print(f"  packaged optional dll: {lib.name} <- {lib}")
+        else:
+            print(f"  WARNING: optional dll not found (skipping): {lib}")
 
     if args.with_crt:
         _copy_crt_libs(dest)

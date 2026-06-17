@@ -81,6 +81,20 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   endif()
 endforeach()
 
+# Externally-built DLLs to also bundle next to the EP (absolute paths, ;-list).
+# Used to ship the AMD GPU umbrella chain (amdgpu-ep.dll + hipep-backend.dll),
+# which is built in the separate onnxruntime-ep-amdgpu repo and has no target
+# here. Passed as --optional-dll so a plain EP-only wheel (var unset) is
+# unaffected and a missing path warns instead of failing. The caller (CI) is
+# responsible for building those DLLs before this wheel target runs.
+set(MORPHIZEN_WHEEL_EXTRA_DLLS "" CACHE STRING
+  "Absolute paths (;-list) of externally-built DLLs to bundle into the wheel")
+foreach(_extra IN LISTS MORPHIZEN_WHEEL_EXTRA_DLLS)
+  if(_extra)
+    list(APPEND _dll_args "--optional-dll" "${_extra}")
+  endif()
+endforeach()
+
 add_custom_target(wheel ALL
   # 1. Stage the package sources into the build dir (keep source tree clean).
   COMMAND ${CMAKE_COMMAND} -E copy_directory
