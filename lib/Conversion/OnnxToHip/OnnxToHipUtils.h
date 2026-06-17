@@ -97,6 +97,53 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
+/// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
+/// Mean / Prod / ...).
+///
+/// Usually this is just the op's own result type. The ONNX importer can,
+/// however, leave a reduction result UNRANKED (`tensor<*xT>`) when the input
+/// carries dynamic symbolic dims and the axes are not explicit -- e.g. Phi's
+/// `ReduceMax(position_ids)` feeding `GreaterOrEqual`. A bare
+/// `mlir::cast<RankedTensorType>` on an unranked type is unchecked in release
+/// builds and dereferences garbage -> crash. In that case, infer the result
+/// type from the (ranked) input + statically-known reduced axes + keepdims,
+/// per ONNX reduction shape semantics:
+///   keepdims=1: reduced axes become size 1, other dims preserved.
+///   keepdims=0: reduced axes are dropped.
+///
+/// \p reducedAxes          reduced axis indices (may be negative; normalized
+///                         here). For the all-axes default the caller passes
+///                         every axis; for a noop (empty axes) it passes none.
+/// \p axesStaticallyKnown  false when axes are only known at runtime, in which
+///                         case an unranked result cannot be inferred.
+/// Returns failure only when the result is unranked AND cannot be inferred
+/// (unranked/absent input type, or runtime-only axes).
+inline mlir::FailureOr<mlir::RankedTensorType>
+inferReduceResultType(mlir::Operation *op, mlir::Value data,
+                      llvm::ArrayRef<int64_t> reducedAxes,
+                      bool axesStaticallyKnown, int64_t keepdims) {
+  if (auto ranked =
+          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType()))
+    return ranked;
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!inputType || !axesStaticallyKnown)
+    return mlir::failure();
+  int64_t rank = inputType.getRank();
+  llvm::SmallVector<bool> reduced(rank, false);
+  for (int64_t a : reducedAxes)
+    reduced[a < 0 ? a + rank : a] = true;
+  llvm::SmallVector<int64_t> outShape;
+  for (int64_t i = 0; i < rank; ++i) {
+    if (reduced[i]) {
+      if (keepdims)
+        outShape.push_back(1);
+    } else {
+      outShape.push_back(inputType.getDimSize(i));
+    }
+  }
+  return mlir::RankedTensorType::get(outShape, inputType.getElementType());
+}
+
 /// Create a tensor.empty for a DPS init whose shape is the NumPy-style
 /// broadcast of \p operands. Operand shapes are right-aligned with the
 /// result. For each dynamic dimension of \p resultType, the size is taken
