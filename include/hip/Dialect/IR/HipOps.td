@@ -2051,6 +2051,49 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
   }];
 }
 
+def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
+  let summary = "Reduce tensor by averaging along axes";
+  let description = [{
+    Computes the mean of input tensor elements along the specified axes.
+    Implements the ONNX ReduceMean operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    The division by the reduced-element count is performed inside the runtime
+    kernel (`reduce_size = num_input / num_output`), so this op is tolerant of
+    a dynamic reduce axis -- no compile-time static reduce dim is required.
+    Result dims are refined post-conversion by `--hip-infer-shapes` through the
+    upstream MLIR `ReifyRankedShapedTypeOpInterface` / `InferTypeOpInterface`
+    that `Hip_DpsOp_Reduction` implements (no ONNX-level shape refinement
+    needed).
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_mean(%ctx) ins(%data, %axes : memref<1x128xf16, 1>, memref<i64, 1>)
+                          outs(%output : memref<1x1xf16, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
   let summary = "Reduce tensor by taking maximum along axes";
   let description = [{
@@ -3473,6 +3516,53 @@ def Hip_ReadbackDimOp : Hip_Op<"readback_dim",
 
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($dim)
+  }];
+}
+
+// hip.readback_scalar : synchronize the stream and read a single
+// device-resident scalar of ARBITRARY element type back to a host scalar of
+// the same type. The general-purpose sibling of `hip.readback_dim` (which is
+// specialised to a non-negative i32 extent and returns `index`): this op
+// preserves the operand's element type (i64 / f32 / f16 / ...) and is used
+// where the host needs the actual value — e.g. the limit/start/delta of a
+// data-dependent `onnx.Range` whose trip count is computed host-side from
+// signed integers or floats.
+//
+// Like `hip.readback_dim` it performs a device->host copy plus a stream
+// synchronization, so it is NOT `Pure`/speculatable and must stay below the
+// kernel that produced `scalar` in program order. A bare `tensor.extract` /
+// `memref.load` of a GPU-written scalar is incorrect on targets where the pool
+// is true device memory: the host read races / reads stale memory and yields a
+// zero count, collapsing the dynamic dimension. (It accidentally works where
+// the pool is UMA-mapped host-accessible memory.)
+//
+// Before (tensor form, after convert-onnx-to-hip):
+//   %v = hip.readback_scalar(%ctx, %limit : tensor<i64>) -> i64
+// After bufferize:
+//   %v = hip.readback_scalar(%ctx, %limit : memref<i64, 1>) -> i64
+def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize and read a device scalar into a host scalar of the "
+                "same element type";
+  let description = [{
+    Reads the single value stored in the device-resident `scalar` buffer back
+    to the host as a value of the SAME element type, after synchronizing the
+    GPU stream so the kernel that wrote `scalar` is guaranteed to have
+    completed.
+
+    Has device->host copy + stream-synchronization side effects; it is not
+    speculative and must not be hoisted across the kernel that produces
+    `scalar`.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$scalar
+  );
+  let results = (outs AnyTypeOf<[AnyInteger, AnyFloat, Index]>:$value);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
 }
 #endif // HIP_OPS

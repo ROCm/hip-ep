@@ -18,6 +18,7 @@
 #include "flatbuffers/flatbuffers.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/artifact_abi.h"
 #include "hip/debug_log.h"
 #include "hip/flatbuffers_json.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -206,7 +207,7 @@ void generateMetadataGlobal(ModuleOp module, const std::string &jsonStr) {
   builder.setInsertionPoint(&module.getBody()->front());
   LLVM::GlobalOp::create(builder, module.getLoc(), arrayType,
                          /*isConstant=*/true, LLVM::Linkage::Internal,
-                         "__metadata_json",
+                         hipdnn::abi::kMetadataJsonGlobal,
                          builder.getStringAttr(jsonStr + '\0'));
 }
 
@@ -226,7 +227,8 @@ void generateMetadataBlobGlobal(ModuleOp module,
                           blob.size());
   LLVM::GlobalOp::create(builder, module.getLoc(), arrayType,
                          /*isConstant=*/true, LLVM::Linkage::Internal,
-                         "__metadata_blob", builder.getStringAttr(blobRef));
+                         hipdnn::abi::kMetadataBlobGlobal,
+                         builder.getStringAttr(blobRef));
 }
 
 /// Generate inference_get_metadata_json() function.
@@ -247,15 +249,15 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
   auto funcType = LLVM::LLVMFunctionType::get(ptrType, {});
 
   auto funcOp = LLVM::LLVMFuncOp::create(
-      builder, loc, "inference_get_metadata_json", funcType);
+      builder, loc, hipdnn::abi::kInferenceGetMetadataJson, funcType);
   funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
   funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
   Block *entry = funcOp.addEntryBlock(builder);
   builder.setInsertionPointToStart(entry);
 
-  Value addr =
-      LLVM::AddressOfOp::create(builder, loc, ptrType, "__metadata_json");
+  Value addr = LLVM::AddressOfOp::create(builder, loc, ptrType,
+                                         hipdnn::abi::kMetadataJsonGlobal);
   LLVM::ReturnOp::create(builder, loc, addr);
 }
 
@@ -461,6 +463,7 @@ private:
         {"hipdnn_ep_stream_sync", i32, {ptr}},
         {"hipdnn_ep_state_reset_error_flag", i32, {ptr}},
         {"hipdnn_ep_state_read_and_clear_error_flag", i32, {ptr}},
+        {"hipdnn_ep_runtime_begin_compute", vd, {ptr}},
     };
   }
 
@@ -487,10 +490,11 @@ private:
     Type i32Type = IntegerType::get(ctx, 32);
     Type i64Type = IntegerType::get(ctx, 64);
 
-    if (module.lookupSymbol<LLVM::LLVMFuncOp>("inference_init") ||
-        module.lookupSymbol<LLVM::LLVMFuncOp>("inference_compute") ||
-        module.lookupSymbol<LLVM::LLVMFuncOp>("inference_cleanup") ||
-        module.lookupSymbol<LLVM::LLVMFuncOp>("inference_get_metadata_json")) {
+    if (module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceInit) ||
+        module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceCompute) ||
+        module.lookupSymbol<LLVM::LLVMFuncOp>(hipdnn::abi::kInferenceCleanup) ||
+        module.lookupSymbol<LLVM::LLVMFuncOp>(
+            hipdnn::abi::kInferenceGetMetadataJson)) {
       COMPILER_DEBUG_LOG(
           "[GenerateInterface] Interface functions already exist. "
           << "Pass already ran.\n");
@@ -590,8 +594,8 @@ private:
     SmallVector<Type> paramTypes = {ptrType, ptrType};
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
-    auto funcOp =
-        LLVM::LLVMFuncOp::create(builder, loc, "inference_init", funcType);
+    auto funcOp = LLVM::LLVMFuncOp::create(
+        builder, loc, hipdnn::abi::kInferenceInit, funcType);
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
@@ -601,8 +605,8 @@ private:
     Value outStatePtr = entryBlock->getArgument(0);
     Value fsPtr = entryBlock->getArgument(1);
 
-    Value blobPtr =
-        LLVM::AddressOfOp::create(builder, loc, ptrType, "__metadata_blob");
+    Value blobPtr = LLVM::AddressOfOp::create(builder, loc, ptrType,
+                                              hipdnn::abi::kMetadataBlobGlobal);
     Value blobSizeVal = LLVM::ConstantOp::create(
         builder, loc, i64Type, builder.getI64IntegerAttr((int64_t)blobSize));
 
@@ -724,8 +728,8 @@ private:
                       : SmallVector<Type>{ptrType, ptrType, ptrType};
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
-    auto funcOp =
-        LLVM::LLVMFuncOp::create(builder, loc, "inference_compute", funcType);
+    auto funcOp = LLVM::LLVMFuncOp::create(
+        builder, loc, hipdnn::abi::kInferenceCompute, funcType);
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
@@ -733,6 +737,29 @@ private:
     builder.setInsertionPointToStart(entryBlock);
 
     Value state = entryBlock->getArgument(0);
+
+    // Re-publish THIS state's stream as the thread-local "current stream"
+    // before any op runs. The in-tree memrefCopy (MLIR memref.copy lowering,
+    // ABI-fixed signature with no `state` arg) issues its D2D copies on that
+    // thread-local; it is otherwise only set by the EP's per-Compute
+    // begin_compute hook. When several inference sessions (e.g. a dynamic
+    // model's shape/prefill/decode specializations) are backed by ONE
+    // model.dll, they share this single thread-local but each owns a DISTINCT
+    // hipStream. Without this re-publish, a memref.copy in one specialization's
+    // main_graph can run on a different specialization's stream than the
+    // consuming kernels (which take `state`'s stream) -> unordered
+    // producer/consumer -> nondeterministic data race on the copied buffer. It
+    // only manifests while several specializations are concurrently live; an
+    // isolated single-session run serializes coincidentally and hides it.
+    // Binding it here makes every main_graph invocation's copies use its own
+    // stream. begin_compute also resets the per-Compute GQA seqlens_k cache,
+    // which is correct at compute entry; the EP's own begin_compute call is
+    // then a harmless idempotent repeat.
+    auto beginComputeFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
+        "hipdnn_ep_runtime_begin_compute");
+    if (beginComputeFunc)
+      LLVM::CallOp::create(builder, loc, beginComputeFunc, ValueRange{state});
+
     Value inputsSpanPtr = entryBlock->getArgument(1);
     // outputsSpanPtr is arg 2 in classic mode only; allocator mode has no
     // outputs span (outputs are allocated in-graph).
@@ -1005,8 +1032,8 @@ private:
     SmallVector<Type> paramTypes = {ptrType};
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
-    auto funcOp =
-        LLVM::LLVMFuncOp::create(builder, loc, "inference_cleanup", funcType);
+    auto funcOp = LLVM::LLVMFuncOp::create(
+        builder, loc, hipdnn::abi::kInferenceCleanup, funcType);
     funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 

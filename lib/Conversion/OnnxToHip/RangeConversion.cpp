@@ -199,12 +199,18 @@ struct RangeToHip : public RewritePattern {
     if (failed(verifyConstantDeltaNonZero(op, op->getOperand(2), elemTy)))
       return failure();
 
-    Value startE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(0),
-                                             ValueRange{});
-    Value limitE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(1),
-                                             ValueRange{});
-    Value deltaE = tensor::ExtractOp::create(rewriter, loc, op->getOperand(2),
-                                             ValueRange{});
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (failed(ctxOrFailure))
+      return failure();
+    Value ctx = *ctxOrFailure;
+
+    // Read start/limit/delta to host SSA values for the trip-count arithmetic.
+    // Constants fold; GPU-computed operands go through a synchronized
+    // hip.readback_scalar (see ReadbackScalar.h for why a plain tensor.extract
+    // is a correctness bug on true-device-memory targets).
+    Value startE = readbackScalarToHost(rewriter, loc, ctx, op->getOperand(0));
+    Value limitE = readbackScalarToHost(rewriter, loc, ctx, op->getOperand(1));
+    Value deltaE = readbackScalarToHost(rewriter, loc, ctx, op->getOperand(2));
 
     Value len = llvm::TypeSwitch<Type, Value>(elemTy)
                     .Case<IntegerType>([&](IntegerType ity) {
@@ -218,11 +224,6 @@ struct RangeToHip : public RewritePattern {
                     .Default([&](Type) { return Value(); });
     if (!len)
       return failure();
-
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (failed(ctxOrFailure))
-      return failure();
-    Value ctx = *ctxOrFailure;
 
     Value init;
     if (resultType.isDynamicDim(0)) {

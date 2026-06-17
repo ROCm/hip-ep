@@ -44,6 +44,7 @@ add_library(HipToLLVM STATIC
   ScatterNDLowering.cpp
   NonZeroLowering.cpp
   ReadbackDimLowering.cpp
+  ReadbackScalarLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
   PoolLowering.cpp

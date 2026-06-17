@@ -983,6 +983,20 @@ void ReduceSumOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ReduceMeanOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMeanOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMeanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ReduceMaxOp: ins(data, axes), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1565,6 +1579,16 @@ void NonZeroOp::getEffects(
 // the Read-after-Write against the producing kernel's write to the same buffer
 // keeps it correctly ordered (and, with no speculatable trait, un-hoistable).
 void ReadbackDimOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Operand order is (ctx, scalar); attach the Read to the scalar operand.
+  if (isa<MemRefType>(getScalar().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         &getOperation()->getOpOperand(1),
+                         SideEffects::DefaultResource::get());
+}
+
+void ReadbackScalarOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   // Operand order is (ctx, scalar); attach the Read to the scalar operand.

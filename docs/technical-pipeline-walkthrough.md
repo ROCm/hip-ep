@@ -21,13 +21,21 @@ Five DLLs participate in the end-to-end flow:
 | DLL | Built by | Role |
 |-----|----------|------|
 | `onnxruntime.dll` | ORT build | The inference framework |
-| `onnxruntime_morphizen_ep.dll` | This repo (MorphiZen + ort-bridge) | Execution Provider — ORT's plugin interface |
-| `hip-compiler.dll` | This repo (MLIR pipeline) | Compiles ONNX MLIR → native model DLL |
+| `onnxruntime_morphizen_ep.dll` | This repo (MorphiZen + ort-bridge) | Execution Provider — ORT's plugin interface; embeds `runtime.bc` and JIT-loads per-model bitcode in-process via `LlvmIrJit` |
+| `hip-compiler.dll` | This repo (MLIR pipeline) | Compiles ONNX MLIR → OS-portable per-model LLVM bitcode (`.bc`) |
 | `hipdnn_graph_runtime.dll` | This repo (runtime lib) | C ABI for hipDNN graph execution at inference time |
 | `hipdnn_backend.dll` | TheRock SDK | The actual hipDNN implementation (wraps MIOpen) |
 
-Plus a **temporary `model.dll`** generated at session creation time, containing the
-JIT-compiled inference code for the specific model.
+Plus a **per-model LLVM bitcode artifact** (`.bc`, stored in the EPContext tar)
+generated at session creation. It is OS-portable (no triple, no data layout, no
+MSVC/glibc symbols); the EP DLL JITs it in-process at session creation alongside
+its embedded `runtime.bc`. No per-model DLL is written to disk and no
+`LoadLibrary` call is made at inference time — a hard requirement for shipping
+under Microsoft's signed-DLL-only loading policy.
+
+Per-arch GPU kernels ship as side-by-side `custom_kernels_<arch>.{dll,so}` next
+to the EP binary; `LlvmIrJit` `dlopen`s the matching variant at JIT init based
+on the device's `gcnArchName`.
 
 ---
 
@@ -102,10 +110,11 @@ hip-compiler.dll
   │      ├── parseSourceFile        (MLIR bytecode → ONNX dialect)
   │      ├── runMLIRPasses          (the full pipeline — see Section 3)
   │      ├── translateToLLVMIR      (LLVM dialect → LLVM IR)
-  │      ├── link EP runtime        (hipdnn_ep_runtime + hipdnn_graph_runtime)
-  │      └── emit model.dll         (+ model.constants.bin)
+  │      ├── optimizeLLVMIR         (target-independent PerModule O0-O3)
+  │      ├── stripTargetMetadata    (clear triple + data layout for OS portability)
+  │      └── emit model.bc          (+ model.constants.bin sidecar)
   ▼
-Temporary model.dll  (written to disk via MorphiZen FileSystem)
+Per-model LLVM bitcode  (written via MorphiZen FileSystem into the EPContext tar)
 ```
 
 **File:** `backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp`
@@ -126,30 +135,35 @@ auto result = func(mlir_bytecode.data(), mlir_bytecode.size(),
 
 **File:** `lib/CInterface/CompilerAPI.cpp`
 The `hip_compile_with_fs` export delegates to `CompilerDriver`, which runs the
-full MLIR pass pipeline and emits the model DLL.
+full MLIR pass pipeline and emits the per-model LLVM bitcode. The producer does
+NOT link `runtime.bc` into the per-model module — `runtime.bc` is OS-specific
+(MSVC vs glibc CRT) and is JIT-loaded as a separate module on the consumer side
+inside the EP DLL, which keeps the per-model artifact OS-portable.
 
-The `GenerateInterfacePass` (the last MLIR pass) emits three exported functions
-in the model DLL:
+The `GenerateInterfacePass` (the last MLIR pass) emits four exported symbols
+in the per-model bitcode:
 
 | Export | Purpose |
 |--------|---------|
 | `inference_init(state**, fs*)` | Allocate GPU memory, load constants, set up buffer pool |
 | `inference_compute(state*, inputs*, outputs*)` | Run the graph on GPU |
 | `inference_cleanup(state*)` | Free GPU resources |
+| `inference_get_metadata_json()` | Return embedded model metadata as JSON (used by `hip-test`/`hip-inspect`) |
 
 ### Phase C: Inference Execution (per-run)
 
-After compilation, MorphiZen's custom op loads the model DLL and calls into it
-on every inference request:
+After compilation, MorphiZen's custom op JIT-loads the per-model bitcode in
+the EP DLL's address space (no temp file, no `LoadLibrary`) and calls into the
+JITted code on every inference request:
 
 ```
 ORT calls MlirCustomOp::Compute()
   │  marshal ORT tensors → span_t (pointer + shape + size)
   ▼
 InferenceState::compute(inputs, outputs)
-  │  calls inference_compute(state, &inputs, &outputs) in model.dll
+  │  calls inference_compute(state, &inputs, &outputs) (JITted symbol)
   ▼
-model.dll  (the generated code from the MLIR pipeline)
+JITted in-memory module  (per-model bitcode + runtime.bc, single LLJIT JITDylib)
   │  inference_compute:
   │    ├── hipdnn_ep_tensor_prepare_input   → hipMemcpyH2D (host → GPU)
   │    ├── hipdnn_ep_tensor_prepare_output  → allocate GPU output buffer
@@ -168,14 +182,15 @@ Results back to ORT
 
 **File:** `backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp`
 ```cpp
-// During session init — load model DLL and call inference_init
-auto init_fn = plugin->get_method<int, void**, void*>("inference_init");
+// During session init — JIT the per-model bitcode and call inference_init
+auto jit = LlvmIrJit::create(bitcode_bytes, "model_compiled");
+auto init_fn = jit->get_method<int, void**, void*>("inference_init");
 int ret = init_fn(&state, static_cast<void*>(fs));
 
-// Per-run — call inference_compute
+// Per-run — call inference_compute (JITted symbol)
 int InferenceState::compute(span_t* inputs, span_t* outputs) const {
     auto compute_fn =
-        plugin_->get_method<int, void*, span_t*, span_t*>("inference_compute");
+        jit_->get_method<int, void*, span_t*, span_t*>("inference_compute");
     return compute_fn(state_, inputs, outputs);
 }
 ```
@@ -349,13 +364,13 @@ which retrieve GPU pointers from the pre-loaded constants buffer:
 
 Lowers all HIP dialect ops to LLVM dialect — function calls to the EP runtime:
 
-| HIP op | LLVM call target | Runtime library |
+| HIP op | LLVM call target | Resolution |
 |--------|-----------------|-----------------|
-| `hip.hipdnn_graph` | `hipdnn_graph_execute(ctx, graph_id, num_tensors, uids, ptrs)` | hipdnn_graph_runtime.dll |
-| `hip.matmul` | `wrap_hipblasLtMatmul(ctx, A, B, C, M, N, K, batch, elem_size)` | EP runtime (linked into model.dll) |
-| `hip.sigmoid` | `wrap_miopenActivationForward(ctx, in, out, num_elems, alpha, beta)` | EP runtime (linked into model.dll) |
-| `hip.get_pool` | `hipdnn_ep_get_pool_base(ctx, domain_id, size)` | EP runtime |
-| `hip.get_constant` | `hipdnn_ep_constant_get(ctx, index)` | EP runtime |
+| `hip.hipdnn_graph` | `hipdnn_graph_execute(ctx, graph_id, num_tensors, uids, ptrs)` | hipdnn_graph_runtime.dll (process search generator) |
+| `hip.matmul` | `wrap_hipblasLtMatmul(ctx, A, B, C, M, N, K, batch, elem_size)` | runtime.bc (JIT-loaded into the same JITDylib) |
+| `hip.sigmoid` | `wrap_miopenActivationForward(ctx, in, out, num_elems, alpha, beta)` | runtime.bc |
+| `hip.get_pool` | `hipdnn_ep_get_pool_base(ctx, domain_id, size)` | runtime.bc |
+| `hip.get_constant` | `hipdnn_ep_constant_get(ctx, index)` | runtime.bc |
 
 The function signature is lowered to the C ABI with explicit memref descriptors
 (base pointer, aligned pointer, offset, sizes, strides).
@@ -383,37 +398,48 @@ Generates the three public entry points (`inference_init`, `inference_compute`,
 
 ---
 
-## 4. Post-MLIR: LLVM IR to Native DLL
+## 4. Post-MLIR: LLVM IR to OS-Portable Bitcode
 
-The IR dump ends after `GenerateInterfacePass`, but there are 5 more steps that happen
-**outside** the MLIR pass pipeline, inside `CompilerDriver::compileImpl`:
+The IR dump ends after `GenerateInterfacePass`. The remaining producer-side steps
+happen inside `CompilerDriver::compileImpl`; the JIT-load + symbol-resolve steps
+happen later, on the consumer side, inside the EP DLL:
 
 ```
 MLIR LLVM Dialect IR  (what ir_dump.mlir shows)
         │
         │  (1) translateToLLVMIR     — MLIR LLVM dialect → actual LLVM IR (llvm::Module)
         ▼
-   LLVM IR  (in-memory)
+   LLVM IR  (in-memory; external decls for wrap_*, hipdnn_ep_*, hip_* kept)
         │
-        │  (2) linkRuntime           — link EP runtime bitcode (function bodies for
-        │                              wrap_miopenConvolutionForward, wrap_hipblasLtMatmul,
-        │                              hipdnn_ep_tensor_prepare_input, etc.)
-        ▼
-   LLVM IR + runtime
-        │
-        │  (3) optimizeLLVMIR        — LLVM optimization passes (O2/O3)
+        │  (2) optimizeLLVMIR        — target-independent PerModule O0-O3
         ▼
    Optimized LLVM IR
         │
-        │  (4) compileToObject       — LLVM TargetMachine emits native x86-64 COFF
+        │  (3) emitLlvmIr           — strip triple/datalayout for OS portability,
+        │                              then llvm::WriteBitcodeToFile
         ▼
-   model.obj
+   model.bc  (OS-portable, stored in the EPContext tar)
+
+   --- runtime side, inside the signed EP DLL ---
         │
-        │  (5) linkToDLL             — system linker produces Windows DLL,
-        │                              exporting: inference_init, inference_compute,
-        │                              inference_cleanup, inference_get_metadata_json
+        │  (4) LlvmIrJit::create    — parseBitcodeFile (per-model AND embedded
+        │                              runtime.bc) into one shared LLVMContext;
+        │                              addIRModule both into one LLJIT JITDylib;
+        │                              install ROCm + per-arch kernel
+        │                              DynamicLibrarySearchGenerators for
+        │                              external symbols (libamdhip64, MIOpen,
+        │                              hipBLASLt, hipdnn_backend, hipdnn_graph_runtime,
+        │                              custom_kernels_<arch>); jit->initialize()
+        │                              runs @llvm.global_ctors.
         ▼
-   model.dll  (temporary, loaded at inference time)
+   JITted in-memory module
+        │
+        │  (5) lookup_raw            — resolve `inference_init`, `inference_compute`,
+        │                              `inference_cleanup`, `inference_get_metadata_json`,
+        │                              and the optional `hipdnn_ep_runtime_begin_compute`
+        │                              hook.
+        ▼
+   ready to run
 ```
 
 **File:** `lib/Compiler/CompilerDriver.cpp`
@@ -422,82 +448,63 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
                                  const std::string &output_path,
                                  const mlir::hip::CompilationOptionsT &options,
                                  std::string &error_message) {
-  if (!runMLIRPasses(module, options, error_message))       // MLIR pipeline
+  if (!runMLIRPasses(module, options, error_message))                       // MLIR pipeline
     return false;
 
   llvm::LLVMContext llvmContext;
-  auto llvmModule = translateToLLVMIR(module, llvmContext, error_message); // (1)
+  auto llvmModule = translateToLLVMIR(module, llvmContext, error_message);  // (1)
   if (!llvmModule) return false;
 
-  if (!linkRuntime(llvmModule.get(), error_message))        // (2)
-    return false;
+  // runtime.bc is JIT-loaded as a separate module by LlvmIrJit on the
+  // consumer side (no producer-time link merge -> OS-portable artifact).
 
-  optimizeLLVMIR(llvmModule.get(), options.opt_level);      // (3)
+  optimizeLLVMIR(llvmModule.get(), options.opt_level);                      // (2)
 
-  if (!compileToObject(llvmModule.get(), obj_path, error_message))  // (4)
-    return false;
-
-  if (!linkToDLL(obj_path, output_path, libraries, library_paths,   // (5)
-                 export_symbols, error_message))
-    return false;
-
-  cleanupIntermediates(base_path);  // removes .ll and .obj
-  return true;
+  return emitLlvmIr(llvmModule.get(), output_path, error_message);         // (3)
 }
 ```
 
-Step (2) is critical: the LLVM IR from the MLIR pipeline only contains **declarations**
-(e.g., `llvm.func @wrap_hipblasLtMatmul(...)`) without function bodies. `linkRuntime`
-links in the **pre-compiled bitcode** of the EP runtime (`lib/Runtime/`), which provides
-the actual implementations that call HIP, MIOpen, and hipBLASLt APIs.
-
-**File:** `lib/Compiler/CompilerDriver.cpp` — the bridge to `LLVMBackend`:
-```cpp
-bool CompilerDriver::linkRuntime(llvm::Module *llvmModule,
-                                 std::string &error_message) {
-  hipdnn::LLVMBackend backend;
-  if (!backend.linkRuntimeModule(llvmModule)) {
-    error_message = "Failed to link runtime module";
-    return false;
-  }
-  return true;
-}
-```
-
-This delegates to `LLVMBackend::linkRuntimeModule` (see Section 4.1 Stage 2), which
-reads the embedded `runtime_bc_data[]` byte array and merges it into the generated
-module via `llvm::Linker`.
-
-The intermediate `.ll` and `.obj` files are cleaned up after the DLL is produced.
+The LLVM IR produced by the MLIR pipeline contains only **external declarations**
+for `wrap_*` / `hipdnn_ep_*` / `hip_*` symbols. The producer does NOT link in
+`runtime.bc` — that step (formerly `LLVMBackend::linkRuntimeModule`, now removed)
+would have baked the build-host's CRT into every per-model artifact and broken
+OS portability. Resolution of the external decls is deferred to the consumer-side
+JIT, where `runtime.bc` is added as a sibling module in the same JITDylib and the
+process search generator binds `hip_*` kernels and ROCm symbols.
 
 ### 4.1 Two-Stage Runtime Compilation
 
 The runtime wrappers in `lib/Runtime/real/` (e.g., `matmul.cpp`, `miopen.cpp`, `gqa.cpp`,
-`activation.cpp`, etc.) use a two-stage compilation strategy that enables cross-module
-inlining between generated code and runtime code.
+`activation.cpp`, etc.) use a two-stage compilation strategy. Stage 1 produces an
+OS-specific `runtime.bc` at EP-build time; stage 2 is the consumer-side JIT load that
+stitches `runtime.bc` and the per-model bitcode into one JITDylib.
 
-**Stage 1 — Build Time: C++ to Embedded Bitcode**
+**Stage 1 — EP Build Time: C++ to Embedded Bitcode**
 
 ```
  lib/Runtime/real/*.cpp  (matmul.cpp, miopen.cpp, gqa.cpp, activation.cpp, ...)
          │
-         │  clang -c -emit-llvm -std=c++17 -O2   (LLVM bitcode, NOT native object code)
+         │  clang -c -emit-llvm -std=c++17 -O2 \
+         │         -fno-threadsafe-statics -fno-sized-deallocation -fno-rtti
+         │  (LLVM bitcode, NOT native object code; the -fno-* flags shrink the
+         │   MSVC-only symbol surface the consumer-side JIT must resolve.)
          ▼
  Individual .bc files  (runtime_matmul.bc, runtime_miopen.bc, runtime_gqa.bc, ...)
          │
-         │  llvm-link   (combines all ~19 modules into one)
+         │  llvm-link   (combines all ~50 modules into one)
          ▼
- runtime.bc
+ runtime.bc  (per-OS: MSVC ABI on Windows, glibc ABI on Linux)
          │
-         │  xxd.py   (Python script converts binary to C byte array)
+         │  cmake/xxd.py   (converts binary to C byte array)
          ▼
  runtime_ir_data.cpp
    extern "C" const unsigned char runtime_bc_data[] = { 0x42, 0x43, ... };
    extern "C" const size_t runtime_bc_data_size = 123456;
          │
-         │  MSVC compiles into HipTargetLLVM.lib → linked into hip-compiler.dll
+         │  Compiled into morphizen-custom-op-mlir static archive,
+         │  WHOLE_ARCHIVE-linked into onnxruntime_morphizen_ep.dll
          ▼
- Embedded as a byte array inside hip-compiler.dll
+ Embedded as a byte array inside the EP DLL
 ```
 
 The key build command is `clang -c -emit-llvm`, which compiles C++ to **LLVM bitcode**
@@ -510,6 +517,7 @@ add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
     COMMAND ${CLANG_EXECUTABLE}
             -c -emit-llvm -std=c++17
+            -fno-threadsafe-statics -fno-sized-deallocation -fno-rtti
             $<$<NOT:$<CONFIG:Debug>>:-O2>
             ${COMPILE_FLAGS}
             ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
@@ -518,34 +526,60 @@ add_custom_command(
 )
 ```
 
-**Stage 2 — Model Compilation Time: Bitcode Linking**
-
-When `CompilerDriver` compiles a model, `linkRuntime` reads the embedded byte array back
-as LLVM bitcode and merges it into the generated IR using `llvm::Linker`:
-
-**File:** `lib/Target/LLVM/LLVMBackend.cpp`
-```cpp
-extern "C" const unsigned char runtime_bc_data[];
-extern "C" const size_t runtime_bc_data_size;
-
-bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
-  auto MemBuf = llvm::MemoryBuffer::getMemBuffer(
-      llvm::StringRef(reinterpret_cast<const char *>(runtime_bc_data), bcSize),
-      "runtime.bc", /*RequiresNullTerminator=*/false);
-
-  auto ModuleOrErr = llvm::parseBitcodeFile(MemBuf->getMemBufferRef(),
-                                            destModule->getContext());
-  // ...
-  llvm::Linker linker(*destModule);
-  linker.linkInModule(std::move(RuntimeModule));
-  return true;
-}
+**File:** `backend-mlir-compiler/custom-op-mlir/CMakeLists.txt` — the embed step
+(consumer side; `runtime.bc` lives in the EP DLL, not in `hip-compiler.dll`):
+```cmake
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+          --var runtime_bc_data
+          --output ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
+          ${RUNTIME_BC_PATH}
+  ...
+)
 ```
 
-After linking, the LLVM optimizer (step 3) can **inline** runtime function bodies directly
-into the generated compute graph code, eliminating call overhead. This is why bitcode
-linking is used instead of a traditional static library — it enables cross-module
-optimization that would be impossible at the native object code level.
+**Stage 2 — Session Creation Time: Consumer-Side JIT Load**
+
+When the EP creates a session, `InferenceState::create` reads the per-model bitcode
+from the EPContext tar, hands it to `LlvmIrJit::create`, which adds **two modules**
+into a single ORC `LLJIT` JITDylib (one shared `LLVMContext` so opaque-struct identity
+holds across the boundary):
+
+**File:** `backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp`
+```cpp
+extern "C" const unsigned char runtime_bc_data[];
+extern "C" const std::size_t runtime_bc_data_size;
+
+// 1. Parse runtime.bc (embedded in the EP DLL) and the per-model bitcode
+//    into one shared LLVMContext.
+auto context = std::make_unique<llvm::LLVMContext>();
+auto module = llvm::parseBitcodeFile(per_model_bytes, *context);
+auto runtime = llvm::parseBitcodeFile(runtime_bc_data, *context);
+
+// 2. The per-model bitcode has empty triple/datalayout (OS-portable);
+//    stamp the JIT host values onto it before addIRModule.
+module->setDataLayout(jit->getDataLayout());
+module->setTargetTriple(jit->getTargetTriple());
+
+// 3. Add runtime first so the per-model module's external `hipdnn_ep_*`
+//    references resolve in the JITDylib's symbol table.
+jit->addIRModule(ThreadSafeModule(std::move(runtime), tsc));
+jit->addIRModule(ThreadSafeModule(std::move(module),  tsc));
+```
+
+This is **not** producer-time linking. Cross-module inlining between generated code
+and runtime functions does not happen at producer time — the per-model bitcode keeps
+external `wrap_*` declarations. The ORC `IRCompileLayer` lazily codegens both modules
+on first symbol lookup; cross-module inlining within a single module is preserved, but
+between modules it requires explicit IR-level merging that we deliberately avoid here
+(merging would re-introduce the OS-specific CRT symbols into the per-model artifact).
+
+**Why bitcode at rest, JIT at runtime.** The two-module split is what makes the
+per-model artifact OS-portable: `runtime.bc` carries the host-OS CRT/ABI baggage and
+stays inside the per-OS EP DLL; the per-model `.bc` is target-neutral and the same
+on-disk bytes work on Windows or Linux. It also satisfies Microsoft's signed-DLL-only
+loading policy — there is no per-model DLL written to disk at inference time.
 
 ### 4.2 The `!hip.context` Type and RuntimeState Lifetime
 
@@ -637,11 +671,15 @@ allows the `RuntimeState` struct to evolve without recompiling models.
                │                      │                        │
                │     ┌────────────────┘                        │
                │     │ MLIR Pipeline:                    MlirCustomOp
-               │     │  ONNX → HIP → LLVM → link             │
+               │     │  ONNX → HIP → LLVM → strip-triple     │
                │     │                                   InferenceState
                │     ▼                                        │
-               │  model.dll  ◄─────────────────────────►  model.dll
-               │  model.constants.bin                    inference_compute()
+               │  model.bc        ─────────────────────►  LlvmIrJit::create
+               │  model.constants.bin                     (model.bc + embedded
+               │                                           runtime.bc → LLJIT)
+               │                                              │
+               │                                              ▼
+               │                                       inference_compute()
                │                                              │
                │                                    ┌─────────┼──────────┐
                │                                    ▼         ▼          ▼
@@ -665,16 +703,19 @@ allows the `RuntimeState` struct to evolve without recompiling models.
 
 ## 6. Plugin Loading Architecture
 
-There are **three distinct plugin-loading steps**, each using a different mechanism:
+There are **three distinct binding steps**, each using a different mechanism:
 
-| Step | Loader | Loaded DLL | API |
-|------|--------|-----------|-----|
+| Step | Loader | Target | API |
+|------|--------|--------|-----|
 | 1 | ORT | `onnxruntime_morphizen_ep.dll` | EP V2 (`CreateEpFactories`) |
 | 2 | MorphiZen | `hip-compiler.dll` | MorphiZen Plugin (`morphizen::Plugin::get`) |
-| 3 | MorphiZen | `model.dll` (temporary) | MorphiZen Plugin (`morphizen::Plugin::create`) |
+| 3 | EP DLL (in-process) | per-model `.bc` (no DLL load) | `LlvmIrJit::create` over ORC `LLJIT` |
 
 This three-level architecture keeps ORT, the compiler, and the generated code
-cleanly separated with stable C ABI boundaries.
+cleanly separated with stable C ABI boundaries. Step 3 was previously a `LoadLibrary`
+of a per-model DLL; replacing it with an in-process JIT was the change that lets
+the per-model artifact stay OS-portable and avoids the signed-DLL gate at inference
+time.
 
 ---
 
@@ -689,7 +730,8 @@ cleanly separated with stable C ABI boundaries.
 | **Compilation** | |
 | Load `hip-compiler` plugin | `backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp` |
 | `hip_compile_with_fs` export | `lib/CInterface/CompilerAPI.cpp` |
-| MLIR pipeline + model DLL linking | `lib/Compiler/CompilerDriver.cpp` |
+| MLIR pipeline + bitcode emit | `lib/Compiler/CompilerDriver.cpp` |
+| Triple/datalayout strip + bitcode write | `lib/Target/LLVM/LLVMBackend.cpp` |
 | **MLIR Passes** | |
 | Add context argument | `lib/Conversion/Passes.cpp` (HipAddContextArgPass) |
 | Outline ops for hipDNN | `lib/Conversion/OnnxToHipDNN/` (OutlineOnnxToHipDNNPass) |
@@ -710,12 +752,12 @@ cleanly separated with stable C ABI boundaries.
 | Memory alloc/free wrappers | `lib/Runtime/real/memory.cpp` |
 | EP state management | `lib/Runtime/hipdnn_ep_runtime_state.cpp` |
 | EP tensor marshalling (GPU) | `lib/Runtime/hipdnn_ep_runtime_tensor.cpp` |
-| **Bitcode Embedding & Linking** | |
-| LLVM IR translation + bitcode linking | `lib/Target/LLVM/LLVMBackend.cpp` |
-| DLL linking (lld-based) | `lib/Target/LLVM/DLLLinker.cpp` |
-| Bitcode embed build (xxd.py) | `lib/Target/LLVM/CMakeLists.txt` |
+| **Runtime Bitcode Embedding (consumer side)** | |
+| Embed `runtime.bc` into EP DLL via `xxd.py` | `backend-mlir-compiler/custom-op-mlir/CMakeLists.txt` |
+| `runtime.bc` link target | `lib/Runtime/CMakeLists.txt` (`RuntimeBitcode`) |
 | **Runtime (Host-side)** | |
-| Load model DLL + call init/compute | `backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp` |
+| In-process ORC JIT for per-model bitcode | `backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp` |
+| JIT bitcode + call init/compute | `backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp` |
 | ORT tensor marshalling | `backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp` |
 | hipDNN graph runtime API | `lib/HipDNNGraphRuntime/hipdnn_graph_runtime.h`, `.cpp` |
 

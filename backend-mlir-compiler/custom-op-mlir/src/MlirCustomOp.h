@@ -34,7 +34,10 @@ public:
                const std::shared_ptr<morphizen::MetaDefProto> &meta_def,
                onnxruntime::Model *model);
 
-  // Defined out-of-line: frees the allocator-mode host-output GPU scratch.
+  // Defined out-of-line: frees the allocator-mode host-output GPU scratch and
+  // releases the lazy-allocated HIPDNN_EP_PERF event pair below
+  // (hipEventDestroy lives in the hip header, which we keep out of this
+  // header).
   ~MlirCustomOp() override;
 
   // Execute inference using loaded artifact
@@ -78,6 +81,15 @@ private:
   // cache, not observable state. Left empty (no allocation) in classic mode and
   // in mock builds.
   mutable std::vector<HostOutputScratch> host_out_scratch_;
+
+  // HIPDNN_EP_PERF wall-clock event pair. Created lazily on the first
+  // Compute() that observes perf_enabled(), then reused for the lifetime of
+  // this MlirCustomOp instance and destroyed in the destructor. Stored as
+  // void* to keep hip headers out of this header; the actual hipEvent_t type
+  // is just a pointer typedef on amdhip64, so the round-trip is safe.
+  // Mutable because Compute() is const but lazy-init writes these once.
+  mutable void *ep_perf_ev_start_ = nullptr;
+  mutable void *ep_perf_ev_stop_ = nullptr;
 };
 
 } // namespace mlir_compilation

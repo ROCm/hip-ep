@@ -45,6 +45,7 @@ inline constexpr const char *kHipAllocOutput = "hipdnn_ep_alloc_output";
 
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
+inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
 
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
@@ -76,6 +77,7 @@ inline constexpr const char *kWrapCast = "wrap_cast";
 inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
+inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMultiHeadAttention =
@@ -118,6 +120,11 @@ inline constexpr const char *kWrapSize = "wrap_size";
 // Synchronize the stream and read a device i32 scalar back to the host
 // (used by hip.readback_dim to materialise a data-dependent dynamic dim).
 inline constexpr const char *kHipReadbackI32 = "hipdnn_ep_readback_i32";
+
+// Synchronize the stream and copy a small device scalar of arbitrary byte
+// width into a host buffer (used by hip.readback_scalar for non-i32 scalars
+// such as the i64/f32/f16 operands of a data-dependent onnx.Range).
+inline constexpr const char *kHipReadbackScalar = "hipdnn_ep_readback_scalar";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -430,6 +437,10 @@ void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
 // i32 scalar can be sliced/sized via this.
 void populateReadbackDimLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
+// hip.readback_scalar: generic synchronized host-readback of a single device
+// scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
+void populateReadbackScalarLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,

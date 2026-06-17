@@ -546,6 +546,34 @@ func.func @refine_reduce_sum_keepdims_constant_axes(%ctx: !hip.context,
 
 // -----
 
+// `hip.reduce_mean` shares the `Hip_DpsOp_Reduction` reify/InferType path with
+// reduce_sum/max/prod (same `reifyReductionShape` helper), so the constant-axes
+// refinement applies identically: data=<?x4096xf16>, axes=dense<[1]>,
+// keepdims=1 → dim 0 passes through (dynamic), dim 1 tightens to static 1.
+// This is the key scalability property: dynamic Reshape result dims that an
+// ONNX-level result-type refiner would once have recovered pre-conversion are
+// now recovered post-conversion by this dialect-level pass instead.
+// CHECK-LABEL: func.func @refine_reduce_mean_keepdims_constant_axes
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}) : tensor<?x1xf16>
+// CHECK:         %[[Y:.*]] = hip.reduce_mean
+// CHECK-SAME:                  outs(%[[E]] : tensor<?x1xf16>){{.*}}: tensor<?x1xf16>
+// CHECK:         tensor.cast %[[Y]] : tensor<?x1xf16> to tensor<?x?xf16>
+func.func @refine_reduce_mean_keepdims_constant_axes(%ctx: !hip.context,
+                                                     %data: tensor<?x4096xf16>,
+                                                     %d0: index, %d1: index)
+    -> tensor<?x?xf16> {
+  %axes = arith.constant dense<[1]> : tensor<1xi64>
+  %e = tensor.empty(%d0, %d1) : tensor<?x?xf16>
+  %y = hip.reduce_mean(%ctx)
+    ins(%data, %axes : tensor<?x4096xf16>, tensor<1xi64>)
+    outs(%e : tensor<?x?xf16>)
+    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    : tensor<?x?xf16>
+  return %y : tensor<?x?xf16>
+}
+
+// -----
+
 // `hip.pad` (along with tile, expand, slice, range) uses the shared
 // `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
 // `getDpsInits()` and lifts each output dim from the DPS `outs`

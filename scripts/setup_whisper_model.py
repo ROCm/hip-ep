@@ -12,17 +12,17 @@ PowerShell). Runs identically in PowerShell and Git Bash:
     python scripts/setup_whisper_model.py          # fp16 (default)
     python scripts/setup_whisper_model.py --fp32   # fp32 model dir
 
-This script does NOT download or build the raw model — it only PREPARES one: it
-applies the ONNX surgery (past_sequence_length input + position-/token-embed
-fixes) and fix_shapes to produce the static-shape variants the EP compiles. The
-DEFAULT is the fp16 model; ``--fp32`` selects the fp32 model directory instead.
-The raw model must already exist; build it first with::
+This script PREPARES a model for the EP: it ensures the raw OGA bundle is present
+(auto-downloading it from the AMD HF repo on first use — backup is a local
+``python build.py --build-whisper-models``), then applies the ONNX surgery
+(past_sequence_length input + position-/token-embed fixes) and fix_shapes to
+produce the static-shape variants the EP compiles. The DEFAULT is the fp16 model
+(``amd/whisper-large-v3-onnx-fp16``); ``--fp32`` selects the fp32 model
+(``amd/whisper-large-v3-onnx-fp32``) instead.
 
-    python build.py --build-whisper-models
-
-If the raw model is absent, this script prints a build hint and exits non-zero.
-Idempotent: re-running is a no-op once the prepared files exist. Works from any
-current directory.
+If the raw model can be neither downloaded nor found locally, this script prints
+the HF + local-build hints and exits non-zero. Idempotent: re-running is a no-op
+once the prepared files exist. Works from any current directory.
 """
 
 import argparse
@@ -65,8 +65,6 @@ def main() -> int:
             setup_whisper_model_dir(model_dir)
     except FileNotFoundError as e:
         print(f"[whisper-setup] ERROR: {e}")
-        print("[whisper-setup] Build the raw models first:")
-        print("    python build.py --build-whisper-models")
         return 1
     expected = [
         "encoder_fixed.onnx",

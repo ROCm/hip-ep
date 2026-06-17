@@ -69,6 +69,13 @@
 // reinterpret_cast user rejected the alloc, so it stayed in the GPU pool and
 // the host store SEGV'd on targets where the pool is real device memory.
 //
+// View ops are matched generically through `ViewLikeOpInterface` rather than a
+// fixed `isa<>` list, so `memref.reshape` (whose result aliases its DATA
+// operand, never its shape operand) and any future view op are covered without
+// editing this pass.  `memref.copy` is accepted as a terminal host-mapping-safe
+// use: some shape-staging chains end in a copy into another buffer, and the
+// host-mapped scratch is a valid copy source/destination.
+//
 // Hip-dialect users are accepted, not rejected
 // --------------------------------------------
 // `hipHostMalloc(hipHostMallocMapped)` returns a host pointer that is also
@@ -110,6 +117,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
@@ -139,27 +147,47 @@ static int64_t roundUp(int64_t x, int64_t align) {
 /// at the first user we cannot vouch for -- an op of an unknown dialect, or a
 /// view whose own users escape.
 ///
-/// Pure view/descriptor ops (reinterpret_cast, expand/collapse_shape, subview,
-/// view, cast) touch no memory themselves, so the backing buffer is still a
-/// host-staged scalar; we recurse into the view's result rather than bail.
+/// View/descriptor ops are recognized generically via `ViewLikeOpInterface`
+/// (reinterpret_cast, expand/collapse_shape, subview, view, cast, AND reshape)
+/// instead of a hand-maintained `isa<>` list. They touch no memory themselves,
+/// so the backing buffer is still a host-staged scalar; we recurse into the
+/// view's result. The recursion is gated on `getViewSource() == memrefVal`:
+/// this matters for `memref.reshape`, whose viewed source is the DATA operand,
+/// not the shape operand -- when our buffer is the shape operand the reshape
+/// result aliases the data (not us), so it is a terminal accept, not a recurse.
+/// `memref.copy` is not view-like (it carries Read/Write memory effects); it is
+/// a terminal host-mapping-safe use and does not itself flag host I/O.
 static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO) {
   for (Operation *user : memrefVal.getUsers()) {
+    // Host I/O — the SEGV trigger we're staging away from the GPU pool.
     if (isa<memref::StoreOp, memref::LoadOp>(user)) {
       sawHostIO = true;
       continue;
     }
+    // Metadata-only / lifetime users: harmless.
     if (isa<memref::DimOp, memref::DeallocOp>(user))
       continue;
+    // hip.* consumers are host-mapping-safe (hipHostMallocMapped is
+    // GPU-readable at the same VA on UMA targets).
     if (user->getDialect() && user->getDialect()->getNamespace() == "hip")
       continue;
-    if (isa<memref::ReinterpretCastOp, memref::ExpandShapeOp,
-            memref::CollapseShapeOp, memref::SubViewOp, memref::ViewOp,
-            memref::CastOp>(user)) {
-      if (!classifyHostScalarUsers(user->getResult(0), sawHostIO))
-        return false;
+    // View/alias ops: recurse ONLY into the result that actually aliases this
+    // buffer. getViewSource() pins which operand is the viewed one — critical
+    // for memref.reshape, where our buffer may be the SHAPE operand (then the
+    // result aliases the DATA, not us → terminal accept, not a recurse).
+    if (auto view = dyn_cast<ViewLikeOpInterface>(user)) {
+      if (view.getViewSource() == memrefVal) {
+        if (!classifyHostScalarUsers(view->getResult(0), sawHostIO))
+          return false;
+      }
       continue;
     }
-    return false;
+    // memref.copy is not view-like; it's a terminal host-mapping-safe use
+    // (Read src / Write dst) and does NOT itself flag host I/O.
+    if (isa<memref::CopyOp>(user))
+      continue;
+
+    return false; // genuinely unknown user → reject candidate
   }
   return true;
 }

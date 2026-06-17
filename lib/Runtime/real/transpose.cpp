@@ -23,6 +23,10 @@ int wrap_transpose(RuntimeState *state, const void *input, void *output,
         return std::string(b);
       },
       state);
+  // Empty transpose is a no-op (NonZero count=0 → [3,0] indices in embedding).
+  if (num_elements <= 0)
+    return 0;
+
   if (!state || !input || !output || !input_shape || !perm) {
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_transpose: null argument (state=%p input=%p output=%p "

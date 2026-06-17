@@ -18,7 +18,7 @@
 #include "InferenceState.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
 #include <hip/hip_runtime_api.h>
 #endif
 #include <algorithm>
@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 // Environment parameters (global scope, before namespace)
@@ -328,6 +329,25 @@ std::vector<uint8_t> load_artifact_from_epcontext(
   MY_LOG(1) << "Loaded artifact: " << total_read << " bytes";
   return artifact_bytes;
 }
+
+// Decide which loader the EP should use for this artifact. The format is
+// recorded in the EPContext metadata by the compiler (artifact_format), which
+// always sets it (see pass_main.cpp); an empty/unknown value means a malformed
+// or pre-PR EPContext and is fatal here rather than mis-loaded.
+customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
+  customop::ArtifactKind kind;
+  if (!customop::artifactKindFromFormat(format_str, kind)) {
+    LOG(FATAL) << "EPContext metadata has empty/unknown artifact_format='"
+               << format_str << "'; expected '"
+               << customop::kArtifactFormatLlvmIr << "' or '"
+               << customop::kArtifactFormatNative << "'.";
+  }
+
+  MY_LOG(1) << "Artifact loader: "
+            << (kind == customop::ArtifactKind::NATIVE ? "native (Plugin)"
+                                                       : "LLVM IR (JIT)");
+  return kind;
+}
 } // anonymous namespace
 
 // ============================================================================
@@ -352,7 +372,8 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 // Interpretation grid for the decode gap vs llama.cpp Vulkan:
 //   compute_cpu >> gpu       -> host dispatch / launch overhead dominates
 //                               (per-kernel hipLaunchKernel cost, bitcode
-//                               trampolines, or glue code in model.dll)
+//                               trampolines, or glue code in the JITted
+//                               per-model module)
 //   fence_residual >> 0      -> compute() is queueing async GPU work; the
 //                               host returns early and we under-count GPU
 //                               per call
@@ -362,13 +383,19 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 //                               attention, etc.)
 //
 // Overhead when disabled: ~0 (single branch on a cached bool).
-// Overhead when enabled:  ~25us/call (hipEventCreate+Record+Sync+Destroy +
-//   one hipDeviceSynchronize + one fprintf) - negligible vs decode cost.
+// Overhead when enabled:  small per-call cost dominated by the
+//   hipDeviceSynchronize fence at the end of the timing block and the
+//   per-Compute fprintf line. hipEventCreate/Destroy is now amortized
+//   (events are session-scoped, lazy-allocated on first perf-enabled
+//   Compute), and the events themselves are created with
+//   hipEventDisableSystemFence so record() does not issue a system-scope
+//   acquire/release fence -- both wasted work for events we only read
+//   after the device-wide sync.
 // ============================================================================
 namespace {
 
 bool perf_enabled() {
-#ifdef BUILD_MOCK_RUNTIME
+#ifndef HIPDNN_EP_LINK_HIP_HOST
   return false;
 #else
   static const bool enabled = [] {
@@ -454,6 +481,85 @@ PerfCollector g_perf_collector;
 
 PerfCollector &perf_collector() { return g_perf_collector; }
 
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+// Per-Compute() HIPDNN_EP_PERF timer, shared by the classic and
+// output-allocator dispatch paths so the event lifecycle and PerfSample
+// assembly live in one place. Brackets the GPU work with a session-lifetime
+// event pair (owned by MlirCustomOp, lazily created here, released in its
+// destructor) and times the host phases with steady_clock.
+//
+// Usage: construct after begin-of-Compute, record_start() right before the
+// inference dispatch, record_stop() right after it returns, then populate the
+// host-phase fields on a PerfSample (they differ per path) and call finish(),
+// which fences the device, reads GPU elapsed time, fills wall/gpu/
+// fence_residual, and records the sample. Only construct when perf is enabled
+// (the disabled path must stay allocation- and timing-free).
+class EpPerfTimer {
+public:
+  using clock = std::chrono::steady_clock;
+
+  static double ms(clock::time_point a, clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  }
+
+  // start_slot / stop_slot are MlirCustomOp's mutable void* event handles.
+  // They are created once (on the first perf-enabled Compute()) and reused;
+  // t_enter is captured after creation so the one-time cost is excluded.
+  EpPerfTimer(void *&start_slot, void *&stop_slot, hipStream_t stream)
+      : stream_(stream) {
+    if (!start_slot) {
+      // hipEventDisableSystemFence: see op_profile.cpp
+      // (op_profile_acquire_event_pair) for the canonical rationale and
+      // guardrail. Safe here -- elapsed time is read only after the
+      // hipDeviceSynchronize() in finish().
+      hipEvent_t a = nullptr, b = nullptr;
+      (void)hipEventCreateWithFlags(&a, hipEventDisableSystemFence);
+      (void)hipEventCreateWithFlags(&b, hipEventDisableSystemFence);
+      start_slot = static_cast<void *>(a);
+      stop_slot = static_cast<void *>(b);
+    }
+    start_ = static_cast<hipEvent_t>(start_slot);
+    stop_ = static_cast<hipEvent_t>(stop_slot);
+    t_enter_ = clock::now();
+  }
+
+  clock::time_point t_enter() const { return t_enter_; }
+  clock::time_point t_after_compute() const { return t_after_compute_; }
+
+  // HIP error codes are intentionally discarded: a failure here only corrupts
+  // diagnostic numbers, never the inference result (the (void) cast also
+  // silences MSVC C4834 on the [[nodiscard]] return).
+  void record_start() { (void)hipEventRecord(start_, stream_); }
+  void record_stop() {
+    t_after_compute_ = clock::now();
+    (void)hipEventRecord(stop_, stream_);
+  }
+
+  // Closes the timing window: fences the device (the residual measures async
+  // work still queued after the dispatch returned), reads GPU elapsed time,
+  // fills the device-side fields on the caller-populated sample, and records
+  // it. The caller must have set the marshal_*/compute_cpu fields first.
+  void finish(PerfSample &s) {
+    (void)hipDeviceSynchronize();
+    const auto t_after_fence = clock::now();
+    float gpu_ms = 0.0f;
+    (void)hipEventSynchronize(stop_);
+    (void)hipEventElapsedTime(&gpu_ms, start_, stop_);
+    s.wall_ms = ms(t_enter_, t_after_fence);
+    s.gpu_ms = static_cast<double>(gpu_ms);
+    s.fence_residual_ms = ms(t_after_compute_, t_after_fence);
+    perf_collector().record(s);
+  }
+
+private:
+  hipStream_t stream_ = nullptr;
+  hipEvent_t start_ = nullptr;
+  hipEvent_t stop_ = nullptr;
+  clock::time_point t_enter_;
+  clock::time_point t_after_compute_;
+};
+#endif // HIPDNN_EP_LINK_HIP_HOST
+
 // Dumps the summary at DLL unload.  See ordering note above.
 struct PerfSummaryPrinter {
   ~PerfSummaryPrinter() {
@@ -502,7 +608,7 @@ struct OutputAllocatorCtx {
   std::vector<bool> allocated;
 };
 
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
 // Ensure scratch[idx] holds at least nbytes of device memory. Grows by
 // hipFree + hipMalloc (never shrinks). Safe within a Compute(): each output
 // index is allocated exactly once, so a grow here cannot invalidate a pointer
@@ -527,7 +633,7 @@ static void *ensure_host_out_slot(std::vector<HostOutputScratch> &scratch,
   }
   return slot.ptr;
 }
-#endif // BUILD_MOCK_RUNTIME
+#endif // HIPDNN_EP_LINK_HIP_HOST
 
 // C callback installed on the RuntimeState (output_allocator_t.allocate).
 // noexcept: invoked from C (the model.dll runtime); a C++ exception crossing
@@ -570,7 +676,7 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
     // Host (CPU) output: the DLL writes into EP GPU scratch; Compute()
     // D2H-copies into ort_ptr after inference_compute returns (the 2-arg
     // interface already stream-synced).
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
     size_t nelem = 1;
     for (int64_t d : out_shape)
       nelem *= static_cast<size_t>(d);
@@ -616,19 +722,37 @@ MlirCustomOp::MlirCustomOp(
   // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
   auto fs =
       const_cast<morphizen::PassContext *>(context.get())->get_file_system();
-  // Create inference state from DLL bytes (uses morphizen::Plugin)
-  inference_state_ = customop::InferenceState::create(
-      load_artifact_from_epcontext(context, metadata_.artifact_filename()),
-      fs.get());
+  auto artifact_bytes =
+      load_artifact_from_epcontext(context, metadata_.artifact_filename());
+  auto kind = determine_artifact_kind(metadata_.artifact_format());
+  inference_state_ =
+      customop::InferenceState::create(artifact_bytes, fs.get(), kind);
 }
 
 MlirCustomOp::~MlirCustomOp() {
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
   // Free the allocator-mode host-output GPU scratch (one buffer per output
   // index). No-op in classic mode (the vector stays empty).
   for (const HostOutputScratch &slot : host_out_scratch_)
     if (slot.ptr)
       (void)hipFree(slot.ptr);
+
+  // Release the lazy-allocated HIPDNN_EP_PERF event pair. Created on first
+  // perf-enabled Compute() and reused for the session lifetime; nullptr here
+  // means perf was never enabled, so nothing to release. Guarded by
+  // HIPDNN_EP_LINK_HIP_HOST (not BUILD_MOCK_RUNTIME): hipEvent_t /
+  // hipEventDestroy are only declared when the HIP headers are linked, and
+  // ep_perf_ev_* are only ever assigned by EpPerfTimer, which is itself behind
+  // this same macro -- so in builds without it these handles are always null
+  // and need no cleanup.
+  if (ep_perf_ev_start_) {
+    (void)hipEventDestroy(static_cast<hipEvent_t>(ep_perf_ev_start_));
+    ep_perf_ev_start_ = nullptr;
+  }
+  if (ep_perf_ev_stop_) {
+    (void)hipEventDestroy(static_cast<hipEvent_t>(ep_perf_ev_stop_));
+    ep_perf_ev_stop_ = nullptr;
+  }
 #endif
 }
 
@@ -640,7 +764,27 @@ void MlirCustomOp::compute_with_output_allocator(
     OrtKernelContext *context) const {
   MY_LOG(2) << "MlirCustomOp::compute_with_output_allocator()";
 
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  // Allocator mode is a separate dispatch that returns before the classic
+  // Compute() perf block, so it must emit its own PerfSample (§4 per-call
+  // distribution) and per-op flush (§3 GPU table) here. Without this an
+  // output-allocator session -- every KV-cache model, the default ABI --
+  // produces no EP-side [PERF]/[PERF SUMMARY] lines under HIPDNN_EP_PERF=1.
+  // Unlike the classic path there is no marshal-out pre-pass (outputs are
+  // allocated in-graph via output_allocate_cb), so marshal_out_ms is 0.
+  const bool perf = perf_enabled();
+  std::optional<EpPerfTimer> timer;
+  EpPerfTimer::clock::time_point t_after_in{};
+  if (perf)
+    timer.emplace(ep_perf_ev_start_, ep_perf_ev_stop_,
+                  static_cast<hipStream_t>(inference_state_->get_stream_raw()));
+#endif
+
   auto inputs = marshal_input_tensors(context, input_index_map_);
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (perf)
+    t_after_in = EpPerfTimer::clock::now();
+#endif
 
   Ort::KernelContext ort_ctx(context);
   OutputAllocatorCtx octx;
@@ -655,7 +799,17 @@ void MlirCustomOp::compute_with_output_allocator(
   alloc.allocate = &output_allocate_cb;
   inference_state_->set_output_allocator(&alloc);
 
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (perf)
+    timer->record_start();
+#endif
+
   int ret = inference_state_->compute_with_output_allocator(&inputs.span);
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (perf)
+    timer->record_stop();
+#endif
 
   // Clear before octx leaves scope so a stale self pointer can never be used by
   // a later call (e.g. the next Compute() before it reinstalls its own ctx).
@@ -681,7 +835,7 @@ void MlirCustomOp::compute_with_output_allocator(
     }
   }
 
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
   // Deferred host-output copies. The 2-arg interface already stream-synced, so
   // the GPU scratch holds final data; a blocking hipMemcpy is safe.
   for (const auto &p : octx.pending_d2h) {
@@ -691,6 +845,19 @@ void MlirCustomOp::compute_with_output_allocator(
       LOG(FATAL) << "output allocator: D2H copy of " << p.nbytes
                  << " bytes failed: " << hipGetErrorString(e);
     }
+  }
+
+  if (perf) {
+    // finish() fences after the post-compute D2H copies, so wall_ms /
+    // fence_residual_ms capture host-visible completion.
+    PerfSample s;
+    s.marshal_in_ms = EpPerfTimer::ms(timer->t_enter(), t_after_in);
+    s.marshal_out_ms = 0.0; // allocator mode: outputs allocated in-graph
+    s.compute_cpu_ms = EpPerfTimer::ms(t_after_in, timer->t_after_compute());
+    timer->finish(s);
+    // Resolve the per-op table AFTER the timing window closes (see the
+    // flush_op_profile contract -- keeps the resolve cost out of wall_ms).
+    inference_state_->flush_op_profile();
   }
 #endif
 
@@ -702,8 +869,8 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
 
   // Tell the runtime that a new forward pass is starting so per-Compute()
   // caches (currently the GQA seqlens_k cache) are invalidated. No-op if
-  // the model.dll predates the begin_compute export -- but in that case
-  // the cache must be disabled via HIPDNN_EP_GQA_CACHE_SEQLENS=0
+  // the per-model bitcode predates the begin_compute export -- but in that
+  // case the cache must be disabled via HIPDNN_EP_GQA_CACHE_SEQLENS=0
   // (default-on), otherwise stale values would survive across forward
   // passes. The mismatch is detected at session creation and produces a
   // LOG(WARNING). The call is a single cached indirect dispatch, so
@@ -712,7 +879,9 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
 
   if (use_output_allocator_) {
     // Allocator mode owns its output staging (no pre-filled outputs span) and
-    // its own post-compute host D2H; it does not share the classic perf path.
+    // its own post-compute host D2H; it runs its OWN HIPDNN_EP_PERF timing +
+    // per-op flush internally (see compute_with_output_allocator) rather than
+    // the classic perf block below.
     compute_with_output_allocator(context);
     MY_LOG(2) << "Compute completed successfully (allocator mode)";
     return;
@@ -734,47 +903,23 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     return;
   }
 
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
   // --- HIPDNN_EP_PERF path: wall + per-phase + GPU timing. ---
-  using clock = std::chrono::steady_clock;
-  auto elapsed_ms = [](clock::time_point a, clock::time_point b) {
-    return std::chrono::duration<double, std::milli>(b - a).count();
-  };
+  // The stream may be the default stream (hipStream_t(0)); hipEvent APIs
+  // accept that fine.
+  EpPerfTimer timer(
+      ep_perf_ev_start_, ep_perf_ev_stop_,
+      static_cast<hipStream_t>(inference_state_->get_stream_raw()));
 
-  const auto t_enter = clock::now();
   auto inputs = marshal_input_tensors(context, input_index_map_);
-  const auto t_after_in = clock::now();
+  const auto t_after_in = EpPerfTimer::clock::now();
   auto outputs =
       marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
-  const auto t_after_out = clock::now();
+  const auto t_after_out = EpPerfTimer::clock::now();
 
-  // Stream used by inference_compute (first field of RuntimeState).  May be
-  // the default stream (hipStream_t(0)) — hipEvent APIs accept that fine.
-  auto stream = static_cast<hipStream_t>(inference_state_->get_stream_raw());
-
-  // HIP error codes are intentionally discarded below: any failure here only
-  // corrupts diagnostic numbers, never the inference result.  Casting to void
-  // also suppresses C4834 ([[nodiscard]] discarded) under MSVC /W4.
-  hipEvent_t ev_start = nullptr, ev_stop = nullptr;
-  (void)hipEventCreate(&ev_start);
-  (void)hipEventCreate(&ev_stop);
-  (void)hipEventRecord(ev_start, stream);
-
+  timer.record_start();
   const int ret = inference_state_->compute(&inputs.span, &outputs.span);
-  const auto t_after_compute = clock::now();
-
-  (void)hipEventRecord(ev_stop, stream);
-  // hipDeviceSynchronize() is the fence: measures residual async work left
-  // on any stream after compute() returned.  For correctly-synchronous
-  // dispatch paths this should be ~0.
-  (void)hipDeviceSynchronize();
-  const auto t_after_fence = clock::now();
-
-  float gpu_ms_f = 0.0f;
-  (void)hipEventSynchronize(ev_stop);
-  (void)hipEventElapsedTime(&gpu_ms_f, ev_start, ev_stop);
-  (void)hipEventDestroy(ev_start);
-  (void)hipEventDestroy(ev_stop);
+  timer.record_stop();
 
   if (ret != 0) {
     LOG(ERROR) << "inference_compute() failed with code: " << ret;
@@ -782,16 +927,20 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   }
 
   PerfSample s;
-  s.wall_ms = elapsed_ms(t_enter, t_after_fence);
-  s.marshal_in_ms = elapsed_ms(t_enter, t_after_in);
-  s.marshal_out_ms = elapsed_ms(t_after_in, t_after_out);
-  s.compute_cpu_ms = elapsed_ms(t_after_out, t_after_compute);
-  s.gpu_ms = static_cast<double>(gpu_ms_f);
-  s.fence_residual_ms = elapsed_ms(t_after_compute, t_after_fence);
-  perf_collector().record(s);
+  s.marshal_in_ms = EpPerfTimer::ms(timer.t_enter(), t_after_in);
+  s.marshal_out_ms = EpPerfTimer::ms(t_after_in, t_after_out);
+  s.compute_cpu_ms = EpPerfTimer::ms(t_after_out, timer.t_after_compute());
+  timer.finish(s);
+
+  // Resolve the per-op table AFTER the timing window closes. The resolve
+  // (one hipEventElapsedTime per recorded op + std::map aggregation + a
+  // per-row fprintf) costs ~1 ms/Compute on a typical decoder graph -- large
+  // enough that keeping it inside the window measurably inflated wall_ms.
+  // See the flush_op_profile() contract in InferenceState.h.
+  inference_state_->flush_op_profile();
 
   MY_LOG(2) << "Compute completed successfully";
-#endif // BUILD_MOCK_RUNTIME
+#endif // HIPDNN_EP_LINK_HIP_HOST
 }
 
 } // namespace mlir_compilation

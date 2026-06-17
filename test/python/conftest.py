@@ -560,25 +560,71 @@ class WhisperModelConfig:
     n_vocab: int = 51866
 
 
-def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
-    """Idempotent fp32 Whisper preparation — CONSUMES a locally-built raw model.
+# Canonical AMD-hosted raw OGA bundles (encoder/decoder + tokenizer + config).
+# These are the default model source: the setup helpers below download them on
+# first use; a local build (scripts/build_whisper_models.py) is the backup that
+# pre-populates the dir so the download is skipped. The fp32 LOCAL dir is
+# `models/whisper-large-v3-onnx` (no -fp32 suffix) but its HF repo carries the
+# -fp32 suffix — the download targets whatever model_dir the caller passes.
+WHISPER_HF_REPO_FP32 = "amd/whisper-large-v3-onnx-fp32"
+WHISPER_HF_REPO_FP16 = "amd/whisper-large-v3-onnx-fp16"
 
-    The raw fp32 ONNX is produced by ``scripts/build_whisper_models.py`` (pinned
-    OGA DirectML builder) into ``model_dir`` — there is NO download (the old
-    external prebuilt was non-reproducible). This function only runs the shared
-    surgery + fix_shapes on the already-present raw bundle.
 
-    Raises FileNotFoundError with a build hint if the raw model is absent, so
-    callers (pytest fixture / CLI) can skip/instruct cleanly.
+def _ensure_whisper_raw_downloaded(model_dir: pathlib.Path, hf_repo: str) -> None:
+    """Fetch the raw OGA bundle from ``hf_repo`` into ``model_dir`` if absent.
+
+    No-op when encoder.onnx + decoder.onnx are already present (a prior download,
+    or a local ``scripts/build_whisper_models.py`` build — the backup path). On
+    any failure (huggingface_hub missing, repo gated/unreachable) raises
+    FileNotFoundError pointing at BOTH the HF-auth and the local-build remedies,
+    so callers (pytest fixture / CLI) get one actionable message.
     """
+    if (model_dir / "encoder.onnx").exists() and (model_dir / "decoder.onnx").exists():
+        return
+
+    hint = (
+        f"Could not obtain the Whisper raw model for {model_dir}.\n"
+        f"  - Primary: it auto-downloads from https://huggingface.co/{hf_repo} "
+        "(run `hf auth login` if the repo needs auth / you are rate-limited).\n"
+        "  - Backup:  build it locally with `python build.py --build-whisper-models`."
+    )
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as e:
+        raise FileNotFoundError(
+            f"{hint}\n  (huggingface_hub not installed: {e})"
+        ) from e
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[whisper] downloading raw model from {hf_repo} -> {model_dir}")
+    # GatedRepo / RepositoryNotFound / network errors all map to the same hint.
+    try:
+        snapshot_download(repo_id=hf_repo, local_dir=str(model_dir))
+    except Exception as e:  # noqa: BLE001
+        raise FileNotFoundError(f"{hint}\n  (download failed: {e})") from e
+
+
+def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
+    """Idempotent fp32 Whisper preparation — downloads the raw model if needed.
+
+    The raw fp32 OGA bundle is fetched from ``amd/whisper-large-v3-onnx-fp32`` on
+    first use (the backup is a local ``scripts/build_whisper_models.py`` build via
+    the pinned OGA DirectML builder, which pre-populates ``model_dir``). This
+    function then runs the shared surgery + fix_shapes on the raw bundle.
+
+    Raises FileNotFoundError (with HF + local-build hints) if the raw model can
+    be neither downloaded nor found, so callers can skip/instruct cleanly.
+    """
+    _ensure_whisper_raw_downloaded(model_dir, WHISPER_HF_REPO_FP32)
     # Guard checks BOTH encoder + decoder: _apply_whisper_surgery_and_fix_shapes
     # reads encoder.onnx (fix_shapes) too, so a half-built dir with one but not
-    # the other must fail here with the build hint, not crash later raw.
+    # the other must fail here with the hint, not crash later raw.
     for fname in ("encoder.onnx", "decoder.onnx"):
         if not (model_dir / fname).exists():
             raise FileNotFoundError(
                 f"Whisper raw model incomplete at {model_dir} (missing {fname}). "
-                "Build it first: python build.py --build-whisper-models"
+                f"Download from https://huggingface.co/{WHISPER_HF_REPO_FP32} or "
+                "build it: python build.py --build-whisper-models"
             )
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 
@@ -633,19 +679,22 @@ def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
 
 
 def setup_whisper_fp16_model_dir(model_dir: pathlib.Path) -> None:
-    """Idempotent fp16 Whisper preparation — CONSUMES a locally-built raw model.
+    """Idempotent fp16 Whisper preparation — downloads the raw model if needed.
 
-    Identical to ``setup_whisper_model_dir`` but for the fp16 bundle (built by
-    ``scripts/build_whisper_models.py`` with -p fp16). The fp16 OGA graph has the
-    same layout as fp32, so ``_apply_whisper_surgery_and_fix_shapes`` applies
+    Identical to ``setup_whisper_model_dir`` but for the fp16 bundle (HF repo
+    ``amd/whisper-large-v3-onnx-fp16``; backup is a local
+    ``scripts/build_whisper_models.py`` build). The fp16 OGA graph has the same
+    layout as fp32, so ``_apply_whisper_surgery_and_fix_shapes`` applies
     unchanged. The fp16 lm_head stays fp32 (OGA convention) -> argmax-lossless.
     """
+    _ensure_whisper_raw_downloaded(model_dir, WHISPER_HF_REPO_FP16)
     # Guard checks BOTH encoder + decoder (see setup_whisper_model_dir).
     for fname in ("encoder.onnx", "decoder.onnx"):
         if not (model_dir / fname).exists():
             raise FileNotFoundError(
                 f"Whisper fp16 raw model incomplete at {model_dir} (missing {fname}). "
-                "Build it first: python build.py --build-whisper-models"
+                f"Download from https://huggingface.co/{WHISPER_HF_REPO_FP16} or "
+                "build it: python build.py --build-whisper-models"
             )
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 

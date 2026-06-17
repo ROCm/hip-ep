@@ -379,6 +379,115 @@ extern "C" int hip_reduce_sum(
 }
 
 // =============================================================================
+// FP16 mean reduction
+// =============================================================================
+//
+// Identical structure to reduce_sum_f16_kernel but divides the float-accumulated
+// sum by `reduce_size` before narrowing to half. Keeping the division in-kernel
+// (rather than synthesizing a 1/reduce_size scalar constant and a separate Mul)
+// is what makes hip.reduce_mean tolerant of a dynamic reduce axis: reduce_size
+// is computed at runtime from num_input / num_output, never baked into the IR.
+__global__ void reduce_mean_f16_kernel(
+    const __half* __restrict__ data,
+    __half* __restrict__ output,
+    int64_t reduce_size,
+    int64_t inner,
+    int64_t num_output_elements) {
+  extern __shared__ float sdata_mean_f16[];
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const __half* slice = data + oo * reduce_size * inner + ii;
+  int tid = threadIdx.x;
+
+  float sum = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
+    sum += __half2float(slice[i * inner]);
+  }
+  sdata_mean_f16[tid] = sum;
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (static_cast<unsigned int>(tid) < s) {
+      sdata_mean_f16[tid] += sdata_mean_f16[tid + s];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    float mean = sdata_mean_f16[0] / static_cast<float>(reduce_size);
+    output[out_idx] = __float2half(mean);
+  }
+}
+
+extern "C" int hip_reduce_mean(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype) {
+  if (num_output_elements <= 0) return 0;
+  if (inner_size <= 0) inner_size = 1;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+  if (num_input_elements % num_output_elements != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_reduce_mean: input(%lld) not divisible "
+            "by output(%lld)\n",
+            (long long)num_input_elements, (long long)num_output_elements);
+    return -1;
+  }
+
+  int64_t reduce_size = num_input_elements / num_output_elements;
+
+  // fp16 is the only supported type: ONNX ReduceMean is float-domain and the
+  // true-fp16 EP path only ever feeds half tensors here. Other dtypes are
+  // rejected so a regression surfaces loudly rather than silently mis-dividing.
+  if (hip_dtype != HIP_DTYPE_FLOAT16) {
+    fprintf(stderr,
+            "[custom_kernels] hip_reduce_mean: unsupported dtype=%d "
+            "(only FLOAT16)\n",
+            hip_dtype);
+    return -1;
+  }
+
+  int block_size = 256;
+  if (reduce_size < 256) {
+    block_size = 1;
+    while (block_size < reduce_size) block_size <<= 1;
+    if (block_size < 1) block_size = 1;
+  }
+  size_t shared_mem = block_size * sizeof(float);
+
+  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_mean: dtype=FLOAT16, "
+          "input=%lld, output=%lld, reduce_size=%lld, block=%d\n",
+          (long long)num_input_elements, (long long)num_output_elements,
+          (long long)reduce_size, block_size);
+
+  hipLaunchKernelGGL(reduce_mean_f16_kernel,
+                   dim3(static_cast<unsigned>(num_output_elements)),
+                   dim3(block_size),
+                   shared_mem, hip_stream,
+                   static_cast<const __half*>(data),
+                   static_cast<__half*>(output),
+                   reduce_size, inner_size, num_output_elements);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_reduce_mean launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+// =============================================================================
 // ReduceMax / ReduceProd
 //
 // Same block-per-output-element pattern as reduce_sum_*. Differences:
