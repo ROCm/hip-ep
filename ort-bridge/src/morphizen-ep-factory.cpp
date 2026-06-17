@@ -196,7 +196,6 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
               factory->gpu_host_accessible_memory_info_.get())) {
         return st;
       }
-      factory->gpu_device_registered_ = true;
     }
 #endif
   }
@@ -213,16 +212,10 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
   auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
   *ep = nullptr;
 
-  if (num_devices == 0) {
-    return factory->ort_api.CreateStatus(
-        ORT_INVALID_ARGUMENT,
-        "MorphiZen EP requires at least one device to be selected.");
-  }
-  // Note: a single factory may be selected for multiple OrtEpDevices (e.g.
-  // multiple AMD GPUs of the same type in a future multi-device build).
-  // Tools like hip-onnx-runner pass *every* OrtEpDevice belonging to this
-  // EP into AppendExecutionProvider_V2, so we must accept num_devices >= 1
-  // here. A single MorphiZenEP instance can serve all of them.
+  // MorphiZen does not use the selected-device array: it compiles for and runs
+  // on the default / currently-selected HIP device. Any num_devices is
+  // accepted, including a parent EP (e.g. the AMD GPU umbrella) that creates
+  // the EP without forwarding the selection.
 
   // Create the execution provider
   factory->throw_if_error(factory->ort_api.Logger_LogMessage(
@@ -287,7 +280,7 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-  if (factory->gpu_device_registered_ && memory_info != nullptr) {
+  if (memory_info != nullptr) {
     *allocator = new HipGpuAllocator(memory_info, factory->ort_api);
     return nullptr;
   }
@@ -318,19 +311,17 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateDataTransferImpl(
   auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-  if (factory->gpu_device_registered_) {
-    if (!factory->data_transfer_impl_) {
-      factory->data_transfer_impl_ =
-          std::make_unique<HipDataTransferImpl>(factory->ort_api);
-    }
-    *data_transfer = factory->data_transfer_impl_.get();
-    return nullptr;
+  if (!factory->data_transfer_impl_) {
+    factory->data_transfer_impl_ =
+        std::make_unique<HipDataTransferImpl>(factory->ort_api);
   }
+  *data_transfer = factory->data_transfer_impl_.get();
+  return nullptr;
 #else
   (void)factory;
-#endif
   *data_transfer = nullptr; // not implemented when GPU allocator is disabled
   return nullptr;
+#endif
 }
 
 bool ORT_API_CALL MorphiZenEpFactory::IsStreamAwareImpl(
