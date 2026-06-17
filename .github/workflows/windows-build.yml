@@ -491,14 +491,6 @@ jobs:
           cp "$AMDGPU_EP" staging/bin/
           cp "$HIPEP_BACKEND" staging/bin/
 
-          # hip-onnx-runner / EPContext tests still look for the legacy DLL name
-          # onnxruntime_morphizen_ep.dll. The EP was renamed to hipep.dll by
-          # cmake/deps.cmake but those tools are not yet updated. Provide a
-          # backward-compat copy so both names resolve to the same binary.
-          if [ -f staging/bin/hipep.dll ] && [ ! -f staging/bin/onnxruntime_morphizen_ep.dll ]; then
-            cp staging/bin/hipep.dll staging/bin/onnxruntime_morphizen_ep.dll
-          fi
-
           # Smoke: the per-arch kernel DLL must be present in staging/bin/
           # for the gpu-test job to load it. Failure here means the install
           # rule in 3rd-party/custom_kernels/CMakeLists.txt regressed.
@@ -711,8 +703,8 @@ jobs:
           for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
             echo === Testing %%~nxM ===
             onnxruntime_perf_test.exe ^
-              --plugin_ep_libs "MorphiZenExecutionProvider|hipep.dll" ^
-              --plugin_eps "MorphiZenExecutionProvider" ^
+              --plugin_ep_libs "hipep|hipep.dll" ^
+              --plugin_eps "hipep" ^
               --plugin_ep_options "config_file|..\morphizen_config.json" ^
               -C "session.disable_cpu_ep_fallback|1" ^
               -t 30 -c 1 -s ^
@@ -757,8 +749,8 @@ jobs:
           )
           echo === Native smoke %SMOKE_MODEL% ===
           onnxruntime_perf_test.exe ^
-            --plugin_ep_libs "MorphiZenExecutionProvider|hipep.dll" ^
-            --plugin_eps "MorphiZenExecutionProvider" ^
+            --plugin_ep_libs "hipep|hipep.dll" ^
+            --plugin_eps "hipep" ^
             --plugin_ep_options "config_file|..\morphizen_config.json artifact_format|NATIVE" ^
             -C "session.disable_cpu_ep_fallback|1" ^
             -r 1 -c 1 -s ^
@@ -811,8 +803,8 @@ jobs:
 
             Write-Host "=== EPContext export: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "MorphiZenExecutionProvider|hipep.dll" `
-              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_libs "hipep|hipep.dll" `
+              --plugin_eps "hipep" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1 ep.context_enable|1 ep.context_embed_mode|0 ep.context_file_path|$ctxPath" `
               -t 5 -c 1 -s -I `
@@ -831,8 +823,8 @@ jobs:
 
             Write-Host "=== EPContext import: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "MorphiZenExecutionProvider|hipep.dll" `
-              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_libs "hipep|hipep.dll" `
+              --plugin_eps "hipep" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1" `
               -t 30 -c 1 -s -I `
@@ -1036,6 +1028,9 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          rem The EP DLL is now hipep.dll; hip-onnx-runner's legacy default name
+          rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
+          set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipep.dll
           set L2_MODEL_DIR=${{ runner.workspace }}\l2-test-models
           if not exist "%L2_MODEL_DIR%" (
             echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%
