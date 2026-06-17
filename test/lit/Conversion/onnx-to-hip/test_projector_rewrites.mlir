@@ -17,6 +17,13 @@
 //     `hip.div` is a flat element-wise kernel with no broadcast
 //     support. Reciprocal preserves rhs shape; the subsequent Mul
 //     broadcasts via the existing path (no kernel-level OOB read).
+//
+//  3. PointwiseConvToMatMul turns a static 1x1 `onnx.Conv` (stride 1,
+//     no pad, no dilation, group 1) into Reshape + `onnx.MatMul`
+//     (+ broadcast bias Add), routing it through hipBLASLt instead of
+//     MIOpen — so the result lowers to `hip.matmul`, NOT `hip.conv`. A
+//     dynamic-shape 1x1 conv must NOT be rewritten (the emitted MatMul's
+//     batch dim cannot be sized correctly), so it stays a `hip.conv`.
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
@@ -48,6 +55,39 @@ module {
         -> tensor<?x256x1152xf16>
     return %z : tensor<?x256x1152xf16>
   }
+
+  // Static 1x1 conv with bias — trigger PointwiseConvToMatMul. Must lower to
+  // a hipBLASLt matmul (+ broadcast bias add), never a MIOpen conv.
+  func.func @test_pointwise_conv_to_matmul(
+      %x: tensor<1x16x64x64xf16>, %w: tensor<256x16x1x1xf16>,
+      %b: tensor<256xf16>) -> tensor<1x256x64x64xf16> {
+    %y = "onnx.Conv"(%x, %w, %b) {
+      kernel_shape = [1 : si64, 1 : si64],
+      strides = [1 : si64, 1 : si64],
+      pads = [0 : si64, 0 : si64, 0 : si64, 0 : si64],
+      dilations = [1 : si64, 1 : si64],
+      group = 1 : si64
+    } : (tensor<1x16x64x64xf16>, tensor<256x16x1x1xf16>, tensor<256xf16>)
+      -> tensor<1x256x64x64xf16>
+    return %y : tensor<1x256x64x64xf16>
+  }
+
+  // Dynamic-batch 1x1 conv — PointwiseConvToMatMul must NOT fire (the emitted
+  // MatMul cannot size a dynamic batch dim); it falls through to the MIOpen
+  // hip.conv path.
+  func.func @test_pointwise_conv_dynamic_stays_conv(
+      %x: tensor<?x16x64x64xf16>, %w: tensor<256x16x1x1xf16>)
+      -> tensor<?x256x64x64xf16> {
+    %y = "onnx.Conv"(%x, %w) {
+      kernel_shape = [1 : si64, 1 : si64],
+      strides = [1 : si64, 1 : si64],
+      pads = [0 : si64, 0 : si64, 0 : si64, 0 : si64],
+      dilations = [1 : si64, 1 : si64],
+      group = 1 : si64
+    } : (tensor<?x16x64x64xf16>, tensor<256x16x1x1xf16>)
+      -> tensor<?x256x64x64xf16>
+    return %y : tensor<?x256x64x64xf16>
+  }
 }
 
 // AvgPool decomp emits an onnx.Transpose with perm=[0,1,2,4,3,5] BEFORE
@@ -67,3 +107,18 @@ module {
 // CHECK-NOT: onnx.Div
 // CHECK-NOT: hip.div
 // CHECK: hip.reciprocal
+
+// Static 1x1 conv: rewritten to a hipBLASLt matmul plus a broadcast bias add.
+// The key invariant is that NO hip.conv (MIOpen) survives — the pointwise conv
+// is computed as a GEMM. The bias lowers to a broadcasting hip.add.
+// CHECK-LABEL: func.func @test_pointwise_conv_to_matmul
+// CHECK-NOT: onnx.Conv
+// CHECK-NOT: hip.conv
+// CHECK-DAG: hip.matmul
+// CHECK-DAG: hip.add
+
+// Dynamic-batch 1x1 conv: the rewrite is skipped, so it lowers via the normal
+// MIOpen path and a hip.conv remains.
+// CHECK-LABEL: func.func @test_pointwise_conv_dynamic_stays_conv
+// CHECK-NOT: hip.matmul
+// CHECK: hip.conv

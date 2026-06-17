@@ -70,6 +70,8 @@ STATISTIC(NumAveragePoolRewrites,
           "onnx.AveragePool rewrites into Reshape + ReduceMean");
 STATISTIC(NumBroadcastDivRewrites,
           "onnx.Div rewrites into Mul(x, Reciprocal(y)) when broadcasting");
+STATISTIC(NumPointwiseConvRewrites,
+          "1x1 onnx.Conv rewrites into MatMul (hipBLASLt) + bias Add");
 
 namespace mlir {
 namespace hip {
@@ -693,10 +695,195 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
   }
 };
 
+//===----------------------------------------------------------------------===//
+// PointwiseConvToMatMul — 1x1 Conv (stride 1, no pad, no dilation, group 1).
+//
+// A pointwise (1x1) convolution is a per-pixel channel mixing:
+//
+//   y[n, co, h, w] = bias[co] + sum_ci x[n, ci, h, w] * W[co, ci]
+//
+// which is a batched matrix multiply of the [Cout, Cin] weight matrix against
+// the [Cin, H*W] activation matrix of each batch element. Routing it through
+// hip.matmul (hipBLASLt) instead of hip.conv (MIOpen) avoids MIOpen's
+// pathological per-call descriptor / workspace / algorithm-search overhead on
+// these tiny-kernel convolutions: the FLOP count is microsecond-scale while
+// the MIOpen launch cost is millisecond-scale. There is NO data movement —
+// every Reshape below is a pure metadata collapse/expand and the layout stays
+// NCHW throughout (W[Cout,Cin,1,1]->[Cout,Cin]; X[N,Cin,H,W]->[N,Cin,H*W];
+// result [N,Cout,H*W]->[N,Cout,H,W]).
+//
+// Restricted to fully static N/Cin/H/W/Cout. The emitted onnx.MatMul has its
+// batch dim coming from operand B (the activations), but MatMulConversion
+// sizes a dynamic non-last result dim from operand A — so a dynamic batch
+// would be mis-sized. Dynamic shapes therefore bail to the MIOpen hip.conv
+// path (ConvToHip, benefit 1).
+//
+// Before (ONNX dialect, 2-D 1x1 conv with bias):
+//   %y = onnx.Conv(%x, %w, %b)
+//        {kernel_shape=[1,1], strides=[1,1], pads=[0,0,0,0],
+//         dilations=[1,1], group=1}
+//        : (tensor<1x16x64x64xf16>, tensor<256x16x1x1xf16>, tensor<256xf16>)
+//        -> tensor<1x256x64x64xf16>
+//
+// After:
+//   %wr = onnx.Reshape(%w,  const [256, 16])       : -> tensor<256x16xf16>
+//   %xr = onnx.Reshape(%x,  const [1, 16, 4096])   : -> tensor<1x16x4096xf16>
+//   %mm = onnx.MatMul(%wr, %xr)                     : -> tensor<1x256x4096xf16>
+//   %y0 = onnx.Reshape(%mm, const [1, 256, 64, 64]): -> tensor<1x256x64x64xf16>
+//   %br = onnx.Reshape(%b,  const [1, 256, 1, 1])  : -> tensor<1x256x1x1xf16>
+//   %y  = onnx.Add(%y0, %br)                        : -> tensor<1x256x64x64xf16>
+//===----------------------------------------------------------------------===//
+struct PointwiseConvToMatMul : public mlir::RewritePattern {
+  PointwiseConvToMatMul(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Conv", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() < 2 || op->getNumOperands() > 3 ||
+        op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "conv.arity");
+    mlir::Value x = op->getOperand(0);
+    mlir::Value w = op->getOperand(1);
+    mlir::Value bias =
+        (op->getNumOperands() == 3 &&
+         !mlir::isa<mlir::NoneType>(op->getOperand(2).getType()))
+            ? op->getOperand(2)
+            : nullptr;
+
+    auto xType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+    auto wType = mlir::dyn_cast<mlir::RankedTensorType>(w.getType());
+    auto yType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!xType || !wType || !yType)
+      return rewriter.notifyMatchFailure(op, "conv.not_ranked");
+
+    // 2D conv (NCHW) only.
+    if (xType.getRank() != 4 || wType.getRank() != 4 || yType.getRank() != 4)
+      return rewriter.notifyMatchFailure(op, "conv.not_rank4");
+
+    // group == 1 (default). Grouped/depthwise 1x1 is not a single GEMM.
+    if (auto g = op->getAttrOfType<mlir::IntegerAttr>("group"))
+      if (g.getValue().getSExtValue() != 1)
+        return rewriter.notifyMatchFailure(op, "conv.group_ne_1");
+
+    // Every entry of an i64 array attr equals `val`. An absent attr means the
+    // ONNX default (strides/dilations = 1, pads = 0), which always matches.
+    auto allEq = [&](mlir::StringRef name, int64_t val) -> bool {
+      auto a = op->getAttrOfType<mlir::ArrayAttr>(name);
+      if (!a)
+        return true;
+      for (mlir::Attribute e : a) {
+        auto ia = mlir::dyn_cast<mlir::IntegerAttr>(e);
+        if (!ia || ia.getValue().getSExtValue() != val)
+          return false;
+      }
+      return true;
+    };
+
+    // Kernel must be 1x1 (weight spatial dims are authoritative; kernel_shape
+    // is cross-checked when present), stride 1, dilation 1, pad 0.
+    if (wType.getDimSize(2) != 1 || wType.getDimSize(3) != 1)
+      return rewriter.notifyMatchFailure(op, "conv.kernel_ne_1x1");
+    if (!allEq("kernel_shape", 1))
+      return rewriter.notifyMatchFailure(op, "conv.kernel_shape_ne_1");
+    if (!allEq("strides", 1))
+      return rewriter.notifyMatchFailure(op, "conv.stride_ne_1");
+    if (!allEq("dilations", 1))
+      return rewriter.notifyMatchFailure(op, "conv.dilation_ne_1");
+    if (!allEq("pads", 0))
+      return rewriter.notifyMatchFailure(op, "conv.pad_ne_0");
+
+    // Require fully static N/Cin/H/W/Cout (see header note on the batch dim).
+    if (!xType.hasStaticShape() || !wType.hasStaticShape() ||
+        !yType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "conv.dynamic_shape");
+
+    int64_t N = xType.getDimSize(0);
+    int64_t Cin = xType.getDimSize(1);
+    int64_t H = xType.getDimSize(2);
+    int64_t W = xType.getDimSize(3);
+    int64_t Cout = wType.getDimSize(0);
+    if (wType.getDimSize(1) != Cin)
+      return rewriter.notifyMatchFailure(op, "conv.cin_mismatch");
+    int64_t HW = H * W;
+
+    mlir::Type elemType = xType.getElementType();
+    // Bias (if any) must share the activation dtype so the broadcast Add
+    // lowers through the single-dtype elementwise path.
+    mlir::RankedTensorType bType;
+    if (bias) {
+      bType = mlir::dyn_cast<mlir::RankedTensorType>(bias.getType());
+      if (!bType || bType.getElementType() != elemType)
+        return rewriter.notifyMatchFailure(op, "conv.bias_dtype");
+    }
+
+    mlir::Location loc = op->getLoc();
+    auto i64Type = rewriter.getI64Type();
+    auto signedI64 = [&](int64_t v) -> mlir::IntegerAttr {
+      return mlir::IntegerAttr::get(
+          mlir::IntegerType::get(rewriter.getContext(), 64,
+                                 mlir::IntegerType::Signed),
+          v);
+    };
+    auto buildShapeConst = [&](mlir::ArrayRef<int64_t> dims) -> mlir::Value {
+      auto t = mlir::RankedTensorType::get(
+          {static_cast<int64_t>(dims.size())}, i64Type);
+      auto attr = mlir::DenseElementsAttr::get(t, dims);
+      mlir::OperationState s(loc, "onnx.Constant");
+      s.addTypes(t);
+      s.addAttribute("value", attr);
+      return rewriter.create(s)->getResult(0);
+    };
+    auto emitReshape = [&](mlir::Value src, mlir::ArrayRef<int64_t> shape,
+                           mlir::Type et) -> mlir::Value {
+      auto ty = mlir::RankedTensorType::get(shape, et);
+      mlir::OperationState s(loc, "onnx.Reshape");
+      s.addOperands({src, buildShapeConst(shape)});
+      s.addTypes(ty);
+      s.addAttribute("allowzero", signedI64(0));
+      return rewriter.create(s)->getResult(0);
+    };
+
+    // wr: [Cout, Cin, 1, 1] -> [Cout, Cin]; xr: [N, Cin, H, W] -> [N, Cin, H*W]
+    mlir::Value wr = emitReshape(w, {Cout, Cin}, wType.getElementType());
+    mlir::Value xr = emitReshape(x, {N, Cin, HW}, elemType);
+
+    // mm = MatMul(wr, xr): NumPy-broadcasts the [Cout, Cin] weight over the N
+    // batch of [Cin, H*W] activations -> [N, Cout, H*W].
+    auto mmType = mlir::RankedTensorType::get({N, Cout, HW}, elemType);
+    mlir::OperationState mmState(loc, "onnx.MatMul");
+    mmState.addOperands({wr, xr});
+    mmState.addTypes(mmType);
+    mlir::Value mm = rewriter.create(mmState)->getResult(0);
+
+    // y0 = Reshape(mm, [N, Cout, H, W]) back to NCHW.
+    mlir::Value result = emitReshape(mm, {N, Cout, H, W}, elemType);
+
+    if (bias) {
+      // br: [Cout] -> [1, Cout, 1, 1], then broadcast-Add over the NCHW result.
+      mlir::Value br =
+          emitReshape(bias, {1, Cout, 1, 1}, bType.getElementType());
+      mlir::OperationState addState(loc, "onnx.Add");
+      addState.addOperands({result, br});
+      addState.addTypes(yType);
+      result = rewriter.create(addState)->getResult(0);
+    }
+
+    rewriter.replaceOp(op, result);
+    ++NumPointwiseConvRewrites;
+    LLVM_DEBUG(llvm::dbgs()
+               << "[" DEBUG_TYPE "] PointwiseConvToMatMul: " << xType << " * "
+               << wType << " -> MatMul [" << N << "x" << Cout << "x" << HW
+               << "] (Cin=" << Cin << ")\n");
+    return mlir::success();
+  }
+};
+
 void populateProjectorOpsRewritePatterns(mlir::RewritePatternSet &patterns,
                                          mlir::MLIRContext *ctx) {
   patterns.add<PowToMul, AveragePoolToReshapeMean, BroadcastDivToMulReciprocal,
-               PatchEmbedConvToGemm>(ctx);
+               PatchEmbedConvToGemm, PointwiseConvToMatMul>(ctx);
 }
 
 } // namespace hip
