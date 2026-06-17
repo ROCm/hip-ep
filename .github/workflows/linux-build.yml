@@ -365,7 +365,7 @@ jobs:
                 done
           }
           stage_pass \
-            "$INSTALL"/lib/libonnxruntime_morphizen_ep.so \
+            "$INSTALL"/lib/libhipep.so \
             "$INSTALL"/lib/libhip-compiler.so \
             "$INSTALL"/bin/hip-compiler \
             "$INSTALL"/bin/hip-onnx-runner \
@@ -458,8 +458,8 @@ jobs:
 
           cp "${{ github.workspace }}/etc/morphizen_config.json" staging/etc/
 
-          # Smoke: per-arch kernel SO must sit next to libonnxruntime_morphizen_ep.so;
-          # the EP anchors dlopen via dladdr() + RPATH=$ORIGIN.
+          # Smoke: per-arch kernel SO must sit next to libhipep.so (the EP, named
+          # via morphizen_OUTPUT_NAME); the EP anchors dlopen via dladdr() + RPATH=$ORIGIN.
           KERNEL_SO="staging/lib/libcustom_kernels_gfx1151.so"
           if [ ! -f "$KERNEL_SO" ]; then
             echo "ERROR: $KERNEL_SO missing from install (HIP_ARCHITECTURES=gfx1151)"
