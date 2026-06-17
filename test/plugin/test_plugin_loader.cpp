@@ -27,13 +27,13 @@
 //      request the plugin made (`AfterConvertOnnxToHip` ->
 //      "hip-ep-sample-print-functions"). The Pipelines.cpp slot
 //      hook reads exactly this state.
-//   6. PR 3: After the callback runs, the registry also records the
+//   6. After the callback runs, the registry also records the
 //      LLVM bitcode buffer the plugin contributed via
 //      `addRuntimeBitcode`. The buffer carries the LLVM bitcode
 //      magic ('BC\xc0\xde'), confirming the build's clang->bitcode
 //      pipeline succeeded and the bytes survived the C ABI boundary
 //      intact.
-//   7. PR 4: After the callback runs, the registry records the
+//   7. After the callback runs, the registry records the
 //      library search path + library name the plugin contributed
 //      via `addLibraryPath` / `addLibrary`. Both round-trip across
 //      the DLL boundary as recorded `std::string` copies returned
@@ -162,11 +162,10 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
 
   // Snapshot the registry's view BEFORE we manually invoke
   // registerCallbacks. The accessors below auto-trigger
-  // `dispatchPluginRegistrationsOnce` (PR 6 made the read paths
-  // defensive), so by the time we read `beforeCount` the auto
-  // dispatch has already run -- the snapshot reflects whatever
-  // production dispatch contributed, and our manual call below
-  // adds one more increment that we then assert on.
+  // `dispatchPluginRegistrationsOnce` (the read paths are defensive), so by
+  // the time we read `beforeCount` the auto dispatch has already run -- the
+  // snapshot reflects whatever production dispatch contributed, and our manual
+  // call below adds one more increment that we then assert on.
   auto beforeCount = hip::compiler::pluginPassesForSlot(
                          hip::compiler::PipelineSlot::AfterConvertOnnxToHip)
                          .size();
@@ -216,7 +215,7 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
       unrelated.size() == 0u,
       "pluginPassesForSlot(AfterPoolAllocs) is empty (unrelated slot)");
 
-  // PR 3: the sample plugin contributed a bitcode buffer if its
+  // The sample plugin contributed a bitcode buffer if its
   // build had clang available. We can't tell from here whether the
   // build was degraded; instead we check that the recorded count
   // either stayed the same (degraded build) or grew by exactly one
@@ -247,7 +246,7 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
                          "without clang at sample-plugin configure time)\n");
   }
 
-  // PR 4: the sample plugin contributes one library path + one
+  // The sample plugin contributes one library path + one
   // library name unconditionally. Both should appear in the
   // accessors with the expected literal values.
   auto afterLibraryPaths = hip::compiler::pluginLibraryPaths();

@@ -350,20 +350,16 @@ bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
     }
   }
 
-  // Step 2: plugin-contributed bitcode (PR 3).
+  // Step 2: plugin-contributed bitcode.
   //
-  // Linked AFTER the in-tree runtime with `OverrideFromSrc` so a
-  // vendor `wrap_*` definition replaces the in-tree weak/default one.
-  // This is the LLVM-native way to do "vendor specialization" of
-  // runtime entry points; it is safer than mutating the destination
-  // module after-the-fact and matches how OpenMP and HIP themselves
-  // overlay device-runtime libraries.
+  // Linked AFTER the in-tree runtime with `OverrideFromSrc` so a vendor
+  // `wrap_*` definition replaces the in-tree one. Overlaying through the
+  // linker is safer than mutating the destination module after the fact.
   //
-  // Order: insertion order from `pluginBitcodeBuffers()`. If two
-  // plugins contribute the same symbol the second one wins; this
-  // mirrors lld's link-order semantics. We document this in the
-  // design doc rather than promising any deterministic-by-name
-  // ordering.
+  // Order: insertion order from `pluginBitcodeBuffers()`. If two plugins
+  // contribute the same symbol, the later one wins (link search-order
+  // semantics); this is documented in the design doc rather than promising a
+  // deterministic-by-name order.
   unsigned i = 0;
   for (const auto &buf : ::hip::compiler::pluginBitcodeBuffers()) {
     std::string name = "plugin." + std::to_string(i++) + ".bc";

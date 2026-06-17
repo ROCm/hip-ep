@@ -71,11 +71,11 @@ llvm::Expected<HipEpPluginLoader>
 HipEpPluginLoader::Load(const std::string &filename) {
   std::string err;
 
-  // `LoadLibraryPermanently` returns true on FAILURE (matches the
-  // upstream `llvm::sys::DynamicLibrary` API surface). We don't need
-  // the returned `DynamicLibrary` from this call — we just want the
-  // file to be permanently loaded into the process so subsequent
-  // `getPermanentLibrary` calls succeed.
+  // `LoadLibraryPermanently` returns true on FAILURE (that is the
+  // `llvm::sys::DynamicLibrary` API contract). We don't need the returned
+  // `DynamicLibrary` from this call -- we just want the file permanently
+  // loaded into the process so the subsequent `getPermanentLibrary` call
+  // succeeds.
   if (llvm::sys::DynamicLibrary::LoadLibraryPermanently(filename.c_str(),
                                                         &err)) {
     return makeError(llvm::Twine("Could not load plugin '") + filename +
@@ -167,13 +167,11 @@ void dispatchPluginRegistrationsOnce() {
     // registry instance.
     HipEpPluginRegistry &registry = getProcessPluginRegistry();
     for (const auto &plugin : loadPluginsOnce()) {
-      // A plugin that throws across the DLL boundary is technically
-      // undefined behaviour (CRT / libstdc++ versions may not match
-      // between host and plugin). We bound the blast radius: catch
-      // anything escaping `RegisterCallbacks`, log it, and continue
-      // with the next plugin. This is similar in spirit to
-      // `mlir-opt`'s handling of plugin-load failures, which also
-      // chooses degrade-and-continue over abort-the-host.
+      // A plugin that throws across the DLL boundary is undefined behaviour
+      // (the CRT / libstdc++ versions may differ between host and plugin). We
+      // bound the blast radius: catch anything escaping `RegisterCallbacks`,
+      // log it, and continue with the next plugin -- degrade-and-continue
+      // rather than abort the host.
       try {
         plugin.registerCallbacks(registry);
       } catch (const std::exception &e) {

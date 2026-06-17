@@ -15,8 +15,7 @@
 #include <string>
 #include <vector>
 
-// Loader for hip-compiler plugins, modeled after `llvm::PassPlugin` and
-// `mlir::PassPlugin`.
+// Loader for hip-compiler plugins.
 //
 // Production callers should use `dispatchPluginRegistrationsOnce()`,
 // which loads every DLL listed in `HIP_EP_PLUGINS` and runs each
@@ -33,8 +32,7 @@ namespace hip::compiler {
 
 class HipEpPluginRegistry;
 
-/// One loaded plugin DLL. Mirrors `llvm::PassPlugin` and
-/// `mlir::PassPlugin`.
+/// One loaded plugin library.
 class HipEpPluginLoader {
 public:
   /// Load the plugin DLL at `filename`, look up the

@@ -11,22 +11,14 @@
 
 // Plugin extension ABI for hip-compiler.
 //
-// This is the public C ABI surface that vendor plugins compile against.
-// Field-for-field aligned with the upstream LLVM/MLIR plugin pattern
-// (see `llvm/include/llvm/Plugins/PassPlugin.h` and
-// `mlir/include/mlir/Tools/Plugins/PassPlugin.h`).
+// This is the public C ABI surface that vendor plugins compile against. A
+// plugin is a shared library that exports `hipEpGetPluginInfo()`; the
+// compiler loads it, validates the API version, and invokes its single
+// registration callback. See docs/design/plugin-extension-api.md for the
+// design rationale.
 //
-// See docs/design/plugin-extension-api.md for design notes,
-// rationale, and the alignment matrix against upstream.
-//
-// STATUS (2026-05): PRs 1-5 of the rollout have landed in private
-// review; PR 6 is a cleanup pass driven by the design self-review
-// (silent-failure-mode fixes, doc corrections, defensive idempotency,
-// host-owned bitcode buffers, etc.). The struct layout is **not yet
-// frozen** -- vendor-team review is still outstanding -- and Open
-// Question 6 (cross-DLL `mlir::PassRegistration`) remains open.
-// Plugins should treat `HIP_EP_PLUGIN_API_VERSION` as a moving
-// target until the design doc Status flips to "Stable".
+// The struct layout is not yet frozen, so treat `HIP_EP_PLUGIN_API_VERSION`
+// as provisional until the design is ratified.
 
 namespace hip::compiler {
 class HipEpPluginRegistry;
@@ -36,11 +28,9 @@ namespace hip::compiler {
 
 /// API version understood by this plugin.
 ///
-/// The version is incremented for ANY ABI-breaking change to the
-/// HipEpPluginLibraryInfo struct (callbacks added, removed, or
-/// reordered). This matches the upstream LLVM/MLIR convention; we
-/// intentionally do not split into major/minor. Drivers reject
-/// mismatched versions.
+/// Incremented for ANY ABI-breaking change to the HipEpPluginLibraryInfo
+/// struct (a callback added, removed, or reordered). There is no
+/// major/minor split: the loader rejects any version it does not equal.
 #define HIP_EP_PLUGIN_API_VERSION 1
 
 extern "C" {
@@ -83,19 +73,14 @@ struct HipEpPluginLibraryInfo {
 
 /// Public entry point for a hip-compiler plugin.
 ///
-/// The host (hip-compiler.dll) looks up this symbol by name in the
-/// plugin DLL and calls it to obtain the plugin info struct.
+/// The host looks up this symbol by name in the plugin library and calls it
+/// to obtain the plugin info struct.
 ///
-/// `LLVM_ATTRIBUTE_WEAK` is intentional and matches upstream:
-/// - On non-Windows targets it lets the same source be either
-///   statically linked into a tool (where the tool resolves the
-///   symbol at link time) or dynamically loaded.
-/// - On Windows `LLVM_ATTRIBUTE_WEAK` is a no-op (per upstream
-///   `llvm/Support/Compiler.h`); plugin authors should annotate the
-///   *definition* with `__declspec(dllexport)` to ensure the symbol
-///   is exported. CMake-side, setting
-///   `WINDOWS_EXPORT_ALL_SYMBOLS` on the plugin target is the
-///   simplest way to achieve this.
+/// `LLVM_ATTRIBUTE_WEAK` lets the same source be either statically linked
+/// into a tool (symbol resolved at link time) or dynamically loaded. It is a
+/// no-op on Windows, where the plugin must export the *definition*
+/// explicitly: annotate it with `__declspec(dllexport)`, or set
+/// `WINDOWS_EXPORT_ALL_SYMBOLS` on the plugin's CMake target.
 ///
 /// Example plugin implementation:
 ///

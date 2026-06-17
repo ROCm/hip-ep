@@ -49,13 +49,12 @@ static_assert(static_cast<int>(PipelineSlot::AfterGenerateInterface) ==
               "update PluginRegistry.cpp to match.");
 
 struct Storage {
-  // (slot, passName) pairs recorded by plugin requestPipelineSlot
-  // calls. PR 2.
+  // (slot, passName) pairs recorded by plugin requestPipelineSlot calls.
   std::vector<std::pair<PipelineSlot, std::string>> slotRequests;
 
-  // Bitcode buffers contributed by plugin addRuntimeBitcode calls.
-  // PR 3, host-owned as of PR 6: the bytes live in `bitcodeStorage`,
-  // and `bitcodeBuffers[i].data` is `bitcodeStorage[i].data()`.
+  // Bitcode buffers contributed by plugin addRuntimeBitcode calls. Host-owned:
+  // the bytes live in `bitcodeStorage`, and `bitcodeBuffers[i].data` is
+  // `bitcodeStorage[i].data()`.
   //
   // Type choice: `std::vector<unsigned char>` (rather than
   // `std::string`) avoids the small-string-optimization trap: when
@@ -70,9 +69,8 @@ struct Storage {
   std::vector<PluginBitcodeBuffer> bitcodeBuffers;
 
   // Library search paths and library names contributed by plugin
-  // addLibraryPath / addLibrary calls. PR 4. The plugin's StringRef
-  // may point into transient storage, so the registry owns the
-  // std::string copies.
+  // addLibraryPath / addLibrary calls. The plugin's StringRef may point into
+  // transient storage, so the registry owns the std::string copies.
   std::vector<std::string> libraryPaths;
   std::vector<std::string> libraries;
 };

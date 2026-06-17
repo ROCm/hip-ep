@@ -539,14 +539,13 @@ void CompilerDriver::discoverLibraries(
   // as the plugin contributes everything the model module needs.
   discoverInTreeLibraries(libraries, library_paths);
 
-  // Phase 2: plugin-contributed libraries (PR 4).
+  // Phase 2: plugin-contributed libraries.
   //
-  // Appended *after* in-tree libraries so that an in-tree library
-  // continues to be searched first when both define the same
-  // symbol. Vendors who need to override an in-tree symbol should
-  // use the bitcode mechanism (`addRuntimeBitcode`, PR 3), which
-  // is wired with `Linker::Flags::OverrideFromSrc` for that
-  // purpose. The doc comment on `pluginLibraries()` in
+  // Appended *after* the in-tree libraries so an in-tree library is searched
+  // first when both define the same symbol. Vendors who need to override an
+  // in-tree symbol should use the bitcode mechanism (`addRuntimeBitcode`),
+  // which is wired with `Linker::Flags::OverrideFromSrc` for that purpose.
+  // The `pluginLibraries()` doc comment in
   // include/hip/Compiler/PluginRegistry.h documents this contract.
   for (const auto &path : ::hip::compiler::pluginLibraryPaths()) {
     library_paths.emplace_back(path);
