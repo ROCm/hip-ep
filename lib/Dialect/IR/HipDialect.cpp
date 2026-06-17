@@ -807,6 +807,18 @@ void SigmoidOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// TanhOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TanhOp::getDpsInitsMutable() { return getYMutable(); }
+
+void TanhOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SoftplusOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 

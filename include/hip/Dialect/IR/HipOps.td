@@ -1471,6 +1471,37 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
   }];
 }
 
+def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
+  let summary = "Tanh activation";
+  let description = [{
+    Applies hyperbolic-tangent activation: y = tanh(x)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.tanh(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                   outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
                                /*outsAccessor=*/"Y",
                                /*autoReify=*/1,
