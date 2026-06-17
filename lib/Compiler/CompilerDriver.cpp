@@ -19,6 +19,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
@@ -229,31 +230,74 @@ bool CompilerDriver::runMLIRPasses(
     COMPILER_DEBUG_LOG("Running ONNX->HIP->LLVM->Interface passes\n");
   }
 
-  mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
-  onnxToHipOpts.externalizeMinNumElements =
-      mlir::hip::kDefaultExternalizeMinNumElements;
-  onnxToHipOpts.skipConstantData = options.skip_constant_data;
-  // Allocator mode is selected once, here, on the OnnxToHip half: when set, the
-  // slot-4.5 pair (hip-use-output-allocator + hip-set-output-allocator-attr)
-  // runs in the OnnxToHip tail and stamps the `hipdnn.output_allocator` module
-  // attribute. The HipToLLVM half (convert-hip-to-llvm + generate-interface)
-  // reads that attribute off the IR, so it needs no separate flag -- the mode
-  // rides on the module, keeping the two halves from ever disagreeing.
-  onnxToHipOpts.useOutputAllocator = options.use_output_allocator;
+  // Pipeline composition override: a downstream may replace the built-in
+  // ONNX->HIP->LLVM order via the HIPDNN_EP_PIPELINE env var. The value is
+  // either a registered pipeline name or a textual `builtin.module(...)`
+  // string; it composes from in-tree passes resolved out of MLIR's global
+  // registry (populated by registerAllPasses() in compile()). A textual
+  // pipeline of in-tree passes needs no shared MLIR. When the env var is unset
+  // the built-in pipeline runs unchanged. The downstream then owns the
+  // load-bearing ordering invariants and the required terminal stages; the
+  // post-run check below hard-fails if the result lacks an inference_compute
+  // entry point. See docs/design/plugin-interface.md, "Pipeline composition".
+  //
+  // hip_get_env (not std::getenv): this code may be linked into the static-CRT
+  // EP DLL where std::getenv cannot see host-process env vars.
+  std::string customPipeline = hip_get_env("HIPDNN_EP_PIPELINE");
+  const bool overridePipeline = !customPipeline.empty();
 
-  if (hipdnnHandle_) {
-    compiledGraphs_ =
-        std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
-    mlir::hip::buildOnnxToHipPipeline(
-        pm, onnxToHipOpts, fileSystem_,
-        static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+  if (overridePipeline) {
+    std::string parseErr;
+    llvm::raw_string_ostream parseErrOS(parseErr);
+    llvm::StringRef desc = llvm::StringRef(customPipeline).trim();
+    // Strip a leading `builtin.module(...)` wrapper if present so the inner
+    // list parses into the module-level PassManager; otherwise treat the value
+    // as a registered pipeline name (or a bare inner list).
+    mlir::LogicalResult parsed = mlir::failure();
+    size_t paren = desc.find_first_of('(');
+    if (paren != llvm::StringRef::npos &&
+        desc.take_front(paren).rtrim() == "builtin.module" &&
+        desc.consume_back(")")) {
+      parsed =
+          mlir::parsePassPipeline(desc.drop_front(paren + 1), pm, parseErrOS);
+    } else {
+      parsed = mlir::parsePassPipeline(desc, pm, parseErrOS);
+    }
+    if (mlir::failed(parsed)) {
+      error_message = "HIPDNN_EP_PIPELINE: failed to parse pipeline '" +
+                      customPipeline + "': " + parseErrOS.str();
+      return false;
+    }
+    COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_PIPELINE set: built-in "
+                       "pipeline overridden by a custom pipeline\n");
   } else {
-    mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
-  }
+    mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
+    onnxToHipOpts.externalizeMinNumElements =
+        mlir::hip::kDefaultExternalizeMinNumElements;
+    onnxToHipOpts.skipConstantData = options.skip_constant_data;
+    // Allocator mode is selected once, here, on the OnnxToHip half: when set,
+    // the slot-4.5 pair (hip-use-output-allocator + hip-set-output-allocator-
+    // attr) runs in the OnnxToHip tail and stamps the `hipdnn.output_allocator`
+    // module attribute. The HipToLLVM half (convert-hip-to-llvm +
+    // generate-interface) reads that attribute off the IR, so it needs no
+    // separate flag -- the mode rides on the module, keeping the two halves
+    // from ever disagreeing.
+    onnxToHipOpts.useOutputAllocator = options.use_output_allocator;
 
-  mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
-  hipToLlvmOpts.constantsFile = options.constants_file;
-  mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
+    if (hipdnnHandle_) {
+      compiledGraphs_ =
+          std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
+      mlir::hip::buildOnnxToHipPipeline(
+          pm, onnxToHipOpts, fileSystem_,
+          static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+    } else {
+      mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+    }
+
+    mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
+    hipToLlvmOpts.constantsFile = options.constants_file;
+    mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
+  }
 
   std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;
   // hip_get_env, not std::getenv: this code may be linked into the static-CRT
@@ -347,6 +391,21 @@ bool CompilerDriver::runMLIRPasses(
                       "(HIPDNN_EP_STRICT=1).\n";
       std::abort();
     }
+    return false;
+  }
+
+  // Guardrail for the HIPDNN_EP_PIPELINE override: a custom pipeline that drops
+  // generate-interface (or otherwise fails to emit the C-ABI entry point)
+  // produces a module the rest of the EP cannot consume. Fail loudly here
+  // rather than later with a cryptic missing-symbol error at link/load. Only
+  // checked in override mode; the built-in pipeline always emits it.
+  if (overridePipeline &&
+      !module.lookupSymbol(hipdnn::abi::kInferenceCompute)) {
+    error_message =
+        std::string("HIPDNN_EP_PIPELINE: the custom pipeline did not produce "
+                    "an '") +
+        hipdnn::abi::kInferenceCompute +
+        "' entry point (did it omit generate-interface?)";
     return false;
   }
 
