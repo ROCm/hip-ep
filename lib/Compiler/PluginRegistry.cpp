@@ -28,7 +28,7 @@ namespace hip::compiler {
 // Concurrency: plugin registration is one-shot. dispatchPluginRegis-
 // trationsOnce() runs every plugin's RegisterCallbacks behind a
 // std::call_once, which serializes all writes. Reads (passesForSlot
-// and the PR-3/PR-4 accessors below) happen after that completes,
+// and the bitcode / library accessors below) happen after that completes,
 // and each accessor calls dispatchPluginRegistrationsOnce() itself
 // as a defensive idempotent step, so a future caller that bypasses
 // CompilerDriver::compile (a new tool, a unit test, etc.) still

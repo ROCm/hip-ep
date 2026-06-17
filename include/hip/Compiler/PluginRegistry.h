@@ -46,7 +46,7 @@
 // depends only on this header (fully inline) plus MLIR (for the definition of
 // `mlir::PassRegistration<T>`), and on no symbol from hip-compiler's source.
 //
-// See docs/design/plugin-extension-api.md.
+// See docs/design/plugin-interface.md.
 
 namespace hip::compiler {
 
@@ -140,7 +140,7 @@ public:
   /// host's `parsePassPipeline` cannot find the pass, and the slot dispatch
   /// emits a `[plugin-loader] WARNING: pass '...' not registered` line. The
   /// other contributions (bitcode, libraries) are unaffected because they do
-  /// not cross MLIR's global state. See docs/design/plugin-extension-api.md.
+  /// not cross MLIR's global state. See docs/design/plugin-interface.md.
   ///
   /// Defined inline because the template must be instantiated in the plugin;
   /// the plugin links MLIR for the definition of `mlir::PassRegistration<T>`

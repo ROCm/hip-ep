@@ -4,10 +4,10 @@
 ##
 
 # Sample plugin DLL exercising the public plugin ABI surface in CI.
-# See docs/design/plugin-extension-api.md for the broader context.
+# See docs/design/plugin-interface.md for the broader context.
 
 # ============================================================================
-# PR 3: embed a tiny LLVM bitcode buffer in the plugin DLL.
+# Embed a tiny LLVM bitcode buffer in the plugin DLL.
 #
 # The plugin's RegisterCallbacks hands this buffer to hip-compiler via
 # HipEpPluginRegistry::addRuntimeBitcode; LLVMBackend::linkRuntimeModule
@@ -82,7 +82,7 @@ else()
 endif()
 
 # ============================================================================
-# PR 4: build a tiny static library and have the plugin contribute
+# Build a tiny static library and have the plugin contribute
 # its path + name through addLibraryPath / addLibrary. The library
 # exposes a single uniquely-named C symbol so it cannot collide with
 # anything in-tree.
@@ -121,9 +121,8 @@ target_compile_definitions(hip_ep_sample_plugin PRIVATE
 # consumer of the public hip-compiler artefact, not an internal
 # component, so we match that constraint here in the in-tree sample.
 #
-# This list mirrors the upstream `mlir/examples/standalone/lib/...`
-# pattern. Bringing in MLIRPass also brings the MLIRSupport / MLIRIR
-# transitive dependencies the pass needs.
+# Bringing in MLIRPass also brings the MLIRSupport / MLIRIR transitive
+# dependencies the pass needs.
 target_link_libraries(hip_ep_sample_plugin PRIVATE
   MLIRPass
   MLIRIR
@@ -141,8 +140,6 @@ target_include_directories(hip_ep_sample_plugin PRIVATE
 )
 
 # Windows: export hipEpGetPluginInfo without a .def file.
-# Mirrors how llvm/examples/Bye/Bye.cpp's CMakeLists handles upstream
-# pass plugins on Windows.
 set_target_properties(hip_ep_sample_plugin PROPERTIES
   WINDOWS_EXPORT_ALL_SYMBOLS ON
   FOLDER "mlir/Test/Plugin"

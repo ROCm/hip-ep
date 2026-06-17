@@ -4,20 +4,17 @@ Licensed under the MIT License.
 -->
 # Authoring a hip-compiler Plugin
 
-**Audience:** vendor / downstream backend engineers writing a plugin DLL
-that ships proprietary ONNX ops, custom kernels, or MLIR passes on top
-of `onnx-hipdnn-ep`.
+**Audience:** down-stream teams writing a plugin shared library that adds
+ONNX ops, custom kernels, or MLIR passes on top of `onnx-hipdnn-ep`.
 
-**Status:** the ABI is in proposal status; PRs 1–5 of the rollout
-have landed plus a PR-6 cleanup pass (defensive idempotency, stderr
-warnings on bad plugin paths, host-owned bitcode buffers, slot
-bounds-checks, exception containment around `RegisterCallbacks`).
-Do not ship a plugin against the in-tree headers until the design
-status flips to "Stable" in
-[`docs/design/plugin-extension-api.md`](design/plugin-extension-api.md).
+**Status:** the plugin ABI is provisional and not yet frozen. Treat
+`HIP_EP_PLUGIN_API_VERSION` as a moving target and rebuild plugins when it
+changes.
 
-This guide is the practical companion to the full design doc. It covers
-*how* to author a plugin, not *why* the API is shaped the way it is.
+This guide is the practical companion to
+[`docs/design/plugin-interface.md`](design/plugin-interface.md): it covers
+*how* to author a plugin, while the design doc covers the architecture and
+the rationale.
 
 ---
 
@@ -38,11 +35,6 @@ The host never calls back into the plugin after `RegisterCallbacks`
 completes. The plugin's pass code, bitcode buffers, and library paths
 must outlive every model compile in the process — in practice that
 means static storage in the plugin DLL.
-
-The shape is field-for-field aligned with the LLVM/MLIR upstream plugin
-pattern (see Appendix C of the design doc); if you have written an
-LLVM pass plugin or an MLIR dialect plugin, the surface here will look
-familiar.
 
 ---
 
@@ -100,7 +92,7 @@ void registerCallbacks(::hip::compiler::HipEpPluginRegistry & /*R*/) {
 }
 } // namespace
 
-extern "C" ::hip::compiler::HipEpPluginLibraryInfo
+extern "C" ::hip::compiler::HipEpPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
 hipEpGetPluginInfo() {
   return {
       HIP_EP_PLUGIN_API_VERSION,
@@ -114,9 +106,14 @@ hipEpGetPluginInfo() {
 CMake (omitting the path for brevity — adapt to your repo layout):
 
 ```cmake
+find_package(MLIR REQUIRED CONFIG)
+
 add_library(my_vendor_plugin SHARED my_plugin.cpp)
-target_link_libraries(my_vendor_plugin PRIVATE
-  MLIRPass MLIRIR MLIRSupport MLIRFuncDialect)
+# Link the shared MLIR library (not the per-component static archives) so the
+# plugin and host share one MLIR pass registry; a static link makes a
+# contributed pass invisible to the host (see section 4).
+target_link_libraries(my_vendor_plugin PRIVATE MLIR)
+target_include_directories(my_vendor_plugin PRIVATE ${MLIR_INCLUDE_DIRS})
 target_compile_features(my_vendor_plugin PRIVATE cxx_std_17)
 set_target_properties(my_vendor_plugin PROPERTIES
   WINDOWS_EXPORT_ALL_SYMBOLS ON
@@ -125,18 +122,16 @@ set_target_properties(my_vendor_plugin PROPERTIES
 )
 ```
 
-Two requirements that are easy to miss:
+Three requirements that are easy to miss:
 
-- **`WINDOWS_EXPORT_ALL_SYMBOLS ON`** is required so
-  `hipEpGetPluginInfo` is exported under its unmangled C name without
-  a `.def` file. The same workaround upstream LLVM uses for its
-  examples (`llvm/examples/Bye/Bye.cpp`).
-- **The plugin links MLIR libraries directly**, not `LibHipCompiler`.
-  `LibHipCompiler` ships as a static library inside `hip-compiler.exe`
-  / `hip-compiler.dll`; there is nothing for a plugin DLL to import
-  against. The plugin reaches `LibHipCompiler` purely through inline
-  thunks in `PluginRegistry.h` (see section 6 of the design doc for
-  the rationale).
+- **Link the shared MLIR library**, not the per-component static archives,
+  for any plugin that contributes a pass (see section 4 for why).
+- **`WINDOWS_EXPORT_ALL_SYMBOLS ON`** is required so `hipEpGetPluginInfo` is
+  exported under its unmangled C name without a `.def` file.
+- **The plugin links MLIR, not `LibHipCompiler`.** `LibHipCompiler` is a
+  static library inside the host (`hip-compiler`); there is nothing for a
+  plugin to import against. The plugin reaches it purely through the inline
+  thunks in `PluginRegistry.h`.
 
 ---
 
@@ -178,16 +173,13 @@ seven public seams in `lib/Dialect/Transforms/Pipelines.cpp`.
 of `onnx.Custom` ops; pick the slot that matches when your transform
 needs to run.
 
-> **Known limitation (open question 6 in the design doc):** because
-> `hip-compiler` and the plugin both link MLIR statically, MLIR's pass
-> registry is duplicated per DLL. A pass registered through
-> `mlir::PassRegistration<>` from inside the plugin DLL is therefore
-> *not* visible to the host's pass registry, so
-> `requestPipelineSlot` records the request correctly but the
-> pipeline emits a warning at compile time and skips the pass. The
-> resolution requires switching to a shared MLIR (the same problem
-> upstream solves with `libLLVM.so`); this is tracked separately and
-> does not affect runtime bitcode or external library contribution.
+> **Prerequisite — shared MLIR:** a contributed pass is only visible to the
+> host when the host and the plugin link the *same* MLIR instance (the shared
+> MLIR library). If either links MLIR statically, the pass registry is
+> duplicated, and `requestPipelineSlot` records the request but the pipeline
+> warns and skips the pass at compile time. Build both against shared MLIR
+> (the CMake in section 3 does this). Runtime bitcode and external library
+> contributions are unaffected.
 
 ---
 
@@ -220,23 +212,12 @@ example.
 
 ### Symbol naming and override semantics — important caveat
 
-`Linker::Flags::OverrideFromSrc` is **unconditional and
-all-or-nothing**. Reading the LLVM source
-([`lib/Linker/LinkModules.cpp::shouldLinkFromSource`](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Linker/LinkModules.cpp)),
-you can see the flag is the very first check in the linkage decision:
-
-```cpp
-if (shouldOverrideFromSrc()) {
-  LinkFromSrc = true;
-  return false;
-}
-```
-
-There is **no per-symbol opt-in** today. Every name collision between
-your plugin's bitcode and the in-tree runtime resolves in favour of
-your plugin. That is exactly what you want for the symbols you are
-deliberately overriding (`wrap_*` or vendor-prefixed entry points).
-But it also silently shadows any *accidental* name collision.
+`Linker::Flags::OverrideFromSrc` is **unconditional and all-or-nothing**:
+there is **no per-symbol opt-in** today. Every name collision between your
+plugin's bitcode and the in-tree runtime resolves in favour of your plugin.
+That is exactly what you want for the symbols you are deliberately overriding
+(vendor-prefixed entry points), but it also silently shadows any *accidental*
+name collision.
 
 Practical implications:
 
@@ -257,14 +238,10 @@ current behaviour is a starting point, not a final decision.
 
 ### Other constraints
 
-- **Buffer lifetime: don't worry about it.** As of PR 6 the host
-  copies the bytes during `addRuntimeBitcode`, so a stack buffer or
-  transient allocation is fine. (Earlier wording on this guide and
-  the public header asked you to keep the buffer alive forever; that
-  requirement is gone. The sample plugin still uses a
-  `static const unsigned char[]` because that's the simplest way to
-  embed bytes from a build-time-generated C array, not because the
-  host needs it.)
+- **Buffer lifetime: don't worry about it.** The host copies the bytes
+  during `addRuntimeBitcode`, so a stack buffer or transient allocation is
+  fine. The sample plugin uses a `static const unsigned char[]` only because
+  that is the simplest way to embed a build-time-generated C array.
 - **Empty buffers are a no-op.** `addRuntimeBitcode(nullptr, 0)`
   emits a `[plugin-loader] WARNING: ...` line and returns. You do
   not need to gate the call on `if (kVendorBitcodeSize != 0)` —
@@ -274,10 +251,9 @@ current behaviour is a starting point, not a final decision.
   the LLVM version `hip-compiler` was built with. In practice this
   means compiling with the same clang that `hip-compiler` was built
   against.
-- Linking happens *after* the in-tree runtime, with
-  `OverrideFromSrc`. Ordering between two plugins contributing the
-  same symbol follows insertion order — second-registered wins, which
-  matches lld's command-line semantics.
+- Linking happens *after* the in-tree runtime, with `OverrideFromSrc`. When
+  two plugins contribute the same symbol, the later-registered one wins, by
+  link order.
 
 ---
 
@@ -296,9 +272,9 @@ void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
 }
 ```
 
-Both `addLibraryPath` and `addLibrary` accept either a bare name (as
-above, resolved by lld-link / the clang driver against the path list)
-or an absolute file path (in which case the path list is irrelevant).
+`addLibraryPath` takes a search directory. `addLibrary` takes either a bare
+name (as above, resolved against the search paths) or an absolute path to a
+library file (in which case the search paths are irrelevant).
 
 Constraints:
 
@@ -322,10 +298,9 @@ Constraints:
 
 Before shipping a plugin DLL to consumers:
 
-- [ ] Plugin builds against the same LLVM major version as the
-      `hip-compiler` install you're shipping for. (LLVM does not
-      promise C++ ABI compatibility across major versions; see
-      Open Question 2 in the design doc.)
+- [ ] Plugin builds against the same LLVM/MLIR version as the
+      `hip-compiler` install you are shipping for. C++ ABI compatibility is
+      not guaranteed across versions, so rebuild when the host's LLVM moves.
 - [ ] `hipEpGetPluginInfo` returns a non-empty `pluginName` and
       `pluginVersion`. The host loader rejects empty values with an
       `llvm::Error`.
@@ -347,8 +322,8 @@ Before shipping a plugin DLL to consumers:
 
 ## 8. Where to look next
 
-- **Why the API is shaped this way:**
-  [`docs/design/plugin-extension-api.md`](design/plugin-extension-api.md).
+- **Design and rationale:**
+  [`docs/design/plugin-interface.md`](design/plugin-interface.md).
 - **The C ABI struct + version macros:**
   [`include/hip/Compiler/PluginAPI.h`](../include/hip/Compiler/PluginAPI.h).
 - **The registry methods you call from `RegisterCallbacks`:**
