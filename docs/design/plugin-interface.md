@@ -473,16 +473,50 @@ downstream plugin exists.
 
 ## Planned extensions
 
-Two capabilities are designed but not yet implemented in the ABI:
+Two capabilities are designed but not yet implemented in the ABI.
 
-- **New first-class ops and bufferization / interface models.** A plugin
-  registers a dialect op (and the interface models it needs, such as
-  bufferization) into the host's dialect registry, so a custom op can
-  survive across passes rather than being lowered away in a single pass.
-- **Pipeline ordering.** Beyond inserting at a fixed slot, a plugin
-  registers a complete named pipeline so a target can define or replace the
-  overall pass order, not only add passes at the existing anchors.
+### New first-class ops and interface models
 
-Both share the [linkage requirement](#linkage-requirement): the dialect,
-type, and pass registries are process-global MLIR state, so the host and
-plugin must share one MLIR instance.
+A plugin registers a dialect op (and the interface models it needs, such as
+bufferization) into the host's dialect registry, so a custom op can survive
+across passes rather than being lowered away in a single pass.
+
+### Pipeline composition
+
+Beyond inserting at a fixed slot, a downstream may want to see the full pass
+set and compose -- or fully replace -- the pass order. The planned design has
+four parts:
+
+- **Expose all passes by name.** Every pass the pipeline uses is registered
+  with a stable command-line name (`getArgument()`), so it is referenceable
+  in a textual `op(pass,...)` pipeline -- the standard MLIR mechanism. A
+  published "pass menu" lists the names and the `PipelineSlot` anchors.
+- **Textual pipeline override.** The driver consults a selector (e.g. a
+  `HIPDNN_EP_PIPELINE` env var). If it is a textual pipeline string, the
+  driver strips a mandatory `builtin.module(...)` wrapper and runs
+  `parsePassPipeline` on the inner text (so the downstream composes from
+  in-tree passes by name); if it names a registered pipeline, that is built;
+  if unset, the in-tree default runs unchanged. A textual pipeline of in-tree
+  passes resolves from the host's own registry, so this part does **not**
+  require shared MLIR.
+- **Registered pipeline builder.** For passes that need runtime-bound state a
+  textual string cannot carry (e.g. the in-memory-filesystem variant of
+  `convert-onnx-to-hip`), a plugin registers a pipeline *builder* that
+  receives a context (the filesystem and pipeline options) and composes
+  passes -- including in-tree stage builders -- in C++. This is the
+  full-fidelity path; it shares the [linkage requirement](#linkage-requirement).
+- **Guardrails.** The load-bearing ordering invariants (host-scalar
+  materialization before pool allocation; output-allocator after buffer
+  deallocation; affine lowering after strided-metadata expansion; the
+  terminal `convert-hip-to-llvm` + `generate-interface` stages) are owned by
+  whoever replaces the order. A post-pipeline check hard-fails with a clear
+  message if the produced module is missing the required entry points.
+
+**Stability:** pass and pipeline names are version-pinned compiler internals,
+not a frozen cross-release contract -- a plugin that composes by name pins to
+a release. (Renaming a pass is a documented breaking change for such plugins.)
+
+Both extensions share the [linkage requirement](#linkage-requirement): the
+dialect, type, and pass registries are process-global MLIR state, so any
+plugin-registered op, pass, or pipeline needs the host and plugin to share one
+MLIR instance.
