@@ -87,6 +87,10 @@ endif()
 # ==============================================================================
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
 
+# Must be declared BEFORE add_subdirectory(tools) so tools/hip-mlir-opt/
+# CMakeLists.txt can see it when deciding static vs dylib linkage.
+option(BUILD_HIP_PLUGINS "Build out-of-tree plugin PoC (requires BUILD_HIP_TOOLS)" OFF)
+
 if(BUILD_HIP_TOOLS)
   find_package(LLVM REQUIRED CONFIG)
   find_package(MLIR REQUIRED CONFIG)
@@ -160,6 +164,11 @@ if(BUILD_HIP_TOOLS)
 
   # Executable targets
   add_subdirectory(tools)
+
+  # Out-of-tree plugin PoC (gated — does not affect default build)
+  if(BUILD_HIP_PLUGINS)
+    add_subdirectory(plugins)
+  endif()
 
   # ==============================================================================
   # HIP Unit Tests (LIT + E2E)

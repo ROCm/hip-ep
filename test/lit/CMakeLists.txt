@@ -46,6 +46,30 @@ if(CMAKE_CONFIGURATION_TYPES)
 else()
     set(LLVM_BUILD_MODE "${CMAKE_BUILD_TYPE}")
 endif()
+
+# Plugin .so paths injected into lit.site.cfg.py — empty when plugins are off.
+# lit.cfg.py checks os.path.exists() before enabling the hip_plugins feature, so
+# tests with `// REQUIRES: hip_plugins` are UNSUPPORTED (not failing) by default.
+if(BUILD_HIP_PLUGINS)
+  # On MSVC multi-config generators the DLL lands in plugins/<config>/foo.dll.
+  # Use a Python format placeholder (%(build_mode)s) so lit.cfg.py resolves
+  # the actual config at runtime — the same technique used for hip_build_mode.
+  if(CMAKE_CONFIGURATION_TYPES)
+    set(_plugin_config_dir "%(build_mode)s/")
+  else()
+    set(_plugin_config_dir "")
+  endif()
+  set(HIP_FUSION_PLUGIN_PATH
+      "${CMAKE_BINARY_DIR}/plugins/${_plugin_config_dir}${CMAKE_SHARED_MODULE_PREFIX}hip_fusion_plugin${CMAKE_SHARED_MODULE_SUFFIX}")
+  set(HIP_FUSION_PLUGIN_NOBUF_PATH
+      "${CMAKE_BINARY_DIR}/plugins/${_plugin_config_dir}${CMAKE_SHARED_MODULE_PREFIX}hip_fusion_plugin_nobuf${CMAKE_SHARED_MODULE_SUFFIX}")
+  # Note: CMAKE_SHARED_MODULE_PREFIX is empty on Windows, suffix is .dll, so
+  # paths correctly resolve to hip_fusion_plugin.dll / hip_fusion_plugin_nobuf.dll
+else()
+  set(HIP_FUSION_PLUGIN_PATH "")
+  set(HIP_FUSION_PLUGIN_NOBUF_PATH "")
+endif()
+
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
     ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py
@@ -60,9 +84,13 @@ configure_file(
 set(LIT_ARGS "-sv" CACHE STRING "Extra arguments passed to lit (e.g. -j4 --no-progress-bar)")
 
 # Add custom build target for manual invocation: cmake --build . --target check-hip-mlir-lit
+set(_lit_deps hip-mlir-opt hip-compiler)
+if(BUILD_HIP_PLUGINS)
+  list(APPEND _lit_deps hip_fusion_plugin hip_fusion_plugin_nobuf)
+endif()
 add_custom_target(check-hip-mlir-lit
     COMMAND ${LIT_EXECUTABLE} ${LIT_ARGS} --param=build_mode=$<CONFIG> .
-    DEPENDS hip-mlir-opt hip-compiler
+    DEPENDS ${_lit_deps}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running LIT tests for hip-mlir-compiler"
 )

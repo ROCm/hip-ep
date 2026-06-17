@@ -26,6 +26,11 @@ config.hip_build_dir = r"@CMAKE_BINARY_DIR@"
 # string) so that lit substitutes the actual config (Debug/Release) at runtime.
 config.hip_build_mode = "@LLVM_BUILD_MODE@"
 
+# Plugin paths — empty strings when BUILD_HIP_PLUGINS=OFF; lit.cfg.py checks
+# whether they exist before enabling the hip_plugins feature.
+config.hip_fusion_plugin     = r"@HIP_FUSION_PLUGIN_PATH@"
+config.hip_fusion_plugin_nobuf = r"@HIP_FUSION_PLUGIN_NOBUF_PATH@"
+
 lit.llvm.initialize(lit_config, config)
 
 # Resolve %(build_mode)s for VS multi-config generators. No-op for single-config.

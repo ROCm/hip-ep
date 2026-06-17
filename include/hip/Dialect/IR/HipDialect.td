@@ -18,6 +18,19 @@ def Hip_Dialect : Dialect {
   }];
   let cppNamespace = "::mlir::hip";
   let useDefaultTypePrinterParser = 1;
+
+  let extraClassDeclaration = [{
+    // Public op-registration shim for out-of-tree plugins.
+    //
+    // `Dialect::addOperations` is protected, so a dynamically-loaded plugin
+    // (.so loaded via hip-mlir-opt --load-dialect-plugin) cannot inject real
+    // `hip.*` ops without this hook. This shim exposes it so a plugin's
+    // DialectRegistry extension can register its ops at dialect-load time,
+    // making plugin-contributed ops genuine `hip.*` ops that reuse the in-tree
+    // bufferization and lowering machinery. See plugins/fusion/.
+    template <typename... Ops>
+    void registerPluginOps() { addOperations<Ops...>(); }
+  }];
 }
 
 #endif // HIP_DIALECT
