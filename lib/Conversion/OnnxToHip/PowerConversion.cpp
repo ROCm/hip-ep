@@ -85,8 +85,8 @@ SqrtToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populatePowerConversionPatterns(RewritePatternSet &patterns,
-                                                MLIRContext *ctx) {
+void populatePowerConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx) {
   patterns.add<ReciprocalToHip, SqrtToHip>(ctx);
 }
 

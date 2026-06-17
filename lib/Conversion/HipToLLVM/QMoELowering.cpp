@@ -205,7 +205,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
 
 } // namespace
 
-void mlir::hip::populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
+void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns) {
   patterns.add<QMoEOpLowering>(converter);
 }

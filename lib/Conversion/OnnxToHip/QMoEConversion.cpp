@@ -175,7 +175,7 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateQMoEConversionPatterns(RewritePatternSet &patterns,
+void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
   patterns.add<QMoEToHip>(ctx);
 }

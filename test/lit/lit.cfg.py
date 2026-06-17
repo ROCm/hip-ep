@@ -92,5 +92,7 @@ _fusion_plugin_nobuf = _resolve(getattr(config, "hip_fusion_plugin_nobuf", ""))
 if _fusion_plugin and os.path.exists(_fusion_plugin) \
         and _fusion_plugin_nobuf and os.path.exists(_fusion_plugin_nobuf):
     config.available_features.add("hip_plugins")
-    config.substitutions.append(("%hip_fusion_plugin",      _fusion_plugin))
+    # Register the longer name first so lit doesn't expand %hip_fusion_plugin
+    # as a prefix of %hip_fusion_plugin_nobuf during substitution.
     config.substitutions.append(("%hip_fusion_plugin_nobuf", _fusion_plugin_nobuf))
+    config.substitutions.append(("%hip_fusion_plugin",      _fusion_plugin))

@@ -85,7 +85,7 @@ struct GatherToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateGatherConversionPatterns(RewritePatternSet &patterns,
+void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                                  MLIRContext *ctx) {
   patterns.add<GatherToHip>(ctx);
 }

@@ -24,7 +24,7 @@
 // RUN: hip-mlir-opt \
 // RUN:   --load-dialect-plugin=%hip_fusion_plugin \
 // RUN:   --load-pass-plugin=%hip_fusion_plugin \
-// RUN:   --pass-pipeline="builtin.module(func.func(hip-fuse-mul-add),one-shot-bufferize{bufferize-function-boundaries},hip-to-llvm-with-fusion-plugin)" \
+// RUN:   --pass-pipeline="builtin.module(func.func(hip-fuse-mul-add),one-shot-bufferize{bufferize-function-boundaries function-boundary-type-conversion=identity-layout-map},hip-to-llvm-with-fusion-plugin)" \
 // RUN:   %s | FileCheck %s
 
 // CHECK-LABEL: llvm.func @test_lowering

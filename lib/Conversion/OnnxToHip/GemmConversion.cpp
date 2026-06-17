@@ -71,7 +71,7 @@ struct GemmToHip : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateGemmConversionPatterns(RewritePatternSet &patterns,
+void populateGemmConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
   patterns.add<GemmToHip>(ctx);
 }

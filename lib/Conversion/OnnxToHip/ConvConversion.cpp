@@ -124,7 +124,7 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateConvConversionPatterns(RewritePatternSet &patterns,
+void populateConvConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
   patterns.add<ConvToHip>(ctx);
 }

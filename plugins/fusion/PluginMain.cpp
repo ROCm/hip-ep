@@ -40,8 +40,10 @@
 
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
@@ -85,10 +87,15 @@ struct FusedMulAddToLLVMPass
     RewritePatternSet patterns(ctx);
     hip::populateFusedMulAddLoweringPatterns(typeConverter, patterns);
 
-    LLVMConversionTarget target(*ctx);
+    // Target: only the plugin op is illegal. Everything else (memref, func,
+    // other hip.* ops) is left for convert-hip-to-llvm which runs after this.
+    ConversionTarget target(*ctx);
     target.addLegalDialect<LLVM::LLVMDialect>();
-    target.addIllegalOp<hip::FusedMulAddOp>();
+    target.addLegalDialect<hip::HipDialect>();
+    target.addLegalDialect<memref::MemRefDialect>();
+    target.addLegalDialect<func::FuncDialect>();
     target.addLegalOp<ModuleOp>();
+    target.addIllegalOp<hip::FusedMulAddOp>();
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))
       signalPassFailure();
@@ -156,13 +163,24 @@ mlirGetPassPluginInfo() {
             //
             // LIT tests that exercise E2E lowering use this pipeline instead of
             // the bare --convert-hip-to-llvm shorthand.
+            // Touchpoint E: register hip-to-llvm-with-fusion-plugin pipeline.
+            //
+            // Run the plugin op lowering BEFORE convert-hip-to-llvm so that
+            // FusedMulAddToLLVMPass sees raw memref operands (not LLVM structs).
+            // convert-hip-to-llvm then lowers everything else including the
+            // remaining memref/arith/func ops in a single combined pass.
+            //
+            // Order:
+            //   1. expand-strided-metadata — same as standard pipeline
+            //   2. fused-mul-add-to-llvm   — lower plugin op only (pre-LLVM)
+            //   3. convert-hip-to-llvm     — lower all remaining hip.* + memref ops
             PassPipelineRegistration<>(
                 "hip-to-llvm-with-fusion-plugin",
                 "HipToLLVM pipeline extended with hip.fused_mul_add lowering",
                 [](OpPassManager &pm) {
                   pm.addPass(memref::createExpandStridedMetadataPass());
-                  pm.addPass(hip::createConvertHipToLLVMPass());
                   pm.addPass(createFusedMulAddToLLVMPass());
+                  pm.addPass(hip::createConvertHipToLLVMPass());
                 });
           }};
 }

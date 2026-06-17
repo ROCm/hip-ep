@@ -111,7 +111,7 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateElementwiseConversionPatterns(
+void populateElementwiseConversionPatterns(
     RewritePatternSet &patterns, MLIRContext *ctx) {
   patterns.add<AddToHip, MulToHip, SubToHip>(ctx);
 }
