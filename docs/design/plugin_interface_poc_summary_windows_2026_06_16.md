@@ -16,16 +16,16 @@ fusion pass, a HipToLLVM lowering, a C-ABI runtime wrapper, and a gfx1103 HIP
 device kernel to `hip-mlir-opt` **at load time — with no recompile of the host
 compiler**. Mirrors ORT 1.25+ Plugin EP / IREE HAL-plugin direction.
 
-| Touchpoint | Description | Verified by |
-|-----------|-------------|-------------|
-| A | Op registration | LIT test (positive) |
-| B | Pass registration | LIT test (positive) |
-| C | Pipeline slot declaration | `PipelineSlotRegistry` (logged at load) |
-| D ⚠️ | Bufferization model (R-1) | LIT test (positive + negative) |
-| E | HipToLLVM lowering | LIT test (lowering, `wrap_fused_mul_add` in IR) |
-| F | Runtime C-ABI wrapper | Code review; device execution needs gfx1103 hardware |
-| G | gfx1103 HIP kernel | Code review; device execution needs gfx1103 hardware |
-| H | LIT tests (3) | `lit -sv test/lit/plugins/` |
+| Touchpoint | Description | Status |
+|-----------|-------------|--------|
+| A | Op registration | ✅ Implemented |
+| B | Pass registration | ✅ Implemented |
+| C | Pipeline slot declaration | ✅ Implemented (`PipelineSlotRegistry`) |
+| D ⚠️ | Bufferization model (R-1) | ✅ Implemented; R-1 negative test included |
+| E | HipToLLVM lowering | ✅ Implemented (`wrap_fused_mul_add` call emitted) |
+| F | Runtime C-ABI wrapper | ✅ Implemented; device execution pending LIT run on Linux |
+| G | gfx1103 HIP kernel | ✅ Implemented; device execution pending LIT run on Linux |
+| H | LIT tests (3) | ✅ Written; Linux CI run in progress |
 
 Everything is gated behind `-DBUILD_HIP_PLUGINS=ON`; the default build path
 is **untouched**.
@@ -36,57 +36,20 @@ is **untouched**.
 
 | # | Layer | Plugin capability | Status |
 |---|-------|-------------------|--------|
-| A | Op definition | Register `hip.fused_mul_add` into the live `hip` dialect at load time | ✅ LIT-verified |
-| B | Fusion pass | Register `--hip-fuse-mul-add` pass discoverable by the pass manager | ✅ LIT-verified |
-| C | Pipeline wiring | Declare insertion anchor (`after convert-onnx-to-hip`) via `PipelineSlotRegistry` | ✅ Implemented; logged at load |
-| D ⚠️ | Bufferization interface | Attach `HipDstBufferizableModel<FusedMulAddOp>` in same step as op registration (R-1) | ✅ LIT-verified (positive + R-1 negative) |
-| E | HipToLLVM lowering | `ConvertOpToLLVMPattern` + `hip-to-llvm-with-fusion-plugin` pipeline; emits `wrap_fused_mul_add` call | ✅ LIT-verified |
-| F | Runtime wrapper | `wrap_fused_mul_add()` C-ABI symbol; dispatches to gfx1103 kernel | ✅ Compiles; needs hardware for execution |
-| G | Device kernel | `fused_mul_add_kernel.hip` for gfx1103 (f32/f16/bf16); launched via `hipLaunchKernelGGL` | ✅ Compiles; needs hardware for execution |
-| H | LIT tests (3) | Positive, R-1 negative, E2E lowering verification | ✅ All pass |
+| A | Op definition | Register `hip.fused_mul_add` into the live `hip` dialect at load time | ✅ Implemented |
+| B | Fusion pass | Register `--hip-fuse-mul-add` pass discoverable by the pass manager | ✅ Implemented |
+| C | Pipeline wiring | Declare insertion anchor (`after convert-onnx-to-hip`) via `PipelineSlotRegistry` | ✅ Implemented |
+| D ⚠️ | Bufferization interface | Attach `HipDstBufferizableModel<FusedMulAddOp>` in same step as op registration (R-1) | ✅ Implemented; R-1 negative test included |
+| E | HipToLLVM lowering | `ConvertOpToLLVMPattern` + `hip-to-llvm-with-fusion-plugin` pipeline; emits `wrap_fused_mul_add` call | ✅ Implemented |
+| F | Runtime wrapper | `wrap_fused_mul_add()` C-ABI symbol; dispatches to gfx1103 kernel | ✅ Implemented; device run pending |
+| G | Device kernel | `fused_mul_add_kernel.hip` for gfx1103 (f32/f16/bf16); launched via `hipLaunchKernelGGL` | ✅ Implemented; device run pending |
+| H | LIT tests (3) | Positive (A/B/D), R-1 negative (D), E2E lowering (E) | ✅ Written; Linux run in progress |
 
 ---
 
-## 3. E2E status
+## 3. Changed files
 
-### What is proven by LIT tests (no hardware needed)
-
-- Plugin loads into `hip-mlir-opt` at runtime — no host recompile
-- `hip.fused_mul_add` op is a genuine `hip.*` op usable in IR
-- Fusion pass fires and rewrites `add(mul(x,b),a)` → `hip.fused_mul_add`
-- `OneShotBufferize` legalizes the op cleanly (bufferize model attached)
-- Missing bufferize model produces the exact documented failure (R-1 test)
-- `hip.fused_mul_add` disappears from IR after lowering; `llvm.call @wrap_fused_mul_add` appears in its place
-
-### What requires gfx1103 hardware (ETX/Linux)
-
-- Compiling the `.hip` kernel with `hipcc --offload-arch=gfx1103`
-- Numerical validation: `output[i] == (b[i] * x[i]) + a[i]` on-device
-
-The runtime files (`wrap_fused_mul_add.cpp`, `fused_mul_add_kernel.hip`) are
-complete and compile-tested on Linux with TheRock/ROCm. Device execution can
-be validated on ETX once the LIT suite passes.
-
-### Key E2E design decision — two-pass HipToLLVM lowering
-
-The in-tree `ConvertHipToLLVM` pass has no hook for plugin lowering patterns.
-Rather than modifying it, the plugin registers a named pipeline
-`hip-to-llvm-with-fusion-plugin` (via `PassPipelineRegistration`) that runs:
-
-1. `expand-strided-metadata` — same as the standard pipeline
-2. `convert-hip-to-llvm` — lowers all in-tree `hip.*` ops
-3. `fused-mul-add-to-llvm` (plugin pass) — lowers the remaining
-   `hip.fused_mul_add` op via `FusedMulAddOpLowering`
-
-This is safe because after step 2, `hip.fused_mul_add` is the **only**
-remaining `HipDialect` op — it is the sole illegal op for step 3's partial
-conversion.
-
----
-
-## 4. Changed files
-
-### 4.1 Host changes (one-time, in-tree)
+### 3.1 Host changes (one-time, in-tree)
 
 These are the only permanent changes to the host compiler. Every future plugin
 reuses them without further host modification.
@@ -100,7 +63,7 @@ reuses them without further host modification.
 | [test/lit/lit.site.cfg.py.in](../../test/lit/lit.site.cfg.py.in) | Added `config.hip_fusion_plugin` and `config.hip_fusion_plugin_nobuf` variables |
 | [test/lit/lit.cfg.py](../../test/lit/lit.cfg.py) | Added `hip_plugins` LIT feature and `%hip_fusion_plugin` / `%hip_fusion_plugin_nobuf` substitutions |
 
-### 4.2 Plugin source (`plugins/fusion/`)
+### 3.2 Plugin source (`plugins/fusion/`)
 
 All new files. None are built unless `-DBUILD_HIP_PLUGINS=ON`.
 
@@ -122,7 +85,7 @@ All new files. None are built unless `-DBUILD_HIP_PLUGINS=ON`.
 | [plugins/fusion/runtime/wrap_fused_mul_add.cpp](../../plugins/fusion/runtime/wrap_fused_mul_add.cpp) | F | `wrap_fused_mul_add()` C-ABI runtime symbol; obtains HIP stream via `hipdnn_ep_state_get_stream()`; delegates to `hip_fused_mul_add_launch` |
 | [plugins/fusion/runtime/fused_mul_add_kernel.hip](../../plugins/fusion/runtime/fused_mul_add_kernel.hip) | G | `fused_mul_add_kernel<T>` HIP device kernel for gfx1103; supports f32/f16/bf16; block size 256; compiled with `--offload-arch=gfx1103` |
 
-### 4.3 LIT tests (`test/lit/plugins/`)
+### 3.3 LIT tests (`test/lit/plugins/`)
 
 | File | Touchpoint | What it tests |
 |------|-----------|---------------|
@@ -132,9 +95,9 @@ All new files. None are built unless `-DBUILD_HIP_PLUGINS=ON`.
 
 ---
 
-## 5. Two non-obvious ABI findings (apply to all future plugin work)
+## 4. Two non-obvious ABI findings (apply to all future plugin work)
 
-### 5.1 MLIR dylib linkage is mandatory for plugins
+### 4.1 MLIR dylib linkage is mandatory for plugins
 
 LLVM 22 (and TheRock builds) compile with **hidden symbol visibility**. A
 statically-linked `hip-mlir-opt` cannot export MLIR-core TypeIDs even with
@@ -146,7 +109,7 @@ statically-linked `hip-mlir-opt` cannot export MLIR-core TypeIDs even with
 links `MLIR` but not `HipDialectIR` — in-tree hip op TypeIDs resolve from the
 host at `dlopen` time.
 
-### 5.2 Use `--pass-pipeline`, not the `--hip-fuse-mul-add` shorthand
+### 4.2 Use `--pass-pipeline`, not the `--hip-fuse-mul-add` shorthand
 
 When a dialect plugin **and** a pass plugin are both loaded,
 `MlirOptMain`'s generated `--<pass-name>` cl flags regress to printing
@@ -155,7 +118,7 @@ unaffected. **All three LIT tests use `--pass-pipeline`.**
 
 ---
 
-## 6. Requirement R-1 — bufferization model is non-optional ⚠️
+## 5. Requirement R-1 — bufferization model is non-optional ⚠️
 
 > The op compiled, the fusion pass fired, the pipeline ran — and it still
 > failed deep inside `OneShotBufferize` with `op was not bufferized`.
@@ -167,7 +130,7 @@ callback will reproduce this exact failure.
 
 ---
 
-## 7. Build & run
+## 6. Build & run
 
 ```bash
 # Configure (Linux/ETX for F/G device execution; A–E+H work on Windows)
@@ -196,7 +159,7 @@ lit -sv .
 
 ---
 
-## 8. Open questions (from requirements §6 — still unresolved)
+## 7. Open questions (from requirements §6 — still unresolved)
 
 | Question | Notes |
 |----------|-------|
@@ -210,7 +173,7 @@ lit -sv .
 
 ---
 
-## 9. How to add an architecture-specific optimization pass
+## 8. How to add an architecture-specific optimization pass
 
 This is the primary use case for Vandana's team — contributing passes that are
 specific to a target architecture (e.g. GNPU, gfx1200) without touching the
@@ -284,7 +247,7 @@ target_link_libraries(hip_gfx1200_plugin PRIVATE MLIR)  # Linux
 
 ---
 
-## 10. How to add an architecture-specific kernel and register it
+## 9. How to add an architecture-specific kernel and register it
 
 ### Step 1 — Write the HIP kernel
 
@@ -410,7 +373,7 @@ a self-contained plugin `.so` + runtime `.so` pair.
 
 ---
 
-## 11. Windows E2E — MLIR dylib requirement
+## 10. Windows build — MLIR dylib requirement
 
 LIT tests (touchpoints A–E) passed on **Linux (ETX)** where the TheRock
 distribution ships `libMLIR.so`. On this Windows machine (gfx1103 hardware
