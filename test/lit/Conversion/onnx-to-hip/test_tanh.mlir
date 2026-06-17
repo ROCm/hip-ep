@@ -20,6 +20,12 @@ module {
     return %output : tensor<1x128x14336xf16>
   }
 
+  // Static fp32 test (f16 covered by @main_graph; ensure fp32 lowers too).
+  func.func @tanh_fp32_static(%input: tensor<256x512xf32>) -> tensor<256x512xf32> {
+    %output = "onnx.Tanh"(%input) : (tensor<256x512xf32>) -> tensor<256x512xf32>
+    return %output : tensor<256x512xf32>
+  }
+
   // Dynamic shape test
   func.func @tanh_dynamic(%input: tensor<?x?x512xf32>) -> tensor<?x?x512xf32> {
     %output = "onnx.Tanh"(%input) : (tensor<?x?x512xf32>) -> tensor<?x?x512xf32>
@@ -33,6 +39,11 @@ module {
 // CHECK: tensor.empty() : tensor<1x128x14336xf16>
 // CHECK: hip.tanh(%[[CTX]]) ins(%[[INPUT]] : tensor<1x128x14336xf16>) outs({{.*}} : tensor<1x128x14336xf16>) : tensor<1x128x14336xf16>
 // CHECK-NOT: hip.alloc
+
+// CHECK-LABEL: func.func @tanh_fp32_static
+// CHECK-SAME: (%[[CTX2:.*]]: !hip.context, %[[IN2:.*]]: tensor<256x512xf32>) -> tensor<256x512xf32>
+// CHECK: tensor.empty() : tensor<256x512xf32>
+// CHECK: hip.tanh(%[[CTX2]]) ins(%[[IN2]] : tensor<256x512xf32>) outs({{.*}} : tensor<256x512xf32>) : tensor<256x512xf32>
 
 // CHECK-LABEL: func.func @tanh_dynamic
 // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<?x?x512xf32>) -> tensor<?x?x512xf32>
