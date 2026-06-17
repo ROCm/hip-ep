@@ -878,11 +878,11 @@ int main(int argc, char *argv[]) {
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
 
-  const std::string kEpName = "MorphiZenExecutionProvider";
+  const std::string kEpName = "hipep";
 #ifdef _WIN32
-  const std::string ep_lib_name = "onnxruntime_morphizen_ep.dll";
+  const std::string ep_lib_name = "hipep.dll";
 #else
-  const std::string ep_lib_name = "libonnxruntime_morphizen_ep.so";
+  const std::string ep_lib_name = "libhipep.so";
 #endif
 
   if (!no_ep) {
