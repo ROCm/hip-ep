@@ -294,7 +294,37 @@ Constraints:
 
 ---
 
-## 7. Distribution checklist
+## 7. Composing a custom pipeline (planned)
+
+> Status: planned, not yet in the ABI. Described here so plugin authors can
+> see the intended surface; the hooks below do not exist yet.
+
+Today a plugin inserts passes at fixed slots (section 4). A planned extension
+lets a plugin instead see the full pass set and compose -- or fully replace --
+the pass order:
+
+- **Reference any in-tree pass by name.** Every pipeline pass is registered
+  with a stable `getArgument()` name, so it is usable in a textual
+  `--pass-pipeline` string. A published pass menu lists the names.
+- **Supply a pipeline as text.** A selector (e.g. a `HIPDNN_EP_PIPELINE` env
+  var) takes a `builtin.module(...)` pipeline string the driver parses with
+  `parsePassPipeline`. This composes from in-tree passes and does not require
+  shared MLIR.
+- **Register a pipeline builder.** For passes that need runtime-bound state a
+  string cannot carry (e.g. the in-memory-filesystem variant of
+  `convert-onnx-to-hip`), a plugin registers a C++ builder that receives the
+  filesystem + options and composes passes, reusing in-tree stage builders.
+  Like `registerPass`, this needs shared MLIR.
+
+If you fully replace the order you own the load-bearing ordering invariants
+and the required terminal stages (`convert-hip-to-llvm`, `generate-interface`);
+a post-pipeline check fails loudly if a required entry point is missing. Pass
+and pipeline names are version-pinned, not a frozen contract -- pin your
+plugin to a release.
+
+See `docs/design/plugin-interface.md`, "Pipeline composition", for the design.
+
+## 8. Distribution checklist
 
 Before shipping a plugin DLL to consumers:
 
@@ -320,7 +350,7 @@ Before shipping a plugin DLL to consumers:
 
 ---
 
-## 8. Where to look next
+## 9. Where to look next
 
 - **Design and rationale:**
   [`docs/design/plugin-interface.md`](design/plugin-interface.md).
