@@ -1393,7 +1393,7 @@ HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
  *
  * Returns: 0 on success, non-zero hipError_t on failure (incl. rank > max).
  */
-int hip_gather_block_quantized(
+HIP_KERNEL_API int hip_gather_block_quantized(
     void* stream,
     const void* data,            // packed quantized
     const void* indices,         // int32 or int64
