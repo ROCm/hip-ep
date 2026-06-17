@@ -24,9 +24,9 @@
 //   * requestPipelineSlot(...) -- run a registered pass at a named slot; read
 //                                 by lib/Dialect/Transforms/Pipelines.cpp.
 //   * addRuntimeBitcode(...)   -- contribute LLVM bitcode linked into the
-//                                 model module by lib/Target/LLVM/LLVMBackend.cpp
-//                                 (see the method comment for override
-//                                 semantics).
+//                                 model module by
+//                                 lib/Target/LLVM/LLVMBackend.cpp (see the
+//                                 method comment for override semantics).
 //   * addLibraryPath(...) /    -- contribute search paths and libraries to the
 //     addLibrary(...)             native link, read by
 //                                 lib/Compiler/CompilerDriver.cpp.

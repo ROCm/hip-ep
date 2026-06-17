@@ -96,12 +96,14 @@ llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_di
 # at this path so the cross-DLL load path is covered in CI without
 # any external artefact.
 plugin_search_dirs = [
-    os.path.join(config.hip_build_dir, "test", "plugin", "sample_plugin",
-                 config.hip_build_mode),
+    os.path.join(
+        config.hip_build_dir, "test", "plugin", "sample_plugin", config.hip_build_mode
+    ),
     os.path.join(config.hip_build_dir, "test", "plugin", "sample_plugin"),
 ]
-plugin_filename = "hip_ep_sample_plugin.dll" if os.name == "nt" else \
-                  "hip_ep_sample_plugin.so"
+plugin_filename = (
+    "hip_ep_sample_plugin.dll" if os.name == "nt" else "hip_ep_sample_plugin.so"
+)
 sample_plugin_path = ""
 for d in plugin_search_dirs:
     candidate = os.path.join(d, plugin_filename)
@@ -114,5 +116,6 @@ if not sample_plugin_path:
     # error from HIP_EP_PLUGINS rather than a missing-substitution
     # LIT error.
     sample_plugin_path = os.path.join(plugin_search_dirs[0], plugin_filename)
-config.substitutions.append(("%hip-ep-sample-plugin",
-                             sample_plugin_path.replace("\\", "/")))
+config.substitutions.append(
+    ("%hip-ep-sample-plugin", sample_plugin_path.replace("\\", "/"))
+)
