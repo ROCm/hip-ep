@@ -125,11 +125,6 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
 
   // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
   std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;
-
-  // Whether GetSupportedDevicesImpl actually claimed any AMD GPU. Used by
-  // CreateAllocatorImpl to decide between the new hipMalloc allocator and the
-  // legacy "not implemented" error path.
-  bool gpu_device_registered_{false};
 #endif
 };
 } // namespace morphizen
