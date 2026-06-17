@@ -30,9 +30,6 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
   mlir::Value data = op->getOperand(0);
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
 
   int64_t noopWithEmptyAxes = 0;
   if (auto noopAttr =
@@ -40,33 +37,51 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
     noopWithEmptyAxes = noopAttr.getSInt();
   }
 
-  mlir::Value axesOperand;
+  int64_t keepdims = 1;
+  if (auto keepdimsAttr = op->getAttrOfType<mlir::IntegerAttr>("keepdims")) {
+    keepdims = keepdimsAttr.getSInt();
+  }
 
-  if (op->getNumOperands() > 1) {
-    axesOperand = op->getOperand(1);
-  } else {
-    llvm::SmallVector<int64_t> axesVec;
+  // Statically-known reduced axes (only when axes is NOT a runtime operand).
+  // Used both to materialize the axes constant below and to infer the result
+  // type when the ONNX importer left the result unranked (see below).
+  bool axesStaticallyKnown = op->getNumOperands() <= 1;
+  llvm::SmallVector<int64_t> axesVec;
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (axesStaticallyKnown) {
     if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
       for (auto a : axesAttr)
         axesVec.push_back(
             mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else if (noopWithEmptyAxes == 0) {
-      auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
+    } else if (noopWithEmptyAxes == 0 && inputType) {
       for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
         axesVec.push_back(i);
     }
+  }
 
+  // The ONNX importer can leave the ReduceMax result unranked (e.g. Phi's
+  // pos_ids_reformat ReduceMax(position_ids) feeding GreaterOrEqual); infer a
+  // ranked result type in that case (see inferReduceResultType).
+  auto resultTypeOr =
+      inferReduceResultType(op, data, axesVec, axesStaticallyKnown, keepdims);
+  if (mlir::failed(resultTypeOr))
+    return rewriter.notifyMatchFailure(
+        op, "ReduceMax: cannot infer unranked result (need ranked input and "
+            "static axes)");
+  mlir::RankedTensorType resultType = *resultTypeOr;
+
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+
+  mlir::Value axesOperand;
+  if (op->getNumOperands() > 1) {
+    axesOperand = op->getOperand(1);
+  } else {
     auto axesType = mlir::RankedTensorType::get(
         {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
     auto axesAttr =
         mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
     axesOperand =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
-  }
-
-  int64_t keepdims = 1;
-  if (auto keepdimsAttr = op->getAttrOfType<mlir::IntegerAttr>("keepdims")) {
-    keepdims = keepdimsAttr.getSInt();
   }
 
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
