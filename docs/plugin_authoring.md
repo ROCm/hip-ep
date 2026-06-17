@@ -294,35 +294,48 @@ Constraints:
 
 ---
 
-## 7. Composing a custom pipeline (planned)
+## 7. Composing a custom pipeline
 
-> Status: planned, not yet in the ABI. Described here so plugin authors can
-> see the intended surface; the hooks below do not exist yet.
+Beyond inserting passes at fixed slots (section 4), the compiler lets you
+compose -- or fully replace -- the pass order. Two mechanisms ship today; one
+is planned.
 
-Today a plugin inserts passes at fixed slots (section 4). A planned extension
-lets a plugin instead see the full pass set and compose -- or fully replace --
-the pass order:
+**Available now:**
 
-- **Reference any in-tree pass by name.** Every pipeline pass is registered
-  with a stable `getArgument()` name, so it is usable in a textual
-  `--pass-pipeline` string. A published pass menu lists the names.
-- **Supply a pipeline as text.** A selector (e.g. a `HIPDNN_EP_PIPELINE` env
-  var) takes a `builtin.module(...)` pipeline string the driver parses with
-  `parsePassPipeline`. This composes from in-tree passes and does not require
-  shared MLIR.
+- **Reference any in-tree pass by name.** Every production pipeline pass is
+  registered with a stable `getArgument()` name in the same registry the
+  override resolves against (`include/hip/InitAllPasses.h::registerAllPasses`),
+  so it is usable in a textual pipeline string. The composable pipeline names
+  (`onnx-to-hip-pipeline`, `hip-to-llvm-pipeline`, `hipdnn-pipeline`) are
+  registered too. See the published menu:
+  [`docs/pipeline_pass_menu.md`](pipeline_pass_menu.md).
+- **Supply a pipeline as text.** Set the `HIPDNN_EP_PIPELINE` env var to a
+  pipeline string (a bare inner list, or a `builtin.module(...)` wrapper) that
+  the driver parses with `parsePassPipeline`. This composes from in-tree passes
+  and does **not** require shared MLIR. A few load-bearing passes are not
+  individually name-registerable (`generate-interface`, `compile-hipdnn-graphs`,
+  and some MLIR utility passes), so a hand-listed pipeline that needs the C-ABI
+  entry point should compose the registered *pipeline names* (which include
+  them) rather than enumerate every pass. The menu documents which is which.
+
+**Planned (not yet in the ABI):**
+
 - **Register a pipeline builder.** For passes that need runtime-bound state a
   string cannot carry (e.g. the in-memory-filesystem variant of
-  `convert-onnx-to-hip`), a plugin registers a C++ builder that receives the
-  filesystem + options and composes passes, reusing in-tree stage builders.
+  `convert-onnx-to-hip`), a plugin would register a C++ builder that receives
+  the filesystem + options and composes passes, reusing in-tree stage builders.
   Like `registerPass`, this needs shared MLIR.
 
 If you fully replace the order you own the load-bearing ordering invariants
 and the required terminal stages (`convert-hip-to-llvm`, `generate-interface`);
-a post-pipeline check fails loudly if a required entry point is missing. Pass
-and pipeline names are version-pinned, not a frozen contract -- pin your
-plugin to a release.
+a post-pipeline check fails loudly if the `inference_compute` entry point is
+missing after the override. Pass and pipeline names are version-pinned, not a
+frozen contract -- pin your plugin to a release.
 
-See `docs/design/plugin-interface.md`, "Pipeline composition", for the design.
+See [`docs/design/plugin-interface.md`](design/plugin-interface.md), "Pipeline
+composition", for the design, and
+[`docs/pipeline_pass_menu.md`](pipeline_pass_menu.md) for the name/anchor/slot
+reference.
 
 ## 8. Distribution checklist
 

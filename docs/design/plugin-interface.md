@@ -484,33 +484,44 @@ across passes rather than being lowered away in a single pass.
 ### Pipeline composition
 
 Beyond inserting at a fixed slot, a downstream may want to see the full pass
-set and compose -- or fully replace -- the pass order. The planned design has
-four parts:
+set and compose -- or fully replace -- the pass order. The design has four
+parts; the first two **ship today**, the third is planned.
 
-- **Expose all passes by name.** Every pass the pipeline uses is registered
-  with a stable command-line name (`getArgument()`), so it is referenceable
-  in a textual `op(pass,...)` pipeline -- the standard MLIR mechanism. A
-  published "pass menu" lists the names and the `PipelineSlot` anchors.
-- **Textual pipeline override.** The driver consults a selector (e.g. a
-  `HIPDNN_EP_PIPELINE` env var). If it is a textual pipeline string, the
-  driver strips a mandatory `builtin.module(...)` wrapper and runs
-  `parsePassPipeline` on the inner text (so the downstream composes from
-  in-tree passes by name); if it names a registered pipeline, that is built;
-  if unset, the in-tree default runs unchanged. A textual pipeline of in-tree
-  passes resolves from the host's own registry, so this part does **not**
+- **Expose all passes by name** *(shipped)*. Every production pipeline pass is
+  registered with a stable command-line name (`getArgument()`) in the registry
+  the driver resolves the override against -- one comprehensive registrar,
+  `include/hip/InitAllPasses.h::registerAllPasses()`, is called by both the EP
+  / `hip-compiler` driver and the `hip-mlir-opt` tool, so the set of nameable
+  passes can never drift between them. The composable pipeline names
+  (`onnx-to-hip-pipeline`, `hip-to-llvm-pipeline`, `hipdnn-pipeline`) are
+  registered alongside. A published "pass menu" lists the names, anchor ops,
+  and `PipelineSlot` anchors: [`docs/pipeline_pass_menu.md`](../pipeline_pass_menu.md).
+  A few load-bearing passes are intentionally *not* individually nameable
+  (`generate-interface` needs a `CompilationOptionsT`; `compile-hipdnn-graphs`
+  needs a runtime handle; a few MLIR utility passes are added only inside the
+  pipeline builders) -- a hand-listed override that needs the C-ABI entry point
+  composes the registered *pipeline names*, which include them.
+- **Textual pipeline override** *(shipped)*. The driver consults the
+  `HIPDNN_EP_PIPELINE` env var (`CompilerDriver::runMLIRPasses`). When set, it
+  strips an optional `builtin.module(...)` wrapper and runs `parsePassPipeline`
+  on the inner text (composing from in-tree passes by name); when unset, the
+  in-tree default runs unchanged. A parse failure is reported up front; the
+  override resolves from the host's own registry, so this part does **not**
   require shared MLIR.
-- **Registered pipeline builder.** For passes that need runtime-bound state a
-  textual string cannot carry (e.g. the in-memory-filesystem variant of
-  `convert-onnx-to-hip`), a plugin registers a pipeline *builder* that
-  receives a context (the filesystem and pipeline options) and composes
-  passes -- including in-tree stage builders -- in C++. This is the
-  full-fidelity path; it shares the [linkage requirement](#linkage-requirement).
-- **Guardrails.** The load-bearing ordering invariants (host-scalar
-  materialization before pool allocation; output-allocator after buffer
-  deallocation; affine lowering after strided-metadata expansion; the
+- **Registered pipeline builder** *(planned)*. For passes that need
+  runtime-bound state a textual string cannot carry (e.g. the
+  in-memory-filesystem variant of `convert-onnx-to-hip`), a plugin would
+  register a pipeline *builder* that receives a context (the filesystem and
+  pipeline options) and composes passes -- including in-tree stage builders --
+  in C++. This is the full-fidelity path; it would share the
+  [linkage requirement](#linkage-requirement).
+- **Guardrails** *(shipped, partial)*. The load-bearing ordering invariants
+  (host-scalar materialization before pool allocation; output-allocator after
+  buffer deallocation; affine lowering after strided-metadata expansion; the
   terminal `convert-hip-to-llvm` + `generate-interface` stages) are owned by
   whoever replaces the order. A post-pipeline check hard-fails with a clear
-  message if the produced module is missing the required entry points.
+  message when the produced module lacks an `inference_compute` entry point
+  after an override.
 
 **Stability:** pass and pipeline names are version-pinned compiler internals,
 not a frozen cross-release contract -- a plugin that composes by name pins to

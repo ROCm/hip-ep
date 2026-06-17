@@ -5,22 +5,28 @@
 #ifndef HIP_COMPILER_INITALLPASSES_H
 #define HIP_COMPILER_INITALLPASSES_H
 
+#include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Pipelines.h"
 
+#include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
@@ -87,13 +93,59 @@ inline void loadAllDialects(mlir::MLIRContext &context) {
   context.loadAllAvailableDialects();
 }
 
-/// Register all passes and pipelines.
+/// Populate MLIR's global pass registry with every pass and pipeline the
+/// production ONNX->HIP->LLVM flow composes, plus the standard MLIR passes it
+/// interleaves. Like upstream `mlir::registerAllPasses`, this matters only for
+/// name-based pass lookup -- a compiler that builds its pipeline
+/// programmatically (the default EP path via `buildOnnxToHipPipeline` etc.)
+/// does not need it. We register here because two name-based consumers do: the
+/// `HIPDNN_EP_PIPELINE` textual-pipeline override (`CompilerDriver`) and the
+/// `hip-mlir-opt` command line. Both call this one function, so the set of
+/// nameable passes can never drift between the EP and the tool.
+///
+/// The authoritative name lists live with the passes themselves
+/// (`Dialect/Transforms/Passes.td`, each conversion pass's `getArgument()`)
+/// and are catalogued in `docs/pipeline_pass_menu.md`; this function only
+/// triggers their registration, so it deliberately does not re-enumerate them.
+///
+/// Override caveat: a few production passes cannot be named individually --
+/// `generate-interface` takes a `CompilationOptionsT`, `compile-hipdnn-graphs`
+/// takes a runtime handle, and a handful of MLIR utility passes are added only
+/// inside the pipeline builders. A textual override that needs the C-ABI entry
+/// point therefore composes the registered *pipeline* names
+/// (`onnx-to-hip-pipeline`, `hip-to-llvm-pipeline`, `hipdnn-pipeline`), which
+/// embed those passes. See docs/design/plugin-interface.md "Pipeline
+/// composition".
 inline void registerAllPasses() {
-  mlir::registerCanonicalizerPass();
-  mlir::hip::registerOptimizeMemRefsPass();
-  mlir::hip::registerPoolAllocsPass();
-  mlir::hip::registerSimplifyOnnxPass();
+  // HIP transform passes (TableGen GEN_PASS_REGISTRATION) and the composable
+  // pipeline names. See docs/pipeline_pass_menu.md for the catalogue.
+  mlir::hip::registerHipPasses();
+  mlir::hip::registerHipPipelines();
+
+  // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
+  // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
+  // set, so it is registered separately below.
   registerConversionPasses();
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::hip::createOnnxLoopOutlinePass();
+  });
+
+  // Standard MLIR passes the production pipeline interleaves, registered so an
+  // override can name them around the hip-* passes. The registrar names differ
+  // from the textual pass names they register (e.g.
+  // registerSCFToControlFlowPass registers `convert-scf-to-cf`);
+  // docs/pipeline_pass_menu.md lists every textual name. Bufferization's
+  // registrars cover several passes each (one-shot-bufferize,
+  // buffer-results-to-out-params, buffer-deallocation-pipeline, ...).
+  mlir::registerCanonicalizerPass();
+  mlir::registerPass(
+      []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
+  mlir::bufferization::registerBufferizationPasses();
+  mlir::bufferization::registerBufferizationPipelines();
+  mlir::registerConvertBufferizationToMemRefPass();
+  mlir::registerSCFToControlFlowPass();
+  mlir::registerReconcileUnrealizedCastsPass();
+  mlir::memref::registerResolveShapedTypeResultDimsPass();
 }
 
 } // namespace hip::compiler

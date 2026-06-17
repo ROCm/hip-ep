@@ -69,32 +69,20 @@ int main(int argc, char **argv) {
   // the tool and the EP.
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
 
-  mlir::hip::registerHipPasses();
-  mlir::hip::registerHipPipelines();
-  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-    return mlir::hip::createOutlineOnnxToHipDNNPass();
-  });
-  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-    return mlir::hip::createOnnxLoopOutlinePass();
-  });
-  mlir::bufferization::registerBufferizationPasses();
-  mlir::bufferization::registerBufferizationPipelines();
-  mlir::registerConvertBufferizationToMemRefPass();
+  // Registers every nameable HIP / pipeline / standard-MLIR pass the tool and
+  // the EP share. Defined once (InitAllPasses.h) so the two never drift; see
+  // that function for the set and docs/pipeline_pass_menu.md for the catalogue.
+  hip::compiler::registerAllPasses();
+
+  // Tool-only extras: the standalone LLVM-lowering conversion passes. The
+  // production pipeline reaches LLVM through `convert-hip-to-llvm` (which
+  // populates these patterns internally), so the EP path does not register
+  // them as separate names; they exist here purely so LIT tests can exercise
+  // each conversion in isolation.
   mlir::registerConvertFuncToLLVMPass();
   mlir::registerArithToLLVMConversionPass();
   mlir::registerFinalizeMemRefToLLVMConversionPass();
-  mlir::registerSCFToControlFlowPass();
   mlir::registerConvertControlFlowToLLVMPass();
-  mlir::registerReconcileUnrealizedCastsPass();
-  // Registered so that LIT tests and end-to-end pipelines can fold
-  // `tensor.dim` / `memref.dim` of HIP op results through the reify
-  // implementation. Used in `hip-matmul-reify-shapes.mlir`.
-  mlir::memref::registerResolveShapedTypeResultDimsPass();
-  mlir::registerPass(
-      []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
-  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-    return mlir::createCanonicalizerPass();
-  });
 
   // Plugin DLLs listed in HIP_EP_PLUGINS get loaded here and have
   // their RegisterCallbacks invoked before MlirOptMain parses the
