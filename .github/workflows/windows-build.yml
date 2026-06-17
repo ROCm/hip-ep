@@ -315,9 +315,21 @@ jobs:
       # shim from the fork's PR branch. USE_AMDGPU forces DML/MIGraphX off and
       # HIPEP on (no MIGraphX SDK needed); the shim loads hipep.dll (the
       # morphizen EP, renamed via cmake/deps.cmake). Built against ort-install.
-      # Commit is pinned; bump it when the fork branch moves.
+      # Commit is pinned; bump it (and the cache key below) when the fork moves.
       # -----------------------------------------------------------------------
+      - name: Cache amdgpu-ep build
+        id: cache-amdgpu
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/build-amdgpu
+          # amdgpu-ep/hipep-backend link against the patched ort-install, so the
+          # key folds in the pinned fork commit + ORT version/PR list; bumping
+          # any of them forces a rebuild. On a hit the checkout + build below are
+          # skipped and the staging step finds the cached DLLs in build-amdgpu.
+          key: dep-amdgpu-19dc45a-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+
       - name: Checkout amdgpu-ep
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: zz002/onnxruntime-ep-amdgpu
@@ -327,6 +339,7 @@ jobs:
           show-progress: false
 
       - name: Build amdgpu-ep
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
         run: |
           # onnxruntime-ep-amdgpu requires CMake >= 4.2; the runner's system
