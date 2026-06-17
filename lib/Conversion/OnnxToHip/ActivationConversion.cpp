@@ -69,6 +69,34 @@ SigmoidToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Tanh -> hip.tanh
+struct TanhToHip : public mlir::RewritePattern {
+  TanhToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Tanh", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+TanhToHip::matchAndRewrite(mlir::Operation *op,
+                           mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::TanhOp::create(rewriter, loc, context, input, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 /// onnx.Softplus -> hip.softplus
 struct SoftplusToHip : public mlir::RewritePattern {
   SoftplusToHip(mlir::MLIRContext *ctx)
@@ -145,7 +173,8 @@ GeluToHip::matchAndRewrite(mlir::Operation *op,
 
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx) {
-  patterns.add<SoftmaxToHip, SigmoidToHip, SoftplusToHip, GeluToHip>(ctx);
+  patterns.add<SoftmaxToHip, SigmoidToHip, TanhToHip, SoftplusToHip, GeluToHip>(
+      ctx);
 }
 
 } // namespace hip

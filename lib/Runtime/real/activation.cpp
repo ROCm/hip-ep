@@ -116,8 +116,20 @@ queryOrCreateActivation(const ActivationCacheKey &key) {
                       cache_fail);
   }
   MIOPEN_CHECK_GOTO(miopenCreateActivationDescriptor(&e.actDesc), cache_fail);
-  MIOPEN_CHECK_GOTO(
-      miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0), cache_fail);
+  {
+    // MIOpen's TANH mode computes y = alpha * tanh(beta * x); plain ONNX Tanh
+    // needs alpha = beta = 1. (LOGISTIC/SOFTRELU ignore alpha/beta, so the
+    // 0,0,0 default is only correct for those modes -- with the default,
+    // TANH would degenerate to 0 * tanh(0) = 0.)
+    double alpha = 0.0, beta = 0.0;
+    if (act == miopenActivationTANH) {
+      alpha = 1.0;
+      beta = 1.0;
+    }
+    MIOPEN_CHECK_GOTO(
+        miopenSetActivationDescriptor(e.actDesc, act, alpha, beta, 0.0),
+        cache_fail);
+  }
   goto cache_done;
 
 cache_fail:
