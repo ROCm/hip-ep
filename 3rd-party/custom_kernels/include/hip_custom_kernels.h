@@ -1358,6 +1358,62 @@ HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
     void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
 
 /* =========================================================================
+ * GatherBlockQuantized (com.microsoft)
+ * =========================================================================
+ *
+ * Combined gather + block-wise dequantize. Equivalent to
+ *   tmp        = Gather(data, indices, axis=gather_axis)   // raw quantized
+ *   output[..] = (decode(tmp[..]) - zp_block[..]) * scale_block[..]
+ * computed in one fused kernel: one thread per output element.
+ *
+ * Storage / packing:
+ *   data         - packed quantized weights (uint8 storage). For bits==4,
+ *                  two nibbles per byte: low nibble first, high nibble
+ *                  second (matches MatMulNBits convention).
+ *   bits == 4 + is_signed_data == 1  -> int4   (sign-extend the nibble)
+ *   bits == 4 + is_signed_data == 0  -> uint4  (raw nibble in [0,15])
+ *   bits == 8 + is_signed_data == 0  -> uint8  (raw byte  in [0,255])
+ *   bits == 8 + is_signed_data == 1  -> int8   (signed byte in [-128,127])
+ *
+ * scales       - one per (data block) along quantize_axis: same shape as
+ *                data except dim quantize_axis is data.shape[qa]/block_size.
+ *                Type: T2 in {fp32, fp16, bf16}, matches output.
+ * zero_points  - same logical shape as scales; same packing as data
+ *                (sub-byte for bits==4). May be null; default zp is then
+ *                applied to every block (caller-supplied via default_zp).
+ *
+ * gather_axis / quantize_axis must be normalized to [0, data_rank) by the
+ * caller (negatives resolved). For uint8 data the spec requires
+ * gather_axis == 0; that constraint is enforced by the host wrapper, not
+ * by the kernel.
+ *
+ * Output rank = indices_rank + (data_rank - 1). Output shape =
+ *   data.shape[0:gather_axis] ++ indices.shape ++ data.shape[gather_axis+1:]
+ * out_dtype is the element type of `scales` and `output`.
+ *
+ * Returns: 0 on success, non-zero hipError_t on failure (incl. rank > max).
+ */
+HIP_KERNEL_API int hip_gather_block_quantized(
+    void* stream,
+    const void* data,            // packed quantized
+    const void* indices,         // int32 or int64
+    const void* scales,          // T2 per block
+    const void* zero_points,     // packed (nullable)
+    void* output,                // T2 dequantized
+    const int64_t* data_shape,    int data_rank,
+    const int64_t* indices_shape, int indices_rank,
+    const int64_t* scales_shape,  int scales_rank,
+    const int64_t* output_shape,  int output_rank,
+    int bits,                    // 4 or 8
+    int block_size,              // power of 2, >= 16
+    int gather_axis,             // normalized
+    int quantize_axis,           // normalized
+    int default_zp,              // applied when zero_points == null
+    int is_signed_data,          // 1 if int4 / int8, 0 if uint4 / uint8
+    int indices_is_int64,        // 1 = i64, 0 = i32
+    int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
+
+/* =========================================================================
  * QMoE Sub-Kernels
  * =========================================================================
  *
