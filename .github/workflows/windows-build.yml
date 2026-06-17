@@ -329,14 +329,19 @@ jobs:
       - name: Build amdgpu-ep
         shell: bash
         run: |
-          cmake -G Ninja -S source-amdgpu -B "${{ runner.workspace }}/build-amdgpu" \
+          # onnxruntime-ep-amdgpu requires CMake >= 4.2; the runner's system
+          # cmake is 3.31, so use a pip-provided cmake for this build.
+          python -m pip install -q "cmake>=4.2"
+          CMAKE="$(python -c "import cmake, os; print(os.path.join(cmake.CMAKE_BIN_DIR, 'cmake.exe'))")"
+          echo "Using $("$CMAKE" --version | head -1)"
+          "$CMAKE" -G Ninja -S source-amdgpu -B "${{ runner.workspace }}/build-amdgpu" \
             -DCMAKE_BUILD_TYPE=Release \
             -DUSE_AMDGPU=ON \
             -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install" \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hipep-ep
+          "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hipep-ep
 
       # -----------------------------------------------------------------------
       # Build OGA (onnxruntime-genai) for model_benchmark.exe
