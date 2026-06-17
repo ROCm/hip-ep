@@ -23,9 +23,9 @@ compiler**. Mirrors ORT 1.25+ Plugin EP / IREE HAL-plugin direction.
 | C | Pipeline slot declaration | ✅ Implemented (`PipelineSlotRegistry`) |
 | D ⚠️ | Bufferization model (R-1) | ✅ Implemented; R-1 negative test included |
 | E | HipToLLVM lowering | ✅ Implemented (`wrap_fused_mul_add` call emitted) |
-| F | Runtime C-ABI wrapper | ✅ Implemented; device execution pending LIT run on Linux |
-| G | gfx1103 HIP kernel | ✅ Implemented; device execution pending LIT run on Linux |
-| H | LIT tests (3) | ✅ Written; Linux CI run in progress |
+| F | Runtime C-ABI wrapper | ✅ Implemented; device execution requires gfx1103 hardware |
+| G | gfx1103 HIP kernel | ✅ Implemented; device execution requires gfx1103 hardware |
+| H | LIT tests (3) | ✅ **3/3 pass on ETX (GCC 13, LLVM 22, libMLIR.so)** |
 
 Everything is gated behind `-DBUILD_HIP_PLUGINS=ON`; the default build path
 is **untouched**.
@@ -43,7 +43,7 @@ is **untouched**.
 | E | HipToLLVM lowering | `ConvertOpToLLVMPattern` + `hip-to-llvm-with-fusion-plugin` pipeline; emits `wrap_fused_mul_add` call | ✅ Implemented |
 | F | Runtime wrapper | `wrap_fused_mul_add()` C-ABI symbol; dispatches to gfx1103 kernel | ✅ Implemented; device run pending |
 | G | Device kernel | `fused_mul_add_kernel.hip` for gfx1103 (f32/f16/bf16); launched via `hipLaunchKernelGGL` | ✅ Implemented; device run pending |
-| H | LIT tests (3) | Positive (A/B/D), R-1 negative (D), E2E lowering (E) | ✅ Written; Linux run in progress |
+| H | LIT tests (3) | Positive (A/B/D), R-1 negative (D), E2E lowering (E) | ✅ **3/3 pass on ETX (Linux)** |
 
 ---
 
