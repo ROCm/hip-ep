@@ -202,7 +202,8 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //      post-out-param-promotion) and BEFORE the pool/hoist passes (so the
   //      synthesized readback + index_cast flow through them). No-op on
   //      non-loop-body funcs. See FixLoopAccumulatorOffset.cpp.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createFixLoopAccumulatorOffsetPass());
+  pm.addNestedPass<func::FuncOp>(
+      mlir::hip::createFixLoopAccumulatorOffsetPass());
 
   // 5. Clean up after bufferization
   pm.addPass(createCSEPass());
@@ -419,7 +420,8 @@ void mlir::hip::buildHipToLLVMPipeline(
   // local pass handles only that case; everything else passes through
   // untouched and is handled by upstream.  See RelaxMultiDynExpandShape.cpp
   // header for the IR snippet and the retirement path.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createRelaxMultiDynExpandShapePass());
+  pm.addNestedPass<func::FuncOp>(
+      mlir::hip::createRelaxMultiDynExpandShapePass());
 
   // Plugin slot: BeforeConvertHipToLLVM. Last chance to operate on
   // hip.* / memref IR before the lowering to LLVM dialect erases it.
