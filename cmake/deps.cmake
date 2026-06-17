@@ -335,7 +335,7 @@ if(BUILD_EP)
 
   # MorphiZen EP build settings, forced before add_subdirectory consumes them.
   set(morphizen_ENABLE_RYZENAI_BIN_METADATA OFF CACHE BOOL "Disable ryzenai_bin_metadata" FORCE)
-  set(morphizen_OUTPUT_NAME "onnxruntime_morphizen_ep" CACHE STRING "Set output name" FORCE)
+  set(morphizen_OUTPUT_NAME "hipep" CACHE STRING "Set output name" FORCE)
   set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
 
   # ONNX Runtime resolution (find_package first, official release zip fallback).

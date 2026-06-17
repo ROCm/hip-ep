@@ -311,6 +311,34 @@ jobs:
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
 
       # -----------------------------------------------------------------------
+      # Build the AMD GPU umbrella EP (onnxruntime-ep-amdgpu) + hipep-backend
+      # shim from the fork's PR branch. USE_AMDGPU forces DML/MIGraphX off and
+      # HIPEP on (no MIGraphX SDK needed); the shim loads hipep.dll (the
+      # morphizen EP, renamed via cmake/deps.cmake). Built against ort-install.
+      # Commit is pinned; bump it when the fork branch moves.
+      # -----------------------------------------------------------------------
+      - name: Checkout amdgpu-ep
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: zz002/onnxruntime-ep-amdgpu
+          ref: 19dc45af58bf3b2775d87fe80455a2543c7b24fb
+          path: source-amdgpu
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Build amdgpu-ep
+        shell: bash
+        run: |
+          cmake -G Ninja -S source-amdgpu -B "${{ runner.workspace }}/build-amdgpu" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_AMDGPU=ON \
+            -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install" \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hipep-ep
+
+      # -----------------------------------------------------------------------
       # Build OGA (onnxruntime-genai) for model_benchmark.exe
       # Cache only the two artifacts we need: model_benchmark.exe and
       # onnxruntime-genai.dll, keyed on OGA commit + ORT version.
@@ -324,47 +352,21 @@ jobs:
           # both OGA's own PR list and ONNXRUNTIME_PR_PATCHES; editing either
           # forces a rebuild. The mm<N> token bumps when the OGA artifact set
           # changes shape (e.g. model_mm / benchmark_multimodal.py added).
-          key: oga-dml-mm1-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: oga-amdgpu-mm1-${{ env.OGA_VERSION }}-81e6157-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
+      # OGA is built from the AMD fork branch that retargets the integration to
+      # the AMD GPU umbrella EP (DeviceType::AMDGPU, loads amdgpu-ep.dll). The
+      # commit is pinned; bump it (and the cache key above) when the fork moves.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: zz002/onnxruntime-genai
+          ref: 81e61572bd8e11f1a3d2d038f47b3285c6c4b095
           path: source-oga
           submodules: true
           fetch-depth: 1
           show-progress: false
-
-      # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
-      # OGA_PR_PATCHES (env), mirroring the ONNX Runtime PR patch step. The
-      # source-oga tree is a fresh checkout so patches apply directly; the OGA
-      # cache key includes the PR list, so editing it forces a rebuild.
-      - name: Apply OGA PR patches
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        shell: pwsh
-        working-directory: ${{ github.workspace }}\source-oga
-        env:
-          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
-        run: |
-          $prs = $env:OGA_PRS.Trim()
-          if (-not $prs) {
-            Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
-            exit 0
-          }
-          foreach ($pr in $prs -split '\s+') {
-            if (-not $pr) { continue }
-            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.patch"
-            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.patch"
-            Write-Host "Fetching $url"
-            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-            Write-Host "Applying PR #$pr"
-            git apply --whitespace=nowarn $tmp
-            if ($LASTEXITCODE -ne 0) {
-              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
-            }
-          }
 
       - name: Prepare ORT_HOME for OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -469,6 +471,20 @@ jobs:
           # LlvmIrJit's GetModuleFileName-anchored Load finds it).
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
+
+          # AMD GPU umbrella EP + hipep-backend shim (built from the fork PR
+          # above). The umbrella loads hipep-backend.dll, which loads hipep.dll
+          # (the morphizen EP, already copied from install/bin). All three sit
+          # together in staging/bin so the load chain resolves.
+          AMDGPU_BUILD="${{ runner.workspace }}/build-amdgpu"
+          AMDGPU_EP=$(find "$AMDGPU_BUILD" -name "amdgpu-ep.dll" -type f | head -1)
+          HIPEP_BACKEND=$(find "$AMDGPU_BUILD" -name "hipep-backend.dll" -type f | head -1)
+          if [ -z "$AMDGPU_EP" ] || [ -z "$HIPEP_BACKEND" ]; then
+            echo "ERROR: amdgpu-ep.dll or hipep-backend.dll not found in $AMDGPU_BUILD"
+            exit 1
+          fi
+          cp "$AMDGPU_EP" staging/bin/
+          cp "$HIPEP_BACKEND" staging/bin/
 
           # Smoke: the per-arch kernel DLL must be present in staging/bin/
           # for the gpu-test job to load it. Failure here means the install
@@ -834,9 +850,36 @@ jobs:
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
           $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
 
-          $ogaModelRoot = "${{ runner.workspace }}\oga-models"
+          $srcModelRoot = "${{ runner.workspace }}\oga-models"
+          if (-not (Test-Path $srcModelRoot)) {
+            Write-Host "[SKIP] OGA model directory not found: $srcModelRoot"
+            exit 0
+          }
+
+          # Generate an AMDGPU-config copy of each model under amdgpu-oga-models.
+          # The AMD GPU umbrella EP selects its backend via the "profile"
+          # provider option, so rewrite genai_config.json to target it. The
+          # original oga-models (MorphiZenEP) is left untouched. Idempotent: the
+          # copy is skipped if it already exists and kept across runs (the GB
+          # weights are not re-copied); the config is always re-applied so reused
+          # copies stay correct.
+          $ogaModelRoot = "${{ runner.workspace }}\amdgpu-oga-models"
+          foreach ($src in (Get-ChildItem $srcModelRoot -Directory)) {
+            if (-not (Test-Path (Join-Path $src.FullName "genai_config.json"))) { continue }
+            $dst = Join-Path $ogaModelRoot $src.Name
+            if (-not (Test-Path $dst)) {
+              Write-Host "Copying $($src.Name) -> amdgpu-oga-models (one-time)"
+              Copy-Item $src.FullName $dst -Recurse -Force
+            }
+            $dstCfg = Join-Path $dst "genai_config.json"
+            $cfg = Get-Content $dstCfg -Raw | ConvertFrom-Json
+            $cfg.model.decoder.session_options.provider_options = @(
+              [PSCustomObject]@{ AMDGPU = [PSCustomObject]@{ profile = "llm" } }
+            )
+            $cfg | ConvertTo-Json -Depth 32 | Set-Content $dstCfg
+          }
           if (-not (Test-Path $ogaModelRoot)) {
-            Write-Host "[SKIP] OGA model directory not found: $ogaModelRoot"
+            Write-Host "[SKIP] no models with genai_config.json under $srcModelRoot"
             exit 0
           }
 
@@ -928,7 +971,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
 
-          $model = "${{ runner.workspace }}\oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+          $model = "${{ runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
           $pkg = "$PWD\wheelpkg"
