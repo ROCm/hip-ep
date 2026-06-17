@@ -73,3 +73,24 @@ tools = [
     "not",
 ]
 llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_dir])
+
+# Plugin feature + substitutions.
+# The `hip_plugins` feature is enabled only when both plugin .so files exist
+# (i.e. the build was configured with -DBUILD_HIP_PLUGINS=ON and compiled).
+# Tests using `// REQUIRES: hip_plugins` are UNSUPPORTED (not failing) in the
+# default BUILD_HIP_PLUGINS=OFF lane.
+# Resolve %(build_mode)s placeholder (same as hip_build_mode above).
+def _resolve(path):
+    try:
+        return path % lit_config.params if path else path
+    except KeyError:
+        return path % {"build_mode": config.hip_build_mode} if path else path
+
+_fusion_plugin     = _resolve(getattr(config, "hip_fusion_plugin", ""))
+_fusion_plugin_nobuf = _resolve(getattr(config, "hip_fusion_plugin_nobuf", ""))
+
+if _fusion_plugin and os.path.exists(_fusion_plugin) \
+        and _fusion_plugin_nobuf and os.path.exists(_fusion_plugin_nobuf):
+    config.available_features.add("hip_plugins")
+    config.substitutions.append(("%hip_fusion_plugin",      _fusion_plugin))
+    config.substitutions.append(("%hip_fusion_plugin_nobuf", _fusion_plugin_nobuf))
