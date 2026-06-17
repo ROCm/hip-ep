@@ -56,6 +56,8 @@ add_library(OnnxToHip STATIC
   ExpandConversion.cpp
   ReduceProdConversion.cpp
   LessConversion.cpp
+  GreaterOrEqualConversion.cpp
+  LessOrEqualConversion.cpp
   GatherNDConversion.cpp
   SignConversion.cpp
   ModConversion.cpp
