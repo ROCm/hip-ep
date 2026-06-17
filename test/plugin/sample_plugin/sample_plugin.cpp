@@ -18,10 +18,10 @@
 //   4. The plugin's pass (`SamplePrintFunctionsPass`) is registered in
 //      MLIR's global pass registry and runs when requested by name
 //      via the `AfterConvertOnnxToHip` slot.
-//   5. PR 3: the plugin contributes a tiny LLVM bitcode buffer
+//   5. the plugin contributes a tiny LLVM bitcode buffer
 //      (compiled at build time from `sample_plugin_runtime.cpp`)
 //      through `addRuntimeBitcode`.
-//   6. PR 4: the plugin contributes a tiny static library (the
+//   6. the plugin contributes a tiny static library (the
 //      sibling `hip_ep_sample_lib` target, compiled from
 //      `sample_lib.cpp`) through `addLibraryPath` + `addLibrary`.
 //      Vendor-side: this is the same shape downstream plugins will
@@ -48,14 +48,9 @@ extern "C" const std::size_t kSamplePluginBitcodeSize;
 
 namespace {
 
-// Minimal no-op pass implemented inside the plugin to demonstrate
-// the upstream-style registerPass<>() flow. We don't transform the
-// IR; we emit one remark per func.func so LIT can FileCheck the
-// effect.
-//
-// PassWrapper + final overrides of getArgument/getDescription are
-// the common upstream shape for hand-written passes (TableGen
-// records do the same thing for declared passes).
+// Minimal no-op pass implemented inside the plugin to demonstrate the
+// registerPass<>() flow. We don't transform the IR; we emit one remark per
+// func.func so LIT can FileCheck the effect.
 struct SamplePrintFunctionsPass
     : public mlir::PassWrapper<SamplePrintFunctionsPass,
                                mlir::OperationPass<mlir::func::FuncOp>> {
@@ -77,9 +72,7 @@ struct SamplePrintFunctionsPass
 };
 
 void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
-  // Hands the pass to MLIR's global registry. Identical pattern to
-  // mlir::PassRegistration<SamplePrintFunctionsPass>() in upstream
-  // tools.
+  // Hand the pass to MLIR's global pass registry.
   R.registerPass<SamplePrintFunctionsPass>();
 
   // Asks the public pipeline to run the pass at the most common
@@ -99,7 +92,7 @@ void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
     R.addRuntimeBitcode(kSamplePluginBitcode, kSamplePluginBitcodeSize);
   }
 
-  // PR 4: contribute the sibling sample static library. Both the
+  // Contribute the sibling sample static library. Both the
   // path and the library name come from compile-time defines
   // populated by sample_plugin/CMakeLists.txt; HIP_EP_SAMPLE_LIB_DIR
   // resolves to $<TARGET_FILE_DIR:hip_ep_sample_lib>, i.e. the
