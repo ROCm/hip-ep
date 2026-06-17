@@ -106,6 +106,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
     "mlir::tensor::TensorDialect",
+    "mlir::linalg::LinalgDialect",
     "mlir::memref::MemRefDialect",
     "mlir::bufferization::BufferizationDialect"
   ];
@@ -663,6 +664,32 @@ def InferLoopBodyShapesPass
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::func::FuncDialect"
+  ];
+}
+
+def FixLoopAccumulatorOffsetPass
+    : Pass<"hip-fix-loop-accumulator-offset", "mlir::func::FuncOp"> {
+  let summary = "Rewrite frozen Concat-accumulator offsets in outlined "
+                "hip.loop body functions to iter-driven offsets";
+  let description = [{
+    Out-param promotion + the LoopLowering trampoline alias each loop-carried
+    `v_in` arg and its `{bufferize.result}` `v_out` out-param onto one
+    immutable memref descriptor, so `memref.dim %v_in, %cN` is frozen at the
+    v_init dim every iteration. A growing-Concat accumulator then appends each
+    chunk at that frozen offset and only the last chunk survives.
+
+    This pass rewrites each chunk-append `memref.subview` OFFSET from the frozen
+    `memref.dim` to the real per-iter chunk start: `seqlens_k[iter]` (read via a
+    synchronized `hip.readback_scalar` of the body's first
+    `hip.gather -> memref<1xi32>`), or `iter * chunk_size` when there is no
+    seqlens gather. Only OFFSETs are touched. Runs after buffer-deallocation
+    and before the pool/hoist passes. See FixLoopAccumulatorOffset.cpp for the
+    matcher and a Before/After snippet.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
   ];
 }
 

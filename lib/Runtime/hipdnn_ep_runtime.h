@@ -304,7 +304,16 @@ void *hipdnn_ep_state_get_stream(RuntimeState *state);
 // Default-stream work serializes with the session stream (legacy implicit
 // sync) and shows up as GPU idle in the prefill profile. Returns NULL before
 // the first begin_compute on this thread (callers fall back to stream 0).
-void *hipdnn_ep_get_current_stream(void);
+//
+// Defined in the natively-compiled tls_stream.cpp (NOT runtime.bc) so the
+// thread_local storage stays out of the JIT'd module; exported so the JIT's
+// process search generator can resolve it from the host.
+HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
+
+// Publishes the session stream for hipdnn_ep_get_current_stream. Called by
+// hipdnn_ep_runtime_begin_compute (and cleared on stream teardown). Lives in
+// tls_stream.cpp alongside the getter.
+HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 
 // Get MIOpen handle from state (for MIOpen operations)
 // Returns: miopenHandle_t cast to void* (NULL on error)
@@ -391,13 +400,41 @@ void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
-// caches such as the GQA seqlens_k cache (see runtime_state_internal.h).
-// Called by the EP-side MlirCustomOp::Compute() entry once per inference;
-// safe to call unconditionally (cheap: writes a single bool). Required for
-// the GQA seqlens_k cache (default on, set HIPDNN_EP_GQA_CACHE_SEQLENS=0
-// to disable) to be correct -- without this hook the cache would persist
-// across forward passes and return stale values.
+// runtime caches -- today: the GQA seqlens_k cache (see
+// runtime_state_internal.h for the canonical list).
+//
+// Contract: the EP-side caller must invoke this exactly once at the top
+// of every MlirCustomOp::Compute(), before any input marshaling. The
+// pairing with Compute() is what defines "forward pass" for cache
+// invalidation purposes.
+//
+// Cost: writes a small number of fields on RuntimeState (no allocation,
+// no GPU work). Safe to call unconditionally on the hot path.
+//
+// Backwards compatibility: model.dlls predating this export are loaded
+// with a null cached function pointer on the EP side and the call is
+// silently skipped. Such DLLs MUST run with HIPDNN_EP_GQA_CACHE_SEQLENS=0;
+// otherwise stale seqlens_k values from the previous forward pass would
+// silently corrupt decode output from token 2 onward. The mismatch is
+// detected at session creation by InferenceState::create() and produces
+// a LOG(WARNING) containing the substring "GQA seqlens_k cache is
+// enabled ... but the loaded model.dll does not export
+// hipdnn_ep_runtime_begin_compute" -- greppable across logs and code.
 void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
+
+// Resolve and print the per-op profile table (HIPDNN_EP_PERF).
+//
+// Contract: the EP must invoke this AFTER the Compute() wall-clock window
+// has closed. The resolve (one hipEventElapsedTime per profiled op + map
+// aggregation + fprintf) used to run inside hipdnn_ep_stream_sync on the
+// hot path, where its cost inflated the very [PERF SUMMARY] numbers the
+// table explains. A no-op (single null check) when perf is disabled, so it
+// is safe to call unconditionally.
+//
+// Backwards compatibility: same as hipdnn_ep_runtime_begin_compute -- a
+// model.dll predating this export resolves to a null pointer EP-side and the
+// call is skipped (inference unaffected; the per-op block just won't print).
+void hipdnn_ep_runtime_flush_op_profile(RuntimeState *state);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
@@ -421,7 +458,7 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 // Today the runtime only special-cases TENSOR_MEMORY_GPU (alias path,
 // avoids the per-inference H2D / D2H copy on AMD APU iGPU mapped-pinned
 // memory). CPU / FPGA / NPU all fall through to the legacy host H2D / D2H
-// path, preserving existing behaviour for hip-test-dll, hip-onnx-runner,
+// path, preserving existing behaviour for hip-test, hip-onnx-runner,
 // and any other host-input caller.
 //
 // Must match the matching enum in
@@ -443,12 +480,12 @@ enum {
 // whether to copy H2D/D2H or alias the caller's GPU-accessible buffer.
 //
 // tensor_t is the wire-protocol ABI between three components that are
-// intentionally kept decoupled (compiler-emitted model.dll, EP runtime
-// DLL, hip-test-dll harness), so we re-declare it here instead of
-// sharing a header. The static_assert block below catches any layout
-// drift at compile time. Sibling copies live at:
+// intentionally kept decoupled (compiler-emitted bitcode, EP runtime,
+// hip-test harness), so we re-declare it here instead of sharing a
+// header. The static_assert block below catches any layout drift at
+// compile time. Sibling copies live at:
 //   * `backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp` (compiler)
-//   * `tools/hip-test-dll/hip-test-dll.cpp`                         (test
+//   * `tools/hip-test/hip-test.cpp`                           (test
 //   driver)
 typedef struct {
   void *data;          // Data pointer (host or GPU-accessible per memory_type)
@@ -463,7 +500,7 @@ typedef struct {
 // / add / remove a field in one copy and forget to mirror it in the others,
 // at least one of them fails to build. Per-field offsets (not raw sizeof)
 // because trailing padding after `memory_type` is compiler-defined and not
-// part of what model.dll actually reads.
+// part of what the JITted per-model code actually reads.
 static_assert(offsetof(tensor_t, data) == 0,
               "tensor_t.data must remain the first field");
 static_assert(offsetof(tensor_t, shape) == sizeof(void *),
@@ -635,6 +672,16 @@ int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
                           const void *src_ptr, size_t src_pitch, size_t width,
                           size_t height);
+
+/// Parallel strided D2D copy via a single kernel launch (element units). Fast
+/// path for a pitched copy with very thin rows, where hipMemcpy2DAsync
+/// degenerates into one micro-transfer per row. `height` rows, each copying
+/// `row_elems` contiguous elements; outer strides are `*_pitch_elems`
+/// (elements). Falls back to hipMemcpy2DAsync internally on kernel failure.
+int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
+                      int64_t elem_bytes, int64_t height,
+                      int64_t src_pitch_elems, int64_t dst_pitch_elems,
+                      int64_t row_elems);
 
 //===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
@@ -910,6 +957,20 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes,
                     int64_t inner_size);
+
+// ReduceMean operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF (ONNX ReduceMean is float-domain).
+// The division by the reduced-element count happens in-kernel, so a dynamic
+// reduce axis is tolerated.
+// `inner_size` = product of input dims AFTER the reduced axis (1 for a
+// trailing/contiguous reduce); enables strided reduction over a non-trailing
+// axis (e.g. NCHW channel-axis LayerNorm2d).
+int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
+                     int64_t data_num_elements, int64_t output_num_elements,
+                     int64_t axes_num_elements, int64_t data_type,
+                     int64_t keepdims, int64_t noop_with_empty_axes,
+                     int64_t inner_size);
 
 // ReduceMax operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
@@ -1248,6 +1309,16 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
 // Used by hip.readback_dim to turn a kernel-computed runtime extent (e.g.
 // NonZero's non-zero count) into a host value that can size dynamic shapes.
 int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar);
+
+// Synchronize the GPU stream, then copy a small device-resident scalar of
+// arbitrary byte width (1/2/4/8) into the caller-provided host buffer. The
+// generic counterpart to hipdnn_ep_readback_i32, used by hip.readback_scalar to
+// materialise a GPU-computed scalar (i64/f32/f16/...) on the host for shape
+// arithmetic — e.g. the limit/start/delta of a data-dependent onnx.Range whose
+// trip count is computed host-side. See the runtime impl for why a bare
+// memref.load of a GPU scalar is incorrect on true-device-memory targets.
+void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
+                               const void *device_scalar, int64_t num_bytes);
 
 // ONNX Size wrapper (dynamic-shape path only).
 //

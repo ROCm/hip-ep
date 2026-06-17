@@ -88,14 +88,14 @@ hip-mlir-opt after_onnx_to_hip.mlir --convert-hip-to-llvm > after_hip_to_llvm.ml
 **hip-compiler:**
 - Purpose: Production compilation
 - Input: ONNX-MLIR or LLVM dialect MLIR
-- Output: Native DLL
+- Output: LLVM bitcode (`.bc`) -- JITted in-process by the EP DLL
 - Use when: Generating production artifacts
 
-**hip-test-dll:**
-- Purpose: DLL testing and validation
-- Input: Compiled DLL (from hip-compiler)
-- Output: Test results (PASSED/FAILED)
-- Use when: Verifying compiled models, CI/CD testing
+**hip-test:**
+- Purpose: Run and validate a compiled per-model artifact end-to-end
+- Input: LLVM bitcode (`.bc`) or native `.dll`/`.so` (detected by file extension)
+- Output: Inference run + optional NaN/Inf output validation
+- Use when: Smoke-testing an artifact through the same loader the EP uses
 
 ## Example Workflow
 
@@ -111,9 +111,9 @@ hip-mlir-opt stage2.mlir --generate-interface -o stage3.mlir
 # Or use the complete pipelines
 hip-mlir-opt demo.mlir --onnx-to-hip-pipeline --hip-to-llvm-pipeline -o output.mlir
 
-# Production workflow (compile and test)
-hip-compiler demo.mlir -o output.dll
-hip-test-dll output.dll --verbose --validate
+# Production workflow (compile to bitcode)
+hip-compiler demo.mlir -o output.bc
+# Execution happens via the EP DLL's LlvmIrJit loader.
 ```
 
 ## Building
@@ -124,5 +124,5 @@ For build instructions, see
 ## See Also
 
 - [Quick Start Guide](../../docs/quick_start.md) - Build and test instructions
-- [hip-compiler](../hip-compiler/) - Production DLL compilation tool
-- [hip-test-dll](../hip-test-dll/) - DLL testing and validation tool
+- [hip-compiler](../hip-compiler/) - Production bitcode compilation tool
+- [hip-test](../hip-test/) - Run/validate a compiled artifact (`.bc` or `.dll`/`.so`)

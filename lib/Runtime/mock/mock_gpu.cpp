@@ -898,6 +898,27 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
   return 0;
 }
 
+int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
+                     int64_t data_num_elements, int64_t output_num_elements,
+                     int64_t axes_num_elements, int64_t data_type,
+                     int64_t keepdims, int64_t noop_with_empty_axes) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_reduce_mean\n");
+    return -1;
+  }
+
+  MOCK_PRINT(
+      "[MOCK] wrap_reduce_mean(data_num_elements=%lld, "
+      "output_num_elements=%lld, axes_num_elements=%lld, data_type=%s(%lld), "
+      "keepdims=%lld, noop_with_empty_axes=%lld)\n",
+      (long long)data_num_elements, (long long)output_num_elements,
+      (long long)axes_num_elements, hipdnn_ep_datatype_name(data_type),
+      (long long)data_type, (long long)keepdims,
+      (long long)noop_with_empty_axes);
+
+  return 0;
+}
+
 int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t src_data_type,
               int64_t dst_data_type) {
@@ -1420,6 +1441,15 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   if (!device_scalar)
     return 0;
   return *static_cast<const int32_t *>(device_scalar);
+}
+
+void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
+                               const void *device_scalar, int64_t num_bytes) {
+  (void)state;
+  // Mock "device" memory is host memory: copy the scalar directly.
+  if (!host_dst || !device_scalar || num_bytes <= 0)
+    return;
+  memcpy(host_dst, device_scalar, static_cast<size_t>(num_bytes));
 }
 
 int wrap_cos(RuntimeState *state, void *input, void *output,

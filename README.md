@@ -116,7 +116,7 @@ These operations are handled through standard MLIR transformations without requi
 - **Custom HIP Kernels** (`3rd-party/custom_kernels/`) — handwritten `.hip` kernels for GQA, RoPE, etc.
 - **Compiler DLL** (`dll/`) — `hip-compiler.dll` exposing the C API
 - **Schemas** (`schemas/`) — FlatBuffers definitions for model metadata and compilation options
-- **Tools** — `hip-mlir-opt`, `hip-compiler`, `hip-test-dll`, `hip-inspect-dll`, `hip-onnx-runner`
+- **Tools** — `hip-mlir-opt`, `hip-compiler`, `hip-onnx-runner`
 - **Backend Integration** (`backend-mlir-compiler/`) — bridges to MorphiZen Execution Provider
 
 ### Architecture
@@ -142,10 +142,14 @@ These operations are handled through standard MLIR transformations without requi
 │      convert-hip-to-llvm (HIP ops → runtime C API calls)    │
 │      generate-interface (inference_init/compute/cleanup)     │
 │      ↓                                                       │
-│  MLIR → LLVM IR → merge runtime.bc → optimize → link        │
-│      ↓                          ↑                            │
-│  model.dll              amdhip64 / MIOpen / hipblaslt /      │
-│  + constants.bin         hip_custom_kernels.lib               │
+│  MLIR → LLVM IR → optimize                                   │
+│      ↓                                                       │
+│  artifact_format?                                            │
+│   ├─ LLVM_IR (default): emit model.bc  (runtime.bc kept      │
+│   │                     separate; OS-portable, no linker)    │
+│   └─ NATIVE  (opt-in) : merge runtime.bc → link model.dll/.so│
+│      ↓                                                       │
+│  model.bc | model.dll   + constants.bin                      │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
                      ↓
@@ -153,17 +157,28 @@ These operations are handled through standard MLIR transformations without requi
 │                          RUNTIME                               │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  Load model.dll + constants.bin                              │
+│  Load artifact + constants.bin  (loader = artifact_format)   │
+│   ├─ LLVM_IR: LlvmIrJit JIT-links model.bc + the runtime.bc  │
+│   │           embedded in the EP, in-process (LLVM ORC)      │
+│   └─ NATIVE : LoadLibrary/dlopen model.dll/.so               │
 │      ↓                                                       │
 │  inference_init   → GPU handles, upload constants, alloc pool│
 │  inference_compute → execute ops (MIOpen/hipBLASLt/kernels)  │
 │  inference_cleanup → free GPU resources                      │
 │                                                              │
-│  Dependencies: amdhip64.dll, MIOpen.dll, hipblaslt.dll       │
-│  No LLVM/MLIR needed at inference time                       │
+│  Dependencies: amdhip64, MIOpen, hipblaslt, custom_kernels   │
+│  No OS toolchain at inference time (LLVM_IR JITs in-process; │
+│  the LLVM ORC engine ships inside the EP)                    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> **Artifact format.** Selected by the single compile option `artifact_format`
+> (`LLVM_IR` default, `NATIVE` opt-in) and recorded in the EPContext metadata,
+> which the EP reads at load time. The default ships **OS-portable LLVM IR** (`.bc`,
+> JIT-loaded in-process); native `.dll`/`.so` stays a first-class opt-in for
+> benchmarking/parity — see
+> [docs/native-vs-ir-comparison.md](docs/native-vs-ir-comparison.md).
 
 ---
 

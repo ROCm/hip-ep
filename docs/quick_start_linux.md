@@ -80,7 +80,7 @@ python3 build.py
 
 The result tree under `<workspace>/install/`:
 
-- `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`, `bin/hip-test-dll`
+- `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`, `bin/hip-test`
 - `lib/libhip-compiler.so`, `lib/libonnxruntime_morphizen_ep.so`
 
 A locally-built `install/` is **not** fully self-contained: `libonnxruntime.so`
@@ -154,11 +154,14 @@ export ROOT="$WORKSPACE/install"            # built from source
 #      transitive deps, so it has to be on LD_LIBRARY_PATH explicitly.
 #
 # LIBRARY_PATH is GCC/clang's build-time linker search-path env;
-# clang++ -shared (driving the per-model DLL link inside hip-compiler)
-# prepends every entry as `-L<dir>`, so the in-tree
-# `libhip_custom_kernels.a` resolves via the level-3 name-only
-# `-lhip_custom_kernels` fallback.
-export THEROCK_DIST="$WORKSPACE/build/onnx-hipdnn-ep/_therock"
+# `hip-compiler` keeps it on the search path for any future offline-link
+# step that needs it.
+#
+# Per-arch GPU kernels ship as `libcustom_kernels_gfx<arch>.so` next to
+# the EP `.so` under `$ROOT/lib`. The EP `.so` is built with
+# `RPATH=$ORIGIN`, so LlvmIrJit's `dlopen` of the matching variant
+# resolves through the loader without needing it on `LD_LIBRARY_PATH`.
+export THEROCK_DIST="$WORKSPACE/therock-dist"
 export LD_LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 # clang/lld for the per-model DLL link (the prebuilt package ships it in

@@ -22,8 +22,9 @@
 // ---------------------------------------------------------------------------
 // Asym MatMulNBits zero_points unpack cache.
 //
-// For each unique zero_points input pointer (which is stable for the lifetime
-// of the model.dll — the pointer comes from the constants blob), cache the
+// For each unique zero_points input pointer (which is stable for the
+// lifetime of the JITted per-model session — the pointer comes from the
+// constants blob), cache the
 // unpacked uint8 buffer used by GEMV/naive paths and the converted fp16
 // buffer used by the WMMA / col-major-GEMV (M>1) paths. This avoids the
 // per-call unpack/convert kernel launches that were the dominant per-call

@@ -65,14 +65,21 @@ else()
   set(_with_crt "")
 endif()
 
-# Bundle the project's own custom-kernels import lib. ROCm import libs
-# (amdhip64/MIOpen/hipBLASLt) are supplied at runtime from the pip rocm[devel]
-# package (or THEROCK_DIST).
-set(_extra_lib_args "")
-if(TARGET hip_custom_kernels)
-  set(_extra_lib_args --extra-lib "$<TARGET_FILE:hip_custom_kernels>")
-  list(APPEND _wheel_deps hip_custom_kernels)
-endif()
+# Bundle the per-arch custom-kernels runtime libraries. The EP dlopens
+# custom_kernels_<arch>.{dll,so} from its own directory at JIT init, so each
+# must ship in onnxruntime/capi next to the EP DLL. ROCm import libs
+# (amdhip64/MIOpen/hipBLASLt) come from the pip rocm[devel] package at runtime.
+foreach(_arch IN LISTS HIP_ARCHITECTURES)
+  set(_ck_target custom_kernels_${_arch})
+  if(TARGET ${_ck_target})
+    list(APPEND _dll_args "--dll" "$<TARGET_FILE:${_ck_target}>")
+    list(APPEND _wheel_deps ${_ck_target})
+  else()
+    message(WARNING
+      "custom kernels target '${_ck_target}' not found; the wheel cannot "
+      "JIT-load GPU kernels for ${_arch}.")
+  endif()
+endforeach()
 
 add_custom_target(wheel ALL
   # 1. Stage the package sources into the build dir (keep source tree clean).
@@ -82,14 +89,13 @@ add_custom_target(wheel ALL
   COMMAND ${CMAKE_COMMAND} -E copy
           "${_pkg_src}/setup.py"
           "${_stage}/"
-  # 2. Stage native artifacts (EP lib + hip-compiler + custom-kernels/CRT import
-  #    libs) into the onnxruntime/capi namespace package dir so the wheel ships
-  #    them at onnxruntime/capi/ (platlib).
+  # 2. Stage native artifacts (EP lib + hip-compiler + per-arch custom-kernels
+  #    runtime DLLs/SOs + CRT import libs) into the onnxruntime/capi namespace
+  #    package dir so the wheel ships them at onnxruntime/capi/ (platlib).
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_libs_dir}"
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}
           --dest "${_libs_dir}"
-          ${_extra_lib_args}
           ${_with_crt}
   # 3. Build the wheel (PEP 517). Drop setuptools' build cache + egg-info first:
   #    they linger across runs and would re-pack stale (e.g. removed) artifacts.

@@ -92,16 +92,16 @@ static bool gqa_fused_decode_disabled() {
 // the first GQA call -- a 32-layer Llama decode then issues one D2H
 // instead of 32, eliminating ~30-45 ms/token of pipeline stalls on Strix
 // Halo. Set HIPDNN_EP_GQA_CACHE_SEQLENS=0 to disable (escape hatch for
-// running against an older model.dll without the begin_compute export, or
-// for A/B measurement).
+// running against an older per-model bitcode without the begin_compute
+// export, or for A/B measurement).
 //
 // Correctness depends on the EP-side MlirCustomOp::Compute() invoking
 // hipdnn_ep_runtime_begin_compute(state) at the start of each forward
-// pass to invalidate the cache. Older model.dlls without that symbol
-// exported are detected at session creation and produce a LOG(WARNING)
-// directing the user to set HIPDNN_EP_GQA_CACHE_SEQLENS=0 (otherwise the
-// cache would survive across forward passes and return stale total_seq
-// values).
+// pass to invalidate the cache. Older per-model bitcode without that
+// symbol exported is detected at session creation and produces a
+// LOG(WARNING) directing the user to set HIPDNN_EP_GQA_CACHE_SEQLENS=0
+// (otherwise the cache would survive across forward passes and return
+// stale total_seq values).
 static bool gqa_cache_seqlens_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_CACHE_SEQLENS");

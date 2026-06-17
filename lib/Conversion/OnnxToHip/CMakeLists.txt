@@ -14,6 +14,7 @@ add_library(OnnxToHip STATIC
   ActivationConversion.cpp
   CastConversion.cpp
   ReduceSumConversion.cpp
+  ReduceMeanConversion.cpp
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
   GatherBlockQuantizedConversion.cpp
@@ -28,6 +29,7 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   GatherShapeFold.cpp
   ReshapeShapeFold.cpp
+  PadShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
@@ -88,6 +90,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRFuncDialect
   MLIRArithDialect
   MLIRTensorDialect
+  MLIRLinalgDialect
   MLIRMemRefDialect
   MLIRBufferizationDialect
   MLIRIR
