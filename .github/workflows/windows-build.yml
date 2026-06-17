@@ -711,7 +711,7 @@ jobs:
           for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
             echo === Testing %%~nxM ===
             onnxruntime_perf_test.exe ^
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+              --plugin_ep_libs "MorphiZenExecutionProvider|hipep.dll" ^
               --plugin_eps "MorphiZenExecutionProvider" ^
               --plugin_ep_options "config_file|..\morphizen_config.json" ^
               -C "session.disable_cpu_ep_fallback|1" ^
@@ -757,7 +757,7 @@ jobs:
           )
           echo === Native smoke %SMOKE_MODEL% ===
           onnxruntime_perf_test.exe ^
-            --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+            --plugin_ep_libs "MorphiZenExecutionProvider|hipep.dll" ^
             --plugin_eps "MorphiZenExecutionProvider" ^
             --plugin_ep_options "config_file|..\morphizen_config.json artifact_format|NATIVE" ^
             -C "session.disable_cpu_ep_fallback|1" ^
@@ -811,7 +811,7 @@ jobs:
 
             Write-Host "=== EPContext export: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_ep_libs "MorphiZenExecutionProvider|hipep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1 ep.context_enable|1 ep.context_embed_mode|0 ep.context_file_path|$ctxPath" `
@@ -831,7 +831,7 @@ jobs:
 
             Write-Host "=== EPContext import: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_ep_libs "MorphiZenExecutionProvider|hipep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1" `
