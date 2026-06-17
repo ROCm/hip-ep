@@ -323,6 +323,8 @@ void populateLessConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateGreaterOrEqualConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
+void populateLessOrEqualConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
 void populateGatherNDConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateSignConversionPatterns(RewritePatternSet &patterns,

@@ -51,6 +51,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Sign | Custom HIP Kernel |
 | Less | Custom HIP Kernel |
 | GreaterOrEqual | Decomposed (Not(Less(A, B))) |
+| LessOrEqual | Decomposed (Not(Less(B, A))) |
 | Min | MIOpen |
 | ReduceSum | Custom HIP Kernel |
 | ReduceMax | Custom HIP Kernel |
