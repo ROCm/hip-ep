@@ -92,7 +92,8 @@ TanhToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
   if (!resultType)
-    return rewriter.notifyMatchFailure(op, "Tanh expects a ranked tensor result");
+    return rewriter.notifyMatchFailure(op,
+                                       "Tanh expects a ranked tensor result");
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
   auto hipOp = mlir::hip::TanhOp::create(rewriter, loc, context, input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));

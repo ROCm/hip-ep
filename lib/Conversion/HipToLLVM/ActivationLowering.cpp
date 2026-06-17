@@ -395,8 +395,7 @@ void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SigmoidOpLowering, TanhOpLowering, SoftplusOpLowering,
                GeluOpLowering, LeakyReluOpLowering, SiluOpLowering,
-               MiopenSoftmaxOpLowering>(
-      converter);
+               MiopenSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip
