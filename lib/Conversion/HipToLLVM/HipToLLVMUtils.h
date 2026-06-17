@@ -49,6 +49,7 @@ inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
 
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
+inline constexpr const char *kWrapPointwiseConv = "wrap_pointwise_conv";
 inline constexpr const char *kMiopenConvolutionTranspose =
     "wrap_miopenConvolutionTranspose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";

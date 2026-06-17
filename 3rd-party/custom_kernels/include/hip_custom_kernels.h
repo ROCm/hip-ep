@@ -924,6 +924,39 @@ HIP_KERNEL_API int hip_global_pool(
     int p);
 
 /* =========================================================================
+ * Pointwise (1x1) convolution -- fused GEMM + bias.
+ * =========================================================================
+ *
+ * Computes a stride-1 / no-pad / no-dilation / group-1 1x1 convolution:
+ *
+ *   y[n, co, p] = bias[co] + sum_{ci} x[n, ci, p] * w[co, ci]
+ *
+ * with p ranging over HW = H*W spatial positions. Layouts (row-major):
+ *   x    : [N, Cin, HW]
+ *   w    : [Cout, Cin]      (the [Cout,Cin,1,1] filter collapsed)
+ *   bias : [Cout]           (may be null -> no bias add)
+ *   y    : [N, Cout, HW]
+ *
+ * The channel reduction accumulates in float regardless of storage dtype.
+ * Selected upstream only for small Cin (the lowering routes larger Cin to the
+ * GEMM-library path); there is no correctness dependence on Cin being small.
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
+ * Returns: 0 on success, non-zero on failure (incl. Cin beyond the LDS bound).
+ */
+HIP_KERNEL_API int hip_pointwise_conv(
+    void* stream,
+    const void* x,
+    const void* w,
+    const void* bias,
+    void* y,
+    int64_t N,
+    int64_t Cin,
+    int64_t Cout,
+    int64_t HW,
+    int hip_dtype);
+
+/* =========================================================================
  * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
  * =========================================================================
  *

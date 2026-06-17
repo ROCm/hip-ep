@@ -1015,6 +1015,31 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_pointwise_conv(RuntimeState *state, const void *input,
+                        const void *weights, const void *bias, void *output,
+                        int64_t N, int64_t Cin, int64_t Cout, int64_t HW,
+                        int64_t data_type) {
+  if (!state || !input || !weights || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_pointwise_conv\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_pointwise_conv(N=%lld, Cin=%lld, Cout=%lld, HW=%lld, "
+             "data_type=%s(%lld), bias=%s)\n",
+             (long long)N, (long long)Cin, (long long)Cout, (long long)HW,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             bias ? "yes" : "null");
+
+  // Mock: zero-fill the output (no GPU). Use the real element size so fp16
+  // buffers aren't overrun.
+  int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+  size_t elem = (elem_bytes > 0) ? (size_t)elem_bytes : sizeof(float);
+  size_t output_size = (size_t)N * Cout * HW * elem;
+  memset(output, 0, output_size);
+
+  return 0;
+}
+
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {

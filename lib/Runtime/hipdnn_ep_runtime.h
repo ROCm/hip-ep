@@ -723,6 +723,18 @@ int wrap_miopenConvolutionForward(
     int64_t group,       // Number of groups
     int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
 
+// Pointwise (1x1) convolution -- fused GEMM + bias custom kernel.
+// Selected by the hip.conv lowering for a 1x1 / stride-1 / no-pad /
+// no-dilation / group-1 conv with small Cin and fully static shapes (larger
+// Cin / dynamic shapes use wrap_miopenConvolutionForward instead). Collapses
+// the conv to a batched GEMM W[Cout,Cin] @ X[Cin,HW] -> Y[Cout,HW] and folds
+// the per-channel bias add into the same kernel. `bias` may be null.
+// `data_type` is a HIPDNN_EP_DATATYPE_* enum shared by all operands.
+int wrap_pointwise_conv(RuntimeState *state, const void *input,
+                        const void *weights, const void *bias, void *output,
+                        int64_t N, int64_t Cin, int64_t Cout, int64_t HW,
+                        int64_t data_type);
+
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
 // RuntimeState pattern - extracts handle/stream internally.
