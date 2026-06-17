@@ -1151,6 +1151,43 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
   return 0;
 }
 
+int wrap_gather_block_quantized(
+    RuntimeState *state, const void *data, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gather_block_quantized\n");
+    return -1;
+  }
+  (void)data;
+  (void)indices;
+  (void)scales;
+  (void)zero_points;
+  (void)output;
+  (void)data_shape;
+  (void)indices_shape;
+  (void)scales_shape;
+  (void)output_shape;
+
+  MOCK_PRINT(
+      "[MOCK] wrap_gather_block_quantized(data_rank=%lld, indices_rank=%lld, "
+      "scales_rank=%lld, output_rank=%lld, bits=%lld, block_size=%lld, "
+      "gather_axis=%lld, quantize_axis=%lld, data_dtype=%s(%lld), "
+      "indices_dtype=%s(%lld), scales_dtype=%s(%lld), zero_points=%s)\n",
+      (long long)data_rank, (long long)indices_rank, (long long)scales_rank,
+      (long long)output_rank, (long long)bits, (long long)block_size,
+      (long long)gather_axis, (long long)quantize_axis,
+      hipdnn_ep_datatype_name(data_dtype), (long long)data_dtype,
+      hipdnn_ep_datatype_name(indices_dtype), (long long)indices_dtype,
+      hipdnn_ep_datatype_name(scales_dtype), (long long)scales_dtype,
+      zero_points ? "yes" : "null");
+  return 0;
+}
+
 int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *router_weights, const void *fc1_weights,
               const void *fc1_scales, const void *fc1_bias,
