@@ -1008,6 +1008,145 @@ ABI choices the vendor team would have shaped differently.
 
 ---
 
+## 9. Requirements Coverage (NPI Plugin Planning, 2026-06-09) & Planned Extensions
+
+This section maps the requirements raised in the ROCm-EP-NPI plugin
+planning meeting (2026-06-09) and the per-op enablement checklist
+(11-model gfx-FFM + fusion PoC) onto what the current ABI (PRs 1–6)
+covers, and specifies the two extensions needed to close the gaps.
+Both extensions are deliberately modeled on the **two** mechanisms
+upstream MLIR already uses, so vendor code stays portable.
+
+### 9.A Coverage matrix
+
+| Requirement | Status | Mechanism / gap |
+| --- | --- | --- |
+| Op registration (`HipOps.td`, `HipDialect.cpp`) — new first-class op | ⚠️ **Gap → Extension B** | Today only `onnx.Custom("vendor.X")` + a lowering pass; no dialect/op registration hook. Closed by the dialect plugin (9.C). |
+| Device kernel (`custom_kernels/*.hip`, `hip_custom_kernels.h`) | ✅ Covered | `addLibrary` + `addLibraryPath` (PR 4); kernels in `vendor_kernels.lib`. |
+| Pass registration (`Passes.td`, `Transforms/*.cpp`) | ✅ Covered* | `registerPass<T>()` (PR 2). *Runs once the host links shared `libMLIR` (Open Question 6, validated 2026-06-16). |
+| Pipeline **insertion** (post-OnnxToHip / pre-bufferize) | ✅ Covered | `PipelineSlot::AfterConvertOnnxToHip` + `BeforeBufferization`. |
+| Pass **order control** (change overall optimization order) | ⚠️ **Gap → Extension A** | Slots are insertion-only (= LLVM EP-callbacks). Full ordering needs the textual/named-pipeline mechanism (9.B). |
+| Bufferization (`HipBufferize.h` interface impl) | ⚠️ **Gap → Extension B** | No first-class interface-registration hook; closed by `DialectRegistry::addExtension` in the dialect plugin (9.C). Workaroundable today by lowering at the `BeforeBufferization` slot. |
+| HipToLLVM lowering (`<op>Lowering.cpp`) | ✅ Covered | Vendor pass at `BeforeConvertHipToLLVM` rewrites vendor ops → `llvm.call @wrap_*`. |
+| Runtime wrapper (`hipdnn_ep_runtime.h`, `real/*.cpp`) | ✅ Covered | `addRuntimeBitcode` (PR 3) + `addLibrary` (PR 4). |
+| Tests (pass-isolation LIT, E2E) | ✅ Covered (pattern) | Sample plugin + LIT/unit/E2E patterns; vendor mirrors them. |
+| Per-arch kernel selection by GFX metadata at runtime | ❌ Out of plugin scope | Runtime/driver concern (9.D). |
+| Precompiled-cache invalidation on GPU swap / GFX mismatch | ❌ Out of plugin scope | Runtime/driver concern (9.D). |
+| Decouple implicit unified-vs-discrete / arch assumptions | ❌ Refactoring workstream | The plugin *enables* isolation; finding/moving the assumptions is separate (9.D). |
+
+Net: the ABI covers kernels, runtime wrappers, pass registration, and
+pass *insertion*. Two extensions close the remaining MLIR gaps; three
+items are non-plugin workstreams.
+
+### 9.B Planned Extension A — Pipeline ordering control (proposed PR 7)
+
+**Requirement.** Meeting decision: support "custom pass ordering, not
+only pass insertion" — some architectures need to change the *overall*
+optimization order, not just drop a pass at a fixed point.
+
+**Upstream model.** LLVM/MLIR do not solve ordering with more
+insertion slots; ordering is owned by a **textual / registered
+pipeline description**, and plugins make their passes placeable
+anywhere in it:
+
+- LLVM: the PM is built from `-passes="..."` via
+  `PassBuilder::parsePassPipeline`
+  (`llvm/include/llvm/Passes/PassBuilder.h:363`); plugins register
+  named passes via `registerPipelineParsingCallback`
+  (`PassBuilder.h:589`) and phase-anchored inserts via the
+  `register*EPCallback` family (`PassBuilder.h:457-540`) — the latter
+  is exactly our `PipelineSlot`.
+- MLIR: the PM is built from `--pass-pipeline="builtin.module(...)"`
+  via `parsePassPipeline` (`mlir/include/mlir/Pass/PassRegistry.h:220`);
+  a whole ordered pipeline is registerable by one name via
+  `PassPipelineRegistration` (`PassRegistry.h:163-215`).
+
+**Proposed addition.** Keep `PipelineSlot` for the common "insert at
+phase X" case (it is the upstream EP-callback analog and covers the
+majority path). Add a named-pipeline escape hatch for full ordering:
+
+- `HipEpPluginRegistry::registerNamedPipeline(StringRef name, ...)` —
+  a thin wrapper over MLIR `PassPipelineRegistration`, so a plugin can
+  register a complete ONNX→HIP (and/or HIP→LLVM) sequence under a name.
+  Like `registerPass<T>()`, this writes MLIR global state, so it rides
+  the same shared-`libMLIR` requirement (Open Question 6), not the
+  C-vtable.
+- A driver-side selector consulted by `CompilerDriver` /
+  `Pipelines.cpp` (e.g. `HIPDNN_EP_PIPELINE=<name>`, or a provider
+  option) that runs a plugin-registered pipeline **instead of** the
+  built-in `buildOnnxToHipPipeline`. Unset ⇒ the built-in pipeline
+  runs with slot insertions exactly as today (zero behaviour change).
+
+**Caveat (must be documented for plugin authors).** The built-in
+pipeline carries hard ordering invariants (e.g. host-scalar
+materialization before pool-allocs; `hip-use-output-allocator` after
+buffer-deallocation; `lower-affine` after expand-strided-metadata —
+all documented in this file and CLAUDE.md). A plugin that *replaces*
+the order owns those invariants; the canonical built-in order is the
+starting point a plugin should fork from, not a blank slate.
+
+### 9.C Planned Extension B — Dialect / op / interface plugin (proposed PR 8)
+
+**Requirement.** Per-op enablement checklist "Op registration [`HipOps.td`,
+`HipDialect.cpp`]" and "Bufferization [`HipBufferize.h`
+BufferizableOpInterface impl]" — i.e. a vendor adds a genuinely new
+first-class op (with builder/verifier, surviving across passes, as a
+fusion PoC needs) and the interface models it requires.
+
+**Upstream model.** This is upstream's *second* plugin type, which v2
+of this design dropped (we kept only the pass plugin):
+
+- `mlirGetDialectPluginInfo` hands the plugin a `DialectRegistry *`
+  (`mlir/include/mlir/Tools/Plugins/DialectPlugin.h`); the plugin does
+  `registry->insert<VendorDialect>()`
+  (`mlir/include/mlir/IR/DialectRegistry.h:163`) to add a first-class
+  dialect + its ops/types/attrs.
+- Interface external models (bufferization, DPS, reify, …) attach via
+  `DialectRegistry::addExtension` (`DialectRegistry.h:255-293`) — the
+  same mechanism MLIR uses to register `BufferizableOpInterface`
+  models for built-in dialects.
+
+**Proposed addition.** Mirror the upstream dialect plugin: a second
+plugin registration phase that receives a `mlir::DialectRegistry&`:
+
+- New callback `RegisterDialects(mlir::DialectRegistry &)` invoked at
+  **context-setup time** — i.e. BEFORE the `MLIRContext` is created and
+  loads dialects, which is strictly earlier than the pipeline-build-time
+  `RegisterCallbacks`. The plugin calls `registry.insert<VendorDialect>()`
+  and `registry.addExtension(...)` there. Adding this callback to the
+  C struct bumps `HIP_EP_PLUGIN_API_VERSION` (it is a new entry point,
+  same discipline as upstream).
+- The existing `onnx.Custom` + single-pass-lowering path (3.E) stays
+  valid for the simple case (no persistent new op). The dialect plugin
+  is for when a vendor op must survive across passes.
+
+**Two-phase lifecycle (honest sequencing note).** This makes the
+plugin lifecycle two-phase, exactly as upstream separates the dialect
+plugin (loaded at registry setup) from the pass plugin (loaded for the
+pass registry): phase 1 = `RegisterDialects(DialectRegistry&)` at
+context setup; phase 2 = `RegisterCallbacks(HipEpPluginRegistry&)` at
+pipeline build (passes, slots, named pipelines, bitcode, libraries).
+Same shared-`libMLIR` requirement applies (the `DialectRegistry`,
+`TypeID`, and pass registry are MLIR process-globals).
+
+### 9.D Out of plugin scope (separate workstreams)
+
+These meeting items are runtime/driver or refactoring concerns that
+the plugin ABI does **not** address (upstream's plugin mechanisms do
+not speak to them either), and are tracked as separate workstreams:
+
+- **Per-architecture kernel selection by GFX metadata at runtime** and
+  **precompiled-cache invalidation on GPU swap / GFX mismatch.** The
+  ABI can *deliver* per-arch kernel libs (9.A), but selecting among
+  them by device metadata and invalidating the model-DLL cache on a
+  GFX change is a runtime/driver feature (the model-DLL cache is keyed
+  on the ONNX hash, not GFX). Tracked as a runtime/driver workstream.
+- **Decoupling implicit unified-vs-discrete-memory / arch-specific
+  assumptions.** The plugin makes isolation *possible*; identifying and
+  moving the implicit assumptions is a refactoring workstream.
+
+---
+
 ## Appendix A — Why Not Simpler Alternatives
 
 | Alternative | Why rejected |
