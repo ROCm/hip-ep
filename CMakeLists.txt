@@ -183,7 +183,7 @@ if(BUILD_HIP_TOOLS)
     add_subdirectory(test/runtime)
 
     # Plugin loader unit tests (PR 1 of the plugin extension API).
-    # See docs/design/plugin-extension-api.md.
+    # See docs/design/plugin-interface.md.
     add_subdirectory(test/plugin)
   endif()
 endif()

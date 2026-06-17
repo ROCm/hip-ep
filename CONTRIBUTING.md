@@ -263,47 +263,45 @@ commit.
 
 ---
 
-## Plugin extension API (proposal — PRs 1–4 landed; freeze pending)
+## Plugin extension API
 
-This repo ships a plugin extension API so confidential AMD-internal
-backends can ship vendor-specific ONNX ops, custom kernels, and MLIR
-passes on top of `onnx-hipdnn-ep` without forking the public repo.
+This repo ships a plugin extension API so a down-stream team can add ONNX
+ops, custom kernels, and MLIR passes on top of `onnx-hipdnn-ep` without
+forking the public repo.
 
-The full design lives at
-[`docs/design/plugin-extension-api.md`](docs/design/plugin-extension-api.md);
-the practical authoring guide is
-[`docs/plugin_authoring.md`](docs/plugin_authoring.md). Three points
-worth knowing as a contributor:
+The design and downstream-usage guide lives at
+[`docs/design/plugin-interface.md`](docs/design/plugin-interface.md); the
+practical authoring guide is
+[`docs/plugin_authoring.md`](docs/plugin_authoring.md). Three points worth
+knowing as a contributor:
 
-1. **Plugins are loaded via `HIP_EP_PLUGINS`** (semicolon-separated
-   list of plugin DLL paths). The public ABI sits at
+1. **Plugins are loaded via `HIP_EP_PLUGINS`** (semicolon-separated list of
+   plugin library paths). The public ABI sits at
    [`include/hip/Compiler/PluginAPI.h`](include/hip/Compiler/PluginAPI.h)
    and [`include/hip/Compiler/PluginRegistry.h`](include/hip/Compiler/PluginRegistry.h);
-   a working sample plugin lives at `test/plugin/sample_plugin/` and
-   is exercised by the `PluginLoaderPR1` CTest target. As of PR 4 the
-   sample exercises every method on `HipEpPluginRegistry`:
+   a working sample plugin lives at `test/plugin/sample_plugin/` and is
+   exercised by the plugin-loader unit test
+   [`test/plugin/test_plugin_loader.cpp`](test/plugin/test_plugin_loader.cpp).
+   The sample exercises every method on `HipEpPluginRegistry`:
    `registerPass<>`, `requestPipelineSlot`, `addRuntimeBitcode`,
    `addLibraryPath`, and `addLibrary`.
-2. **Vendor improvements that are not confidential go upstream, not
-   into a plugin.** The plugin model exists to keep proprietary code
-   out of the public repo — not to keep day-to-day improvements out
-   of the public repo. See section 1.A of the design doc for the
-   plugin-vs-upstream decision rule.
-3. **Editing `HipEpPluginRegistry` is editing public ABI.** Adding a
-   new method requires (a) appending an entry to the `VTable` struct
-   in `PluginRegistry.h`, (b) implementing it in
-   `lib/Compiler/PluginRegistry.cpp`, (c) wiring at most one host
-   site to read the recorded state, and (d) a unit-test assertion
-   that exercises the round-trip. Do **not** remove or reorder
-   existing `VTable` entries; that is an ABI break that bumps
-   `HIP_EP_PLUGIN_API_VERSION`.
+2. **Improvements that need not live out of tree go upstream, not into a
+   plugin.** A down-stream team may use the plugin for any reason, but a
+   generic op, bug fix, or non-target-specific pass is still best contributed
+   upstream through the normal flow. See the design doc for the
+   plugin-vs-upstream guidance.
+3. **Editing `HipEpPluginRegistry` is editing public ABI.** Adding a new
+   method requires (a) appending an entry to the `VTable` struct in
+   `PluginRegistry.h`, (b) implementing it in
+   `lib/Compiler/PluginRegistry.cpp`, (c) wiring at most one host site to read
+   the recorded state, and (d) a unit-test assertion that exercises the
+   round-trip. Do **not** remove or reorder existing `VTable` entries; that is
+   an ABI break that bumps `HIP_EP_PLUGIN_API_VERSION`.
 
-The ABI is **not yet frozen**: PR 5 (the docs you are reading + a few
-final tweaks) is still landing, the vendor team's review is pending,
-and the open question on shared-MLIR linkage (so MLIR pass plugins
-can actually run, not just register) is unresolved. Do not ship a
-plugin against the in-tree headers until the design status changes
-from "Proposal — under review" to "Stable".
+The ABI is **not yet frozen** (treat `HIP_EP_PLUGIN_API_VERSION` as
+provisional), and a contributed MLIR pass only runs when the host and plugin
+share one MLIR instance (the shared MLIR library) -- see the linkage
+requirement in the design doc.
 
 ---
 

@@ -14,7 +14,7 @@
 // This is the public C ABI surface that vendor plugins compile against. A
 // plugin is a shared library that exports `hipEpGetPluginInfo()`; the
 // compiler loads it, validates the API version, and invokes its single
-// registration callback. See docs/design/plugin-extension-api.md for the
+// registration callback. See docs/design/plugin-interface.md for the
 // design rationale.
 //
 // The struct layout is not yet frozen, so treat `HIP_EP_PLUGIN_API_VERSION`

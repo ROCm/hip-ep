@@ -4,13 +4,13 @@
 ##
 
 #=============================================================================
-# Plugin loader tests (PR 1)
+# Plugin loader tests
 #=============================================================================
 # Builds a small sample plugin DLL exposing the public ABI from
-# include/hip/Compiler/PluginAPI.h, and a GTest unit test that loads it
-# and validates the loader's behaviour.
+# include/hip/Compiler/PluginAPI.h, and a unit test that loads it and
+# validates the loader's behaviour.
 #
-# See docs/design/plugin-extension-api.md for the broader context.
+# See docs/design/plugin-interface.md for the broader context.
 
 message(STATUS "Configuring plugin loader tests")
 
@@ -18,10 +18,8 @@ message(STATUS "Configuring plugin loader tests")
 # the loader test.
 add_subdirectory(sample_plugin)
 
-# Plain main()-driven test (no GTest dependency). Intentionally minimal
-# for PR 1; PR 2 will likely promote this to GTest once the loader has
-# more methods worth checking and the morphizen FetchContent for GTest
-# is reliably visible at this scope.
+# Plain main()-driven test (no GTest dependency), so it has no dependency the
+# public configure does not already provide.
 add_executable(test_plugin_loader test_plugin_loader.cpp)
 
 target_compile_features(test_plugin_loader PRIVATE cxx_std_17)
@@ -44,7 +42,7 @@ set_target_properties(test_plugin_loader PROPERTIES FOLDER "mlir/Test/Plugin")
 # Register with CTest. WORKING_DIRECTORY is the build directory of the
 # test exe so the sample plugin DLL sits next to it on Windows (where
 # the loader resolves dependent DLLs from the EXE's directory by default).
-add_test(NAME PluginLoaderPR1
+add_test(NAME PluginLoader
   COMMAND test_plugin_loader
   WORKING_DIRECTORY $<TARGET_FILE_DIR:test_plugin_loader>
 )

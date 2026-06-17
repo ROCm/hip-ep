@@ -7,26 +7,19 @@
 // This test is intentionally expected to fail today.
 //
 // The slot-recording half of the public plugin ABI works end-to-end
-// (validated by the unit test in test/plugin/test_plugin_loader.cpp:
-// the plugin's requestPipelineSlot call lands in host-side storage
-// and Pipelines.cpp queries it correctly). What does NOT work in the
-// current prebuilt is the *MLIR-pass-instance* half: the plugin DLL
-// statically links MLIRPass / MLIRIR / MLIRFuncDialect from
-// prebuilt-local/, which gives the plugin its own copy of MLIR's
-// global pass registry, dialect registry, and TypeID state. The
-// plugin's mlir::PassRegistration<SamplePrintFunctionsPass>() then
-// writes into the plugin's copy, not the host's.
+// (validated by the unit test in test/plugin/test_plugin_loader.cpp: the
+// plugin's requestPipelineSlot call lands in host-side storage and
+// Pipelines.cpp queries it). What does NOT work in the default build is the
+// pass-instance half: the host and the plugin each link MLIR statically, so
+// the plugin's mlir::PassRegistration<SamplePrintFunctionsPass>() writes into
+// the plugin's own copy of MLIR's global pass registry, not the host's, and
+// the host's pass lookup never finds it.
 //
-// Resolution requires shipping MLIR as a shared library that both
-// the host process and the plugin link against -- the same problem
-// upstream LLVM solves with libLLVM.so. That is a build-system
-// change beyond PR 2's scope; this LIT test will start passing once
-// the project's MLIR-build mode lands.
-//
-// Until then we keep this test on disk (XFAIL'd) so:
-//   1. The shape of a vendor LIT test is reviewable.
-//   2. Once shared MLIR lands, removing the XFAIL line is the only
-//      change needed to flip this from XFAIL -> PASS.
+// Resolution requires the host and the plugin to share one MLIR instance (a
+// shared MLIR library) -- a build-system change. This test will start passing
+// once that build mode lands; removing the XFAIL line is then the only change
+// needed. Until then it is kept on disk (XFAIL'd) so the shape of a plugin
+// LIT test is reviewable.
 //===----------------------------------------------------------------------===//
 
 // RUN: env HIP_EP_PLUGINS=%hip-ep-sample-plugin \
