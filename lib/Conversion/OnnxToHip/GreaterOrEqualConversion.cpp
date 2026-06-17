@@ -9,30 +9,29 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.GreaterOrEqual -> onnx.Not(onnx.Less(A, B))
+/// onnx.GreaterOrEqual -> hip.not(hip.less(A, B))
 ///
 /// GreaterOrEqual(A, B) is the elementwise complement of Less(A, B):
 ///   A >= B  <=>  !(A < B)
-/// Both onnx.Less and onnx.Not already have ONNX->HIP conversion patterns,
-/// so the emitted ops are picked up in the same greedy rewrite round. No new
-/// hip.* op, lowering or runtime implementation is required.
+/// The decomposition emits the hip.* ops directly (rather than onnx.Less /
+/// onnx.Not). convert-onnx-to-hip runs its greedy rewrite with
+/// GreedyRewriteStrictness::ExistingOps, so freshly created onnx.* ops would
+/// NOT be revisited by the onnx.Less / onnx.Not patterns and would survive to
+/// bufferization. Building hip.less / hip.not here keeps the lowering
+/// self-contained. No new hip.* op, lowering or runtime is required (hip.less
+/// and hip.not already exist).
 struct GreaterOrEqualDecompose : public mlir::RewritePattern {
   GreaterOrEqualDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.GreaterOrEqual", /*benefit=*/1, ctx) {}
 
-  static mlir::Value createOnnxOp(mlir::PatternRewriter &rewriter,
-                                  mlir::Location loc, llvm::StringRef opName,
-                                  llvm::ArrayRef<mlir::Value> operands,
-                                  mlir::Type resultType) {
-    mlir::OperationState state(loc, opName);
-    state.addOperands(operands);
-    state.addTypes(resultType);
-    return rewriter.create(state)->getResult(0);
-  }
-
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
     mlir::Location loc = op->getLoc();
     mlir::Value a = op->getOperand(0);
     mlir::Value b = op->getOperand(1);
@@ -43,12 +42,20 @@ struct GreaterOrEqualDecompose : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.GreaterOrEqual decompose expects a ranked tensor result");
 
-    // %less has the same (boolean, broadcasted) type as the final result.
+    // less = (A < B); same (boolean, broadcasted) type as the final result.
+    mlir::FailureOr<mlir::Value> lessInit =
+        createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+    if (mlir::failed(lessInit))
+      return rewriter.notifyMatchFailure(
+          op, "GreaterOrEqual: no ranked operand spans dynamic result dim");
     mlir::Value less =
-        createOnnxOp(rewriter, loc, "onnx.Less", {a, b}, resultType);
-    mlir::Value result =
-        createOnnxOp(rewriter, loc, "onnx.Not", {less}, resultType);
-    rewriter.replaceOp(op, result);
+        mlir::hip::LessOp::create(rewriter, loc, context, a, b, *lessInit)
+            ->getResult(0);
+
+    // result = !less
+    mlir::Value notInit = createEmptyTensor(rewriter, loc, resultType, less);
+    auto notOp = mlir::hip::NotOp::create(rewriter, loc, context, less, notInit);
+    rewriter.replaceOp(op, notOp->getResult(0));
     return mlir::success();
   }
 };
