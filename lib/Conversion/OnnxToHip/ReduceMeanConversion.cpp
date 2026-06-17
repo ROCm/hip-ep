@@ -48,9 +48,6 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
   mlir::Value data = op->getOperand(0);
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
 
   // Extract noop_with_empty_axes attribute (defaults to 0 in ONNX)
   int64_t noopWithEmptyAxes = 0;
@@ -59,31 +56,46 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
     noopWithEmptyAxes = noopAttr.getSInt();
   }
 
-  // Handle axes: can be operand (opset 18+) or attribute (opset < 18)
-  // axes is always required in HIP dialect; create empty tensor<0xi64> when not
-  // provided
-  mlir::Value axesOperand;
+  // Extract keepdims attribute (defaults to 1 in ONNX)
+  int64_t keepdims = 1;
+  if (auto keepdimsAttr = op->getAttrOfType<mlir::IntegerAttr>("keepdims")) {
+    keepdims = keepdimsAttr.getSInt();
+  }
 
-  if (op->getNumOperands() > 1) {
-    // Axes provided as operand (opset 18+)
-    axesOperand = op->getOperand(1);
-  } else {
-    // Axes provided as attribute - convert to constant tensor
-    llvm::SmallVector<int64_t> axesVec;
+  // Statically-known reduced axes (only when axes is NOT a runtime operand).
+  bool axesStaticallyKnown = op->getNumOperands() <= 1;
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  llvm::SmallVector<int64_t> axesVec;
+  if (axesStaticallyKnown) {
     if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
       for (auto a : axesAttr)
         axesVec.push_back(
             mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else if (noopWithEmptyAxes == 0) {
+    } else if (noopWithEmptyAxes == 0 && inputType) {
       // Default: reduce all axes (when noop_with_empty_axes is 0)
-      auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
       for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
         axesVec.push_back(i);
-    } else {
-      // noop_with_empty_axes is 1 and no axes provided, axesVec remains empty
-      // (will create empty tensor<0xi64>)
     }
+    // noop_with_empty_axes == 1 with no axes -> axesVec stays empty (identity).
+  }
 
+  // Resolve the result type (infer if the importer left it unranked).
+  auto resultTypeOr =
+      inferReduceResultType(op, data, axesVec, axesStaticallyKnown, keepdims);
+  if (mlir::failed(resultTypeOr))
+    return rewriter.notifyMatchFailure(
+        op, "ReduceMean: cannot infer unranked result (need ranked input and "
+            "static axes)");
+  mlir::RankedTensorType resultType = *resultTypeOr;
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+
+  // axes is always required in HIP dialect; create empty tensor<0xi64> when not
+  // provided
+  mlir::Value axesOperand;
+  if (op->getNumOperands() > 1) {
+    // Axes provided as operand (opset 18+)
+    axesOperand = op->getOperand(1);
+  } else {
     // Create constant tensor for axes
     auto axesType = mlir::RankedTensorType::get(
         {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
@@ -91,12 +103,6 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
         mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
     axesOperand =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
-  }
-
-  // Extract keepdims attribute (defaults to 1 in ONNX)
-  int64_t keepdims = 1;
-  if (auto keepdimsAttr = op->getAttrOfType<mlir::IntegerAttr>("keepdims")) {
-    keepdims = keepdimsAttr.getSInt();
   }
 
   // Create hip.reduce_mean operation (axes always provided, may be empty)
