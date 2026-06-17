@@ -5,6 +5,8 @@
 #ifndef HIPDNN_EP_RUNTIME_MOCK_TYPES_H
 #define HIPDNN_EP_RUNTIME_MOCK_TYPES_H
 
+#include <stddef.h> // size_t
+
 // Mock type definitions for testing without GPU
 typedef void *hipStream_t;
 typedef void *hipEvent_t;

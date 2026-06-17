@@ -84,8 +84,8 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateTransposeConversionPatterns(RewritePatternSet &patterns,
-                                                    MLIRContext *ctx) {
+void populateTransposeConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx) {
   patterns.add<TransposeToHip>(ctx);
 }
 

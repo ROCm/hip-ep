@@ -136,7 +136,7 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
 
 } // namespace
 
-void mlir::hip::populateCausalConvWithStateConversionPatterns(
+void populateCausalConvWithStateConversionPatterns(
     RewritePatternSet &patterns, MLIRContext *ctx) {
   patterns.add<CausalConvWithStateToHip>(ctx);
 }

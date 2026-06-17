@@ -13,6 +13,7 @@ message(STATUS "Building Target LLVM Library")
 # this gracefully (bcSize == 0 → skip linking).
 if(NOT TARGET RuntimeBitcode)
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp
+        "#include <cstddef>\n"
         "extern \"C\" const unsigned char runtime_bc_data[] = {0};\n"
         "extern \"C\" const size_t runtime_bc_data_size = 0;\n"
     )
@@ -33,7 +34,7 @@ else()
                 --output ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
                 ${RUNTIME_BC_PATH}
         COMMAND ${Python3_EXECUTABLE} -c
-                "import os; data = open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); bc_size = os.path.getsize('${RUNTIME_BC_PATH}'); data += f'\\nextern \"C\" const size_t runtime_bc_data_size = {bc_size};\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp', 'w').write(data)"
+                "import os; data = open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); bc_size = os.path.getsize('${RUNTIME_BC_PATH}'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t runtime_bc_data_size = {bc_size};\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp', 'w').write(data)"
         COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
         DEPENDS ${RUNTIME_BC_PATH}
         COMMENT "Generating runtime_ir_data.cpp from runtime.bc"

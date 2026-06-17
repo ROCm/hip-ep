@@ -140,7 +140,7 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
 
 } // namespace
 
-void mlir::hip::populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
+void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns) {
   patterns.add<GemmOpLowering>(converter);
 }

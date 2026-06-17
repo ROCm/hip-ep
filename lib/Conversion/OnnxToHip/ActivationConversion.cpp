@@ -141,7 +141,7 @@ GeluToHip::matchAndRewrite(mlir::Operation *op,
 
 } // namespace
 
-void mlir::hip::populateActivationConversionPatterns(
+void populateActivationConversionPatterns(
     RewritePatternSet &patterns, MLIRContext *ctx) {
   patterns.add<SoftmaxToHip, SigmoidToHip, SoftplusToHip, GeluToHip>(ctx);
 }

@@ -277,7 +277,7 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
 
 } // namespace
 
-void mlir::hip::populateReshapeConversionPatterns(RewritePatternSet &patterns,
+void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx) {
   patterns.add<ReshapeToStdTensor, UnsqueezeToStdTensor, SqueezeToStdTensor>(
       ctx);

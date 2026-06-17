@@ -5,6 +5,8 @@
 #ifndef DLL_LINKER_H
 #define DLL_LINKER_H
 
+#include <cstddef>   // size_t
+#include <cstdint>   // uint8_t
 #include <string>
 #include <vector>
 

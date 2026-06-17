@@ -222,7 +222,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
 } // namespace
 
-void mlir::hip::populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
+void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns) {
   patterns.add<GqaOpLowering>(converter);
 }

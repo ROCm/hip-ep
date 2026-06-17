@@ -282,7 +282,7 @@ struct MemRefDeallocOpLowering
 
 } // namespace
 
-void mlir::hip::populateMemoryLoweringPatterns(
+void populateMemoryLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
                GetConstantOpLowering, MemRefAllocOpLowering,

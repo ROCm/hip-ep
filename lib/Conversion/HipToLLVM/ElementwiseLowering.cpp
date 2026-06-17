@@ -224,7 +224,7 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
 
 } // namespace
 
-void mlir::hip::populateElementwiseLoweringPatterns(
+void populateElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<ElementwiseOpLowering<MulOp, kTensorOpMul>,
                ElementwiseOpLowering<AddOp, kTensorOpAdd>, SubOpLowering>(
