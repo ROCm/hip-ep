@@ -1132,6 +1132,34 @@ int wrap_matmul_nbits(
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
 
+// GatherBlockQuantized operation wrapper (com.microsoft).
+// Gather + block-wise dequantize: gather rows from `data` along
+// `gather_axis` using `indices`, then dequantize the gathered rows using
+// per-block `scales` and optional `zero_points`. Handles sub-byte
+// unpacking when `bits == 4` (two values per byte, low nibble first).
+//
+// Shapes are passed as int64_t* arrays + ranks because both `data` and
+// `indices` rank are arbitrary per ONNX spec. zero_points is nullable —
+// when null, default is 0 for int4/uint4, 2^(bits-1) for uint8.
+//
+// Currently a stub — see lib/Runtime/real/gather_block_quantized.cpp.
+int wrap_gather_block_quantized(
+    RuntimeState *state,
+    const void *data,        // packed quantized [r-rank]
+    const void *indices,     // i32/i64 [q-rank]
+    const void *scales,      // dequant scales (T2)
+    const void *zero_points, // dequant zero points (nullable)
+    void *output,            // dequantized output [q + (r-1)-rank]
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank,
+    int64_t bits,       // 4 or 8
+    int64_t block_size, // power of 2, >= 16
+    int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype,    // HIPDNN_EP_DATATYPE_* (uint8 packed)
+    int64_t indices_dtype, // INT32 / INT64
+    int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
+
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
 // applies activation (e.g. SwiGLU), and combines results.
