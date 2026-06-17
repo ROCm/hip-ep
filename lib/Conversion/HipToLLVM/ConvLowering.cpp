@@ -9,6 +9,16 @@ namespace mlir {
 namespace hip {
 namespace {
 
+// Pointwise (1x1) convs with a reduction dimension at or below this many input
+// channels are routed to the fused GEMM+bias custom kernel (wrap_pointwise_conv)
+// instead of MIOpen; above it, MIOpen's GEMM tiling wins. MUST stay in sync
+// with the identical let-out threshold in
+// lib/Conversion/OnnxToHip/ProjectorOpsRewrites.cpp (PointwiseConvToMatMul):
+// that pattern lets small-Cin 1x1 convs fall through to hip.conv precisely so
+// they reach this branch, and routes larger Cin to onnx.MatMul. If the two
+// thresholds disagree, a 1x1 conv can land on the slow MIOpen path.
+static constexpr int64_t kPointwiseConvFusedMaxCin = 64;
+
 // ===== Convolution ops ================================
 
 // hip.conv(%ctx, %input, %weights, %bias, %output)
@@ -124,6 +134,86 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     }
     if (outputType.getRank() != 4) {
       return op.emitError("Output must be rank-4 tensor [N, K, H', W']");
+    }
+
+    // ---- Pointwise (1x1) fast path: fused GEMM + bias custom kernel --------
+    //
+    // A 1x1 / stride-1 / no-pad / no-dilation / group-1 conv with small Cin and
+    // fully static shapes is a skinny batched GEMM where MIOpen's per-call
+    // overhead dominates. Route it to wrap_pointwise_conv, which folds the
+    // bias add into the GEMM. Anything outside this envelope (kernel != 1x1,
+    // padded/strided/dilated/grouped, dynamic shape, or large Cin) falls
+    // through to the MIOpen path below — this branch IS the fallback gate.
+    //
+    // Before:
+    //   hip.conv(%ctx) ins(%x: memref<1x16x64x64xf16>,
+    //                      %w: memref<256x16x1x1xf16>, %b: memref<256xf16>)
+    //                  outs(%y: memref<1x256x64x64xf16>)
+    //                  {kernel_shape=[1,1], strides=[1,1], pads=[0,0,0,0],
+    //                   dilations=[1,1], group=1}
+    // After:
+    //   llvm.call @wrap_pointwise_conv(%ctx, %x, %w, %b, %y,
+    //                                  /*N=*/1, /*Cin=*/16, /*Cout=*/256,
+    //                                  /*HW=*/4096, /*data_type=*/1 /*f16*/)
+    {
+      auto allArrayEq = [](ArrayAttr a, int64_t v) -> bool {
+        if (!a)
+          return true; // absent => ONNX default (strides/dil=1, pads=0)
+        for (Attribute e : a) {
+          auto ia = dyn_cast<IntegerAttr>(e);
+          if (!ia || ia.getInt() != v)
+            return false;
+        }
+        return true;
+      };
+      auto kshape = op.getKernelShape();
+      bool kernel1x1 = kshape.size() == 2 &&
+                       cast<IntegerAttr>(kshape[0]).getInt() == 1 &&
+                       cast<IntegerAttr>(kshape[1]).getInt() == 1 &&
+                       weightsType.getDimSize(2) == 1 &&
+                       weightsType.getDimSize(3) == 1;
+      bool eligible =
+          kernel1x1 && op.getGroup() == 1 &&
+          allArrayEq(op.getStrides(), 1) && allArrayEq(op.getPads(), 0) &&
+          allArrayEq(op.getDilations(), 1) && inputType.hasStaticShape() &&
+          weightsType.hasStaticShape() && outputType.hasStaticShape() &&
+          inputType.getDimSize(1) <= kPointwiseConvFusedMaxCin;
+      if (eligible) {
+        int64_t dt = getHipdnnDataType(outputType.getElementType());
+        if (dt < 0)
+          return op.emitError("hip.conv (pointwise): unsupported element type ")
+                 << outputType.getElementType();
+        int64_t N = inputType.getDimSize(0);
+        int64_t Cin = inputType.getDimSize(1);
+        int64_t Cout = weightsType.getDimSize(0);
+        int64_t HW = inputType.getDimSize(2) * inputType.getDimSize(3);
+
+        SmallVector<Type, 10> pwParamTypes = {
+            ptrType, // state
+            ptrType, // input
+            ptrType, // weights
+            ptrType, // bias
+            ptrType, // output
+            i64Type, // N
+            i64Type, // Cin
+            i64Type, // Cout
+            i64Type, // HW
+            i64Type  // data_type
+        };
+        FailureOr<LLVM::LLVMFuncOp> pwFunc = LLVM::lookupOrCreateFn(
+            rewriter, module, kWrapPointwiseConv, pwParamTypes, i32Type);
+        if (failed(pwFunc))
+          return failure();
+        SmallVector<Value, 10> pwArgs = {
+            statePtr,           inputPtr,
+            weightsPtr,         biasPtr,
+            outputPtr,          createI64Const(N),
+            createI64Const(Cin), createI64Const(Cout),
+            createI64Const(HW), createI64Const(dt)};
+        LLVM::CallOp::create(rewriter, loc, *pwFunc, pwArgs);
+        rewriter.eraseOp(op);
+        return success();
+      }
     }
 
     // Input shape: [N, C, H, W]

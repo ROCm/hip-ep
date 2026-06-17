@@ -733,6 +733,14 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
 //   %br = onnx.Reshape(%b,  const [1, 256, 1, 1])  : -> tensor<1x256x1x1xf16>
 //   %y  = onnx.Add(%y0, %br)                        : -> tensor<1x256x64x64xf16>
 //===----------------------------------------------------------------------===//
+// Small-Cin 1x1 convs are NOT rewritten to MatMul here — they are let through
+// to ConvToHip (hip.conv), whose HIP->LLVM lowering routes them to the fused
+// GEMM+bias custom kernel (wrap_pointwise_conv). MUST stay in sync with
+// kPointwiseConvFusedMaxCin in lib/Conversion/HipToLLVM/ConvLowering.cpp.
+// Larger Cin keeps the MatMul path (hipBLASLt), whose tiling wins once the
+// reduction dimension is no longer tiny.
+static constexpr int64_t kPointwiseConvFusedMaxCin = 64;
+
 struct PointwiseConvToMatMul : public mlir::RewritePattern {
   PointwiseConvToMatMul(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Conv", /*benefit=*/2, ctx) {}
@@ -807,6 +815,14 @@ struct PointwiseConvToMatMul : public mlir::RewritePattern {
     if (wType.getDimSize(1) != Cin)
       return rewriter.notifyMatchFailure(op, "conv.cin_mismatch");
     int64_t HW = H * W;
+
+    // Let small-Cin 1x1 convs fall through to ConvToHip (hip.conv); their
+    // lowering routes them to the fused GEMM+bias custom kernel, which beats a
+    // skinny-K hipBLASLt GEMM + separate bias-add. Larger Cin keeps this MatMul
+    // path. (All other fused-kernel preconditions — static shape, stride 1,
+    // pad 0, dilation 1, group 1 — are already guaranteed by the checks above.)
+    if (Cin <= kPointwiseConvFusedMaxCin)
+      return rewriter.notifyMatchFailure(op, "conv.small_cin_fused_kernel");
 
     mlir::Type elemType = xType.getElementType();
     // Bias (if any) must share the activation dtype so the broadcast Add

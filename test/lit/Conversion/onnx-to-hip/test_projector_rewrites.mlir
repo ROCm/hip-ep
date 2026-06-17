@@ -18,12 +18,14 @@
 //     support. Reciprocal preserves rhs shape; the subsequent Mul
 //     broadcasts via the existing path (no kernel-level OOB read).
 //
-//  3. PointwiseConvToMatMul turns a static 1x1 `onnx.Conv` (stride 1,
-//     no pad, no dilation, group 1) into Reshape + `onnx.MatMul`
-//     (+ broadcast bias Add), routing it through hipBLASLt instead of
-//     MIOpen — so the result lowers to `hip.matmul`, NOT `hip.conv`. A
-//     dynamic-shape 1x1 conv must NOT be rewritten (the emitted MatMul's
-//     batch dim cannot be sized correctly), so it stays a `hip.conv`.
+//  3. PointwiseConvToMatMul turns a LARGE-Cin static 1x1 `onnx.Conv`
+//     (stride 1, no pad, no dilation, group 1) into Reshape + `onnx.MatMul`
+//     (+ broadcast bias Add), routing it through hipBLASLt — so the result
+//     lowers to `hip.matmul`, NOT `hip.conv`. A SMALL-Cin 1x1 conv is instead
+//     let through to `hip.conv` (its HIP->LLVM lowering routes it to the fused
+//     GEMM+bias custom kernel; that routing is checked in the hip-to-llvm
+//     lit suite). A dynamic-shape 1x1 conv also stays a `hip.conv` (the
+//     emitted MatMul's batch dim cannot be sized correctly).
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
@@ -56,9 +58,28 @@ module {
     return %z : tensor<?x256x1152xf16>
   }
 
-  // Static 1x1 conv with bias — trigger PointwiseConvToMatMul. Must lower to
-  // a hipBLASLt matmul (+ broadcast bias add), never a MIOpen conv.
-  func.func @test_pointwise_conv_to_matmul(
+  // LARGE-Cin static 1x1 conv with bias — trigger PointwiseConvToMatMul. Cin
+  // (128) is above the fused-kernel threshold, so it must lower to a hipBLASLt
+  // matmul (+ broadcast bias add), never a MIOpen conv.
+  func.func @test_pointwise_conv_large_cin_to_matmul(
+      %x: tensor<1x128x64x64xf16>, %w: tensor<256x128x1x1xf16>,
+      %b: tensor<256xf16>) -> tensor<1x256x64x64xf16> {
+    %y = "onnx.Conv"(%x, %w, %b) {
+      kernel_shape = [1 : si64, 1 : si64],
+      strides = [1 : si64, 1 : si64],
+      pads = [0 : si64, 0 : si64, 0 : si64, 0 : si64],
+      dilations = [1 : si64, 1 : si64],
+      group = 1 : si64
+    } : (tensor<1x128x64x64xf16>, tensor<256x128x1x1xf16>, tensor<256xf16>)
+      -> tensor<1x256x64x64xf16>
+    return %y : tensor<1x256x64x64xf16>
+  }
+
+  // SMALL-Cin static 1x1 conv with bias — Cin (16) is at/below the fused-kernel
+  // threshold, so PointwiseConvToMatMul lets it through to ConvToHip. It stays
+  // a hip.conv here (the wrap_pointwise_conv routing happens in HIP->LLVM), and
+  // must NOT be rewritten into a matmul.
+  func.func @test_pointwise_conv_small_cin_to_conv(
       %x: tensor<1x16x64x64xf16>, %w: tensor<256x16x1x1xf16>,
       %b: tensor<256xf16>) -> tensor<1x256x64x64xf16> {
     %y = "onnx.Conv"(%x, %w, %b) {
@@ -108,14 +129,21 @@ module {
 // CHECK-NOT: hip.div
 // CHECK: hip.reciprocal
 
-// Static 1x1 conv: rewritten to a hipBLASLt matmul plus a broadcast bias add.
-// The key invariant is that NO hip.conv (MIOpen) survives — the pointwise conv
-// is computed as a GEMM. The bias lowers to a broadcasting hip.add.
-// CHECK-LABEL: func.func @test_pointwise_conv_to_matmul
+// Large-Cin static 1x1 conv: rewritten to a hipBLASLt matmul plus a broadcast
+// bias add. The key invariant is that NO hip.conv (MIOpen) survives — the
+// pointwise conv is computed as a GEMM. The bias lowers to a broadcasting
+// hip.add.
+// CHECK-LABEL: func.func @test_pointwise_conv_large_cin_to_matmul
 // CHECK-NOT: onnx.Conv
 // CHECK-NOT: hip.conv
 // CHECK-DAG: hip.matmul
 // CHECK-DAG: hip.add
+
+// Small-Cin static 1x1 conv: NOT rewritten to a matmul — it is let through to
+// hip.conv (the fused-kernel routing happens later in HIP->LLVM).
+// CHECK-LABEL: func.func @test_pointwise_conv_small_cin_to_conv
+// CHECK-NOT: hip.matmul
+// CHECK: hip.conv
 
 // Dynamic-batch 1x1 conv: the rewrite is skipped, so it lowers via the normal
 // MIOpen path and a hip.conv remains.

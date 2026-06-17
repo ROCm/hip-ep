@@ -52,6 +52,7 @@ set(_kernel_sources
     hip/pool_kernel.hip
     hip/resize_kernel.hip
     hip/global_pool_kernel.hip
+    hip/pointwise_conv_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
     hip/linear_attention_kernel.hip
