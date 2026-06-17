@@ -54,7 +54,8 @@ struct GreaterOrEqualDecompose : public mlir::RewritePattern {
 
     // result = !less
     mlir::Value notInit = createEmptyTensor(rewriter, loc, resultType, less);
-    auto notOp = mlir::hip::NotOp::create(rewriter, loc, context, less, notInit);
+    auto notOp =
+        mlir::hip::NotOp::create(rewriter, loc, context, less, notInit);
     rewriter.replaceOp(op, notOp->getResult(0));
     return mlir::success();
   }
