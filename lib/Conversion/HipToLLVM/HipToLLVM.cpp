@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+
 namespace mlir {
 namespace hip {
 
@@ -368,6 +370,18 @@ void ConvertHipToLLVMPass::runOnOperation() {
   target.addIllegalDialect<HipDialect>();
   target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
+
+  // Out-of-tree dialects (e.g. a plugin-contributed vendor dialect) inject
+  // their HIP->LLVM lowering through the standard upstream mechanism: walk the
+  // module and, for every dialect in use that implements
+  // ConvertToLLVMPatternInterface, let it add conversion patterns AND mark its
+  // own ops illegal on `target`. This is a no-op when only in-tree dialects are
+  // present (none of them register the interface -- their lowerings are the
+  // explicit populate*LoweringPatterns calls above), so it cannot perturb the
+  // in-tree conversion. See docs/design/plugin-interface.md "Custom-op
+  // lowering".
+  populateConversionTargetFromOperation(module, target, typeConverter,
+                                        patterns);
 
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
     signalPassFailure();

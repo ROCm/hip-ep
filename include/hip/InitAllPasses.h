@@ -5,6 +5,7 @@
 #ifndef HIP_COMPILER_INITALLPASSES_H
 #define HIP_COMPILER_INITALLPASSES_H
 
+#include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/IR/HipBufferize.h"
@@ -86,9 +87,20 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
 }
 
 /// Load all required dialects into an MLIRContext.
+///
+/// After the in-tree dialects are registered, any dialect-registration
+/// callbacks contributed by loaded plugins (`addDialectRegistration`) are
+/// applied to the same registry, so a plugin's vendor dialect -- and its
+/// bufferization / HIP->LLVM-lowering interface models attached via
+/// DialectExtension -- are present in this context. No-op when no plugin
+/// contributes a dialect. Callers that load plugins (e.g. CompilerDriver)
+/// invoke `dispatchPluginRegistrationsOnce()` before this; the accessor is
+/// also defensively idempotent.
 inline void loadAllDialects(mlir::MLIRContext &context) {
   mlir::DialectRegistry registry;
   registerAllDialects(registry);
+  for (auto registerFn : pluginDialectRegistrations())
+    registerFn(registry);
   context.appendDialectRegistry(registry);
   context.loadAllAvailableDialects();
 }

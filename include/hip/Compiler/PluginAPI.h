@@ -29,9 +29,17 @@ namespace hip::compiler {
 /// API version understood by this plugin.
 ///
 /// Incremented for ANY ABI-breaking change to the HipEpPluginLibraryInfo
-/// struct (a callback added, removed, or reordered). There is no
-/// major/minor split: the loader rejects any version it does not equal.
-#define HIP_EP_PLUGIN_API_VERSION 1
+/// struct (a callback added, removed, or reordered) OR to the
+/// HipEpPluginRegistry::VTable layout (a registry capability added or
+/// reordered). There is no major/minor split: the loader rejects any version
+/// it does not equal.
+///
+/// History:
+///   1 -- initial: registerPass, requestPipelineSlot, addRuntimeBitcode,
+///        addLibraryPath, addLibrary.
+///   2 -- added addDialectRegistration (vtable entry 5) for out-of-tree
+///        dialect + op + bufferization/lowering-interface contribution.
+#define HIP_EP_PLUGIN_API_VERSION 2
 
 extern "C" {
 

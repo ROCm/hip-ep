@@ -73,6 +73,12 @@ struct Storage {
   // transient storage, so the registry owns the std::string copies.
   std::vector<std::string> libraryPaths;
   std::vector<std::string> libraries;
+
+  // Dialect-registration callbacks contributed by plugin
+  // addDialectRegistration calls. Plain function pointers (the public API
+  // requires non-capturing callbacks), so no ownership concern -- they point
+  // into the plugin DLL's code, which stays mapped for the process lifetime.
+  std::vector<void (*)(mlir::DialectRegistry &)> dialectRegistrations;
 };
 
 Storage &storage() {
@@ -145,11 +151,22 @@ void addLibraryImpl(void * /*self*/, const char *name, std::size_t nameLen) {
   storage().libraries.emplace_back(name, nameLen);
 }
 
+void addDialectRegistrationImpl(void * /*self*/,
+                                void (*registerFn)(mlir::DialectRegistry &)) {
+  if (registerFn == nullptr) {
+    llvm::errs() << "[plugin-loader] WARNING: addDialectRegistration called "
+                 << "with a null callback; skipping.\n";
+    return;
+  }
+  storage().dialectRegistrations.push_back(registerFn);
+}
+
 const HipEpPluginRegistry::VTable g_vtable = {
-    /* requestPipelineSlot = */ &requestPipelineSlotImpl,
-    /* addRuntimeBitcode   = */ &addRuntimeBitcodeImpl,
-    /* addLibraryPath      = */ &addLibraryPathImpl,
-    /* addLibrary          = */ &addLibraryImpl,
+    /* requestPipelineSlot     = */ &requestPipelineSlotImpl,
+    /* addRuntimeBitcode       = */ &addRuntimeBitcodeImpl,
+    /* addLibraryPath          = */ &addLibraryPathImpl,
+    /* addLibrary              = */ &addLibraryImpl,
+    /* addDialectRegistration  = */ &addDialectRegistrationImpl,
 };
 
 } // namespace
@@ -204,6 +221,16 @@ llvm::SmallVector<std::string> pluginLibraries() {
   result.reserve(storage().libraries.size());
   for (const auto &l : storage().libraries)
     result.push_back(l);
+  return result;
+}
+
+llvm::SmallVector<void (*)(mlir::DialectRegistry &)>
+pluginDialectRegistrations() {
+  dispatchPluginRegistrationsOnce();
+  llvm::SmallVector<void (*)(mlir::DialectRegistry &)> result;
+  result.reserve(storage().dialectRegistrations.size());
+  for (auto fn : storage().dialectRegistrations)
+    result.push_back(fn);
   return result;
 }
 

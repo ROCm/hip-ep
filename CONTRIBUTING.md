@@ -282,9 +282,10 @@ knowing as a contributor:
    a working sample plugin lives at `test/plugin/sample_plugin/` and is
    exercised by the plugin-loader unit test
    [`test/plugin/test_plugin_loader.cpp`](test/plugin/test_plugin_loader.cpp).
-   The sample exercises every method on `HipEpPluginRegistry`:
-   `registerPass<>`, `requestPipelineSlot`, `addRuntimeBitcode`,
-   `addLibraryPath`, and `addLibrary`.
+   The sample exercises `registerPass<>`, `requestPipelineSlot`,
+   `addRuntimeBitcode`, `addLibraryPath`, and `addLibrary`. The remaining
+   method, `addDialectRegistration` (contribute a custom dialect + op), is
+   documented in the design doc's "Custom ops" section.
 2. **Improvements that need not live out of tree go upstream, not into a
    plugin.** A down-stream team may use the plugin for any reason, but a
    generic op, bug fix, or non-target-specific pass is still best contributed

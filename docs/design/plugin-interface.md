@@ -21,6 +21,7 @@ to ship one.
 - [Linkage requirement](#linkage-requirement)
 - [What a downstream team does](#what-a-downstream-team-does)
 - [Component layout](#component-layout)
+- [Custom ops: a plugin-owned dialect end-to-end](#custom-ops-a-plugin-owned-dialect-end-to-end)
 - [Planned extensions](#planned-extensions)
 
 ## Motivation
@@ -60,9 +61,8 @@ improvements to it.
 A plugin is a shared library (`.so` / `.dll`) listed in the
 `HIP_EP_PLUGINS` environment variable. When the compiler starts, it loads
 each library, validates its API version, and invokes a single registration
-callback. Through the registry handed to that callback, the plugin makes up
-to four kinds of contribution, each consumed at a fixed point in the
-existing compile flow:
+callback. Through the registry handed to that callback, the plugin makes its
+contributions, each consumed at a fixed point in the existing compile flow:
 
 ```text
 HIP_EP_PLUGINS=vendor.so
@@ -71,9 +71,11 @@ HIP_EP_PLUGINS=vendor.so
 Plugin loader  -->  HipEpPluginRegistry
   |
   |   the registry routes each contribution to a fixed point in the
-  |   compile flow; the three sinks all emit into the final model.dll:
+  |   compile flow; all of them feed the final model.dll:
   |
   +--  registerPass + requestPipelineSlot  -->  ONNX->HIP->LLVM pipeline
+  |
+  +--  addDialectRegistration              -->  pipeline MLIRContext (loadAllDialects)
   |
   +--  addRuntimeBitcode                    -->  LLVM backend (link)
   |
@@ -84,6 +86,7 @@ Plugin loader  -->  HipEpPluginRegistry
 |---|---|---|
 | MLIR pass | `registerPass<T>()` | `lib/Dialect/Transforms/Pipelines.cpp` |
 | Pass placement | `requestPipelineSlot(slot, name)` | same |
+| Dialect + op + interface models | `addDialectRegistration(fn)` | `hip::compiler::loadAllDialects` (`include/hip/InitAllPasses.h`) |
 | Runtime bitcode | `addRuntimeBitcode(data, size)` | `lib/Target/LLVM/LLVMBackend.cpp` |
 | Link path / library | `addLibraryPath` / `addLibrary` | `lib/Compiler/CompilerDriver.cpp` |
 
@@ -104,7 +107,7 @@ The host looks up one symbol, `hipEpGetPluginInfo`, by name and calls it to
 obtain a small info struct returned by value:
 
 ```cpp
-#define HIP_EP_PLUGIN_API_VERSION 1
+#define HIP_EP_PLUGIN_API_VERSION 2
 
 extern "C" {
 struct HipEpPluginLibraryInfo {
@@ -126,7 +129,7 @@ loader rejects any version it does not equal. `RegisterCallbacks` may be
 ### The registry
 
 `HipEpPluginRegistry` is passed by reference to `RegisterCallbacks` and
-exposes the four contributions:
+exposes the contributions:
 
 ```cpp
 class HipEpPluginRegistry {
@@ -137,6 +140,13 @@ public:
 
   // Run a registered pass (by its MLIR command-line name) at a named slot.
   void requestPipelineSlot(PipelineSlot slot, llvm::StringRef passName);
+
+  // Contribute a dialect-registration callback. The host runs it against the
+  // DialectRegistry it builds the pipeline's MLIRContext from, so the callback
+  // can registry.insert<VendorDialect>() and registry.addExtension(...) to
+  // attach the op's bufferization and HIP->LLVM-lowering interface models --
+  // the same thing the upstream mlirGetDialectPluginInfo callback does.
+  void addDialectRegistration(void (*registerFn)(mlir::DialectRegistry &));
 
   // Contribute LLVM bitcode linked into the model module after the in-tree
   // runtime bitcode (e.g. vendor wrap_* implementations).
@@ -223,8 +233,8 @@ Windows drive letters). For each entry the loader:
 
 After dispatch, the host reads back what the plugins contributed through the
 accessors in `PluginRegistry.h` -- `pluginPassesForSlot`,
-`pluginBitcodeBuffers`, `pluginLibraryPaths`, `pluginLibraries` -- at the
-three hook sites.
+`pluginDialectRegistrations`, `pluginBitcodeBuffers`, `pluginLibraryPaths`,
+`pluginLibraries` -- at the four hook sites.
 
 ### Multiple plugins
 
@@ -485,6 +495,7 @@ In-tree, the mechanism is:
 | [lib/Compiler/PluginLoader.cpp](../../lib/Compiler/PluginLoader.cpp) | `HIP_EP_PLUGINS` parsing, load, version check, dispatch |
 | [lib/Compiler/PluginRegistry.cpp](../../lib/Compiler/PluginRegistry.cpp) | Host-side function-pointer table + contribution storage |
 | [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp) | Slot hook (`addPluginPassesForSlot`) |
+| [include/hip/InitAllPasses.h](../../include/hip/InitAllPasses.h) | Dialect hook (`loadAllDialects` applies plugin dialect registrations) |
 | [lib/Target/LLVM/LLVMBackend.cpp](../../lib/Target/LLVM/LLVMBackend.cpp) | Links plugin bitcode into the model module |
 | [lib/Compiler/CompilerDriver.cpp](../../lib/Compiler/CompilerDriver.cpp) | Appends plugin link paths / libraries |
 | [test/plugin/sample_plugin/](../../test/plugin/sample_plugin/) | Worked example exercised in CI |
@@ -494,15 +505,42 @@ The sample plugin is built behind a CMake option and exercised by the unit
 test and a LIT test, so the ABI stays exercised in CI even before any
 downstream plugin exists.
 
+## Custom ops: a plugin-owned dialect end-to-end
+
+A plugin can contribute its **own dialect op** that lives across the whole
+pipeline -- introduced from a model op, bufferized like an in-tree op, and
+lowered to a vendor kernel -- entirely from out-of-tree code, via three
+idiomatic MLIR seams that ride the same [linkage](#linkage-requirement) as a
+plugin pass (no shared `libMLIR` dylib):
+
+1. **Dialect + op + interface models** -- `addDialectRegistration(fn)` hands the
+   host a callback it runs against the `DialectRegistry` the pipeline's
+   `MLIRContext` is built from (`hip::compiler::loadAllDialects`). The callback
+   does `registry.insert<VendorDialect>()` and, via `registry.addExtension(...)`
+   DialectExtensions, attaches the op's `BufferizableOpInterface` model and its
+   `ConvertToLLVMPatternInterface`.
+2. **Bufferization** -- one-shot-bufferize finds the attached
+   `BufferizableOpInterface` model and turns the tensor-form op into its
+   buffer form, exactly like an in-tree HIP op. (A custom op with memref
+   operands must also carry `MemoryEffectOpInterface`, or the ownership-based
+   buffer-deallocation pass rejects it with "unknown memory side effects".)
+3. **HIP -> LLVM lowering** -- `convert-hip-to-llvm` calls
+   `populateConversionTargetFromOperation`, which walks the module, collects
+   every dialect implementing `ConvertToLLVMPatternInterface`, and lets each
+   add its lowering patterns and mark its ops illegal. The vendor op lowers to
+   a call into the vendor runtime wrapper (contributed via `addRuntimeBitcode`),
+   which launches the vendor kernel (contributed via `addLibrary`).
+
+A vendor pass (registered + slotted as above, typically at
+`AfterSimplifyOnnx`) introduces the op from a model op -- e.g. rewriting
+`onnx.Add` into `vendor.add`. Because the in-tree `convert-onnx-to-hip` only
+matches `onnx.*` ops, the vendor op passes through untouched to bufferization.
+
+This is exercised end-to-end (compile + GPU run + numeric check) by the
+`hip-ep-plugin` example's `vendor.add` op (`out = a + b`): `onnx.Add` ->
+`vendor.add` -> bufferized -> `wrap_hip_ep_vendor_add` -> vendor HIP kernel.
+
 ## Planned extensions
-
-Two capabilities are designed but not yet implemented in the ABI.
-
-### New first-class ops and interface models
-
-A plugin registers a dialect op (and the interface models it needs, such as
-bufferization) into the host's dialect registry, so a custom op can survive
-across passes rather than being lowered away in a single pass.
 
 ### Pipeline composition
 
@@ -550,7 +588,7 @@ parts; the first two **ship today**, the third is planned.
 not a frozen cross-release contract -- a plugin that composes by name pins to
 a release. (Renaming a pass is a documented breaking change for such plugins.)
 
-Both extensions share the [linkage requirement](#linkage-requirement): the
-dialect, type, and pass registries are process-global MLIR state, so any
-plugin-registered op, pass, or pipeline needs the host and plugin to share one
-MLIR instance.
+The custom-op path and the pipeline-composition extension share the
+[linkage requirement](#linkage-requirement): the dialect, type, and pass
+registries are process-global MLIR state, so any plugin-registered op, pass,
+or pipeline needs the host and plugin to share one MLIR instance.

@@ -13,6 +13,10 @@
 #include <cstddef>
 #include <string>
 
+namespace mlir {
+class DialectRegistry;
+} // namespace mlir
+
 // Public registry passed to a plugin's RegisterCallbacks. It exposes the
 // contributions a plugin can make:
 //
@@ -21,6 +25,13 @@
 //                                 requested slot. Requires the host and plugin
 //                                 to share one MLIR instance (see the method
 //                                 comment).
+//   * addDialectRegistration() -- contribute a vendor dialect (+ op
+//                                 verifiers, bufferization models, and
+//                                 HipToLLVM lowering via DialectExtension /
+//                                 ConvertToLLVMPatternInterface) into the
+//                                 DialectRegistry the pipeline's MLIRContext
+//                                 is built from. Same shared-MLIR requirement
+//                                 as registerPass.
 //   * requestPipelineSlot(...) -- run a registered pass at a named slot; read
 //                                 by lib/Dialect/Transforms/Pipelines.cpp.
 //   * addRuntimeBitcode(...)   -- contribute LLVM bitcode linked into the
@@ -109,13 +120,22 @@ public:
                               std::size_t sizeBytes);
     void (*addLibraryPath)(void *self, const char *path, std::size_t pathLen);
     void (*addLibrary)(void *self, const char *name, std::size_t nameLen);
+    // V2: contribute a dialect registration callback. The callback is invoked
+    // by the host against the DialectRegistry used to build the pipeline's
+    // MLIRContext (see loadAllDialects). `mlir::DialectRegistry &` in the
+    // signature is intentional: dialect contribution inherently requires the
+    // plugin and host to share one MLIR build (same as registerPass), so the
+    // MLIR ABI match this argument implies is already a precondition of using
+    // it -- a bitcode/library-only plugin never touches this entry.
+    void (*addDialectRegistration)(void *self,
+                                   void (*registerFn)(mlir::DialectRegistry &));
   };
 
-  /// Tripwire: the V1 vtable layout has exactly four function pointers.
+  /// Tripwire: the V2 vtable layout has exactly five function pointers.
   /// Any change to `VTable` makes this assertion fire; the compiler
   /// error is your reminder to bump `HIP_EP_PLUGIN_API_VERSION` in
   /// PluginAPI.h before the new layout ships.
-  static_assert(sizeof(VTable) == 4 * sizeof(void (*)()),
+  static_assert(sizeof(VTable) == 5 * sizeof(void (*)()),
                 "VTable layout changed -- bump HIP_EP_PLUGIN_API_VERSION "
                 "and update this assertion to match the new entry count.");
 
@@ -147,6 +167,37 @@ public:
   /// and needs no hip-compiler symbol.
   template <typename PassT> void registerPass() {
     mlir::PassRegistration<PassT>();
+  }
+
+  // ---------- Dialects (out-of-tree ops + interfaces) -----------------
+  /// Contribute a dialect-registration callback. The host invokes `registerFn`
+  /// against the `mlir::DialectRegistry` it uses to build the pipeline's
+  /// MLIRContext (`hip::compiler::loadAllDialects`), so the callback is the
+  /// place to do everything the upstream `mlirGetDialectPluginInfo` callback
+  /// does:
+  ///
+  /// ```
+  /// R.addDialectRegistration(+[](mlir::DialectRegistry &registry) {
+  ///   registry.insert<VendorDialect>();
+  ///   // bufferization model (DialectExtension -> attachInterface):
+  ///   registry.addExtension(+[](mlir::MLIRContext *ctx, VendorDialect *) {
+  ///     VendorScaleOp::attachInterface<VendorScaleBufferizeModel>(*ctx);
+  ///   });
+  ///   // HIP->LLVM lowering (ConvertToLLVMPatternInterface on the dialect):
+  ///   registry.addExtension(+[](mlir::MLIRContext *, VendorDialect *d) {
+  ///     d->addInterfaces<VendorConvertToLLVMInterface>();
+  ///   });
+  /// });
+  /// ```
+  ///
+  /// Constraint: same as `registerPass` -- the dialect's op TypeIDs and any
+  /// attached interface models live in MLIR's per-context registries, so the
+  /// plugin and host must share one MLIR build (one shared MLIR library, the
+  /// static+export host model). `registerFn` must be a non-capturing function
+  /// (a `+[]` lambda or a free function) so it converts to a plain function
+  /// pointer.
+  void addDialectRegistration(void (*registerFn)(mlir::DialectRegistry &)) {
+    vtable_->addDialectRegistration(self_, registerFn);
   }
 
   /// Request that a registered pass run at a named pipeline slot.
@@ -220,6 +271,16 @@ HipEpPluginRegistry &getProcessPluginRegistry();
 /// slot to look up the requested plugin passes by name in MLIR's
 /// global pass registry and add them to the active `PassManager`.
 llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot);
+
+/// Read the dialect-registration callbacks recorded by every loaded plugin's
+/// `addDialectRegistration` call, in the order they were registered.
+///
+/// Used by `hip::compiler::loadAllDialects` (`include/hip/InitAllPasses.h`):
+/// after the in-tree dialects are registered, each callback is invoked on the
+/// same `mlir::DialectRegistry` so plugin dialects + their bufferization /
+/// HIP->LLVM-lowering interface models are present in the pipeline's context.
+llvm::SmallVector<void (*)(mlir::DialectRegistry &)>
+pluginDialectRegistrations();
 
 /// One bitcode buffer contributed by a plugin's `addRuntimeBitcode`
 /// call. The bytes are owned by the per-process plugin registry
