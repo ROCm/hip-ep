@@ -2,24 +2,21 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// XFAIL: *
+// REQUIRES: hip_plugins_enabled
 //
-// This test is intentionally expected to fail today.
+// Validates the pass-instance half of the public plugin ABI end-to-end: a
+// plugin loaded via HIP_EP_PLUGINS registers an MLIR pass with
+// mlir::PassRegistration<>(), and the host resolves + runs it by name.
 //
-// The slot-recording half of the public plugin ABI works end-to-end
-// (validated by the unit test in test/plugin/test_plugin_loader.cpp: the
-// plugin's requestPipelineSlot call lands in host-side storage and
-// Pipelines.cpp queries it). What does NOT work in the default build is the
-// pass-instance half: the host and the plugin each link MLIR statically, so
-// the plugin's mlir::PassRegistration<SamplePrintFunctionsPass>() writes into
-// the plugin's own copy of MLIR's global pass registry, not the host's, and
-// the host's pass lookup never finds it.
-//
-// Resolution requires the host and the plugin to share one MLIR instance (a
-// shared MLIR library) -- a build-system change. This test will start passing
-// once that build mode lands; removing the XFAIL line is then the only change
-// needed. Until then it is kept on disk (XFAIL'd) so the shape of a plugin
-// LIT test is reviewable.
+// This works because the tools are built with HIPDNN_ENABLE_PLUGINS, which
+// makes hip-mlir-opt export its statically-linked MLIR symbols (LLVM's
+// export_executable_symbols_for_plugins, the same call mlir-opt makes). The
+// plugin's MLIR registry references then bind to the host's single copy at
+// dlopen time, so the plugin's registration lands in the registry the host
+// reads. (Built WITHOUT that export, host and plugin would have separate
+// static MLIR registries and the lookup would miss -- hence the
+// hip_plugins_enabled gate.) The slot-recording / bitcode / library halves of
+// the ABI work regardless and are covered by test/plugin/test_plugin_loader.
 //===----------------------------------------------------------------------===//
 
 // RUN: env HIP_EP_PLUGINS=%hip-ep-sample-plugin \

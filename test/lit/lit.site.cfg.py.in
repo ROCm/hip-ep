@@ -26,6 +26,11 @@ config.hip_build_dir = r"@CMAKE_BINARY_DIR@"
 # string) so that lit substitutes the actual config (Debug/Release) at runtime.
 config.hip_build_mode = "@LLVM_BUILD_MODE@"
 
+# Whether the tools were built exporting their MLIR symbols for plugins
+# (HIPDNN_ENABLE_PLUGINS). lit.cfg.py turns this into the `hip_plugins_enabled`
+# feature that gates the Plugin/ pass tests.
+config.hip_plugins_enabled = @HIPDNN_PLUGINS_LIT_FEATURE@
+
 lit.llvm.initialize(lit_config, config)
 
 # Resolve %(build_mode)s for VS multi-config generators. No-op for single-config.

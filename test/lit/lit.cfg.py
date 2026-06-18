@@ -119,3 +119,11 @@ if not sample_plugin_path:
 config.substitutions.append(
     ("%hip-ep-sample-plugin", sample_plugin_path.replace("\\", "/"))
 )
+
+# `hip_plugins_enabled` feature: set when the tools were built with
+# HIPDNN_ENABLE_PLUGINS (they export their MLIR symbols, so a dlopen'd plugin's
+# mlir::PassRegistration binds to the host's single pass registry). Plugin pass
+# tests gate on it via `// REQUIRES: hip_plugins_enabled`; the slot-recording /
+# bitcode / library paths work without it and are covered by the unit test.
+if getattr(config, "hip_plugins_enabled", False):
+    config.available_features.add("hip_plugins_enabled")
