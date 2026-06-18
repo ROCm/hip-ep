@@ -136,8 +136,7 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
       return failure();
 
     SmallVector<Value, 19> args = {
-        adaptor.getCtx(),
-        getOpStateSlotValue(op, rewriter, loc),
+        adaptor.getCtx(), getOpStateSlotValue(op, rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};

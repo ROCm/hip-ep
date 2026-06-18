@@ -135,8 +135,8 @@ struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
   hipdnn_ep_real::ZpUnpackCache zp;
 };
 
-extern "C" int8_t
-hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state, int32_t slot) {
+extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
+                                                            int32_t slot) {
   return MatmulNbitsState::create(state, slot);
 }
 

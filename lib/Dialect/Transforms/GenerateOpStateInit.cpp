@@ -17,8 +17,8 @@
 //     // per stateful op, in slot order. Each construct_<op> stores its built
 //     // state into op_states[slot] itself (via hipdnn_ep_op_state_set, called
 //     // inside the runtime fn) and returns an i8 ok flag:
-//     %ok = <op.generateOpStateInit emits: call construct_<op>(%state, slot, attrs)>
-//     llvm.return 0
+//     %ok = <op.generateOpStateInit emits: call construct_<op>(%state, slot,
+//     attrs)> llvm.return 0
 //   ^fail:
 //     llvm.return 1   // nothing constructed, so nothing to free
 //   }

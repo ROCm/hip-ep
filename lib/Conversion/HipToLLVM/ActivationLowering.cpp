@@ -91,13 +91,11 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
   if (failed(funcOp))
     return failure();
 
-  SmallVector<Value, 7> args = {statePtr,
-                                getOpStateSlotValue(op, rewriter, loc),
-                                inputPtr,
-                                outputPtr,
-                                numElements,
-                                dataTypeVal,
-                                activationModeVal};
+  SmallVector<Value, 7> args = {
+      statePtr,         getOpStateSlotValue(op, rewriter, loc),
+      inputPtr,         outputPtr,
+      numElements,      dataTypeVal,
+      activationModeVal};
 
   LLVM::CallOp::create(rewriter, loc, *funcOp, args);
   rewriter.eraseOp(op);

@@ -95,17 +95,13 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,
-                               getOpStateSlotValue(op, rewriter, loc),
-                               inputPtr,
-                               scalePtr,
-                               outputPtr,
-                               inputNumElements,
-                               scaleNumElements,
-                               elementSizeBytesVal,
-                               axisVal,
-                               epsilonVal,
-                               stashTypeVal};
+    SmallVector<Value> args = {
+        statePtr,         getOpStateSlotValue(op, rewriter, loc),
+        inputPtr,         scalePtr,
+        outputPtr,        inputNumElements,
+        scaleNumElements, elementSizeBytesVal,
+        axisVal,          epsilonVal,
+        stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -187,13 +183,18 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        statePtr,         getOpStateSlotValue(op, rewriter, loc),
-        inputPtr,         skipPtr,
-        gammaPtr,         biasPtr,
-        outputPtr,        skipOutputPtr,
-        inputNumElements, gammaNumElements,
-        elementSizeBytesVal, epsilonVal};
+    SmallVector<Value> args = {statePtr,
+                               getOpStateSlotValue(op, rewriter, loc),
+                               inputPtr,
+                               skipPtr,
+                               gammaPtr,
+                               biasPtr,
+                               outputPtr,
+                               skipOutputPtr,
+                               inputNumElements,
+                               gammaNumElements,
+                               elementSizeBytesVal,
+                               epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
