@@ -54,7 +54,9 @@ extern "C" bool hipdnn_ep_op_state_set(RuntimeState *state, int32_t slot,
 // instance from an operator's runtime entry, and `create` builds the state and
 // stores it into its slot.
 template <class T> struct OpStateT : OpState {
-  OpStateT() { this->deletor = [](OpState *p) { delete static_cast<T *>(p); }; }
+  OpStateT() {
+    this->deletor = [](OpState *p) { delete static_cast<T *>(p); };
+  }
 
   // Reach this op's state inside its runtime entry.
   static T *get_slot(RuntimeState *state, int slot) {
@@ -90,7 +92,8 @@ template <class T> struct OpStateT : OpState {
 // NOTE: intentionally distinct from `morphizen::utils::WeakStore` -- this one
 // adds the mutex (that store is unlocked) and drops the initialize-injection /
 // cleanup machinery. Expired entries are not pruned: keys here are device ids,
-// so the residual is O(#devices). Do NOT reuse this with an unbounded key space.
+// so the residual is O(#devices). Do NOT reuse this with an unbounded key
+// space.
 template <class Key, class Val> class WeakStore {
 public:
   template <class Factory>

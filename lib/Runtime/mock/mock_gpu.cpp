@@ -612,8 +612,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 }
 
 int wrap_group_query_attention(
-    RuntimeState *state,
-    int op_state_slot,
+    RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
     void *seqlens_k, void *total_seq_len,
@@ -673,8 +672,7 @@ int wrap_group_query_attention(
 }
 
 int wrap_multi_head_attention(
-    RuntimeState *state,
-    int op_state_slot,
+    RuntimeState *state, int op_state_slot,
     // Inputs (10)
     void *query, void *key, void *value, void *bias, void *key_padding_mask,
     void *attention_bias, void *past_key, void *past_value,

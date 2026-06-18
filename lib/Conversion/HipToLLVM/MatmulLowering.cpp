@@ -159,17 +159,13 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 11> args = {statePtr,
-                                   getOpStateSlotValue(op, rewriter, loc),
-                                   APtr,
-                                   BPtr,
-                                   outputPtr,
-                                   M,
-                                   N,
-                                   K,
-                                   batchCount,
-                                   elemSize,
-                                   bBatchStride};
+    SmallVector<Value, 11> args = {
+        statePtr,    getOpStateSlotValue(op, rewriter, loc),
+        APtr,        BPtr,
+        outputPtr,   M,
+        N,           K,
+        batchCount,  elemSize,
+        bBatchStride};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

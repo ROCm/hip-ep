@@ -23,8 +23,8 @@ struct MockOpState : OpStateT<MockOpState> {};
 
 // MatMulNBits: real runtime owns a zero_points unpack cache (MatmulNbitsState
 // in real/matmul_nbits.cpp); the mock owns no device memory.
-extern "C" int8_t
-hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state, int32_t slot) {
+extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
+                                                            int32_t slot) {
   return MockOpState::create(state, slot);
 }
 

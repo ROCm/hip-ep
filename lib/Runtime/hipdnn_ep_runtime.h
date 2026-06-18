@@ -809,15 +809,15 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // at compile time when B's leading dims are static, else at runtime.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
-    int op_state_slot,      // per-instance op-state slot (shared algo table)
-    const void *A,          // Matrix A GPU pointer
-    const void *B,          // Matrix B GPU pointer
-    void *output,           // Output GPU pointer
-    int64_t M,              // Rows of A (per batch)
-    int64_t N,              // Columns of B
-    int64_t K,              // Columns of A / Rows of B
-    int64_t batch_count,    // Number of batches
-    int64_t elem_size,      // Element size in bytes (2=f16, 4=f32)
+    int op_state_slot,       // per-instance op-state slot (shared algo table)
+    const void *A,           // Matrix A GPU pointer
+    const void *B,           // Matrix B GPU pointer
+    void *output,            // Output GPU pointer
+    int64_t M,               // Rows of A (per batch)
+    int64_t N,               // Columns of B
+    int64_t K,               // Columns of A / Rows of B
+    int64_t batch_count,     // Number of batches
+    int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
     int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
 
 // GroupQueryAttention operation wrapper (Full MS spec)
@@ -1217,10 +1217,10 @@ int wrap_qmoe(
 //   k-1) activation: 0=none, 1=silu/swish
 int wrap_causal_conv_with_state(
     RuntimeState *state,
-    int op_state_slot,      // per-instance op-state slot (descriptor cache home)
-    const void *input,      // (batch, channels, seq_len)
-    const void *weight,     // (channels, 1, kernel_size)
-    const void *bias,       // nullable, (channels)
+    int op_state_slot,  // per-instance op-state slot (descriptor cache home)
+    const void *input,  // (batch, channels, seq_len)
+    const void *weight, // (channels, 1, kernel_size)
+    const void *bias,   // nullable, (channels)
     const void *past_state, // nullable, (batch, channels, kernel_size - 1)
     void *output,           // (batch, channels, seq_len)
     void *present_state,    // (batch, channels, kernel_size - 1)
