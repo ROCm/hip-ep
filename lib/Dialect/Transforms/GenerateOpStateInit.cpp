@@ -10,11 +10,16 @@
 // standalone LLVM function:
 //
 //   llvm.func @hipdnn_ep_op_states_init_fn(%state: !llvm.ptr) -> i32 {
-//     %rc = llvm.call @hipdnn_ep_op_states_alloc(%state, N)   // alloc array
+//     %ok = llvm.call @hipdnn_ep_op_states_alloc(%state, N)   // alloc array
+//     llvm.cond_br %ok, ^construct, ^fail   // skip construction if alloc
+//     failed
+//   ^construct:
 //     // per stateful op, in slot order:
 //     %st = <op.generateOpStateInit emits: call construct_<op>(%state, attrs)>
 //     llvm.call @hipdnn_ep_op_state_set(%state, slot, %st)  // -> slot
-//     llvm.return %rc
+//     llvm.return 0
+//   ^fail:
+//     llvm.return 1   // nothing constructed, so nothing to free
 //   }
 //
 // --generate-interface later calls this from inference_init. Building the init
@@ -114,23 +119,36 @@ struct GenerateOpStateInitPass
       return;
     }
 
-    // ok = op_states_alloc(state, numSlots); then map the bool to the int
-    // status inference_init returns (0 = success, 1 = failure).
+    // ok = op_states_alloc(state, numSlots).
     Value nVal = LLVM::ConstantOp::create(builder, loc, i64Type,
                                           builder.getI64IntegerAttr(numSlots));
     auto allocCall =
         LLVM::CallOp::create(builder, loc, *allocFn, ValueRange{state, nVal});
     Value zeroI8 = LLVM::ConstantOp::create(builder, loc, i8Type,
                                             builder.getI8IntegerAttr(0));
-    Value allocOk = LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne,
-                                         allocCall.getResult(), zeroI8);
+    Value allocFailed = LLVM::ICmpOp::create(
+        builder, loc, LLVM::ICmpPredicate::eq, allocCall.getResult(), zeroI8);
     Value zeroI32 = LLVM::ConstantOp::create(builder, loc, i32Type,
                                              builder.getI32IntegerAttr(0));
     Value oneI32 = LLVM::ConstantOp::create(builder, loc, i32Type,
                                             builder.getI32IntegerAttr(1));
-    Value rc = LLVM::SelectOp::create(builder, loc, allocOk, zeroI32, oneI32);
 
-    // Per stateful op (slot order): construct + store into its slot.
+    // On alloc failure, return failure (1) WITHOUT running any construct_<op>:
+    // the slot array is null, so _set would refuse to store (see op_state.cpp)
+    // and every constructed OpState -- with the device resources / WeakStore
+    // handles it owns -- would be dropped unreachable, leaking with its deletor
+    // never run. inference_init maps the returned 1 to a failed session.
+    Block *constructBlock = initFn.addBlock();
+    Block *allocFailBlock = initFn.addBlock();
+    LLVM::CondBrOp::create(builder, loc, allocFailed, allocFailBlock,
+                           constructBlock);
+
+    builder.setInsertionPointToStart(allocFailBlock);
+    LLVM::ReturnOp::create(builder, loc, oneI32);
+
+    // Success path: per stateful op (slot order), construct + store into its
+    // slot, then report success (0).
+    builder.setInsertionPointToStart(constructBlock);
     for (int64_t slot = 0; slot < numSlots; ++slot) {
       Operation *op = bySlot[slot];
       auto statefulOp = cast<OpStateOpInterface>(op);
@@ -147,7 +165,7 @@ struct GenerateOpStateInitPass
                            ValueRange{state, slotVal, constructed});
     }
 
-    LLVM::ReturnOp::create(builder, loc, rc);
+    LLVM::ReturnOp::create(builder, loc, zeroI32);
   }
 };
 

@@ -17,18 +17,23 @@
 // CHECK: llvm.func @hipdnn_ep_op_states_init_fn(%[[STATE:.*]]: !llvm.ptr) -> i32
 
 // Allocate the slot array for the single matmul_nbits (N = 1). _alloc returns a
-// bool (i8) that is mapped to the i32 status inference_init expects.
+// bool (i8); on failure we branch to the fail block and return without
+// constructing anything (so no constructed state can leak).
 // CHECK: %[[N:.*]] = llvm.mlir.constant(1 : i64)
 // CHECK: %[[OK:.*]] = llvm.call @hipdnn_ep_op_states_alloc(%[[STATE]], %[[N]])
-// CHECK: %[[RC:.*]] = llvm.select
+// CHECK: llvm.cond_br %{{.*}}, ^[[FAIL:bb[0-9]+]], ^[[OK_BB:bb[0-9]+]]
 
-// MatMulNBits contributes a no-arg construction (cache fills lazily at runtime).
+// Success path: MatMulNBits contributes a no-arg construction (cache fills
+// lazily at runtime), then the state is stored into slot 0.
+// CHECK: ^[[OK_BB]]:
 // CHECK: %[[ST:.*]] = llvm.call @hipdnn_ep_op_state_construct_matmul_nbits(%[[STATE]])
-
-// Store the constructed state into slot 0.
 // CHECK: %[[SLOT:.*]] = llvm.mlir.constant(0 : i32)
 // CHECK: llvm.call @hipdnn_ep_op_state_set(%[[STATE]], %[[SLOT]], %[[ST]])
-// CHECK: llvm.return %[[RC]]
+// CHECK: llvm.return
+
+// Failure path: nothing constructed, just return.
+// CHECK: ^[[FAIL]]:
+// CHECK: llvm.return
 
 module {
   func.func @one_matmul_nbits(%ctx: !hip.context,
