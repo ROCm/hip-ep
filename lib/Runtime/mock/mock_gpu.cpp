@@ -827,8 +827,19 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
                 int64_t axis_size, int64_t inner_size,
-                int64_t element_size_bytes,
-                int64_t indices_element_size_bytes) {
+                int64_t element_size_bytes, int64_t indices_element_size_bytes,
+                const int64_t *data_shape, int64_t data_rank,
+                const int64_t *indices_shape, int64_t indices_rank,
+                const int64_t *output_shape, int64_t output_rank,
+                int64_t data_hip_dtype, int64_t indices_hip_dtype) {
+  (void)data_shape;
+  (void)data_rank;
+  (void)indices_shape;
+  (void)indices_rank;
+  (void)output_shape;
+  (void)output_rank;
+  (void)data_hip_dtype;
+  (void)indices_hip_dtype;
   (void)data;
   (void)indices;
   (void)output;

@@ -31,6 +31,7 @@ inline constexpr const char *kSetOutputAllocator =
     "hipdnn_ep_set_output_allocator";
 inline constexpr const char *kRuntimeFlushOpProfile =
     "hipdnn_ep_runtime_flush_op_profile";
+inline constexpr const char *kSetCpuFallback = "hipdnn_ep_set_cpu_fallback";
 
 // Per-op-state-slots C-ABI symbol names (see
 // docs/design/op-state-slots-design.md). kOpStatesInitFn is emitted by

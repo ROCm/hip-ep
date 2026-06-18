@@ -181,6 +181,7 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     //                                          its wall_ms window closes so the
     //                                          resolve cost doesn't pollute
     //                                          TPS)
+    //   hipdnn_ep_set_cpu_fallback           — debug-only EP CPU reference path
     std::vector<std::string> export_symbols = {
         hipdnn::abi::kInferenceInit,
         hipdnn::abi::kInferenceCompute,
@@ -189,7 +190,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
         "test_hip_from_dll",
         hipdnn::abi::kRuntimeBeginCompute,
         hipdnn::abi::kSetOutputAllocator,
-        hipdnn::abi::kRuntimeFlushOpProfile};
+        hipdnn::abi::kRuntimeFlushOpProfile,
+        hipdnn::abi::kSetCpuFallback};
     std::vector<std::string> libraries;
     std::vector<std::string> library_paths;
     discoverLibraries(libraries, library_paths);

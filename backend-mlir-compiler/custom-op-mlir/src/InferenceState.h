@@ -153,6 +153,12 @@ private:
   // present.
   using FlushOpProfileFn = void (*)(void *);
   FlushOpProfileFn flush_op_profile_fn_;
+
+  // Optional debug CPU fallback: second arg is the C iface from
+  // hipdnn_ep_runtime.h, kept as const void* here so this header does not
+  // include that file (avoids typedef vs forward-declare clashes with MSVC).
+  using SetCpuFallbackFn = void (*)(void *, const void *);
+  SetCpuFallbackFn set_cpu_fallback_fn_{nullptr};
 };
 
 } // namespace mlir_compilation::customop
