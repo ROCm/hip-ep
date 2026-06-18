@@ -14,6 +14,12 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/morphizen_options.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/extra_functions.cmake)
 
+# Lowercase MORPHIZEN_EP_REGISTRATION_NAME and inject it as a compile definition
+# so ort-bridge / morphizen-core form the `ep.<name>.` provider-option prefix at
+# compile time. Must precede the add_subdirectory calls below to propagate.
+string(TOLOWER "${MORPHIZEN_EP_REGISTRATION_NAME}" MORPHIZEN_EP_REGISTRATION_NAME_LOWER)
+add_compile_definitions(MORPHIZEN_EP_REGISTRATION_NAME_LOWER="${MORPHIZEN_EP_REGISTRATION_NAME_LOWER}")
+
 # Add foundation library first (lowest layer, no MorphiZen dependencies)
 add_subdirectory(morphizen-foundation)
 # Add utility library (depends on foundation)

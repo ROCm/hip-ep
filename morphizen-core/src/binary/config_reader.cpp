@@ -25,7 +25,7 @@ static constexpr char kProviderOptions[] = "sessionOptions";
 static constexpr char kSessionConfig[] = "ort_session_config";
 static constexpr char kSessionOptionPtr[] = "session_options";
 static constexpr char kEpProviderOptionPrefix[] =
-    "ep.morphizenexecutionprovider.";
+    "ep." MORPHIZEN_EP_REGISTRATION_NAME_LOWER ".";
 namespace morphizen {
 
 namespace config_default {
@@ -101,7 +101,7 @@ static void set_session_config(google::protobuf::Struct& ret,
     MY_LOG(1) << "convert " << key << " to " << key2 << " and set "
               << "provider_options"
               << "[" << key2 << "]=\"" << value << "\"";
-    // The key is prefixed with "ep.morphizenexecutionprovider."
+    // The key is prefixed with the per-EP provider-option prefix.
     // Remove the prefix before setting the value.
     set_struct_value(ret, kProviderOptions, key2, value);
   } else {
