@@ -8,6 +8,7 @@
 
 include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
+include "hip/Dialect/IR/HipOpStateInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -487,7 +488,8 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
+def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface],
+                           /*outsAccessor=*/"Output",
                            /*autoReify=*/1,
                            /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "2D convolution operation using MIOpen (in-place)";
@@ -534,6 +536,23 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
     type($input) `,` type($weights) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
+  }];
+
+  // OpStateOpInterface: construct this conv instance's per-session state from
+  // its own compile-time kernel geometry (the design's poster example of
+  // per-instance + parameterized construction). The constructed pointer is
+  // stored into op_states[slot] by --generate-op-state-init.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      ::mlir::ArrayAttr kernel = getKernelShape();
+      int64_t kernelH = ::llvm::cast<::mlir::IntegerAttr>(kernel[0]).getInt();
+      int64_t kernelW = ::llvm::cast<::mlir::IntegerAttr>(kernel[1]).getInt();
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, "hipdnn_ep_op_state_construct_conv",
+          {kernelH, kernelW});
+    }
   }];
 }
 
@@ -611,7 +630,7 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
 // reason to write that boilerplate by hand. Matmul is the worked
 // example for the orthogonality of these two layers on #260; #262
 // extends the same split to gemm / qmoe / matmul_nbits.
-def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
+def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
                              /*outsAccessor=*/"Output",
                              /*autoReify=*/0,
                              /*autoInfer=*/1,
@@ -666,6 +685,20 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
     attr-dict (`:` type($result_tensors)^)?
   }];
 
+  // OpStateOpInterface: construct this matmul instance's per-session state
+  // (MatmulState), which holds a shared_ptr to the device-wide hipBLASLt algo
+  // table. No compile-time params — the table fills lazily per call. The
+  // constructed pointer is stored into op_states[slot] by
+  // --generate-op-state-init.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, "hipdnn_ep_op_state_construct_matmul", {});
+    }
+  }];
+
   let hasVerifier = 1;
 }
 
@@ -674,7 +707,8 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
 //===----------------------------------------------------------------------===//
 
 def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
-                                  /*traits=*/[AttrSizedOperandSegments],
+                                  /*traits=*/[AttrSizedOperandSegments,
+                                              OpStateOpInterface],
                                   /*outsAccessor=*/"Output",
                                   /*autoReify=*/0,
                                   /*autoInfer=*/1,
@@ -737,10 +771,25 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // OpStateOpInterface: construct this MatMulNBits instance's per-session
+  // zero_points unpack cache (MatmulNbitsState). No compile-time params — the
+  // cache fills lazily per call. The constructed pointer is stored into
+  // op_states[slot] by --generate-op-state-init.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, "hipdnn_ep_op_state_construct_matmul_nbits",
+          {});
+    }
+  }];
 }
 
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
-                           /*traits=*/[AttrSizedOperandSegments],
+                           /*traits=*/[AttrSizedOperandSegments,
+                                       OpStateOpInterface],
                            /*outsAccessor=*/"Output",
                            /*autoReify=*/0,
                            /*autoInfer=*/1,
@@ -835,6 +884,19 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  // OpStateOpInterface: construct this QMoE instance's per-session scratch
+  // (grow-on-demand device + pinned-host buffers in QmoeState). No compile-time
+  // params are needed — buffers size lazily per call. The constructed pointer is
+  // stored into op_states[slot] by --generate-op-state-init.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, "hipdnn_ep_op_state_construct_qmoe", {});
+    }
   }];
 }
 
@@ -2163,7 +2225,7 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
 // ===== Causal Conv with State ================================================
 
 def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
-    [AttrSizedOperandSegments]> {
+    [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Stateful causal depthwise convolution";
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
@@ -2230,11 +2292,26 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // OpStateOpInterface: construct this instance's per-session MIOpen
+  // descriptor/algo cache (CausalConvState). No compile-time params — the
+  // cache fills lazily per shape. The constructed pointer is stored into
+  // op_states[slot] by --generate-op-state-init.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr,
+          "hipdnn_ep_op_state_construct_causal_conv_with_state", {});
+    }
+  }];
 }
 
 // ===== Group Query Attention =================================================
 
-def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
+def Hip_GqaOp : Hip_DpsOp<"gqa",
+    [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{
     Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
@@ -2374,6 +2451,19 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
     attr-dict (`:` type($result_tensors)^)?
   }];
 
+  // OpStateOpInterface: construct this GQA instance's per-session hipBLASLt
+  // GEMM descriptor/algo cache (GqaState). No compile-time params — the cache
+  // fills lazily per GEMM shape. The constructed pointer is stored into
+  // op_states[slot] by --generate-op-state-init.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, "hipdnn_ep_op_state_construct_gqa", {});
+    }
+  }];
+
   let hasVerifier = 1;
 }
 
@@ -2488,7 +2578,7 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
 // ===== Multi-Head Attention =================================================
 
 def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
-    [AttrSizedOperandSegments]> {
+    [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
   let description = [{
     Implements the com.microsoft.MultiHeadAttention operator (opset v1).
@@ -2628,6 +2718,20 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
         ( `,` type($qk)^ )?
     `)`
     attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  // OpStateOpInterface: construct this MHA instance's per-session hipBLASLt
+  // GEMM descriptor/algo cache (MhaState). No compile-time params — the cache
+  // fills lazily per GEMM shape. The constructed pointer is stored into
+  // op_states[slot] by --generate-op-state-init.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr,
+          "hipdnn_ep_op_state_construct_multi_head_attention", {});
+    }
   }];
 }
 

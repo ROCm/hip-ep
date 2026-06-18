@@ -184,7 +184,8 @@ struct MultiHeadAttentionOpLowering
         i64Type, // v_hidden
         i64Type, // head_size
         i64Type, // query_rank
-        i64Type  // element_size_bytes
+        i64Type, // element_size_bytes
+        i32Type  // op_state_slot
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -204,7 +205,10 @@ struct MultiHeadAttentionOpLowering
                                numHeads, maskFilterValue, scale, unidirectional,
                                // Shape info (7)
                                batchSize, seqLenQ, seqLenKV, queryHidden,
-                               vHidden, headSize, queryRankVal, elemSizeVal};
+                               vHidden, headSize, queryRankVal, elemSizeVal,
+                               // Per-instance op-state slot (threaded by
+                               // --assign-op-state-slots)
+                               getOpStateSlotValue(op, rewriter, loc)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

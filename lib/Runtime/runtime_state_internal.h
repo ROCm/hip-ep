@@ -22,6 +22,10 @@
 // hipdnn_ep_runtime.h only forward-declares RuntimeState; it does not include
 // this internal header.
 #include "hipdnn_ep_runtime.h"
+// For `struct OpState` (the op_states array element type below). op_state.h is
+// layout-agnostic (it only forward-declares RuntimeState), so including it here
+// is acyclic.
+#include "op_state.h"
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
@@ -87,75 +91,41 @@ struct RuntimeState {
   // never calls alloc_output); zero-initialized in initialize_state_handles.
   hipdnn_output_allocator_t output_allocator;
 
-  // Per-state scratch buffer for wrap_qmoe transient device buffers
-  // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
-  // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
-  //
-  // Why this exists: pre-cache wrap_qmoe issued 8 hipMalloc + 8 hipFree per
-  // call, every layer, every inference. On 24-layer gpt-oss-20b that's 192
-  // mallocs + 192 frees per token; HIP's hipMalloc takes ~50 us each on
-  // Windows, so the storm cost ~10-12 ms/token and bottlenecked decode TPS to
-  // roughly half the Vulkan baseline on the same hardware.
-  //
-  // Layout policy: one contiguous buffer sized to fit ALL sub-buffers for the
-  // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
-  // by this session. Sub-buffer offsets recomputed per-call (cheap arithmetic);
-  // the buffer itself grows on demand via hipdnn_ep_state_ensure_qmoe_scratch
-  // and never shrinks (mirrors the `workspace` field's policy).
-  //
-  // Pinned host mirror is needed for the 24-bytes-per-layer D2H readback of
-  // expert routing decisions (still required at decode pre-Phase-2). hipHost-
-  // Malloc'd once with hipHostMallocDefault; reused across calls without sync.
-  void *qmoe_scratch;
-  size_t qmoe_scratch_size;
-  void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
-  size_t qmoe_host_scratch_size;
+  // NOTE: wrap_qmoe's transient device + pinned-host scratch formerly lived
+  // here as qmoe_scratch / qmoe_host_scratch. It is now per-qmoe-instance,
+  // owned by QmoeState in its op-state slot (see op_states below and
+  // docs/design/op-state-slots-design.md), so two qmoe instances no longer
+  // share one scratch buffer.
 
-  // Per-state scratch buffer for the MIOpen convolution workspace
-  // (wrap_miopenConvolutionForward, both 2D and the H=1 1D conv path).
-  //
-  // The MIOpen forward-convolution Find API selects an algorithm whose
-  // workspace requirement is shape-dependent (winograd/gemm/etc). Whisper's
-  // encoder front-end runs the same two Conv shapes every inference
-  // (Cin=128/Cout=1280 K=3 s=1, Cin=1280/Cout=1280 K=3 s=2), so a per-call
-  // hipMalloc/hipFree of the workspace would be wasted work after the
-  // first call. Same grow-on-demand policy as qmoe_scratch above: lazily
-  // allocated on first use, never shrinks, freed in
-  // hipdnn_ep_state_cleanup. Single-buffer reuse is safe because the HIP
-  // stream is serialised -- the next conv launches only after the previous
-  // miopenConvolutionForward + bias add have consumed the workspace.
-  void *conv_scratch;
-  size_t conv_scratch_size;
+  // NOTE: the MIOpen convolution workspace formerly lived here as conv_scratch.
+  // It is now per-conv-instance, owned by ConvState in its op-state slot (see
+  // op_states below and docs/design/op-state-slots-design.md), so two conv
+  // instances no longer share one workspace buffer.
 
-  // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
-  // Caches hipBLASLt descriptors + algorithms by GEMM shape.
-  void *gqa_gemm_cache;
+  // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
+  // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in
+  // its GqaState op-state slot (see op_states below and
+  // docs/design/op-state-slots-design.md), so concurrent sessions (and
+  // distinct GQA layers) no longer share one descriptor map.
 
-  // MultiHeadAttention GEMM descriptor cache (MhaGemmCache*) for the
-  // decomposed Score + Value path. Same shape-keyed hipBLASLt descriptor
-  // cache as gqa_gemm_cache, distinct so concurrent MHA + GQA sessions
-  // do not contend on a single map.
-  void *mha_gemm_cache;
+  // NOTE: the MultiHeadAttention GEMM descriptor cache (MhaGemmCache) formerly
+  // lived here as mha_gemm_cache. It is now per-op-instance: each
+  // multi_head_attention instance owns one in its MhaState op-state slot (see
+  // op_states below and docs/design/op-state-slots-design.md).
 
-  // CausalConvWithState MIOpen descriptor + algorithm cache
-  // (CausalConvCache*). Caches MIOpen tensor / convolution / bias / activation
-  // descriptors and the heuristic-selected forward algorithm by shape, so that
-  // miopenFindConvolutionForwardAlgorithm runs only once per shape rather than
-  // every layer × every token.
-  void *causal_conv_cache;
+  // NOTE: the CausalConvWithState MIOpen descriptor + algorithm cache
+  // (CausalConvCache) formerly lived here as causal_conv_cache. It is now
+  // per-op-instance: each causal_conv_with_state instance owns one in its
+  // CausalConvState op-state slot (see op_states below and
+  // docs/design/op-state-slots-design.md), so concurrent instances no longer
+  // share one descriptor cache.
 
-  // MatMulNBits asym-path zero_points unpack cache (ZpUnpackCache*).
-  //
-  // The asym AWQ path stores zero_points as packed nibbles [N, ceil(K/bs/2)].
-  // Two unpacked layouts are needed (u8 [N, K/bs] for GEMV/naive, fp16 for
-  // WMMA/col-major GEMV M>1), and naively the unpack kernel is launched on
-  // every wrap_matmul_nbits call. For 8B asym decode this is ~225 redundant
-  // launches per Compute(). Since zero_points points into the model constants
-  // blob (stable for the session lifetime), we cache the unpacked buffer per
-  // input pointer. Lazily created on first asym call. Owned by
-  // lib/Runtime/real/matmul_nbits.cpp; freed in hipdnn_ep_state_cleanup via
-  // hipdnn_ep_zp_unpack_cache_destroy.
-  void *zp_unpack_cache;
+  // NOTE: the MatMulNBits asym zero_points unpack cache (ZpUnpackCache)
+  // formerly lived here as zp_unpack_cache. It is now per-op-instance: owned by
+  // each matmul_nbits instance's MatmulNbitsState op-state slot, and embedded
+  // in each qmoe instance's QmoeState slot (see op_states below and
+  // docs/design/op-state-slots-design.md), so concurrent instances no longer
+  // share one cache.
 
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.
@@ -247,6 +217,15 @@ struct RuntimeState {
   void
       *loop_cond_dev; // hipHostGetDevicePointer(loop_cond_host), passed to body
   void *loop_event;   // hipEvent_t cast to void*; reused for cond-readback sync
+
+  // Per-op state slots (see docs/design/op-state-slots-design.md). One entry
+  // per stateful op instance, sized by --assign-op-state-slots and constructed
+  // by the generated @hipdnn_ep_op_states_init_fn during inference_init. Each
+  // entry's concrete type derives from OpState; cleanup walks the array calling
+  // each object's `deletor`, so teardown needs no per-type knowledge. Managed
+  // by hipdnn_ep_op_states_alloc / _set / _get in op_state.cpp.
+  OpState **op_states;
+  int num_op_states;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

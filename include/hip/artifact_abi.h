@@ -32,6 +32,18 @@ inline constexpr const char *kSetOutputAllocator =
 inline constexpr const char *kRuntimeFlushOpProfile =
     "hipdnn_ep_runtime_flush_op_profile";
 
+// Per-op-state-slots C-ABI symbol names (see
+// docs/design/op-state-slots-design.md). kOpStatesInitFn is emitted by
+// GenerateOpStateInit and called from inference_init by GenerateInterface;
+// kOpStatesAlloc / kOpStateSet are defined in lib/Runtime/op_state.cpp and
+// called from that emitted init function. Centralizing them here keeps the
+// producer (passes) and consumer (runtime) from drifting into silent JIT
+// symbol-lookup failures. (op_state_get is resolved via the op_state<T>
+// runtime template, not emitted by a pass, so it has no name here.)
+inline constexpr const char *kOpStatesInitFn = "hipdnn_ep_op_states_init_fn";
+inline constexpr const char *kOpStatesAlloc = "hipdnn_ep_op_states_alloc";
+inline constexpr const char *kOpStateSet = "hipdnn_ep_op_state_set";
+
 // Internal-linkage globals baked into the artifact by GenerateInterface.
 //   kMetadataBlobGlobal: FlatBuffers HipModelMetaInfo consumed by
 //                        inference_init (constant-weight upload) -- functional.

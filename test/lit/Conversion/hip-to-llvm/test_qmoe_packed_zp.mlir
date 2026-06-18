@@ -17,7 +17,7 @@
 //   fc1_zp, fc2_zp} optional-operand matrix.
 // ============================================================================
 
-// RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
+// RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s
 
 module {
   // ===== Test 1: QMoE with fc1 + fc2 zero_points (no biases) =====
@@ -56,7 +56,7 @@ module {
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64, i32) -> i32
   // Verify 30 parameters (same shape as test_qmoe.mlir):
   // - 16 pointers: state, input, router, fc1_w, fc1_s, fc1_b(null), fc2_w, fc2_s, fc2_b(null),
   //                fc3_w(null), fc3_s(null), fc3_b(null), fc1_zp, fc2_zp, fc3_zp(null), output
@@ -105,6 +105,6 @@ module {
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64, i32) -> i32
   // 16 pointers, four of which (fc1_b, fc2_b, fc1_zp, fc2_zp) must be non-null.
 }

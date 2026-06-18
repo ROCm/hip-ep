@@ -156,7 +156,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         f32Type, // activation_beta
         f32Type, // swiglu_limit
         i64Type, // normalize_routing_weights
-        i64Type  // elem_size
+        i64Type, // elem_size
+        i32Type  // op_state_slot
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -195,7 +196,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                    activationBetaVal,
                                    swigluLimitVal,
                                    normalizeVal,
-                                   elemSizeVal};
+                                   elemSizeVal,
+                                   getOpStateSlotValue(op, rewriter, loc)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
