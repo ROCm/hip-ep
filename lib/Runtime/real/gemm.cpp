@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -93,11 +95,38 @@ struct GemmCacheEntry {
   bool use_default_algo = false;
 };
 
-static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash>
-    g_gemm_algo_cache;
-// Serializes access to g_gemm_algo_cache. Concurrent cold-misses may each run
-// the benchmark and the last writer wins; that is wasteful but correct.
-static std::mutex g_gemm_algo_cache_mutex;
+// One hipBLASLt algo table shared across every session in the process and
+// freed when the last session holding it is destroyed. Entries are POD (a
+// selected hipblasLtMatmulAlgo_t value + workspace size); the per-call
+// descriptors/layouts are created and destroyed in wrap_gemm, so the table
+// owns no GPU resources and the destructor is implicit. The mutex serialises
+// find/insert; concurrent cold-misses may each benchmark and the last writer
+// wins -- wasteful but correct.
+struct GemmAlgoTable {
+  std::mutex mu;
+  std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> map;
+};
+
+// weak_ptr-backed so this file-scope static does not itself leak the table:
+// it lives only while some session's GemmState holds a shared_ptr.
+static WeakStore<int, GemmAlgoTable> g_gemm_tables;
+
+// Per-instance op state for hip.gemm: the slot holds a shared_ptr to the one
+// shared algo table.
+struct GemmState : OpState {
+  std::shared_ptr<GemmAlgoTable> table;
+};
+
+extern "C" OpState *hipdnn_ep_op_state_construct_gemm(RuntimeState *) {
+  GemmState *st = make_op_state<GemmState>();
+  if (!st)
+    return nullptr;
+  int dev = 0;
+  hipGetDevice(&dev);
+  st->table = g_gemm_tables.get_or_create(
+      dev, [] { return std::make_shared<GemmAlgoTable>(); });
+  return st;
+}
 
 // =============================================================================
 // Broadcast helper: write beta * C_broadcast into output using MIOpen
@@ -458,7 +487,7 @@ static GemmCacheEntry selectGemmAlgo(
 int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               void *output, int64_t M, int64_t N, int64_t K, float alpha,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
-              int64_t cDim0, int64_t cDim1) {
+              int64_t cDim0, int64_t cDim1, int op_state_slot) {
   OP_PROFILE(
       "gemm",
       [&] {
@@ -482,6 +511,13 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
     fprintf(stderr, "wrap_gemm: null handle or stream\n");
     return -1;
   }
+
+  GemmState *gs = op_state<GemmState>(state, op_state_slot);
+  if (!gs || !gs->table) {
+    fprintf(stderr, "wrap_gemm: missing op-state for slot %d\n", op_state_slot);
+    return -1;
+  }
+  GemmAlgoTable &table = *gs->table;
 
   hipDataType dataType;
   hipblasComputeType_t computeType;
@@ -563,9 +599,9 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
 
   GemmCacheKey key{M, N, K, transA, transB, typeCode, use_bias_epilogue};
   {
-    std::lock_guard<std::mutex> lk(g_gemm_algo_cache_mutex);
-    auto it = g_gemm_algo_cache.find(key);
-    if (it != g_gemm_algo_cache.end()) {
+    std::lock_guard<std::mutex> lk(table.mu);
+    auto it = table.map.find(key);
+    if (it != table.map.end()) {
       cached = it->second;
       have_cached = true;
     }
@@ -642,11 +678,11 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
                        matC_layout, A, B, alpha, M, N, K, transA, transB,
                        typeCode, dataType, computeType, stream);
     {
-      std::lock_guard<std::mutex> lk(g_gemm_algo_cache_mutex);
+      std::lock_guard<std::mutex> lk(table.mu);
       // Another thread may have inserted this key meanwhile; try_emplace keeps
       // the existing entry in that case. Either way `cached` ends up holding a
       // valid algo for this problem.
-      cached = g_gemm_algo_cache.try_emplace(key, entry).first->second;
+      cached = table.map.try_emplace(key, entry).first->second;
     }
     have_cached = true;
 

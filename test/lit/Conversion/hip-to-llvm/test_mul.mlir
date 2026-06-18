@@ -37,7 +37,7 @@ module {
     hip.mul(%ctx) ins(%a, %b : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
                          outs(%c : memref<128x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32) -> i32
 
     return
   }
@@ -53,7 +53,7 @@ module {
     hip.mul(%ctx) ins(%a, %b : memref<1024xf16, 1>, memref<1024xf16, 1>)
                          outs(%c : memref<1024xf16, 1>)
 
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32) -> i32
 
     return
   }
@@ -69,7 +69,7 @@ module {
     hip.mul(%ctx) ins(%a, %b : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>)
                          outs(%c : memref<2x64x128xf32, 1>)
 
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32) -> i32
 
     return
   }
@@ -87,7 +87,7 @@ module {
 
     // Dynamic dim extracted via llvm.extractvalue from descriptor
     // CHECK: llvm.extractvalue
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32) -> i32
 
     return
   }
@@ -104,7 +104,7 @@ module {
                          outs(%c : memref<?x?xf16, 1>)
 
     // CHECK: llvm.extractvalue
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32) -> i32
 
     return
   }

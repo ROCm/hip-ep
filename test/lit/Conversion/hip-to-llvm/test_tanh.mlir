@@ -31,7 +31,7 @@ module {
     hip.tanh(%ctx) ins(%input : memref<1x128x512xf32, 1>)
                    outs(%output : memref<1x128x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i32) -> i32
 
     return
   }
@@ -46,7 +46,7 @@ module {
     hip.tanh(%ctx) ins(%input : memref<256x512xf32, 1>)
                    outs(%output : memref<256x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i32) -> i32
 
     return
   }
@@ -67,7 +67,7 @@ module {
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
     // CHECK-DAG: llvm.mlir.constant(0 : i64) : i64
-    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenActivationForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i32) -> i32
 
     return
   }

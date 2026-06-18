@@ -190,7 +190,7 @@ module {
     // CHECK:       %[[OUTRAW:.*]] = llvm.call @hipdnn_ep_alloc_output(%{{.*}}, %[[OUTIDX]], %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
     // CHECK:       %[[OUTCAST:.*]] = llvm.addrspacecast %[[OUTRAW]] : !llvm.ptr to !llvm.ptr<1>
     // CHECK:       llvm.insertvalue %[[OUTCAST]], %{{.*}}[1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-    // CHECK:       llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK:       llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i32) -> i32
     %0 = hip.alloc_output(%ctx) {out_idx = 29 : i64} : memref<3x5xf16, 1>
     hip.sigmoid(%ctx) ins(%in : memref<3x5xf16, 1>) outs(%0 : memref<3x5xf16, 1>)
     return
