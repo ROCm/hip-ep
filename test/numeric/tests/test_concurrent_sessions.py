@@ -19,22 +19,23 @@ computed up front.
 
 Scenarios:
 
-  * ``conv`` -- the reference migrated op. Both sessions run a Conv (a
-    per-session ``ConvState`` slot that owns a grow-on-demand MIOpen
-    workspace) but with *different shapes*, so they need *different*
-    workspace sizes. If a session ever read another session's slot, the
-    workspace would belong to the wrong shape and the output would be wrong
-    (or it would crash). This is the per-instance isolation assertion for
-    conv's migrated workspace (formerly the shared RuntimeState::conv_scratch).
+  * ``conv`` -- both sessions run a Conv whose MIOpen workspace lives in the
+    per-session ``RuntimeState::conv_scratch`` field (one buffer per session,
+    grown on demand, shared across that session's conv instances) but with
+    *different shapes*, so they need *different* workspace sizes. Because each
+    session has its own ``RuntimeState``, the two sessions cannot share the
+    buffer; if they did, the workspace would belong to the wrong shape and the
+    output would be wrong (or it would crash). This is the cross-session
+    isolation assertion for conv's workspace.
 
-  * ``qmoe`` -- both sessions run a QMoE (a per-session ``QmoeState`` slot
-    owning a grow-on-demand device buffer + pinned-host mirror) with
-    *different shapes* (token count / hidden / intermediate / experts), so
-    they need *different* scratch sizes. If a session read another session's
-    slot, the transient sub-buffers would be mis-sized for its shape and the
-    output would be wrong (or it would crash). This is the per-instance
-    isolation assertion for qmoe's migrated scratch (formerly the shared
-    RuntimeState::qmoe_scratch / qmoe_host_scratch).
+  * ``qmoe`` -- both sessions run a QMoE whose device + pinned-host scratch
+    lives in the per-session ``RuntimeState::qmoe_scratch`` /
+    ``qmoe_host_scratch`` fields with *different shapes* (token count / hidden
+    / intermediate / experts), so they need *different* scratch sizes. Each
+    session has its own ``RuntimeState``, so the buffers cannot be shared
+    across sessions; if they were, the transient sub-buffers would be mis-sized
+    and the output would be wrong (or it would crash). This is the cross-session
+    isolation assertion for qmoe's scratch.
 
   * ``matmul_nbits_asym`` -- both sessions run an asymmetric MatMulNBits (a
     per-session ``MatmulNbitsState`` slot owning the zero_points unpack cache)
@@ -213,8 +214,8 @@ def _build_mha(seq, num_heads, head_dim, seed):
 def _build_qmoe(seq_len, hidden, intermediate, num_experts, top_k, seed):
     """fp16 QMoE (com.microsoft) with 4-bit packed expert weights.
 
-    Shapes drive the per-session QmoeState scratch sizing (num_tokens *
-    hidden / intermediate / experts), so two differently-shaped specs need
+    Shapes drive the per-session RuntimeState::qmoe_scratch sizing (num_tokens
+    * hidden / intermediate / experts), so two differently-shaped specs need
     different device + pinned-host buffer sizes.
     """
     model = _make_qmoe_model(
@@ -227,9 +228,10 @@ def _build_qmoe(seq_len, hidden, intermediate, num_experts, top_k, seed):
 
 
 # Two independent (model, inputs, atol) thread specs per scenario, each with
-# different shapes so the two sessions need different per-session slot buffer
-# sizes -> proves the op-state slot is resolved per-session (no cross-session
-# sharing of the migrated ConvState / QmoeState scratch).
+# different shapes so the two sessions need different buffer sizes -> proves
+# per-session state is resolved per-session (no cross-session sharing). conv /
+# qmoe use per-session RuntimeState scratch fields; the remaining scenarios use
+# per-instance op-state slots.
 _SCENARIOS = {
     "conv": lambda: [
         (*_build_conv(in_c=8, out_c=16, k=3, spatial=32, seed=1), 1e-2),

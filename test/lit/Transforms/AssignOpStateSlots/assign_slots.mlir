@@ -11,32 +11,25 @@
 
 // RUN: hip-mlir-opt %s --assign-op-state-slots | FileCheck %s
 
-// Two conv instances -> two independent slots (0, 1) and a count of 2.
+// Two matmul instances -> two independent slots (0, 1) and a count of 2.
 // CHECK: module attributes {{.*}}hipdnn.num_op_state_slots = 2 : i32
 module {
-  func.func @two_convs(
+  func.func @two_matmuls(
       %ctx: !hip.context,
-      %input: memref<1x3x224x224xf32, 1>,
-      %weights: memref<64x3x7x7xf32, 1>,
-      %bias: memref<64xf32, 1>,
-      %output: memref<1x64x112x112xf32, 1>) {
-    // CHECK: hip.conv
+      %A: memref<1x128x4096xf16, 1>,
+      %B: memref<4096x1024xf16, 1>,
+      %output: memref<1x128x1024xf16, 1>) {
+    // CHECK: hip.matmul
     // CHECK-SAME: hip.op_state_slot = 0 : i32
-    hip.conv(%ctx) ins(%input, %weights, %bias : memref<1x3x224x224xf32, 1>,
-                                                 memref<64x3x7x7xf32, 1>,
-                                                 memref<64xf32, 1>)
-                   outs(%output : memref<1x64x112x112xf32, 1>)
-                   {kernel_shape = [7, 7], strides = [2, 2],
-                    pads = [3, 3, 3, 3], dilations = [1, 1], group = 1}
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<1x128x4096xf16, 1>, memref<4096x1024xf16, 1>)
+        outs(%output : memref<1x128x1024xf16, 1>)
 
-    // CHECK: hip.conv
+    // CHECK: hip.matmul
     // CHECK-SAME: hip.op_state_slot = 1 : i32
-    hip.conv(%ctx) ins(%input, %weights, %bias : memref<1x3x224x224xf32, 1>,
-                                                 memref<64x3x7x7xf32, 1>,
-                                                 memref<64xf32, 1>)
-                   outs(%output : memref<1x64x112x112xf32, 1>)
-                   {kernel_shape = [7, 7], strides = [2, 2],
-                    pads = [3, 3, 3, 3], dilations = [1, 1], group = 1}
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<1x128x4096xf16, 1>, memref<4096x1024xf16, 1>)
+        outs(%output : memref<1x128x1024xf16, 1>)
     return
   }
 }

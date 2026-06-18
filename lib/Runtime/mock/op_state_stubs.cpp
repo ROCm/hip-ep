@@ -5,8 +5,8 @@
 //===- op_state_stubs.cpp - Mock per-op state constructors --------------===//
 //
 // Mock-runtime counterparts of the per-op state constructors that the real
-// runtime defines in each op's translation unit (e.g. ConvState +
-// hipdnn_ep_op_state_construct_conv in real/miopen.cpp). The mock has no HIP,
+// runtime defines in each op's translation unit (e.g. MatmulState +
+// hipdnn_ep_op_state_construct_matmul in real/matmul.cpp). The mock has no HIP,
 // so each stub allocates a trivial OpState whose only job is to be non-null
 // (so the generated op-states init succeeds) and to be freed generically by
 // its deletor at cleanup. See docs/design/op-state-slots-design.md.
@@ -14,32 +14,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "../op_state.h"
-
-namespace {
-// Trivial mock state: holds the constructor's compile-time args for parity with
-// the real ConvState, owns no device memory.
-struct MockConvState : OpState {
-  int64_t kernel_h = 0;
-  int64_t kernel_w = 0;
-};
-} // namespace
-
-extern "C" OpState *hipdnn_ep_op_state_construct_conv(RuntimeState *,
-                                                      int64_t kernel_h,
-                                                      int64_t kernel_w) {
-  MockConvState *st = make_op_state<MockConvState>();
-  if (!st)
-    return nullptr;
-  st->kernel_h = kernel_h;
-  st->kernel_w = kernel_w;
-  return st;
-}
-
-// QMoE: real runtime owns grow-on-demand device + pinned-host scratch
-// (QmoeState in real/qmoe.cpp); the mock owns no device memory.
-extern "C" OpState *hipdnn_ep_op_state_construct_qmoe(RuntimeState *) {
-  return make_op_state<OpState>();
-}
 
 // MatMulNBits: real runtime owns a zero_points unpack cache (MatmulNbitsState
 // in real/matmul_nbits.cpp); the mock owns no device memory.

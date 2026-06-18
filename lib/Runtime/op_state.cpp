@@ -69,7 +69,7 @@ void *hipdnn_ep_op_state_get(RuntimeState *state, int slot) {
 
 // NOTE: per-op constructors (hipdnn_ep_op_state_construct_<class>) live in each
 // op's own runtime translation unit, not here, because their state typically
-// owns device resources (HIP). The reference op `conv` defines ConvState +
-// hipdnn_ep_op_state_construct_conv in lib/Runtime/real/miopen.cpp (with a mock
-// stub in lib/Runtime/mock/op_state_stubs.cpp). This TU stays host-only so it
-// can be shared verbatim by the real and mock runtimes.
+// owns device resources (HIP). For example `matmul` defines MatmulState +
+// hipdnn_ep_op_state_construct_matmul in lib/Runtime/real/matmul.cpp (with a
+// mock stub in lib/Runtime/mock/op_state_stubs.cpp). This TU stays host-only so
+// it can be shared verbatim by the real and mock runtimes.

@@ -10,18 +10,18 @@
 // kernels on every call when zero_points pointers are stable across inferences
 // (which they are — the pointers come from the model constants blob).
 //
-// Ownership (see docs/design/op-state-slots-design.md): this cache is now
-// per-op-instance. matmul_nbits owns one in its MatmulNbitsState op-state slot;
-// qmoe embeds one in its QmoeState slot. It used to be a single shared
-// RuntimeState::zp_unpack_cache, which two concurrent sessions could contend
-// on. Each op instance's zero_points pointers are distinct, so a per-instance
-// cache holds exactly that instance's entries (matmul_nbits: 1 pointer; qmoe:
-// one per expert) with no cross-instance/cross-session sharing.
+// Ownership (see docs/design/op-state-slots-design.md): matmul_nbits owns a
+// per-op-instance cache in its MatmulNbitsState op-state slot; qmoe uses the
+// per-session RuntimeState::zp_unpack_cache (one per session, shared across all
+// qmoe instances and reached via get_or_create_zp_cache). Each zero_points
+// pointer is distinct, so entries never collide across ops.
 
 #include <cstddef>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+
+struct RuntimeState;
 
 namespace hipdnn_ep_real {
 
@@ -53,6 +53,12 @@ const void *lookup_or_unpack_zp_u8(ZpUnpackCache &cache, void *stream,
 const void *lookup_or_convert_zp_fp16(ZpUnpackCache &cache, void *stream,
                                       const void *zp_packed, int N,
                                       int groups_k);
+
+// Lazily creates (on first use) and returns the per-session ZpUnpackCache owned
+// by RuntimeState::zp_unpack_cache. Used by wrap_qmoe (matmul_nbits owns a
+// per-instance cache in its op-state slot instead). Defined in matmul_nbits.cpp
+// where the full RuntimeState definition + ZpUnpackCache HIP teardown live.
+ZpUnpackCache *get_or_create_zp_cache(RuntimeState *state);
 
 } // namespace hipdnn_ep_real
 

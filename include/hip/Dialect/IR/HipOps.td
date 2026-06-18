@@ -488,8 +488,7 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface],
-                           /*outsAccessor=*/"Output",
+def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
                            /*autoReify=*/1,
                            /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "2D convolution operation using MIOpen (in-place)";
@@ -536,23 +535,6 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface],
     type($input) `,` type($weights) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
-  }];
-
-  // OpStateOpInterface: construct this conv instance's per-session state from
-  // its own compile-time kernel geometry (the design's poster example of
-  // per-instance + parameterized construction). The constructed pointer is
-  // stored into op_states[slot] by --generate-op-state-init.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      ::mlir::ArrayAttr kernel = getKernelShape();
-      int64_t kernelH = ::llvm::cast<::mlir::IntegerAttr>(kernel[0]).getInt();
-      int64_t kernelW = ::llvm::cast<::mlir::IntegerAttr>(kernel[1]).getInt();
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_conv",
-          {kernelH, kernelW});
-    }
   }];
 }
 
@@ -788,8 +770,7 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
 }
 
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
-                           /*traits=*/[AttrSizedOperandSegments,
-                                       OpStateOpInterface],
+                           /*traits=*/[AttrSizedOperandSegments],
                            /*outsAccessor=*/"Output",
                            /*autoReify=*/0,
                            /*autoInfer=*/1,
@@ -884,19 +865,6 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
-  }];
-
-  // OpStateOpInterface: construct this QMoE instance's per-session scratch
-  // (grow-on-demand device + pinned-host buffers in QmoeState). No compile-time
-  // params are needed — buffers size lazily per call. The constructed pointer is
-  // stored into op_states[slot] by --generate-op-state-init.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_qmoe", {});
-    }
   }];
 }
 

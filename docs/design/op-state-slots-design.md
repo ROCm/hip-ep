@@ -31,7 +31,9 @@ Licensed under the MIT License.
 
 ## Overview
 
-Some operators keep state across a session: convolution descriptors, attention GEMM descriptors, dequant unpack buffers, autotuned algorithm choices, recurrent hidden state. That state needs a per-session home that does not pile unrelated concerns onto a shared `RuntimeState` struct and does not leak through a process-lifetime `static`. This design gives each stateful operator *instance* a compiler-assigned slot in a `RuntimeState` array; session init constructs each slot by asking the operator to emit its own initialization code, with construction arguments taken from the operator's compile-time attributes.
+Some operators keep state across a session: attention GEMM descriptors, dequant unpack buffers, autotuned algorithm choices, recurrent hidden state. That state needs a per-session home that does not pile unrelated concerns onto a shared `RuntimeState` struct and does not leak through a process-lifetime `static`. This design gives each stateful operator *instance* a compiler-assigned slot in a `RuntimeState` array; session init constructs each slot by asking the operator to emit its own initialization code, with construction arguments taken from the operator's compile-time attributes.
+
+> **Which ops use slots (current codebase).** The ops actually on op-state slots are `matmul`, `matmul_nbits`, `gqa`, `multi_head_attention`, and `causal_conv_with_state`. **`conv` is used throughout this document only as an illustrative example of *parameterized* construction (kernel/stride passed from op attributes) — it is NOT slot-backed in the current codebase.** `conv` and `qmoe` keep their transient scratch in per-session `RuntimeState` fields (`conv_scratch`, `qmoe_scratch`/`qmoe_host_scratch`), shared across each session's instances and reused across `Run()` calls: that scratch is mutable per-execution memory whose correct sharing scope is per-session, and one buffer grown on demand uses far less VRAM than one per instance. The slot mechanism below is for *persistent* per-instance state (descriptor/algo caches, unpack caches) where per-instance isolation is the point.
 
 ## Constraints
 
@@ -146,7 +148,7 @@ The slot-assignment pass stamps each op with its slot and records the slot count
 
 ## Data flow example
 
-Two `conv` instances in one fused function, with different compile-time attributes. The example traces `kernel`/`stride` from the graph to the runtime entry.
+Two `conv` instances in one fused function, with different compile-time attributes. The example traces `kernel`/`stride` from the graph to the runtime entry. (As noted in the Overview, `conv` is an illustrative stand-in for a parameterized-construction op; it is not slot-backed in the current codebase. A real op with the same shape would be any of the five slot ops listed above.)
 
 **1. After slot assignment** — each instance carries its own attributes and slot:
 
