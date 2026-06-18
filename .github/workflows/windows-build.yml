@@ -299,7 +299,7 @@ jobs:
       # Commit is pinned; bump it (and the cache key below) when the fork moves.
       #
       # Built BEFORE onnx-hipdnn-ep so its wheel target can bundle amdgpu-ep.dll
-      # + hipep-backend.dll (MORPHIZEN_WHEEL_EXTRA_DLLS below). amdgpu-ep only
+      # + hipep-backend.dll (HIPEP_WHEEL_EXTRA_DLLS below). amdgpu-ep only
       # links ort-install, so it has no dependency on the onnx-hipdnn-ep build.
       # -----------------------------------------------------------------------
       - name: Cache amdgpu-ep build
@@ -350,7 +350,7 @@ jobs:
       # (repo.parent), matching what the later staging step expects. The LIT tests
       # run inside build.py after install.
       #
-      # MORPHIZEN_WHEEL_EXTRA_DLLS feeds the wheel target the amdgpu-ep.dll +
+      # HIPEP_WHEEL_EXTRA_DLLS feeds the wheel target the amdgpu-ep.dll +
       # hipep-backend.dll built above, so the morphizen wheel ships the whole
       # AMD GPU umbrella chain in onnxruntime/capi/ next to hipep.dll.
       # -----------------------------------------------------------------------
@@ -368,7 +368,7 @@ jobs:
             --hip_arch gfx1151 \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
-            --cmake_extra_defines "MORPHIZEN_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIPEP_BACKEND"
+            --cmake_extra_defines "HIPEP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIPEP_BACKEND"
 
       # -----------------------------------------------------------------------
       # Build OGA (onnxruntime-genai) for model_benchmark.exe
