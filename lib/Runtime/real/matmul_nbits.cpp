@@ -5,7 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
-#include "../runtime_state_internal.h"
+#include "../op_state.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "zp_unpack_cache.h"
@@ -14,13 +14,12 @@
 
 #include <cstdio>
 #include <mutex>
-#include <unordered_map>
 #include <utility>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 
 // ---------------------------------------------------------------------------
-// Asym MatMulNBits zero_points unpack cache.
+// Asym MatMulNBits zero_points unpack cache (ZpUnpackCache).
 //
 // For each unique zero_points input pointer (which is stable for the
 // lifetime of the JITted per-model session — the pointer comes from the
@@ -30,42 +29,34 @@
 // per-call unpack/convert kernel launches that were the dominant per-call
 // overhead for asym 8B decode (~225 launches per Compute()).
 //
-// Lifecycle: lazily created on first asym call; freed in
-// hipdnn_ep_state_cleanup via hipdnn_ep_zp_unpack_cache_destroy.
+// Ownership (see docs/design/op-state-slots-design.md): the cache is now
+// per-op-instance — matmul_nbits owns one in its MatmulNbitsState op-state
+// slot, and qmoe embeds one in its QmoeState slot. The struct + lookup helpers
+// are defined here (HIP lives here); the struct definition + helper decls are
+// in zp_unpack_cache.h so qmoe can embed/reach a cache too.
 // ---------------------------------------------------------------------------
 
 namespace hipdnn_ep_real {
 
-struct ZpUnpackCache {
-  // Map keyed on zero_points GPU pointer. Value = (device buffer, byte size).
-  std::unordered_map<const void *, std::pair<void *, size_t>> u8;
-  std::unordered_map<const void *, std::pair<void *, size_t>> fp16;
-  // Concurrent inferences on the same RuntimeState don't run today (single
-  // stream, sequential Compute() calls) but the lock is cheap and lets us
-  // remain correct if that ever changes.
-  std::mutex mu;
-};
-
-namespace {
-
-ZpUnpackCache *get_or_create_zp_cache(RuntimeState *state) {
-  if (!state->zp_unpack_cache)
-    state->zp_unpack_cache = new ZpUnpackCache();
-  return static_cast<ZpUnpackCache *>(state->zp_unpack_cache);
+// Out-of-line so zp_unpack_cache.h (embedded by QmoeState in qmoe.cpp) needs
+// no HIP. Frees every cached device buffer when the owning op-state slot is
+// torn down.
+ZpUnpackCache::~ZpUnpackCache() {
+  for (auto &[k, v] : u8)
+    hipFree(v.first);
+  for (auto &[k, v] : fp16)
+    hipFree(v.first);
 }
-
-} // namespace
 
 // Returns the cached u8 buffer for `zp_packed`, or unpacks into a freshly
 // allocated buffer on miss. Returns nullptr only on hipMalloc failure.
-const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
+const void *lookup_or_unpack_zp_u8(ZpUnpackCache &cache, void *stream,
                                    const void *zp_packed, int N, int groups_k) {
-  ZpUnpackCache *cache = get_or_create_zp_cache(state);
   const size_t need = static_cast<size_t>(N) * static_cast<size_t>(groups_k);
 
-  std::lock_guard<std::mutex> lock(cache->mu);
-  auto it = cache->u8.find(zp_packed);
-  if (it != cache->u8.end() && it->second.second >= need)
+  std::lock_guard<std::mutex> lock(cache.mu);
+  auto it = cache.u8.find(zp_packed);
+  if (it != cache.u8.end() && it->second.second >= need)
     return it->second.first;
 
   // Miss (or cached buffer too small for an unexpected re-shape on the same
@@ -78,26 +69,25 @@ const void *lookup_or_unpack_zp_u8(RuntimeState *state, void *stream,
   }
   hip_matmul_nbits_unpack_zp_u8(stream, zp_packed, dst, N, groups_k);
 
-  if (it != cache->u8.end()) {
+  if (it != cache.u8.end()) {
     // Replace the undersized entry. Free the stale buffer.
     hipFree(it->second.first);
     it->second = {dst, need};
   } else {
-    cache->u8.emplace(zp_packed, std::make_pair(dst, need));
+    cache.u8.emplace(zp_packed, std::make_pair(dst, need));
   }
   return dst;
 }
 
-const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
+const void *lookup_or_convert_zp_fp16(ZpUnpackCache &cache, void *stream,
                                       const void *zp_packed, int N,
                                       int groups_k) {
-  ZpUnpackCache *cache = get_or_create_zp_cache(state);
   const size_t need =
       static_cast<size_t>(N) * static_cast<size_t>(groups_k) * sizeof(__fp16);
 
-  std::lock_guard<std::mutex> lock(cache->mu);
-  auto it = cache->fp16.find(zp_packed);
-  if (it != cache->fp16.end() && it->second.second >= need)
+  std::lock_guard<std::mutex> lock(cache.mu);
+  auto it = cache.fp16.find(zp_packed);
+  if (it != cache.fp16.end() && it->second.second >= need)
     return it->second.first;
 
   void *dst = nullptr;
@@ -108,26 +98,27 @@ const void *lookup_or_convert_zp_fp16(RuntimeState *state, void *stream,
   }
   hip_matmul_nbits_convert_zp_fp16(stream, zp_packed, dst, N, groups_k);
 
-  if (it != cache->fp16.end()) {
+  if (it != cache.fp16.end()) {
     hipFree(it->second.first);
     it->second = {dst, need};
   } else {
-    cache->fp16.emplace(zp_packed, std::make_pair(dst, need));
+    cache.fp16.emplace(zp_packed, std::make_pair(dst, need));
   }
   return dst;
 }
 
 } // namespace hipdnn_ep_real
 
-extern "C" void hipdnn_ep_zp_unpack_cache_destroy(void *cache_ptr) {
-  auto *cache = static_cast<hipdnn_ep_real::ZpUnpackCache *>(cache_ptr);
-  if (!cache)
-    return;
-  for (auto &[k, v] : cache->u8)
-    hipFree(v.first);
-  for (auto &[k, v] : cache->fp16)
-    hipFree(v.first);
-  delete cache;
+// Per-instance MatMulNBits op-state (see docs/design/op-state-slots-design.md):
+// owns this instance's zero_points unpack cache. Replaces the former shared
+// RuntimeState::zp_unpack_cache, so concurrent matmul_nbits sessions no longer
+// share it.
+struct MatmulNbitsState : OpState {
+  hipdnn_ep_real::ZpUnpackCache zp;
+};
+
+extern "C" OpState *hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *) {
+  return make_op_state<MatmulNbitsState>();
 }
 
 int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
@@ -135,7 +126,7 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       const void *g_idx, const void *bias, void *output,
                       int64_t M, int64_t N, int64_t K, int64_t batch_count,
                       int64_t bits, int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size) {
+                      int64_t zp_elem_size, int op_state_slot) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -170,14 +161,21 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
     return -1;
   }
 
-  // Pre-unpack zero_points (asym path) using the per-state pointer-keyed
-  // cache. The kernel itself no longer launches its own unpack/convert.
+  // Pre-unpack zero_points (asym path) using this instance's pointer-keyed
+  // cache (owned by its op-state slot). The kernel itself no longer launches
+  // its own unpack/convert.
   const void *pre_zp_u8 = nullptr;
   const void *pre_zp_fp16 = nullptr;
   if (zero_points && zp_elem_size == 1 && bits == 4 && block_size > 0) {
+    MatmulNbitsState *mst = op_state<MatmulNbitsState>(state, op_state_slot);
+    if (!mst) {
+      fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
+              op_state_slot);
+      return -1;
+    }
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
     pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-        state, stream, zero_points, static_cast<int>(N), ngk);
+        mst->zp, stream, zero_points, static_cast<int>(N), ngk);
     if (!pre_zp_u8)
       return -1;
     // The fp16 buffer is consumed only by WMMA (batch==1 && K%32==0 && M>=16)
@@ -187,7 +185,7 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
     bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
     if (wmma_data_format && M > 1) {
       pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
-          state, stream, zero_points, static_cast<int>(N), ngk);
+          mst->zp, stream, zero_points, static_cast<int>(N), ngk);
       if (!pre_zp_fp16)
         return -1;
     }

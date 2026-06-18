@@ -371,27 +371,32 @@ void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
 
-// Per-state scratch for wrap_qmoe transient buffers (device + pinned-host
-// mirror for routing readback). Replaces the per-call hipMalloc/hipFree storm
-// (8 buffers x N MoE layers per inference). Same grow-on-demand policy as
-// the shared workspace; never shrinks. See runtime_state_internal.h for
-// rationale.
-void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state);
-int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
-                                        size_t needed_size);
-void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
-int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
-                                             size_t needed_size);
+// NOTE: wrap_qmoe's transient device + pinned-host scratch formerly lived in
+// RuntimeState::qmoe_scratch / qmoe_host_scratch (+ ensure/get shims here).
+// They now live in the qmoe op's per-instance op-state slot (QmoeState in
+// real/qmoe.cpp). See docs/design/op-state-slots-design.md.
 
-// Per-state MIOpen convolution workspace pool (used by
-// wrap_miopenConvolutionForward for both 2D and the H=1 1D conv path). Lazily
-// grown via hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch
-// above: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
-// reused across all conv calls in the session -- safe because the stream is
-// serialised. See runtime_state_internal.h for design rationale.
-void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
-int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
-                                        size_t needed_size);
+// NOTE: the MIOpen convolution workspace formerly lived in
+// RuntimeState::conv_scratch (+ ensure/get shims here). It now lives in the
+// conv op's per-instance op-state slot (ConvState in real/miopen.cpp), reached
+// via op_state<ConvState>(state, slot).
+// See docs/design/op-state-slots-design.md.
+
+// Per-op state slots (see docs/design/op-state-slots-design.md). The generated
+// @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
+// _alloc once, then per stateful op calls its construct symbol and _set. _get
+// (declared in op_state.h) reaches a slot from an op's runtime entry. Cleanup
+// walks the array via each object's deletor. OpState is opaque here.
+struct OpState;
+bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
+bool hipdnn_ep_op_state_set(RuntimeState *state, int32_t slot,
+                            struct OpState *value);
+// Reference op constructor (conv): builds state from the op's compile-time
+// kernel geometry. Real per-op constructors follow this (RuntimeState*, ...)
+// shape; see op_state.cpp.
+struct OpState *hipdnn_ep_op_state_construct_conv(RuntimeState *state,
+                                                  int64_t kernel_h,
+                                                  int64_t kernel_w);
 
 // Device-side runtime error flag (set by kernels, observed by wrappers).
 // Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
@@ -605,17 +610,31 @@ int hipdnn_ep_stream_sync(RuntimeState *state);
 // HIPDNN_EP_PERF)
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 
-// GQA GEMM cache lifecycle (managed by RuntimeState)
-void hipdnn_ep_gqa_gemm_cache_destroy(void *cache);
+// NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived in
+// RuntimeState::gqa_gemm_cache with a hipdnn_ep_gqa_gemm_cache_destroy teardown
+// shim here. It is now per-instance: each gqa instance owns one in its GqaState
+// op-state slot, so concurrent sessions (and distinct GQA layers) no longer
+// share it. See docs/design/op-state-slots-design.md.
 
-// MultiHeadAttention GEMM cache lifecycle (managed by RuntimeState)
-void hipdnn_ep_mha_gemm_cache_destroy(void *cache);
+// NOTE: the MultiHeadAttention GEMM descriptor cache (MhaGemmCache) formerly
+// lived in RuntimeState::mha_gemm_cache with a hipdnn_ep_mha_gemm_cache_destroy
+// teardown shim here. It is now per-instance: each multi_head_attention
+// instance owns one in its MhaState op-state slot. See
+// docs/design/op-state-slots-design.md.
 
-// CausalConvWithState descriptor/algo cache lifecycle (managed by RuntimeState)
-void hipdnn_ep_causal_conv_cache_destroy(void *cache);
+// NOTE: the CausalConvWithState descriptor/algo cache (CausalConvCache)
+// formerly lived in RuntimeState::causal_conv_cache with a
+// hipdnn_ep_causal_conv_cache_destroy teardown shim here. It is now
+// per-instance: each causal_conv_with_state instance owns one in its
+// CausalConvState op-state slot, so concurrent sessions no longer share it.
+// See docs/design/op-state-slots-design.md.
 
-// MatMulNBits asym zero_points unpack cache lifecycle (managed by RuntimeState)
-void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
+// NOTE: the MatMulNBits asym zero_points unpack cache (ZpUnpackCache) formerly
+// lived in RuntimeState::zp_unpack_cache with a
+// hipdnn_ep_zp_unpack_cache_destroy teardown shim here. It is now per-instance:
+// matmul_nbits owns one in its MatmulNbitsState op-state slot, and qmoe embeds
+// one in its QmoeState slot, so concurrent sessions no longer share it. See
+// docs/design/op-state-slots-design.md.
 
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
@@ -721,7 +740,8 @@ int wrap_miopenConvolutionForward(
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
     int64_t group,       // Number of groups
-    int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
+    int64_t data_type,   // HIPDNN_EP_DATATYPE_* for I/O and weights
+    int op_state_slot);  // Per-instance op-state slot (conv workspace home)
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
@@ -788,15 +808,16 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // at compile time when B's leading dims are static, else at runtime.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
-    const void *A,           // Matrix A GPU pointer
-    const void *B,           // Matrix B GPU pointer
-    void *output,            // Output GPU pointer
-    int64_t M,               // Rows of A (per batch)
-    int64_t N,               // Columns of B
-    int64_t K,               // Columns of A / Rows of B
-    int64_t batch_count,     // Number of batches
-    int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
-    int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
+    const void *A,          // Matrix A GPU pointer
+    const void *B,          // Matrix B GPU pointer
+    void *output,           // Output GPU pointer
+    int64_t M,              // Rows of A (per batch)
+    int64_t N,              // Columns of B
+    int64_t K,              // Columns of A / Rows of B
+    int64_t batch_count,    // Number of batches
+    int64_t elem_size,      // Element size in bytes (2=f16, 4=f32)
+    int64_t b_batch_stride, // 0 = broadcast (any rank); K*N = per-batch
+    int op_state_slot);     // per-instance op-state slot (shared algo table)
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
@@ -826,7 +847,8 @@ int wrap_group_query_attention(
     int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int op_state_slot); // per-instance op-state slot (GEMM descriptor cache)
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -864,7 +886,8 @@ int wrap_multi_head_attention(
     //              query_rank, element_size_bytes)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
-    int64_t query_rank, int64_t element_size_bytes);
+    int64_t query_rank, int64_t element_size_bytes,
+    int op_state_slot); // per-instance op-state slot (GEMM descriptor cache)
 
 // Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
@@ -1118,7 +1141,8 @@ int wrap_matmul_nbits(
     int64_t bits,            // quantization bits (e.g. 4)
     int64_t block_size,      // quantization block size
     int64_t elem_size,       // element size in bytes
-    int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
+    int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
+    int op_state_slot);      // per-instance op-state slot (zp-cache home)
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
@@ -1175,7 +1199,8 @@ int wrap_qmoe(
     int64_t block_size, int64_t swiglu_fusion,
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
     float activation_alpha, float activation_beta, float swiglu_limit,
-    int64_t normalize_routing_weights, int64_t elem_size);
+    int64_t normalize_routing_weights, int64_t elem_size,
+    int op_state_slot); // per-instance op-state slot (qmoe scratch home)
 
 // CausalConvWithState operation wrapper (stateful causal depthwise convolution)
 // Used by Gated DeltaNet (Qwen3.5) and Mamba models.
@@ -1198,7 +1223,8 @@ int wrap_causal_conv_with_state(
     int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
     int64_t ndim,
     int64_t activation, // 0=none, 1=silu/swish
-    int64_t element_size_bytes);
+    int64_t element_size_bytes,
+    int op_state_slot); // per-instance op-state slot (descriptor cache home)
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

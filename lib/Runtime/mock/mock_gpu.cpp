@@ -448,7 +448,9 @@ int wrap_miopenConvolutionForward(
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type,
+    int op_state_slot) {
+  (void)op_state_slot;
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
@@ -517,11 +519,15 @@ int wrap_miopenConvolutionTranspose(
   return 0;
 }
 
-int wrap_causal_conv_with_state(
-    RuntimeState *state, const void *input, const void *weight,
-    const void *bias, const void *past_state, void *output, void *present_state,
-    int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
-    int64_t ndim, int64_t activation, int64_t element_size_bytes) {
+int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
+                                const void *weight, const void *bias,
+                                const void *past_state, void *output,
+                                void *present_state, int64_t batch_size,
+                                int64_t channels, int64_t seq_len,
+                                int64_t kernel_size, int64_t ndim,
+                                int64_t activation, int64_t element_size_bytes,
+                                int op_state_slot) {
+  (void)op_state_slot;
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr,
             "Invalid required argument in wrap_causal_conv_with_state\n");
@@ -591,8 +597,9 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
 int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                          void *output, int64_t M, int64_t N, int64_t K,
                          int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride) {
+                         int64_t b_batch_stride, int op_state_slot) {
   (void)b_batch_stride;
+  (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hipblasLtMatmul\n");
     return -1;
@@ -626,11 +633,13 @@ int wrap_group_query_attention(
     int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int op_state_slot) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
   }
+  (void)op_state_slot;
 
   (void)position_ids;
   (void)attention_bias;
@@ -679,11 +688,12 @@ int wrap_multi_head_attention(
     // Shape info (8)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
-    int64_t query_rank, int64_t element_size_bytes) {
+    int64_t query_rank, int64_t element_size_bytes, int op_state_slot) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_multi_head_attention\n");
     return -1;
   }
+  (void)op_state_slot;
 
   (void)query;
   (void)bias;
@@ -1134,7 +1144,8 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       const void *g_idx, const void *bias, void *output,
                       int64_t M, int64_t N, int64_t K, int64_t batch_count,
                       int64_t bits, int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size) {
+                      int64_t zp_elem_size, int op_state_slot) {
+  (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
     return -1;
@@ -1200,7 +1211,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              int op_state_slot) {
+  (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_qmoe\n");
     return -1;

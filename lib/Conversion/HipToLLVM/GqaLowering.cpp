@@ -227,7 +227,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // seq_len_kv
         i64Type, // past_buf_seq
         i64Type, // head_dim
-        i64Type  // element_size_bytes
+        i64Type, // element_size_bytes
+        i32Type  // op_state_slot
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -249,7 +250,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         kvCacheBitWidth, noCausal,
         // Shape info (6 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
-        elemSizeVal};
+        elemSizeVal,
+        // Per-instance op-state slot (threaded by --assign-op-state-slots)
+        getOpStateSlotValue(op, rewriter, loc)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

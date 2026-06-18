@@ -1,0 +1,205 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
+# Op-State Slots Design
+
+**Date:** 2026-06-15
+**Document Type:** Design
+**Status:** Draft
+**Related:** [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md), [constant-handling-design.md](constant-handling-design.md), [per-op-profiling.md](per-op-profiling.md), [technical-pipeline-walkthrough.md](../technical-pipeline-walkthrough.md)
+
+---
+
+## Contents
+
+- [Overview](#overview)
+- [Constraints](#constraints)
+- [Design](#design)
+  - [Data model](#data-model)
+  - [Identity: one slot per instance](#identity-one-slot-per-instance)
+  - [Construction: the op generates its own init](#construction-the-op-generates-its-own-init)
+  - [Access](#access)
+  - [Sharing is opt-in](#sharing-is-opt-in)
+- [Pipeline](#pipeline)
+- [Data flow example](#data-flow-example)
+- [Authoring a stateful op](#authoring-a-stateful-op)
+- [Why compile time](#why-compile-time)
+- [Related Documents](#related-documents)
+
+---
+
+## Overview
+
+Some operators keep state across a session: convolution descriptors, attention GEMM descriptors, dequant unpack buffers, autotuned algorithm choices, recurrent hidden state. That state needs a per-session home that does not pile unrelated concerns onto a shared `RuntimeState` struct and does not leak through a process-lifetime `static`. This design gives each stateful operator *instance* a compiler-assigned slot in a `RuntimeState` array; session init constructs each slot by asking the operator to emit its own initialization code, with construction arguments taken from the operator's compile-time attributes.
+
+## Constraints
+
+- **Multi-model per process** — many sessions run in one process, so per-op state must not bloat a shared struct and must not outlive its session through a process `static`.
+- **Per-instance isolation** — two operators of the same kind must hold independent state. Three stacked recurrent layers each keep their own hidden state; a single object shared by kind would corrupt them.
+- **Construction from op data** — a slot must be constructible from values the operator knows at compile time (a device id, kernel geometry, a size hint), not only from a bare context pointer.
+
+## Design
+
+Three concerns are kept separate: *identity* (which slot an operator owns), *construction* (how the state is built and from what data), and *sharing* (whether instances reuse one object). Identity is per instance. Construction is code the operator emits for itself. Sharing is opt-in.
+
+### Data model
+
+```cpp
+struct OpState {                 // base of every state struct
+  void (*deletor)(OpState *);    // set at construction; enables generic teardown
+};
+
+struct RuntimeState {
+  /* core: stream, library handles, pools, constants */
+  OpState **op_states;           // N entries, one per slot
+  int       num_op_states;
+};
+```
+
+Each constructor wires `deletor` to a function that destroys its concrete type, so session cleanup walks `op_states` and frees every slot without knowing the types. Slots reference nothing in other slots, so construction and teardown order never matter.
+
+### Identity: one slot per instance
+
+A stateful operator implements `OpStateOpInterface`. A module pass walks stateful ops and gives **each instance** its own dense slot `0..N-1`, recording `N` for the fused function. Two operators of the same kind get two slots and two state objects. Operators that would emit byte-identical initialization code may be deduplicated onto one slot, but that is an optimization layered on top, not the default.
+
+### Construction: the op generates its own init
+
+The interface exposes a code-generation method. Each operator emits the IR that constructs its own state:
+
+```cpp
+def OpStateOpInterface : OpInterface<"OpStateOpInterface"> {
+  let methods = [
+    InterfaceMethod<
+      "Emit IR that constructs this op's state into op_states[slot].",
+      /*retTy=*/"::mlir::Value",          // the constructed pointer (null => init fails)
+      /*name=*/"generateOpStateInit",
+      (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc,
+           "::mlir::Value":$statePtr, "int32_t":$slot)>
+  ];
+}
+```
+
+An operator reads its own attributes, declares the constructor symbol it needs with whatever parameters it wants, emits the call, and stores the result into its slot:
+
+```text
+ConvOp::generateOpStateInit(b, loc, statePtr, slot):
+    k     = this.attr("kernel")                              # the op's own attribute
+    s     = this.attr("stride")
+    ctor  = declare_extern("hipdnn_ep_op_state_construct_conv",
+                           ret = ptr, params = [ptr, i64, i64])
+    st    = b.call(ctor, [ statePtr, const(k), const(s) ])   # parameters passed in
+    b.store(st, gep(statePtr->op_states, slot))
+    return st
+```
+
+The runtime constructor takes those parameters and builds the state:
+
+```cpp
+extern "C" OpState *
+hipdnn_ep_op_state_construct_conv(RuntimeState *s, int64_t kernel, int64_t stride) {
+  auto *st = make_op_state<ConvState>();   // allocate + wire deletor; null on failure
+  if (!st) return nullptr;                 // null propagates; init reports and fails
+  auto *c = static_cast<ConvState *>(st);
+  c->kernel = kernel;
+  c->stride = stride;
+  return st;
+}
+```
+
+Because the operator generates the call, it can pass any compile-time value it knows — a device id for multi-GPU selection, kernel geometry, a buffer-size hint, per-slot configuration. There is no shared class string and no central constructor table: the slot-to-construction binding lives in the operator and is visible in the IR it emits. This is the same compiler-supplied-init pattern as [constant-handling-design.md](constant-handling-design.md).
+
+A value that is unknown until inference (an input's dynamic shape, a data pointer) is not available to `generateOpStateInit`, which runs before any input exists. An operator that needs such a value keys it at runtime inside its `wrap_*` entry, using the per-slot state object as the cache home.
+
+### Access
+
+Inside an operator's runtime entry, reaching the state is one indexed load. `slot` is the trailing argument the lowering threads into the operator's `wrap_*` call:
+
+```cpp
+template <class T> T *op_state(RuntimeState *s, int slot) {
+  return static_cast<T *>(s->op_states[slot]);
+}
+```
+
+### Sharing is opt-in
+
+Per-instance is the default, so like operators never collide. When like operators *should* share — an autotuned algorithm table is identical for a device and library version across every session in a process — the constructor pulls a `weak_ptr`-backed handle from a `WeakStore`: the value lives while some session holds it and is freed when the last session is destroyed. Sharing is then one line inside the constructor, decoupled from slot assignment:
+
+```cpp
+static WeakStore<AlgoKey, AlgoTable> g_algos;   // file-scope in the op's translation unit
+// inside the constructor:
+st->algo = g_algos.get_or_create(key, [&] { return autotune(...); });   // shared_ptr
+```
+
+## Pipeline
+
+```mermaid
+graph TD
+  ATTRS["op attributes (compile-time)"] --> GENM["op.generateOpStateInit(builder, slot)"]
+  GENM -->|emit| CALL["call construct_op(state, p1, ...)"]
+  CALL --> STORE["store into op_states[slot]"]
+  STORE --> ARR["RuntimeState.op_states"]
+  WRAP["wrap_op(..., slot) at inference"] -->|"op_state(state, slot)"| ARR
+```
+
+The slot-assignment pass stamps each op with its slot and records the slot count on the module. The interface generator, while building the `inference_init` entry, calls each op's `generateOpStateInit` to weave the per-slot construction in after core state and pool init. The lowerings thread the slot index in as the trailing `wrap_*` argument. This count-then-consume shape mirrors the memory pool, where a pass computes a count and offsets that generated init consumes; see [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md).
+
+## Data flow example
+
+Two `conv` instances in one fused function, with different compile-time attributes. The example traces `kernel`/`stride` from the graph to the runtime entry.
+
+**1. After slot assignment** — each instance carries its own attributes and slot:
+
+```mlir
+%y0 = hip.conv(%x,  %w0) {kernel = 3, stride = 1, hip.op_state_slot = 0}
+%y1 = hip.conv(%y0, %w1) {kernel = 5, stride = 2, hip.op_state_slot = 1}
+```
+
+**2. Compile time** — each op's `generateOpStateInit` emits a parameterized constructor call into `inference_init`:
+
+```mlir
+%k0  = llvm.mlir.constant(3 : i64)
+%s0  = llvm.mlir.constant(1 : i64)
+%st0 = llvm.call @hipdnn_ep_op_state_construct_conv(%state, %k0, %s0)
+llvm.store %st0, %op_states_0
+%k1  = llvm.mlir.constant(5 : i64)
+%s1  = llvm.mlir.constant(2 : i64)
+%st1 = llvm.call @hipdnn_ep_op_state_construct_conv(%state, %k1, %s1)
+llvm.store %st1, %op_states_1
+```
+
+**3. Session init (runs once)** — constructors run with the baked-in arguments, producing two independent objects:
+
+```cpp
+state->op_states[0] = construct_conv(state, /*kernel=*/3, /*stride=*/1);   // ConvState{3,1}
+state->op_states[1] = construct_conv(state, /*kernel=*/5, /*stride=*/2);   // ConvState{5,2}
+```
+
+**4. Inference (per call)** — each conv reads its own slot; the two never collide:
+
+```cpp
+wrap_conv(..., /*slot=*/0);   // op_state<ConvState>(state, 0) -> kernel 3
+wrap_conv(..., /*slot=*/1);   // op_state<ConvState>(state, 1) -> kernel 5
+```
+
+The input spatial size is unknown at step 2, so it is not a constructor argument; if `conv` needs a workspace sized by it, it grows that workspace inside `wrap_conv` from the runtime arguments, stored in the per-slot state.
+
+## Authoring a stateful op
+
+1. Define a state struct deriving from `OpState`.
+2. Implement `OpStateOpInterface::generateOpStateInit` — read the op's attributes, declare the constructor symbol and its parameter types, emit the call and the store into `op_states[slot]`.
+3. Provide the matching `extern "C"` constructor `(RuntimeState *, params...)` returning the state via `make_op_state<T>()`; optionally fetch a shared value from a `WeakStore`.
+4. Reach the state in the runtime entry with `op_state<MyState>(state, slot)`.
+
+Stateless operators declare nothing.
+
+## Why compile time
+
+The set of stateful operators in a fused function, and the attributes each needs to construct its state, are fixed at compile time, so identity and construction arguments are cheapest to decide there. It makes runtime access a plain array index, keeps the slot and its construction call visible in the IR for inspection and testing, and removes the runtime registry, string hashing, and process-global spec table that runtime-side resolution would otherwise need.
+
+## Related Documents
+
+- [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) — Pass computes a count + offsets; generated init consumes them.
+- [constant-handling-design.md](constant-handling-design.md) — Compiler-supplied attribute consumed by generated init.
+- [per-op-profiling.md](per-op-profiling.md) — Existing per-session operator state attached to `RuntimeState`.
+- [technical-pipeline-walkthrough.md](../technical-pipeline-walkthrough.md) — End-to-end compile/runtime pipeline and where init runs.
