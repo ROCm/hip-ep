@@ -742,13 +742,13 @@ jobs:
           exit /b %FAILED%
 
       # ----------------------------------------------------------------------
-      # Native artifact smoke test (artifact_format=NATIVE).
+      # Native artifact smoke test (artifact_format=NATIVE), direct hipep EP.
       # Exercises the dual-format path: CompilerDriver emits a per-model .dll
       # (lld-link in-process), InferenceState loads it via morphizen::Plugin
-      # (LoadLibrary). LLVM IR stays the production default; native is opt-in
-      # for benchmarking, so this is best-effort and never fails the job. The
-      # MSVC/UCRT release CRT import libs staged into gpu-test-package/lib (+
-      # LIB) are what lld-link consumes to link the model .dll at runtime.
+      # (LoadLibrary). LLVM IR stays the production default; native is opt-in.
+      # lld-link consumes the MSVC/UCRT release CRT import libs + hipdnn-ep-tls.lib
+      # staged into gpu-test-package/lib (+ LIB) to link the model .dll. This is
+      # now a real gate (no exit /b 0): if native breaks, the job fails.
       # ----------------------------------------------------------------------
       - name: Run native-artifact smoke test (GPU)
         if: always()
@@ -782,9 +782,52 @@ jobs:
             -C "session.disable_cpu_ep_fallback|1" ^
             -r 1 -c 1 -s ^
             "%SMOKE_MODEL%" > "..\results-native\smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
           type "..\results-native\smoke.txt"
-          rem Best-effort: native is opt-in, never fail the pipeline on it.
-          exit /b 0
+          rem Real gate: hipdnn-ep-tls.lib is now staged into gpu-test-package/lib
+          rem so the NATIVE compile -> lld-link -> load -> execute path must pass.
+          exit /b %RC%
+
+      # ----------------------------------------------------------------------
+      # AMD GPU umbrella NATIVE smoke test: same NATIVE compile/link/load path,
+      # but driven through the amdgpu-ep umbrella instead of the hipep EP
+      # directly. profile=llm (an umbrella option, ep.amdgpuexecutionprovider.
+      # prefix) selects the hipep backend; the umbrella forwards non-umbrella
+      # session-config entries verbatim, so artifact_format is passed as a raw
+      # ep.hipep.* entry to reach the backend. Real gate (no exit /b 0).
+      # ----------------------------------------------------------------------
+      - name: Run AMD GPU umbrella native smoke test (GPU)
+        if: always()
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 0
+          )
+          cd gpu-test-package\bin
+          mkdir ..\results-amdgpu-native 2>nul
+          set "SMOKE_MODEL="
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
+          if not defined SMOKE_MODEL (
+            echo [SKIP] no *seq128.onnx model under %MODEL_DIR%
+            exit /b 0
+          )
+          echo === AMD GPU umbrella native smoke %SMOKE_MODEL% ===
+          onnxruntime_perf_test.exe ^
+            --plugin_ep_libs "AMDGPUExecutionProvider|amdgpu-ep.dll" ^
+            --plugin_eps "AMDGPUExecutionProvider" ^
+            --plugin_ep_options "profile|llm" ^
+            -C "session.disable_cpu_ep_fallback|1" ^
+            -C "ep.hipep.artifact_format|NATIVE" ^
+            -r 1 -c 1 -s ^
+            "%SMOKE_MODEL%" > "..\results-amdgpu-native\smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "..\results-amdgpu-native\smoke.txt"
+          exit /b %RC%
 
       # ----------------------------------------------------------------------
       # EPContext export + import perf test (PR #132 sidecar-in-tar path).
