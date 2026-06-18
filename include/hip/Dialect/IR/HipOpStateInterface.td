@@ -18,9 +18,10 @@ include "mlir/IR/OpBase.td"
 //
 // The op provides `generateOpStateInit` directly (typically a one-liner that
 // reads its attributes and calls `mlir::hip::emitOpStateConstruct` with its
-// construct symbol). It does NOT store into the slot itself: --generate-op-
-// state-init stores the returned pointer via hipdnn_ep_op_state_set, keeping
-// the RuntimeState layout opaque to generated IR.
+// construct symbol and slot). The emitted construct symbol stores the built
+// state into op_states[slot] itself (via hipdnn_ep_op_state_set, called inside
+// the runtime construct fn -- not the slot array directly), keeping the
+// RuntimeState layout opaque to generated IR. It returns an i8 ok flag.
 def OpStateOpInterface : OpInterface<"OpStateOpInterface"> {
   let description = [{
     Marker + code-gen interface for stateful HIP ops. Implementers emit the IR
@@ -35,9 +36,9 @@ def OpStateOpInterface : OpInterface<"OpStateOpInterface"> {
         Emit IR (into `builder`'s current insertion point, inside the generated
         op-state init function) that constructs this op's state object. Read
         the op's own attributes, declare the construct symbol with whatever
-        parameter types are needed, and emit the call. Returns the constructed
-        OpState pointer (a null value at runtime means construction failed);
-        the caller stores it into op_states[slot].
+        parameter types are needed, and emit the call passing `slot`. The
+        construct symbol stores the built state into op_states[slot] itself and
+        returns an i8 ok flag (0 at runtime means the store was refused).
       }],
       /*retTy=*/"::mlir::Value",
       /*methodName=*/"generateOpStateInit",

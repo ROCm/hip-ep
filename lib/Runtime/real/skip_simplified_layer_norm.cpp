@@ -84,25 +84,23 @@ struct SkipT5NormTable {
   }
 };
 
-// weak_ptr-backed so this file-scope static does not itself leak the table:
-// it lives only while some session's SkipT5NormState holds a shared_ptr.
-static WeakStore<int, SkipT5NormTable> g_skip_t5norm_tables;
-
 // Per-instance op state for hip.skip_rms_norm: the slot holds a shared_ptr to
-// the one shared descriptor table.
-struct SkipT5NormState : OpState {
+// the one shared descriptor table, reached through a global WeakStore keyed by
+// device (see op_state.h). The store is weak_ptr-backed, so the table lives
+// only while some session's SkipT5NormState holds a shared_ptr to it.
+struct SkipT5NormState : OpStateT<SkipT5NormState> {
   std::shared_ptr<SkipT5NormTable> table;
+  SkipT5NormState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, SkipT5NormTable>::get_or_create(
+        dev, [] { return std::make_shared<SkipT5NormTable>(); });
+  }
 };
 
-extern "C" OpState *hipdnn_ep_op_state_construct_skip_t5norm(RuntimeState *) {
-  SkipT5NormState *st = make_op_state<SkipT5NormState>();
-  if (!st)
-    return nullptr;
-  int dev = 0;
-  hipGetDevice(&dev);
-  st->table = g_skip_t5norm_tables.get_or_create(
-      dev, [] { return std::make_shared<SkipT5NormTable>(); });
-  return st;
+extern "C" int8_t hipdnn_ep_op_state_construct_skip_t5norm(RuntimeState *state,
+                                                           int32_t slot) {
+  return SkipT5NormState::create(state, slot);
 }
 
 static const SkipT5NormCacheEntry *
@@ -209,13 +207,13 @@ cache_done:
 //   rstd (scratch):                      [num_rows] (f32)
 //===----------------------------------------------------------------------===//
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
+                                    void *input, void *skip, void *gamma,
+                                    void *bias, void *output,
+                                    void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon,
-                                    int op_state_slot) {
+                                    int64_t element_size_bytes, float epsilon) {
   OP_PROFILE(
       "skip_layernorm",
       [&] {
@@ -266,7 +264,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
     return -1;
   }
 
-  SkipT5NormState *ns = op_state<SkipT5NormState>(state, op_state_slot);
+  SkipT5NormState *ns = SkipT5NormState::get_slot(state, op_state_slot);
   if (!ns || !ns->table) {
     fprintf(stderr,
             "wrap_skip_simplified_layer_norm: missing op-state for slot %d\n",

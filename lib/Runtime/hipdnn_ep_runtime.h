@@ -809,6 +809,7 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // at compile time when B's leading dims are static, else at runtime.
 int wrap_hipblasLtMatmul(
     RuntimeState *state,
+    int op_state_slot,      // per-instance op-state slot (shared algo table)
     const void *A,          // Matrix A GPU pointer
     const void *B,          // Matrix B GPU pointer
     void *output,           // Output GPU pointer
@@ -817,8 +818,7 @@ int wrap_hipblasLtMatmul(
     int64_t K,              // Columns of A / Rows of B
     int64_t batch_count,    // Number of batches
     int64_t elem_size,      // Element size in bytes (2=f16, 4=f32)
-    int64_t b_batch_stride, // 0 = broadcast (any rank); K*N = per-batch
-    int op_state_slot);     // per-instance op-state slot (shared algo table)
+    int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
@@ -829,6 +829,7 @@ int wrap_hipblasLtMatmul(
 // smooth_softmax).
 int wrap_group_query_attention(
     RuntimeState *state,
+    int op_state_slot, // per-instance op-state slot (GEMM descriptor cache)
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
     void *seqlens_k, void *total_seq_len,
@@ -848,8 +849,7 @@ int wrap_group_query_attention(
     int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int op_state_slot); // per-instance op-state slot (GEMM descriptor cache)
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -874,6 +874,7 @@ int wrap_group_query_attention(
 //   v_hidden        = value.shape[2] when value is provided else 0
 int wrap_multi_head_attention(
     RuntimeState *state,
+    int op_state_slot, // per-instance op-state slot (GEMM descriptor cache)
     // Inputs 1-10 (10 pointers - some may be nullptr)
     void *query, void *key, void *value, void *bias, void *key_padding_mask,
     void *attention_bias, void *past_key, void *past_value,
@@ -887,8 +888,7 @@ int wrap_multi_head_attention(
     //              query_rank, element_size_bytes)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
-    int64_t query_rank, int64_t element_size_bytes,
-    int op_state_slot); // per-instance op-state slot (GEMM descriptor cache)
+    int64_t query_rank, int64_t element_size_bytes);
 
 // Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
@@ -896,13 +896,12 @@ int wrap_multi_head_attention(
 // broadcasting: dims of 1 are broadcast against the corresponding larger dim.
 //   tensor_op: HIPDNN_EP_TENSOR_OP_* constant (mul, add, min, max)
 //   data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
-                        int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
-                        int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
-                        int64_t rhs_h, int64_t rhs_w, int64_t out_n,
-                        int64_t out_c, int64_t out_h, int64_t out_w,
-                        int64_t data_type, int64_t tensor_op,
-                        int op_state_slot);
+int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
+                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                        int64_t out_n, int64_t out_c, int64_t out_h,
+                        int64_t out_w, int64_t data_type, int64_t tensor_op);
 
 // Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
 // Computes output = lhs - rhs; materialises broadcast via hip_expand when
@@ -1014,9 +1013,10 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
 // Generic MIOpen activation wrapper
 // Applies activation_mode (HIPDNN_EP_ACTIVATION_*) element-wise
 // data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
+int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
+                                 void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode, int op_state_slot);
+                                 int64_t activation_mode);
 
 // GELU activation wrapper (uses custom HIP kernel)
 // Applies GELU element-wise with support for exact or approximate mode
@@ -1096,12 +1096,12 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
 // SimplifiedLayerNormalization operation wrapper
-int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
-                                  void *output, int64_t input_num_elements,
+int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
+                                  void *input, void *scale, void *output,
+                                  int64_t input_num_elements,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
-                                  float epsilon, int64_t stash_type,
-                                  int op_state_slot);
+                                  float epsilon, int64_t stash_type);
 
 // LayerNormalization operation wrapper (standard ONNX opset 17+)
 // bias, mean, inv_std may be nullptr when optional inputs/outputs are absent
@@ -1116,13 +1116,13 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
 // bias and input_skip_bias_sum may be nullptr (optional per MS spec)
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
+                                    void *input, void *skip, void *gamma,
+                                    void *bias, void *output,
+                                    void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon,
-                                    int op_state_slot);
+                                    int64_t element_size_bytes, float epsilon);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
@@ -1131,6 +1131,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 // Optional: zero_points, g_idx (deprecated), bias - pass nullptr if absent
 int wrap_matmul_nbits(
     RuntimeState *state,
+    int op_state_slot,       // per-instance op-state slot (zp-cache home)
     const void *A,           // activation tensor
     const void *B,           // packed quantized weights
     const void *scales,      // per-block scale factors
@@ -1145,8 +1146,7 @@ int wrap_matmul_nbits(
     int64_t bits,            // quantization bits (e.g. 4)
     int64_t block_size,      // quantization block size
     int64_t elem_size,       // element size in bytes
-    int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
-    int op_state_slot);      // per-instance op-state slot (zp-cache home)
+    int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
@@ -1217,6 +1217,7 @@ int wrap_qmoe(
 //   k-1) activation: 0=none, 1=silu/swish
 int wrap_causal_conv_with_state(
     RuntimeState *state,
+    int op_state_slot,      // per-instance op-state slot (descriptor cache home)
     const void *input,      // (batch, channels, seq_len)
     const void *weight,     // (channels, 1, kernel_size)
     const void *bias,       // nullable, (channels)
@@ -1226,8 +1227,7 @@ int wrap_causal_conv_with_state(
     int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
     int64_t ndim,
     int64_t activation, // 0=none, 1=silu/swish
-    int64_t element_size_bytes,
-    int op_state_slot); // per-instance op-state slot (descriptor cache home)
+    int64_t element_size_bytes);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
@@ -1281,10 +1281,10 @@ int wrap_linear_attention(
 //==============================================================================
 // Y = alpha * op(A) * op(B) + beta * C
 // op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
-int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
-              void *output, int64_t M, int64_t N, int64_t K, float alpha,
-              float beta, int64_t transA, int64_t transB, int64_t typeCode,
-              int64_t cDim0, int64_t cDim1, int op_state_slot);
+int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
+              const void *B, const void *C, void *output, int64_t M, int64_t N,
+              int64_t K, float alpha, float beta, int64_t transA,
+              int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1);
 
 // `out_num_elements` is the broadcast result count.  `a_num_elements` and
 // `b_num_elements` are the per-input element counts; either may be 1 to

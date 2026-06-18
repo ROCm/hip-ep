@@ -7,8 +7,9 @@
 // hip.gemm. Its GemmState holds a shared_ptr to the device-wide hipBLASLt algo
 // table (shared across sessions via WeakStore). The constructor takes no
 // compile-time args (the algo cache fills lazily per GEMM shape). The generated
-// init must allocate the slot array, call hipdnn_ep_op_state_construct_gemm,
-// and store the result into slot 0. See docs/design/op-state-slots-design.md.
+// init must allocate the slot array, then call hipdnn_ep_op_state_construct_gemm
+// with slot 0, which stores the state into op_states[0] itself and returns an
+// i8 ok flag. See docs/design/op-state-slots-design.md.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --assign-op-state-slots --generate-op-state-init | FileCheck %s
@@ -19,9 +20,8 @@
 // On alloc failure, branch to the fail block and return without constructing.
 // CHECK: llvm.cond_br %{{.*}}, ^[[FAIL:bb[0-9]+]], ^[[OK_BB:bb[0-9]+]]
 // CHECK: ^[[OK_BB]]:
-// CHECK: %[[ST:.*]] = llvm.call @hipdnn_ep_op_state_construct_gemm(%[[STATE]])
 // CHECK: %[[SLOT:.*]] = llvm.mlir.constant(0 : i32)
-// CHECK: llvm.call @hipdnn_ep_op_state_set(%[[STATE]], %[[SLOT]], %[[ST]])
+// CHECK: %[[ST:.*]] = llvm.call @hipdnn_ep_op_state_construct_gemm(%[[STATE]], %[[SLOT]])
 // CHECK: llvm.return
 // CHECK: ^[[FAIL]]:
 // CHECK: llvm.return

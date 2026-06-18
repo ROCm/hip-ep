@@ -517,14 +517,14 @@ int wrap_miopenConvolutionTranspose(
   return 0;
 }
 
-int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
-                                const void *weight, const void *bias,
-                                const void *past_state, void *output,
-                                void *present_state, int64_t batch_size,
-                                int64_t channels, int64_t seq_len,
-                                int64_t kernel_size, int64_t ndim,
-                                int64_t activation, int64_t element_size_bytes,
-                                int op_state_slot) {
+int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
+                                const void *input, const void *weight,
+                                const void *bias, const void *past_state,
+                                void *output, void *present_state,
+                                int64_t batch_size, int64_t channels,
+                                int64_t seq_len, int64_t kernel_size,
+                                int64_t ndim, int64_t activation,
+                                int64_t element_size_bytes) {
   (void)op_state_slot;
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr,
@@ -592,10 +592,10 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
   return 0;
 }
 
-int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
-                         void *output, int64_t M, int64_t N, int64_t K,
-                         int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride, int op_state_slot) {
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride) {
   (void)b_batch_stride;
   (void)op_state_slot;
   if (!state) {
@@ -613,6 +613,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
 
 int wrap_group_query_attention(
     RuntimeState *state,
+    int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
     void *seqlens_k, void *total_seq_len,
@@ -631,8 +632,7 @@ int wrap_group_query_attention(
     int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int op_state_slot) {
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -674,6 +674,7 @@ int wrap_group_query_attention(
 
 int wrap_multi_head_attention(
     RuntimeState *state,
+    int op_state_slot,
     // Inputs (10)
     void *query, void *key, void *value, void *bias, void *key_padding_mask,
     void *attention_bias, void *past_key, void *past_value,
@@ -686,7 +687,7 @@ int wrap_multi_head_attention(
     // Shape info (8)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
-    int64_t query_rank, int64_t element_size_bytes, int op_state_slot) {
+    int64_t query_rank, int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_multi_head_attention\n");
     return -1;
@@ -775,13 +776,12 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   return 0;
 }
 
-int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
-                        int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
-                        int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
-                        int64_t rhs_h, int64_t rhs_w, int64_t out_n,
-                        int64_t out_c, int64_t out_h, int64_t out_w,
-                        int64_t data_type, int64_t tensor_op,
-                        int op_state_slot) {
+int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
+                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                        int64_t out_n, int64_t out_c, int64_t out_h,
+                        int64_t out_w, int64_t data_type, int64_t tensor_op) {
   (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenOpTensor\n");
@@ -1025,9 +1025,10 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
-int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
+int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
+                                 void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode, int op_state_slot) {
+                                 int64_t activation_mode) {
   (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenActivationForward\n");
@@ -1099,12 +1100,12 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
   return 0;
 }
 
-int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
-                                  void *output, int64_t input_num_elements,
+int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
+                                  void *input, void *scale, void *output,
+                                  int64_t input_num_elements,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
-                                  float epsilon, int64_t stash_type,
-                                  int op_state_slot) {
+                                  float epsilon, int64_t stash_type) {
   (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenT5LayerNormForward\n");
@@ -1121,13 +1122,13 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
   return 0;
 }
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
+                                    void *input, void *skip, void *gamma,
+                                    void *bias, void *output,
+                                    void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon,
-                                    int op_state_slot) {
+                                    int64_t element_size_bytes, float epsilon) {
   (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm\n");
@@ -1144,12 +1145,13 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   return 0;
 }
 
-int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
-                      const void *scales, const void *zero_points,
-                      const void *g_idx, const void *bias, void *output,
-                      int64_t M, int64_t N, int64_t K, int64_t batch_count,
-                      int64_t bits, int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int op_state_slot) {
+int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
+                      const void *B, const void *scales,
+                      const void *zero_points, const void *g_idx,
+                      const void *bias, void *output, int64_t M, int64_t N,
+                      int64_t K, int64_t batch_count, int64_t bits,
+                      int64_t block_size, int64_t elem_size,
+                      int64_t zp_elem_size) {
   (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");

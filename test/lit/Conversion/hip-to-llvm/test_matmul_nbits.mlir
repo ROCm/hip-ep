@@ -37,13 +37,13 @@ module {
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_basic
   // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
-  // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i32) -> i32
+  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
   // Verify 17 parameters:
+  // - 1 i32: op_state_slot (2nd arg; per-instance MatmulNbitsState; threaded by
+  //          --assign-op-state-slots, replaces shared RuntimeState::zp_unpack_cache)
   // - 8 pointers: state, A, B, scales, zero_points(null), g_idx(null), bias(null), output
   // - 8 i64: M=128, N=5120, K=2880, batch_count=1, bits=4, block_size=32, elem_size=2, zp_elem_size=0
-  // - 1 i32: op_state_slot (per-instance MatmulNbitsState; threaded by
-  //          --assign-op-state-slots, replaces shared RuntimeState::zp_unpack_cache)
 
   // ===== Test 2: MatMulNBits with zero_points =====
 
@@ -66,8 +66,8 @@ module {
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_with_zp
   // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
-  // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i32) -> i32
+  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
   // ===== Test 3: 2D MatMulNBits (no batch dimension) =====
 
@@ -88,7 +88,7 @@ module {
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_2d
   // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
-  // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i32) -> i32
+  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
   // M=128, batch_count=1 (2D: no batch dims)
 }

@@ -82,11 +82,11 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
 
     // Runtime function signature (11 params)
     SmallVector<Type> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, // state, input, scale, output
+        ptrType, i32Type,          // state, op_state_slot
+        ptrType, ptrType, ptrType, // input, scale, output
         i64Type, i64Type, i64Type, // input_num_elements, scale_num_elements,
                                    // element_size_bytes
-        i64Type, f32Type, i64Type, // axis, epsilon, stash_type
-        i32Type                    // op_state_slot
+        i64Type, f32Type, i64Type  // axis, epsilon, stash_type
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -96,6 +96,7 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
       return failure();
 
     SmallVector<Value> args = {statePtr,
+                               getOpStateSlotValue(op, rewriter, loc),
                                inputPtr,
                                scalePtr,
                                outputPtr,
@@ -104,8 +105,7 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
                                elementSizeBytesVal,
                                axisVal,
                                epsilonVal,
-                               stashTypeVal,
-                               getOpStateSlotValue(op, rewriter, loc)};
+                               stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -168,6 +168,7 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     // Runtime function signature (12 params)
     SmallVector<Type> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         ptrType, // input
         ptrType, // skip
         ptrType, // gamma
@@ -177,8 +178,7 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
         i64Type, // input_num_elements
         i64Type, // gamma_num_elements
         i64Type, // element_size_bytes
-        f32Type, // epsilon
-        i32Type  // op_state_slot
+        f32Type  // epsilon
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -188,12 +188,12 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
       return failure();
 
     SmallVector<Value> args = {
-        statePtr,         inputPtr,
-        skipPtr,          gammaPtr,
-        biasPtr,          outputPtr,
-        skipOutputPtr,    inputNumElements,
-        gammaNumElements, elementSizeBytesVal,
-        epsilonVal,       getOpStateSlotValue(op, rewriter, loc)};
+        statePtr,         getOpStateSlotValue(op, rewriter, loc),
+        inputPtr,         skipPtr,
+        gammaPtr,         biasPtr,
+        outputPtr,        skipOutputPtr,
+        inputNumElements, gammaNumElements,
+        elementSizeBytesVal, epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

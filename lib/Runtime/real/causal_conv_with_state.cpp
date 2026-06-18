@@ -184,15 +184,16 @@ CausalConvCache::~CausalConvCache() {
 // owns this instance's per-shape MIOpen descriptor + algorithm cache. Replaces
 // the former shared RuntimeState::causal_conv_cache, so concurrent sessions no
 // longer share it.
-struct CausalConvState : OpState {
+struct CausalConvState : OpStateT<CausalConvState> {
   CausalConvCache cache;
 };
 
 } // namespace
 
-extern "C" OpState *
-hipdnn_ep_op_state_construct_causal_conv_with_state(RuntimeState *) {
-  return make_op_state<CausalConvState>();
+extern "C" int8_t
+hipdnn_ep_op_state_construct_causal_conv_with_state(RuntimeState *state,
+                                                    int32_t slot) {
+  return CausalConvState::create(state, slot);
 }
 
 // SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
@@ -200,14 +201,14 @@ template <typename T> static inline T silu(T x) {
   return x / (static_cast<T>(1) + std::exp(-x));
 }
 
-int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
-                                const void *weight, const void *bias,
-                                const void *past_state, void *output,
-                                void *present_state, int64_t batch_size,
-                                int64_t channels, int64_t seq_len,
-                                int64_t kernel_size, int64_t ndim,
-                                int64_t activation, int64_t element_size_bytes,
-                                int op_state_slot) {
+int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
+                                const void *input, const void *weight,
+                                const void *bias, const void *past_state,
+                                void *output, void *present_state,
+                                int64_t batch_size, int64_t channels,
+                                int64_t seq_len, int64_t kernel_size,
+                                int64_t ndim, int64_t activation,
+                                int64_t element_size_bytes) {
   // ---- Cheap, configuration-level validation FIRST. None of these touch the
   // device, so do them before any allocation or descriptor work to avoid
   // ad-hoc cleanup paths (and to keep the OP_PROFILE scope tight around the
@@ -344,7 +345,7 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
                     bias ? 1 : 0,
                     activation};
 
-  CausalConvState *ccs = op_state<CausalConvState>(state, op_state_slot);
+  CausalConvState *ccs = CausalConvState::get_slot(state, op_state_slot);
   if (!ccs) {
     fprintf(stderr,
             "wrap_causal_conv_with_state: no CausalConvState at slot %d\n",

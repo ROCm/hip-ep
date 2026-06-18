@@ -142,6 +142,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     //                          int64_t b_batch_stride, int op_state_slot)
     SmallVector<Type, 11> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         ptrType, // A
         ptrType, // B
         ptrType, // output
@@ -150,8 +151,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         i64Type, // K
         i64Type, // batch_count
         i64Type, // elem_size
-        i64Type, // b_batch_stride
-        i32Type  // op_state_slot
+        i64Type  // b_batch_stride
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -160,6 +160,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
       return failure();
 
     SmallVector<Value, 11> args = {statePtr,
+                                   getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
                                    BPtr,
                                    outputPtr,
@@ -168,8 +169,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                    K,
                                    batchCount,
                                    elemSize,
-                                   bBatchStride,
-                                   getOpStateSlotValue(op, rewriter, loc)};
+                                   bBatchStride};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

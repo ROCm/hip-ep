@@ -670,14 +670,14 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
   // OpStateOpInterface: construct this matmul instance's per-session state
   // (MatmulState), which holds a shared_ptr to the device-wide hipBLASLt algo
   // table. No compile-time params — the table fills lazily per call. The
-  // constructed pointer is stored into op_states[slot] by
-  // --generate-op-state-init.
+  // construct fn stores the state into op_states[slot] itself.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_matmul", {});
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_matmul",
+          {});
     }
   }];
 
@@ -756,15 +756,15 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
 
   // OpStateOpInterface: construct this MatMulNBits instance's per-session
   // zero_points unpack cache (MatmulNbitsState). No compile-time params — the
-  // cache fills lazily per call. The constructed pointer is stored into
-  // op_states[slot] by --generate-op-state-init.
+  // cache fills lazily per call. The construct fn stores the state into
+  // op_states[slot] itself.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_matmul_nbits",
-          {});
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_matmul_nbits", {});
     }
   }];
 }
@@ -986,7 +986,8 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_t5norm", {});
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_t5norm",
+          {});
     }
   }];
 
@@ -1169,7 +1170,7 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr,
+          builder, loc, statePtr, slot,
           "hipdnn_ep_op_state_construct_skip_t5norm", {});
     }
   }];
@@ -1255,7 +1256,8 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_optensor", {});
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
+          {});
     }
   }];
   let description = [{
@@ -1294,7 +1296,8 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_optensor", {});
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
+          {});
     }
   }];
   let description = [{
@@ -1333,7 +1336,8 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_optensor", {});
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
+          {});
     }
   }];
   let description = [{
@@ -1375,7 +1379,8 @@ def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_optensor", {});
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
+          {});
     }
   }];
   let description = [{
@@ -1561,7 +1566,7 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr,
+          builder, loc, statePtr, slot,
           "hipdnn_ep_op_state_construct_activation", {});
     }
   }];
@@ -1603,7 +1608,7 @@ def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[OpStateOpInterface],
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr,
+          builder, loc, statePtr, slot,
           "hipdnn_ep_op_state_construct_activation", {});
     }
   }];
@@ -1645,7 +1650,7 @@ def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[OpStateOpInterface],
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr,
+          builder, loc, statePtr, slot,
           "hipdnn_ep_op_state_construct_activation", {});
     }
   }];
@@ -2374,14 +2379,14 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
 
   // OpStateOpInterface: construct this instance's per-session MIOpen
   // descriptor/algo cache (CausalConvState). No compile-time params — the
-  // cache fills lazily per shape. The constructed pointer is stored into
-  // op_states[slot] by --generate-op-state-init.
+  // cache fills lazily per shape. The construct fn stores the state into
+  // op_states[slot] itself.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr,
+          builder, loc, statePtr, slot,
           "hipdnn_ep_op_state_construct_causal_conv_with_state", {});
     }
   }];
@@ -2532,14 +2537,14 @@ def Hip_GqaOp : Hip_DpsOp<"gqa",
 
   // OpStateOpInterface: construct this GQA instance's per-session hipBLASLt
   // GEMM descriptor/algo cache (GqaState). No compile-time params — the cache
-  // fills lazily per GEMM shape. The constructed pointer is stored into
-  // op_states[slot] by --generate-op-state-init.
+  // fills lazily per GEMM shape. The construct fn stores the state into
+  // op_states[slot] itself.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_gqa", {});
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_gqa", {});
     }
   }];
 
@@ -2801,14 +2806,14 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
 
   // OpStateOpInterface: construct this MHA instance's per-session hipBLASLt
   // GEMM descriptor/algo cache (MhaState). No compile-time params — the cache
-  // fills lazily per GEMM shape. The constructed pointer is stored into
-  // op_states[slot] by --generate-op-state-init.
+  // fills lazily per GEMM shape. The construct fn stores the state into
+  // op_states[slot] itself.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr,
+          builder, loc, statePtr, slot,
           "hipdnn_ep_op_state_construct_multi_head_attention", {});
     }
   }];
@@ -2968,7 +2973,8 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
                                       ::mlir::Location loc,
                                       ::mlir::Value statePtr, int32_t slot) {
       return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, "hipdnn_ep_op_state_construct_gemm", {});
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_gemm",
+          {});
     }
   }];
 }

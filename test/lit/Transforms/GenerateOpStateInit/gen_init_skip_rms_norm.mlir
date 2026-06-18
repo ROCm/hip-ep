@@ -7,8 +7,9 @@
 // hip.skip_rms_norm. Its SkipT5NormState holds a shared_ptr to the device-wide
 // MIOpen descriptor table (shared across sessions via WeakStore). The
 // constructor takes no compile-time args. The generated init must allocate the
-// slot array, call hipdnn_ep_op_state_construct_skip_t5norm, and store the
-// result into slot 0. See docs/design/op-state-slots-design.md.
+// slot array, then call hipdnn_ep_op_state_construct_skip_t5norm with slot 0,
+// which stores the state into op_states[0] itself and returns an i8 ok flag.
+// See docs/design/op-state-slots-design.md.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --assign-op-state-slots --generate-op-state-init | FileCheck %s
@@ -19,9 +20,8 @@
 // On alloc failure, branch to the fail block and return without constructing.
 // CHECK: llvm.cond_br %{{.*}}, ^[[FAIL:bb[0-9]+]], ^[[OK_BB:bb[0-9]+]]
 // CHECK: ^[[OK_BB]]:
-// CHECK: %[[ST:.*]] = llvm.call @hipdnn_ep_op_state_construct_skip_t5norm(%[[STATE]])
 // CHECK: %[[SLOT:.*]] = llvm.mlir.constant(0 : i32)
-// CHECK: llvm.call @hipdnn_ep_op_state_set(%[[STATE]], %[[SLOT]], %[[ST]])
+// CHECK: %[[ST:.*]] = llvm.call @hipdnn_ep_op_state_construct_skip_t5norm(%[[STATE]], %[[SLOT]])
 // CHECK: llvm.return
 // CHECK: ^[[FAIL]]:
 // CHECK: llvm.return

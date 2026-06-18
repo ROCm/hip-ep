@@ -39,7 +39,7 @@ module {
     hip.gemm(%ctx) ins(%a, %b, %c : memref<1x5120xf16, 1>, memref<5120x5120xf16, 1>, memref<5120xf16, 1>)
                    outs(%y : memref<1x5120xf16, 1>)
 
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64, i32) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -59,7 +59,7 @@ module {
 
     // null pointer for absent C
     // CHECK: llvm.mlir.zero
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64, i32) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -79,7 +79,7 @@ module {
                    outs(%y : memref<1x512xf16, 1>)
                    {transB = 1 : i64}
 
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64, i32) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -99,7 +99,7 @@ module {
                    outs(%y : memref<128x512xf32, 1>)
                    {alpha = 2.000000e+00 : f32, beta = 5.000000e-01 : f32, transA = 1 : i64}
 
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64, i32) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -118,7 +118,7 @@ module {
     hip.gemm(%ctx) ins(%a, %b, %c : memref<128x256xf32, 1>, memref<256x512xf32, 1>, memref<128x512xf32, 1>)
                    outs(%y : memref<128x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64, i32) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }

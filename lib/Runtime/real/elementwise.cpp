@@ -159,25 +159,23 @@ struct OpTensorTable {
   }
 };
 
-// weak_ptr-backed so this file-scope static does not itself leak the table:
-// it lives only while some session's OpTensorState holds a shared_ptr.
-static WeakStore<int, OpTensorTable> g_optensor_tables;
-
 // Per-instance op state for hip.miopen.add: the slot holds a shared_ptr to the
-// one shared descriptor table.
-struct OpTensorState : OpState {
+// one shared descriptor table, reached through a global WeakStore keyed by
+// device (see op_state.h). The store is weak_ptr-backed, so the table lives
+// only while some session's OpTensorState holds a shared_ptr to it.
+struct OpTensorState : OpStateT<OpTensorState> {
   std::shared_ptr<OpTensorTable> table;
+  OpTensorState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, OpTensorTable>::get_or_create(
+        dev, [] { return std::make_shared<OpTensorTable>(); });
+  }
 };
 
-extern "C" OpState *hipdnn_ep_op_state_construct_optensor(RuntimeState *) {
-  OpTensorState *st = make_op_state<OpTensorState>();
-  if (!st)
-    return nullptr;
-  int dev = 0;
-  hipGetDevice(&dev);
-  st->table = g_optensor_tables.get_or_create(
-      dev, [] { return std::make_shared<OpTensorTable>(); });
-  return st;
+extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
+                                                        int32_t slot) {
+  return OpTensorState::create(state, slot);
 }
 
 /// Look up or create cached MIOpen tensor descriptors for an OpTensor shape.
@@ -250,13 +248,12 @@ cache_done:
 // The compiler (HipToLLVM) left-pads shapes with 1 for rank < 4.
 //===----------------------------------------------------------------------===//
 
-int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
-                        int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
-                        int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
-                        int64_t rhs_h, int64_t rhs_w, int64_t out_n,
-                        int64_t out_c, int64_t out_h, int64_t out_w,
-                        int64_t data_type, int64_t tensor_op,
-                        int op_state_slot) {
+int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
+                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                        int64_t out_n, int64_t out_c, int64_t out_h,
+                        int64_t out_w, int64_t data_type, int64_t tensor_op) {
   OP_PROFILE(
       "elementwise",
       [&] {
@@ -637,7 +634,7 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     }
   }
 
-  OpTensorState *os = op_state<OpTensorState>(state, op_state_slot);
+  OpTensorState *os = OpTensorState::get_slot(state, op_state_slot);
   if (!os || !os->table) {
     fprintf(stderr, "wrap_miopenOpTensor: missing op-state for slot %d\n",
             op_state_slot);

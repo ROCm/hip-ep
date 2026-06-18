@@ -34,13 +34,15 @@ namespace mlir {
 namespace hip {
 /// Shared helper for `OpStateOpInterface::generateOpStateInit` bodies: declare
 /// (or look up) the extern construct symbol `ctorSymbol` with signature
-/// `(RuntimeState*, i64 x N) -> OpState*`, emit the call passing `statePtr`
-/// plus `i64Args` as constants, and return the constructed pointer. The caller
-/// (--generate-op-state-init) stores the result into op_states[slot]. Defined
-/// in lib/Dialect/IR/HipOpStateInterface.cpp.
+/// `(RuntimeState*, i32 slot, i64 x N) -> i8`, emit the call passing `statePtr`,
+/// the `slot` constant, and `i64Args` as constants, and return the i8 ok
+/// result. The construct symbol stores the built state into op_states[slot]
+/// itself (via hipdnn_ep_op_state_set), so the caller (--generate-op-state-init)
+/// does not emit a separate store. Defined in
+/// lib/Dialect/IR/HipOpStateInterface.cpp.
 ::mlir::Value emitOpStateConstruct(::mlir::OpBuilder &builder,
                                    ::mlir::Location loc, ::mlir::Value statePtr,
-                                   ::llvm::StringRef ctorSymbol,
+                                   int32_t slot, ::llvm::StringRef ctorSymbol,
                                    ::llvm::ArrayRef<int64_t> i64Args);
 } // namespace hip
 } // namespace mlir

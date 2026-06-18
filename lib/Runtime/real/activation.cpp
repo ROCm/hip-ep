@@ -109,25 +109,24 @@ struct ActivationTable {
   }
 };
 
-// weak_ptr-backed so this file-scope static does not itself leak the table:
-// it lives only while some session's ActivationState holds a shared_ptr.
-static WeakStore<int, ActivationTable> g_activation_tables;
-
 // Per-instance op state shared by hip.sigmoid / hip.tanh / hip.softplus: each
-// slot holds a shared_ptr to the one shared descriptor table.
-struct ActivationState : OpState {
+// slot holds a shared_ptr to the one shared descriptor table. The table is
+// reached through a global WeakStore keyed by device (see op_state.h): it is
+// weak_ptr-backed, so it lives only while some session's ActivationState holds
+// a shared_ptr to it.
+struct ActivationState : OpStateT<ActivationState> {
   std::shared_ptr<ActivationTable> table;
+  ActivationState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, ActivationTable>::get_or_create(
+        dev, [] { return std::make_shared<ActivationTable>(); });
+  }
 };
 
-extern "C" OpState *hipdnn_ep_op_state_construct_activation(RuntimeState *) {
-  ActivationState *st = make_op_state<ActivationState>();
-  if (!st)
-    return nullptr;
-  int dev = 0;
-  hipGetDevice(&dev);
-  st->table = g_activation_tables.get_or_create(
-      dev, [] { return std::make_shared<ActivationTable>(); });
-  return st;
+extern "C" int8_t hipdnn_ep_op_state_construct_activation(RuntimeState *state,
+                                                          int32_t slot) {
+  return ActivationState::create(state, slot);
 }
 
 static const ActivationCacheEntry *
@@ -213,9 +212,10 @@ cache_done:
 // MIOpen's 4D tensor descriptor requirement.
 //===----------------------------------------------------------------------===//
 
-int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
+int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
+                                 void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode, int op_state_slot) {
+                                 int64_t activation_mode) {
   OP_PROFILE(
       "activation",
       [&] {
@@ -246,7 +246,7 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
     return -1;
   }
 
-  ActivationState *as = op_state<ActivationState>(state, op_state_slot);
+  ActivationState *as = ActivationState::get_slot(state, op_state_slot);
   if (!as || !as->table) {
     fprintf(stderr,
             "[REAL] wrap_miopenActivationForward: missing op-state for slot "

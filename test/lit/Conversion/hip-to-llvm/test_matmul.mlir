@@ -24,7 +24,7 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank2_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i32) -> i32
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 // Verify 11 parameters:
 // - 4 pointers: state, A, B, output
 // - 6 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2, b_batch_stride=0
@@ -54,4 +54,4 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank3_leading_one_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i32) -> i32
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32

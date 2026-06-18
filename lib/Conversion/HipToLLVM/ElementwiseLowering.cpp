@@ -126,9 +126,9 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
     // 19 params: state + 3 data ptrs + 12 shape dims + data_type + tensor_op
     // + op_state_slot
-    SmallVector<Type, 19> paramTypes(4, ptrType);
+    SmallVector<Type, 19> paramTypes = {ptrType, i32Type, ptrType, ptrType,
+                                        ptrType};
     paramTypes.append(14, i64Type);
-    paramTypes.push_back(i32Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
@@ -137,6 +137,7 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
     SmallVector<Value, 19> args = {
         adaptor.getCtx(),
+        getOpStateSlotValue(op, rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};
@@ -145,7 +146,6 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     args.append(outDims.begin(), outDims.end());
     args.push_back(createI64Const(dataType));
     args.push_back(createI64Const(tensorOpEnum));
-    args.push_back(getOpStateSlotValue(op, rewriter, loc));
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
