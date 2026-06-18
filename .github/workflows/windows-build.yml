@@ -740,17 +740,16 @@ jobs:
           Remove-Item therock.tar.gz
 
       # Run perf test against seq128 models via MorphiZen EP (models pre-placed
-      # at C:\actions-runner\_work\model\). THEROCK_DIST locates HIP libs; LIB
-      # carries the link-time CRT + per-arch import libs (GPU kernels ship as
-      # runtime DLLs in gpu-test-package/bin co-located with the EP DLL).
+      # at C:\actions-runner\_work\model\). Default bitcode (LLVM_IR) path only
+      # needs PATH -> ROCm runtime DLLs (therock-dist/bin) + co-located
+      # custom_kernels; the in-memory JIT reads neither THEROCK_DIST nor LIB
+      # (those are NATIVE-only, set in the native smoke steps below).
       # Output is tee'd to results/ for QPS extraction. Non-zero exit code
       # sets FAILED but continues so all models are tested.
       - name: Run onnxruntime_perf_test (GPU)
         shell: cmd
         run: |
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
@@ -880,10 +879,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
-          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
-          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
 
           $modelDir = "${{ runner.workspace }}\model"
           if (-not (Test-Path $modelDir)) {
@@ -958,10 +955,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
-          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
-          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
 
           # amdgpu-oga-models holds AMDGPU-profile genai_config copies; it was
           # generated once on the GPU runner and persists across runs, so just
@@ -1106,9 +1101,7 @@ jobs:
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
           rem The EP DLL is now hipep.dll; hip-onnx-runner's legacy default name
           rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
           set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipep.dll
