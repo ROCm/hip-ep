@@ -26,8 +26,9 @@ that:
 1. Exports one well-known C symbol — `hipEpGetPluginInfo` — that returns
    metadata + a callback function pointer.
 2. Inside that callback, calls methods on a `HipEpPluginRegistry &` to
-   contribute extensions: MLIR passes, runtime bitcode, library paths,
-   and library names.
+   contribute extensions: MLIR passes, a custom dialect and op (with its
+   bufferization and HIP→LLVM-lowering interface models), runtime bitcode,
+   library paths, and library names.
 3. Is loaded by `hip-compiler` (or any host that links `LibHipCompiler`)
    when the user sets `HIP_EP_PLUGINS=path/to/plugin.dll`.
 
@@ -41,8 +42,11 @@ means static storage in the plugin DLL.
 ## 2. Quickstart: the in-tree sample as your worked example
 
 `test/plugin/sample_plugin/` is a complete, building plugin that
-exercises every callback. It is your reference implementation. Source
-files:
+exercises the pass, runtime-bitcode, and library callbacks. It is your
+reference implementation for those. (The custom dialect + op callback,
+`addDialectRegistration`, is shown by the separate end-to-end example
+`rocm-ep-plugin`; see [section 7](#7-contributing-a-custom-op-a-vendor-dialect).)
+Source files:
 
 - [`sample_plugin.cpp`](../test/plugin/sample_plugin/sample_plugin.cpp) —
   the plugin entry point. Defines a sample MLIR pass, exports
@@ -327,7 +331,82 @@ Constraints:
 
 ---
 
-## 7. Composing a custom pipeline
+## 7. Contributing a custom op (a vendor dialect)
+
+The most complete extension is a vendor's **own dialect op** that lives across
+the whole pipeline: introduced from a model op, bufferized like an in-tree op,
+and lowered to a vendor kernel. The end-to-end worked example is the separate
+`rocm-ep-plugin` repository's `vendor.add` op (`out = a + b`); this section is
+the map to it.
+
+A custom op uses `addDialectRegistration` together with the pass (section 4),
+bitcode (section 5), and library (section 6) callbacks. The same shared-MLIR
+requirement as `registerPass` applies (the dialect, op TypeIDs, and attached
+interface models are process-global MLIR state) — link MLIR headers only, and
+build against the host's MLIR (section 3).
+
+### Register the dialect
+
+`addDialectRegistration` hands the host a callback it runs against the
+`mlir::DialectRegistry` the pipeline's `MLIRContext` is built from. Make it a
+non-capturing function (so it converts to a plain function pointer). It does
+exactly what an upstream `mlirGetDialectPluginInfo` callback does: insert the
+dialect, and attach the op's interface models via `DialectExtension`s.
+
+```cpp
+static void registerVendorDialect(mlir::DialectRegistry &registry) {
+  registry.insert<VendorDialect>();
+  // Bufferization model for the op (tensor semantics -> memref).
+  registry.addExtension(+[](mlir::MLIRContext *ctx, VendorDialect *) {
+    VendorAddOp::attachInterface<VendorAddBufferizeModel>(*ctx);
+  });
+  // HIP->LLVM lowering for the op.
+  registry.addExtension(+[](mlir::MLIRContext *, VendorDialect *d) {
+    d->addInterfaces<VendorConvertToLLVMInterface>();
+  });
+}
+
+void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
+  R.addDialectRegistration(&registerVendorDialect);
+  R.registerPass<ConvertOnnxAddToVendorPass>();   // introduces the op
+  R.requestPipelineSlot(::hip::compiler::PipelineSlot::AfterSimplifyOnnx,
+                        "func.func(my-onnx-to-vendor)");
+  // ... addRuntimeBitcode + addLibrary for the op's runtime wrapper + kernel.
+}
+```
+
+### The three seams the op flows through
+
+1. **Introduce the op.** A vendor pass (section 4) rewrites a model op into the
+   vendor op. Schedule it *before* `convert-onnx-to-hip` (the `AfterSimplifyOnnx`
+   slot) when you are claiming an op the in-tree pipeline would otherwise lower
+   itself; `convert-onnx-to-hip` only matches `onnx.*` ops, so it passes the
+   vendor op through untouched.
+2. **Bufferize.** `one-shot-bufferize` finds the op's attached
+   `BufferizableOpInterface` model and rewrites tensor semantics to memref. If
+   the bufferized op has memref operands, it must also implement
+   `MemoryEffectOpInterface` (declaring which operands it reads and writes), or
+   the ownership-based buffer-deallocation pass rejects it with "unknown memory
+   side effects".
+3. **Lower to LLVM.** `convert-hip-to-llvm` collects every dialect that
+   implements `ConvertToLLVMPatternInterface` and lets it add its lowering
+   patterns and mark its ops illegal. The vendor op lowers to a call into the
+   vendor runtime wrapper contributed via `addRuntimeBitcode` (section 5), which
+   launches the kernel contributed via `addLibrary` (section 6).
+
+### Defining the dialect and op
+
+`rocm-ep-plugin` defines its single op by hand (a plain C++ class registered
+with `addOperations`) to avoid a TableGen build step. That is reasonable for one
+trivial op; a real dialect with several ops should use ODS (a `.td` file with
+`mlir_tablegen`), as the in-tree HIP dialect and the upstream `standalone`
+example do — ODS generates the builders, verifiers, accessors, and interface
+glue that are tedious and error-prone to write by hand.
+
+See the upstream design doc's "Custom ops: a plugin-owned dialect end-to-end"
+section for the same flow from the architecture side.
+
+## 8. Composing a custom pipeline
 
 Beyond inserting passes at fixed slots (section 4), the compiler lets you
 compose -- or fully replace -- the pass order. Two mechanisms ship today; one
@@ -370,7 +449,7 @@ composition", for the design, and
 [`docs/pipeline_pass_menu.md`](pipeline_pass_menu.md) for the name/anchor/slot
 reference.
 
-## 8. Distribution checklist
+## 9. Distribution checklist
 
 Before shipping a plugin DLL to consumers:
 
@@ -396,7 +475,7 @@ Before shipping a plugin DLL to consumers:
 
 ---
 
-## 9. Where to look next
+## 10. Where to look next
 
 - **Design and rationale:**
   [`docs/design/plugin-interface.md`](design/plugin-interface.md).
@@ -407,8 +486,11 @@ Before shipping a plugin DLL to consumers:
 - **The host loader, in case you need to inspect what your plugin is
   exposing:** [`include/hip/Compiler/PluginLoader.h`](../include/hip/Compiler/PluginLoader.h)
   and `lib/Compiler/PluginLoader.cpp`.
-- **A complete in-tree example exercising every callback:**
-  `test/plugin/sample_plugin/`.
+- **A complete in-tree example** exercising the pass, bitcode, and library
+  callbacks: `test/plugin/sample_plugin/`.
+- **An end-to-end custom-op example** (the `addDialectRegistration` path:
+  dialect + op + bufferization + lowering + kernel, with a numeric check):
+  the separate `rocm-ep-plugin` repository.
 
 When in doubt, mirror the sample and prune. The sample is built and
 tested in CI, so any divergence from its shape that breaks loading

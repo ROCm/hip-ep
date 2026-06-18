@@ -231,8 +231,8 @@ For prerequisites, environment setup, and step-by-step build instructions, see
 
 `hip-compiler` ships a public plugin loader (`HIP_EP_PLUGINS` env var,
 semicolon-separated paths) that lets a down-stream shared library contribute
-MLIR passes, runtime LLVM bitcode, and external libraries without forking
-this repo. The design and downstream-usage guide lives in
+MLIR passes, a custom dialect + op, runtime LLVM bitcode, and external
+libraries without forking this repo. The design and downstream-usage guide lives in
 [docs/design/plugin-interface.md](docs/design/plugin-interface.md); the
 practical authoring guide is
 [docs/plugin_authoring.md](docs/plugin_authoring.md). A working in-tree
