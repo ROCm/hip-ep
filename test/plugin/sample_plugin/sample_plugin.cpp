@@ -76,11 +76,15 @@ void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
   R.registerPass<SamplePrintFunctionsPass>();
 
   // Asks the public pipeline to run the pass at the most common
-  // vendor slot: right after onnx->hip conversion. The pass name
-  // must match getArgument() above; Pipelines.cpp resolves it via
-  // mlir::parsePassPipeline.
+  // vendor slot: right after onnx->hip conversion. Pipelines.cpp
+  // resolves the string via mlir::parsePassPipeline into the slot's
+  // MODULE-level pass manager, so the string follows --pass-pipeline
+  // syntax: a func.func pass must be nested as `func.func(<arg>)`
+  // (a bare op-agnostic / ModuleOp pass would use just its <arg>).
+  // SamplePrintFunctionsPass is an OperationPass<func::FuncOp>, hence
+  // the nesting; <arg> matches getArgument() above.
   R.requestPipelineSlot(::hip::compiler::PipelineSlot::AfterConvertOnnxToHip,
-                        "hip-ep-sample-print-functions");
+                        "func.func(hip-ep-sample-print-functions)");
 
   // Contribute the embedded plugin bitcode. The buffer lives in
   // this DLL's read-only data segment for the lifetime of hip-

@@ -55,6 +55,15 @@ target_link_libraries(hip-mlir-opt PRIVATE
   ${llvm_libs}
 )
 
+# Export this executable's statically-linked MLIR symbols so a plugin loaded
+# via HIP_EP_PLUGINS (dlopen'd into the hip-mlir-opt process) binds to THIS
+# host's single MLIR pass registry -- the exact call mlir-opt makes
+# (mlir/tools/mlir-opt/CMakeLists.txt). Gated by HIPDNN_ENABLE_PLUGINS, which
+# sets LLVM_ENABLE_PLUGINS so this call takes effect.
+if(HIPDNN_ENABLE_PLUGINS)
+  export_executable_symbols_for_plugins(hip-mlir-opt)
+endif()
+
 # Install target
 install(TARGETS hip-mlir-opt
   RUNTIME DESTINATION bin

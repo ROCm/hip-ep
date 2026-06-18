@@ -49,12 +49,22 @@ void addPluginPassesForSlot(OpPassManager &pm,
   if (passNames.empty())
     return;
   for (llvm::StringRef passName : passNames) {
+    // parsePassPipeline resolves the string into this (module-level) pass
+    // manager, exactly like --pass-pipeline. Two common failure causes: the
+    // pass is not registered (the plugin did not registerPass<>(), or the
+    // host did not export its MLIR symbols so the plugin's registration is in
+    // a separate registry), OR the string omits the anchor nesting a non-
+    // module pass needs (a func.func pass must be requested as
+    // `func.func(<arg>)`, not the bare `<arg>`).
     if (failed(parsePassPipeline(passName, pm))) {
       llvm::errs()
-          << "[plugin-loader] WARNING: pass '" << passName
-          << "' requested for pipeline slot " << static_cast<int>(slot)
-          << " but not registered in MLIR's pass registry. "
-          << "Did the plugin's RegisterCallbacks call registerPass<>()?\n";
+          << "[plugin-loader] WARNING: could not add pass pipeline '"
+          << passName << "' requested for pipeline slot "
+          << static_cast<int>(slot)
+          << ". Check that the plugin registered the pass (registerPass<>() + "
+             "the host built with plugin symbol export) and that the string "
+             "carries the right anchor nesting (e.g. func.func(<arg>) for a "
+             "FuncOp pass).\n";
     }
   }
 }

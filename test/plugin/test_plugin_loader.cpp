@@ -189,15 +189,17 @@ void testRegisterCallbacksFiresAcrossDllBoundary() {
 
   // The sample plugin's RegisterCallbacks calls
   //   R.requestPipelineSlot(PipelineSlot::AfterConvertOnnxToHip,
-  //                         "hip-ep-sample-print-functions");
-  // so that pair must now be queryable through the public accessor.
+  //                         "func.func(hip-ep-sample-print-functions)");
+  // (the func.func(...) nesting is required because the slot resolves the
+  // string into a module-level pass manager and the pass is a FuncOp pass).
+  // That pair must now be queryable through the public accessor.
   auto afterPasses = hip::compiler::pluginPassesForSlot(
       hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
   HIP_EP_CHECK(afterPasses.size() == beforeCount + 1u,
                "pluginPassesForSlot increments by 1 after registerCallbacks");
   bool foundSamplePass = false;
   for (auto name : afterPasses) {
-    if (name == llvm::StringRef("hip-ep-sample-print-functions")) {
+    if (name == llvm::StringRef("func.func(hip-ep-sample-print-functions)")) {
       foundSamplePass = true;
       break;
     }
