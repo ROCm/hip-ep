@@ -1006,15 +1006,11 @@ jobs:
           $model = "${{ runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
-          # The AMDGPU OGA integration loads amdgpu-ep.dll at runtime, but the
-          # EP is built separately and not bundled into any Python wheel. The
-          # wheel smoke would need those DLLs injected into the venv's
-          # site-packages next to onnxruntime-genai.dll. Skip until the
-          # packaging story is resolved — the native OGA benchmark (above)
-          # already validates the full chain end-to-end.
-          Write-Host "[SKIP] OGA wheel smoke skipped for AMDGPU integration (amdgpu-ep.dll not in wheels)"
-          exit 0
-
+          # The morphizen wheel now bundles the whole AMD GPU umbrella chain
+          # (amdgpu-ep.dll + hipep-backend.dll + hipep.dll + hip-compiler +
+          # custom_kernels) into onnxruntime/capi/, next to onnxruntime.dll where
+          # OGA discovers the EP. No DLL injection needed — exercise the wheel
+          # path end-to-end.
           $pkg = "$PWD\wheelpkg"
           $venv = "$PWD\oga-smoke-venv"
           if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
