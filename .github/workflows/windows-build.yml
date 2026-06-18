@@ -418,6 +418,12 @@ jobs:
             Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           }
+          # pull/<n>.patch is a format-patch series; apply with `git am` so that
+          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
+          # correct intermediate tree. `git apply` flattens the series and chokes
+          # on the rename whose pre-image only exists after an earlier commit.
+          git config user.email "ci@rocm.amd.com"
+          git config user.name "ROCm CI"
           foreach ($pr in $prs -split '\s+') {
             if (-not $pr) { continue }
             $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.patch"
@@ -425,8 +431,9 @@ jobs:
             Write-Host "Fetching $url"
             Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
             Write-Host "Applying PR #$pr"
-            git apply --whitespace=nowarn $tmp
+            git am --3way --whitespace=nowarn $tmp
             if ($LASTEXITCODE -ne 0) {
+              git am --abort
               throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
             }
           }
