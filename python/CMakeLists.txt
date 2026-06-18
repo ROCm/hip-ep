@@ -87,9 +87,9 @@ endforeach()
 # here. Passed as --optional-dll so a plain EP-only wheel (var unset) is
 # unaffected and a missing path warns instead of failing. The caller (CI) is
 # responsible for building those DLLs before this wheel target runs.
-set(MORPHIZEN_WHEEL_EXTRA_DLLS "" CACHE STRING
+set(HIPEP_WHEEL_EXTRA_DLLS "" CACHE STRING
   "Absolute paths (;-list) of externally-built DLLs to bundle into the wheel")
-foreach(_extra IN LISTS MORPHIZEN_WHEEL_EXTRA_DLLS)
+foreach(_extra IN LISTS HIPEP_WHEEL_EXTRA_DLLS)
   if(_extra)
     list(APPEND _dll_args "--optional-dll" "${_extra}")
   endif()
