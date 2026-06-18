@@ -64,7 +64,10 @@ if(HIPDNN_ENABLE_PLUGINS)
   export_executable_symbols_for_plugins(hip-mlir-opt)
 endif()
 
-# Install target
+# Install target. EXPORT HipDnnEpTargets emits an IMPORTED HipDnnEp::hip-mlir-opt
+# target in the installed package config (install(EXPORT ...) is in the
+# top-level CMakeLists after add_subdirectory(tools)).
 install(TARGETS hip-mlir-opt
+  EXPORT HipDnnEpTargets
   RUNTIME DESTINATION bin
 )

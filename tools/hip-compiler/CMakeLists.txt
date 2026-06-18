@@ -36,4 +36,8 @@ if(HIPDNN_ENABLE_PLUGINS)
   export_executable_symbols_for_plugins(hip-compiler)
 endif()
 
-install(TARGETS hip-compiler RUNTIME DESTINATION bin)
+# EXPORT HipDnnEpTargets: emit an IMPORTED HipDnnEp::hip-compiler target in the
+# installed package config so downstream plugins can locate the compiler via
+# find_package(HipDnnEp). install(EXPORT HipDnnEpTargets) is in the top-level
+# CMakeLists after add_subdirectory(tools).
+install(TARGETS hip-compiler EXPORT HipDnnEpTargets RUNTIME DESTINATION bin)
