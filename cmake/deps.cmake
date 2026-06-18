@@ -18,6 +18,14 @@ foreach(_dep IN LISTS _HIPDNN_DEPS_LIST)
   set(DEP_HASH_${_dep_name} "${_dep}")  # remaining column = hash (may be empty)
 endforeach()
 
+# Single source of truth for the ROCm/TheRock SDK version: drives both the
+# auto-download tarball basename (below) and the rocm[...] wheel pin in
+# python/pyproject.toml.in. Defaults to the deps.txt therock pin; override with
+# -DTHEROCK_VERSION=<ver> (CI builds each matrix version) to keep the SDK and
+# the wheel dependency in lockstep.
+set(THEROCK_VERSION "${DEP_HASH_therock}" CACHE STRING
+    "ROCm/TheRock SDK version (auto-download tarball + rocm wheel pin)")
+
 # The shared toolchain (LLVM/MLIR/LLD, flatbuffers, cpptrace, TheRock) is needed
 # by both the EP and the standalone HIP tools, so it is resolved whenever either
 # is on. The EP-only deps (morphizen, ONNX Runtime, protobuf) stay gated on
@@ -59,9 +67,9 @@ if(_HIPDNN_NEED_TOOLCHAIN)
     else()
       # Auto-download: no SDK provided, so download the official tarball from the
       # public AMD host and extract it under the build tree, so a fresh real
-      # build needs no manual SDK setup. The pin lives in cmake/deps.txt
-      # (therock;<base-url>;<rocm-version>); the full tarball basename is derived
-      # from the host OS + the first HIP_ARCHITECTURES entry.
+      # build needs no manual SDK setup. The version is THEROCK_VERSION (default
+      # from the cmake/deps.txt therock row); the base URL is its url column. The
+      # full tarball basename is derived from the host OS + first HIP_ARCHITECTURES.
       set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
       if(NOT EXISTS "${_therock_root}/bin")
         if(WIN32)
@@ -78,7 +86,7 @@ if(_HIPDNN_NEED_TOOLCHAIN)
             "Cannot derive the TheRock tarball: set -DHIP_ARCHITECTURES=<gfxNNNN> "
             "(GPU arch), or provide -DTHEROCK_DIST=/path/to/therock.")
         endif()
-        set(_therock_base "therock-dist-${_therock_os}-${_therock_arch}-${DEP_HASH_therock}")
+        set(_therock_base "therock-dist-${_therock_os}-${_therock_arch}-${THEROCK_VERSION}")
         set(_therock_url "${DEP_URL_therock}/${_therock_base}.tar.gz")
         set(_therock_tgz "${CMAKE_BINARY_DIR}/${_therock_base}.tar.gz")
         if(NOT EXISTS "${_therock_tgz}")

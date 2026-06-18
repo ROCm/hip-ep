@@ -24,8 +24,9 @@ jobs:
     runs-on: windows-2022
     # Build each TheRock ROCm SDK version in parallel. fail-fast: false so one
     # version's failure does not cancel the others. The version flows into the
-    # build (build.py --therock_dist), the packaged amdhip64_7.dll, and the
-    # per-version artifact names consumed by the matching gpu-test leg.
+    # build (-DTHEROCK_VERSION drives the deps.cmake auto-download + the rocm
+    # wheel pin), the packaged amdhip64_7.dll, and the per-version artifact names
+    # consumed by the matching gpu-test leg.
     strategy:
       fail-fast: false
       matrix:
@@ -352,29 +353,12 @@ jobs:
           "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hipep-ep
 
       # -----------------------------------------------------------------------
-      # Download the matrix TheRock ROCm SDK so build.py uses this exact version
-      # (--therock_dist) instead of cmake/deps.cmake auto-downloading the pinned
-      # default. Same tarball layout the gpu-test job downloads at runtime; the
-      # packaged amdhip64_7.dll is taken from here too (staging step below).
-      # -----------------------------------------------------------------------
-      - name: Download & extract TheRock (build)
-        shell: pwsh
-        run: |
-          $dist = "${{ runner.workspace }}\therock-dist"
-          New-Item -ItemType Directory -Force -Path $dist | Out-Null
-          curl.exe -fsSL `
-            "https://repo.amd.com/rocm/tarball/therock-dist-windows-gfx1151-${{ matrix.therock }}.tar.gz" `
-            -o therock.tar.gz
-          tar -xzf therock.tar.gz -C $dist --strip-components=1
-          Remove-Item therock.tar.gz
-
-      # -----------------------------------------------------------------------
       # Build onnx-hipdnn-ep via the cross-platform build.py (same driver
       # as the Linux CI and docs/quick_start.md). Cached LLVM/ORT prefixes are
-      # injected; protobuf/flatbuffers build from source and TheRock comes from
-      # the matrix version downloaded above (--therock_dist). build.py's default
-      # build/install dirs resolve to ${{ runner.workspace }}/build/<repo> and
-      # ${{ runner.workspace }}/install (repo.parent), matching what the later
+      # injected; protobuf/flatbuffers build from source and TheRock auto-downloads
+      # via cmake/deps.cmake at the matrix version (-DTHEROCK_VERSION). build.py's
+      # default build/install dirs resolve to ${{ runner.workspace }}/build/<repo>
+      # and ${{ runner.workspace }}/install (repo.parent), matching what the later
       # staging step expects. The LIT tests run inside build.py after install.
       #
       # HIPEP_WHEEL_EXTRA_DLLS feeds the wheel target the amdgpu-ep.dll +
@@ -393,9 +377,9 @@ jobs:
             --config Release \
             --cmake_generator Ninja \
             --hip_arch gfx1151 \
-            --therock_dist "${{ runner.workspace }}/therock-dist" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines THEROCK_VERSION=${{ matrix.therock }} \
             --cmake_extra_defines "HIPEP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIPEP_BACKEND"
 
       # -----------------------------------------------------------------------
@@ -600,10 +584,10 @@ jobs:
           # without touching this workflow each time.
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
-          # amdhip64_7.dll – HIP runtime required at inference time. TheRock is
-          # the matrix version downloaded above and passed via build.py
-          # --therock_dist (so the build tree's _therock is not created).
-          THEROCK_DIR="${{ runner.workspace }}/therock-dist"
+          # amdhip64_7.dll – HIP runtime required at inference time. TheRock was
+          # auto-downloaded by cmake/deps.cmake (at THEROCK_VERSION) into the
+          # build tree's _therock.
+          THEROCK_DIR="../build/$(basename "$PWD")/_therock"
           cp "$THEROCK_DIR/bin/amdhip64_7.dll" staging/bin/
 
           # MorphiZen EP config
