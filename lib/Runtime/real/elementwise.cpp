@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -13,6 +14,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -127,24 +130,66 @@ struct OpTensorCacheKeyHash {
   }
 };
 
-/// Cached MIOpen tensor descriptors for a single OpTensor shape.
-/// Ownership: descriptors are created in queryOrCreateOpTensor() and live
-/// for the process lifetime (never destroyed individually).
+/// Cached MIOpen tensor descriptors for a single OpTensor shape. Owned by the
+/// OpTensorTable, which destroys them when the last session sharing it is torn
+/// down (previously these leaked for the process lifetime).
 struct OpTensorCacheEntry {
   miopenTensorDescriptor_t aDesc, bDesc, cDesc; // lhs, rhs, output
 };
 
-static std::unordered_map<OpTensorCacheKey, OpTensorCacheEntry,
-                          OpTensorCacheKeyHash>
-    g_optensor_cache;
+// One descriptor table shared across every session in the process and freed
+// when the last session holding it is destroyed. MIOpen tensor descriptors are
+// pure shape/dtype metadata (no device binding), so a single table is correct
+// for all sessions; the mutex guards find/insert because sessions run
+// Compute() on independent threads.
+struct OpTensorTable {
+  std::mutex mu;
+  std::unordered_map<OpTensorCacheKey, OpTensorCacheEntry, OpTensorCacheKeyHash>
+      map;
+  ~OpTensorTable() {
+    for (auto &kv : map) {
+      OpTensorCacheEntry &e = kv.second;
+      if (e.cDesc)
+        miopenDestroyTensorDescriptor(e.cDesc);
+      if (e.bDesc)
+        miopenDestroyTensorDescriptor(e.bDesc);
+      if (e.aDesc)
+        miopenDestroyTensorDescriptor(e.aDesc);
+    }
+  }
+};
+
+// weak_ptr-backed so this file-scope static does not itself leak the table:
+// it lives only while some session's OpTensorState holds a shared_ptr.
+static WeakStore<int, OpTensorTable> g_optensor_tables;
+
+// Per-instance op state for hip.miopen.add: the slot holds a shared_ptr to the
+// one shared descriptor table.
+struct OpTensorState : OpState {
+  std::shared_ptr<OpTensorTable> table;
+};
+
+extern "C" OpState *hipdnn_ep_op_state_construct_optensor(RuntimeState *) {
+  OpTensorState *st = make_op_state<OpTensorState>();
+  if (!st)
+    return nullptr;
+  int dev = 0;
+  hipGetDevice(&dev);
+  st->table = g_optensor_tables.get_or_create(
+      dev, [] { return std::make_shared<OpTensorTable>(); });
+  return st;
+}
 
 /// Look up or create cached MIOpen tensor descriptors for an OpTensor shape.
 /// Returns nullptr on any MIOpen API failure (partially created descriptors
 /// are cleaned up before returning).
 static const OpTensorCacheEntry *
-queryOrCreateOpTensor(const OpTensorCacheKey &key) {
-  auto it = g_optensor_cache.find(key);
-  if (it != g_optensor_cache.end())
+queryOrCreateOpTensor(OpTensorTable &table, const OpTensorCacheKey &key) {
+  // The table is shared across sessions, so guard find/insert. Entries are
+  // never erased, so the returned pointer stays valid after the lock drops.
+  std::lock_guard<std::mutex> guard(table.mu);
+  auto it = table.map.find(key);
+  if (it != table.map.end())
     return &it->second;
 
   bool type_ok;
@@ -187,7 +232,7 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = g_optensor_cache.emplace(key, e);
+  auto [ins, _] = table.map.emplace(key, e);
   return &ins->second;
 }
 
@@ -210,7 +255,8 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
                         int64_t rhs_h, int64_t rhs_w, int64_t out_n,
                         int64_t out_c, int64_t out_h, int64_t out_w,
-                        int64_t data_type, int64_t tensor_op) {
+                        int64_t data_type, int64_t tensor_op,
+                        int op_state_slot) {
   OP_PROFILE(
       "elementwise",
       [&] {
@@ -591,9 +637,16 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     }
   }
 
+  OpTensorState *os = op_state<OpTensorState>(state, op_state_slot);
+  if (!os || !os->table) {
+    fprintf(stderr, "wrap_miopenOpTensor: missing op-state for slot %d\n",
+            op_state_slot);
+    return -1;
+  }
+
   OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,    rhs_h,
                        rhs_w, out_n, out_c, out_h, out_w, data_type};
-  const OpTensorCacheEntry *c = queryOrCreateOpTensor(key);
+  const OpTensorCacheEntry *c = queryOrCreateOpTensor(*os->table, key);
   if (!c) {
     fprintf(stderr, "wrap_miopenOpTensor: descriptor cache creation failed\n");
     return -1;

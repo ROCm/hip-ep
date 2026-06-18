@@ -49,3 +49,38 @@ extern "C" OpState *
 hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *) {
   return make_op_state<OpState>();
 }
+
+// Activation (sigmoid/tanh/softplus): real runtime holds a shared_ptr to a
+// device-wide MIOpen descriptor table (ActivationState in real/activation.cpp);
+// the mock owns no device/MIOpen resources.
+extern "C" OpState *hipdnn_ep_op_state_construct_activation(RuntimeState *) {
+  return make_op_state<OpState>();
+}
+
+// MIOpen OpTensor (miopen.add): real runtime holds a shared_ptr to a
+// device-wide MIOpen descriptor table (OpTensorState in real/elementwise.cpp);
+// the mock owns no device/MIOpen resources.
+extern "C" OpState *hipdnn_ep_op_state_construct_optensor(RuntimeState *) {
+  return make_op_state<OpState>();
+}
+
+// SimplifiedLayerNorm (rms_norm): real runtime holds a shared_ptr to a
+// device-wide MIOpen descriptor table (T5NormState in
+// real/simplified_layer_norm.cpp); the mock owns no device/MIOpen resources.
+extern "C" OpState *hipdnn_ep_op_state_construct_t5norm(RuntimeState *) {
+  return make_op_state<OpState>();
+}
+
+// SkipSimplifiedLayerNorm (skip_rms_norm): real runtime holds a shared_ptr to a
+// device-wide MIOpen descriptor table (SkipT5NormState in
+// real/skip_simplified_layer_norm.cpp); the mock owns no device/MIOpen
+// resources.
+extern "C" OpState *hipdnn_ep_op_state_construct_skip_t5norm(RuntimeState *) {
+  return make_op_state<OpState>();
+}
+
+// Gemm: real runtime holds a shared_ptr to a device-wide hipBLASLt algo table
+// (GemmState in real/gemm.cpp); the mock owns no device/hipBLASLt resources.
+extern "C" OpState *hipdnn_ep_op_state_construct_gemm(RuntimeState *) {
+  return make_op_state<OpState>();
+}

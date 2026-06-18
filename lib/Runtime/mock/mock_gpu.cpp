@@ -780,7 +780,9 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
                         int64_t rhs_h, int64_t rhs_w, int64_t out_n,
                         int64_t out_c, int64_t out_h, int64_t out_w,
-                        int64_t data_type, int64_t tensor_op) {
+                        int64_t data_type, int64_t tensor_op,
+                        int op_state_slot) {
+  (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenOpTensor\n");
     return -1;
@@ -1025,7 +1027,8 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
 
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode) {
+                                 int64_t activation_mode, int op_state_slot) {
+  (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenActivationForward\n");
     return -1;
@@ -1100,7 +1103,9 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
                                   void *output, int64_t input_num_elements,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
-                                  float epsilon, int64_t stash_type) {
+                                  float epsilon, int64_t stash_type,
+                                  int op_state_slot) {
+  (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenT5LayerNormForward\n");
     return -1;
@@ -1121,7 +1126,9 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     void *output, void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon) {
+                                    int64_t element_size_bytes, float epsilon,
+                                    int op_state_slot) {
+  (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm\n");
     return -1;

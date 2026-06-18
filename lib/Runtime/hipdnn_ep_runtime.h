@@ -901,7 +901,8 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
                         int64_t rhs_h, int64_t rhs_w, int64_t out_n,
                         int64_t out_c, int64_t out_h, int64_t out_w,
-                        int64_t data_type, int64_t tensor_op);
+                        int64_t data_type, int64_t tensor_op,
+                        int op_state_slot);
 
 // Element-wise subtraction with 4D ONNX broadcast (rank <= 4).
 // Computes output = lhs - rhs; materialises broadcast via hip_expand when
@@ -1015,7 +1016,7 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
 // data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
-                                 int64_t activation_mode);
+                                 int64_t activation_mode, int op_state_slot);
 
 // GELU activation wrapper (uses custom HIP kernel)
 // Applies GELU element-wise with support for exact or approximate mode
@@ -1099,7 +1100,8 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
                                   void *output, int64_t input_num_elements,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
-                                  float epsilon, int64_t stash_type);
+                                  float epsilon, int64_t stash_type,
+                                  int op_state_slot);
 
 // LayerNormalization operation wrapper (standard ONNX opset 17+)
 // bias, mean, inv_std may be nullptr when optional inputs/outputs are absent
@@ -1119,7 +1121,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     void *output, void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon);
+                                    int64_t element_size_bytes, float epsilon,
+                                    int op_state_slot);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
@@ -1281,7 +1284,7 @@ int wrap_linear_attention(
 int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               void *output, int64_t M, int64_t N, int64_t K, float alpha,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
-              int64_t cDim0, int64_t cDim1);
+              int64_t cDim0, int64_t cDim1, int op_state_slot);
 
 // `out_num_elements` is the broadcast result count.  `a_num_elements` and
 // `b_num_elements` are the per-input element counts; either may be 1 to
