@@ -13,6 +13,11 @@
 
 #include "./api-ptrs.hpp"
 
+#include <cstddef>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
 namespace morphizen {
 
 // hipHostMalloc(Mapped|Coherent) backed OrtAllocator. One instance is created
@@ -28,12 +33,40 @@ struct HipGpuAllocator : OrtAllocator {
   // GPU that the OrtEpDevice actually represents (instead of always hitting
   // device 0).
   HipGpuAllocator(const OrtMemoryInfo* memory_info, const OrtApi& api);
+  // Frees every pinned buffer this allocator ever handed out (both the
+  // currently-free pool entries and any still checked out). Called by the
+  // factory's ReleaseAllocator at session teardown.
+  ~HipGpuAllocator();
 
 private:
   static void* ORT_API_CALL AllocImpl(OrtAllocator* this_, size_t size);
   static void ORT_API_CALL FreeImpl(OrtAllocator* this_, void* p);
   static const OrtMemoryInfo* ORT_API_CALL InfoImpl(const OrtAllocator* this_);
   static void* ORT_API_CALL ReserveImpl(OrtAllocator* this_, size_t size);
+
+  // Caching free-list. hipHostMalloc is a heavyweight (page-pinning) call:
+  // ORT re-allocates the per-Run input device-copy buffers and (allocator
+  // mode) the graph-output buffers on EVERY inference, so without caching the
+  // EP pays dozens of hipHostMalloc + hipHostFree per Compute (the dominant
+  // non-compute cost on small fixed-shape graphs). Instead Free returns the
+  // buffer to a size-keyed free list and Alloc reuses it; the driver is only
+  // touched on a cold miss (first inference / a newly-seen size). The pool
+  // grows on demand and is released wholesale in the destructor — matching
+  // the project's per-session "grow-on-demand, never shrink, free at cleanup"
+  // memory contract. Keyed on exact byte size so fixed-shape models reuse at
+  // 100% hit rate; distinct dynamic-shape sizes simply pool separately.
+  //
+  // Reuse needs no per-handout stream sync: ORT only calls Free after Run
+  // returns, and allocator-mode inference_compute ends with a full
+  // hipdnn_ep_stream_sync, so any GPU work touching a freed buffer has
+  // already drained before it can be handed back out.
+  std::mutex pool_mutex_;
+  std::unordered_map<size_t, std::vector<void*>> free_lists_;
+  // Every pointer hipHostMalloc'd by this allocator -> its byte size. Entries
+  // persist for the allocator's lifetime (Free does not erase them; it only
+  // moves the pointer onto free_lists_) so the destructor can free them all
+  // and FreeImpl can recover a pointer's bucket size.
+  std::unordered_map<void*, size_t> ptr_to_size_;
 
   const OrtMemoryInfo* memory_info_;
   // Cached at construction time. -1 means "couldn't read it from memory_info"
