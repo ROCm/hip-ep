@@ -9,6 +9,7 @@
 // Set HIPDNN_EP_PERF=1 to enable only [PERF] timing breakdown per inference.
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #ifdef _WIN32
 // Static CRT (/MT) DLLs have their own CRT env — _dupenv_s can't see env vars
@@ -23,6 +24,19 @@ inline bool check_env(const char *name) {
   char buf[8];
   unsigned long n = GetEnvironmentVariableA(name, buf, sizeof(buf));
   return n > 0 && buf[0] >= '1';
+}
+
+// Full string read for comma-separated op lists (see
+// HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS). Uses Win32 so /MT model.dll sees the host
+// process environment.
+inline const char *read_env_string_into(char *buf, unsigned buf_size,
+                                        const char *name, unsigned long *out_len) {
+  unsigned long n = GetEnvironmentVariableA(name, buf, buf_size);
+  *out_len = n;
+  if (n == 0 || n >= buf_size)
+    return nullptr;
+  buf[n] = '\0';
+  return buf;
 }
 } // namespace detail
 #endif
@@ -78,6 +92,71 @@ inline bool hipdnn_ep_perf_enabled() {
 #endif
   }();
   return enabled;
+}
+
+// HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS: comma-separated names (e.g. "Gather").
+// Matching is case-insensitive on whole trimmed tokens. Read once per process
+// on first use — intended for debug-only paths, not hot-tuned production.
+inline bool hipdnn_ep_debug_cpu_fallback_ops_contains(const char *token) {
+  static const int kUnknown = -1;
+  static const int kFalse = 0;
+  static const int kTrue = 1;
+  static int cached = kUnknown;
+  static char storage[2048];
+  if (cached != kUnknown)
+    return cached == kTrue;
+#ifdef _WIN32
+  unsigned long n = 0;
+  const char *list =
+      detail::read_env_string_into(storage, sizeof(storage),
+                                     "HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS", &n);
+  if (!list || !list[0]) {
+    cached = kFalse;
+    return false;
+  }
+#else
+  const char *list = std::getenv("HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS");
+  if (!list || !list[0]) {
+    cached = kFalse;
+    return false;
+  }
+#endif
+  const size_t tok_len = std::strlen(token);
+  const char *p = list;
+  while (*p) {
+    while (*p == ',' || *p == ' ' || *p == '\t')
+      ++p;
+    if (!*p)
+      break;
+    const char *start = p;
+    while (*p && *p != ',')
+      ++p;
+    const char *end = p;
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t'))
+      --end;
+    size_t seg_len = static_cast<size_t>(end - start);
+    if (seg_len == tok_len) {
+      size_t i = 0;
+      for (; i < tok_len; ++i) {
+        char a = start[i];
+        char b = token[i];
+        if (a >= 'A' && a <= 'Z')
+          a = static_cast<char>(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z')
+          b = static_cast<char>(b - 'A' + 'a');
+        if (a != b)
+          break;
+      }
+      if (i == tok_len) {
+        cached = kTrue;
+        return true;
+      }
+    }
+    if (*p == ',')
+      ++p;
+  }
+  cached = kFalse;
+  return false;
 }
 
 #define RUNTIME_DEBUG_LOG(fmt, ...)                                            \

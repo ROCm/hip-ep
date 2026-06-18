@@ -157,6 +157,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   // leaves it null and never calls hipdnn_ep_alloc_output.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
+  state->cpu_fallback.user = nullptr;
+  state->cpu_fallback.invoke = nullptr;
   state->qmoe_scratch = nullptr;
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;

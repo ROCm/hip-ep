@@ -29,6 +29,9 @@ Options:
  -1 = default, not call this function  (default: -1)
 -p, --positive-only       Generate positive-only random inputs [0.1, 256.0]
  for Sqrt/Reciprocal testing (flag)
+--token-vocab N           For INT32/INT64 tensors named input_ids (or *input_ids),
+ random token ids uniform in [0, N). Default 32000. Use 0 for legacy full-range
+ int64 random (Gather/embedding CPU paths may then reject out-of-range indices).
 */
 //===----------------------------------------------------------------------===//
 
@@ -67,6 +70,20 @@ static int64_t calculate_product(const std::vector<int64_t> &shape) {
   for (auto d : shape)
     n *= d;
   return n;
+}
+
+/// HF-style token tensors: bounded random ids avoid ORT Gather rejecting
+/// indices outside [0, vocab) when comparing against EP CPU fallback (GPU
+/// gather_kernel clamps out-of-range indices instead).
+static bool is_input_ids_tensor_name(const char *name) {
+  if (!name || !*name)
+    return false;
+  if (std::strcmp(name, "input_ids") == 0)
+    return true;
+  const char *suffix = "input_ids";
+  const size_t n = std::strlen(name);
+  const size_t ns = std::strlen(suffix);
+  return n >= ns && std::strcmp(name + (n - ns), suffix) == 0;
 }
 
 static size_t element_byte_size(ONNXTensorElementDataType t) {
@@ -257,15 +274,15 @@ static uint16_t float_to_bf16_bits(float f) {
 }
 
 // Random fill matching element type (do not reinterpret float bits as
-// int/fp16). Integers: uniform over the full representable range of each type.
-// Float32/fp16: keep a modest interval (same order as the old float-only path)
-// to avoid surprising huge magnitudes in models that expect bounded inputs.
-// positive_only: if true, generate only positive values for float types (for
-// Sqrt/Reciprocal testing)
+// int/fp16). Integers: mostly full-range; INT32/INT64 `input_ids` tensors use
+// [0, token_vocab) when token_vocab > 0 so embedding Gather matches ORT bounds.
+// Float32/fp16: modest interval. positive_only: positive float range only.
 static void fill_random_input_buffer(char *dst, size_t nbytes,
                                      ONNXTensorElementDataType et,
                                      std::mt19937 &rng,
-                                     bool positive_only = false) {
+                                     bool positive_only,
+                                     const char *input_name,
+                                     int token_vocab_hi_exclusive) {
   std::uniform_real_distribution<float> fdist(positive_only ? 0.1f : -256.0f,
                                               positive_only ? 256.0f : 255.0f);
   std::uniform_int_distribution<int> idist_i16(-32768, 32767);
@@ -307,6 +324,13 @@ static void fill_random_input_buffer(char *dst, size_t nbytes,
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
     auto *p = reinterpret_cast<int64_t *>(dst);
     const size_t n = nbytes / sizeof(int64_t);
+    if (input_name && token_vocab_hi_exclusive > 0 &&
+        is_input_ids_tensor_name(input_name)) {
+      std::uniform_int_distribution<int> dist(0, token_vocab_hi_exclusive - 1);
+      for (size_t i = 0; i < n; ++i)
+        p[i] = static_cast<int64_t>(dist(rng));
+      return;
+    }
     for (size_t i = 0; i < n; ++i) {
       const uint64_t u = idist_u64(rng);
       std::memcpy(&p[i], &u, sizeof(p[i]));
@@ -316,6 +340,13 @@ static void fill_random_input_buffer(char *dst, size_t nbytes,
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
     auto *p = reinterpret_cast<int32_t *>(dst);
     const size_t n = nbytes / sizeof(int32_t);
+    if (input_name && token_vocab_hi_exclusive > 0 &&
+        is_input_ids_tensor_name(input_name)) {
+      std::uniform_int_distribution<int> dist(0, token_vocab_hi_exclusive - 1);
+      for (size_t i = 0; i < n; ++i)
+        p[i] = static_cast<int32_t>(dist(rng));
+      return;
+    }
     for (size_t i = 0; i < n; ++i) {
       const uint32_t u = idist_u32(rng);
       std::memcpy(&p[i], &u, sizeof(p[i]));
@@ -828,6 +859,12 @@ int main(int argc, char *argv[]) {
       "Generate positive-only random inputs (for Sqrt/Reciprocal testing)",
       "false", true);
   mo.add_option(
+      "V", "token-vocab",
+      "Random-fill: for input_ids (*input_ids), INT32/INT64 tokens uniform in "
+      "[0,N). Default 32000. Use 0 for full-range int64 stress (may break Gather "
+      "CPU fallback vs ORT).",
+      "32000");
+  mo.add_option(
       "f", "free-dim",
       "Resolve a symbolic input dimension by name to a concrete value at RUN "
       "time: 'name:value' (repeatable or comma-separated), e.g. "
@@ -858,6 +895,12 @@ int main(int argc, char *argv[]) {
   const bool use_input_files = !input_dir_str.empty();
   const int graph_optimization_level = mo.get<int>("graph-opt-level");
   const bool positive_only = mo.get<bool>("positive-only");
+  const int token_vocab = mo.get<int>("token-vocab");
+  if (token_vocab < 0) {
+    std::cerr << "Error: --token-vocab must be >= 0.\n\n";
+    mo.print_help(argv[0]);
+    return 1;
+  }
 
   if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
       !l2norm_arg[1].empty()) {
@@ -1112,8 +1155,9 @@ int main(int argc, char *argv[]) {
       std::cout << "Loaded input " << i << " from " << bin_path.string()
                 << "\n";
     } else {
-      fill_random_input_buffer(input_buffers[i].data(), input_buffers[i].size(),
-                               input_types[i], rng, positive_only);
+      fill_random_input_buffer(
+          input_buffers[i].data(), input_buffers[i].size(), input_types[i], rng,
+          positive_only, input_names_str[i].c_str(), token_vocab);
     }
 
     Ort::MemoryInfo mem =

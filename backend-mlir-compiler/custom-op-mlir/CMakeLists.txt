@@ -8,6 +8,7 @@ message(STATUS "Configuring MLIR Custom Op")
 
 # Find dependencies
 find_package(glog CONFIG REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 # The embedded runtime.bc (runtime_bc_data) is provided by the shared
 # runtime-bc-embed lib (lib/Runtime); see its rationale there. LlvmIrJit.cpp's
@@ -57,12 +58,31 @@ llvm_map_components_to_libnames(bitcode_jit_llvm_libs
 
 # Create custom op library
 set(LIB_NAME morphizen-custom-op-mlir)
+
+# Gather CPU-fallback: embed a minimal valid ONNX (ORT Session). MorphiZen MLIR
+# backend's model_proto_serialize_as_string is NOT ONNX protobuf — do not feed
+# it to Ort::Session (protobuf parse fails). Source: onnx/gather_cpu_fb_*.onnx
+set(_HIPDNN_GATHER_FB_ONNX
+    ${CMAKE_CURRENT_SOURCE_DIR}/onnx/gather_cpu_fb_axis0_fp16_i64.onnx)
+set(_HIPDNN_GATHER_FB_GEN_INC
+    ${CMAKE_CURRENT_BINARY_DIR}/gather_cpu_fb_onnx_data.inc)
+add_custom_command(
+  OUTPUT ${_HIPDNN_GATHER_FB_GEN_INC}
+  COMMAND
+    ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_binary_c_array.py
+    ${_HIPDNN_GATHER_FB_ONNX} kGatherCpuFbOnnx ${_HIPDNN_GATHER_FB_GEN_INC}
+  DEPENDS ${_HIPDNN_GATHER_FB_ONNX}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_binary_c_array.py
+  COMMENT "Embedding Gather CPU-fallback ONNX (ORT-parseable)")
+
 add_library(${LIB_NAME} STATIC
   src/plugin_registration.cpp
   src/MlirCustomOp.cpp
   src/InferenceState.cpp
   src/LlvmIrJit.cpp
   src/LoadedArtifact.cpp
+  src/cpu_fallback_bridge.cpp
 )
 if(TARGET RuntimeBitcode)
   add_dependencies(${LIB_NAME} RuntimeBitcode)
@@ -103,10 +123,16 @@ endif()
 # Include directories
 target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_BINARY_DIR} # gather_cpu_fb_onnx_data.inc (CPU Gather fallback)
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
   ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by LlvmIrJit.cpp
+  ${CMAKE_SOURCE_DIR}/lib/Runtime # hipdnn_ep_runtime.h (CPU fallback ABI)
 )
+
+# Ensure gather_cpu_fb_onnx_data.inc exists before compiling cpu_fallback_bridge.cpp.
+add_custom_target(hipdnn_gather_cpu_fb_onnx_inc DEPENDS ${_HIPDNN_GATHER_FB_GEN_INC})
+add_dependencies(${LIB_NAME} hipdnn_gather_cpu_fb_onnx_inc)
 
 # Link to EP target with whole archive to ensure registration
 # Only link if target is defined (set by parent morphizen build system)

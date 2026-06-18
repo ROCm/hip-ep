@@ -194,6 +194,47 @@ static inline const char *hipdnn_ep_pool_mode_name(int64_t mode) {
 typedef struct RuntimeState RuntimeState;
 
 //===----------------------------------------------------------------------===//
+// Debug CPU fallback (EP installs; optional ONNX CPU path per op)
+//===----------------------------------------------------------------------===//
+//
+// `wrap_*` may call `iface->invoke` after D2H when env
+// HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS lists the op (see docs/design/
+// debug-cpu-fallback-plan.md). Intended for development only.
+//===----------------------------------------------------------------------===//
+
+#define HIPDNN_CPU_FB_OP_GATHER 1
+
+typedef struct HipdnnCpuFbGatherDesc {
+  int64_t axis;
+  int64_t data_hip_dtype;
+  int64_t indices_hip_dtype;
+  /** 4 = int32 indices, 8 = int64 (from `wrap_gather`; ORT path may widen 4→8). */
+  int64_t indices_element_size_bytes;
+  int64_t data_rank;
+  const int64_t *data_shape;
+  const void *data_host;
+  int64_t indices_rank;
+  const int64_t *indices_shape;
+  const void *indices_host;
+  int64_t output_rank;
+  const int64_t *output_shape;
+  void *output_host;
+  /* Element counts from wrap_gather (trusted); EP validates shape product. */
+  int64_t data_num_elements;
+  int64_t indices_num_elements;
+  int64_t output_num_elements;
+} HipdnnCpuFbGatherDesc;
+
+typedef int (*HipdnnCpuFallbackInvokeFn)(void *user, RuntimeState *state,
+                                         int32_t op_kind, const void *detail,
+                                         size_t detail_size);
+
+typedef struct hipdnn_cpu_fallback_iface {
+  void *user;
+  HipdnnCpuFallbackInvokeFn invoke;
+} hipdnn_cpu_fallback_iface_t;
+
+//===----------------------------------------------------------------------===//
 // RuntimeState: Opaque Execution State
 //===----------------------------------------------------------------------===//
 //
@@ -266,6 +307,11 @@ static_assert(offsetof(hipdnn_output_allocator_t, self) == 0,
 HIPDNN_EP_RT_EXPORT void
 hipdnn_ep_set_output_allocator(RuntimeState *state,
                                const hipdnn_output_allocator_t *allocator);
+
+// EP -> model.dll: optional debug path; `iface == nullptr` clears the slot.
+HIPDNN_EP_RT_EXPORT void
+hipdnn_ep_set_cpu_fallback(RuntimeState *state,
+                           const hipdnn_cpu_fallback_iface_t *iface);
 
 // generated main_graph -> runtime (internal), forwards to the installed
 // callback. Returns a generic address-space-0 device pointer (the lowering
@@ -948,11 +994,17 @@ int wrap_power(RuntimeState *state, void *input, void *output,
 // `axis_size` = data.shape[axis]; `inner_size` = product of
 // data.shape[axis+1:]. outer_size is derived as data_num_elements / (axis_size
 // * inner_size).
+// Shape arrays are stack (alloca) storage in the generated caller; ranks match
+// memref ranks. `data_hip_dtype` / `indices_hip_dtype` are HIPDNN_EP_DATATYPE_*.
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
                 int64_t axis_size, int64_t inner_size,
-                int64_t element_size_bytes, int64_t indices_element_size_bytes);
+                int64_t element_size_bytes, int64_t indices_element_size_bytes,
+                const int64_t *data_shape, int64_t data_rank,
+                const int64_t *indices_shape, int64_t indices_rank,
+                const int64_t *output_shape, int64_t output_rank,
+                int64_t data_hip_dtype, int64_t indices_hip_dtype);
 
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
