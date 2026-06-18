@@ -131,20 +131,22 @@ extern "C" void hipdnn_ep_zp_unpack_cache_destroy(void *cache_ptr) {
 // owns this instance's zero_points unpack cache. Replaces the former shared
 // RuntimeState::zp_unpack_cache, so concurrent matmul_nbits sessions no longer
 // share it.
-struct MatmulNbitsState : OpState {
+struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
   hipdnn_ep_real::ZpUnpackCache zp;
 };
 
-extern "C" OpState *hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *) {
-  return make_op_state<MatmulNbitsState>();
+extern "C" int8_t
+hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state, int32_t slot) {
+  return MatmulNbitsState::create(state, slot);
 }
 
-int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
-                      const void *scales, const void *zero_points,
-                      const void *g_idx, const void *bias, void *output,
-                      int64_t M, int64_t N, int64_t K, int64_t batch_count,
-                      int64_t bits, int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int op_state_slot) {
+int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
+                      const void *B, const void *scales,
+                      const void *zero_points, const void *g_idx,
+                      const void *bias, void *output, int64_t M, int64_t N,
+                      int64_t K, int64_t batch_count, int64_t bits,
+                      int64_t block_size, int64_t elem_size,
+                      int64_t zp_elem_size) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -185,7 +187,7 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
   const void *pre_zp_u8 = nullptr;
   const void *pre_zp_fp16 = nullptr;
   if (zero_points && zp_elem_size == 1 && bits == 4 && block_size > 0) {
-    MatmulNbitsState *mst = op_state<MatmulNbitsState>(state, op_state_slot);
+    MatmulNbitsState *mst = MatmulNbitsState::get_slot(state, op_state_slot);
     if (!mst) {
       fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
               op_state_slot);

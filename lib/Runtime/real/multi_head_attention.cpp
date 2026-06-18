@@ -135,7 +135,7 @@ struct MhaGemmCache {
 // owns this instance's per-GEMM-shape hipBLASLt descriptor/algorithm cache.
 // Replaces the former shared RuntimeState::mha_gemm_cache, so concurrent
 // sessions (and distinct MHA layers) no longer share one descriptor map.
-struct MhaState : OpState {
+struct MhaState : OpStateT<MhaState> {
   MhaGemmCache cache;
 };
 
@@ -143,7 +143,7 @@ struct MhaState : OpState {
 // nullptr when the slot is unconstructed (init failure) — callers propagate the
 // error rather than lazily allocating, since the slot is built at session init.
 MhaGemmCache *get_mha_gemm_cache(RuntimeState *state, int op_state_slot) {
-  MhaState *ms = op_state<MhaState>(state, op_state_slot);
+  MhaState *ms = MhaState::get_slot(state, op_state_slot);
   return ms ? &ms->cache : nullptr;
 }
 
@@ -299,10 +299,11 @@ MhaGemmCache::~MhaGemmCache() {
 
 // Construct this MHA instance's op-state slot (see op-state-slots-design.md).
 // No compile-time params: the descriptor cache fills lazily per GEMM shape. The
-// returned pointer is stored into op_states[slot] by --generate-op-state-init.
-extern "C" OpState *
-hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *) {
-  return make_op_state<MhaState>();
+// construct fn stores the state into op_states[slot] itself.
+extern "C" int8_t
+hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
+                                                  int32_t slot) {
+  return MhaState::create(state, slot);
 }
 
 //===----------------------------------------------------------------------===//
@@ -311,16 +312,16 @@ hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *) {
 //===----------------------------------------------------------------------===//
 
 extern "C" int wrap_multi_head_attention(
-    RuntimeState *state, void *query, void *key, void *value, void *bias,
+    RuntimeState *state,
+    // Per-instance op-state slot (MhaState: this layer's GEMM descriptor cache)
+    int op_state_slot, void *query, void *key, void *value, void *bias,
     void *key_padding_mask, void *attention_bias, void *past_key,
     void *past_value, void *past_sequence_length, void *cache_indirection,
     void *output, void *present_key, void *present_value, void *qk,
     int64_t num_heads, float mask_filter_value, float scale,
     int64_t unidirectional, int64_t batch_size, int64_t seq_len_q,
     int64_t seq_len_kv, int64_t query_hidden, int64_t v_hidden,
-    int64_t head_size, int64_t query_rank, int64_t element_size_bytes,
-    // Per-instance op-state slot (MhaState: this layer's GEMM descriptor cache)
-    int op_state_slot) {
+    int64_t head_size, int64_t query_rank, int64_t element_size_bytes) {
   (void)mask_filter_value; // currently unused (causal mask uses the -inf/-65504
                            // sentinel from hip_gqa_causal_mask_f32)
 

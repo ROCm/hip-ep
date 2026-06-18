@@ -78,25 +78,23 @@ struct T5NormTable {
   }
 };
 
-// weak_ptr-backed so this file-scope static does not itself leak the table:
-// it lives only while some session's T5NormState holds a shared_ptr.
-static WeakStore<int, T5NormTable> g_t5norm_tables;
-
 // Per-instance op state for hip.rms_norm: the slot holds a shared_ptr to the
-// one shared descriptor table.
-struct T5NormState : OpState {
+// one shared descriptor table, reached through a global WeakStore keyed by
+// device (see op_state.h). The store is weak_ptr-backed, so the table lives
+// only while some session's T5NormState holds a shared_ptr to it.
+struct T5NormState : OpStateT<T5NormState> {
   std::shared_ptr<T5NormTable> table;
+  T5NormState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, T5NormTable>::get_or_create(
+        dev, [] { return std::make_shared<T5NormTable>(); });
+  }
 };
 
-extern "C" OpState *hipdnn_ep_op_state_construct_t5norm(RuntimeState *) {
-  T5NormState *st = make_op_state<T5NormState>();
-  if (!st)
-    return nullptr;
-  int dev = 0;
-  hipGetDevice(&dev);
-  st->table = g_t5norm_tables.get_or_create(
-      dev, [] { return std::make_shared<T5NormTable>(); });
-  return st;
+extern "C" int8_t hipdnn_ep_op_state_construct_t5norm(RuntimeState *state,
+                                                      int32_t slot) {
+  return T5NormState::create(state, slot);
 }
 
 static const T5NormCacheEntry *queryOrCreateT5Norm(T5NormTable &table,
@@ -183,12 +181,12 @@ cache_done:
 //   rstd:   [num_rows]              (scratch -- not exposed to caller)
 //===----------------------------------------------------------------------===//
 
-int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
-                                  void *output, int64_t input_num_elements,
+int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
+                                  void *input, void *scale, void *output,
+                                  int64_t input_num_elements,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
-                                  float epsilon, int64_t stash_type,
-                                  int op_state_slot) {
+                                  float epsilon, int64_t stash_type) {
   OP_PROFILE(
       "layernorm",
       [&] {
@@ -238,7 +236,7 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
     return -1;
   }
 
-  T5NormState *ns = op_state<T5NormState>(state, op_state_slot);
+  T5NormState *ns = T5NormState::get_slot(state, op_state_slot);
   if (!ns || !ns->table) {
     fprintf(stderr,
             "wrap_miopenT5LayerNormForward: missing op-state for slot %d\n",

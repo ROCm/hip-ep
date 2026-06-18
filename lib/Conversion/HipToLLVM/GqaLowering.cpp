@@ -187,6 +187,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     // Function signature matches wrap_group_query_attention() in gqa.cpp
     SmallVector<Type, 39> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
         ptrType, // query
         ptrType, // key
@@ -227,8 +228,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // seq_len_kv
         i64Type, // past_buf_seq
         i64Type, // head_dim
-        i64Type, // element_size_bytes
-        i32Type  // op_state_slot
+        i64Type  // element_size_bytes
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -238,6 +238,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
     SmallVector<Value, 39> args = {
         statePtr,
+        // Per-instance op-state slot (threaded by --assign-op-state-slots)
+        getOpStateSlotValue(op, rewriter, loc),
         // Inputs (14 pointers)
         queryPtr, keyPtr, valuePtr, pastKeyPtr, pastValuePtr, seqlensKPtr,
         totalSeqLenPtr, cosCachePtr, sinCachePtr, positionIdsPtr,
@@ -250,9 +252,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         kvCacheBitWidth, noCausal,
         // Shape info (6 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
-        elemSizeVal,
-        // Per-instance op-state slot (threaded by --assign-op-state-slots)
-        getOpStateSlotValue(op, rewriter, loc)};
+        elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

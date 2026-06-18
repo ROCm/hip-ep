@@ -6,9 +6,10 @@
 // Verify --generate-op-state-init emits per-instance op-state construction for
 // hip.matmul_nbits. Its MatmulNbitsState owns a zero_points unpack cache that
 // fills lazily per call, so the constructor takes no compile-time args. The
-// generated init must (1) allocate the slot array, (2) call the no-arg
-// constructor hipdnn_ep_op_state_construct_matmul_nbits, and (3) store the
-// result into slot 0. See docs/design/op-state-slots-design.md.
+// generated init must (1) allocate the slot array and (2) call
+// hipdnn_ep_op_state_construct_matmul_nbits with slot 0, which stores the state
+// into op_states[0] itself and returns an i8 ok flag. See
+// docs/design/op-state-slots-design.md.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --assign-op-state-slots --generate-op-state-init | FileCheck %s
@@ -24,11 +25,11 @@
 // CHECK: llvm.cond_br %{{.*}}, ^[[FAIL:bb[0-9]+]], ^[[OK_BB:bb[0-9]+]]
 
 // Success path: MatMulNBits contributes a no-arg construction (cache fills
-// lazily at runtime), then the state is stored into slot 0.
+// lazily at runtime). The construct fn takes slot 0 and stores the state into
+// op_states[0] itself.
 // CHECK: ^[[OK_BB]]:
-// CHECK: %[[ST:.*]] = llvm.call @hipdnn_ep_op_state_construct_matmul_nbits(%[[STATE]])
 // CHECK: %[[SLOT:.*]] = llvm.mlir.constant(0 : i32)
-// CHECK: llvm.call @hipdnn_ep_op_state_set(%[[STATE]], %[[SLOT]], %[[ST]])
+// CHECK: %[[ST:.*]] = llvm.call @hipdnn_ep_op_state_construct_matmul_nbits(%[[STATE]], %[[SLOT]])
 // CHECK: llvm.return
 
 // Failure path: nothing constructed, just return.

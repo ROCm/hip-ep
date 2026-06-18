@@ -107,25 +107,23 @@ struct GemmAlgoTable {
   std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> map;
 };
 
-// weak_ptr-backed so this file-scope static does not itself leak the table:
-// it lives only while some session's GemmState holds a shared_ptr.
-static WeakStore<int, GemmAlgoTable> g_gemm_tables;
-
 // Per-instance op state for hip.gemm: the slot holds a shared_ptr to the one
-// shared algo table.
-struct GemmState : OpState {
+// shared algo table, reached through a global WeakStore keyed by device (see
+// op_state.h). The store is weak_ptr-backed, so the table lives only while some
+// session's GemmState holds a shared_ptr to it.
+struct GemmState : OpStateT<GemmState> {
   std::shared_ptr<GemmAlgoTable> table;
+  GemmState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, GemmAlgoTable>::get_or_create(
+        dev, [] { return std::make_shared<GemmAlgoTable>(); });
+  }
 };
 
-extern "C" OpState *hipdnn_ep_op_state_construct_gemm(RuntimeState *) {
-  GemmState *st = make_op_state<GemmState>();
-  if (!st)
-    return nullptr;
-  int dev = 0;
-  hipGetDevice(&dev);
-  st->table = g_gemm_tables.get_or_create(
-      dev, [] { return std::make_shared<GemmAlgoTable>(); });
-  return st;
+extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
+                                                    int32_t slot) {
+  return GemmState::create(state, slot);
 }
 
 // =============================================================================
@@ -484,10 +482,10 @@ static GemmCacheEntry selectGemmAlgo(
 //   C/Y:      [M,N] rm  → col-major [N,M] ld=N
 // =============================================================================
 
-int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
-              void *output, int64_t M, int64_t N, int64_t K, float alpha,
-              float beta, int64_t transA, int64_t transB, int64_t typeCode,
-              int64_t cDim0, int64_t cDim1, int op_state_slot) {
+int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
+              const void *B, const void *C, void *output, int64_t M, int64_t N,
+              int64_t K, float alpha, float beta, int64_t transA,
+              int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1) {
   OP_PROFILE(
       "gemm",
       [&] {
@@ -512,7 +510,7 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
     return -1;
   }
 
-  GemmState *gs = op_state<GemmState>(state, op_state_slot);
+  GemmState *gs = GemmState::get_slot(state, op_state_slot);
   if (!gs || !gs->table) {
     fprintf(stderr, "wrap_gemm: missing op-state for slot %d\n", op_state_slot);
     return -1;

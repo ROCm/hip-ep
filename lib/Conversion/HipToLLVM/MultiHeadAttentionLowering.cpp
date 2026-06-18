@@ -155,6 +155,7 @@ struct MultiHeadAttentionOpLowering
     // wrap_multi_head_attention signature (declared in hipdnn_ep_runtime.h).
     SmallVector<Type> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         // Inputs (10 pointers - some may be nullptr)
         ptrType, // query
         ptrType, // key
@@ -184,8 +185,7 @@ struct MultiHeadAttentionOpLowering
         i64Type, // v_hidden
         i64Type, // head_size
         i64Type, // query_rank
-        i64Type, // element_size_bytes
-        i32Type  // op_state_slot
+        i64Type  // element_size_bytes
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -194,6 +194,9 @@ struct MultiHeadAttentionOpLowering
       return failure();
 
     SmallVector<Value> args = {statePtr,
+                               // Per-instance op-state slot (threaded by
+                               // --assign-op-state-slots)
+                               getOpStateSlotValue(op, rewriter, loc),
                                // Inputs (10)
                                queryPtr, keyPtr, valuePtr, biasPtr,
                                keyPaddingMaskPtr, attentionBiasPtr, pastKeyPtr,
@@ -205,10 +208,7 @@ struct MultiHeadAttentionOpLowering
                                numHeads, maskFilterValue, scale, unidirectional,
                                // Shape info (7)
                                batchSize, seqLenQ, seqLenKV, queryHidden,
-                               vHidden, headSize, queryRankVal, elemSizeVal,
-                               // Per-instance op-state slot (threaded by
-                               // --assign-op-state-slots)
-                               getOpStateSlotValue(op, rewriter, loc)};
+                               vHidden, headSize, queryRankVal, elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

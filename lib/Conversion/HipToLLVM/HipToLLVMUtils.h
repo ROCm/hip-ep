@@ -280,10 +280,11 @@ extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter &rewriter,
 }
 
 // Read the compiler-assigned op-state slot (`hip.op_state_slot`, set by
-// --assign-op-state-slots) as an i32 constant Value, to be appended as the
-// trailing argument of a stateful op's wrap_* runtime call. Returns -1 when the
-// attribute is absent (op not stateful / pass not run), which the runtime
-// treats as "no slot". See docs/design/op-state-slots-design.md.
+// --assign-op-state-slots) as an i32 constant Value, passed as the second
+// argument (right after RuntimeState*) of a stateful op's wrap_* runtime call.
+// Returns -1 when the attribute is absent (op not stateful / pass not run),
+// which the runtime treats as "no slot". See
+// docs/design/op-state-slots-design.md.
 inline Value getOpStateSlotValue(Operation *op,
                                  ConversionPatternRewriter &rewriter,
                                  Location loc) {

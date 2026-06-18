@@ -128,25 +128,24 @@ struct MatmulAlgoTable {
   }
 };
 
-// weak_ptr-backed so this file-scope static does not itself leak the tables:
-// a table lives only while some session's MatmulState holds a shared_ptr.
-static WeakStore<int, MatmulAlgoTable> g_matmul_tables;
-
 // Per-instance op state: each hip.matmul slot holds a shared_ptr to its
-// device's shared table, keeping it alive for the session's lifetime.
-struct MatmulState : OpState {
+// device's shared table, keeping it alive for the session's lifetime. The table
+// is reached through a global WeakStore keyed by device (see op_state.h); it is
+// weak_ptr-backed, so it lives only while some session's MatmulState holds a
+// shared_ptr to it.
+struct MatmulState : OpStateT<MatmulState> {
   std::shared_ptr<MatmulAlgoTable> table;
+  MatmulState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, MatmulAlgoTable>::get_or_create(
+        dev, [] { return std::make_shared<MatmulAlgoTable>(); });
+  }
 };
 
-extern "C" OpState *hipdnn_ep_op_state_construct_matmul(RuntimeState *) {
-  MatmulState *st = make_op_state<MatmulState>();
-  if (!st)
-    return nullptr;
-  int dev = 0;
-  hipGetDevice(&dev);
-  st->table = g_matmul_tables.get_or_create(
-      dev, [] { return std::make_shared<MatmulAlgoTable>(); });
-  return st;
+extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
+                                                      int32_t slot) {
+  return MatmulState::create(state, slot);
 }
 
 static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
@@ -432,10 +431,10 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 // Both fp16 and fp32 use HIPBLAS_COMPUTE_32F for accumulation precision.
 //===----------------------------------------------------------------------===//
 
-int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
-                         void *output, int64_t M, int64_t N, int64_t K,
-                         int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride, int op_state_slot) {
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride) {
   OP_PROFILE(
       "matmul",
       [&] {
@@ -475,7 +474,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                     (long long)elem_size, type_name,
                     (long long)(batch_count * M * N * elem_size));
 
-  MatmulState *ms = op_state<MatmulState>(state, op_state_slot);
+  MatmulState *ms = MatmulState::get_slot(state, op_state_slot);
   if (!ms || !ms->table) {
     fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",
             op_state_slot);

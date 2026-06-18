@@ -340,7 +340,7 @@ struct GqaGemmCache {
 // instance's per-GEMM-shape hipBLASLt descriptor/algorithm cache. Replaces the
 // former shared RuntimeState::gqa_gemm_cache, so concurrent sessions (and
 // distinct GQA layers) no longer share one descriptor map.
-struct GqaState : OpState {
+struct GqaState : OpStateT<GqaState> {
   GqaGemmCache cache;
 };
 
@@ -348,7 +348,7 @@ struct GqaState : OpState {
 // nullptr when the slot is unconstructed (init failure) — callers propagate the
 // error rather than lazily allocating, since the slot is built at session init.
 static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
-  GqaState *gs = op_state<GqaState>(state, op_state_slot);
+  GqaState *gs = GqaState::get_slot(state, op_state_slot);
   return gs ? &gs->cache : nullptr;
 }
 
@@ -1380,6 +1380,8 @@ cleanup:
 
 int wrap_group_query_attention(
     RuntimeState *state,
+    // Per-instance op-state slot (GqaState: this layer's GEMM descriptor cache)
+    int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
     void *seqlens_k, void *total_seq_len,
@@ -1401,9 +1403,7 @@ int wrap_group_query_attention(
     // Shape values (6): past_buf_seq is the buffer dimension of past_key
     // (may differ from actual past token count for pre-allocated caches)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    // Per-instance op-state slot (GqaState: this layer's GEMM descriptor cache)
-    int op_state_slot) {
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
   OP_PROFILE(
       "gqa",
       [&] {
@@ -1569,7 +1569,8 @@ GqaGemmCache::~GqaGemmCache() {
 
 // Construct this GQA instance's op-state slot (see op-state-slots-design.md).
 // No compile-time params: the descriptor cache fills lazily per GEMM shape. The
-// returned pointer is stored into op_states[slot] by --generate-op-state-init.
-extern "C" OpState *hipdnn_ep_op_state_construct_gqa(RuntimeState *) {
-  return make_op_state<GqaState>();
+// construct fn stores the state into op_states[slot] itself.
+extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
+                                                   int32_t slot) {
+  return GqaState::create(state, slot);
 }

@@ -18,8 +18,17 @@
 // CHECK: llvm.func @hipdnn_ep_op_states_init_fn(%[[STATE:.*]]: !llvm.ptr) -> i32
 // CHECK: %[[N:.*]] = llvm.mlir.constant(2 : i64)
 // CHECK: llvm.call @hipdnn_ep_op_states_alloc(%[[STATE]], %[[N]])
-// CHECK: llvm.call @hipdnn_ep_op_state_construct_optensor(%[[STATE]])
-// CHECK: llvm.call @hipdnn_ep_op_state_construct_optensor(%[[STATE]])
+// On alloc failure, branch to the fail block and return without constructing.
+// CHECK: llvm.cond_br %{{.*}}, ^[[FAIL:bb[0-9]+]], ^[[OK_BB:bb[0-9]+]]
+// Each instance is constructed in its own slot (anchored inside the construct
+// block so the slot constants are not confused with the entry-block i32
+// success/failure return constants); the construct fn takes the slot operand
+// and stores the state into op_states[slot] itself (no separate _set call).
+// CHECK: ^[[OK_BB]]:
+// CHECK: %[[SLOT0:.*]] = llvm.mlir.constant(0 : i32)
+// CHECK: %[[ST0:.*]] = llvm.call @hipdnn_ep_op_state_construct_optensor(%[[STATE]], %[[SLOT0]])
+// CHECK: %[[SLOT1:.*]] = llvm.mlir.constant(1 : i32)
+// CHECK: %[[ST1:.*]] = llvm.call @hipdnn_ep_op_state_construct_optensor(%[[STATE]], %[[SLOT1]])
 
 module {
   func.func @add_then_mul(%ctx: !hip.context,

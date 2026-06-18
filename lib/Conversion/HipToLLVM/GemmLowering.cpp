@@ -107,6 +107,7 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
 
     SmallVector<Type, 16> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         ptrType, // A
         ptrType, // B
         ptrType, // C (nullable)
@@ -121,7 +122,6 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
         i64Type, // typeCode
         i64Type, // cDim0
         i64Type, // cDim1
-        i32Type, // op_state_slot
     };
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapGemm, paramTypes, i32Type);
@@ -130,14 +130,14 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     }
 
     SmallVector<Value, 16> args = {
-        statePtr,    input_A_ptr,
-        input_B_ptr, input_C_ptr,
-        output_ptr,  M,
-        N,           K,
-        alpha,       beta,
-        transA,      transB,
-        typeCodeVal, cDim0,
-        cDim1,       getOpStateSlotValue(op, rewriter, loc)};
+        statePtr,    getOpStateSlotValue(op, rewriter, loc),
+        input_A_ptr, input_B_ptr,
+        input_C_ptr, output_ptr,
+        M,           N,
+        K,           alpha,
+        beta,        transA,
+        transB,      typeCodeVal,
+        cDim0,       cDim1};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
