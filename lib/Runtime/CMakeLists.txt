@@ -437,6 +437,13 @@ add_library(hipdnn-ep-tls STATIC tls_stream.cpp)
 set_target_properties(hipdnn-ep-tls PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Install the import/static lib so NATIVE model DLLs can link it on a deploy
+# host that only has the packaged tree (no build dir). CompilerDriver bakes the
+# build-tree path into HIPDNN_EP_TLS_LIB_DIR, which does not exist on the GPU
+# test machine; staging hipdnn-ep-tls.lib into install/lib (then onto LIB) lets
+# lld-link resolve it there. Bitcode (default) does not need it.
+install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
+
 # ============================================================================
 # STEP 7: Shared embedded runtime.bc (single source of truth)
 # ============================================================================
