@@ -244,15 +244,32 @@ once. Contributions compose by load order:
 ## Linkage requirement
 
 `registerPass<T>()` writes MLIR's process-global pass registry. For a
-plugin-registered pass to be visible to the host, **the host and the plugin
-must share a single MLIR instance** -- i.e. both link the shared MLIR
-library rather than the per-component static archives. If each links MLIR
-statically, the plugin populates its own copy of the registry, the host's
-pass lookup cannot find the pass, and the slot dispatch emits the
-"not registered" warning above.
+plugin-registered pass to be visible to the host, the plugin's registration
+must land in **the host's** copy of that registry. The host (`hip-compiler` /
+`hip-mlir-opt`) links MLIR statically, so this is achieved exactly the way
+upstream LLVM tools do it -- the host **exports its statically-linked MLIR
+symbols**, and the plugin leaves its MLIR symbols **undefined** so they bind to
+the host at `dlopen` time:
+
+- **Host side:** built with `HIPDNN_ENABLE_PLUGINS` (default ON), which calls
+  `export_executable_symbols_for_plugins()` on the tool executables -- the same
+  call `mlir-opt` makes (`mlir/tools/mlir-opt/CMakeLists.txt`). On Linux this
+  takes the `ENABLE_EXPORTS` / `-rdynamic` path. LLVM is already linked as the
+  shared `libLLVM`, so only the MLIR symbols are exported.
+- **Plugin side:** links MLIR **headers only** (no MLIR libraries), so its
+  registry/op references are undefined and resolve to the host's single copy.
+  A plugin that statically links MLIR gets its own registry; the host's lookup
+  then misses and the slot dispatch warns.
+
+This is the model the public build ships. (An alternative -- routing MLIR
+through a shared `libMLIR.so` dylib so host and plugin both link it -- also
+works and is what a non-executable host, e.g. an EP DLL, would need; it is not
+how the CLI tools are built.) ROCm's `libamd_comgr.so` references no MLIR
+symbols and resolves its LLVM from the same shared `libLLVM`, so exporting the
+host's MLIR symbols does not perturb comgr.
 
 The bitcode and library contributions do not cross MLIR's global state, so
-they work regardless of MLIR linkage. The shared-MLIR requirement applies
+they work regardless of this -- the symbol-export requirement applies
 specifically to the pass (and, for the planned dialect/op extension, the
 dialect and type registries).
 
@@ -275,29 +292,32 @@ A pass-only or lowering-only plugin writes a subset (no kernel / no runtime
 wrapper).
 
 > Prerequisite for pass-contributing plugins: a plugin pass only takes effect
-> when the host (`hip-compiler` / `hip-mlir-opt`) is built against the shared
-> MLIR library, so the host and plugin share one pass registry (see
-> [Linkage requirement](#linkage-requirement)). The default host build
-> statically links MLIR, so enabling the shared-MLIR build is a one-time setup
-> step. The bitcode and library contributions do not depend on this and work
-> against the default build.
+> when the host (`hip-compiler` / `hip-mlir-opt`) was built with
+> `HIPDNN_ENABLE_PLUGINS` (default ON) so it exports its MLIR symbols, and the
+> plugin links MLIR headers only (see
+> [Linkage requirement](#linkage-requirement)). The bitcode and library
+> contributions do not depend on this and work regardless.
 
 ### 1. Consume the public install tree
 
-The public build installs the plugin headers and the compiler binaries
-under a prefix:
+The public build installs the plugin headers, the compiler binaries, and a
+CMake package config under a prefix:
 
 ```
 <prefix>/include/hip/Compiler/PluginAPI.h
 <prefix>/include/hip/Compiler/PluginRegistry.h
 <prefix>/include/hip/Compiler/PluginLoader.h
 <prefix>/bin/hip-compiler, hip-mlir-opt
+<prefix>/lib/cmake/HipDnnEp/HipDnnEpConfig.cmake
 ```
 
-The plugin's CMake takes that prefix (for example `-DHIPDNN_EP_DIST=<prefix>`),
-adds its `include/` to the include path, and links the shared MLIR library
-(see [Linkage requirement](#linkage-requirement)). The plugin links no
-symbol from `hip-compiler` itself.
+The plugin's CMake does `find_package(HipDnnEp CONFIG REQUIRED)` (with
+`-DHipDnnEp_DIR=<prefix>/lib/cmake/HipDnnEp`), which provides the
+`HipDnnEp::plugin_headers` INTERFACE target (the include path) and the
+`HipDnnEp::hip-compiler` / `HipDnnEp::hip-mlir-opt` IMPORTED executables. It
+also `find_package(MLIR CONFIG)`s the same MLIR build and links MLIR
+**headers only** (see [Linkage requirement](#linkage-requirement)). The plugin
+links no symbol from `hip-compiler` itself.
 
 ### 2. Write the pass
 
@@ -392,9 +412,11 @@ in-tree runtime; the kernel library is added to the native link.
 ### 5. Build the plugin
 
 ```cmake
-# CMakeLists.txt (downstream repo). HIPDNN_EP_DIST points at the public
-# install prefix; MLIR must be the same build the host was compiled against.
-find_package(MLIR REQUIRED CONFIG)
+# CMakeLists.txt (downstream repo). Consume the public install tree's package
+# config; MLIR must be the same build the host was compiled against.
+#   -DHipDnnEp_DIR=<prefix>/lib/cmake/HipDnnEp
+find_package(HipDnnEp CONFIG REQUIRED)
+find_package(MLIR CONFIG REQUIRED)
 
 # (a) Compile the runtime wrapper to LLVM bitcode and embed it as a byte
 #     array (my_wrap_bc / my_wrap_bc_size), e.g. clang -emit-llvm then an
@@ -402,16 +424,17 @@ find_package(MLIR REQUIRED CONFIG)
 # (b) Build the device kernels into a vendor library.
 add_library(vendor_kernels STATIC runtime/my_kernel.hip)
 
-# (c) Build the plugin shared library. Link the shared MLIR library so the
-#     pass registry is shared with the host (see Linkage requirement); link
-#     no hip-compiler symbol.
+# (c) Build the plugin shared library. Link the plugin ABI headers + MLIR
+#     HEADERS ONLY (no MLIR libraries) so the plugin's MLIR symbols bind to the
+#     symbol-exporting host at load (see Linkage requirement); link no
+#     hip-compiler symbol.
 add_library(my_vendor_plugin SHARED
   plugin_main.cpp MyLoweringPass.cpp ${EMBEDDED_BC_SRC})
-target_include_directories(my_vendor_plugin PRIVATE
-  ${HIPDNN_EP_DIST}/include ${MLIR_INCLUDE_DIRS})
-target_link_libraries(my_vendor_plugin PRIVATE MLIR)   # shared libMLIR
+target_include_directories(my_vendor_plugin PRIVATE ${MLIR_INCLUDE_DIRS})
+target_link_libraries(my_vendor_plugin PRIVATE HipDnnEp::plugin_headers)
 set_target_properties(my_vendor_plugin PROPERTIES
-  WINDOWS_EXPORT_ALL_SYMBOLS ON)                        # export hipEpGetPluginInfo
+  WINDOWS_EXPORT_ALL_SYMBOLS ON                          # export hipEpGetPluginInfo
+  PREFIX "")
 ```
 
 ### 6. Deploy

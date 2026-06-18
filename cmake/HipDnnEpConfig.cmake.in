@@ -1,0 +1,33 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+#
+# onnx-hipdnn-ep plugin SDK package config.
+#
+# Consumed by a downstream plugin via:
+#   find_package(HipDnnEp CONFIG REQUIRED)   # -DHipDnnEp_DIR=<prefix>/lib/cmake/HipDnnEp
+#
+# Provides:
+#   HipDnnEp::plugin_headers - INTERFACE target carrying the public include dir
+#                              (hip/Compiler/PluginAPI.h, PluginRegistry.h).
+#   HipDnnEp::hip-compiler   - IMPORTED executable: the ONNX MLIR -> LLVM/native
+#                              compiler CLI that loads HIP_EP_PLUGINS plugins.
+#   HipDnnEp::hip-mlir-opt   - IMPORTED executable: the MLIR pass driver.
+#
+# A plugin links HipDnnEp::plugin_headers for the ABI headers and ALSO needs
+# MLIR headers (for mlir::PassRegistration<>). MLIR is intentionally NOT
+# re-exported here: call find_package(MLIR CONFIG) yourself against the SAME
+# MLIR build the tools were compiled with, and link the plugin to MLIR HEADERS
+# ONLY (do not link the MLIR libraries -- the plugin's MLIR symbols must stay
+# undefined so they bind to the symbol-exporting host at dlopen time; see
+# docs/plugin_authoring.md). The build-time MLIR_DIR / LLVM_DIR are recorded
+# below as convenience hints.
+set(HipDnnEp_MLIR_DIR_HINT "@MLIR_DIR@")
+set(HipDnnEp_LLVM_DIR_HINT "@LLVM_DIR@")
+
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/HipDnnEpTargets.cmake")
+
+check_required_components(HipDnnEp)

@@ -103,16 +103,27 @@ hipEpGetPluginInfo() {
 }
 ```
 
-CMake (omitting the path for brevity — adapt to your repo layout):
+CMake — consume the upstream install tree via its package config:
 
 ```cmake
-find_package(MLIR REQUIRED CONFIG)
+# Point at <upstream-install-prefix>/lib/cmake/HipDnnEp:
+#   cmake -S . -B build -DHipDnnEp_DIR=<prefix>/lib/cmake/HipDnnEp ...
+find_package(HipDnnEp CONFIG REQUIRED)
+# The SAME MLIR build the host (hip-compiler) was compiled with. The package
+# config records the build-time location in HipDnnEp_MLIR_DIR_HINT.
+find_package(MLIR CONFIG REQUIRED)
 
 add_library(my_vendor_plugin SHARED my_plugin.cpp)
-# Link the shared MLIR library (not the per-component static archives) so the
-# plugin and host share one MLIR pass registry; a static link makes a
-# contributed pass invisible to the host (see section 4).
-target_link_libraries(my_vendor_plugin PRIVATE MLIR)
+
+# Link the plugin ABI HEADERS and MLIR HEADERS ONLY. Do NOT link the MLIR
+# libraries: the plugin's MLIR symbols (mlir::PassRegistration, the pass
+# registry, op TypeIDs) must stay UNDEFINED so they bind to the host's single
+# copy at dlopen time. The host (hip-compiler / hip-mlir-opt) is built with
+# HIPDNN_ENABLE_PLUGINS, which exports its statically-linked MLIR symbols
+# (LLVM's export_executable_symbols_for_plugins, the same call mlir-opt makes).
+# Linking MLIR into the plugin would give it a PRIVATE registry the host never
+# reads, so its pass would be invisible (see section 4).
+target_link_libraries(my_vendor_plugin PRIVATE HipDnnEp::plugin_headers)
 target_include_directories(my_vendor_plugin PRIVATE ${MLIR_INCLUDE_DIRS})
 target_compile_features(my_vendor_plugin PRIVATE cxx_std_17)
 set_target_properties(my_vendor_plugin PROPERTIES
@@ -122,16 +133,24 @@ set_target_properties(my_vendor_plugin PROPERTIES
 )
 ```
 
-Three requirements that are easy to miss:
+Requirements that are easy to miss:
 
-- **Link the shared MLIR library**, not the per-component static archives,
-  for any plugin that contributes a pass (see section 4 for why).
+- **Link MLIR HEADERS only, not the MLIR libraries.** The plugin's MLIR
+  symbols stay undefined and resolve against the symbol-exporting host at
+  `dlopen` time. This requires the host to have been built with
+  `HIPDNN_ENABLE_PLUGINS` (default ON), which exports its MLIR symbols. A
+  plugin that links the MLIR libraries (`MLIR` aggregate or the per-component
+  archives) gets its own registry copy and its contributed pass is invisible
+  to the host (see section 4).
+- **Use the SAME MLIR build as the host.** The registry/op types are ABI
+  objects: the plugin's MLIR headers must match the host's MLIR version and
+  `LLVM_ENABLE_RTTI` setting.
 - **`WINDOWS_EXPORT_ALL_SYMBOLS ON`** is required so `hipEpGetPluginInfo` is
   exported under its unmangled C name without a `.def` file.
-- **The plugin links MLIR, not `LibHipCompiler`.** `LibHipCompiler` is a
-  static library inside the host (`hip-compiler`); there is nothing for a
-  plugin to import against. The plugin reaches it purely through the inline
-  thunks in `PluginRegistry.h`.
+- **The plugin links `HipDnnEp::plugin_headers`, not `LibHipCompiler`.**
+  `LibHipCompiler` is a static library inside the host; there is nothing for a
+  plugin to import against. The plugin reaches the host purely through the
+  inline thunks in `PluginRegistry.h`.
 
 ---
 
@@ -160,9 +179,14 @@ struct MyVendorPass
 
 void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
   R.registerPass<MyVendorPass>();
+  // The slot string is resolved with mlir::parsePassPipeline into the slot's
+  // MODULE-level pass manager, so it follows --pass-pipeline syntax: a
+  // func.func pass must carry its anchor nesting. MyVendorPass is an
+  // OperationPass<func::FuncOp>, hence func.func(...); a ModuleOp / op-agnostic
+  // pass would use the bare "my-vendor-pass".
   R.requestPipelineSlot(
       ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip,
-      "my-vendor-pass");
+      "func.func(my-vendor-pass)");
 }
 ```
 
@@ -173,13 +197,22 @@ seven public seams in `lib/Dialect/Transforms/Pipelines.cpp`.
 of `onnx.Custom` ops; pick the slot that matches when your transform
 needs to run.
 
-> **Prerequisite — shared MLIR:** a contributed pass is only visible to the
-> host when the host and the plugin link the *same* MLIR instance (the shared
-> MLIR library). If either links MLIR statically, the pass registry is
-> duplicated, and `requestPipelineSlot` records the request but the pipeline
-> warns and skips the pass at compile time. Build both against shared MLIR
-> (the CMake in section 3 does this). Runtime bitcode and external library
-> contributions are unaffected.
+> **Slot-string nesting:** the slot pass manager is anchored on
+> `builtin.module`, so a non-module pass must be requested with its anchor
+> (`func.func(<arg>)`, `func.func(<region-pass>)`, ...), exactly as you would
+> write it for `--pass-pipeline`. A bare `<arg>` for a `func.func` pass fails
+> to add and the pipeline prints a `[plugin-loader] WARNING` at compile time.
+
+> **Prerequisite — host symbol export:** a contributed pass is only visible to
+> the host when the host's MLIR pass registry is the one the plugin's
+> `mlir::PassRegistration<>()` writes to. The host links MLIR statically, so it
+> must be built with `HIPDNN_ENABLE_PLUGINS` (default ON), which exports its
+> MLIR symbols (LLVM's `export_executable_symbols_for_plugins`); the plugin in
+> turn links MLIR *headers only* (section 3) so its MLIR references bind to the
+> host at load. If the host was built with the export off, or the plugin links
+> the MLIR libraries, the registry is duplicated: `requestPipelineSlot` records
+> the request but the pipeline warns and skips the pass. Runtime bitcode and
+> external library contributions are unaffected either way.
 
 ---
 
