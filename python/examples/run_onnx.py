@@ -10,7 +10,7 @@ from the installed wheels, then either:
   - Delegates to benchmark_e2e.py for OGA benchmarks (--benchmark).
 
 Prerequisites (see docs/python_package_guide.md):
-  - pip install the onnxruntime + onnxruntime_morphizen_ep wheels
+  - pip install the onnxruntime + onnxruntime_ep_hipep wheels
   - rocm-sdk init        (expands rocm[devel] import libs)
 
 Usage:
@@ -69,9 +69,7 @@ def _random_input(spec):
 
 
 def _run_onnx(model_path, capi):
-    ort.register_execution_provider_library(
-        EP_NAME, os.path.join(capi, "onnxruntime_morphizen_ep.dll")
-    )
+    ort.register_execution_provider_library(EP_NAME, os.path.join(capi, "hipep.dll"))
 
     devices = [d for d in ort.get_ep_devices() if d.ep_name == EP_NAME]
     if not devices:

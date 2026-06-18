@@ -38,7 +38,7 @@ configure_file(
   @ONLY)
 
 # The EP shared library target is created by morphizen via deps.cmake; its name
-# is the (git-versioned) unique id, output name onnxruntime_morphizen_ep.
+# is the (git-versioned) unique id, output name hipep (morphizen_OUTPUT_NAME).
 set(_ep_target "${morphizen_CORE_DYNAMIC_UNIQUE_ID}")
 if(NOT TARGET ${_ep_target})
   message(FATAL_ERROR
@@ -98,8 +98,8 @@ endforeach()
 add_custom_target(wheel ALL
   # 1. Stage the package sources into the build dir (keep source tree clean).
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${_pkg_src}/onnxruntime_morphizen_ep"
-          "${_stage}/onnxruntime_morphizen_ep"
+          "${_pkg_src}/onnxruntime_ep_hipep"
+          "${_stage}/onnxruntime_ep_hipep"
   COMMAND ${CMAKE_COMMAND} -E copy
           "${_pkg_src}/setup.py"
           "${_stage}/"
@@ -115,13 +115,13 @@ add_custom_target(wheel ALL
   #    they linger across runs and would re-pack stale (e.g. removed) artifacts.
   #    --no-deps: do not pull deps here.
   COMMAND ${CMAKE_COMMAND} -E rm -rf
-          "${_stage}/build" "${_stage}/onnxruntime_morphizen_ep.egg-info"
+          "${_stage}/build" "${_stage}/onnxruntime_ep_hipep.egg-info"
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_dist_dir}"
   COMMAND ${Python3_EXECUTABLE} -m pip wheel "${_stage}"
           --no-deps --wheel-dir "${_dist_dir}"
   DEPENDS ${_wheel_deps}
   WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-  COMMENT "Building onnxruntime_morphizen_ep wheel -> ${_dist_dir}"
+  COMMENT "Building onnxruntime_ep_hipep wheel -> ${_dist_dir}"
   VERBATIM)
 
 message(STATUS "Python wheel target 'wheel' configured (out: ${_dist_dir})")
