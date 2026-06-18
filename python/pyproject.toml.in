@@ -19,9 +19,9 @@ dependencies = [
     # ROCm runtime (TheRock). Not on PyPI -- supply at install time via
     # `--extra-index-url https://repo.amd.com/rocm/whl/@MORPHIZEN_HIP_ARCH@/`
     # (@MORPHIZEN_HIP_ARCH@ = the GPU arch this wheel was built for). Pinned to
-    # the exact TheRock version the EP is built against to avoid runtime/JIT
-    # import ABI skew.
-    "rocm[libraries,devel]==7.11.0",
+    # the exact TheRock version the EP is built against (THEROCK_VERSION, default
+    # cmake/deps.txt) to avoid runtime/JIT import ABI skew.
+    "rocm[libraries,devel]==@THEROCK_VERSION@",
 ]
 # NOTE: a custom ONNX Runtime build (the plugin-EP-patched onnxruntime-directml)
 # is required at runtime, but it is NOT declared as a dependency: this wheel
