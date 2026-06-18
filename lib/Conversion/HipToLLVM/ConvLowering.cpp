@@ -206,8 +206,7 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
         i64Type, // dilation_h
         i64Type, // dilation_w
         i64Type, // group
-        i64Type, // data_type
-        i32Type  // op_state_slot
+        i64Type  // data_type
     };
 
     // Lookup or create the runtime function
@@ -216,34 +215,12 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     if (failed(funcOp))
       return failure();
 
-    // Build argument list matching the signature. The trailing arg is the
-    // compiler-assigned op-state slot (--assign-op-state-slots), which the
-    // runtime uses to reach this conv instance's per-session state (workspace).
-    SmallVector<Value, 25> args = {statePtr,
-                                   inputPtr,
-                                   inputN,
-                                   inputC,
-                                   inputH,
-                                   inputW,
-                                   weightsPtr,
-                                   weightsK,
-                                   biasPtr,
-                                   outputPtr,
-                                   outputH,
-                                   outputW,
-                                   kernelH,
-                                   kernelW,
-                                   strideH,
-                                   strideW,
-                                   padTop,
-                                   padLeft,
-                                   padBottom,
-                                   padRight,
-                                   dilationH,
-                                   dilationW,
-                                   groupVal,
-                                   dataType,
-                                   getOpStateSlotValue(op, rewriter, loc)};
+    // Build argument list matching the signature
+    SmallVector<Value, 25> args = {
+        statePtr,   inputPtr, inputN,    inputC,    inputH,   inputW,
+        weightsPtr, weightsK, biasPtr,   outputPtr, outputH,  outputW,
+        kernelH,    kernelW,  strideH,   strideW,   padTop,   padLeft,
+        padBottom,  padRight, dilationH, dilationW, groupVal, dataType};
 
     // Call the runtime function
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

@@ -6,6 +6,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "../op_state.h"
+#include "../runtime_state_internal.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "zp_unpack_cache.h"
@@ -29,23 +30,33 @@
 // per-call unpack/convert kernel launches that were the dominant per-call
 // overhead for asym 8B decode (~225 launches per Compute()).
 //
-// Ownership (see docs/design/op-state-slots-design.md): the cache is now
-// per-op-instance — matmul_nbits owns one in its MatmulNbitsState op-state
-// slot, and qmoe embeds one in its QmoeState slot. The struct + lookup helpers
-// are defined here (HIP lives here); the struct definition + helper decls are
-// in zp_unpack_cache.h so qmoe can embed/reach a cache too.
+// Ownership (see docs/design/op-state-slots-design.md): matmul_nbits owns a
+// per-op-instance cache in its MatmulNbitsState op-state slot, while qmoe uses
+// the per-session RuntimeState::zp_unpack_cache (reached via
+// get_or_create_zp_cache below). The struct + lookup helpers are defined here
+// (HIP lives here); the struct definition + helper decls are in
+// zp_unpack_cache.h so qmoe can reach a cache too.
 // ---------------------------------------------------------------------------
 
 namespace hipdnn_ep_real {
 
-// Out-of-line so zp_unpack_cache.h (embedded by QmoeState in qmoe.cpp) needs
-// no HIP. Frees every cached device buffer when the owning op-state slot is
-// torn down.
+// Out-of-line so zp_unpack_cache.h needs no HIP. Frees every cached device
+// buffer when the owning cache (op-state slot or RuntimeState field) is torn
+// down.
 ZpUnpackCache::~ZpUnpackCache() {
   for (auto &[k, v] : u8)
     hipFree(v.first);
   for (auto &[k, v] : fp16)
     hipFree(v.first);
+}
+
+// Lazily create the per-session ZpUnpackCache owned by RuntimeState (used by
+// wrap_qmoe). matmul_nbits itself uses a per-instance cache in its op-state
+// slot; this RuntimeState-owned cache is qmoe's home for the same data.
+ZpUnpackCache *get_or_create_zp_cache(RuntimeState *state) {
+  if (!state->zp_unpack_cache)
+    state->zp_unpack_cache = new ZpUnpackCache();
+  return static_cast<ZpUnpackCache *>(state->zp_unpack_cache);
 }
 
 // Returns the cached u8 buffer for `zp_packed`, or unpacks into a freshly
@@ -108,6 +119,13 @@ const void *lookup_or_convert_zp_fp16(ZpUnpackCache &cache, void *stream,
 }
 
 } // namespace hipdnn_ep_real
+
+// Teardown shim for the qmoe-owned RuntimeState::zp_unpack_cache. Called from
+// hipdnn_ep_state_cleanup; delete invokes ~ZpUnpackCache which hipFree's every
+// cached device buffer.
+extern "C" void hipdnn_ep_zp_unpack_cache_destroy(void *cache_ptr) {
+  delete static_cast<hipdnn_ep_real::ZpUnpackCache *>(cache_ptr);
+}
 
 // Per-instance MatMulNBits op-state (see docs/design/op-state-slots-design.md):
 // owns this instance's zero_points unpack cache. Replaces the former shared

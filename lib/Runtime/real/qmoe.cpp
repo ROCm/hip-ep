@@ -5,10 +5,8 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
-#include "../op_state.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
-#include "op_state_buffers.h"
 #include "runtime_types.h"
 #include "zp_unpack_cache.h"
 
@@ -25,24 +23,6 @@ struct TokenEntry {
   int32_t slot;
 };
 
-// Per-instance QMoE op-state (see docs/design/op-state-slots-design.md): one
-// grow-on-demand device buffer holding all transient sub-buffers (offsets
-// recomputed per call), plus a pinned host mirror for the small per-expert
-// counts D2H readback. Replaces the former shared RuntimeState::qmoe_scratch /
-// qmoe_host_scratch fields, so concurrent QMoE sessions no longer share them.
-struct QmoeState : OpState {
-  GrowableDeviceBuffer device;
-  GrowablePinnedBuffer host;
-  // Per-expert zero_points unpack cache (one entry per expert fc1/fc2 zp
-  // pointer). Formerly the shared RuntimeState::zp_unpack_cache; now embedded
-  // here so concurrent QMoE sessions never share it.
-  hipdnn_ep_real::ZpUnpackCache zp;
-};
-
-extern "C" OpState *hipdnn_ep_op_state_construct_qmoe(RuntimeState *) {
-  return make_op_state<QmoeState>();
-}
-
 int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *router_weights, const void *fc1_weights,
               const void *fc1_scales, const void *fc1_bias,
@@ -55,8 +35,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size,
-              int op_state_slot) {
+              int64_t normalize_routing_weights, int64_t elem_size) {
   OP_PROFILE(
       "qmoe",
       [&] {
@@ -125,12 +104,6 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   int result = 0;
 
-  QmoeState *qst = op_state<QmoeState>(state, op_state_slot);
-  if (!qst) {
-    fprintf(stderr, "wrap_qmoe: no QmoeState at slot %d\n", op_state_slot);
-    return -1;
-  }
-
   int64_t fusion_inter = 2 * inter_size;
   int64_t k_blocks_fc1 = (hidden_size + block_size - 1) / block_size;
   int64_t blob_size_fc1 = block_size / 2;
@@ -176,13 +149,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
   size_t total_scratch = off_sorted_weights + sz_sorted_weights;
 
-  char *scratch_base =
-      static_cast<char *>(qst->device.ensure(total_scratch, hip_stream));
-  if (!scratch_base) {
-    fprintf(stderr, "wrap_qmoe: QmoeState device.ensure(%zu) failed\n",
+  if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
+    fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
             total_scratch);
     return -1;
   }
+  char *scratch_base =
+      static_cast<char *>(hipdnn_ep_state_get_qmoe_scratch(state));
   void *d_expert_indices = scratch_base + off_expert_indices;
   void *d_expert_weights = scratch_base + off_expert_weights;
   void *d_gather_buf = scratch_base + off_gather_buf;
@@ -242,13 +215,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     size_t hsz_counts = align_up_64h(num_experts * sizeof(int32_t));
     size_t total_host = hsz_counts;
 
-    char *host_base =
-        static_cast<char *>(qst->host.ensure(total_host, hip_stream));
-    if (!host_base) {
-      fprintf(stderr, "wrap_qmoe: QmoeState host.ensure(%zu) failed\n",
+    if (hipdnn_ep_state_ensure_qmoe_host_scratch(state, total_host) != 0) {
+      fprintf(stderr, "wrap_qmoe: ensure_qmoe_host_scratch(%zu) failed\n",
               total_host);
       return -1;
     }
+    char *host_base =
+        static_cast<char *>(hipdnn_ep_state_get_qmoe_host_scratch(state));
     int32_t *h_counts = reinterpret_cast<int32_t *>(host_base);
 
     // Bucket tokens on the device: count per expert (atomicAdd), exclusive
@@ -285,6 +258,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
+
+    // Per-session pointer-keyed zero_points unpack cache (qmoe-owned, lives on
+    // RuntimeState). Each expert's fc1/fc2 zp is a distinct pointer into the
+    // constants blob, so each gets its own entry; unpack cost is paid once per
+    // expert across the session lifetime.
+    hipdnn_ep_real::ZpUnpackCache *zpc =
+        hipdnn_ep_real::get_or_create_zp_cache(state);
 
     for (int64_t e = 0; e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(h_counts[e]);
@@ -329,7 +309,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                      : nullptr;
 
       // hip_matmul_nbits no longer unpacks zp internally — pre-unpack via the
-      // per-state pointer-keyed cache (same path as wrap_matmul_nbits). Each
+      // per-session pointer-keyed cache (same path as wrap_matmul_nbits). Each
       // expert's fc1_zp_e is a distinct pointer into the constants blob, so
       // each expert gets its own cache entry; the cost is paid once per
       // expert across the lifetime of the session.
@@ -338,7 +318,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       if (fc1_zp_e && expert_weight_bits == 4 && block_size > 0) {
         int ngk = static_cast<int>(k_blocks_fc1);
         fc1_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            qst->zp, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
+            *zpc, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
         if (!fc1_pre_zp_u8) {
           result = -1;
           goto cleanup;
@@ -346,7 +326,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         bool wmma_data_format = (hidden_size % 32 == 0);
         if (wmma_data_format && count > 1) {
           fc1_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
-              qst->zp, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
+              *zpc, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
           if (!fc1_pre_zp_fp16) {
             result = -1;
             goto cleanup;
@@ -391,7 +371,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       if (fc2_zp_e && expert_weight_bits == 4 && block_size > 0) {
         int ngk = static_cast<int>(k_blocks_fc2);
         fc2_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            qst->zp, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
+            *zpc, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
         if (!fc2_pre_zp_u8) {
           result = -1;
           goto cleanup;
@@ -399,7 +379,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         bool wmma_data_format = (inter_size % 32 == 0);
         if (wmma_data_format && count > 1) {
           fc2_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
-              qst->zp, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
+              *zpc, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
           if (!fc2_pre_zp_fp16) {
             result = -1;
             goto cleanup;
@@ -425,8 +405,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
 cleanup:
   // Sub-buffers above (d_expert_indices ... d_sorted_weights) are views into
-  // QmoeState::device -- owned by this session's op-state slot, freed when the
-  // state is destroyed in session cleanup. Do NOT hipFree them here.
+  // the per-session RuntimeState::qmoe_scratch pool -- freed in
+  // hipdnn_ep_state_cleanup. Do NOT hipFree them here.
   if (result == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: completed successfully\n");
   }

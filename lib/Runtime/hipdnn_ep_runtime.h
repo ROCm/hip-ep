@@ -371,16 +371,27 @@ void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
 
-// NOTE: wrap_qmoe's transient device + pinned-host scratch formerly lived in
-// RuntimeState::qmoe_scratch / qmoe_host_scratch (+ ensure/get shims here).
-// They now live in the qmoe op's per-instance op-state slot (QmoeState in
-// real/qmoe.cpp). See docs/design/op-state-slots-design.md.
+// Per-session scratch for wrap_qmoe transient buffers (device + pinned-host
+// mirror for routing readback). Replaces the per-call hipMalloc/hipFree storm
+// (8 buffers x N MoE layers per inference). Same grow-on-demand policy as
+// the shared workspace; never shrinks. See runtime_state_internal.h for
+// rationale.
+void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
+                                        size_t needed_size);
+void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
+                                             size_t needed_size);
 
-// NOTE: the MIOpen convolution workspace formerly lived in
-// RuntimeState::conv_scratch (+ ensure/get shims here). It now lives in the
-// conv op's per-instance op-state slot (ConvState in real/miopen.cpp), reached
-// via op_state<ConvState>(state, slot).
-// See docs/design/op-state-slots-design.md.
+// Per-session MIOpen convolution workspace pool (used by
+// wrap_miopenConvolutionForward for both 2D and the H=1 1D conv path). Lazily
+// grown via hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch
+// above: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
+// reused across all conv calls in the session -- safe because the stream is
+// serialised. See runtime_state_internal.h for design rationale.
+void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
+                                        size_t needed_size);
 
 // Per-op state slots (see docs/design/op-state-slots-design.md). The generated
 // @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
@@ -391,12 +402,6 @@ struct OpState;
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 bool hipdnn_ep_op_state_set(RuntimeState *state, int32_t slot,
                             struct OpState *value);
-// Reference op constructor (conv): builds state from the op's compile-time
-// kernel geometry. Real per-op constructors follow this (RuntimeState*, ...)
-// shape; see op_state.cpp.
-struct OpState *hipdnn_ep_op_state_construct_conv(RuntimeState *state,
-                                                  int64_t kernel_h,
-                                                  int64_t kernel_w);
 
 // Device-side runtime error flag (set by kernels, observed by wrappers).
 // Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
@@ -629,12 +634,9 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 // CausalConvState op-state slot, so concurrent sessions no longer share it.
 // See docs/design/op-state-slots-design.md.
 
-// NOTE: the MatMulNBits asym zero_points unpack cache (ZpUnpackCache) formerly
-// lived in RuntimeState::zp_unpack_cache with a
-// hipdnn_ep_zp_unpack_cache_destroy teardown shim here. It is now per-instance:
-// matmul_nbits owns one in its MatmulNbitsState op-state slot, and qmoe embeds
-// one in its QmoeState slot, so concurrent sessions no longer share it. See
-// docs/design/op-state-slots-design.md.
+// Asym zero_points unpack cache lifecycle (qmoe-owned RuntimeState cache;
+// matmul_nbits keeps a per-instance cache in its op-state slot).
+void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
 
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
@@ -740,8 +742,7 @@ int wrap_miopenConvolutionForward(
     int64_t dilation_h,  // Dilation height
     int64_t dilation_w,  // Dilation width
     int64_t group,       // Number of groups
-    int64_t data_type,   // HIPDNN_EP_DATATYPE_* for I/O and weights
-    int op_state_slot);  // Per-instance op-state slot (conv workspace home)
+    int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque
@@ -1199,8 +1200,7 @@ int wrap_qmoe(
     int64_t block_size, int64_t swiglu_fusion,
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
     float activation_alpha, float activation_beta, float swiglu_limit,
-    int64_t normalize_routing_weights, int64_t elem_size,
-    int op_state_slot); // per-instance op-state slot (qmoe scratch home)
+    int64_t normalize_routing_weights, int64_t elem_size);
 
 // CausalConvWithState operation wrapper (stateful causal depthwise convolution)
 // Used by Gated DeltaNet (Qwen3.5) and Mamba models.

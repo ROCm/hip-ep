@@ -157,6 +157,13 @@ static int initialize_state_handles(RuntimeState **out_state) {
   // leaves it null and never calls hipdnn_ep_alloc_output.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
+  state->qmoe_scratch = nullptr;
+  state->qmoe_scratch_size = 0;
+  state->qmoe_host_scratch = nullptr;
+  state->qmoe_host_scratch_size = 0;
+  state->conv_scratch = nullptr;
+  state->conv_scratch_size = 0;
+  state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
@@ -683,13 +690,19 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->workspace));
   }
 
-  // (The qmoe device scratch + pinned host mirror are no longer freed here:
-  // they moved into each qmoe instance's QmoeState op-state slot, freed by the
-  // slot's deletor in the per-op-state teardown just below.)
+  // Free qmoe device scratch + pinned host mirror (if allocated)
+  if (state->qmoe_scratch) {
+    HIP_CLEANUP(hipFree(state->qmoe_scratch));
+  }
+  if (state->qmoe_host_scratch) {
+    HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
+  }
 
-  // (The MIOpen convolution workspace is no longer freed here: it moved into
-  // each conv instance's ConvState op-state slot, freed by the slot's deletor
-  // in the per-op-state teardown just below.)
+  // Free the MIOpen convolution workspace pool (if allocated). The stream
+  // sync above has drained any in-flight conv that may still be reading it.
+  if (state->conv_scratch) {
+    HIP_CLEANUP(hipFree(state->conv_scratch));
+  }
 
   // Tear down per-op state slots. Each entry's deletor destroys its concrete
   // type; slots reference nothing in other slots, so order is irrelevant. The
@@ -771,10 +784,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // op-state slot, freed by the slot's deletor in the per-op-state teardown
   // just below.)
 
-  // (The MatMulNBits asym zero_points unpack cache is no longer freed here:
-  // it moved into each matmul_nbits instance's MatmulNbitsState op-state slot
-  // and each qmoe instance's QmoeState slot, freed by the slot's deletor in
-  // the per-op-state teardown just below.)
+  // Free the asym zero_points unpack cache (qmoe-owned; matmul_nbits keeps a
+  // per-instance cache in its op-state slot).
+  if (state->zp_unpack_cache) {
+    hipdnn_ep_zp_unpack_cache_destroy(state->zp_unpack_cache);
+    state->zp_unpack_cache = nullptr;
+  }
 
   // Free op profiling state
   if (state->op_profile) {
@@ -1166,12 +1181,158 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   return 0;
 }
 
-// NOTE: the QMoE device + pinned-host scratch helpers
-// (hipdnn_ep_state_{get,ensure}_qmoe_scratch / _qmoe_host_scratch) formerly
-// lived here. They are now per-qmoe-instance: QmoeState (real/qmoe.cpp) owns a
-// GrowableDeviceBuffer + GrowablePinnedBuffer in its op-state slot, applying
-// the same grow-on-demand / sync-before-free / never-shrink policy. See
-// docs/design/op-state-slots-design.md.
+//===----------------------------------------------------------------------===//
+// QMoE scratch helpers (device + pinned-host)
+//===----------------------------------------------------------------------===//
+//
+// Per-session grow-on-demand scratch shared by all qmoe instances. Single-
+// buffer reuse is safe because the HIP stream is serialised: the next qmoe
+// launches only after the previous one's kernels have consumed the buffer.
+// Both grow paths sync the stream BEFORE freeing the old buffer (hipFree on a
+// buffer with in-flight kernel reads is undefined behavior) and never shrink.
+//===----------------------------------------------------------------------===//
+
+// qmoe device scratch (single contiguous buffer, sub-buffer offsets computed
+// per-call by wrap_qmoe). Same grow-on-demand policy as workspace; never
+// shrinks. Caller is responsible for ensuring no in-flight kernel still reads
+// the old buffer when growing -- we sync the stream before hipFree+hipMalloc.
+void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state) {
+  return state ? state->qmoe_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
+                                        size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->qmoe_scratch_size >= needed_size)
+    return 0;
+
+  // Same 1.5x growth amortization as the shared workspace -- prefill->decode
+  // shape transitions and any future autotune retries grow monotonically.
+  size_t alloc_size = needed_size;
+  if (state->qmoe_scratch_size > 0) {
+    size_t grown = state->qmoe_scratch_size + state->qmoe_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->qmoe_scratch) {
+    if (state->stream) {
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
+    }
+    HIP_CLEANUP(hipFree(state->qmoe_scratch));
+    state->qmoe_scratch = nullptr;
+    state->qmoe_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->qmoe_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_qmoe_scratch: hipMalloc failed for %zu "
+            "bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->qmoe_scratch_size = alloc_size;
+  return 0;
+}
+
+// Pinned host mirror used for the small (k * sizeof(int32_t) + k * elem_size)
+// readback of expert routing decisions per qmoe call. hipHostMalloc'd once,
+// reused; no sync on grow because grow only fires when a larger num_tokens*k
+// is seen and growth is rare relative to call frequency.
+void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state) {
+  return state ? state->qmoe_host_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
+                                             size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->qmoe_host_scratch_size >= needed_size)
+    return 0;
+
+  size_t alloc_size = needed_size;
+  if (state->qmoe_host_scratch_size > 0) {
+    size_t grown =
+        state->qmoe_host_scratch_size + state->qmoe_host_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->qmoe_host_scratch) {
+    // Sync first: any in-flight hipMemcpyAsync(D2H) targeting this pinned
+    // buffer must complete before we free it. Cheap relative to alloc.
+    if (state->stream) {
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
+    }
+    HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
+    state->qmoe_host_scratch = nullptr;
+    state->qmoe_host_scratch_size = 0;
+  }
+
+  if (hipHostMalloc(&state->qmoe_host_scratch, alloc_size,
+                    hipHostMallocDefault) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_qmoe_host_scratch: hipHostMalloc failed "
+            "for %zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->qmoe_host_scratch_size = alloc_size;
+  return 0;
+}
+
+// MIOpen convolution workspace pool. Same grow-on-demand policy as qmoe_scratch
+// above. Single-buffer reuse is safe because the stream is serialised: the
+// next conv only launches after the previous miopenConvolutionForward (+ bias
+// add) has consumed the workspace.
+void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state) {
+  return state ? state->conv_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
+                                        size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->conv_scratch_size >= needed_size)
+    return 0;
+
+  // 1.5x growth amortisation mirrors workspace / qmoe_scratch.
+  size_t alloc_size = needed_size;
+  if (state->conv_scratch_size > 0) {
+    size_t grown = state->conv_scratch_size + state->conv_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->conv_scratch) {
+    // Drain any in-flight conv that may still be reading the old workspace
+    // before we free it. Growth is rare (only on first call per new shape)
+    // so the sync cost is amortised away.
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->conv_scratch));
+    state->conv_scratch = nullptr;
+    state->conv_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->conv_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
+            "bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->conv_scratch_size = alloc_size;
+  return 0;
+}
 
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
   return state ? static_cast<void *>(state->device_error_flag) : nullptr;

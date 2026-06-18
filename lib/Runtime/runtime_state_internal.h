@@ -91,16 +91,47 @@ struct RuntimeState {
   // never calls alloc_output); zero-initialized in initialize_state_handles.
   hipdnn_output_allocator_t output_allocator;
 
-  // NOTE: wrap_qmoe's transient device + pinned-host scratch formerly lived
-  // here as qmoe_scratch / qmoe_host_scratch. It is now per-qmoe-instance,
-  // owned by QmoeState in its op-state slot (see op_states below and
-  // docs/design/op-state-slots-design.md), so two qmoe instances no longer
-  // share one scratch buffer.
+  // Per-session scratch buffer for wrap_qmoe transient device buffers
+  // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
+  // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
+  //
+  // Why this exists: pre-cache wrap_qmoe issued 8 hipMalloc + 8 hipFree per
+  // call, every layer, every inference. On 24-layer gpt-oss-20b that's 192
+  // mallocs + 192 frees per token; HIP's hipMalloc takes ~50 us each on
+  // Windows, so the storm cost ~10-12 ms/token and bottlenecked decode TPS to
+  // roughly half the Vulkan baseline on the same hardware.
+  //
+  // Layout policy: one contiguous buffer sized to fit ALL sub-buffers for the
+  // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
+  // by this session. Sub-buffer offsets recomputed per-call (cheap arithmetic);
+  // the buffer itself grows on demand via hipdnn_ep_state_ensure_qmoe_scratch
+  // and never shrinks (mirrors the `workspace` field's policy). Shared by all
+  // qmoe instances in the session: safe because the HIP stream is serialised,
+  // so the next qmoe launches only after the previous one's kernels finish.
+  //
+  // Pinned host mirror is needed for the 24-bytes-per-layer D2H readback of
+  // expert routing decisions (still required at decode pre-Phase-2). hipHost-
+  // Malloc'd once with hipHostMallocDefault; reused across calls without sync.
+  void *qmoe_scratch;
+  size_t qmoe_scratch_size;
+  void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
+  size_t qmoe_host_scratch_size;
 
-  // NOTE: the MIOpen convolution workspace formerly lived here as conv_scratch.
-  // It is now per-conv-instance, owned by ConvState in its op-state slot (see
-  // op_states below and docs/design/op-state-slots-design.md), so two conv
-  // instances no longer share one workspace buffer.
+  // Per-session scratch buffer for the MIOpen convolution workspace
+  // (wrap_miopenConvolutionForward, both 2D and the H=1 1D conv path).
+  //
+  // The MIOpen forward-convolution Find API selects an algorithm whose
+  // workspace requirement is shape-dependent (winograd/gemm/etc). Whisper's
+  // encoder front-end runs the same two Conv shapes every inference
+  // (Cin=128/Cout=1280 K=3 s=1, Cin=1280/Cout=1280 K=3 s=2), so a per-call
+  // hipMalloc/hipFree of the workspace would be wasted work after the
+  // first call. Same grow-on-demand policy as qmoe_scratch above: lazily
+  // allocated on first use, never shrinks, freed in
+  // hipdnn_ep_state_cleanup. Single-buffer reuse is safe because the HIP
+  // stream is serialised -- the next conv launches only after the previous
+  // miopenConvolutionForward + bias add have consumed the workspace.
+  void *conv_scratch;
+  size_t conv_scratch_size;
 
   // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
   // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in
@@ -120,12 +151,20 @@ struct RuntimeState {
   // docs/design/op-state-slots-design.md), so concurrent instances no longer
   // share one descriptor cache.
 
-  // NOTE: the MatMulNBits asym zero_points unpack cache (ZpUnpackCache)
-  // formerly lived here as zp_unpack_cache. It is now per-op-instance: owned by
-  // each matmul_nbits instance's MatmulNbitsState op-state slot, and embedded
-  // in each qmoe instance's QmoeState slot (see op_states below and
-  // docs/design/op-state-slots-design.md), so concurrent instances no longer
-  // share one cache.
+  // Asym zero_points unpack cache (ZpUnpackCache*) used by wrap_qmoe.
+  //
+  // The asym AWQ path stores zero_points as packed nibbles [N, ceil(K/bs/2)].
+  // Two unpacked layouts are needed (u8 [N, K/bs] for GEMV/naive, fp16 for
+  // WMMA/col-major GEMV M>1), and naively the unpack kernel is launched on
+  // every call. Since zero_points points into the model constants blob (stable
+  // for the session lifetime), we cache the unpacked buffer per input pointer.
+  // Lazily created on first asym call. Freed in hipdnn_ep_state_cleanup via
+  // hipdnn_ep_zp_unpack_cache_destroy.
+  //
+  // NOTE: matmul_nbits no longer uses this shared cache -- it owns a
+  // per-instance ZpUnpackCache in its MatmulNbitsState op-state slot. This
+  // field is therefore qmoe-owned.
+  void *zp_unpack_cache;
 
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.

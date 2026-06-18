@@ -5,46 +5,10 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
-#include "../op_state.h"
 #include "error_check_macros.h"
-#include "op_state_buffers.h"
 #include "runtime_types.h"
 
-#include <cstddef>
 #include <cstdio>
-
-//===----------------------------------------------------------------------===//
-// Conv per-instance op-state (see docs/design/op-state-slots-design.md).
-//
-// Reference op for the op-state-slots design. Each hip.conv instance owns a
-// ConvState slot built by the compiler-emitted call to
-// hipdnn_ep_op_state_construct_conv (parameterized with the op's compile-time
-// kernel geometry, the design's "construction from op data" example). The slot
-// also owns this instance's grow-on-demand MIOpen workspace -- replacing the
-// old shared RuntimeState::conv_scratch field, so two convs no longer contend
-// on one buffer.
-//===----------------------------------------------------------------------===//
-
-struct ConvState : OpState {
-  // Compile-time kernel geometry, passed by ConvOp::generateOpStateInit. Kept
-  // to demonstrate parameterized construction (and available for future
-  // shape-specific tuning); the workspace below is the active per-instance
-  // resource today.
-  int64_t kernel_h = 0;
-  int64_t kernel_w = 0;
-  GrowableDeviceBuffer ws;
-};
-
-extern "C" OpState *hipdnn_ep_op_state_construct_conv(RuntimeState *,
-                                                      int64_t kernel_h,
-                                                      int64_t kernel_w) {
-  ConvState *st = make_op_state<ConvState>();
-  if (!st)
-    return nullptr;
-  st->kernel_h = kernel_h;
-  st->kernel_w = kernel_w;
-  return st;
-}
 
 // Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
 // label)
@@ -176,8 +140,7 @@ int wrap_miopenConvolutionForward(
     const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type,
-    int op_state_slot) {
+    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
   OP_PROFILE(
       "conv",
       [&] {
@@ -227,8 +190,8 @@ int wrap_miopenConvolutionForward(
   miopenTensorDescriptor_t output_desc = nullptr;
   miopenTensorDescriptor_t bias_desc = nullptr;
   miopenConvolutionDescriptor_t conv_desc = nullptr;
-  // Workspace is owned by this conv's ConvState op-state slot (grow-on-demand);
-  // do NOT hipFree it here -- the slot's deletor frees it at session cleanup.
+  // Workspace is owned by RuntimeState->conv_scratch (grow-on-demand pool);
+  // do NOT hipFree it here.
   void *workspace = nullptr;
   int result = 0;
   miopenConvAlgoPerf_t perf_results[1];
@@ -285,33 +248,24 @@ int wrap_miopenConvolutionForward(
   }
 
   // Workspace: query the worst-case size MIOpen needs for this conv config,
-  // then grow this instance's ConvState workspace to fit. The same buffer
+  // then grow the per-RuntimeState conv_scratch pool to fit. The same buffer
   // serves both the Find API and the forward call. This replaces the old
-  // per-call hipMalloc(10MB)/hipFree pattern -- the per-instance buffer is
-  // reused across all calls to this conv in the session.
+  // per-call hipMalloc(10MB)/hipFree pattern -- the pool is reused across all
+  // conv calls in the session (encoder front-end runs it once per prefill).
   MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
       miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
       &workspace_size));
 
   if (workspace_size > 0) {
-    ConvState *cst = op_state<ConvState>(state, op_state_slot);
-    if (!cst) {
+    if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
       fprintf(stderr,
-              "wrap_miopenConvolutionForward: missing conv op-state (slot %d); "
-              "did --assign-op-state-slots / op-states init run?\n",
-              op_state_slot);
-      result = -1;
-      goto cleanup;
-    }
-    workspace = cst->ws.ensure(workspace_size, hip_stream);
-    if (!workspace) {
-      fprintf(stderr,
-              "wrap_miopenConvolutionForward: failed to grow conv workspace to "
+              "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
               "%zu bytes\n",
               workspace_size);
       result = -1;
       goto cleanup;
     }
+    workspace = hipdnn_ep_state_get_conv_scratch(state);
   }
 
   // Find best algorithm
@@ -361,7 +315,7 @@ int wrap_miopenConvolutionForward(
   }
 
 cleanup:
-  // Workspace is owned by this conv's ConvState slot; do NOT hipFree here.
+  // Workspace is owned by RuntimeState->conv_scratch; do NOT hipFree here.
   if (bias_desc) {
     miopenDestroyTensorDescriptor(bias_desc);
   }
