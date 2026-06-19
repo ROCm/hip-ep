@@ -163,9 +163,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_host_scratch_size = 0;
   state->conv_scratch = nullptr;
   state->conv_scratch_size = 0;
-  state->gqa_gemm_cache = nullptr;
-  state->mha_gemm_cache = nullptr;
-  state->causal_conv_cache = nullptr;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
@@ -180,6 +177,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->loop_cond_host = nullptr;
   state->loop_cond_dev = nullptr;
   state->loop_event = nullptr;
+  state->op_states = nullptr;
+  state->num_op_states = 0;
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -705,6 +704,20 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->conv_scratch));
   }
 
+  // Tear down per-op state slots. Each entry's deletor destroys its concrete
+  // type; slots reference nothing in other slots, so order is irrelevant. The
+  // stream sync at the top has drained any in-flight op that may read a slot.
+  if (state->op_states) {
+    for (int i = 0; i < state->num_op_states; ++i) {
+      OpState *os = state->op_states[i];
+      if (os && os->deletor)
+        os->deletor(os);
+    }
+    free(state->op_states);
+    state->op_states = nullptr;
+    state->num_op_states = 0;
+  }
+
   // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
   // allocated). The stream sync at the top of cleanup has already drained
   // any in-flight kernel that may have been holding loop_*_dev pointers,
@@ -758,25 +771,21 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->gpu_constants)
     free(state->gpu_constants);
 
-  // Free GQA GEMM descriptor cache
-  if (state->gqa_gemm_cache) {
-    hipdnn_ep_gqa_gemm_cache_destroy(state->gqa_gemm_cache);
-    state->gqa_gemm_cache = nullptr;
-  }
+  // (The GQA GEMM descriptor cache is no longer freed here: it moved into each
+  // gqa instance's GqaState op-state slot, freed by the slot's deletor in the
+  // per-op-state teardown just below.)
 
-  // Free MultiHeadAttention GEMM descriptor cache
-  if (state->mha_gemm_cache) {
-    hipdnn_ep_mha_gemm_cache_destroy(state->mha_gemm_cache);
-    state->mha_gemm_cache = nullptr;
-  }
+  // (The MultiHeadAttention GEMM descriptor cache is no longer freed here: it
+  // moved into each multi_head_attention instance's MhaState op-state slot,
+  // freed by the slot's deletor in the per-op-state teardown just below.)
 
-  // Free CausalConvWithState descriptor/algo cache
-  if (state->causal_conv_cache) {
-    hipdnn_ep_causal_conv_cache_destroy(state->causal_conv_cache);
-    state->causal_conv_cache = nullptr;
-  }
+  // (The CausalConvWithState descriptor/algo cache is no longer freed here:
+  // it moved into each causal_conv_with_state instance's CausalConvState
+  // op-state slot, freed by the slot's deletor in the per-op-state teardown
+  // just below.)
 
-  // Free MatMulNBits asym zero_points unpack cache
+  // Free the asym zero_points unpack cache (qmoe-owned; matmul_nbits keeps a
+  // per-instance cache in its op-state slot).
   if (state->zp_unpack_cache) {
     hipdnn_ep_zp_unpack_cache_destroy(state->zp_unpack_cache);
     state->zp_unpack_cache = nullptr;
@@ -1176,43 +1185,11 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
 // QMoE scratch helpers (device + pinned-host)
 //===----------------------------------------------------------------------===//
 //
-// Why this lives in the dynseqlen PR
-// ----------------------------------
-// Conceptually independent of dynamic sequence length, but the same
-// grow-on-demand infrastructure (1.5x amortization, sync-before-free,
-// monotonic-grow, never-shrink) introduced by dynseqlen for the runtime
-// pool and the shared workspace already encodes the policy this code
-// wants.  Bundling keeps the policy in one place and avoids repeating
-// the same sync-and-free dance in three near-identical helpers.
-//
-// Sub-buffer offset validation
-// ----------------------------
-// `wrap_qmoe` (lib/Runtime/real/qmoe.cpp) is the sole writer of
-// sub-buffer offsets, and it sums them into `total_scratch` before
-// calling `hipdnn_ep_state_ensure_qmoe_scratch`.  No defensive bound
-// check is performed at the use sites today; that is intentional in the
-// hot path but means a future refactor that adds a sub-buffer without
-// updating `total_scratch` would silently overrun the allocation.  A
-// follow-up should add a `qmoe_scratch_size` parameter exchange so the
-// caller can `assert(offset + size <= cap)` per sub-buffer.
-//
-// Cleanup-after-sync ordering
-// ---------------------------
-// Both grow paths sync the stream BEFORE freeing the old buffer
-// (`HIP_CLEANUP(hipStreamSynchronize) → HIP_CLEANUP(hipFree)`) and BEFORE
-// hipMalloc'ing the replacement.  Synchronizing first is required by HIP
-// semantics: hipFree on a buffer with in-flight kernel reads is undefined
-// behavior.  Both calls go through HIP_CLEANUP so a sync/free failure is
-// logged but does not abort the runtime — losing this scratch is a
-// recoverable error (the next call re-allocates).
-//
-// Mock-CI coverage
-// ----------------
-// The mock GPU (`lib/Runtime/mock/mock_gpu.cpp`) stubs `hipMalloc` /
-// `hipHostMalloc` so the grow path runs under mock CI, but no mock-CI
-// test exercises a shape progression that triggers an actual
-// reallocation.  Real-CI dynamic-shape benchmarks DO exercise the grow
-// path; document this gap rather than paper over it with mock fixtures.
+// Per-session grow-on-demand scratch shared by all qmoe instances. Single-
+// buffer reuse is safe because the HIP stream is serialised: the next qmoe
+// launches only after the previous one's kernels have consumed the buffer.
+// Both grow paths sync the stream BEFORE freeing the old buffer (hipFree on a
+// buffer with in-flight kernel reads is undefined behavior) and never shrink.
 //===----------------------------------------------------------------------===//
 
 // qmoe device scratch (single contiguous buffer, sub-buffer offsets computed

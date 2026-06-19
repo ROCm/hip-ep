@@ -80,10 +80,10 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
   Value dataTypeVal = createI64Const(dataType);
   Value activationModeVal = createI64Const(activationMode);
 
-  // int wrap_miopenActivationForward(RuntimeState* state, void* input,
-  //     void* output, int64_t num_elements, int64_t data_type,
+  // int wrap_miopenActivationForward(RuntimeState* state, int op_state_slot,
+  //     void* input, void* output, int64_t num_elements, int64_t data_type,
   //     int64_t activation_mode)
-  SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+  SmallVector<Type, 7> paramTypes = {ptrType, i32Type, ptrType, ptrType,
                                      i64Type, i64Type, i64Type};
 
   FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -91,8 +91,11 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
   if (failed(funcOp))
     return failure();
 
-  SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
-                                numElements, dataTypeVal, activationModeVal};
+  SmallVector<Value, 7> args = {
+      statePtr,         getOpStateSlotValue(op, rewriter, loc),
+      inputPtr,         outputPtr,
+      numElements,      dataTypeVal,
+      activationModeVal};
 
   LLVM::CallOp::create(rewriter, loc, *funcOp, args);
   rewriter.eraseOp(op);
