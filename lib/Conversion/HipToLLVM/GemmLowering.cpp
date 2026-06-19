@@ -105,8 +105,9 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
       cDim1 = createI64Const(0);
     }
 
-    SmallVector<Type, 15> paramTypes = {
+    SmallVector<Type, 16> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         ptrType, // A
         ptrType, // B
         ptrType, // C (nullable)
@@ -128,10 +129,15 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
       return failure();
     }
 
-    SmallVector<Value, 15> args = {
-        statePtr, input_A_ptr, input_B_ptr, input_C_ptr, output_ptr,
-        M,        N,           K,           alpha,       beta,
-        transA,   transB,      typeCodeVal, cDim0,       cDim1};
+    SmallVector<Value, 16> args = {
+        statePtr,    getOpStateSlotValue(op, rewriter, loc),
+        input_A_ptr, input_B_ptr,
+        input_C_ptr, output_ptr,
+        M,           N,
+        K,           alpha,
+        beta,        transA,
+        transB,      typeCodeVal,
+        cDim0,       cDim1};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

@@ -279,6 +279,22 @@ extractMemRefDescriptor(Value memrefDesc, ConversionPatternRewriter &rewriter,
   return MemRefDescriptor(memrefDesc);
 }
 
+// Read the compiler-assigned op-state slot (`hip.op_state_slot`, set by
+// --assign-op-state-slots) as an i32 constant Value, passed as the second
+// argument (right after RuntimeState*) of a stateful op's wrap_* runtime call.
+// Returns -1 when the attribute is absent (op not stateful / pass not run),
+// which the runtime treats as "no slot". See
+// docs/design/op-state-slots-design.md.
+inline Value getOpStateSlotValue(Operation *op,
+                                 ConversionPatternRewriter &rewriter,
+                                 Location loc) {
+  int32_t slot = -1;
+  if (auto attr = op->getAttrOfType<IntegerAttr>("hip.op_state_slot"))
+    slot = static_cast<int32_t>(attr.getInt());
+  return LLVM::ConstantOp::create(rewriter, loc, rewriter.getI32Type(),
+                                  rewriter.getI32IntegerAttr(slot));
+}
+
 // Helper: get a single memref dimension as an i64 Value, using a compile-time
 // constant for static dims and extracting from the descriptor for dynamic dims.
 inline Value getMemRefDimSize(MemRefType type, unsigned dimIdx,

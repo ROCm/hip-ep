@@ -155,6 +155,7 @@ struct MultiHeadAttentionOpLowering
     // wrap_multi_head_attention signature (declared in hipdnn_ep_runtime.h).
     SmallVector<Type> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         // Inputs (10 pointers - some may be nullptr)
         ptrType, // query
         ptrType, // key
@@ -193,6 +194,9 @@ struct MultiHeadAttentionOpLowering
       return failure();
 
     SmallVector<Value> args = {statePtr,
+                               // Per-instance op-state slot (threaded by
+                               // --assign-op-state-slots)
+                               getOpStateSlotValue(op, rewriter, loc),
                                // Inputs (10)
                                queryPtr, keyPtr, valuePtr, biasPtr,
                                keyPaddingMaskPtr, attentionBiasPtr, pastKeyPtr,

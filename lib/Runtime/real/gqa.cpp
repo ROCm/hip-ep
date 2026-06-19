@@ -6,6 +6,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "../runtime_state_internal.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
@@ -329,19 +330,39 @@ struct GqaGemmCacheEntry {
 
 struct GqaGemmCache {
   std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash> entries;
+  // Destroys every cached hipBLASLt descriptor/layout entry. Defined
+  // out-of-line below. Runs when the owning op-state slot is torn down
+  // (GqaState's deletor).
+  ~GqaGemmCache();
 };
 
-static GqaGemmCache *get_gemm_cache(RuntimeState *state) {
-  if (!state->gqa_gemm_cache)
-    state->gqa_gemm_cache = new GqaGemmCache;
-  return static_cast<GqaGemmCache *>(state->gqa_gemm_cache);
+// Per-instance GQA op-state (see op-state-slots-design.md): owns this
+// instance's per-GEMM-shape hipBLASLt descriptor/algorithm cache. Replaces the
+// former shared RuntimeState::gqa_gemm_cache, so concurrent sessions (and
+// distinct GQA layers) no longer share one descriptor map.
+struct GqaState : OpStateT<GqaState> {
+  GqaGemmCache cache;
+};
+
+// Resolve this GQA instance's descriptor cache from its op-state slot. Returns
+// nullptr when the slot is unconstructed (init failure) — callers propagate the
+// error rather than lazily allocating, since the slot is built at session init.
+static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
+  GqaState *gs = GqaState::get_slot(state, op_state_slot);
+  return gs ? &gs->cache : nullptr;
 }
 
 static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
                                                        hipblasLtHandle_t handle,
-                                                       const GqaGemmKey &key) {
+                                                       const GqaGemmKey &key,
+                                                       int op_state_slot) {
   assert(handle && "queryOrCreateGemmState: null handle");
-  auto *cache = get_gemm_cache(state);
+  auto *cache = get_gemm_cache(state, op_state_slot);
+  if (!cache) {
+    fprintf(stderr, "queryOrCreateGemmState: no GqaState at slot %d\n",
+            op_state_slot);
+    return nullptr;
+  }
   auto it = cache->entries.find(key);
   if (it != cache->entries.end())
     return &it->second;
@@ -542,7 +563,7 @@ static int gqa_forward_hipblaslt(
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes) {
+    int64_t element_size_bytes, int op_state_slot) {
 
   int64_t HPG = H / G;
   // present_seq is the buffer dimension of present_key (may be max_length
@@ -1082,11 +1103,11 @@ static int gqa_forward_hipblaslt(
   }
 
   const GqaGemmCacheEntry *scoreState =
-      queryOrCreateGemmState(state, ltHandle, scoreKey);
+      queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
   if (!scoreState)
     return -1;
   const GqaGemmCacheEntry *valueState =
-      queryOrCreateGemmState(state, ltHandle, valueKey);
+      queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
   if (!valueState)
     return -1;
 
@@ -1359,6 +1380,8 @@ cleanup:
 
 int wrap_group_query_attention(
     RuntimeState *state,
+    // Per-instance op-state slot (GqaState: this layer's GEMM descriptor cache)
+    int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
     void *seqlens_k, void *total_seq_len,
@@ -1516,7 +1539,7 @@ int wrap_group_query_attention(
       seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax, output,
       present_key, present_value, batch_size, seq_len_q, seq_len_kv,
       past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
-      local_window_size, no_causal != 0, element_size_bytes);
+      local_window_size, no_causal != 0, element_size_bytes, op_state_slot);
 
   if (rc != 0) {
     fprintf(stderr, "wrap_group_query_attention: gqa_forward failed (rc=%d)\n",
@@ -1529,11 +1552,8 @@ int wrap_group_query_attention(
   return rc;
 }
 
-void hipdnn_ep_gqa_gemm_cache_destroy(void *cache_ptr) {
-  auto *cache = static_cast<GqaGemmCache *>(cache_ptr);
-  if (!cache)
-    return;
-  for (auto &[k, e] : cache->entries) {
+GqaGemmCache::~GqaGemmCache() {
+  for (auto &[k, e] : entries) {
     if (e.layD)
       hipblasLtMatrixLayoutDestroy(e.layD);
     if (e.layC)
@@ -1545,5 +1565,12 @@ void hipdnn_ep_gqa_gemm_cache_destroy(void *cache_ptr) {
     if (e.desc)
       hipblasLtMatmulDescDestroy(e.desc);
   }
-  delete cache;
+}
+
+// Construct this GQA instance's op-state slot (see op-state-slots-design.md).
+// No compile-time params: the descriptor cache fills lazily per GEMM shape. The
+// construct fn stores the state into op_states[slot] itself.
+extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
+                                                   int32_t slot) {
+  return GqaState::create(state, slot);
 }

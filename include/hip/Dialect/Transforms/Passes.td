@@ -112,6 +112,50 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
   ];
 }
 
+def AssignOpStateSlotsPass
+    : Pass<"assign-op-state-slots", "mlir::ModuleOp"> {
+  let summary = "Assign one op-state slot per stateful op instance";
+  let description = [{
+    Identity half of the op-state-slots design
+    (docs/design/op-state-slots-design.md). Walks the module in program order
+    and gives EACH op implementing `OpStateOpInterface` its own dense slot
+    `0..N-1`, stamping `hip.op_state_slot` on the op and recording the total as
+    the module attribute `hipdnn.num_op_state_slots`.
+
+    Per-instance is the default: two ops of the same kind get two slots and
+    two independent state objects. No per-class deduplication is done here.
+
+    Runs before --convert-hip-to-llvm so the slot is available to the lowering
+    (threaded into the op's wrap_* call) and to --generate-op-state-init. A
+    no-op (no module attr) when no op implements the interface.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect"
+  ];
+}
+
+def GenerateOpStateInitPass
+    : Pass<"generate-op-state-init", "mlir::ModuleOp"> {
+  let summary = "Emit @hipdnn_ep_op_states_init_fn from per-op generateOpStateInit";
+  let description = [{
+    Construction half of the op-state-slots design
+    (docs/design/op-state-slots-design.md). Runs AFTER --assign-op-state-slots
+    and BEFORE --convert-hip-to-llvm, while the HIP ops still exist. Emits a
+    standalone `llvm.func @hipdnn_ep_op_states_init_fn(!llvm.ptr) -> i32` that:
+      1. calls @hipdnn_ep_op_states_alloc(state, N) to size the slot array,
+      2. for each stateful op (in slot order) calls the op's
+         `generateOpStateInit` (which emits its construct_* call from the op's
+         own attributes) and stores the result via @hipdnn_ep_op_state_set.
+
+    --generate-interface later calls this function from inference_init. A no-op
+    when `hipdnn.num_op_state_slots` is absent or zero.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::LLVM::LLVMDialect"
+  ];
+}
+
 def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
   let summary = "Convert HIP dialect to LLVM dialect";
   let description = [{

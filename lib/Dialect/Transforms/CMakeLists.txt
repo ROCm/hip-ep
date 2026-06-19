@@ -5,9 +5,11 @@
 
 add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
+  AssignOpStateSlots.cpp
   BufferUtils.cpp
   FixLoopAccumulatorOffset.cpp
   GenerateInterface.cpp
+  GenerateOpStateInit.cpp
   HoistAllocSizeArith.cpp
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
