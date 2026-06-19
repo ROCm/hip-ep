@@ -144,6 +144,19 @@ def _setup():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _gc_between_tests():
+    """Free ORT sessions + GPU memory between tests.
+
+    On 32 GB UMA machines (Strix Halo) CPU+GPU share a single memory pool.
+    Without explicit cleanup, sessions from one test linger into the next and
+    peak allocation can exceed what's available — manifesting as a Windows
+    access violation during session creation.
+    """
+    yield
+    gc.collect()
+
+
 def _prepare_fp16_model_dir():
     """Run surgery+fix_shapes on the locally-built fp16 bundle; return its dir.
 
@@ -310,6 +323,8 @@ def test_encoder_correctness(precision, capfd):
     # CPU reference: the original dynamic encoder at this precision.
     cpu = _cpu_session("encoder.onnx", model_dir)
     cpu_hidden, _ = _encoder_cross_kv(cpu, audio, dtype=dtype)
+    del cpu
+    gc.collect()
 
     # IMPORTANT: the MorphiZen MLIR compile happens at SESSION INIT, so the
     # "Compilation failed" stderr is emitted by InferenceSession(), not run().
@@ -371,6 +386,7 @@ def test_decoder_prefill_correctness(precision, capfd):
     # from any encoder GPU/CPU drift.
     cpu_enc = _cpu_session("encoder.onnx", model_dir)
     _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=dtype)
+    del cpu_enc
 
     # ── CPU reference: DYNAMIC decoder, empty (0-slot) past ──────────────────
     cpu_dec = _cpu_session("decoder.onnx", model_dir)
@@ -384,6 +400,8 @@ def test_decoder_prefill_correctness(precision, capfd):
             (1, _N_HEADS, 0, _HEAD_DIM), dtype=dtype
         )
     cpu_logits = dict(zip(cpu_names, cpu_dec.run(None, cpu_feed)))["logits"]
+    del cpu_dec, cpu_feed
+    gc.collect()
 
     # ── MorphiZen GPU: static 448-slot shared-buffer prefill ─────────────────
     # int64 ids (surgered decoder re-types input_ids to int64 for the GPU token-
@@ -450,6 +468,8 @@ def test_decoder_decode_correctness(precision):
     # Shared cross-KV from the CPU encoder (isolate the decoder).
     cpu_enc = _cpu_session("encoder.onnx", model_dir)
     _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=dtype)
+    del cpu_enc
+    gc.collect()
 
     # ── CPU reference: DYNAMIC decoder, empty growing past ───────────────────
     cpu_dec = _cpu_session("decoder.onnx", model_dir)
@@ -799,6 +819,7 @@ def test_e2e_transcription_greedy(precision, capfd):
 
     cpu_tokens = _greedy_decode_cpu(audio, model_dir=model_dir, dtype=dtype)
     cpu_text = _decode_text(cpu_tokens)
+    gc.collect()
 
     capfd.readouterr()
     mz_tokens = _greedy_decode_morphizen(audio, model_dir=model_dir, dtype=dtype)
@@ -1402,6 +1423,7 @@ def test_librispeech_gpu_vs_cpu(librispeech, default_precision, capfd, clip):
 
     cpu_tokens = _greedy_decode_cpu(audio, model_dir=model_dir, dtype=dtype)
     cpu_text = _decode_text(cpu_tokens)
+    gc.collect()
 
     capfd.readouterr()
     gpu_tokens = _greedy_decode_morphizen(audio, model_dir=model_dir, dtype=dtype)
@@ -1477,6 +1499,7 @@ def test_long_30s_gpu_vs_cpu(librispeech, default_precision, capfd):
         audio, max_length=_LONG_MAX_LEN, model_dir=model_dir, dtype=dtype
     )
     cpu_text = _decode_text(cpu_tokens)
+    gc.collect()
 
     capfd.readouterr()
     gpu_tokens = _greedy_decode_morphizen(
