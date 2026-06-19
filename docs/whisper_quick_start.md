@@ -311,12 +311,14 @@ is unreachable.
 Runs the full pipeline on GPU and asserts the transcription matches the ORT CPU
 fp32 reference **verbatim**:
 
-Clear the compiled-model cache to force a real compile, then run the test:
+Clear the compiled-model cache to force a real compile, then run the test
+(parametrized across fp16 + fp32 — split per precision on tight memory, see §4c):
 
 ```
 # PowerShell:  Remove-Item "$env:TEMP\morphizen_mlir_*" -ErrorAction Ignore
 # Git Bash:    rm -f "$TEMP"/morphizen_mlir_*
-pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -v -s
+pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -k fp16 -v -s
+pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -k fp32 -v -s
 ```
 
 Expected: both the GPU and CPU runs print
@@ -335,12 +337,26 @@ pytest test/python/whisper/test_whisper.py -k "librispeech or long_30s" -v -s
 
 ### 4c. Per-step correctness
 
-(Single line — runs the same in PowerShell and Git Bash. Use `-k` to select the
-three correctness tests.)
+These three tests are parametrized across **both** precisions (`fp16` + `fp32`).
+On memory-constrained machines, run each precision in its **own pytest process**
+(`-k "... and fp16"`, then `-k "... and fp32"`) so the first precision's GPU
+memory is fully reclaimed before the second starts:
 
+```bash
+SEL="encoder_correctness or decoder_prefill_correctness or decoder_decode_correctness"
+pytest test/python/whisper/test_whisper.py -k "($SEL) and fp16" -v -s
+pytest test/python/whisper/test_whisper.py -k "($SEL) and fp32" -v -s
 ```
-pytest test/python/whisper/test_whisper.py -k "encoder_correctness or decoder_prefill_correctness or decoder_decode_correctness" -v -s
-```
+
+> **Why split by precision?** The MorphiZen runtime keeps two **process-global**
+> GPU caches that are NOT freed on `InferenceSession` destruction — the transient
+> GPU buffer pool (`g_gpu_buffer_pool`) and the hipBLASLt autotune cache
+> (`g_gemm_algo_cache`) — they live until the process exits. Running fp16 + fp32
+> in one process therefore accumulates both precisions' GPU footprint (the fp32
+> constants blob is ~2× the fp16 one). On a 32 GB UMA part this can exhaust the
+> shared pool and crash with an access violation. Splitting into one process per
+> precision caps the peak at a single precision's footprint. To run both in one
+> process anyway (plenty of memory), drop the `and fp16`/`and fp32` filters.
 
 ### 4d. Per-op numeric tests (vs ORT CPU)
 
@@ -361,6 +377,9 @@ ctest --test-dir $ROOT/build -C Release -R MorphizenMLIRLitTests
 ```
 pytest test/python/whisper/test_whisper.py -v -s
 ```
+
+On a 32 GB UMA machine, prefer running the precision-parametrized tests one
+precision at a time (see §4c) instead of the all-at-once command above.
 
 ---
 
