@@ -114,8 +114,9 @@ struct CausalConvWithStateOpLowering
     Value elemSizeVal = createI64Const(elemSizeBytes);
 
     // Build function signature
-    SmallVector<Type, 14> paramTypes = {
+    SmallVector<Type, 15> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         ptrType, // input
         ptrType, // weight
         ptrType, // bias (nullable)
@@ -136,10 +137,15 @@ struct CausalConvWithStateOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 14> args = {
-        statePtr,      inputPtr,        weightPtr,     biasPtr,    pastStatePtr,
-        outputPtr,     presentStatePtr, batchSize,     channels,   seqLen,
-        kernelSizeVal, ndimVal,         activationVal, elemSizeVal};
+    SmallVector<Value, 15> args = {
+        statePtr,   getOpStateSlotValue(op, rewriter, loc),
+        inputPtr,   weightPtr,
+        biasPtr,    pastStatePtr,
+        outputPtr,  presentStatePtr,
+        batchSize,  channels,
+        seqLen,     kernelSizeVal,
+        ndimVal,    activationVal,
+        elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

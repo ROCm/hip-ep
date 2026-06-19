@@ -187,6 +187,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     // Function signature matches wrap_group_query_attention() in gqa.cpp
     SmallVector<Type, 39> paramTypes = {
         ptrType, // state
+        i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
         ptrType, // query
         ptrType, // key
@@ -237,6 +238,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
     SmallVector<Value, 39> args = {
         statePtr,
+        // Per-instance op-state slot (threaded by --assign-op-state-slots)
+        getOpStateSlotValue(op, rewriter, loc),
         // Inputs (14 pointers)
         queryPtr, keyPtr, valuePtr, pastKeyPtr, pastValuePtr, seqlensKPtr,
         totalSeqLenPtr, cosCachePtr, sinCachePtr, positionIdsPtr,
