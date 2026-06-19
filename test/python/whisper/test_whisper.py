@@ -68,6 +68,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from conftest import (  # noqa: E402
     AMD_VENDOR_ID,
+    EP_PROVIDER_OPTIONS,
     REPO_ROOT,
     WhisperModelConfig,
     get_amd_dml_providers,
@@ -234,7 +235,7 @@ def _cpu_session(model_name, model_dir=_MODEL_DIR):
 def _morphizen_session(model_name, model_dir=_MODEL_DIR):
     devices = register_morphizen_ep(REPO_ROOT)
     if not devices:
-        pytest.skip("MorphiZen EP not found — run build.py first")
+        pytest.skip("AMDGPU EP not found — run build.py first")
     so = ort.SessionOptions()
     # CRITICAL for the decoder: disable ORT's ahead-of-time function inlining.
     # The Whisper decoder MLP uses ai.onnx Gelu, which is a registered ONNX
@@ -248,7 +249,8 @@ def _morphizen_session(model_name, model_dir=_MODEL_DIR):
     # not need this (its Gelu is not inlined by ORT), but setting it everywhere
     # is harmless and keeps the helper uniform.
     so.add_session_config_entry("session.disable_aot_function_inlining", "1")
-    so.add_provider_for_devices(devices, {})
+    # profile=llm tells the AMDGPU umbrella to dispatch to the hipep backend.
+    so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))
     return ort.InferenceSession(str(model_dir / model_name), sess_options=so)
 
 

@@ -119,10 +119,18 @@ python build.py --build_dir "$ROOT\build" --install_dir "$ROOT\local" --cmake_pr
 
 This resolves the LLVM/MLIR/Protobuf/FlatBuffers + ONNX Runtime deps (auto-downloaded
 unless `--cmake_prefix_path` points at prebuilt ones) + the TheRock ROCm SDK,
-detects your GPU, and builds the compiler + MorphiZen EP into `$ROOT/local/`. See the
-main [Quick Start](quick_start.md) for details and troubleshooting.
+detects your GPU, and builds the compiler + the EP backend (`hipep.dll`) into
+`$ROOT/local/`. See the main [Quick Start](quick_start.md) for details and troubleshooting.
 
-After it finishes you should have `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`.
+After it finishes you should have `$ROOT/local/bin/hipep.dll`.
+
+> **AMDGPU umbrella EP.** The tests reach the backend through the AMD GPU
+> umbrella EP — `amdgpu-ep.dll` (registration name `AMDGPUExecutionProvider`),
+> which loads `hipep-backend.dll` → `hipep.dll`. The umbrella + shim are built
+> from the `onnxruntime-ep-amdgpu` fork (see `.github/workflows/windows-build.yml`
+> for the pinned commit + `cmake -DUSE_AMDGPU=ON` recipe) and must sit next to
+> `hipep.dll` in `$ROOT/local/bin/`. The umbrella selects the hipep backend via
+> the `profile=llm` provider option.
 
 ---
 
@@ -192,7 +200,7 @@ under the build dir (`$ROOT/build/_therock`); if you passed your own
 `-DTHEROCK_DIST`, point at that instead. `MORPHIZEN_EP_BIN` tells the Python
 tests where the EP DLL is — **required when you installed out-of-tree** (the
 `$ROOT/local` layout here); the tests otherwise look in the legacy in-repo
-`install/dist/bin` and `skip` with "MorphiZen EP not found".
+`install/dist/bin` and `skip` with "AMDGPU EP not found".
 
 **Git Bash** (the convention for the rest of this guide):
 
@@ -363,7 +371,7 @@ pytest test/python/whisper/test_whisper.py -k "($SEL) and fp32" -v -s
 Conv1d, attention, and LayerNorm, both fp16 and fp32 (one line):
 
 ```
-pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name MorphiZenExecutionProvider --ep-dll $ROOT/local/bin/onnxruntime_morphizen_ep.dll --ep-option config_file=$ROOT/local/bin/morphizen_config.json -v
+pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name AMDGPUExecutionProvider --ep-dll $ROOT/local/bin/amdgpu-ep.dll --ep-option profile=llm --ep-option config_file=$ROOT/local/bin/morphizen_config.json -v
 ```
 
 ### 4e. MLIR conversion (LIT)
@@ -541,7 +549,7 @@ EP comparison.
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
 | Model setup fails / `Could not obtain the Whisper raw model` | The raw bundle download from `amd/whisper-large-v3-onnx-{fp16,fp32}` failed. If it's an auth / rate-limit error, run `hf auth login` and retry. If HF is unreachable, build the models locally instead (§3b: `python scripts/build_whisper_models.py`). |
-| Every test `skip`s with "MorphiZen EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `MORPHIZEN_EP_BIN` (§2). Verify the DLL exists at `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`. |
+| Every test `skip`s with "AMDGPU EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `MORPHIZEN_EP_BIN` (§2). Verify `amdgpu-ep.dll` (+ `hipep-backend.dll` + `hipep.dll`) exist at `$ROOT/local/bin/`. |
 | EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §1b). |
 
 For internals (how the ONNX surgery works, the `no_causal` GQA path, the fp32

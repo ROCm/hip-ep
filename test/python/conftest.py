@@ -36,8 +36,15 @@ os.environ.setdefault("HIPDNN_EP_STRICT", "1")
 NUM_WARMUP = 1
 NUM_RUNS = 3
 
-EP_DLL_NAME = "onnxruntime_morphizen_ep.dll"
-EP_REGISTRATION_NAME = "MorphiZenExecutionProvider"
+# The EP is now reached through the AMD GPU umbrella EP (amdgpu-ep.dll), which
+# loads hipep-backend.dll → hipep.dll (the renamed MorphiZen EP). The umbrella
+# selects the backend via the "profile" provider option (see EP_PROVIDER_OPTIONS).
+EP_DLL_NAME = "amdgpu-ep.dll"
+EP_REGISTRATION_NAME = "AMDGPUExecutionProvider"
+# OGA registers the umbrella under its short name (genai_config key).
+EP_OGA_NAME = "AMDGPU"
+# Provider option the umbrella forwards to pick the hipep backend.
+EP_PROVIDER_OPTIONS = {"profile": "llm"}
 
 _morphizen_registered = False
 
@@ -467,7 +474,12 @@ def get_amd_dml_providers():
 
 
 def register_morphizen_ep(repo_root):
-    """Register the MorphiZen EP library with ONNX Runtime (once per process)."""
+    """Register the AMDGPU umbrella EP library with ONNX Runtime (once per process).
+
+    Registers ``amdgpu-ep.dll`` under ``AMDGPUExecutionProvider``; the umbrella
+    loads hipep-backend.dll → hipep.dll underneath. Returns the matching EP
+    devices (callers pass ``EP_PROVIDER_OPTIONS`` to ``add_provider_for_devices``).
+    """
     global _morphizen_registered
 
     dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
@@ -1051,17 +1063,19 @@ def create_cpu_session(model_path):
 
 
 def create_ep_session(model_path, repo_root, provider_options=None):
-    """Create a MorphiZen-EP InferenceSession.
+    """Create an AMDGPU-umbrella-EP InferenceSession.
 
-    provider_options: optional dict forwarded to the EP. Defaults to {}. The EP
-    compiles every model in output-allocator mode (the 2-arg in-graph
-    hip.alloc_output ABI) -- there is no provider option to select a mode.
+    provider_options: optional dict forwarded to the EP. Defaults to
+    EP_PROVIDER_OPTIONS ({"profile": "llm"}) — the umbrella uses "profile" to
+    select the hipep backend. The backend compiles every model in
+    output-allocator mode (the 2-arg in-graph hip.alloc_output ABI) -- there is
+    no provider option to select a mode.
     """
     devices = register_morphizen_ep(repo_root)
     if not devices:
-        pytest.skip("MorphiZen EP not found — run build.py first")
+        pytest.skip("AMDGPU EP not found — run build.py first")
     so = ort.SessionOptions()
-    so.add_provider_for_devices(devices, provider_options or {})
+    so.add_provider_for_devices(devices, provider_options or dict(EP_PROVIDER_OPTIONS))
     return ort.InferenceSession(model_path, sess_options=so)
 
 
@@ -1239,7 +1253,7 @@ def setup_oga_ep(repo_root):
     dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
     ep_dll = dist_bin / EP_DLL_NAME
     if not ep_dll.exists():
-        pytest.skip("MorphiZen EP DLL not found — run build.py first")
+        pytest.skip("AMDGPU EP DLL not found — run build.py first")
 
     for d in [dist_bin, therock_bin]:
         if d.exists() and str(d) not in os.environ.get("PATH", ""):
@@ -1247,7 +1261,7 @@ def setup_oga_ep(repo_root):
 
     global _oga_ep_registered
     if not _oga_ep_registered:
-        og.register_execution_provider_library("MorphiZenEP", str(ep_dll))
+        og.register_execution_provider_library(EP_OGA_NAME, str(ep_dll))
         _oga_ep_registered = True
 
     return og, ep_dll
@@ -1261,7 +1275,7 @@ def patch_genai_config_for_morphizen(model_dir, ep_dll):
     shutil.copy2(config_path, backup_path)
     with open(config_path) as f:
         config = json.load(f)
-    morphizen_options = [{"MorphiZenEP": {}}]
+    morphizen_options = [{EP_OGA_NAME: dict(EP_PROVIDER_OPTIONS)}]
     config["model"]["decoder"]["session_options"]["provider_options"] = (
         morphizen_options
     )
